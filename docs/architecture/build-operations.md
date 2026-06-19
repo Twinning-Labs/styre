@@ -38,52 +38,65 @@ paid layer that removes organisational/financial/social friction.
 **Everything we've specced (schema / control-loop / projector / minimal-loop) IS the core's
 "Tickets → SDLC" engine.** The plane never reaches inside it — it talks through the stable contracts in §5.
 
-## 3. Distribution + run modes
+## 3. Distribution, install targets + run modes
 
-The fleet/CI use-cases mean the core ships **more than a launchd daemon**:
+**Install targets are macOS *and* Linux — both first-class — plus a container image and a GitHub
+Action.** This is real, not aspirational: the runtime is OS-portable by construction (TypeScript +
+embedded SQLite + native timers — **no launchd, no `gtimeout`, no bash**), so the OS only shows up at
+the *service-install* edge. The same TS core compiles to per-platform binaries.
 
-- **Distribution:** a single self-contained **binary** (Homebrew tap + GitHub release), a **GitHub
-  Action**, and a **container image**. All three wrap the same core.
+- **Distribution per target:**
+  - **macOS** (Apple Silicon + Intel) — `brew install styre` (Homebrew tap) or the release binary.
+  - **Linux** (x86_64 + arm64; box / VM) — a one-line install script (`curl … | sh`) or the release
+    tarball (a **static/musl** build for portability across distros); `.deb`/`.rpm` later.
+  - **Container** — a small OCI (Linux) image; the primary cloud / fleet / CI artifact.
+  - **GitHub Action** — wraps the container/binary for CI.
+  - **Upgrade** (any target): replace the binary/image; `migrate()` self-applies schema migrations on start.
 - **Run modes:**
   - **`styre setup <repo>`** — the probe: discover the project-profile, discover/ask the checks-system,
-    create+migrate the DB, refresh the Linear id-cache + projection labels, and (for daemon mode) render
-    + bootstrap the launchd plist. Idempotent. *This is the developer hook* (download → setup → an
-    instantly-useful profile).
-  - **`styre daemon`** — persistent local (launchd `KeepAlive`), watches the SQLite queue, K-concurrency,
-    one DB / all projects (CL-1). The **solo-dev / local-team** mode.
-  - **`styre run <ticket>`** — a **one-shot headless runner**: execute ONE ticket to PR-ready (or merge)
-    and exit, emitting telemetry. The **CI / cloud / fleet primitive** — the SaaS spins up N of these in
-    parallel. Ephemeral per-run SQLite (the journal still gives in-run crash-resume); the durable output
-    is the **git branch + the telemetry**.
+    create+migrate the DB, refresh the Linear id-cache + projection labels, and **install the host
+    service for the detected OS** (launchd on macOS, systemd on Linux). Idempotent. *The developer hook.*
+  - **`styre daemon`** — persistent local, supervised by the host service manager (**launchd / systemd**),
+    watches the SQLite queue, K-concurrency, one DB / all projects (CL-1). The **solo-dev / local-team** mode.
+  - **`styre run <ticket>`** — a **one-shot headless runner**: execute ONE ticket to PR-ready and exit,
+    emitting telemetry. The **CI / cloud / fleet primitive** (the SaaS spins up N in parallel; ephemeral
+    per-run SQLite — the journal still gives in-run crash-resume; durable output = the git branch + telemetry).
   - **management CLI:** `status` · `inbox` (resume/`--after-fix`/abandon) · `config` · `pause`/`resume` ·
     `logs` · `uninstall`.
-- **Upgrade:** replace the binary; `migrate()` self-applies schema migrations on next start.
 
-### 3.1 Linux & cloud-native operation (Styre runs anywhere)
+### 3.1 The install matrix (macOS · Linux · container)
 
-macOS/launchd was only ever *one* host. As the OSS core, Styre must run on **Linux boxes, VMs,
-containers, and cloud workers** — and it does, because the runtime is OS-portable by construction
-(TypeScript + embedded SQLite + native timers; **no launchd, no `gtimeout`, no bash**). The OS only
-shows up at the service-install edge.
+| | **macOS** | **Linux** (box/VM) | **Container / cloud** |
+|---|---|---|---|
+| Get it | `brew install styre` / release binary | `curl … \| sh` / release tarball (static/musl) | OCI image (Linux) |
+| Arch | arm64 + x64 | x86_64 + arm64 | per-arch images |
+| Daemon supervisor | launchd LaunchAgent | **systemd** (`--user` or system unit) | orchestrator (k8s / Fargate) |
+| State / config paths | XDG | XDG | mounted volume (persistent) or ephemeral (runner) |
+| Primary mode | `daemon` (persistent) | `daemon` (persistent) | `run <ticket>` (ephemeral worker) |
+| Auth | subscription session *or* API key | either | `ANTHROPIC_API_KEY` (headless) |
 
-- **Service-install matrix** (same daemon, different supervisor): macOS → **launchd**; Linux box/VM →
-  **systemd unit** (or any process manager); cloud → the **container orchestrator**. `styre setup`
-  renders the right one for the host; the daemon logic is identical.
-- **The container image is the primary cloud artifact.** A small image (node + embedded SQLite + `git`
-  + `gh` + `claude`); logs to **stdout** (container-native); secrets via env / a secret manager.
-- **The cloud-native pattern is the headless runner, not a shared daemon.** The SaaS fleet runs **N
-  ephemeral `styre run <ticket>` workers** (a k8s `Job` / Fargate task / CI job), each in its own
-  container with its **own ephemeral SQLite** and worktree, executing one ticket and exiting. So:
-  - **no shared database, no multi-writer problem** — the single-writer invariant (B2) is preserved
-    *per runner*; the SaaS Control Plane (not the core) decides which ticket each runner gets.
-  - **horizontally scalable + stateless** — autoscale workers freely; the durable output is the **git
-    branch + the emitted telemetry**, not local disk. A killed worker is just re-spawned on the ticket.
+- **One path model on both OSes** — the **XDG Base Directory spec** (Linux-native, works cleanly on
+  macOS): DB at `$XDG_STATE_HOME/styre/`, config at `$XDG_CONFIG_HOME/styre/`. No per-OS path forks.
+- **Host deps (all targets):** `git`, `gh`, the `claude` CLI; node is bundled in the binary.
+- **`styre setup` is OS-aware:** it renders the **launchd plist** (macOS) or the **systemd unit** (Linux)
+  from the *same* daemon definition — the daemon logic is identical; only the supervisor unit differs.
+- **No-init environments** (bare containers, minimal images): run `styre daemon` directly under the
+  orchestrator / as PID 1 — no service manager required.
+
+### 3.2 Cloud-native operation (the fleet)
+
+- **The cloud pattern is the headless runner, not a shared daemon.** The SaaS fleet runs **N ephemeral
+  `styre run <ticket>` workers** (a k8s `Job` / Fargate task / CI job), each in its own container with its
+  **own ephemeral SQLite** and worktree, executing one ticket and exiting:
+  - **no shared database, no multi-writer problem** — the single-writer invariant (B2) holds *per runner*;
+    the SaaS Control Plane (not the core) decides which ticket each worker gets.
+  - **horizontally scalable + stateless** — autoscale freely; durable output = git branch + telemetry,
+    not local disk; a killed worker is just re-spawned on the same ticket.
+  - logs to **stdout** (container-native); secrets via env / a secret manager.
   - the **GitHub Action** is this same runner on GitHub's Linux runners.
-- **Persistent-daemon mode** (one box, one SQLite, K-concurrency) stays the **local/solo** model — Mac
-  *or* Linux. The schema's `Postgres`-on-concurrency-demand note (§9.2) is the upgrade path *if* anyone
-  ever wants a single shared multi-worker daemon; the fleet model above avoids needing it.
-- **Headless auth is mandatory here:** cloud/CI workers use `ANTHROPIC_API_KEY` (§4), not the
-  interactive subscription session.
+- **Persistent-daemon mode** (one box, one SQLite, K-concurrency) stays the **local/solo** model on Mac
+  *or* Linux. `Postgres`-on-concurrency-demand (schema §9.2) is the upgrade path only if anyone ever
+  wants a single shared multi-worker daemon — the fleet model avoids needing it.
 
 ## 4. Auth + config (re-thought for both audiences)
 

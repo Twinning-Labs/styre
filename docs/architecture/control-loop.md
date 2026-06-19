@@ -15,8 +15,8 @@
 
 ## 0. Vocabulary
 
-- **Daemon** — the long-running TS process (launchd `KeepAlive`, **B4**). The only writer of the
-  SQLite SoT (**B2**).
+- **Daemon** — the long-running TS process (kept alive by the host service manager — launchd on macOS,
+  systemd on Linux; **B4**). The only writer of the SQLite SoT (**B2**).
 - **Workflow** — the lifecycle of one `ticket`, `design → released`. Long-running; many dispatches
   and human waits.
 - **Step** — one durable unit of progress, a `workflow_step` row. Deterministic `step_key`; carries
@@ -608,8 +608,8 @@ One command, no server setup. Implications the daemon owns:
 - **Embedded SQLite, zero-ops** — no DB server; WAL on by default.
 - **Self-bootstrapping schema** — `migrate()` creates/upgrades the DB on start; no manual SQL.
 - **One idempotent `setup <target-repo>`** — creates+migrates the DB, seeds the `project` row,
-  refreshes the `linear_id_cache`, **discovers/asks the checks system**, renders + bootstraps the
-  single `KeepAlive` plist.
+  refreshes the `linear_id_cache`, **discovers/asks the checks system**, and installs the host service
+  (**launchd on macOS, systemd on Linux** — both first-class install targets; see build-operations §3.1).
 - **Minimal host contract** — the binary + `claude` + `git` + `gh`; one config file + one secrets
   file; no ambient `LINEAR_API_KEY`.
 - **Reach-out-only networking** — polling (not webhooks) for checks/merge → works behind any
