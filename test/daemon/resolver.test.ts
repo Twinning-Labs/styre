@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { nextStepKey } from "../../src/daemon/resolver.ts";
+import { nextActionableUnit, nextStepKey, nextUnrunCheck } from "../../src/daemon/resolver.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { insertPending, markDelivered } from "../../src/db/repos/signal.ts";
 import { setNeedsDocs, setTicketStage, setTicketTrack } from "../../src/db/repos/ticket.ts";
-import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
+import { insertWorkUnit, setStatus } from "../../src/db/repos/work-unit.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
@@ -180,4 +180,56 @@ test("released: runs released:project then reports done", async () => {
   const d = nextStepKey(db, ticketId);
   db.close();
   expect(d).toEqual({ kind: "done" });
+});
+
+test("nextActionableUnit: dep-gating — wu2 gated until wu1 verified", () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  const wu1 = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", verifyCheckTypes: ["test"] });
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 2,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    dependsOn: [1],
+  });
+  // wu1 is pending, wu2 dep not satisfied — should return wu1
+  const first = nextActionableUnit(db, ticketId);
+  expect(first?.seq).toBe(1);
+  // mark wu1 verified — wu2 dep is now satisfied
+  setStatus(db, wu1.id, "verified");
+  const second = nextActionableUnit(db, ticketId);
+  db.close();
+  expect(second?.seq).toBe(2);
+});
+
+test("nextStepKey: blocked descriptor when unit is neither pending/verifying nor verified", () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "blocked",
+  });
+  const d = nextStepKey(db, ticketId);
+  db.close();
+  expect(d).toEqual({ kind: "blocked", reason: "no actionable unit and not all units verified" });
+});
+
+test("nextUnrunCheck: returns first check-type lacking a signal", () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  const u = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test", "integration"],
+    status: "verifying",
+  });
+  insertSignal(db, { ticketId, workUnitId: u.id, signalType: "test", result: "pass" });
+  const check = nextUnrunCheck(db, u);
+  db.close();
+  expect(check).toBe("integration");
 });
