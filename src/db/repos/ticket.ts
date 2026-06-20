@@ -7,25 +7,36 @@ export interface TicketRow {
   ident: string;
   stage: string;
   status: string;
+  track: string | null;
+  needs_docs: number;
 }
 
-const COLS = "id, project_id, ident, stage, status";
+const COLS = "id, project_id, ident, stage, status, track, needs_docs";
 
 export function insertTicket(
   db: Database,
-  t: { projectId: number; ident: string; stage?: string; status?: string },
+  t: {
+    projectId: number;
+    ident: string;
+    stage?: string;
+    status?: string;
+    track?: string;
+    needsDocs?: number;
+  },
 ): number {
   const now = nowUtc();
   const res = db
     .query(
-      `INSERT INTO ticket (project_id, ident, stage, status, created_at, updated_at)
-       VALUES ($pid, $ident, $stage, $status, $now, $now)`,
+      `INSERT INTO ticket (project_id, ident, stage, status, track, needs_docs, created_at, updated_at)
+       VALUES ($pid, $ident, $stage, $status, $track, $needsDocs, $now, $now)`,
     )
     .run({
       $pid: t.projectId,
       $ident: t.ident,
       $stage: t.stage ?? "design",
       $status: t.status ?? "active",
+      $track: t.track ?? null,
+      $needsDocs: t.needsDocs ?? 0,
       $now: now,
     });
   return Number(res.lastInsertRowid);
@@ -38,6 +49,30 @@ export function getTicket(db: Database, id: number): TicketRow | null {
 export function setTicketStatus(db: Database, id: number, status: string): void {
   db.query("UPDATE ticket SET status = $status, updated_at = $now WHERE id = $id").run({
     $status: status,
+    $now: nowUtc(),
+    $id: id,
+  });
+}
+
+export function setTicketStage(db: Database, id: number, stage: string): void {
+  db.query("UPDATE ticket SET stage = $stage, updated_at = $now WHERE id = $id").run({
+    $stage: stage,
+    $now: nowUtc(),
+    $id: id,
+  });
+}
+
+export function setTicketTrack(db: Database, id: number, track: string): void {
+  db.query("UPDATE ticket SET track = $track, updated_at = $now WHERE id = $id").run({
+    $track: track,
+    $now: nowUtc(),
+    $id: id,
+  });
+}
+
+export function setNeedsDocs(db: Database, id: number, needsDocs: number): void {
+  db.query("UPDATE ticket SET needs_docs = $nd, updated_at = $now WHERE id = $id").run({
+    $nd: needsDocs,
     $now: nowUtc(),
     $id: id,
   });
