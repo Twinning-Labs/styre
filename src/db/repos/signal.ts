@@ -65,3 +65,13 @@ export function markConsumed(db: Database, id: number): void {
     $id: id,
   });
 }
+
+export function hasDelivered(db: Database, ticketId: number, signalType: string): boolean {
+  const row = db
+    .query<{ n: number }, [number, string]>(
+      `SELECT COUNT(*) AS n FROM signal
+       WHERE ticket_id = ? AND signal_type = ? AND status IN ('delivered','consumed')`,
+    )
+    .get(ticketId, signalType);
+  return (row?.n ?? 0) > 0;
+}
