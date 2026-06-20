@@ -132,6 +132,12 @@ The plane integrates *only* through these. Treat them as the public API surface 
    metrics the dashboards need (cycle count, unit cost per ticket, autonomous-fix ratio, first-time CI
    pass rate, escalation reasons). Our `dispatch` / `metric_event` / `event_log` / `ground_truth_signal`
    already hold this data; expose it cleanly + emit a per-ticket terminal/JSON summary.
+   - **The export's wire form is a structured event stream to stdout** `[DECIDED — operator 2026-06-20]`:
+     the core writes each `metric_event` / `event_log` / `ground_truth_signal` row to stdout (NDJSON)
+     as it is journaled, plus a final per-ticket summary on exit. This is container-native (the
+     orchestrator's log pipeline ingests it), idempotent (rows keyed by `dispatch_id` so a re-spawned
+     worker dedups cleanly), and **lives in the OSS core** — the GitHub Action and any self-hoster get
+     it too. The plane *consumes* this stream; it does not fork the core to produce it.
 4. **(Later) a programmatic API.** The vision mentions "feeds into the harness API." At OSS cutover the
    artifact contracts (1–3) suffice; a thin REST/IPC API is a later addition for tighter coupling.
 
@@ -152,7 +158,13 @@ The plane integrates *only* through these. Treat them as the public API surface 
   sourced from the ticket config block (§4).
 - **Headless runner mode** ⇒ the durable-execution model spans **ephemeral per-run SQLite** (runner) and
   the **persistent daemon DB** (local) — both must work; the journal semantics are identical, only the
-  DB lifetime differs.
+  DB lifetime differs. `[RESOLVED — operator 2026-06-20]` **One core, no fork.** SQLite is the system of
+  record in *both* modes — persistent (daemon = the OSS solo/local model) and ephemeral-per-run (`run` =
+  the container/CI/fleet model). The ephemeral DB is the in-run journal; durable output that survives the
+  runner is **git branch + the stdout telemetry stream** (§5.3, option B). The commercial value stays
+  entirely in the *plane* (Autonomous PM, dashboards, fleet orchestrator, escalation routing, retro
+  portal — §2) which wraps the unmodified core; there is **no closed-source fork of styre** (CLAUDE.md
+  invariant; §1). The DB-lifetime switch is run-mode config, not a second codebase.
 - **Telemetry is first-class**, not an afterthought — it's a paid-product input, so the per-ticket
   summary + the export schema get designed deliberately.
 
@@ -162,6 +174,8 @@ The plane integrates *only* through these. Treat them as the public API surface 
 headless `run`) · **dual auth** (subscription session + `ANTHROPIC_API_KEY`) · the **§5 seam as the
 first build priority**. The open-core boundary + four-tier config follow from the vision and stand.
 **Corrected:** the "pre-scoped skips design" idea is **rejected** — design always runs (§6); SaaS
-enrichment is richer input only. Remaining §6 flags for a later spec pass: the headless-runner DB
-lifetime (ephemeral per-run vs persistent daemon) and the per-ticket-config → K_DISTINCT/threshold
-mapping. Get the §5 contracts stable early so the plane never has to fork the core.
+enrichment is richer input only. **DECIDED (operator 2026-06-20):** **no closed-source fork** — one
+core serves both SoR modes (persistent daemon DB + ephemeral per-run DB); the §5.3 telemetry export
+is a **structured stdout event stream (option B)** that ships in the OSS core; commercial value lives
+only in the plane (§6 resolved). Remaining §6 flag for a later spec pass: the per-ticket-config →
+K_DISTINCT/threshold mapping. Get the §5 contracts stable early so the plane never has to fork the core.
