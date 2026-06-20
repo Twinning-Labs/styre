@@ -78,10 +78,11 @@ export async function advanceOneStep(
         execute: (step) => handler({ db, ticket, step, workUnitId: d.workUnitId }),
       });
       return { kind: "stepped", stepKey: d.stepKey };
-    } catch {
+    } catch (err) {
       const failed = getByKey(db, ticketId, d.stepKey);
-      if (!failed) {
-        throw new Error(`advanceOneStep: failed step '${d.stepKey}' missing after failure`);
+      if (!failed || failed.status !== "failed") {
+        // Not a handler failure — e.g. StepInFlightError (a running step; recover() owns it). Propagate.
+        throw err;
       }
       const { decision } = applyFailurePolicy(db, ticketId, failed);
       return { kind: decision, stepKey: d.stepKey };

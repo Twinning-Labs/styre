@@ -4,7 +4,8 @@ import { StepRegistry } from "../../src/daemon/step-registry.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { getTicket, setTicketStage, setTicketTrack } from "../../src/db/repos/ticket.ts";
 import { getById as getUnit, insertWorkUnit } from "../../src/db/repos/work-unit.ts";
-import { getByKey } from "../../src/db/repos/workflow-step.ts";
+import { getByKey, insertPending, markRunning } from "../../src/db/repos/workflow-step.ts";
+import { StepInFlightError } from "../../src/engine/step-journal.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 test("a step descriptor runs the registered handler and journals success", async () => {
@@ -114,4 +115,28 @@ test("a failing handler routes through failure-policy (retry)", async () => {
   db.close();
   expect(outcome).toEqual({ kind: "retry", stepKey: "design:dispatch" });
   expect(step?.status).toBe("pending"); // reset for retry by failure-policy
+});
+
+test("a running step propagates StepInFlightError instead of routing through failure-policy", async () => {
+  const { db, ticketId } = makeTestDb();
+  // Insert the design:dispatch step as pending, then mark it running (simulates crash-interrupted run).
+  const pending = insertPending(db, {
+    ticketId,
+    stepKey: "design:dispatch",
+    stepType: "dispatch",
+  });
+  markRunning(db, pending.id, { pid: 1 });
+
+  const registry = new StepRegistry();
+  // Handler must NOT be called — if it is, the test is wrong.
+  registry.register("design:dispatch", () => {
+    throw new Error("handler must not be called for a running step");
+  });
+
+  // advanceOneStep must propagate StepInFlightError, not swallow it into failure-policy.
+  await expect(advanceOneStep(db, ticketId, registry)).rejects.toBeInstanceOf(StepInFlightError);
+
+  // Step must still be 'running' — failure-policy did NOT reset it to pending.
+  expect(getByKey(db, ticketId, "design:dispatch")?.status).toBe("running");
+  db.close();
 });
