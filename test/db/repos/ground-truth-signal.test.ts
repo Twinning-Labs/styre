@@ -19,6 +19,7 @@ test("insertSignal records a pass signal with detail; listByUnit returns it", ()
   expect(list[0]?.signal_type).toBe("test");
   expect(list[0]?.result).toBe("pass");
   expect(JSON.parse(list[0]?.detail_json ?? "null")).toEqual({ tests_passed: 3 });
+  expect(list[0]?.measured_at).toBeTruthy();
 });
 
 test("listByUnit is empty for a unit with no signals", () => {
@@ -27,4 +28,19 @@ test("listByUnit is empty for a unit with no signals", () => {
   const list = gts.listByUnit(db, unit.id);
   db.close();
   expect(list).toEqual([]);
+});
+
+test("insertSignal stores SQL NULL when detail is omitted", () => {
+  const { db, ticketId } = makeTestDb();
+  const unit = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend" });
+  gts.insertSignal(db, {
+    ticketId,
+    workUnitId: unit.id,
+    signalType: "build",
+    result: "pass",
+  });
+  const list = gts.listByUnit(db, unit.id);
+  db.close();
+  expect(list.length).toBe(1);
+  expect(list[0]?.detail_json).toBeNull();
 });

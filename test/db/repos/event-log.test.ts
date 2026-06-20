@@ -22,6 +22,7 @@ test("appendEvent assigns monotonic seq per ticket", () => {
   expect(a.kind).toBe("transition");
   expect(a.from_stage).toBe("design");
   expect(a.to_stage).toBe("implement");
+  expect(a.actor).toBe("daemon");
 });
 
 test("appendEvent records loopback fields; listByTicket returns in order", () => {
@@ -42,6 +43,8 @@ test("appendEvent records loopback fields; listByTicket returns in order", () =>
   const list = eventLog.listByTicket(db, ticketId);
   db.close();
   expect(list.length).toBe(2);
+  expect(list[0]?.seq).toBe(1);
+  expect(list[1]?.seq).toBe(2);
   expect(list[1]?.kind).toBe("loopback");
   expect(list[1]?.loop).toBe("implement");
   expect(list[1]?.signature).toBe("tests-red:[t1]");
