@@ -28,10 +28,30 @@ export interface RunStepResult {
   replayed: boolean;
 }
 
-/** The durable step executor (control-loop §3 / §6.2).
+/**
+ * The durable step executor (control-loop §3 / §6.2).
  *  - succeeded → return recorded result, never re-run (replay)
  *  - running   → throw StepInFlightError (recover owns it)
- *  - pending/failed → execute with write-ahead intent (effectful), journal the outcome */
+ *  - pending/failed → execute with write-ahead intent (effectful), journal the outcome
+ *
+ * Pure-vs-effectful split (deliberate design — do not "fix"):
+ *   Only **effectful** steps journal `running` + an idempotency key before the effect
+ *   (write-ahead intent, control-loop §3). **Pure** steps compute → `markSucceeded`
+ *   with no `running` phase: a pure step is a deterministic recompute from SQLite state,
+ *   so a crash leaves it `pending` (markSucceeded never committed), which is the correct,
+ *   safe re-run state — there is no external effect to double-apply.
+ *
+ * Three-write effectful path (deliberate design — not an oversight):
+ *   `markRunning` → `execute` → `markSucceeded` are intentionally NOT a single
+ *   transaction: the external effect lives between intent and outcome (control-loop §3).
+ *   Collapsing them would prevent write-ahead crash detection.
+ *
+ * M2 invariant (resolver / event loop):
+ *   The resolver advances one step per ticket per tick; K-concurrency is across
+ *   **tickets**, so no two workers ever share a `step_key`. The `StepInFlightError`
+ *   guard + `recover()` cover crash-resume; per-ticket serialization covers concurrency.
+ *   This is why pure steps need no `running` journal for safety.
+ */
 export async function runStep(db: Database, params: RunStepParams): Promise<RunStepResult> {
   const existing = steps.getByKey(db, params.ticketId, params.stepKey);
   const step =
@@ -56,6 +76,7 @@ export async function runStep(db: Database, params: RunStepParams): Promise<RunS
   }
 
   // pending | failed → (re)execute
+  // Effectful only: write-ahead intent + idempotency key before the external effect (control-loop §3).
   if (params.effectful) {
     steps.markRunning(db, step.id, {
       idempotencyKey: params.idempotencyKey ?? null,

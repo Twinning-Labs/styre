@@ -38,12 +38,17 @@ export function deliverSignal(
   return tx();
 }
 
-/** Consume a delivered signal — the parked await step then succeeds. */
+/** Consume a delivered signal — the parked await step then succeeds.
+ *  Wrapped in a transaction to be symmetric with awaitSignal/deliverSignal; M2/M6
+ *  will extend this to atomically advance the parked await step. */
 export function consumeSignal(db: Database, signalId: number): signals.SignalRow {
-  signals.markConsumed(db, signalId);
-  const sig = signals.getById(db, signalId);
-  if (!sig) {
-    throw new Error(`consumeSignal: signal ${signalId} not found`);
-  }
-  return sig;
+  const tx = db.transaction(() => {
+    signals.markConsumed(db, signalId);
+    const sig = signals.getById(db, signalId);
+    if (!sig) {
+      throw new Error(`consumeSignal: signal ${signalId} not found`);
+    }
+    return sig;
+  });
+  return tx();
 }
