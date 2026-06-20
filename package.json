@@ -9,7 +9,7 @@
     "format": "biome format --write .",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "build": "bun build --compile ./src/index.ts --outfile dist/styre"
+    "build": "sh scripts/build.sh"
   },
   "dependencies": {
     "citty": "^0.1.6"
