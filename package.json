@@ -1,0 +1,22 @@
+{
+  "name": "styre",
+  "version": "0.0.0",
+  "description": "The open-source autonomous-SDLC execution core: drives a structured ticket design → released.",
+  "type": "module",
+  "bin": { "styre": "./src/index.ts" },
+  "scripts": {
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "build": "bun build --compile ./src/index.ts --outfile dist/styre"
+  },
+  "dependencies": {
+    "citty": "^0.1.6"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}
