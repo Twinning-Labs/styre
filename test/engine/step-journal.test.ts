@@ -88,7 +88,9 @@ test("a keyed effect is exactly-once-effective across a crash + recovery re-run"
   const { db, ticketId } = makeTestDb();
   const key = idempotencyKey("ENG-1-d1", "push");
   // The "external effect" is a keyed outbox insert that dedups on idempotency_key.
+  let effectCalls = 0;
   const effect = (): { applied: true } => {
+    effectCalls += 1;
     db.query(
       `INSERT INTO projection_outbox (ticket_id, target, op, idempotency_key, status, created_at)
        VALUES ($t, 'github', 'push', $key, 'pending', $now)
@@ -128,5 +130,6 @@ test("a keyed effect is exactly-once-effective across a crash + recovery re-run"
     )
     .get(key);
   db.close();
-  expect(count?.n).toBe(1); // at-least-once-attempted, exactly-once-effective
+  expect(effectCalls).toBe(2); // at-least-once-attempted: effect was invoked on both runs
+  expect(count?.n).toBe(1); // exactly-once-effective: keyed insert applied only once
 });
