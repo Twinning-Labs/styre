@@ -29,6 +29,14 @@ Everything authoritative lives in `docs/architecture/`. Read top-to-bottom befor
 
 The `▶ RESUME HERE` banner at the top of `brainstorm.md` is the live status pointer — check it first to see what's settled and what's open.
 
+## Docs conventions (where new docs go)
+
+- **Brainstorms** → `docs/brainstorms/` — exploratory decision-shaping docs from the brainstorming skill.
+- **Plans** → `docs/plans/` — implementation/scaffolding plans from the planning skill.
+- **Repo (design) docs** → `docs/design/` — durable design docs, linked from the root `README.md`.
+
+Use the **superpowers brainstorming and planning skills** for that work, not ad-hoc freewriting. (Note: the existing authoritative design docs currently live in `docs/architecture/`; see migration note in that section above until they are moved under `docs/design/`.)
+
 ## Architecture: the non-obvious invariants
 
 These are the load-bearing decisions. Code that violates them is wrong even if it works:
