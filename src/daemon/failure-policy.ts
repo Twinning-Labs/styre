@@ -8,7 +8,7 @@ import {
   listByTicket as listUnits,
   setStatus as setUnitStatus,
 } from "../db/repos/work-unit.ts";
-import { listVerifyStepsForUnit, resetToPending } from "../db/repos/workflow-step.ts";
+import { listStepsForUnit, resetToPending } from "../db/repos/workflow-step.ts";
 import type { WorkflowStepRow } from "../db/repos/workflow-step.ts";
 
 export type FailureDecision = "retry" | "loopback" | "escalated";
@@ -100,7 +100,7 @@ export function applyFailurePolicy(
     // previously-passed ones re-run against the new commit.
     db.transaction(() => {
       setUnitStatus(db, workUnitId, "pending");
-      for (const s of listVerifyStepsForUnit(db, ticketId, workUnitId)) {
+      for (const s of listStepsForUnit(db, ticketId, workUnitId)) {
         resetToPending(db, s.id);
       }
       appendEvent(db, {

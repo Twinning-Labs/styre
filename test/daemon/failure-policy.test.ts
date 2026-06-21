@@ -215,6 +215,52 @@ test("same verify failure twice in a row escalates (no-progress backstop, attemp
   expect(pending.some((s) => s.signal_type === "human_resume")).toBe(true);
 });
 
+test("bounce-back resets the implement dispatch step so re-coding actually runs", () => {
+  // Regression: the old code only reset verify steps, leaving the dispatch step succeeded.
+  // The durable journal would replay it (return cached result), setUnitStatus never re-fires,
+  // and the unit gets stuck "pending" forever.
+  const { db, ticketId } = makeTestDb();
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verifying",
+  });
+
+  // Seed the implement dispatch step as succeeded (as it would be after the first coding pass).
+  const dispatchStep = insertPending(db, {
+    ticketId,
+    workUnitId: unit.id,
+    stepKey: "implement:wu1:dispatch",
+    stepType: "dispatch",
+  });
+  markRunning(db, dispatchStep.id, { pid: 1 });
+  markSucceeded(db, dispatchStep.id, { ok: true });
+
+  // Seed the verify step as failed with a "fail" ground-truth signal.
+  const verifyStep = insertPending(db, {
+    ticketId,
+    workUnitId: unit.id,
+    stepKey: "verify:wu1:test",
+    stepType: "verify",
+  });
+  markRunning(db, verifyStep.id, { pid: 1 });
+  markFailed(db, verifyStep.id, new Error("tests red"));
+  // Insert a "fail" ground-truth signal so latestVerifyResult returns "fail" (not "error").
+  insertSignal(db, { ticketId, workUnitId: unit.id, signalType: "test", result: "fail" });
+
+  const failed = getStep(db, verifyStep.id);
+  if (!failed) throw new Error("verify step missing");
+  const result = applyFailurePolicy(db, ticketId, failed);
+  const dispatchAfter = getStep(db, dispatchStep.id);
+  db.close();
+
+  expect(result.decision).toBe("loopback");
+  // The implement dispatch step MUST be reset so the next tick re-runs the handler.
+  expect(dispatchAfter?.status).toBe("pending");
+});
+
 test("whole-project failure spawns a reconcile unit and re-opens integration", () => {
   const { db, ticketId } = makeTestDb();
   insertWorkUnit(db, {

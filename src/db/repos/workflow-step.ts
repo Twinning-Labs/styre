@@ -130,14 +130,14 @@ export function resetToPending(db: Database, id: number): void {
   ).run({ $now: nowUtc(), $id: id });
 }
 
-export function listVerifyStepsForUnit(
+export function listStepsForUnit(
   db: Database,
   ticketId: number,
   workUnitId: number,
 ): WorkflowStepRow[] {
   return db
     .query<WorkflowStepRow, [number, number]>(
-      `SELECT ${COLS} FROM workflow_step WHERE ticket_id = ? AND work_unit_id = ? AND step_type = 'verify'`,
+      `SELECT ${COLS} FROM workflow_step WHERE ticket_id = ? AND work_unit_id = ?`,
     )
     .all(ticketId, workUnitId);
 }
