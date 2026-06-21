@@ -64,9 +64,6 @@ test("validateExtraction rejects a forward or self dependency", () => {
 
 test("validateExtraction accepts a valid backward dependency", () => {
   expect(
-    validateExtraction([
-      unit({ seq: 1, depends_on: [] }),
-      unit({ seq: 2, depends_on: [1] }),
-    ]),
+    validateExtraction([unit({ seq: 1, depends_on: [] }), unit({ seq: 2, depends_on: [1] })]),
   ).toEqual([]);
 });

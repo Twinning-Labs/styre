@@ -1,5 +1,5 @@
-import designTemplate from "../../prompts/design.md" with { type: "text" };
 import designExtractTemplate from "../../prompts/design-extract.md" with { type: "text" };
+import designTemplate from "../../prompts/design.md" with { type: "text" };
 import implementTemplate from "../../prompts/implement.md" with { type: "text" };
 import type { Profile } from "./profile.ts";
 

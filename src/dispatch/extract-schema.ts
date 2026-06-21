@@ -34,10 +34,11 @@ export function validateExtraction(units: ExtractedWorkUnit[]): string[] {
   const seqs = units.map((u) => u.seq);
   const seqSet = new Set(seqs);
   const expected = new Set(Array.from({ length: units.length }, (_, i) => i + 1));
-  const contiguous =
-    seqSet.size === seqs.length && [...expected].every((s) => seqSet.has(s));
+  const contiguous = seqSet.size === seqs.length && [...expected].every((s) => seqSet.has(s));
   if (!contiguous) {
-    errors.push(`seqs must be the unique contiguous set 1..${units.length}, got [${seqs.join(", ")}]`);
+    errors.push(
+      `seqs must be the unique contiguous set 1..${units.length}, got [${seqs.join(", ")}]`,
+    );
   }
 
   for (const u of units) {
