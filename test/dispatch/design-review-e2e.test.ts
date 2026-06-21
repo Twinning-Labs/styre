@@ -250,52 +250,86 @@ test("fast-track ticket (1 unit, track=fast) advances design→implement WITHOUT
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
 
-  // Set up state that the real design:extract sizer produces for a 1-unit ticket:
-  // design:dispatch succeeded, design:extract succeeded, 1 work unit, track='fast'.
-  // This mirrors how the real handlers leave things after a fast-track ticket goes through design.
+  // Seed only design:dispatch as succeeded (mirroring readyForExtract pattern from
+  // design-extract.test.ts). track is intentionally left NULL so the real sizer decides.
   const dispatch = insertPending(db, {
     ticketId,
     stepKey: "design:dispatch",
     stepType: "dispatch",
   });
   db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(dispatch.id);
+  // design:extract NOT pre-seeded; work units NOT pre-inserted; track NOT pre-set.
+  // The real design:extract handler will run, parse the sidecar, call sizeTrack([1 unit]) = 'fast'.
 
-  const extract = insertPending(db, {
-    ticketId,
-    stepKey: "design:extract",
-    stepType: "dispatch",
+  // Wire a FakeAgentRunner that:
+  //   - On the FIRST call (design:extract): returns a valid 1-unit extract sidecar.
+  //   - On any subsequent call (design:review would be one): throws loudly.
+  // This enforces that design:review is never dispatched AND pins the sizer's output.
+  let callCount = 0;
+  const extractSidecarPayload = JSON.stringify({
+    units: [
+      {
+        seq: 1,
+        kind: "backend",
+        title: "implement the feature",
+        description: "add the core backend logic",
+        behavioral: false,
+        test_plan: null,
+        files_to_touch: ["src/feature.ts"],
+        verify_check_types: ["build"],
+        depends_on: [],
+      },
+    ],
   });
-  db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(extract.id);
-
-  // Exactly 1 unit → sizeTrack([unit]) = 'fast'.
-  insertWorkUnit(db, {
-    ticketId,
-    seq: 1,
-    kind: "backend",
-    behavioral: 0,
-    verifyCheckTypes: ["test"],
-  });
-
-  setTicketTrack(db, ticketId, "fast");
-
-  // Wire a FakeAgentRunner that throws loudly if ANY agent step is dispatched.
-  // The resolver must skip design:review (fast-track) and emit an inline advance design→implement;
-  // no agent is invoked for a pure inline transition.
   const runner = new FakeAgentRunner(() => {
-    throw new Error("unexpected runner call: fast-track ticket must not invoke any agent step");
+    callCount += 1;
+    if (callCount === 1) {
+      // Serve the design:extract call with a valid 1-unit sidecar.
+      return {
+        completed: true,
+        exitCode: 0,
+        stdout: `Here is the breakdown.\n\n\`\`\`styre-sidecar\n${extractSidecarPayload}\n\`\`\`\n`,
+        stderr: "",
+        timedOut: false,
+        costUsd: null,
+        tokensIn: null,
+        tokensOut: null,
+      };
+    }
+    // Any second call would be design:review (or implement:dispatch) — both mean the
+    // fast-track skip failed. Throw so the test fails loudly.
+    throw new Error(
+      `unexpected runner call #${callCount}: fast-track ticket must not invoke design:review`,
+    );
   });
   const registry = registryFor(repo, runner);
 
-  // The resolver sees: design:dispatch done ✓, units present ✓, track='fast' (not 'full') →
-  // skips design:review → emits advance design→implement (inline, no step run).
-  // So advanceOneStep collapses the inline advance and should throw because implement:dispatch
-  // has no implement worktree (no real code), OR it drives into implement stage.
-  // The binding fact is that design:review step was NEVER created.
-  let advanceError: Error | null = null;
-  try {
-    await advanceOneStep(db, ticketId, registry);
-  } catch (err) {
-    advanceError = err as Error;
+  // Drive the loop:
+  //   Tick 1 → design:extract runs (real handler) → sizer sees 1 unit → sets track='fast' →
+  //             returns { kind: "stepped", stepKey: "design:extract" }
+  //   Tick 2 → resolver: design:dispatch done ✓, units present ✓, track='fast' (≠'full') →
+  //             advance design→implement (inline, no agent call) → routes to implement:wu1:dispatch
+  //             which calls the runner a 2nd time → throws → caught → step fails → failure-policy
+  //             returns some retry/blocked outcome; the binding fact (stage=implement) is already set.
+  for (let i = 0; i < 10; i++) {
+    const t = getTicket(db, ticketId);
+    if (!t || t.stage !== "design") break;
+    const outcome = await advanceOneStep(db, ticketId, registry);
+    if (
+      outcome.kind === "stepped" &&
+      "stepKey" in outcome &&
+      outcome.stepKey === "design:extract"
+    ) {
+      // design:extract done → fire the inline advance design→implement.
+      // implement:dispatch has no real worktree so may throw; catch it since the binding fact
+      // (stage=implement) is already committed by the inline advance before the runner is called.
+      try {
+        await advanceOneStep(db, ticketId, registry);
+      } catch {
+        // Expected: stage transition to implement already recorded; implement:dispatch throws.
+      }
+      break;
+    }
   }
 
   const ticket = getTicket(db, ticketId);
@@ -303,13 +337,11 @@ test("fast-track ticket (1 unit, track=fast) advances design→implement WITHOUT
   db.close();
 
   // Binding facts:
-  // 1. Ticket advanced past design (now 'implement') — the inline advance fired.
+  // 1. The real sizer ran and produced 'fast' from a 1-unit breakdown.
+  //    (If the sizer threshold were wrong this would be 'full' and all subsequent asserts would fail.)
+  expect(ticket?.track).toBe("fast");
+  // 2. Ticket advanced past design (now 'implement') — the inline advance fired.
   expect(ticket?.stage).toBe("implement");
-  // 2. design:review step was NEVER created (null = resolver never routed there).
+  // 3. design:review step was NEVER created (null = resolver never routed there).
   expect(designReviewStep).toBeNull();
-  // 3. No error about design:review being called (the runner would have thrown if it was).
-  //    If advanceError exists, it must NOT be from the design:review guard.
-  if (advanceError !== null) {
-    expect(advanceError.message).not.toContain("design:review must not run");
-  }
 });
