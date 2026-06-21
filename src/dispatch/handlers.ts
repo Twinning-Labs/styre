@@ -6,6 +6,7 @@ import type { AgentConfig } from "../config/agent-config.ts";
 import { StepRegistry } from "../daemon/step-registry.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
 import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";
+import { listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { insertSignal } from "../db/repos/ground-truth-signal.ts";
 import { getProject } from "../db/repos/project.ts";
 import { getById as getUnit, setStatus as setUnitStatus } from "../db/repos/work-unit.ts";
@@ -43,6 +44,14 @@ function worktreeFor(
     worktreePath: join(deps.worktreeRoot, ctx.ticket.ident),
     branch: branchNameFor(ctx.ticket),
   };
+}
+
+/** Has this unit been bounced back to coding before? (a loopback event targeting its checks) */
+function isUnitLoopback(ctx: HandlerContext, unitSeq: number): boolean {
+  const prefix = `verify:wu${unitSeq}:`;
+  return listEvents(ctx.db, ctx.ticket.id).some(
+    (e) => e.kind === "loopback" && (e.route_to?.startsWith(prefix) ?? false),
+  );
 }
 
 function depsFor(ctx: HandlerContext, deps: RegistryDeps, timeoutMs: number): DispatchDeps {
@@ -97,6 +106,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         handlerKey: "implement:dispatch",
         template: IMPLEMENT_TEMPLATE,
         vars: implementVars(ctx.ticket, unit, deps.profile),
+        loopback: isUnitLoopback(ctx, unit.seq),
         postcondition: ({ changed }) => {
           if (!changed) {
             throw new Error("implement:dispatch postcondition: empty diff");
