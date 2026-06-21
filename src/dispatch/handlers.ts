@@ -15,6 +15,7 @@ import {
   setStatus as setUnitStatus,
 } from "../db/repos/work-unit.ts";
 import { runCommand } from "../util/run-command.ts";
+import { implementFeedback } from "./feedback.ts";
 import type { Profile } from "./profile.ts";
 import { DESIGN_TEMPLATE, IMPLEMENT_TEMPLATE, designVars, implementVars } from "./prompt-vars.ts";
 import type { DispatchDeps } from "./run-dispatch.ts";
@@ -110,7 +111,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       {
         handlerKey: "implement:dispatch",
         template: IMPLEMENT_TEMPLATE,
-        vars: implementVars(ctx.ticket, unit, deps.profile),
+        vars: implementVars(ctx.ticket, unit, deps.profile, implementFeedback(ctx.db, unit.id)),
         loopback: isUnitLoopback(ctx, unit.seq),
         postcondition: ({ changed }) => {
           if (!changed) {

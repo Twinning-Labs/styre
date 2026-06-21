@@ -32,3 +32,11 @@ test("implementVars resolves every placeholder in the implement template", () =>
     expect(name in vars).toBe(true);
   }
 });
+
+test("implementVars carries the feedback var (empty by default)", () => {
+  const profile = parseProfile({ slug: "demo", targetRepo: "/r", commands: { test: "bun test" } });
+  const ticket = { ident: "ENG-1", title: "T" };
+  const unit = { seq: 1, kind: "backend", title: "U" };
+  expect(implementVars(ticket, unit, profile).feedback).toBe("");
+  expect(implementVars(ticket, unit, profile, "fix the build").feedback).toBe("fix the build");
+});
