@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
-import { latestDispatchForStep, listOpenByTicket } from "../../src/db/repos/review-finding.ts";
-import { getTicket, setTicketTrack } from "../../src/db/repos/ticket.ts";
+import { listOpenByTicket } from "../../src/db/repos/review-finding.ts";
+import { setTicketTrack } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { getByKey, insertPending } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
@@ -69,7 +69,9 @@ test("design:review files plan findings with review_kind=plan and daemon-compute
       JSON.stringify({
         findings: [
           {
-            severity: "major",
+            // minor severity → computeBlocksShip returns 0 (non-blocking) → verdict is "clean"
+            // → no redesign loopback → no cascade-delete → finding survives for inspection.
+            severity: "minor",
             category: "decomposition",
             location: "plan:Task 2",
             rationale: "split",
@@ -86,25 +88,18 @@ test("design:review files plan findings with review_kind=plan and daemon-compute
     tokensIn: null,
     tokensOut: null,
   }));
-  // After Task 5, the verdict fires immediately after the handler succeeds.
-  // A blocking plan finding (major, non-deferred) → redesign loopback.
-  // The loopback cascade-deletes work units (and their findings via FK CASCADE).
-  // We capture the dispatch ID for finding inspection before the cascade wipes them.
-  // Instead, assert the post-verdict state: loopback outcome + ticket back to design.
   const outcome = await advanceOneStep(db, ticketId, registryFor(repo, runner));
-  // Capture the dispatch that was filed by the handler (before any future resets clear it).
-  const dispatchId = latestDispatchForStep(db, ticketId, "design:review");
-  const ticket = getTicket(db, ticketId);
+  const open = listOpenByTicket(db, ticketId);
   const step = getByKey(db, ticketId, "design:review");
   db.close();
-  // The handler ran and filed a blocking finding → verdict triggered loopback.
-  expect(outcome).toEqual({ kind: "loopback", stepKey: "design:review" });
-  // Redesign loopback resets ticket to design stage.
-  expect(ticket?.stage).toBe("design");
-  // The design:review step was reset to pending by redesignLoopback.
-  expect(step?.status).toBe("pending");
-  // The dispatch was created (the handler ran).
-  expect(dispatchId).not.toBeNull();
+  // Non-blocking finding → clean verdict → step stays succeeded, ticket stays in design.
+  expect(outcome).toEqual({ kind: "stepped", stepKey: "design:review" });
+  expect(step?.status).toBe("succeeded");
+  // Handler assertion: exactly 1 open finding with the handler's distinguishing attributes.
+  expect(open.length).toBe(1);
+  expect(open[0].review_kind).toBe("plan"); // handler always files reviewKind="plan"
+  expect(open[0].blocks_ship).toBe(0); // daemon-computed: minor → 0
+  expect(open[0].work_unit_id).not.toBeNull(); // seq=2 mapped to the real unit id
 });
 
 test("design:review throws on an absent sidecar (transport failure)", async () => {
