@@ -32,6 +32,7 @@ test("a unit that fails then passes ends verified, with both results on record",
     ticketId,
     seq: 1,
     kind: "backend",
+    behavioral: 0,
     verifyCheckTypes: ["test"],
   });
 

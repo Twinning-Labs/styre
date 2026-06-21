@@ -31,6 +31,7 @@ test("implement then real verify:check drives a work-unit to verified", async ()
     ticketId,
     seq: 1,
     kind: "backend",
+    behavioral: 0,
     verifyCheckTypes: ["test"],
   });
 
