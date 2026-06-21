@@ -304,3 +304,49 @@ test("behavioral unit: a test file in the diff passes the test check", async () 
   db.close();
   expect(sig?.result).toBe("pass");
 });
+
+test("scope_diff records an advisory fail for out-of-scope files but does NOT fail the step", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+  // Unit declares it will touch only allowed.ts; non-behavioral so A1 doesn't interfere.
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    behavioral: 0,
+    verifyCheckTypes: ["test"],
+    filesToTouch: ["allowed.ts"],
+  });
+  const runner = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "allowed.ts"), "export const a = 1;\n");
+    writeFileSync(join(input.cwd, "sneaky.ts"), "export const b = 2;\n"); // out of scope
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: "{}",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({ slug: "demo", targetRepo: repo, commands: { test: "true" } }),
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-sd-")),
+  });
+  await advanceOneStep(db, ticketId, registry); // implement
+  const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test (passes) + scope_diff advisory
+  const sigs = listByUnit(db, unit.id);
+  const scope = sigs.find((s) => s.signal_type === "scope_diff");
+  const testSig = sigs.find((s) => s.signal_type === "test");
+  db.close();
+  expect(outcome.kind).toBe("stepped"); // step succeeded — advisory did NOT fail it
+  expect(testSig?.result).toBe("pass");
+  expect(scope?.result).toBe("fail");
+  expect(JSON.parse(scope?.detail_json ?? "{}").out_of_scope).toEqual(["sneaky.ts"]);
+});

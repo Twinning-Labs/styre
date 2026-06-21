@@ -7,9 +7,13 @@ import { StepRegistry } from "../daemon/step-registry.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
 import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";
 import { listByTicket as listEvents } from "../db/repos/event-log.ts";
-import { insertSignal } from "../db/repos/ground-truth-signal.ts";
+import { insertSignal, listByUnit } from "../db/repos/ground-truth-signal.ts";
 import { getProject } from "../db/repos/project.ts";
-import { getById as getUnit, setStatus as setUnitStatus } from "../db/repos/work-unit.ts";
+import {
+  getById as getUnit,
+  parseFilesToTouch,
+  setStatus as setUnitStatus,
+} from "../db/repos/work-unit.ts";
 import { runCommand } from "../util/run-command.ts";
 import type { Profile } from "./profile.ts";
 import { DESIGN_TEMPLATE, IMPLEMENT_TEMPLATE, designVars, implementVars } from "./prompt-vars.ts";
@@ -179,6 +183,29 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       branchHeadSha,
       detail,
     });
+
+    // scope_diff (A3) — advisory only: compare the coding diff against the unit's declared files.
+    // Recorded once per (unit, commit); NEVER throws, NEVER gates the step.
+    if (branchHeadSha !== undefined) {
+      const unitRow = getUnit(ctx.db, ctx.workUnitId);
+      const declared = unitRow ? parseFilesToTouch(unitRow) : [];
+      const already = listByUnit(ctx.db, ctx.workUnitId).some(
+        (s) => s.signal_type === "scope_diff" && s.branch_head_sha === branchHeadSha,
+      );
+      if (declared.length > 0 && !already) {
+        const changed = changedFilesAt(branchHeadSha, worktreePath);
+        const outOfScope = changed.filter((p) => !declared.includes(p));
+        insertSignal(ctx.db, {
+          ticketId: ctx.ticket.id,
+          workUnitId: ctx.workUnitId,
+          signalType: "scope_diff",
+          result: outOfScope.length === 0 ? "pass" : "fail",
+          branchHeadSha,
+          detail: { changed, out_of_scope: outOfScope },
+        });
+      }
+    }
+
     if (result !== "pass") {
       throw new Error(`verify:check ${checkType}: ${result}`);
     }
