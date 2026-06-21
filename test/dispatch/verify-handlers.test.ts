@@ -171,6 +171,35 @@ test("verify:integration fails the step when a command fails", async () => {
   expect(sigs[0]?.result).toBe("fail");
 });
 
+test("a timed-out check records an error signal (not fail)", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  // Build the registry inline with a tiny timeout and a command that sleeps longer.
+  const registry = buildDispatchRegistry({
+    runner: new FakeAgentRunner(() => ({
+      completed: true,
+      exitCode: 0,
+      stdout: "{}",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    })),
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({ slug: "demo", targetRepo: repo, commands: { test: "sleep 5" } }),
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfywt2-")),
+    timeoutMs: 200,
+  });
+  const unit = seedVerifying(db, ticketId, projectId, repo, registry);
+
+  await advanceOneStep(db, ticketId, registry);
+  const sigs = listByUnit(db, unit.id);
+  db.close();
+  // timedOut || exitCode === null maps to "error", not "fail"
+  expect(sigs[0]?.result).toBe("error");
+});
+
 test("verify:check stamps the verified commit on the signal", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();

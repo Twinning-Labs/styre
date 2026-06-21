@@ -145,8 +145,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       cwd: worktreePath,
       timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
     });
-    const latest = getLatestByWorkUnit(ctx.db, ctx.workUnitId);
-    const branchHeadSha = latest?.branch_head_sha ?? null;
+    const branchHeadSha = getLatestByWorkUnit(ctx.db, ctx.workUnitId)?.branch_head_sha ?? undefined;
     const result =
       run.exitCode === 0 ? "pass" : run.timedOut || run.exitCode === null ? "error" : "fail";
     insertSignal(ctx.db, {
@@ -155,7 +154,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       signalType: checkType,
       result,
       command,
-      branchHeadSha: branchHeadSha ?? undefined,
+      branchHeadSha,
       detail: { exitCode: run.exitCode, timedOut: run.timedOut, stderr: run.stderr.slice(0, 2000) },
     });
     if (result !== "pass") {

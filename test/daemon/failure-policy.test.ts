@@ -4,7 +4,12 @@ import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { listPending } from "../../src/db/repos/signal.ts";
 import { getTicket, setTicketStage } from "../../src/db/repos/ticket.ts";
-import { getById as getUnit, insertWorkUnit, listByTicket } from "../../src/db/repos/work-unit.ts";
+import {
+  getById as getUnit,
+  insertWorkUnit,
+  listByTicket,
+  parseDependsOn,
+} from "../../src/db/repos/work-unit.ts";
 import {
   getById as getStep,
   getByKey as getStepByKey,
@@ -288,4 +293,8 @@ test("whole-project failure spawns a reconcile unit and re-opens integration", (
   expect(reconcile).toBeDefined();
   expect(reconcile?.status).toBe("pending");
   expect(intAfter?.status).toBe("pending");
+  // Regression guard: computed fields on the new reconcile unit
+  if (!reconcile) throw new Error("no reconcile unit");
+  expect(reconcile.seq).toBe(2); // max(existing seq)+1; seeded one unit at seq 1
+  expect(parseDependsOn(reconcile)).toEqual([1]); // depends on the single existing unit
 });

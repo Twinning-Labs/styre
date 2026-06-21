@@ -133,7 +133,8 @@ test("implement:dispatch escalates to the deep tier after a bounce-back", async 
   });
 
   await advanceOneStep(db, ticketId, registry);
-  const model = listByTicket(db, ticketId)[0]?.model;
+  const dispatches = listByTicket(db, ticketId);
   db.close();
-  expect(model).toBe("claude-opus-4-8"); // deep tier (escalated), not the standard sonnet
+  expect(dispatches.length).toBe(1);
+  expect(dispatches[0]?.model).toBe("claude-opus-4-8"); // deep tier (escalated), not the standard sonnet
 });
