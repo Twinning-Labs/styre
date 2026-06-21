@@ -86,14 +86,26 @@ test("review handler files findings with daemon-computed blocks_ship", async () 
     tokensOut: null,
   }));
   await advanceOneStep(db, ticketId, registryFor(repo, runner));
-  const open = listOpenByTicket(db, ticketId);
+  // Query all findings (not just open): the blocking major gets superseded by the verdict's
+  // code-loopback in the same advanceOneStep call, so listOpenByTicket would only see the nit.
+  const all = db
+    .query<
+      { severity: string; blocks_ship: number | null; work_unit_id: number | null; status: string },
+      [number]
+    >(
+      "SELECT severity, blocks_ship, work_unit_id, status FROM review_finding WHERE ticket_id = ? ORDER BY id",
+    )
+    .all(ticketId);
   const step = getByKey(db, ticketId, "review");
   db.close();
-  expect(open.length).toBe(2);
-  const major = open.find((f) => f.severity === "major");
+  expect(all.length).toBe(2);
+  const major = all.find((f) => f.severity === "major");
   expect(major?.blocks_ship).toBe(1); // daemon-computed
   expect(major?.work_unit_id).not.toBeNull(); // mapped from work_unit_seq=1
-  expect(open.find((f) => f.severity === "nit")?.blocks_ship).toBe(0);
+  expect(major?.status).toBe("superseded"); // code-loopback supersedes all open findings
+  const nit = all.find((f) => f.severity === "nit");
+  expect(nit?.blocks_ship).toBe(0);
+  expect(nit?.status).toBe("superseded"); // all open findings superseded on code loopback
   // step status is governed by the verdict (Task 5); here we only assert findings were written.
   expect(step).not.toBeNull();
 });

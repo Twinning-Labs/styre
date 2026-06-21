@@ -371,7 +371,7 @@ CREATE TABLE review_finding (
     blocks_ship        INTEGER CHECK (blocks_ship IN (0,1)),  -- DAEMON-computed (critical-floor + major-not-deferred)
     location           TEXT,                            -- file:line
     rationale          TEXT,
-    status             TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','fixed','deferred','wont-fix')),
+    status             TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','fixed','deferred','wont-fix','superseded')),
     created_at         TEXT NOT NULL,
     -- critical-floor guard (defense-in-depth; the daemon also enforces it):
     CHECK (blocks_ship IS NULL OR severity <> 'critical' OR blocks_ship = 1)

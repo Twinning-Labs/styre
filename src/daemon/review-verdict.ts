@@ -5,6 +5,8 @@ import {
   type ReviewFindingRow,
   latestReviewDispatchId,
   listByDispatch,
+  listOpenByTicket as listOpenFindings,
+  setStatus as setFindingStatus,
 } from "../db/repos/review-finding.ts";
 import { insertPending as insertSignal } from "../db/repos/signal.ts";
 import { setTicketStage, setTicketStatus } from "../db/repos/ticket.ts";
@@ -76,6 +78,10 @@ function codeLoopback(
     const reviewStep = getByKey(db, ticketId, "review");
     if (reviewStep) {
       resetToPending(db, reviewStep.id);
+    }
+    // Supersede the current round's open findings so the next review round starts clean.
+    for (const f of listOpenFindings(db, ticketId)) {
+      setFindingStatus(db, f.id, "superseded");
     }
     setTicketStage(db, ticketId, "implement");
     appendEvent(db, {
