@@ -173,6 +173,7 @@ test("review step with blocking finding → outcome loopback and stage implement
       ticketId: ctx.ticket.id,
       dispatchId: did,
       seq: nextSeq(ctx.db, ctx.ticket.id),
+      stepId: ctx.step.id,
       stage: "review",
     });
     insertFinding(ctx.db, {

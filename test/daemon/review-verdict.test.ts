@@ -17,7 +17,7 @@ function seedReviewRound(db: ReturnType<typeof makeTestDb>["db"], ticketId: numb
   const s = insertPending(db, { ticketId, stepKey: "review", stepType: "dispatch" });
   db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
   const did = "T-d0001";
-  insertDispatch(db, { ticketId, dispatchId: did, seq: 1, stage: "review" });
+  insertDispatch(db, { ticketId, dispatchId: did, seq: 1, stepId: s.id, stage: "review" });
   return { unit, did };
 }
 

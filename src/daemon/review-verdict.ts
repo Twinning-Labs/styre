@@ -3,7 +3,7 @@ import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
 import {
   type ReviewFindingRow,
-  latestReviewDispatchId,
+  latestDispatchForStep,
   listByDispatch,
 } from "../db/repos/review-finding.ts";
 import { insertPending as insertSignal } from "../db/repos/signal.ts";
@@ -117,7 +117,7 @@ export function applyReviewVerdict(
   ticketId: number,
   config: RuntimeConfig,
 ): ReviewVerdictResult {
-  const dispatchId = latestReviewDispatchId(db, ticketId);
+  const dispatchId = latestDispatchForStep(db, ticketId, "review");
   if (dispatchId === null) {
     return { decision: "clean" };
   }
