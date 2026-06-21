@@ -9,9 +9,13 @@ export interface TicketRow {
   status: string;
   track: string | null;
   needs_docs: number;
+  branch_name: string | null;
+  branch_prefix: string | null;
+  type_label: string | null;
 }
 
-const COLS = "id, project_id, ident, stage, status, track, needs_docs";
+const COLS =
+  "id, project_id, ident, stage, status, track, needs_docs, branch_name, branch_prefix, type_label";
 
 export function insertTicket(
   db: Database,
@@ -73,6 +77,14 @@ export function setTicketTrack(db: Database, id: number, track: string): void {
 export function setNeedsDocs(db: Database, id: number, needsDocs: number): void {
   db.query("UPDATE ticket SET needs_docs = $nd, updated_at = $now WHERE id = $id").run({
     $nd: needsDocs,
+    $now: nowUtc(),
+    $id: id,
+  });
+}
+
+export function setBranch(db: Database, id: number, branchName: string): void {
+  db.query("UPDATE ticket SET branch_name = $b, updated_at = $now WHERE id = $id").run({
+    $b: branchName,
     $now: nowUtc(),
     $id: id,
   });
