@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { applyReviewVerdict } from "../../src/daemon/review-verdict.ts";
 import { insertDispatch } from "../../src/db/repos/dispatch.ts";
-import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { appendEvent, listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import { insertFinding } from "../../src/db/repos/review-finding.ts";
 import { listPending } from "../../src/db/repos/signal.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
@@ -123,4 +123,42 @@ test("non-blocking major + deferral_candidate → escalated", () => {
   db.close();
   expect(r.decision).toBe("escalated");
   expect(ticket?.status).toBe("waiting");
+});
+
+test("no-progress guard: identical blocking signature in prior loopback event → escalated (not loopback)", () => {
+  // The signature for a blocking finding {category:"correctness", location:"a.ts:1"} is:
+  //   "review:correctness:a.ts:1"
+  // Seed a prior loopback event carrying that exact signature so the guard fires.
+  const { db, ticketId } = makeTestDb();
+  const { did } = seedReviewRound(db, ticketId);
+  const matchingSignature = "review:correctness:a.ts:1";
+  // Append a prior loopback event with the same signature the guard will compute below.
+  appendEvent(db, {
+    ticketId,
+    kind: "loopback",
+    loop: "implement",
+    routeTo: "review",
+    signature: matchingSignature,
+  });
+  // File a blocking finding whose computed signature matches the seeded event.
+  insertFinding(db, {
+    ticketId,
+    reviewKind: "code",
+    dispatchId: did,
+    severity: "major",
+    category: "correctness",
+    deferralCandidate: 0,
+    blocksShip: 1,
+    location: "a.ts:1",
+  });
+  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "escalate" });
+  const ticket = getTicket(db, ticketId);
+  const signals = listPending(db, ticketId);
+  db.close();
+  // Guard fires: escalated instead of looping back again.
+  expect(r.decision).toBe("escalated");
+  expect(ticket?.status).toBe("waiting");
+  expect(signals.some((s) => s.signal_type === "human_resume")).toBe(true);
+  // Proof the guard is doing the work: WITHOUT the matching prior loopback event the same
+  // finding would produce decision "loopback" (see "blocking code finding" test above).
 });

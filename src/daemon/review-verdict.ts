@@ -5,7 +5,6 @@ import {
   type ReviewFindingRow,
   latestReviewDispatchId,
   listByDispatch,
-  setStatus,
 } from "../db/repos/review-finding.ts";
 import { insertPending as insertSignal } from "../db/repos/signal.ts";
 import { setTicketStage, setTicketStatus } from "../db/repos/ticket.ts";
@@ -79,9 +78,6 @@ function codeLoopback(
       resetToPending(db, reviewStep.id);
     }
     setTicketStage(db, ticketId, "implement");
-    for (const f of blocking) {
-      setStatus(db, f.id, "superseded");
-    }
     appendEvent(db, {
       ticketId,
       kind: "loopback",
@@ -92,12 +88,7 @@ function codeLoopback(
   })();
 }
 
-function redesignLoopback(
-  db: Database,
-  ticketId: number,
-  open: ReviewFindingRow[],
-  signature: string,
-): void {
+function redesignLoopback(db: Database, ticketId: number, signature: string): void {
   db.transaction(() => {
     deleteByTicket(db, ticketId);
     for (const key of ["design:dispatch", "design:extract", "review"]) {
@@ -105,9 +96,6 @@ function redesignLoopback(
       if (step) {
         resetToPending(db, step.id);
       }
-    }
-    for (const f of open) {
-      setStatus(db, f.id, "superseded");
     }
     setTicketStage(db, ticketId, "design");
     appendEvent(db, {
@@ -149,7 +137,7 @@ export function applyReviewVerdict(
     const isPlanDefect = blocking.some((f) => f.category === "plan-defect");
     if (isPlanDefect) {
       if (config.onPlanDefect === "redesign") {
-        redesignLoopback(db, ticketId, open, signature);
+        redesignLoopback(db, ticketId, signature);
         return { decision: "loopback" };
       }
       escalate(
