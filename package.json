@@ -3,7 +3,9 @@
   "version": "0.0.0",
   "description": "The open-source autonomous-SDLC execution core: drives a structured ticket design → released.",
   "type": "module",
-  "bin": { "styre": "./src/index.ts" },
+  "bin": {
+    "styre": "./src/index.ts"
+  },
   "scripts": {
     "lint": "biome check .",
     "format": "biome format --write .",
@@ -12,7 +14,8 @@
     "build": "sh scripts/build.sh"
   },
   "dependencies": {
-    "citty": "^0.1.6"
+    "citty": "^0.1.6",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
