@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
+import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
 import { listByUnit } from "../../src/db/repos/ground-truth-signal.ts";
 import {
   getById as getUnit,
@@ -168,4 +169,25 @@ test("verify:integration fails the step when a command fails", async () => {
   db.close();
   expect(["retry", "loopback", "escalated"]).toContain(outcome.kind);
   expect(sigs[0]?.result).toBe("fail");
+});
+
+test("verify:check stamps the verified commit on the signal", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  const registry = registryFor(repo, { test: "true" });
+  const unit = seedVerifying(db, ticketId, projectId, repo, registry);
+  // record a coding attempt with a known commit for the unit
+  const d = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0001",
+    seq: nextSeq(db, ticketId),
+    workUnitId: unit.id,
+  });
+  completeDispatch(db, d.id, { outcome: "clean-success", branchHeadSha: "deadbeef" });
+
+  await advanceOneStep(db, ticketId, registry);
+  const sig = listByUnit(db, unit.id)[0];
+  db.close();
+  expect(sig?.result).toBe("pass");
+  expect(sig?.branch_head_sha).toBe("deadbeef");
 });
