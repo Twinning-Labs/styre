@@ -9,10 +9,12 @@ import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts
 import { listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { insertSignal, listByUnit } from "../db/repos/ground-truth-signal.ts";
 import { getProject } from "../db/repos/project.ts";
+import { insertFinding } from "../db/repos/review-finding.ts";
 import { setTicketTrack } from "../db/repos/ticket.ts";
 import {
   getById as getUnit,
   insertWorkUnit,
+  listByTicket as listUnits,
   parseFilesToTouch,
   setStatus as setUnitStatus,
 } from "../db/repos/work-unit.ts";
@@ -24,10 +26,13 @@ import {
   DESIGN_TEMPLATE,
   EXTRACT_TEMPLATE,
   IMPLEMENT_TEMPLATE,
+  REVIEW_TEMPLATE,
   designVars,
   extractVars,
   implementVars,
+  reviewVars,
 } from "./prompt-vars.ts";
+import { ReviewOutputSchema, computeBlocksShip, validateReviewFindings } from "./review-schema.ts";
 import type { DispatchDeps } from "./run-dispatch.ts";
 import { runAgentDispatch } from "./run-dispatch.ts";
 import { extractSidecar } from "./sidecar.ts";
@@ -313,6 +318,52 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       throw new Error(`verify:integration: ${result}`);
     }
     return { integration: result };
+  });
+
+  registry.register("review", async (ctx: HandlerContext) => {
+    const result = await runAgentDispatch(
+      ctx,
+      depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
+      {
+        handlerKey: "review",
+        template: REVIEW_TEMPLATE,
+        vars: reviewVars(ctx.ticket, deps.profile),
+        postcondition: () => {}, // read-only: nothing commits
+      },
+    );
+
+    const parsed = extractSidecar(result.output, ReviewOutputSchema);
+    if (!parsed.ok) {
+      throw new Error(`review sidecar ${parsed.reason}: ${parsed.detail}`);
+    }
+    const units = listUnits(ctx.db, ctx.ticket.id);
+    const seqToId = new Map(units.map((u) => [u.seq, u.id]));
+    const errors = validateReviewFindings(parsed.value.findings, [...seqToId.keys()]);
+    if (errors.length > 0) {
+      throw new Error(`review findings invalid: ${errors.join("; ")}`);
+    }
+
+    let blocking = 0;
+    for (const f of parsed.value.findings) {
+      const blocksShip = computeBlocksShip(f.severity, f.deferral_candidate);
+      if (blocksShip === 1) {
+        blocking += 1;
+      }
+      insertFinding(ctx.db, {
+        ticketId: ctx.ticket.id,
+        reviewKind: "code",
+        dispatchId: result.dispatchId,
+        workUnitId: f.work_unit_seq === null ? null : (seqToId.get(f.work_unit_seq) ?? null),
+        severity: f.severity,
+        category: f.category,
+        factorsJson: f.factors === null ? null : JSON.stringify(f.factors),
+        deferralCandidate: f.deferral_candidate ? 1 : 0,
+        blocksShip,
+        location: f.location,
+        rationale: f.rationale,
+      });
+    }
+    return { findings: parsed.value.findings.length, blocking };
   });
 
   return registry;

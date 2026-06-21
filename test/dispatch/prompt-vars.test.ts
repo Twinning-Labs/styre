@@ -4,9 +4,11 @@ import {
   DESIGN_TEMPLATE,
   EXTRACT_TEMPLATE,
   IMPLEMENT_TEMPLATE,
+  REVIEW_TEMPLATE,
   designVars,
   extractVars,
   implementVars,
+  reviewVars,
 } from "../../src/dispatch/prompt-vars.ts";
 import { placeholders, renderPrompt } from "../../src/dispatch/render-prompt.ts";
 
@@ -47,4 +49,13 @@ test("implementVars carries the feedback var (empty by default)", () => {
   const unit = { seq: 1, kind: "backend", title: "U" };
   expect(implementVars(ticket, unit, profile).feedback).toBe("");
   expect(implementVars(ticket, unit, profile, "fix the build").feedback).toBe("fix the build");
+});
+
+test("review template renders with reviewVars (no missing placeholders)", () => {
+  const profile = parseProfile({ slug: "demo", targetRepo: "/tmp/x", commands: {} });
+  const r = renderPrompt(REVIEW_TEMPLATE, reviewVars({ ident: "ENG-1", title: "T" }, profile));
+  expect(r.ok).toBe(true);
+  for (const name of placeholders(REVIEW_TEMPLATE)) {
+    expect(name in reviewVars({ ident: "ENG-1", title: "T" }, profile)).toBe(true);
+  }
 });

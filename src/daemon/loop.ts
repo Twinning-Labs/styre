@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { advanceOneStep } from "./advance.ts";
 import type { StepRegistry } from "./step-registry.ts";
 
@@ -18,13 +19,13 @@ export function readyTicketIds(db: Database): number[] {
 export async function tick(
   db: Database,
   registry: StepRegistry,
-  opts?: { maxConcurrent?: number },
+  opts?: { maxConcurrent?: number; config?: RuntimeConfig },
 ): Promise<{ advanced: number }> {
   const max = opts?.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
   const ids = readyTicketIds(db).slice(0, max);
   let advanced = 0;
   for (const id of ids) {
-    await advanceOneStep(db, id, registry);
+    await advanceOneStep(db, id, registry, { config: opts?.config });
     advanced++;
   }
   return { advanced };

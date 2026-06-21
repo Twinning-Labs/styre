@@ -3,6 +3,7 @@ import { advanceOneStep } from "../../src/daemon/advance.ts";
 import { StepRegistry } from "../../src/daemon/step-registry.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
+import { insertFinding } from "../../src/db/repos/review-finding.ts";
 import { getTicket, setTicketStage, setTicketTrack } from "../../src/db/repos/ticket.ts";
 import { getById as getUnit, insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { getByKey, insertPending, markRunning } from "../../src/db/repos/workflow-step.ts";
@@ -155,4 +156,43 @@ test("a running step propagates StepInFlightError instead of routing through fai
   // Step must still be 'running' — failure-policy did NOT reset it to pending.
   expect(getByKey(db, ticketId, "design:dispatch")?.status).toBe("running");
   db.close();
+});
+
+test("review step with blocking finding → outcome loopback and stage implement", async () => {
+  const { db, ticketId } = makeTestDb();
+  // Seed a ticket in review stage with a pending review step.
+  setTicketStage(db, ticketId, "review");
+  insertPending(db, { ticketId, stepKey: "review", stepType: "dispatch" });
+
+  const registry = new StepRegistry();
+  // The handler mimics a real review agent: records a dispatch with stage='review'
+  // and files one blocking code finding against that dispatch.
+  registry.register("review", (ctx) => {
+    const did = `${ctx.ticket.ident}-rev001`;
+    insertDispatch(ctx.db, {
+      ticketId: ctx.ticket.id,
+      dispatchId: did,
+      seq: nextSeq(ctx.db, ctx.ticket.id),
+      stage: "review",
+    });
+    insertFinding(ctx.db, {
+      ticketId: ctx.ticket.id,
+      reviewKind: "code",
+      dispatchId: did,
+      severity: "major",
+      category: "correctness",
+      deferralCandidate: 0,
+      blocksShip: 1,
+      location: "src/foo.ts:10",
+    });
+    return { findings: 1 };
+  });
+
+  const outcome = await advanceOneStep(db, ticketId, registry);
+  const ticket = getTicket(db, ticketId);
+  db.close();
+
+  // Verdict: blocking finding → loopback to implement.
+  expect(outcome).toEqual({ kind: "loopback", stepKey: "review" });
+  expect(ticket?.stage).toBe("implement");
 });
