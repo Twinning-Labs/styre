@@ -2,8 +2,10 @@ import { expect, test } from "bun:test";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import {
   DESIGN_TEMPLATE,
+  EXTRACT_TEMPLATE,
   IMPLEMENT_TEMPLATE,
   designVars,
+  extractVars,
   implementVars,
 } from "../../src/dispatch/prompt-vars.ts";
 import { placeholders, renderPrompt } from "../../src/dispatch/render-prompt.ts";
@@ -31,6 +33,12 @@ test("implementVars resolves every placeholder in the implement template", () =>
   for (const name of placeholders(IMPLEMENT_TEMPLATE)) {
     expect(name in vars).toBe(true);
   }
+});
+
+test("extract template renders with extractVars (no missing placeholders)", () => {
+  const profile = parseProfile({ slug: "demo", targetRepo: "/tmp/x", commands: {} });
+  const r = renderPrompt(EXTRACT_TEMPLATE, extractVars({ ident: "ENG-1", title: "T" }, profile));
+  expect(r.ok).toBe(true);
 });
 
 test("implementVars carries the feedback var (empty by default)", () => {
