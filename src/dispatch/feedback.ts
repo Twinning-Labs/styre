@@ -10,7 +10,7 @@ export function implementFeedback(db: Database, workUnitId: number): string {
     return "";
   }
   const failures = listByUnit(db, workUnitId).filter(
-    (s) => s.branch_head_sha === sha && s.result !== "pass",
+    (s) => s.branch_head_sha === sha && s.result !== "pass" && s.signal_type !== "scope_diff",
   );
   if (failures.length === 0) {
     return "";

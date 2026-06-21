@@ -60,3 +60,31 @@ test("a failing check yields a what-failed instruction", () => {
   db.close();
   expect(fb).toContain("build");
 });
+
+test("advisory scope_diff failure is excluded from re-coding feedback; real gating failures still surface", () => {
+  const { db, ticketId } = makeTestDb();
+  const u = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend" });
+  seedAttempt(db, ticketId, u.id, "sha1");
+  // Advisory signal — must NOT appear in feedback
+  insertSignal(db, {
+    ticketId,
+    workUnitId: u.id,
+    signalType: "scope_diff",
+    result: "fail",
+    branchHeadSha: "sha1",
+    detail: { out_of_scope: ["x.ts"] },
+  });
+  // Gating signal — MUST appear in feedback
+  insertSignal(db, {
+    ticketId,
+    workUnitId: u.id,
+    signalType: "build",
+    result: "fail",
+    branchHeadSha: "sha1",
+    detail: { stderr: "type error" },
+  });
+  const fb = implementFeedback(db, u.id);
+  db.close();
+  expect(fb).not.toContain("scope_diff");
+  expect(fb).toContain("build");
+});
