@@ -3,7 +3,11 @@ import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.t
 import { listByUnit } from "../db/repos/ground-truth-signal.ts";
 import { insertPending as insertSignal } from "../db/repos/signal.ts";
 import { setTicketStatus } from "../db/repos/ticket.ts";
-import { setStatus as setUnitStatus } from "../db/repos/work-unit.ts";
+import {
+  insertWorkUnit,
+  listByTicket as listUnits,
+  setStatus as setUnitStatus,
+} from "../db/repos/work-unit.ts";
 import { listVerifyStepsForUnit, resetToPending } from "../db/repos/workflow-step.ts";
 import type { WorkflowStepRow } from "../db/repos/workflow-step.ts";
 
@@ -105,6 +109,32 @@ export function applyFailurePolicy(
         loop: "implement",
         routeTo: step.step_key,
         signature,
+      });
+    })();
+    return { decision: "loopback" };
+  }
+
+  // Whole-project (integration) failure → ticket-scoped reconcile: add a fix unit that runs
+  // after all others, then re-open the integration check.
+  if (step.step_type === "verify" && step.work_unit_id === null) {
+    db.transaction(() => {
+      const units = listUnits(db, ticketId);
+      const nextSeqNum = Math.max(0, ...units.map((u) => u.seq)) + 1;
+      insertWorkUnit(db, {
+        ticketId,
+        seq: nextSeqNum,
+        kind: "reconcile",
+        behavioral: 0,
+        verifyCheckTypes: [],
+        dependsOn: units.map((u) => u.seq),
+      });
+      resetToPending(db, step.id);
+      appendEvent(db, {
+        ticketId,
+        kind: "loopback",
+        loop: "integration",
+        routeTo: step.step_key,
+        signature: failureSignature(step),
       });
     })();
     return { decision: "loopback" };

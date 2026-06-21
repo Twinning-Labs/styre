@@ -4,7 +4,7 @@ import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { listPending } from "../../src/db/repos/signal.ts";
 import { getTicket, setTicketStage } from "../../src/db/repos/ticket.ts";
-import { getById as getUnit, insertWorkUnit } from "../../src/db/repos/work-unit.ts";
+import { getById as getUnit, insertWorkUnit, listByTicket } from "../../src/db/repos/work-unit.ts";
 import {
   getById as getStep,
   getByKey as getStepByKey,
@@ -213,4 +213,33 @@ test("same verify failure twice in a row escalates (no-progress backstop, attemp
   expect(escalations.length).toBe(1);
   expect(escalations[0]?.reason).toBe("no progress");
   expect(pending.some((s) => s.signal_type === "human_resume")).toBe(true);
+});
+
+test("whole-project failure spawns a reconcile unit and re-opens integration", () => {
+  const { db, ticketId } = makeTestDb();
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verified",
+  });
+  const intStep = insertPending(db, {
+    ticketId,
+    stepKey: "verify:integration",
+    stepType: "verify",
+  });
+  markRunning(db, intStep.id, {});
+  markFailed(db, intStep.id, new Error("integration red"));
+  const s = getStep(db, intStep.id);
+  if (!s) throw new Error("no step");
+  const r = applyFailurePolicy(db, ticketId, s);
+  const units = listByTicket(db, ticketId);
+  const reconcile = units.find((u) => u.kind === "reconcile");
+  const intAfter = getStep(db, intStep.id);
+  db.close();
+  expect(r.decision).toBe("loopback");
+  expect(reconcile).toBeDefined();
+  expect(reconcile?.status).toBe("pending");
+  expect(intAfter?.status).toBe("pending");
 });
