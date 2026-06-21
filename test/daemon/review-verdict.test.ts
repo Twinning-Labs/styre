@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import { applyReviewVerdict } from "../../src/daemon/review-verdict.ts";
 import { insertDispatch } from "../../src/db/repos/dispatch.ts";
 import { appendEvent, listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
@@ -17,14 +18,14 @@ function seedReviewRound(db: ReturnType<typeof makeTestDb>["db"], ticketId: numb
   const s = insertPending(db, { ticketId, stepKey: "review", stepType: "dispatch" });
   db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
   const did = "T-d0001";
-  insertDispatch(db, { ticketId, dispatchId: did, seq: 1, stage: "review" });
+  insertDispatch(db, { ticketId, dispatchId: did, seq: 1, stepId: s.id, stage: "review" });
   return { unit, did };
 }
 
 test("clean review (no findings) → decision clean", () => {
   const { db, ticketId } = makeTestDb();
   seedReviewRound(db, ticketId);
-  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "escalate" });
+  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "escalate" }, { stepKey: "review" });
   db.close();
   expect(r.decision).toBe("clean");
 });
@@ -43,7 +44,7 @@ test("blocking code finding → loopback to implement (unit + review step reset,
     workUnitId: unit.id,
     location: "a.ts:1",
   });
-  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "escalate" });
+  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "escalate" }, { stepKey: "review" });
   const ticket = getTicket(db, ticketId);
   const reviewStep = getByKey(db, ticketId, "review");
   const events = listEvents(db, ticketId);
@@ -67,7 +68,7 @@ test("blocking plan-defect, config escalate → escalated (parked on human_resum
     blocksShip: 1,
     location: null,
   });
-  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "escalate" });
+  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "escalate" }, { stepKey: "review" });
   const ticket = getTicket(db, ticketId);
   const signals = listPending(db, ticketId);
   db.close();
@@ -94,7 +95,7 @@ test("blocking plan-defect, config redesign → loopback to design (units cleare
     blocksShip: 1,
     location: null,
   });
-  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "redesign" });
+  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "redesign" }, { stepKey: "review" });
   const ticket = getTicket(db, ticketId);
   const units = listUnits(db, ticketId);
   const designStep = getByKey(db, ticketId, "design:dispatch");
@@ -118,7 +119,7 @@ test("non-blocking major + deferral_candidate → escalated", () => {
     blocksShip: 0,
     location: "a.ts:2",
   });
-  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "escalate" });
+  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "escalate" }, { stepKey: "review" });
   const ticket = getTicket(db, ticketId);
   db.close();
   expect(r.decision).toBe("escalated");
@@ -151,7 +152,7 @@ test("no-progress guard: identical blocking signature in prior loopback event �
     blocksShip: 1,
     location: "a.ts:1",
   });
-  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "escalate" });
+  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "escalate" }, { stepKey: "review" });
   const ticket = getTicket(db, ticketId);
   const signals = listPending(db, ticketId);
   db.close();
@@ -161,4 +162,81 @@ test("no-progress guard: identical blocking signature in prior loopback event �
   expect(signals.some((s) => s.signal_type === "human_resume")).toBe(true);
   // Proof the guard is doing the work: WITHOUT the matching prior loopback event the same
   // finding would produce decision "loopback" (see "blocking code finding" test above).
+});
+
+test("plan review: a blocking plan finding loops back to re-design", () => {
+  const { db, ticketId } = makeTestDb();
+  db.query("UPDATE ticket SET stage = 'design', track = 'full' WHERE id = ?").run(ticketId);
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", behavioral: 0 });
+  for (const k of ["design:dispatch", "design:extract", "design:review"]) {
+    const s = insertPending(db, { ticketId, stepKey: k, stepType: "dispatch" });
+    db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
+  }
+  const drStep = getByKey(db, ticketId, "design:review");
+  if (!drStep) throw new Error("design:review step missing");
+  const did = "T-dr01";
+  insertDispatch(db, { ticketId, dispatchId: did, seq: 1, stepId: drStep.id, stage: "design" });
+  insertFinding(db, {
+    ticketId,
+    reviewKind: "plan",
+    dispatchId: did,
+    severity: "critical",
+    category: "feasibility",
+    deferralCandidate: 0,
+    blocksShip: 1,
+    location: "plan:1",
+  });
+  const r = applyReviewVerdict(db, ticketId, DEFAULT_RUNTIME_CONFIG, { stepKey: "design:review" });
+  const ticket = getTicket(db, ticketId);
+  const units = listUnits(db, ticketId);
+  const drAfter = getByKey(db, ticketId, "design:review");
+  db.close();
+  expect(r.decision).toBe("loopback");
+  expect(ticket?.stage).toBe("design");
+  expect(units.length).toBe(0); // deleteByTicket cleared units for a fresh re-extract
+  expect(drAfter?.status).toBe("pending"); // design:review reset so the NEW plan is re-reviewed
+});
+
+test("plan review: a clean round advances (no blocking findings)", () => {
+  const { db, ticketId } = makeTestDb();
+  db.query("UPDATE ticket SET stage = 'design', track = 'full' WHERE id = ?").run(ticketId);
+  const s = insertPending(db, { ticketId, stepKey: "design:review", stepType: "dispatch" });
+  db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
+  insertDispatch(db, { ticketId, dispatchId: "T-dr02", seq: 1, stepId: s.id, stage: "design" });
+  // no findings filed → clean
+  const r = applyReviewVerdict(db, ticketId, DEFAULT_RUNTIME_CONFIG, { stepKey: "design:review" });
+  db.close();
+  expect(r.decision).toBe("clean");
+});
+
+test("plan review: repeated identical blocking round escalates (no-progress)", () => {
+  const { db, ticketId } = makeTestDb();
+  db.query("UPDATE ticket SET stage = 'design', track = 'full' WHERE id = ?").run(ticketId);
+  const s = insertPending(db, { ticketId, stepKey: "design:review", stepType: "dispatch" });
+  db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
+  const did = "T-dr03";
+  insertDispatch(db, { ticketId, dispatchId: did, seq: 1, stepId: s.id, stage: "design" });
+  insertFinding(db, {
+    ticketId,
+    reviewKind: "plan",
+    dispatchId: did,
+    severity: "major",
+    category: "scope",
+    deferralCandidate: 0,
+    blocksShip: 1,
+    location: "plan:7",
+  });
+  // a prior design loopback with the SAME signature (review:scope:plan:7)
+  appendEvent(db, {
+    ticketId,
+    kind: "loopback",
+    loop: "design",
+    routeTo: "design:review",
+    signature: "review:scope:plan:7",
+  });
+  const r = applyReviewVerdict(db, ticketId, DEFAULT_RUNTIME_CONFIG, { stepKey: "design:review" });
+  const ticket = getTicket(db, ticketId);
+  db.close();
+  expect(r.decision).toBe("escalated");
+  expect(ticket?.status).toBe("waiting");
 });

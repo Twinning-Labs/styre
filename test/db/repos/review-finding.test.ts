@@ -1,10 +1,13 @@
 import { expect, test } from "bun:test";
+import { insertDispatch } from "../../../src/db/repos/dispatch.ts";
 import {
   insertFinding,
+  latestDispatchForStep,
   listByDispatch,
   listOpenByTicket,
   setStatus,
 } from "../../../src/db/repos/review-finding.ts";
+import { insertPending } from "../../../src/db/repos/workflow-step.ts";
 import { makeTestDb } from "../../helpers/db.ts";
 
 test("insertFinding persists fields and round-trips by dispatch", () => {
@@ -37,4 +40,39 @@ test("listOpenByTicket returns only open; setStatus flips it", () => {
   const open = listOpenByTicket(db, ticketId);
   db.close();
   expect(open.length).toBe(0);
+});
+
+test("latestDispatchForStep returns the newest dispatch owned by that step_key", () => {
+  const { db, ticketId } = makeTestDb();
+  // a design:review step + two dispatches owned by it; and a 'review' step + dispatch (must NOT match)
+  const drStep = insertPending(db, { ticketId, stepKey: "design:review", stepType: "dispatch" });
+  insertDispatch(db, {
+    ticketId,
+    dispatchId: "T-d0001",
+    seq: 1,
+    stepId: drStep.id,
+    stage: "design",
+  });
+  insertDispatch(db, {
+    ticketId,
+    dispatchId: "T-d0002",
+    seq: 2,
+    stepId: drStep.id,
+    stage: "design",
+  });
+  const crStep = insertPending(db, { ticketId, stepKey: "review", stepType: "dispatch" });
+  insertDispatch(db, {
+    ticketId,
+    dispatchId: "T-d0003",
+    seq: 3,
+    stepId: crStep.id,
+    stage: "review",
+  });
+  const dr = latestDispatchForStep(db, ticketId, "design:review");
+  const cr = latestDispatchForStep(db, ticketId, "review");
+  const none = latestDispatchForStep(db, ticketId, "merge:push");
+  db.close();
+  expect(dr).toBe("T-d0002"); // newest design:review dispatch, not the 'review' one
+  expect(cr).toBe("T-d0003");
+  expect(none).toBeNull();
 });

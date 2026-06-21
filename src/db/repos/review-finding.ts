@@ -97,16 +97,24 @@ export function listOpenByTicket(db: Database, ticketId: number): ReviewFindingR
     .all(ticketId);
 }
 
-/** The dispatch_id of the most recent code-review round for this ticket (the dispatch with
- *  stage='review', highest seq). Findings are scoped to this so a clean re-review round is not
- *  re-judged against a prior round's blocking findings. */
-export function latestReviewDispatchId(db: Database, ticketId: number): string | null {
+/** The dispatch_id of the most recent dispatch owned by the given step (joined via
+ *  dispatch.step_id → workflow_step.step_key, highest dispatch.seq). Lets the verdict scope a
+ *  review round precisely — design:review (plan) and review (code) are distinguished by step,
+ *  even though several steps share a stage. Clean round (0 findings) still resolves via the
+ *  dispatch row, so it is not re-judged against a prior round. */
+export function latestDispatchForStep(
+  db: Database,
+  ticketId: number,
+  stepKey: string,
+): string | null {
   const row = db
-    .query<{ dispatch_id: string }, [number]>(
-      `SELECT dispatch_id FROM dispatch WHERE ticket_id = ? AND stage = 'review'
-       ORDER BY seq DESC LIMIT 1`,
+    .query<{ dispatch_id: string }, [number, string]>(
+      `SELECT d.dispatch_id FROM dispatch d
+         JOIN workflow_step w ON d.step_id = w.id
+        WHERE d.ticket_id = ? AND w.step_key = ?
+        ORDER BY d.seq DESC LIMIT 1`,
     )
-    .get(ticketId);
+    .get(ticketId, stepKey);
   return row?.dispatch_id ?? null;
 }
 

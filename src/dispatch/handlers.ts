@@ -23,10 +23,12 @@ import { ExtractOutputSchema, validateExtraction } from "./extract-schema.ts";
 import { implementFeedback } from "./feedback.ts";
 import type { Profile } from "./profile.ts";
 import {
+  DESIGN_REVIEW_TEMPLATE,
   DESIGN_TEMPLATE,
   EXTRACT_TEMPLATE,
   IMPLEMENT_TEMPLATE,
   REVIEW_TEMPLATE,
+  designReviewVars,
   designVars,
   extractVars,
   implementVars,
@@ -37,6 +39,7 @@ import type { DispatchDeps } from "./run-dispatch.ts";
 import { runAgentDispatch } from "./run-dispatch.ts";
 import { extractSidecar } from "./sidecar.ts";
 import { isTestFile } from "./test-file.ts";
+import { sizeTrack } from "./track-sizing.ts";
 import { changedFilesAt, ensureWorktree } from "./worktree.ts";
 
 export interface RegistryDeps {
@@ -150,9 +153,57 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         dependsOn: u.depends_on,
       });
     }
-    // M5a: always fast-track. Real fast/full sizing + design:review land together in M5b.
-    setTicketTrack(ctx.db, ctx.ticket.id, "fast");
+    // M5b-2: size the track from the validated breakdown (sprawl-only). An explicitly-set
+    // track (per-ticket override) wins; the complexity grader is the M5b-3 follow-up.
+    const track = ctx.ticket.track ?? sizeTrack(parsed.value.units);
+    setTicketTrack(ctx.db, ctx.ticket.id, track);
     return { units: parsed.value.units.length };
+  });
+
+  registry.register("design:review", async (ctx: HandlerContext) => {
+    const result = await runAgentDispatch(
+      ctx,
+      depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
+      {
+        handlerKey: "design:review",
+        template: DESIGN_REVIEW_TEMPLATE,
+        vars: designReviewVars(ctx.ticket, deps.profile),
+        postcondition: () => {}, // read-only: nothing commits
+      },
+    );
+
+    const parsed = extractSidecar(result.output, ReviewOutputSchema);
+    if (!parsed.ok) {
+      throw new Error(`design:review sidecar ${parsed.reason}: ${parsed.detail}`);
+    }
+    const units = listUnits(ctx.db, ctx.ticket.id);
+    const seqToId = new Map(units.map((u) => [u.seq, u.id]));
+    const errors = validateReviewFindings(parsed.value.findings, [...seqToId.keys()]);
+    if (errors.length > 0) {
+      throw new Error(`design:review findings invalid: ${errors.join("; ")}`);
+    }
+
+    let blocking = 0;
+    for (const f of parsed.value.findings) {
+      const blocksShip = computeBlocksShip(f.severity, f.deferral_candidate);
+      if (blocksShip === 1) {
+        blocking += 1;
+      }
+      insertFinding(ctx.db, {
+        ticketId: ctx.ticket.id,
+        reviewKind: "plan",
+        dispatchId: result.dispatchId,
+        workUnitId: f.work_unit_seq === null ? null : (seqToId.get(f.work_unit_seq) ?? null),
+        severity: f.severity,
+        category: f.category,
+        factorsJson: f.factors === null ? null : JSON.stringify(f.factors),
+        deferralCandidate: f.deferral_candidate ? 1 : 0,
+        blocksShip,
+        location: f.location,
+        rationale: f.rationale,
+      });
+    }
+    return { findings: parsed.value.findings.length, blocking };
   });
 
   registry.register("implement:dispatch", async (ctx: HandlerContext) => {
