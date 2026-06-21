@@ -91,7 +91,7 @@ function codeLoopback(
 function redesignLoopback(db: Database, ticketId: number, signature: string): void {
   db.transaction(() => {
     deleteByTicket(db, ticketId);
-    for (const key of ["design:dispatch", "design:extract", "review"]) {
+    for (const key of ["design:dispatch", "design:extract", "design:review", "review"]) {
       const step = getByKey(db, ticketId, key);
       if (step) {
         resetToPending(db, step.id);
@@ -116,14 +116,32 @@ export function applyReviewVerdict(
   db: Database,
   ticketId: number,
   config: RuntimeConfig,
+  opts: { stepKey: string },
 ): ReviewVerdictResult {
-  const dispatchId = latestDispatchForStep(db, ticketId, "review");
+  const dispatchId = latestDispatchForStep(db, ticketId, opts.stepKey);
   if (dispatchId === null) {
     return { decision: "clean" };
   }
 
   const open = listByDispatch(db, ticketId, dispatchId).filter((f) => f.status === "open");
   const blocking = open.filter((f) => f.blocks_ship === 1);
+
+  // Plan review (S1c): any blocking plan finding → re-design (always; re-design is the natural
+  // action at design time). No category routing, no deferral path. No-progress → escalate.
+  if (opts.stepKey === "design:review") {
+    if (blocking.length === 0) {
+      return { decision: "clean" };
+    }
+    const signature = findingsSignature(blocking);
+    if (isRepeatedReviewLoopback(db, ticketId, signature)) {
+      escalate(db, ticketId, "no progress: identical plan-review findings", signature);
+      return { decision: "escalated" };
+    }
+    redesignLoopback(db, ticketId, signature);
+    return { decision: "loopback" };
+  }
+
+  // Code review (S5): existing M5b-1 routing.
   const deferred = open.filter((f) => f.severity === "major" && f.deferral_candidate === 1);
 
   if (blocking.length > 0) {

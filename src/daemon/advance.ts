@@ -85,6 +85,7 @@ export async function advanceOneStep(
           db,
           ticketId,
           opts?.config ?? DEFAULT_RUNTIME_CONFIG,
+          { stepKey: "review" },
         );
         if (decision !== "clean") {
           return { kind: decision, stepKey: d.stepKey };
