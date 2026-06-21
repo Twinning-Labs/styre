@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { insertSignal, listByUnit } from "../../../src/db/repos/ground-truth-signal.ts";
 import * as gts from "../../../src/db/repos/ground-truth-signal.ts";
 import { insertWorkUnit } from "../../../src/db/repos/work-unit.ts";
 import { makeTestDb } from "../../helpers/db.ts";
@@ -43,4 +44,43 @@ test("insertSignal stores SQL NULL when detail is omitted", () => {
   db.close();
   expect(list.length).toBe(1);
   expect(list[0]?.detail_json).toBeNull();
+});
+
+test("insertSignal persists and reads back the profile command", () => {
+  const { db, ticketId } = makeTestDb();
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+  });
+  const row = insertSignal(db, {
+    ticketId,
+    workUnitId: unit.id,
+    signalType: "test",
+    result: "pass",
+    command: "bun test",
+  });
+  const back = listByUnit(db, unit.id);
+  db.close();
+  expect(row.command).toBe("bun test");
+  expect(back[0]?.command).toBe("bun test");
+});
+
+test("command defaults to null when omitted", () => {
+  const { db, ticketId } = makeTestDb();
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+  });
+  const row = insertSignal(db, {
+    ticketId,
+    workUnitId: unit.id,
+    signalType: "test",
+    result: "pass",
+  });
+  db.close();
+  expect(row.command).toBeNull();
 });
