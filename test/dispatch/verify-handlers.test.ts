@@ -115,3 +115,57 @@ test("a missing profile command records an error signal and fails the step", asy
   expect(["retry", "loopback", "escalated"]).toContain(outcome.kind);
   expect(sigs[0]?.result).toBe("error");
 });
+
+/** Drive a ticket whose units are all verified to the verify:integration step. */
+function seedAllVerified(
+  db: ReturnType<typeof makeTestDb>["db"],
+  ticketId: number,
+  projectId: number,
+  repo: string,
+) {
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+  });
+  setUnitStatus(db, unit.id, "verified");
+}
+
+test("verify:integration passes when build and test pass, recording an integration signal", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  const registry = registryFor(repo, { build: "true", test: "true" });
+  seedAllVerified(db, ticketId, projectId, repo);
+
+  const outcome = await advanceOneStep(db, ticketId, registry);
+  const step = getByKey(db, ticketId, "verify:integration");
+  const sigs = db
+    .query(
+      "SELECT signal_type, result FROM ground_truth_signal WHERE ticket_id = ? AND signal_type = 'integration'",
+    )
+    .all(ticketId) as Array<{ signal_type: string; result: string }>;
+  db.close();
+  expect(outcome.kind).toBe("stepped");
+  expect(step?.status).toBe("succeeded");
+  expect(sigs[0]?.result).toBe("pass");
+});
+
+test("verify:integration fails the step when a command fails", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  const registry = registryFor(repo, { build: "true", test: "false" });
+  seedAllVerified(db, ticketId, projectId, repo);
+
+  const outcome = await advanceOneStep(db, ticketId, registry);
+  const sigs = db
+    .query(
+      "SELECT result FROM ground_truth_signal WHERE ticket_id = ? AND signal_type = 'integration'",
+    )
+    .all(ticketId) as Array<{ result: string }>;
+  db.close();
+  expect(["retry", "loopback", "escalated"]).toContain(outcome.kind);
+  expect(sigs[0]?.result).toBe("fail");
+});

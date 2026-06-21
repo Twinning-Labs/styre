@@ -149,5 +149,52 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     return { check: checkType, result };
   });
 
+  registry.register("verify:integration", async (ctx: HandlerContext) => {
+    const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
+    ensureWorktree(repoPath, branch, worktreePath);
+
+    const commands = (["build", "test"] as const)
+      .map((key) => ({ key, command: deps.profile.commands[key] }))
+      .filter((c): c is { key: "build" | "test"; command: string } => c.command !== undefined);
+
+    if (commands.length === 0) {
+      insertSignal(ctx.db, {
+        ticketId: ctx.ticket.id,
+        signalType: "integration",
+        result: "error",
+        detail: { reason: "no build/test profile command declared" },
+      });
+      throw new Error("verify:integration: no build/test profile command declared");
+    }
+
+    const ran: Array<{ key: string; exitCode: number | null; timedOut: boolean }> = [];
+    let result: "pass" | "fail" | "error" = "pass";
+    let lastCommand = "";
+    for (const { key, command } of commands) {
+      lastCommand = command;
+      const run = await runCommand(command, {
+        cwd: worktreePath,
+        timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
+      });
+      ran.push({ key, exitCode: run.exitCode, timedOut: run.timedOut });
+      if (run.exitCode !== 0) {
+        result = run.timedOut ? "error" : "fail";
+        break;
+      }
+    }
+
+    insertSignal(ctx.db, {
+      ticketId: ctx.ticket.id,
+      signalType: "integration",
+      result,
+      command: lastCommand,
+      detail: { ran },
+    });
+    if (result !== "pass") {
+      throw new Error(`verify:integration: ${result}`);
+    }
+    return { integration: result };
+  });
+
   return registry;
 }
