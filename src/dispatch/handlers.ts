@@ -37,6 +37,7 @@ import type { DispatchDeps } from "./run-dispatch.ts";
 import { runAgentDispatch } from "./run-dispatch.ts";
 import { extractSidecar } from "./sidecar.ts";
 import { isTestFile } from "./test-file.ts";
+import { sizeTrack } from "./track-sizing.ts";
 import { changedFilesAt, ensureWorktree } from "./worktree.ts";
 
 export interface RegistryDeps {
@@ -150,8 +151,10 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         dependsOn: u.depends_on,
       });
     }
-    // M5a: always fast-track. Real fast/full sizing + design:review land together in M5b.
-    setTicketTrack(ctx.db, ctx.ticket.id, "fast");
+    // M5b-2: size the track from the validated breakdown (sprawl-only). An explicitly-set
+    // track (per-ticket override) wins; the complexity grader is the M5b-3 follow-up.
+    const track = ctx.ticket.track ?? sizeTrack(parsed.value.units);
+    setTicketTrack(ctx.db, ctx.ticket.id, track);
     return { units: parsed.value.units.length };
   });
 
