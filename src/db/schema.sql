@@ -340,6 +340,7 @@ CREATE TABLE ground_truth_signal (
                                                         -- /'integration'/'visual'/'scope_diff'/'ci'/...
     result          TEXT NOT NULL CHECK (result IN ('pass','fail','error')),
     is_authoritative INTEGER NOT NULL DEFAULT 0 CHECK (is_authoritative IN (0,1)),  -- CI = merge arbiter
+    branch_head_sha TEXT,                               -- the commit fingerprint this check ran against (M4b-a)
     command         TEXT,                               -- project-profile command run (A1/F4)
     detail_json     TEXT CHECK (detail_json IS NULL OR json_valid(detail_json)),
                                                         -- {tests_passed,tests_failed,failing:[…]}
