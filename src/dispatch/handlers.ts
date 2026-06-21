@@ -9,17 +9,28 @@ import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts
 import { listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { insertSignal, listByUnit } from "../db/repos/ground-truth-signal.ts";
 import { getProject } from "../db/repos/project.ts";
+import { setTicketTrack } from "../db/repos/ticket.ts";
 import {
   getById as getUnit,
+  insertWorkUnit,
   parseFilesToTouch,
   setStatus as setUnitStatus,
 } from "../db/repos/work-unit.ts";
 import { runCommand } from "../util/run-command.ts";
+import { ExtractOutputSchema, validateExtraction } from "./extract-schema.ts";
 import { implementFeedback } from "./feedback.ts";
 import type { Profile } from "./profile.ts";
-import { DESIGN_TEMPLATE, IMPLEMENT_TEMPLATE, designVars, implementVars } from "./prompt-vars.ts";
+import {
+  DESIGN_TEMPLATE,
+  EXTRACT_TEMPLATE,
+  IMPLEMENT_TEMPLATE,
+  designVars,
+  extractVars,
+  implementVars,
+} from "./prompt-vars.ts";
 import type { DispatchDeps } from "./run-dispatch.ts";
 import { runAgentDispatch } from "./run-dispatch.ts";
+import { extractSidecar } from "./sidecar.ts";
 import { isTestFile } from "./test-file.ts";
 import { changedFilesAt, ensureWorktree } from "./worktree.ts";
 
@@ -77,7 +88,7 @@ function depsFor(ctx: HandlerContext, deps: RegistryDeps, timeoutMs: number): Di
 }
 
 /** Register the real worktree-agent handlers (control-loop §4 S1a/S2b), provider-agnostic.
- *  Other handlerKeys (extract/review → M5; verify → M4; merge → M6) are added later. */
+ *  design:extract (M5a) is real; design:review (M5b) and merge (M6) are added later. */
 export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   const registry = new StepRegistry();
 
@@ -96,6 +107,48 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       },
     }),
   );
+
+  registry.register("design:extract", async (ctx: HandlerContext) => {
+    const { output } = await runAgentDispatch(
+      ctx,
+      depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
+      {
+        handlerKey: "design:extract",
+        template: EXTRACT_TEMPLATE,
+        vars: extractVars(ctx.ticket, deps.profile),
+        // Read-only step: no files change, so no postcondition on the diff.
+        postcondition: () => {},
+      },
+    );
+
+    const parsed = extractSidecar(output, ExtractOutputSchema);
+    if (!parsed.ok) {
+      // Absent/malformed sidecar = transport failure (§3a) → failure-policy re-dispatches.
+      throw new Error(`design:extract sidecar ${parsed.reason}: ${parsed.detail}`);
+    }
+    const errors = validateExtraction(parsed.value.units);
+    if (errors.length > 0) {
+      throw new Error(`design:extract completeness failed: ${errors.join("; ")}`);
+    }
+
+    for (const u of parsed.value.units) {
+      insertWorkUnit(ctx.db, {
+        ticketId: ctx.ticket.id,
+        seq: u.seq,
+        kind: u.kind,
+        title: u.title,
+        description: u.description,
+        behavioral: u.behavioral ? 1 : 0, // the carry: classify explicitly, never default
+        testPlan: u.test_plan,
+        filesToTouch: u.files_to_touch,
+        verifyCheckTypes: u.verify_check_types,
+        dependsOn: u.depends_on,
+      });
+    }
+    // M5a: always fast-track. Real fast/full sizing + design:review land together in M5b.
+    setTicketTrack(ctx.db, ctx.ticket.id, "fast");
+    return { units: parsed.value.units.length };
+  });
 
   registry.register("implement:dispatch", async (ctx: HandlerContext) => {
     if (ctx.workUnitId === null) {

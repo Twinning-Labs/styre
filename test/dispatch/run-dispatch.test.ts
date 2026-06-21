@@ -83,6 +83,37 @@ test("runs the agent, commits its edits (CL-COMMIT), records the dispatch with t
   expect(rows[0]?.model).toBe("claude-sonnet-4-6"); // standard tier via DEFAULT_AGENT_CONFIG
 });
 
+test("runAgentDispatch surfaces the agent stdout as output", async () => {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-stdout-${Date.now()}`);
+  const runner = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "feature-stdout.ts"), "export const x = 1;\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: "MARKER-STDOUT",
+      stderr: "",
+      timedOut: false,
+      costUsd: 0.1,
+      tokensIn: 5,
+      tokensOut: 2,
+    };
+  });
+  const result = await runAgentDispatch(
+    ctxFor(db, ticketId),
+    { runner, ...depsFor(repo, wt) },
+    {
+      handlerKey: "implement:dispatch",
+      template: "implement {{ident}}",
+      vars: { ident: "ENG-1" },
+      postcondition: () => {},
+    },
+  );
+  db.close();
+  expect(result.output).toBe("MARKER-STDOUT");
+});
+
 test("a CL-PROFILE miss throws before running the agent", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();

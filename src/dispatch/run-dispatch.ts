@@ -42,7 +42,7 @@ export async function runAgentDispatch(
   ctx: HandlerContext,
   deps: DispatchDeps,
   spec: DispatchSpec,
-): Promise<{ dispatchId: string; sha: string; changed: boolean }> {
+): Promise<{ dispatchId: string; sha: string; changed: boolean; output: string }> {
   const rendered = renderPrompt(spec.template, spec.vars);
   if (!rendered.ok) {
     throw new Error(`CL-PROFILE: unresolved prompt vars: ${rendered.missing.join(", ")}`);
@@ -97,5 +97,5 @@ export async function runAgentDispatch(
     throw err;
   }
   completeDispatch(ctx.db, inserted.id, { outcome: "clean-success", ...completion });
-  return { dispatchId: did, sha, changed };
+  return { dispatchId: did, sha, changed, output: result.stdout };
 }
