@@ -150,7 +150,7 @@ test("clean review (no findings) advances ticket to merge with no review_finding
 
 // ─── Flow 2: Blocking code finding → re-code → clean → merge ─────────────────
 
-test("blocking code finding loops back to implement; clean second review drives to merge with first finding superseded", async () => {
+test("blocking code finding loops back to implement; clean second review drives to merge via dispatch-scoping", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
@@ -182,24 +182,21 @@ test("blocking code finding loops back to implement; clean second review drives 
   const reviewStepAfterLoopback = getByKey(db, ticketId, "review");
   expect(reviewStepAfterLoopback?.status).toBe("pending");
 
-  // The round-1 finding should now be superseded (not open).
+  // The round-1 finding stays 'open' — findings are NOT mutated on loopback.
+  // Round isolation is guaranteed by dispatch-scoping: the next review reads only the
+  // latest dispatch's findings via latestReviewDispatchId + listByDispatch.
   const openAfterLoopback = listOpenByTicket(db, ticketId);
-  expect(openAfterLoopback.length).toBe(0); // blocking finding is now superseded
-
-  // Verify all round-1 findings are superseded via direct query.
-  const allRound1 = db
-    .query<{ status: string }, [number]>(
-      "SELECT status FROM review_finding WHERE ticket_id = ? ORDER BY id",
-    )
-    .all(ticketId);
-  expect(allRound1.every((r) => r.status === "superseded")).toBe(true);
+  expect(openAfterLoopback.length).toBe(1); // finding remains open after loopback
+  expect(openAfterLoopback[0]?.status).toBe("open");
 
   // Re-seed the ticket at review stage (simulate re-coding + verify completing).
   // This keeps the test focused on the review verdict route without re-testing implement/verify.
   db.query("UPDATE ticket SET stage = 'review' WHERE id = ?").run(ticketId);
   db.query("UPDATE work_unit SET status = 'verified' WHERE ticket_id = ?").run(ticketId);
 
-  // Round 2: drive the review step with clean findings, then catch the merge:push throw.
+  // Round 2: drive the review step with clean findings (0 findings in new dispatch),
+  // then catch the merge:push throw. The verdict reads only the round-2 dispatch → 0 findings
+  // → clean → advances to merge. The round-1 finding on the older dispatch is never re-read.
   for (let i = 0; i < 8; i++) {
     const t = getTicket(db, ticketId);
     if (!t || t.stage !== "review") break;
@@ -220,18 +217,15 @@ test("blocking code finding loops back to implement; clean second review drives 
 
   expect(getTicket(db, ticketId)?.stage).toBe("merge");
 
-  // Round-2 findings: no open ones (clean review).
-  const openAfterMerge = listOpenByTicket(db, ticketId);
-  expect(openAfterMerge.length).toBe(0);
-
-  // Total finding count: 1 superseded (round 1), 0 from round 2 (clean).
+  // Total finding count: 1 from round 1 (still open, on its older dispatch).
+  // Round 2 filed 0 findings. Dispatch-scoping means the verdict saw 0 → clean.
   const allFindings = db
     .query<{ status: string }, [number]>(
       "SELECT status FROM review_finding WHERE ticket_id = ? ORDER BY id",
     )
     .all(ticketId);
   expect(allFindings.length).toBe(1);
-  expect(allFindings[0]?.status).toBe("superseded");
+  expect(allFindings[0]?.status).toBe("open"); // round-1 finding untouched, stays open
 
   db.close();
 });
