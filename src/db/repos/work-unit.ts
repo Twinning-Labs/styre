@@ -85,6 +85,10 @@ export function setStatus(db: Database, id: number, status: string): void {
   });
 }
 
+export function deleteByTicket(db: Database, ticketId: number): void {
+  db.query("DELETE FROM work_unit WHERE ticket_id = ?").run(ticketId);
+}
+
 export function parseDependsOn(row: WorkUnitRow): number[] {
   return row.depends_on === null ? [] : (JSON.parse(row.depends_on) as number[]);
 }
