@@ -39,3 +39,10 @@ test("loadProfile reads + validates a JSON file", () => {
   const p = loadProfile(path);
   expect(p.slug).toBe("demo");
 });
+
+test("testFilePattern is optional and parses when present", () => {
+  expect(parseProfile({ slug: "s", targetRepo: "/r" }).testFilePattern).toBeUndefined();
+  expect(
+    parseProfile({ slug: "s", targetRepo: "/r", testFilePattern: "\\.spec\\." }).testFilePattern,
+  ).toBe("\\.spec\\.");
+});

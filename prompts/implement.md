@@ -6,3 +6,5 @@ Write the code AND its tests in the worktree. Do not commit — the daemon commi
 Run the project's build/test as you go: {{test_command}}
 
 Project stack notes: {{stack}}
+
+{{feedback}}

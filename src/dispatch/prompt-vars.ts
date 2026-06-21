@@ -22,6 +22,7 @@ export function implementVars(
   ticket: { ident: string; title: string | null },
   unit: { seq: number; kind: string; title: string | null },
   profile: Profile,
+  feedback = "",
 ): Record<string, string> {
   return {
     ident: ticket.ident,
@@ -31,6 +32,7 @@ export function implementVars(
     unit_title: unit.title ?? "",
     test_command: profile.commands.test ?? "",
     stack: "",
+    feedback,
     ...profile.promptVars,
   };
 }

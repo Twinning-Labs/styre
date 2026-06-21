@@ -39,6 +39,7 @@ export function insertWorkUnit(
     kind: string;
     status?: string;
     behavioral?: number;
+    filesToTouch?: string[] | null;
     verifyCheckTypes?: number[] | string[] | null;
     dependsOn?: number[] | null;
   },
@@ -47,8 +48,8 @@ export function insertWorkUnit(
   const res = db
     .query(
       `INSERT INTO work_unit
-         (ticket_id, seq, kind, status, behavioral, verify_check_types, depends_on, created_at, updated_at)
-       VALUES ($t, $seq, $kind, $status, $behavioral, $vct, $dep, $now, $now)`,
+         (ticket_id, seq, kind, status, behavioral, files_to_touch, verify_check_types, depends_on, created_at, updated_at)
+       VALUES ($t, $seq, $kind, $status, $behavioral, $ftt, $vct, $dep, $now, $now)`,
     )
     .run({
       $t: p.ticketId,
@@ -56,6 +57,7 @@ export function insertWorkUnit(
       $kind: p.kind,
       $status: p.status ?? "pending",
       $behavioral: p.behavioral ?? 1,
+      $ftt: p.filesToTouch == null ? null : JSON.stringify(p.filesToTouch),
       $vct: p.verifyCheckTypes == null ? null : JSON.stringify(p.verifyCheckTypes),
       $dep: p.dependsOn == null ? null : JSON.stringify(p.dependsOn),
       $now: now,
@@ -81,4 +83,8 @@ export function parseDependsOn(row: WorkUnitRow): number[] {
 
 export function parseVerifyCheckTypes(row: WorkUnitRow): string[] {
   return row.verify_check_types === null ? [] : (JSON.parse(row.verify_check_types) as string[]);
+}
+
+export function parseFilesToTouch(row: WorkUnitRow): string[] {
+  return row.files_to_touch === null ? [] : (JSON.parse(row.files_to_touch) as string[]);
 }

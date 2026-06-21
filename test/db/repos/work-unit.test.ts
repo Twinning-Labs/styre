@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { insertWorkUnit, parseFilesToTouch } from "../../../src/db/repos/work-unit.ts";
 import * as workUnits from "../../../src/db/repos/work-unit.ts";
 import { makeTestDb } from "../../helpers/db.ts";
 
@@ -42,4 +43,18 @@ test("parse helpers tolerate null json", () => {
   db.close();
   expect(workUnits.parseDependsOn(u)).toEqual([]);
   expect(workUnits.parseVerifyCheckTypes(u)).toEqual([]);
+});
+
+test("parseFilesToTouch returns the declared paths, [] when null", () => {
+  const { db, ticketId } = makeTestDb();
+  const u1 = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    filesToTouch: ["a.ts", "b.ts"],
+  });
+  const u2 = insertWorkUnit(db, { ticketId, seq: 2, kind: "backend" });
+  db.close();
+  expect(parseFilesToTouch(u1)).toEqual(["a.ts", "b.ts"]);
+  expect(parseFilesToTouch(u2)).toEqual([]);
 });

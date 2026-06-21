@@ -7,15 +7,21 @@ import { StepRegistry } from "../daemon/step-registry.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
 import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";
 import { listByTicket as listEvents } from "../db/repos/event-log.ts";
-import { insertSignal } from "../db/repos/ground-truth-signal.ts";
+import { insertSignal, listByUnit } from "../db/repos/ground-truth-signal.ts";
 import { getProject } from "../db/repos/project.ts";
-import { getById as getUnit, setStatus as setUnitStatus } from "../db/repos/work-unit.ts";
+import {
+  getById as getUnit,
+  parseFilesToTouch,
+  setStatus as setUnitStatus,
+} from "../db/repos/work-unit.ts";
 import { runCommand } from "../util/run-command.ts";
+import { implementFeedback } from "./feedback.ts";
 import type { Profile } from "./profile.ts";
 import { DESIGN_TEMPLATE, IMPLEMENT_TEMPLATE, designVars, implementVars } from "./prompt-vars.ts";
 import type { DispatchDeps } from "./run-dispatch.ts";
 import { runAgentDispatch } from "./run-dispatch.ts";
-import { ensureWorktree } from "./worktree.ts";
+import { isTestFile } from "./test-file.ts";
+import { changedFilesAt, ensureWorktree } from "./worktree.ts";
 
 export interface RegistryDeps {
   runner: AgentRunner;
@@ -105,7 +111,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       {
         handlerKey: "implement:dispatch",
         template: IMPLEMENT_TEMPLATE,
-        vars: implementVars(ctx.ticket, unit, deps.profile),
+        vars: implementVars(ctx.ticket, unit, deps.profile, implementFeedback(ctx.db, unit.id)),
         loopback: isUnitLoopback(ctx, unit.seq),
         postcondition: ({ changed }) => {
           if (!changed) {
@@ -146,8 +152,29 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
     });
     const branchHeadSha = getLatestByWorkUnit(ctx.db, ctx.workUnitId)?.branch_head_sha ?? undefined;
-    const result =
+    let result =
       run.exitCode === 0 ? "pass" : run.timedOut || run.exitCode === null ? "error" : "fail";
+    let detail: Record<string, unknown> = {
+      exitCode: run.exitCode,
+      timedOut: run.timedOut,
+      stderr: run.stderr.slice(0, 2000),
+    };
+
+    // Behavioral gate (A1): a behavioral unit's green test check still fails if the coding diff
+    // added no test file. Deterministic; "is the test good?" is the reviewer's job (M5).
+    if (result === "pass" && checkType === "test") {
+      const unit = getUnit(ctx.db, ctx.workUnitId);
+      if (unit && unit.behavioral === 1) {
+        const changed =
+          branchHeadSha === undefined ? [] : changedFilesAt(branchHeadSha, worktreePath);
+        const hasTest = changed.some((p) => isTestFile(p, deps.profile.testFilePattern));
+        if (!hasTest) {
+          result = "fail";
+          detail = { reason: "behavioral-no-test", changed };
+        }
+      }
+    }
+
     insertSignal(ctx.db, {
       ticketId: ctx.ticket.id,
       workUnitId: ctx.workUnitId,
@@ -155,10 +182,33 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       result,
       command,
       branchHeadSha,
-      detail: { exitCode: run.exitCode, timedOut: run.timedOut, stderr: run.stderr.slice(0, 2000) },
+      detail,
     });
+
+    // scope_diff (A3) — advisory only: compare the coding diff against the unit's declared files.
+    // Recorded once per (unit, commit); NEVER throws, NEVER gates the step.
+    if (branchHeadSha !== undefined) {
+      const unitRow = getUnit(ctx.db, ctx.workUnitId);
+      const declared = unitRow ? parseFilesToTouch(unitRow) : [];
+      const already = listByUnit(ctx.db, ctx.workUnitId).some(
+        (s) => s.signal_type === "scope_diff" && s.branch_head_sha === branchHeadSha,
+      );
+      if (declared.length > 0 && !already) {
+        const changed = changedFilesAt(branchHeadSha, worktreePath);
+        const outOfScope = changed.filter((p) => !declared.includes(p));
+        insertSignal(ctx.db, {
+          ticketId: ctx.ticket.id,
+          workUnitId: ctx.workUnitId,
+          signalType: "scope_diff",
+          result: outOfScope.length === 0 ? "pass" : "fail",
+          branchHeadSha,
+          detail: { changed, out_of_scope: outOfScope },
+        });
+      }
+    }
+
     if (result !== "pass") {
-      throw new Error(`verify:check ${checkType}: ${result} (exit ${run.exitCode})`);
+      throw new Error(`verify:check ${checkType}: ${result}`);
     }
     return { check: checkType, result };
   });
