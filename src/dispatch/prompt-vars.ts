@@ -1,11 +1,13 @@
 import designExtractTemplate from "../../prompts/design-extract.md" with { type: "text" };
 import designTemplate from "../../prompts/design.md" with { type: "text" };
 import implementTemplate from "../../prompts/implement.md" with { type: "text" };
+import reviewTemplate from "../../prompts/review.md" with { type: "text" };
 import type { Profile } from "./profile.ts";
 
 export const DESIGN_TEMPLATE = designTemplate;
 export const EXTRACT_TEMPLATE = designExtractTemplate;
 export const IMPLEMENT_TEMPLATE = implementTemplate;
+export const REVIEW_TEMPLATE = reviewTemplate;
 
 export function extractVars(
   ticket: { ident: string; title: string | null },
@@ -47,6 +49,18 @@ export function implementVars(
     test_command: profile.commands.test ?? "",
     stack: "",
     feedback,
+    ...profile.promptVars,
+  };
+}
+
+export function reviewVars(
+  ticket: { ident: string; title: string | null },
+  profile: Profile,
+): Record<string, string> {
+  return {
+    ident: ticket.ident,
+    title: ticket.title ?? "",
+    slug: profile.slug,
     ...profile.promptVars,
   };
 }
