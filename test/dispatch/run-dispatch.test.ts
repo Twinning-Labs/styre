@@ -1,0 +1,147 @@
+import { expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
+import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
+import type { HandlerContext } from "../../src/daemon/step-registry.ts";
+import { listByTicket } from "../../src/db/repos/dispatch.ts";
+import { getTicket } from "../../src/db/repos/ticket.ts";
+import { insertPending } from "../../src/db/repos/workflow-step.ts";
+import { parseProfile } from "../../src/dispatch/profile.ts";
+import { runAgentDispatch } from "../../src/dispatch/run-dispatch.ts";
+import { makeTestDb } from "../helpers/db.ts";
+
+function gitRepo(): string {
+  const root = mkdtempSync(join(tmpdir(), "styre-rd-"));
+  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
+  run(["init", "-b", "main"]);
+  run(["config", "user.email", "t@s.dev"]);
+  run(["config", "user.name", "T"]);
+  writeFileSync(join(root, "README.md"), "x");
+  run(["add", "-A"]);
+  run(["commit", "-m", "init"]);
+  return root;
+}
+
+function ctxFor(db: ReturnType<typeof makeTestDb>["db"], ticketId: number): HandlerContext {
+  const step = insertPending(db, {
+    ticketId,
+    stepKey: "implement:wu1:dispatch",
+    stepType: "dispatch",
+  });
+  const ticket = getTicket(db, ticketId);
+  if (!ticket) throw new Error("no ticket");
+  return { db, ticket, step, workUnitId: null };
+}
+
+function depsFor(repo: string, wt: string) {
+  return {
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({ slug: "demo", targetRepo: repo }),
+    repoPath: repo,
+    worktreePath: wt,
+    branch: "feat/ENG-1",
+    timeoutMs: 1000,
+  };
+}
+
+test("runs the agent, commits its edits (CL-COMMIT), records the dispatch with the standard-tier model", async () => {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-${Date.now()}`);
+  const runner = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "feature.ts"), "export const x = 1;\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: "{}",
+      stderr: "",
+      timedOut: false,
+      costUsd: 0.1,
+      tokensIn: 5,
+      tokensOut: 2,
+    };
+  });
+  const out = await runAgentDispatch(
+    ctxFor(db, ticketId),
+    { runner, ...depsFor(repo, wt) },
+    {
+      handlerKey: "implement:dispatch",
+      template: "implement {{ident}}",
+      vars: { ident: "ENG-1" },
+      postcondition: ({ changed }) => {
+        if (!changed) throw new Error("empty diff");
+      },
+    },
+  );
+  const rows = listByTicket(db, ticketId);
+  db.close();
+  expect(out.changed).toBe(true);
+  expect(out.sha).toMatch(/^[0-9a-f]{7,40}$/);
+  expect(rows[0]?.outcome).toBe("clean-success");
+  expect(rows[0]?.model).toBe("claude-sonnet-4-6"); // standard tier via DEFAULT_AGENT_CONFIG
+});
+
+test("a CL-PROFILE miss throws before running the agent", async () => {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  let ran = false;
+  const runner = new FakeAgentRunner(() => {
+    ran = true;
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const call = runAgentDispatch(
+    ctxFor(db, ticketId),
+    { runner, ...depsFor(repo, join(repo, "..", `wt2-${Date.now()}`)) },
+    {
+      handlerKey: "implement:dispatch",
+      template: "needs {{missing}}",
+      vars: {},
+      postcondition: () => {},
+    },
+  );
+  await expect(call).rejects.toThrow(/CL-PROFILE|missing/);
+  db.close();
+  expect(ran).toBe(false);
+});
+
+test("a postcondition failure throws and records postcondition-failed", async () => {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const runner = new FakeAgentRunner(() => ({
+    completed: true,
+    exitCode: 0,
+    stdout: "{}",
+    stderr: "",
+    timedOut: false,
+    costUsd: null,
+    tokensIn: null,
+    tokensOut: null,
+  }));
+  const call = runAgentDispatch(
+    ctxFor(db, ticketId),
+    { runner, ...depsFor(repo, join(repo, "..", `wt3-${Date.now()}`)) },
+    {
+      handlerKey: "implement:dispatch",
+      template: "implement {{ident}}",
+      vars: { ident: "ENG-1" },
+      postcondition: ({ changed }) => {
+        if (!changed) throw new Error("empty diff");
+      },
+    },
+  );
+  await expect(call).rejects.toThrow(/empty diff/);
+  const rows = listByTicket(db, ticketId);
+  db.close();
+  expect(rows[0]?.outcome).toBe("postcondition-failed");
+});
