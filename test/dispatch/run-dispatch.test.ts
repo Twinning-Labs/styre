@@ -145,3 +145,40 @@ test("a postcondition failure throws and records postcondition-failed", async ()
   db.close();
   expect(rows[0]?.outcome).toBe("postcondition-failed");
 });
+
+test("a transport failure records dispatch-failed and does NOT commit", async () => {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt4-${Date.now()}`);
+  const runner = new FakeAgentRunner((input) => {
+    // Write a file to prove worktree changes do not get committed on transport failure
+    writeFileSync(join(input.cwd, "should-not-be-committed.ts"), "export const x = 1;\n");
+    return {
+      completed: false,
+      exitCode: null,
+      stdout: "",
+      stderr: "boom",
+      timedOut: true,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const call = runAgentDispatch(
+    ctxFor(db, ticketId),
+    { runner, ...depsFor(repo, wt) },
+    {
+      handlerKey: "implement:dispatch",
+      template: "implement {{ident}}",
+      vars: { ident: "ENG-1" },
+      postcondition: () => {
+        throw new Error("postcondition must never be reached on transport failure");
+      },
+    },
+  );
+  await expect(call).rejects.toThrow(/transport failure|timedOut/);
+  const rows = listByTicket(db, ticketId);
+  db.close();
+  expect(rows[0]?.outcome).toBe("dispatch-failed");
+  expect(rows[0]?.branch_head_sha).toBeNull();
+});
