@@ -130,6 +130,18 @@ export function resetToPending(db: Database, id: number): void {
   ).run({ $now: nowUtc(), $id: id });
 }
 
+export function listStepsForUnit(
+  db: Database,
+  ticketId: number,
+  workUnitId: number,
+): WorkflowStepRow[] {
+  return db
+    .query<WorkflowStepRow, [number, number]>(
+      `SELECT ${COLS} FROM workflow_step WHERE ticket_id = ? AND work_unit_id = ?`,
+    )
+    .all(ticketId, workUnitId);
+}
+
 export function listByStatus(db: Database, status: string): WorkflowStepRow[] {
   return db
     .query<WorkflowStepRow, [string]>(

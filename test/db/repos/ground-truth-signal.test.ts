@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { insertSignal, listByUnit } from "../../../src/db/repos/ground-truth-signal.ts";
+import {
+  insertSignal,
+  listByUnit,
+  passingShasFor,
+} from "../../../src/db/repos/ground-truth-signal.ts";
 import * as gts from "../../../src/db/repos/ground-truth-signal.ts";
 import { insertWorkUnit } from "../../../src/db/repos/work-unit.ts";
 import { makeTestDb } from "../../helpers/db.ts";
@@ -83,4 +87,31 @@ test("command defaults to null when omitted", () => {
   });
   db.close();
   expect(row.command).toBeNull();
+});
+
+test("records branch_head_sha and reports the SHAs a check passed at", () => {
+  const { db, ticketId } = makeTestDb();
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+  });
+  insertSignal(db, {
+    ticketId,
+    workUnitId: unit.id,
+    signalType: "test",
+    result: "fail",
+    branchHeadSha: "aaa",
+  });
+  insertSignal(db, {
+    ticketId,
+    workUnitId: unit.id,
+    signalType: "test",
+    result: "pass",
+    branchHeadSha: "bbb",
+  });
+  const passed = passingShasFor(db, { ticketId, workUnitId: unit.id, signalType: "test" });
+  db.close();
+  expect(passed).toEqual(["bbb"]); // only the passing SHA, history of the fail kept
 });

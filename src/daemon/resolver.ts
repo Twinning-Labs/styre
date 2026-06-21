@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";
 import * as gts from "../db/repos/ground-truth-signal.ts";
 import { hasDelivered } from "../db/repos/signal.ts";
 import { getTicket } from "../db/repos/ticket.ts";
@@ -48,11 +49,24 @@ export function nextActionableUnit(db: Database, ticketId: number): workUnits.Wo
   return null;
 }
 
-/** First declared verify check-type for the unit that has no ground-truth signal yet. */
+/** The commit a unit's verification is currently judged against = the unit's latest coding
+ *  attempt's branch head. Null if it hasn't been coded yet. */
+function currentShaForUnit(db: Database, workUnitId: number): string | null {
+  return getLatestByWorkUnit(db, workUnitId)?.branch_head_sha ?? null;
+}
+
+/** First declared check-type for the unit that has NOT passed at the unit's current commit.
+ *  A pass recorded against an older commit does not count (content-keyed re-verification). */
 export function nextUnrunCheck(db: Database, unit: workUnits.WorkUnitRow): string | null {
-  const run = new Set(gts.listByUnit(db, unit.id).map((s) => s.signal_type));
+  const sha = currentShaForUnit(db, unit.id);
   for (const check of workUnits.parseVerifyCheckTypes(unit)) {
-    if (!run.has(check)) {
+    const passedShas = gts.passingShasFor(db, {
+      ticketId: unit.ticket_id,
+      workUnitId: unit.id,
+      signalType: check,
+    });
+    const satisfied = sha !== null && passedShas.includes(sha);
+    if (!satisfied) {
       return check;
     }
   }
@@ -100,7 +114,13 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
         return { kind: "mark-verified", workUnitId: u.id };
       }
       if (allUnitsVerified(db, ticketId)) {
-        if (!done(db, ticketId, "verify:integration")) {
+        const branchSha = getLatestForTicket(db, ticketId)?.branch_head_sha ?? null;
+        const integrationPassedShas = gts.passingShasFor(db, {
+          ticketId,
+          workUnitId: null,
+          signalType: "integration",
+        });
+        if (branchSha === null || !integrationPassedShas.includes(branchSha)) {
           return step("verify:integration", "verify", "verify:integration", null);
         }
         if (ticket.needs_docs === 1 && !done(db, ticketId, "docs:revise")) {

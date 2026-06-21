@@ -126,3 +126,23 @@ export function completeDispatch(
     $id: id,
   });
 }
+
+export function getLatestByWorkUnit(db: Database, workUnitId: number): DispatchRow | null {
+  return (
+    db
+      .query<DispatchRow, [number]>(
+        `SELECT ${COLS} FROM dispatch WHERE work_unit_id = ? ORDER BY seq DESC LIMIT 1`,
+      )
+      .get(workUnitId) ?? null
+  );
+}
+
+export function getLatestForTicket(db: Database, ticketId: number): DispatchRow | null {
+  return (
+    db
+      .query<DispatchRow, [number]>(
+        `SELECT ${COLS} FROM dispatch WHERE ticket_id = ? AND branch_head_sha IS NOT NULL ORDER BY seq DESC LIMIT 1`,
+      )
+      .get(ticketId) ?? null
+  );
+}

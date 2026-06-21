@@ -3,6 +3,13 @@ import { tick } from "../../src/daemon/loop.ts";
 import { recover } from "../../src/daemon/recover.ts";
 import { StepRegistry } from "../../src/daemon/step-registry.ts";
 import type { HandlerContext } from "../../src/daemon/step-registry.ts";
+import {
+  completeDispatch,
+  getLatestByWorkUnit,
+  getLatestForTicket,
+  insertDispatch,
+  nextSeq,
+} from "../../src/db/repos/dispatch.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { listPending } from "../../src/db/repos/signal.ts";
 import { getTicket, setTicketTrack } from "../../src/db/repos/ticket.ts";
@@ -29,21 +36,50 @@ function skeletonRegistry(): StepRegistry {
   r.register("implement:dispatch", (ctx: HandlerContext) => {
     if (ctx.workUnitId !== null) {
       setUnitStatus(ctx.db, ctx.workUnitId, "verifying");
+      // Record a coding attempt with a branch_head_sha so verify:check can stamp its signals
+      // at the current commit (content-keyed re-verification)
+      const d = insertDispatch(ctx.db, {
+        ticketId: ctx.ticket.id,
+        dispatchId: `${ctx.ticket.ident}-wud${ctx.workUnitId}`,
+        seq: nextSeq(ctx.db, ctx.ticket.id),
+        workUnitId: ctx.workUnitId,
+      });
+      completeDispatch(ctx.db, d.id, { outcome: "clean-success", branchHeadSha: "sha-skeleton" });
     }
     return { code: "ok" };
   });
   r.register("verify:check", (ctx: HandlerContext) => {
     const check = ctx.step.step_key.split(":").pop() ?? "test";
+    // Stamp the PASS signal at the unit's current commit SHA (content-keyed)
+    const sha =
+      ctx.workUnitId !== null
+        ? (getLatestByWorkUnit(ctx.db, ctx.workUnitId)?.branch_head_sha ?? null)
+        : null;
     insertSignal(ctx.db, {
       ticketId: ctx.ticket.id,
       workUnitId: ctx.workUnitId,
       signalType: check,
       result: "pass",
+      branchHeadSha: sha ?? undefined,
     });
     return { check };
   });
   r.register("verify:integration", (ctx: HandlerContext) => {
-    insertSignal(ctx.db, { ticketId: ctx.ticket.id, signalType: "integration", result: "pass" });
+    // Record a ticket-level dispatch with a branch_head_sha so the integration gate can match
+    const d = insertDispatch(ctx.db, {
+      ticketId: ctx.ticket.id,
+      dispatchId: `${ctx.ticket.ident}-int${Date.now()}`,
+      seq: nextSeq(ctx.db, ctx.ticket.id),
+    });
+    completeDispatch(ctx.db, d.id, { outcome: "clean-success", branchHeadSha: "sha-skeleton" });
+    // Stamp the integration PASS at the branch's current SHA
+    const sha = getLatestForTicket(ctx.db, ctx.ticket.id)?.branch_head_sha ?? null;
+    insertSignal(ctx.db, {
+      ticketId: ctx.ticket.id,
+      signalType: "integration",
+      result: "pass",
+      branchHeadSha: sha ?? undefined,
+    });
     return { integration: "pass" };
   });
   r.register("review", () => ({ findings: 0 }));

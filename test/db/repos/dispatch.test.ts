@@ -1,5 +1,13 @@
 import { expect, test } from "bun:test";
+import {
+  completeDispatch,
+  getLatestByWorkUnit,
+  getLatestForTicket,
+  insertDispatch,
+  nextSeq,
+} from "../../../src/db/repos/dispatch.ts";
 import * as dispatch from "../../../src/db/repos/dispatch.ts";
+import { insertWorkUnit } from "../../../src/db/repos/work-unit.ts";
 import { makeTestDb } from "../../helpers/db.ts";
 
 test("nextSeq starts at 1 and increments per ticket", () => {
@@ -55,4 +63,28 @@ test("listByTicket returns dispatches ordered by seq", () => {
   const list = dispatch.listByTicket(db, ticketId);
   db.close();
   expect(list.map((d) => d.seq)).toEqual([1, 2]);
+});
+
+test("getLatestByWorkUnit / getLatestForTicket return the most recent coding attempt", () => {
+  const { db, ticketId } = makeTestDb();
+  const unit = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend" });
+  const d1 = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0001",
+    seq: nextSeq(db, ticketId),
+    workUnitId: unit.id,
+  });
+  completeDispatch(db, d1.id, { outcome: "clean-success", branchHeadSha: "sha1" });
+  const d2 = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0002",
+    seq: nextSeq(db, ticketId),
+    workUnitId: unit.id,
+  });
+  completeDispatch(db, d2.id, { outcome: "clean-success", branchHeadSha: "sha2" });
+  const latestUnit = getLatestByWorkUnit(db, unit.id);
+  const latestTicket = getLatestForTicket(db, ticketId);
+  db.close();
+  expect(latestUnit?.branch_head_sha).toBe("sha2");
+  expect(latestTicket?.branch_head_sha).toBe("sha2");
 });

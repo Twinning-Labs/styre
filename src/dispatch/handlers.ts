@@ -5,6 +5,8 @@ import type { AgentRunner } from "../agent/runner.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
 import { StepRegistry } from "../daemon/step-registry.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
+import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";
+import { listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { insertSignal } from "../db/repos/ground-truth-signal.ts";
 import { getProject } from "../db/repos/project.ts";
 import { getById as getUnit, setStatus as setUnitStatus } from "../db/repos/work-unit.ts";
@@ -42,6 +44,14 @@ function worktreeFor(
     worktreePath: join(deps.worktreeRoot, ctx.ticket.ident),
     branch: branchNameFor(ctx.ticket),
   };
+}
+
+/** Has this unit been bounced back to coding before? (a loopback event targeting its checks) */
+function isUnitLoopback(ctx: HandlerContext, unitSeq: number): boolean {
+  const prefix = `verify:wu${unitSeq}:`;
+  return listEvents(ctx.db, ctx.ticket.id).some(
+    (e) => e.kind === "loopback" && (e.route_to?.startsWith(prefix) ?? false),
+  );
 }
 
 function depsFor(ctx: HandlerContext, deps: RegistryDeps, timeoutMs: number): DispatchDeps {
@@ -96,6 +106,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         handlerKey: "implement:dispatch",
         template: IMPLEMENT_TEMPLATE,
         vars: implementVars(ctx.ticket, unit, deps.profile),
+        loopback: isUnitLoopback(ctx, unit.seq),
         postcondition: ({ changed }) => {
           if (!changed) {
             throw new Error("implement:dispatch postcondition: empty diff");
@@ -134,13 +145,16 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       cwd: worktreePath,
       timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
     });
-    const result = run.exitCode === 0 ? "pass" : run.timedOut ? "error" : "fail";
+    const branchHeadSha = getLatestByWorkUnit(ctx.db, ctx.workUnitId)?.branch_head_sha ?? undefined;
+    const result =
+      run.exitCode === 0 ? "pass" : run.timedOut || run.exitCode === null ? "error" : "fail";
     insertSignal(ctx.db, {
       ticketId: ctx.ticket.id,
       workUnitId: ctx.workUnitId,
       signalType: checkType,
       result,
       command,
+      branchHeadSha,
       detail: { exitCode: run.exitCode, timedOut: run.timedOut, stderr: run.stderr.slice(0, 2000) },
     });
     if (result !== "pass") {
@@ -167,6 +181,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       throw new Error("verify:integration: no build/test profile command declared");
     }
 
+    const branchHeadSha = getLatestForTicket(ctx.db, ctx.ticket.id)?.branch_head_sha ?? undefined;
     const ran: Array<{ key: string; exitCode: number | null; timedOut: boolean }> = [];
     let result: "pass" | "fail" | "error" = "pass";
     let lastCommand = "";
@@ -178,7 +193,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       });
       ran.push({ key, exitCode: run.exitCode, timedOut: run.timedOut });
       if (run.exitCode !== 0) {
-        result = run.timedOut ? "error" : "fail";
+        result = run.timedOut || run.exitCode === null ? "error" : "fail";
         break;
       }
     }
@@ -188,6 +203,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       signalType: "integration",
       result,
       command: lastCommand,
+      branchHeadSha,
       detail: { ran },
     });
     if (result !== "pass") {

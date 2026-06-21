@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { nextActionableUnit, nextStepKey, nextUnrunCheck } from "../../src/daemon/resolver.ts";
+import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { insertPending, markDelivered } from "../../src/db/repos/signal.ts";
 import { setNeedsDocs, setTicketStage, setTicketTrack } from "../../src/db/repos/ticket.ts";
-import { insertWorkUnit, setStatus } from "../../src/db/repos/work-unit.ts";
+import { getById, insertWorkUnit, setStatus } from "../../src/db/repos/work-unit.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
@@ -99,7 +100,22 @@ test("implement: a verifying unit whose checks all have signals asks to mark-ver
     verifyCheckTypes: ["test"],
     status: "verifying",
   });
-  insertSignal(db, { ticketId, workUnitId: u.id, signalType: "test", result: "pass" });
+  // Record the coding attempt at a known commit, then stamp the PASS signal at that same SHA
+  // (realistic shape: commit-keyed verification requires a dispatch with branch_head_sha)
+  const disp = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0001",
+    seq: nextSeq(db, ticketId),
+    workUnitId: u.id,
+  });
+  completeDispatch(db, disp.id, { outcome: "clean-success", branchHeadSha: "sha-abc" });
+  insertSignal(db, {
+    ticketId,
+    workUnitId: u.id,
+    signalType: "test",
+    result: "pass",
+    branchHeadSha: "sha-abc",
+  });
   const d = nextStepKey(db, ticketId);
   db.close();
   expect(d).toEqual({ kind: "mark-verified", workUnitId: u.id });
@@ -120,13 +136,27 @@ test("implement: all units verified + no docs → verify:integration then advanc
   expect(beforeIntegration.kind === "step" && beforeIntegration.handlerKey).toBe(
     "verify:integration",
   );
-  await succeed(db, ticketId, "verify:integration");
+  // Simulate the integration verify handler completing: record a dispatch with branch_head_sha
+  // and stamp a ticket-level PASS integration signal at that SHA (content-keyed integration gate).
+  const disp = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0001",
+    seq: nextSeq(db, ticketId),
+  });
+  completeDispatch(db, disp.id, { outcome: "clean-success", branchHeadSha: "sha-abc" });
+  insertSignal(db, {
+    ticketId,
+    workUnitId: null,
+    signalType: "integration",
+    result: "pass",
+    branchHeadSha: "sha-abc",
+  });
   const afterIntegration = nextStepKey(db, ticketId);
   db.close();
   expect(afterIntegration).toEqual({ kind: "advance", from: "implement", to: "review" });
 });
 
-test("implement: needs_docs routes through docs:revise before advancing", async () => {
+test("implement: needs_docs routes through docs:revise before advancing", () => {
   const { db, ticketId } = makeTestDb();
   setTicketStage(db, ticketId, "implement");
   setNeedsDocs(db, ticketId, 1);
@@ -137,7 +167,20 @@ test("implement: needs_docs routes through docs:revise before advancing", async 
     verifyCheckTypes: ["test"],
     status: "verified",
   });
-  await succeed(db, ticketId, "verify:integration");
+  // Simulate integration verify complete: dispatch with branch_head_sha + matching PASS signal
+  const disp = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0001",
+    seq: nextSeq(db, ticketId),
+  });
+  completeDispatch(db, disp.id, { outcome: "clean-success", branchHeadSha: "sha-abc" });
+  insertSignal(db, {
+    ticketId,
+    workUnitId: null,
+    signalType: "integration",
+    result: "pass",
+    branchHeadSha: "sha-abc",
+  });
   const d = nextStepKey(db, ticketId);
   db.close();
   expect(d.kind === "step" && d.handlerKey).toBe("docs:revise");
@@ -228,8 +271,85 @@ test("nextUnrunCheck: returns first check-type lacking a signal", () => {
     verifyCheckTypes: ["test", "integration"],
     status: "verifying",
   });
-  insertSignal(db, { ticketId, workUnitId: u.id, signalType: "test", result: "pass" });
+  // Record a coding attempt at a known commit, then stamp the "test" PASS at that same SHA
+  // so "test" is satisfied at the current commit and "integration" is returned as the next unrun check
+  const disp = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0001",
+    seq: nextSeq(db, ticketId),
+    workUnitId: u.id,
+  });
+  completeDispatch(db, disp.id, { outcome: "clean-success", branchHeadSha: "sha-abc" });
+  insertSignal(db, {
+    ticketId,
+    workUnitId: u.id,
+    signalType: "test",
+    result: "pass",
+    branchHeadSha: "sha-abc",
+  });
   const check = nextUnrunCheck(db, u);
   db.close();
   expect(check).toBe("integration");
+});
+
+test("nextUnrunCheck: a check that passed at an OLD commit is unrun at the new commit", () => {
+  const { db, ticketId } = makeTestDb();
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+  });
+  setStatus(db, unit.id, "verifying");
+  // latest coding attempt is at commit "new"
+  const d = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0002",
+    seq: nextSeq(db, ticketId),
+    workUnitId: unit.id,
+  });
+  completeDispatch(db, d.id, { outcome: "clean-success", branchHeadSha: "new" });
+  // a stale PASS from a previous commit
+  insertSignal(db, {
+    ticketId,
+    workUnitId: unit.id,
+    signalType: "test",
+    result: "pass",
+    branchHeadSha: "old",
+  });
+  const u = getById(db, unit.id);
+  if (!u) throw new Error("no unit");
+  const check = nextUnrunCheck(db, u);
+  db.close();
+  expect(check).toBe("test"); // stale pass does NOT satisfy the current commit
+});
+
+test("nextUnrunCheck: a PASS at the current commit satisfies the check", () => {
+  const { db, ticketId } = makeTestDb();
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+  });
+  setStatus(db, unit.id, "verifying");
+  const d = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0002",
+    seq: nextSeq(db, ticketId),
+    workUnitId: unit.id,
+  });
+  completeDispatch(db, d.id, { outcome: "clean-success", branchHeadSha: "cur" });
+  insertSignal(db, {
+    ticketId,
+    workUnitId: unit.id,
+    signalType: "test",
+    result: "pass",
+    branchHeadSha: "cur",
+  });
+  const u = getById(db, unit.id);
+  if (!u) throw new Error("no unit");
+  const check = nextUnrunCheck(db, u);
+  db.close();
+  expect(check).toBeNull(); // satisfied → resolver will mark-verified
 });
