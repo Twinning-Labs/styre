@@ -6,9 +6,15 @@ export interface CommandResult {
 }
 
 /** Run one shell command in `cwd` under a timeout, capturing ground-truth exit state.
- *  Daemon-only: used by the verify steps to run the project-profile commands (B2). The
- *  `timedOut` flag is set in the kill callback so a true timeout is never confused with
- *  a command that merely exited non-zero. */
+ *  Daemon-only: used by the verify steps to run the project-profile commands (B2).
+ *
+ *  On timeout we resolve PROMPTLY (race the exit against the timer) and best-effort
+ *  SIGKILL the process — we do NOT await `proc.exited` or drain the pipes first. A shell
+ *  that forks its command (`sh -c "sleep 5"` under dash on Linux) can leave a child holding
+ *  the inherited stdout pipe open after the shell is killed, which stalls `exited`/drain
+ *  until that child ends on its own. Returning on the timer makes the timeout deterministic
+ *  regardless of child cleanup. On the normal path stdout/stderr are drained concurrently
+ *  with the exit wait (avoids the large-output pipe-buffer deadlock). */
 export async function runCommand(
   command: string,
   opts: { cwd: string; timeoutMs: number },
@@ -18,19 +24,25 @@ export async function runCommand(
     stdout: "pipe",
     stderr: "pipe",
   });
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    proc.kill();
-  }, opts.timeoutMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutP = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), opts.timeoutMs);
+  });
   try {
+    const outcome = await Promise.race([proc.exited.then(() => "exited" as const), timeoutP]);
+    if (outcome === "timeout") {
+      proc.kill("SIGKILL");
+      return { exitCode: null, stdout: "", stderr: "", timedOut: true };
+    }
     const exitCode = await proc.exited;
-    clearTimeout(timer);
-    const stdout = await new Response(proc.stdout).text();
-    const stderr = await new Response(proc.stderr).text();
-    return { exitCode, stdout, stderr, timedOut };
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    return { exitCode, stdout, stderr, timedOut: false };
   } catch (err) {
+    return { exitCode: null, stdout: "", stderr: String(err), timedOut: false };
+  } finally {
     clearTimeout(timer);
-    return { exitCode: null, stdout: "", stderr: String(err), timedOut };
   }
 }
