@@ -147,6 +147,11 @@ correctness mechanism.
 
 ## 4. Step catalog — guards, inputs, outputs, tools
 
+> **Provider-agnostic (2026-06-21):** the per-step **Model** (Opus/Sonnet/Haiku) is the *default
+> Claude adapter*'s preset. Steps map to abstract tiers (deep/standard/cheap); the concrete model id
+> + provider come from config behind a generic `AgentRunner`. See
+> `docs/brainstorms/2026-06-21-provider-agnostic-agent-design.md`.
+
 Each step declares **Guard** (precondition to fire), **Input**, **Output** (postcondition + rows),
 **Tools** (agent steps) or **Commands/Capability** (daemon steps), **Model** (agent steps), and
 **Failure → route** (see the Loopback Atlas, §8). An unmet guard *parks or blocks*, it does not fail.

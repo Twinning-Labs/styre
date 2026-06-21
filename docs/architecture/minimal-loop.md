@@ -83,6 +83,10 @@ signature trips the consecutive-identical cap faster (control-loop §8.2).
 
 ## 3. Dispatch shell-out — keeping the leaves (§9.1)
 
+> **Provider-agnostic (2026-06-21):** the `claude -p` invocation below is the *default Claude
+> adapter*, not a core assumption. The agent runs behind a generic `AgentRunner` selected from
+> config; see `docs/brainstorms/2026-06-21-provider-agnostic-agent-design.md`.
+
 The TS daemon owns control; the agent *work* runs through the kept bash leaves. For an agent step the
 daemon: resolves model (F1) + the step's tool allowlist (§4 catalog) + timeout (§4 below), renders
 the prompt (`render-prompt.sh` + project-profile), invokes `dispatch.sh` (`claude -p --allowed-tools
