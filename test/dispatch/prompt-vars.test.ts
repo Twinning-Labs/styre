@@ -1,0 +1,34 @@
+import { expect, test } from "bun:test";
+import { parseProfile } from "../../src/dispatch/profile.ts";
+import {
+  DESIGN_TEMPLATE,
+  IMPLEMENT_TEMPLATE,
+  designVars,
+  implementVars,
+} from "../../src/dispatch/prompt-vars.ts";
+import { placeholders, renderPrompt } from "../../src/dispatch/render-prompt.ts";
+
+const profile = parseProfile({
+  slug: "demo",
+  targetRepo: "/tmp/demo",
+  commands: { test: "bun test" },
+  promptVars: { stack: "Bun + SQLite" },
+});
+const ticket = { ident: "ENG-9", title: "Add widget" };
+const unit = { seq: 2, kind: "backend", title: "API" };
+
+test("designVars resolves every placeholder in the design template", () => {
+  const vars = designVars(ticket, profile);
+  expect(renderPrompt(DESIGN_TEMPLATE, vars).ok).toBe(true);
+  for (const name of placeholders(DESIGN_TEMPLATE)) {
+    expect(name in vars).toBe(true);
+  }
+});
+
+test("implementVars resolves every placeholder in the implement template", () => {
+  const vars = implementVars(ticket, unit, profile);
+  expect(renderPrompt(IMPLEMENT_TEMPLATE, vars).ok).toBe(true);
+  for (const name of placeholders(IMPLEMENT_TEMPLATE)) {
+    expect(name in vars).toBe(true);
+  }
+});

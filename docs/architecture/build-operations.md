@@ -100,6 +100,11 @@ the *service-install* edge. The same TS core compiles to per-platform binaries.
 
 ## 4. Auth + config (re-thought for both audiences)
 
+> **Provider-agnostic (2026-06-21):** the model tiers here (Opus/Sonnet/Haiku) are the *default
+> Claude adapter*'s preset, not a core assumption. The agent is a config-selected provider behind a
+> generic `AgentRunner`; steps map to abstract tiers (deep/standard/cheap) and config maps tier→model
+> id per provider. See `docs/brainstorms/2026-06-21-provider-agnostic-agent-design.md`.
+
 **Auth — TWO modes** (a change from the local-only "subscription session, never an API key"):
 - **Subscription session** — local dev; cheapest for an individual; the OSS adoption hook.
 - **`ANTHROPIC_API_KEY`** — **required for headless** (the GitHub Action, the cloud fleet): an interactive
