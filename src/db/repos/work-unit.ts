@@ -7,9 +7,11 @@ export interface WorkUnitRow {
   seq: number;
   kind: string;
   title: string | null;
+  description: string | null;
   status: string;
   behavioral: number;
   files_to_touch: string | null;
+  test_plan: string | null;
   verify_check_types: string | null;
   depends_on: string | null;
   created_at: string;
@@ -17,7 +19,7 @@ export interface WorkUnitRow {
 }
 
 const COLS =
-  "id, ticket_id, seq, kind, title, status, behavioral, files_to_touch, verify_check_types, depends_on, created_at, updated_at";
+  "id, ticket_id, seq, kind, title, description, status, behavioral, files_to_touch, test_plan, verify_check_types, depends_on, created_at, updated_at";
 
 export function getById(db: Database, id: number): WorkUnitRow | null {
   return (
@@ -37,6 +39,9 @@ export function insertWorkUnit(
     ticketId: number;
     seq: number;
     kind: string;
+    title?: string | null;
+    description?: string | null;
+    testPlan?: string | null;
     status?: string;
     behavioral?: number;
     filesToTouch?: string[] | null;
@@ -48,16 +53,19 @@ export function insertWorkUnit(
   const res = db
     .query(
       `INSERT INTO work_unit
-         (ticket_id, seq, kind, status, behavioral, files_to_touch, verify_check_types, depends_on, created_at, updated_at)
-       VALUES ($t, $seq, $kind, $status, $behavioral, $ftt, $vct, $dep, $now, $now)`,
+         (ticket_id, seq, kind, title, description, status, behavioral, files_to_touch, test_plan, verify_check_types, depends_on, created_at, updated_at)
+       VALUES ($t, $seq, $kind, $title, $desc, $status, $behavioral, $ftt, $tp, $vct, $dep, $now, $now)`,
     )
     .run({
       $t: p.ticketId,
       $seq: p.seq,
       $kind: p.kind,
+      $title: p.title ?? null,
+      $desc: p.description ?? null,
       $status: p.status ?? "pending",
       $behavioral: p.behavioral ?? 1,
       $ftt: p.filesToTouch == null ? null : JSON.stringify(p.filesToTouch),
+      $tp: p.testPlan ?? null,
       $vct: p.verifyCheckTypes == null ? null : JSON.stringify(p.verifyCheckTypes),
       $dep: p.dependsOn == null ? null : JSON.stringify(p.dependsOn),
       $now: now,
