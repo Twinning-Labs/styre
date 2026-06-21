@@ -40,3 +40,10 @@ export function commitWorktree(
 export function removeWorktree(repoPath: string, worktreePath: string): void {
   git(["worktree", "remove", "--force", worktreePath], repoPath);
 }
+
+/** The files changed by commit `sha` (its diff vs its parent). Read-only; used by the verify
+ *  gates to inspect what a coding attempt actually touched. */
+export function changedFilesAt(sha: string, worktreePath: string): string[] {
+  const out = git(["diff-tree", "--no-commit-id", "-r", "--name-only", sha], worktreePath);
+  return out === "" ? [] : out.split("\n").filter((l) => l !== "");
+}

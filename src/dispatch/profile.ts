@@ -11,6 +11,7 @@ export const ProfileSchema = z.object({
   checksSystem: z.enum(["github", "external", "none"]).default("none"),
   commands: z.record(z.string(), z.string()).default({}),
   promptVars: z.record(z.string(), z.string()).default({}),
+  testFilePattern: z.string().optional(),
 });
 
 export type Profile = z.infer<typeof ProfileSchema>;

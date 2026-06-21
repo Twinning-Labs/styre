@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  changedFilesAt,
   commitWorktree,
   ensureWorktree,
   removeWorktree,
@@ -75,4 +76,23 @@ test("removeWorktree detaches the worktree", () => {
   ensureWorktree(repo, "feat/eng-4", wt);
   removeWorktree(repo, wt);
   expect(existsSync(join(wt, "README.md"))).toBe(false);
+});
+
+test("changedFilesAt returns the files a commit touched", () => {
+  const root = mkdtempSync(join(tmpdir(), "styre-cf-"));
+  roots.push(root);
+  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
+  run(["init", "-b", "main"]);
+  run(["config", "user.email", "t@s.dev"]);
+  run(["config", "user.name", "T"]);
+  writeFileSync(join(root, "README.md"), "x");
+  run(["add", "-A"]);
+  run(["commit", "-m", "init"]);
+  writeFileSync(join(root, "feature.ts"), "export const x = 1;\n");
+  writeFileSync(join(root, "feature.test.ts"), "test\n");
+  run(["add", "-A"]);
+  run(["commit", "-m", "work"]);
+  const sha = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: root }).stdout.toString().trim();
+  const files = changedFilesAt(sha, root);
+  expect(files.sort()).toEqual(["feature.test.ts", "feature.ts"]);
 });
