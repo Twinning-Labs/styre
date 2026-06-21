@@ -6,6 +6,7 @@ export interface WorkUnitRow {
   ticket_id: number;
   seq: number;
   kind: string;
+  title: string | null;
   status: string;
   behavioral: number;
   files_to_touch: string | null;
@@ -16,7 +17,7 @@ export interface WorkUnitRow {
 }
 
 const COLS =
-  "id, ticket_id, seq, kind, status, behavioral, files_to_touch, verify_check_types, depends_on, created_at, updated_at";
+  "id, ticket_id, seq, kind, title, status, behavioral, files_to_touch, verify_check_types, depends_on, created_at, updated_at";
 
 export function getById(db: Database, id: number): WorkUnitRow | null {
   return (

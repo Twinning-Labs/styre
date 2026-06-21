@@ -5,6 +5,7 @@ export interface TicketRow {
   id: number;
   project_id: number;
   ident: string;
+  title: string | null;
   stage: string;
   status: string;
   track: string | null;
@@ -15,7 +16,7 @@ export interface TicketRow {
 }
 
 const COLS =
-  "id, project_id, ident, stage, status, track, needs_docs, branch_name, branch_prefix, type_label";
+  "id, project_id, ident, title, stage, status, track, needs_docs, branch_name, branch_prefix, type_label";
 
 export function insertTicket(
   db: Database,

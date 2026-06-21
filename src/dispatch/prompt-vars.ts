@@ -13,6 +13,7 @@ export function designVars(
     ident: ticket.ident,
     title: ticket.title ?? "",
     slug: profile.slug,
+    stack: "",
     ...profile.promptVars,
   };
 }
@@ -29,6 +30,7 @@ export function implementVars(
     unit_kind: unit.kind,
     unit_title: unit.title ?? "",
     test_command: profile.commands.test ?? "",
+    stack: "",
     ...profile.promptVars,
   };
 }
