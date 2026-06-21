@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
+import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
 import { listOpenByTicket } from "../../src/db/repos/review-finding.ts";
 import { listPending } from "../../src/db/repos/signal.ts";
@@ -256,6 +257,7 @@ test("blocking plan-defect with default config escalates ticket to waiting with 
 
   const ticket = getTicket(db, ticketId);
   expect(ticket?.status).toBe("waiting");
+  expect(ticket?.stage).toBe("review");
 
   const signals = listPending(db, ticketId);
   expect(signals.some((s) => s.signal_type === "human_resume")).toBe(true);
@@ -285,7 +287,7 @@ test("blocking plan-defect with onPlanDefect=redesign routes to design stage wit
 
   // Pass config with redesign policy.
   const outcome = await advanceOneStep(db, ticketId, registry, {
-    config: { onPlanDefect: "redesign" },
+    config: { ...DEFAULT_RUNTIME_CONFIG, onPlanDefect: "redesign" },
   });
   expect(outcome.kind).toBe("loopback");
 
@@ -323,6 +325,7 @@ test("major finding with deferral_candidate=true escalates ticket to waiting wit
 
   const ticket = getTicket(db, ticketId);
   expect(ticket?.status).toBe("waiting");
+  expect(ticket?.stage).toBe("review");
 
   const signals = listPending(db, ticketId);
   expect(signals.some((s) => s.signal_type === "human_resume")).toBe(true);

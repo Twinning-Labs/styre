@@ -48,14 +48,24 @@ test("computeBlocksShip: minor and nit never block", () => {
 });
 
 test("validateReviewFindings rejects a dangling work_unit_seq", () => {
-  expect(validateReviewFindings([finding({ work_unit_seq: 9 })], [1, 2]).length).toBeGreaterThan(0);
+  const errors = validateReviewFindings([finding({ work_unit_seq: 9 })], [1, 2]);
+  expect(errors.some((e) => e.includes("work_unit_seq"))).toBe(true);
 });
 
 test("validateReviewFindings rejects a deferral-flagged critical", () => {
-  expect(
-    validateReviewFindings([finding({ severity: "critical", deferral_candidate: true })], [1])
-      .length,
-  ).toBeGreaterThan(0);
+  const errors = validateReviewFindings(
+    [finding({ severity: "critical", deferral_candidate: true })],
+    [1],
+  );
+  expect(errors.some((e) => e.includes("non-deferrable"))).toBe(true);
+});
+
+test("computeBlocksShip: minor with deferral_candidate never blocks", () => {
+  expect(computeBlocksShip("minor", true)).toBe(0);
+});
+
+test("computeBlocksShip: nit with deferral_candidate never blocks", () => {
+  expect(computeBlocksShip("nit", true)).toBe(0);
 });
 
 test("validateReviewFindings accepts a clean set (null unit seq allowed)", () => {

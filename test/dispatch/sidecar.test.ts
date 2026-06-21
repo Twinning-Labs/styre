@@ -36,3 +36,14 @@ test("respects a custom fence label", () => {
   const r = extractSidecar(out, Schema, { fence: "findings" });
   expect(r.ok).toBe(true);
 });
+
+test("last-block-wins: two sidecar blocks → parses the second (last)", () => {
+  const first = '```styre-sidecar\n{ "units": 1 }\n```';
+  const second = '```styre-sidecar\n{ "units": 2 }\n```';
+  const out = `Echo of example:\n${first}\n\nReal answer:\n${second}`;
+  const r = extractSidecar(out, Schema);
+  expect(r.ok).toBe(true);
+  if (r.ok) {
+    expect(r.value.units).toBe(2);
+  }
+});

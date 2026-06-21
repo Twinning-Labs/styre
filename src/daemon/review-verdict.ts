@@ -21,9 +21,9 @@ export interface ReviewVerdictResult {
   decision: ReviewDecision;
 }
 
-/** Deterministic signature of a blocking round: sorted `category:location` of the blocking
- *  findings. Two rounds with the same blocking shape produce the same signature → no-progress. */
-function blockingSignature(blocking: ReviewFindingRow[]): string {
+/** Deterministic signature of a set of findings: sorted `category:location`. Two rounds with the
+ *  same shape produce the same signature → no-progress detection. */
+function findingsSignature(blocking: ReviewFindingRow[]): string {
   const parts = blocking.map((f) => `${f.category ?? ""}:${f.location ?? ""}`).sort();
   return `review:${parts.join("|")}`;
 }
@@ -127,7 +127,7 @@ export function applyReviewVerdict(
   const deferred = open.filter((f) => f.severity === "major" && f.deferral_candidate === 1);
 
   if (blocking.length > 0) {
-    const signature = blockingSignature(blocking);
+    const signature = findingsSignature(blocking);
 
     if (isRepeatedReviewLoopback(db, ticketId, signature)) {
       escalate(db, ticketId, "no progress: identical review findings", signature);
@@ -158,7 +158,7 @@ export function applyReviewVerdict(
       db,
       ticketId,
       "deferrable major finding requires a human deferral decision",
-      blockingSignature(deferred),
+      findingsSignature(deferred),
     );
     return { decision: "escalated" };
   }

@@ -110,6 +110,8 @@ export function latestReviewDispatchId(db: Database, ticketId: number): string |
   return row?.dispatch_id ?? null;
 }
 
-export function setStatus(db: Database, id: number, status: string): void {
+export type ReviewFindingStatus = "open" | "fixed" | "deferred" | "wont-fix";
+
+export function setStatus(db: Database, id: number, status: ReviewFindingStatus): void {
   db.query("UPDATE review_finding SET status = $s WHERE id = $id").run({ $s: status, $id: id });
 }

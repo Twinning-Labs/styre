@@ -13,14 +13,15 @@ export function extractSidecar<T>(
   opts?: { fence?: string },
 ): SidecarResult<T> {
   const fence = opts?.fence ?? "styre-sidecar";
-  const re = new RegExp(`\`\`\`${fence}\\s*\\n([\\s\\S]*?)\\n\`\`\``);
-  const match = output.match(re);
-  if (!match || match[1] === undefined) {
+  const re = new RegExp(`\`\`\`${fence}\\s*\\n([\\s\\S]*?)\\n\`\`\``, "g");
+  const matches = [...output.matchAll(re)];
+  const lastMatch = matches[matches.length - 1];
+  if (!lastMatch || lastMatch[1] === undefined) {
     return { ok: false, reason: "absent", detail: `no \`\`\`${fence} block found` };
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(match[1]);
+    parsed = JSON.parse(lastMatch[1]);
   } catch (err) {
     return { ok: false, reason: "malformed", detail: `invalid JSON: ${String(err)}` };
   }
