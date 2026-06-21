@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import {
+  DESIGN_REVIEW_TEMPLATE,
   DESIGN_TEMPLATE,
   EXTRACT_TEMPLATE,
   IMPLEMENT_TEMPLATE,
   REVIEW_TEMPLATE,
+  designReviewVars,
   designVars,
   extractVars,
   implementVars,
@@ -57,5 +59,17 @@ test("review template renders with reviewVars (no missing placeholders)", () => 
   expect(r.ok).toBe(true);
   for (const name of placeholders(REVIEW_TEMPLATE)) {
     expect(name in reviewVars({ ident: "ENG-1", title: "T" }, profile)).toBe(true);
+  }
+});
+
+test("design-review template renders with designReviewVars (no missing placeholders)", () => {
+  const profile = parseProfile({ slug: "demo", targetRepo: "/tmp/x", commands: {} });
+  const r = renderPrompt(
+    DESIGN_REVIEW_TEMPLATE,
+    designReviewVars({ ident: "ENG-1", title: "T" }, profile),
+  );
+  expect(r.ok).toBe(true);
+  for (const name of placeholders(DESIGN_REVIEW_TEMPLATE)) {
+    expect(name in designReviewVars({ ident: "ENG-1", title: "T" }, profile)).toBe(true);
   }
 });
