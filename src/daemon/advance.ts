@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { DEFAULT_RUNTIME_CONFIG, type RuntimeConfig } from "../config/runtime-config.ts";
 import { appendEvent } from "../db/repos/event-log.ts";
 import { getTicket, setTicketStage, setTicketStatus } from "../db/repos/ticket.ts";
 import { setStatus as setUnitStatus } from "../db/repos/work-unit.ts";
@@ -7,6 +8,7 @@ import { awaitSignal } from "../engine/signals.ts";
 import { runStep } from "../engine/step-journal.ts";
 import { applyFailurePolicy } from "./failure-policy.ts";
 import { nextStepKey } from "./resolver.ts";
+import { applyReviewVerdict } from "./review-verdict.ts";
 import type { StepRegistry } from "./step-registry.ts";
 
 const MAX_TRANSITIONS = 100;
@@ -28,6 +30,7 @@ export async function advanceOneStep(
   db: Database,
   ticketId: number,
   registry: StepRegistry,
+  opts?: { config?: RuntimeConfig },
 ): Promise<AdvanceOutcome> {
   for (let i = 0; i < MAX_TRANSITIONS; i++) {
     const d = nextStepKey(db, ticketId);
@@ -77,6 +80,16 @@ export async function advanceOneStep(
         effectful: true,
         execute: (step) => handler({ db, ticket, step, workUnitId: d.workUnitId }),
       });
+      if (d.stepKey === "review") {
+        const { decision } = applyReviewVerdict(
+          db,
+          ticketId,
+          opts?.config ?? DEFAULT_RUNTIME_CONFIG,
+        );
+        if (decision !== "clean") {
+          return { kind: decision, stepKey: d.stepKey };
+        }
+      }
       return { kind: "stepped", stepKey: d.stepKey };
     } catch (err) {
       const failed = getByKey(db, ticketId, d.stepKey);
