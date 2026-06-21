@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
 import { StepRegistry } from "../../src/daemon/step-registry.ts";
+import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { getTicket, setTicketStage, setTicketTrack } from "../../src/db/repos/ticket.ts";
 import { getById as getUnit, insertWorkUnit } from "../../src/db/repos/work-unit.ts";
@@ -34,8 +35,23 @@ test("advance + mark-verified transitions collapse, then the next real step runs
     verifyCheckTypes: ["test"],
     status: "verifying",
   });
-  insertSignal(db, { ticketId, workUnitId: unit.id, signalType: "test", result: "pass" });
-  // resolver: unit verifying, all checks have signals → mark-verified (collapses), then
+  // Record coding attempt at a known commit, then stamp the PASS signal at that same SHA
+  // (content-keyed: the resolver requires a PASS at the current commit to consider it satisfied)
+  const disp = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0001",
+    seq: nextSeq(db, ticketId),
+    workUnitId: unit.id,
+  });
+  completeDispatch(db, disp.id, { outcome: "clean-success", branchHeadSha: "sha-abc" });
+  insertSignal(db, {
+    ticketId,
+    workUnitId: unit.id,
+    signalType: "test",
+    result: "pass",
+    branchHeadSha: "sha-abc",
+  });
+  // resolver: unit verifying, all checks satisfied at current commit → mark-verified (collapses), then
   // allUnitsVerified → verify:integration step runs.
   const registry = new StepRegistry();
   registry.register("verify:integration", () => ({ ok: true }));
