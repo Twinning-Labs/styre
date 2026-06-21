@@ -13,6 +13,8 @@ import type { StepRegistry } from "./step-registry.ts";
 
 const MAX_TRANSITIONS = 100;
 
+const VERDICT_BEARING_STEPS = new Set(["review", "design:review"]);
+
 export type AdvanceOutcome =
   | { kind: "stepped"; stepKey: string }
   | { kind: "waiting"; signalType: string }
@@ -80,12 +82,14 @@ export async function advanceOneStep(
         effectful: true,
         execute: (step) => handler({ db, ticket, step, workUnitId: d.workUnitId }),
       });
-      if (d.stepKey === "review") {
+      if (VERDICT_BEARING_STEPS.has(d.stepKey)) {
         const { decision } = applyReviewVerdict(
           db,
           ticketId,
           opts?.config ?? DEFAULT_RUNTIME_CONFIG,
-          { stepKey: "review" },
+          {
+            stepKey: d.stepKey,
+          },
         );
         if (decision !== "clean") {
           return { kind: decision, stepKey: d.stepKey };

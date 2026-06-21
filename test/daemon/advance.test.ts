@@ -6,7 +6,12 @@ import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { insertFinding } from "../../src/db/repos/review-finding.ts";
 import { getTicket, setTicketStage, setTicketTrack } from "../../src/db/repos/ticket.ts";
 import { getById as getUnit, insertWorkUnit } from "../../src/db/repos/work-unit.ts";
-import { getByKey, insertPending, markRunning } from "../../src/db/repos/workflow-step.ts";
+import {
+  getByKey,
+  insertPending,
+  markRunning,
+  markSucceeded,
+} from "../../src/db/repos/workflow-step.ts";
 import { StepInFlightError } from "../../src/engine/step-journal.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
@@ -196,4 +201,53 @@ test("review step with blocking finding → outcome loopback and stage implement
   // Verdict: blocking finding → loopback to implement.
   expect(outcome).toEqual({ kind: "loopback", stepKey: "review" });
   expect(ticket?.stage).toBe("implement");
+});
+
+test("design:review step with blocking plan finding → outcome loopback and stage design", async () => {
+  const { db, ticketId } = makeTestDb();
+  // Seed a ticket in design stage: prior steps succeeded, at least one work unit inserted (so
+  // the resolver skips design:extract), track=full so resolver returns design:review.
+  setTicketStage(db, ticketId, "design");
+  setTicketTrack(db, ticketId, "full");
+  const dDispatch = insertPending(db, {
+    ticketId,
+    stepKey: "design:dispatch",
+    stepType: "dispatch",
+  });
+  markSucceeded(db, dDispatch.id, { plan: "ok" });
+  // Insert a work unit so resolver sees it and skips design:extract.
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", verifyCheckTypes: ["test"] });
+
+  const registry = new StepRegistry();
+  // The handler mimics a real plan-review agent: records a dispatch with stage='design'
+  // and files one blocking plan finding against that dispatch.
+  registry.register("design:review", (ctx) => {
+    const did = `${ctx.ticket.ident}-drev001`;
+    insertDispatch(ctx.db, {
+      ticketId: ctx.ticket.id,
+      dispatchId: did,
+      seq: nextSeq(ctx.db, ctx.ticket.id),
+      stepId: ctx.step.id,
+      stage: "design",
+    });
+    insertFinding(ctx.db, {
+      ticketId: ctx.ticket.id,
+      reviewKind: "plan",
+      dispatchId: did,
+      severity: "major",
+      category: "correctness",
+      deferralCandidate: 0,
+      blocksShip: 1,
+      location: "plan:section-2",
+    });
+    return { findings: 1 };
+  });
+
+  const outcome = await advanceOneStep(db, ticketId, registry);
+  const ticket = getTicket(db, ticketId);
+  db.close();
+
+  // Verdict: blocking plan finding → redesign loopback back to design.
+  expect(outcome).toEqual({ kind: "loopback", stepKey: "design:review" });
+  expect(ticket?.stage).toBe("design");
 });
