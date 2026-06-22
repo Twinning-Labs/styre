@@ -23,6 +23,7 @@
  */
 import { LinearClient } from "@linear/sdk";
 import type { IssueState, IssueTrackerPort } from "../issue-tracker.ts";
+import { type IngestedTicket, deriveTypeLabel } from "../ticket-source.ts";
 
 /** Neutral IssueState → Linear workflow-state NAME. Resolved to a team-scoped state id per call. */
 const LINEAR_STATE_NAME: Record<IssueState, string> = {
@@ -75,6 +76,22 @@ export function linearIssueTracker(opts?: { apiKey?: string }): IssueTrackerPort
   const client = new LinearClient({ apiKey });
 
   return {
+    async fetchTicket(ref: string): Promise<IngestedTicket> {
+      const issue = await client.issue(ref);
+      const labels = await issue.labels();
+      const labelNames = labels.nodes.map((l) => l.name);
+      const typeLabel = deriveTypeLabel(labelNames);
+      // branchPrefixFor is applied by the ingestion caller; surface typeLabel here.
+      return {
+        ident: issue.identifier,
+        title: issue.title,
+        description: issue.description ?? null,
+        typeLabel,
+        linearIssueUuid: issue.id,
+        url: issue.url ?? null,
+      };
+    },
+
     async setState(ref: string, state: IssueState): Promise<void> {
       const issue = await client.issue(ref);
       const targetName = LINEAR_STATE_NAME[state];
