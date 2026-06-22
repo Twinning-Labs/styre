@@ -8,6 +8,13 @@ export function stateDir(): string {
   return join(base, "styre");
 }
 
+/** XDG config dir for Styre's profiles + workspace config (build-operations §3.1 / §5). */
+export function configDir(): string {
+  const xdg = process.env.XDG_CONFIG_HOME;
+  const base = xdg && xdg.length > 0 ? xdg : join(homedir(), ".config");
+  return join(base, "styre");
+}
+
 /** Default path of the single SoT database. */
 export function defaultDbPath(): string {
   return join(stateDir(), "styre.db");
