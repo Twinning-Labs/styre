@@ -8,7 +8,7 @@ import {
   markFailed,
   markSent,
 } from "../db/repos/projection-outbox.ts";
-import { insertPending as insertSignal } from "../db/repos/signal.ts";
+import { insertPending as insertSignal, recordDelivered } from "../db/repos/signal.ts";
 import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
 import type { ForgePort } from "../integrations/forge.ts";
 import type { IssueState, IssueTrackerPort } from "../integrations/issue-tracker.ts";
@@ -102,7 +102,15 @@ async function applyRow(
         const pr = await f.ensurePr(
           payload as { branch: string; base: string; title: string; body: string },
         );
-        return pr.ref; // → response_ref (the PR#); M6b-2 delivers it as external_pr_result
+        // The drainer delivers external_pr_result (control-loop §7): the durable PR-ref record the
+        // deferred human-merge poll consumes. A data-carrier — recorded delivered, never pending.
+        recordDelivered(db, {
+          ticketId: row.ticket_id,
+          signalType: "external_pr_result",
+          payload: { ref: pr.ref, url: pr.url },
+          idempotencyKey: `${ticket.ident}:pr_result`,
+        });
+        return pr.ref; // → response_ref (the PR#)
       }
       case "pr_comment":
         return await f.addPrComment(

@@ -75,3 +75,32 @@ export function hasDelivered(db: Database, ticketId: number, signalType: string)
     .get(ticketId, signalType);
   return (row?.n ?? 0) > 0;
 }
+
+/** Insert a signal already in 'delivered' (a data-carrier the resolver never awaits, e.g.
+ *  external_pr_result). Idempotent: INSERT OR IGNORE on the unique idempotency_key. */
+export function recordDelivered(
+  db: Database,
+  p: { ticketId: number; signalType: string; payload?: unknown; idempotencyKey: string },
+): void {
+  const now = nowUtc();
+  db.query(
+    `INSERT OR IGNORE INTO signal
+       (ticket_id, signal_type, status, payload_json, idempotency_key, requested_at, delivered_at)
+     VALUES ($t, $ty, 'delivered', $p, $key, $now, $now)`,
+  ).run({
+    $t: p.ticketId,
+    $ty: p.signalType,
+    $p: p.payload === undefined ? null : JSON.stringify(p.payload),
+    $key: p.idempotencyKey,
+    $now: now,
+  });
+}
+
+/** All pending signals of a given type, across tickets (the checks poll's work-list). */
+export function listPendingByType(db: Database, signalType: string): SignalRow[] {
+  return db
+    .query<SignalRow, [string]>(
+      `SELECT ${COLS} FROM signal WHERE signal_type = ? AND status = 'pending' ORDER BY id`,
+    )
+    .all(signalType);
+}
