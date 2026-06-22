@@ -153,11 +153,16 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         dependsOn: u.depends_on,
       });
     }
-    // M5b-2: size the track from the validated breakdown (sprawl-only). An explicitly-set
-    // track (per-ticket override) wins; the complexity grader is the M5b-3 follow-up.
-    const track = ctx.ticket.track ?? sizeTrack(parsed.value.units);
-    setTicketTrack(ctx.db, ctx.ticket.id, track);
     return { units: parsed.value.units.length };
+  });
+
+  registry.register("design:size", async (ctx: HandlerContext) => {
+    const units = listUnits(ctx.db, ctx.ticket.id);
+    // Off path (M5b-3 default): deterministic sprawl-only sizing, no agent. The grader on-path
+    // is added in Task 4 behind ctx.config.complexityGrading.
+    const track = sizeTrack(units);
+    setTicketTrack(ctx.db, ctx.ticket.id, track);
+    return { track, graded: false };
   });
 
   registry.register("design:review", async (ctx: HandlerContext) => {

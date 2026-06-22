@@ -34,6 +34,22 @@ test("design: after dispatch with no work units, asks for design:extract", async
   expect(d.kind === "step" && d.handlerKey).toBe("design:extract");
 });
 
+test("design: units present + track unset → routes to design:size", async () => {
+  const { db, ticketId } = makeTestDb();
+  await succeed(db, ticketId, "design:dispatch");
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", verifyCheckTypes: ["test"] });
+  // track is null (extract no longer sizes)
+  const d = nextStepKey(db, ticketId);
+  db.close();
+  expect(d).toEqual({
+    kind: "step",
+    stepKey: "design:size",
+    stepType: "dispatch",
+    handlerKey: "design:size",
+    workUnitId: null,
+  });
+});
+
 test("design fast-track: with units + track=fast, advances to implement", async () => {
   const { db, ticketId } = makeTestDb();
   await succeed(db, ticketId, "design:dispatch");
