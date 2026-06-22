@@ -24,6 +24,14 @@ export function listByUnit(db: Database, workUnitId: number): GroundTruthSignalR
     .all(workUnitId);
 }
 
+export function listByTicket(db: Database, ticketId: number): GroundTruthSignalRow[] {
+  return db
+    .query<GroundTruthSignalRow, [number]>(
+      `SELECT ${COLS} FROM ground_truth_signal WHERE ticket_id = ? ORDER BY measured_at, id`,
+    )
+    .all(ticketId);
+}
+
 export function insertSignal(
   db: Database,
   p: {

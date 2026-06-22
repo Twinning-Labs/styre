@@ -13,6 +13,7 @@ import { openDb } from "../db/client.ts";
 import { migrate } from "../db/migrate.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import { loadProfile } from "../dispatch/profile.ts";
+import { stdoutSink } from "../telemetry/emit.ts";
 
 export const runCommand = defineCommand({
   meta: { name: "run", description: "Ingest one ticket and drive it to PR-ready, then exit." },
@@ -53,8 +54,9 @@ export const runCommand = defineCommand({
       ports,
       registry,
       ticketRef: args.ticket,
+      emit: stdoutSink,
     });
-    console.log(out.summary);
+    console.error(out.summary); // human summary → stderr; stdout carries only NDJSON telemetry
     db.close();
     if (out.outcome === "blocked" || out.outcome === "no-progress") {
       throw new Error(`run: ticket ${args.ticket} ended ${out.outcome}`);
