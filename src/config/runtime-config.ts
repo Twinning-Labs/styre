@@ -12,6 +12,8 @@ export const RuntimeConfigSchema = z.object({
   complexityGrading: z.boolean().default(false),
   // M6a: which issue-tracker adapter projects ticket state outward. Vendor-neutral; creds via env.
   issueTracker: z.string().default("linear"),
+  // M6b: which forge (code-host) adapter handles push/PR ops. Vendor-neutral; creds via env.
+  forge: z.string().default("github"),
 });
 
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
