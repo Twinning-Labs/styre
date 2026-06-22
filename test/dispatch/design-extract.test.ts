@@ -98,7 +98,7 @@ test("design:extract inserts units with the behavioral flag honored (carry)", as
   expect(units[0]?.behavioral).toBe(1);
   expect(units[1]?.behavioral).toBe(0); // the carry: non-behavioral lands as 0, not the default 1
   expect(units[1]?.kind).toBe("docs");
-  expect(ticket?.track).toBe("full"); // 2 units → full-track (sizer: FULL_TRACK_MIN_UNITS = 2)
+  expect(ticket?.track).toBeNull(); // extract no longer sizes — design:size owns sizing now
 });
 
 test("design:extract fails the step when the sidecar is absent (transport failure)", async () => {

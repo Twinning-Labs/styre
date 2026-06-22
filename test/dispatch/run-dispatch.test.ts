@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
+import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import type { HandlerContext } from "../../src/daemon/step-registry.ts";
 import { listByTicket } from "../../src/db/repos/dispatch.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
@@ -32,7 +33,7 @@ function ctxFor(db: ReturnType<typeof makeTestDb>["db"], ticketId: number): Hand
   });
   const ticket = getTicket(db, ticketId);
   if (!ticket) throw new Error("no ticket");
-  return { db, ticket, step, workUnitId: null };
+  return { db, ticket, step, workUnitId: null, config: DEFAULT_RUNTIME_CONFIG };
 }
 
 function depsFor(repo: string, wt: string) {

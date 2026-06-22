@@ -9,6 +9,7 @@ const ALLOWLISTS: Record<string, string[]> = {
   "implement:dispatch": [...READ_ONLY, "Write", "Edit", "Bash"],
   "docs:revise": [...READ_ONLY, "Write", "Edit"],
   "design:extract": [...READ_ONLY],
+  "design:size": [...READ_ONLY],
   "design:review": [...READ_ONLY],
   review: [...READ_ONLY],
   "merge:pr-ensure": [...READ_ONLY],

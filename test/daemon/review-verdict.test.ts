@@ -25,7 +25,7 @@ function seedReviewRound(db: ReturnType<typeof makeTestDb>["db"], ticketId: numb
 test("clean review (no findings) → decision clean", () => {
   const { db, ticketId } = makeTestDb();
   seedReviewRound(db, ticketId);
-  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "escalate" }, { stepKey: "review" });
+  const r = applyReviewVerdict(db, ticketId, DEFAULT_RUNTIME_CONFIG, { stepKey: "review" });
   db.close();
   expect(r.decision).toBe("clean");
 });
@@ -44,7 +44,7 @@ test("blocking code finding → loopback to implement (unit + review step reset,
     workUnitId: unit.id,
     location: "a.ts:1",
   });
-  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "escalate" }, { stepKey: "review" });
+  const r = applyReviewVerdict(db, ticketId, DEFAULT_RUNTIME_CONFIG, { stepKey: "review" });
   const ticket = getTicket(db, ticketId);
   const reviewStep = getByKey(db, ticketId, "review");
   const events = listEvents(db, ticketId);
@@ -68,7 +68,7 @@ test("blocking plan-defect, config escalate → escalated (parked on human_resum
     blocksShip: 1,
     location: null,
   });
-  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "escalate" }, { stepKey: "review" });
+  const r = applyReviewVerdict(db, ticketId, DEFAULT_RUNTIME_CONFIG, { stepKey: "review" });
   const ticket = getTicket(db, ticketId);
   const signals = listPending(db, ticketId);
   db.close();
@@ -95,7 +95,12 @@ test("blocking plan-defect, config redesign → loopback to design (units cleare
     blocksShip: 1,
     location: null,
   });
-  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "redesign" }, { stepKey: "review" });
+  const r = applyReviewVerdict(
+    db,
+    ticketId,
+    { ...DEFAULT_RUNTIME_CONFIG, onPlanDefect: "redesign" },
+    { stepKey: "review" },
+  );
   const ticket = getTicket(db, ticketId);
   const units = listUnits(db, ticketId);
   const designStep = getByKey(db, ticketId, "design:dispatch");
@@ -119,7 +124,7 @@ test("non-blocking major + deferral_candidate → escalated", () => {
     blocksShip: 0,
     location: "a.ts:2",
   });
-  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "escalate" }, { stepKey: "review" });
+  const r = applyReviewVerdict(db, ticketId, DEFAULT_RUNTIME_CONFIG, { stepKey: "review" });
   const ticket = getTicket(db, ticketId);
   db.close();
   expect(r.decision).toBe("escalated");
@@ -152,7 +157,7 @@ test("no-progress guard: identical blocking signature in prior loopback event �
     blocksShip: 1,
     location: "a.ts:1",
   });
-  const r = applyReviewVerdict(db, ticketId, { onPlanDefect: "escalate" }, { stepKey: "review" });
+  const r = applyReviewVerdict(db, ticketId, DEFAULT_RUNTIME_CONFIG, { stepKey: "review" });
   const ticket = getTicket(db, ticketId);
   const signals = listPending(db, ticketId);
   db.close();

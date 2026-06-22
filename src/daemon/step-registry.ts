@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import type { RuntimeConfig } from "../config/runtime-config.ts";
 import type { TicketRow } from "../db/repos/ticket.ts";
 import type { WorkflowStepRow } from "../db/repos/workflow-step.ts";
 
@@ -9,6 +10,7 @@ export interface HandlerContext {
   ticket: TicketRow;
   step: WorkflowStepRow;
   workUnitId: number | null;
+  config: RuntimeConfig;
 }
 
 export type StepHandler = (ctx: HandlerContext) => unknown | Promise<unknown>;

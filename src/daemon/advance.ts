@@ -80,7 +80,14 @@ export async function advanceOneStep(
         stepKey: d.stepKey,
         stepType: d.stepType,
         effectful: true,
-        execute: (step) => handler({ db, ticket, step, workUnitId: d.workUnitId }),
+        execute: (step) =>
+          handler({
+            db,
+            ticket,
+            step,
+            workUnitId: d.workUnitId,
+            config: opts?.config ?? DEFAULT_RUNTIME_CONFIG,
+          }),
       });
       if (VERDICT_BEARING_STEPS.has(d.stepKey)) {
         const { decision } = applyReviewVerdict(

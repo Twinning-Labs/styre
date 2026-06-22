@@ -94,6 +94,9 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
       if (workUnits.listByTicket(db, ticketId).length === 0) {
         return step("design:extract", "dispatch", "design:extract", null);
       }
+      if (ticket.track === null) {
+        return step("design:size", "dispatch", "design:size", null);
+      }
       if (ticket.track === "full" && !done(db, ticketId, "design:review")) {
         return step("design:review", "dispatch", "design:review", null);
       }

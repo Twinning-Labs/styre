@@ -304,31 +304,22 @@ test("fast-track ticket (1 unit, track=fast) advances design→implement WITHOUT
   });
   const registry = registryFor(repo, runner);
 
-  // Drive the loop:
-  //   Tick 1 → design:extract runs (real handler) → sizer sees 1 unit → sets track='fast' →
-  //             returns { kind: "stepped", stepKey: "design:extract" }
-  //   Tick 2 → resolver: design:dispatch done ✓, units present ✓, track='fast' (≠'full') →
+  // Drive the loop until the ticket leaves the design stage:
+  //   Tick 1 → design:extract runs (real handler), inserts the 1 unit; track stays null
+  //             (extract no longer sizes).
+  //   Tick 2 → design:size runs (off path, no agent call) → sizer sees 1 unit → sets track='fast'.
+  //   Tick 3 → resolver: design:dispatch done ✓, units present ✓, track='fast' (≠'full') →
   //             advance design→implement (inline, no agent call) → routes to implement:wu1:dispatch
-  //             which calls the runner a 2nd time → throws → caught → step fails → failure-policy
-  //             returns some retry/blocked outcome; the binding fact (stage=implement) is already set.
+  //             which calls the runner a 2nd time → throws → caught → step fails; the binding fact
+  //             (stage=implement) is already committed by the inline advance.
   for (let i = 0; i < 10; i++) {
     const t = getTicket(db, ticketId);
     if (!t || t.stage !== "design") break;
-    const outcome = await advanceOneStep(db, ticketId, registry);
-    if (
-      outcome.kind === "stepped" &&
-      "stepKey" in outcome &&
-      outcome.stepKey === "design:extract"
-    ) {
-      // design:extract done → fire the inline advance design→implement.
-      // implement:dispatch has no real worktree so may throw; catch it since the binding fact
-      // (stage=implement) is already committed by the inline advance before the runner is called.
-      try {
-        await advanceOneStep(db, ticketId, registry);
-      } catch {
-        // Expected: stage transition to implement already recorded; implement:dispatch throws.
-      }
-      break;
+    try {
+      await advanceOneStep(db, ticketId, registry);
+    } catch {
+      // Expected once the inline advance fires: implement:dispatch has no real worktree and
+      // throws. The stage transition to implement is already recorded before the runner is called.
     }
   }
 
