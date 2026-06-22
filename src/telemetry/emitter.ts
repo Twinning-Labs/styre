@@ -1,10 +1,16 @@
 import type { Database } from "bun:sqlite";
 import type { RunResult } from "../daemon/run-ticket.ts";
-import { listByTicket as listDispatches } from "../db/repos/dispatch.ts";
+import {
+  listByTicket as listDispatches,
+  listByTicketSince as listDispatchesSince,
+} from "../db/repos/dispatch.ts";
 import type { DispatchRow } from "../db/repos/dispatch.ts";
-import { listByTicket as listEvents } from "../db/repos/event-log.ts";
+import {
+  listByTicket as listEvents,
+  listByTicketSince as listEventsSince,
+} from "../db/repos/event-log.ts";
 import type { EventLogRow } from "../db/repos/event-log.ts";
-import { listByTicket as listSignals } from "../db/repos/ground-truth-signal.ts";
+import { listByTicketSince as listSignalsSince } from "../db/repos/ground-truth-signal.ts";
 import type { GroundTruthSignalRow } from "../db/repos/ground-truth-signal.ts";
 import { getTicket } from "../db/repos/ticket.ts";
 import type { TelemetrySink } from "./emit.ts";
@@ -102,28 +108,27 @@ export function createTelemetryEmitter(sink: TelemetrySink): {
   flushNew(db: Database, ticketId: number): void;
   emitSummary(db: Database, ticketId: number, result: RunResult): void;
 } {
+  // Monotonic watermarks instead of growing seen-sets: each tick scans only rows newer than the
+  // last, so total work is ~O(rows) over a run rather than O(ticks × rows).
   let lastEventSeq = 0;
-  const seenDispatch = new Set<string>();
-  const seenSignal = new Set<number>();
+  let lastDispatchId = 0;
+  let lastSignalId = 0;
   return {
     flushNew(db, ticketId) {
-      for (const r of listEvents(db, ticketId)) {
-        if (r.seq > lastEventSeq) {
-          sink(toEvent(r));
-          lastEventSeq = r.seq;
-        }
+      for (const r of listEventsSince(db, ticketId, lastEventSeq)) {
+        sink(toEvent(r));
+        lastEventSeq = r.seq;
       }
-      for (const d of listDispatches(db, ticketId)) {
-        if (d.ended_at !== null && !seenDispatch.has(d.dispatch_id)) {
-          sink(toDispatch(d));
-          seenDispatch.add(d.dispatch_id);
-        }
+      // A dispatch is created and completed within one tick, so a row past the watermark is already
+      // ended on the common path; advance the watermark regardless and emit only ended rows (an
+      // abandoned/failed dispatch with no ended_at is correctly never emitted — and never re-scanned).
+      for (const d of listDispatchesSince(db, ticketId, lastDispatchId)) {
+        lastDispatchId = d.id;
+        if (d.ended_at !== null) sink(toDispatch(d));
       }
-      for (const s of listSignals(db, ticketId)) {
-        if (!seenSignal.has(s.id)) {
-          sink(toSignal(s));
-          seenSignal.add(s.id);
-        }
+      for (const s of listSignalsSince(db, ticketId, lastSignalId)) {
+        sink(toSignal(s));
+        lastSignalId = s.id;
       }
     },
     emitSummary(db, ticketId, result) {

@@ -34,6 +34,16 @@ export function listByTicket(db: Database, ticketId: number): EventLogRow[] {
     .all(ticketId);
 }
 
+/** Rows journaled after `afterSeq` (exclusive), in seq order. Lets a streaming consumer process
+ *  only genuinely-new rows per tick instead of re-scanning the full history. */
+export function listByTicketSince(db: Database, ticketId: number, afterSeq: number): EventLogRow[] {
+  return db
+    .query<EventLogRow, [number, number]>(
+      `SELECT ${COLS} FROM event_log WHERE ticket_id = ? AND seq > ? ORDER BY seq`,
+    )
+    .all(ticketId, afterSeq);
+}
+
 export function appendEvent(
   db: Database,
   e: {

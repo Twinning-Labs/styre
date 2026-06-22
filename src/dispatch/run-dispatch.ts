@@ -69,7 +69,9 @@ export async function runAgentDispatch(
   const result = await deps.runner.run({
     prompt: rendered.prompt,
     model,
-    allowedTools: allowlistFor(spec.handlerKey),
+    allowedTools: allowlistFor(spec.handlerKey, {
+      runnerCommands: Object.values(deps.profile.commands),
+    }),
     cwd: deps.worktreePath,
     timeoutMs: deps.timeoutMs,
     onSpawn: (pid) => setPid(ctx.db, ctx.step.id, pid),

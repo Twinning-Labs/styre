@@ -1,18 +1,8 @@
+import { agentEnv } from "../agent-env.ts";
 import type { AgentRunInput, AgentRunResult, AgentRunner } from "../runner.ts";
 
-/** Creds the daemon holds and must NOT leak into the agent subprocess (capability isolation,
- *  move-4: agents get no ambient LINEAR_API_KEY / GITHUB_TOKEN; the worktree is their only surface). */
-const AGENT_ENV_DENYLIST = ["LINEAR_API_KEY", "GITHUB_TOKEN"];
-
-/** A curated env for the agent subprocess: the parent env minus the daemon-held creds (and minus
- *  undefined values). Denylist, not allowlist, so the `claude` CLI keeps whatever it needs to auth. */
-export function agentEnv(parentEnv: Record<string, string | undefined>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(parentEnv)) {
-    if (v !== undefined && !AGENT_ENV_DENYLIST.includes(k)) out[k] = v;
-  }
-  return out;
-}
+// agentEnv (the cred scrub) is shared with the verify sink (run-command.ts); see ../agent-env.ts.
+export { agentEnv } from "../agent-env.ts";
 
 /** The Claude `claude -p` argv (pure). Flag names are CLI-version-specific — verified against a
  *  real `claude` run in the Task 7 smoke; the core never depends on these. */
@@ -51,10 +41,27 @@ export function parseClaudeJson(stdout: string): {
 
 /** The Claude adapter: spawn `<command> -p …` in the worktree, feed the prompt on stdin,
  *  capture stdout/exit under a timeout, parse usage. The ONLY place that knows Claude's CLI.
- *  Exercised by the manual smoke (Task 7), where flags + JSON fields are confirmed. */
+ *  Exercised by the manual smoke (Task 7), where flags + JSON fields are confirmed.
+ *
+ *  Timeout is a HARD progress bound (mirrors util/run-command.ts): we race `proc.exited` against
+ *  the timer rather than awaiting it unconditionally, so a `claude` (or forked child holding the
+ *  stdout pipe) that ignores SIGTERM or wedges in IO can never hang the single-threaded run loop.
+ *  On timeout we SIGKILL and resolve PROMPTLY — without awaiting `proc.exited` or draining pipes,
+ *  either of which can stall on the same wedged child. The normal path drains stdout/stderr
+ *  concurrently with the exit wait (avoids the large-output pipe-buffer deadlock). */
 export function claudeAgentRunner(command = "claude"): AgentRunner {
   return {
     async run(input: AgentRunInput): Promise<AgentRunResult> {
+      const transportFailure = (stderr: string, timedOut: boolean): AgentRunResult => ({
+        completed: false,
+        exitCode: null,
+        stdout: "",
+        stderr,
+        timedOut,
+        costUsd: null,
+        tokensIn: null,
+        tokensOut: null,
+      });
       const proc = Bun.spawn([command, ...buildClaudeArgs(input)], {
         cwd: input.cwd,
         env: agentEnv(process.env),
@@ -65,27 +72,27 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
       if (input.onSpawn && typeof proc.pid === "number") {
         input.onSpawn(proc.pid);
       }
-      const timer = setTimeout(() => proc.kill(), input.timeoutMs);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeoutP = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), input.timeoutMs);
+      });
       try {
+        const outcome = await Promise.race([proc.exited.then(() => "exited" as const), timeoutP]);
+        if (outcome === "timeout") {
+          proc.kill("SIGKILL");
+          return transportFailure("dispatch timed out", true);
+        }
         const exitCode = await proc.exited;
-        clearTimeout(timer);
-        const stdout = await new Response(proc.stdout).text();
-        const stderr = await new Response(proc.stderr).text();
-        const timedOut = exitCode !== 0 && stdout === "";
+        const [stdout, stderr] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+        ]);
         const usage = parseClaudeJson(stdout);
-        return { completed: exitCode === 0, exitCode, stdout, stderr, timedOut, ...usage };
+        return { completed: exitCode === 0, exitCode, stdout, stderr, timedOut: false, ...usage };
       } catch (err) {
+        return transportFailure(String(err), false);
+      } finally {
         clearTimeout(timer);
-        return {
-          completed: false,
-          exitCode: null,
-          stdout: "",
-          stderr: String(err),
-          timedOut: true,
-          costUsd: null,
-          tokensIn: null,
-          tokensOut: null,
-        };
       }
     },
   };

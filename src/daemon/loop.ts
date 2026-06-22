@@ -28,13 +28,18 @@ export async function tick(
     ports?: ProjectorPorts;
     profile?: { checksSystem: string };
   },
-): Promise<{ advanced: number }> {
+): Promise<{ advanced: number; blocked: boolean }> {
   const max = opts?.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
   const ids = readyTicketIds(db).slice(0, max);
   let advanced = 0;
+  // A 'blocked' resolver outcome makes no state change and raises no signal, so it is NOT progress:
+  // count it separately so the driver can terminate instead of spinning to the iteration cap
+  // (control-loop §8-P1: never a dead end).
+  let blocked = false;
   for (const id of ids) {
-    await advanceOneStep(db, id, registry, { config: opts?.config });
-    advanced++;
+    const outcome = await advanceOneStep(db, id, registry, { config: opts?.config });
+    if (outcome.kind === "blocked") blocked = true;
+    else advanced++;
   }
   if (opts?.ports) {
     await drainOutbox(db, opts.ports);
@@ -42,5 +47,5 @@ export async function tick(
   if (opts?.profile) {
     await pollChecks(db, opts.profile, opts.ports?.checks);
   }
-  return { advanced };
+  return { advanced, blocked };
 }

@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { readyTicketIds, tick } from "../../src/daemon/loop.ts";
 import { StepRegistry } from "../../src/daemon/step-registry.ts";
-import { insertTicket } from "../../src/db/repos/ticket.ts";
+import { insertTicket, setTicketStage } from "../../src/db/repos/ticket.ts";
+import { insertWorkUnit, setStatus as setUnitStatus } from "../../src/db/repos/work-unit.ts";
 import { getByKey } from "../../src/db/repos/workflow-step.ts";
 import { awaitSignal } from "../../src/engine/signals.ts";
 import { makeTestDb } from "../helpers/db.ts";
@@ -45,5 +46,19 @@ test("tick advances nothing when there are no ready tickets", async () => {
   awaitSignal(db, { ticketId, signalType: "human_merge_approval" }); // the only ticket is parked
   const summary = await tick(db, registry());
   db.close();
+  expect(summary.advanced).toBe(0);
+});
+
+test("tick surfaces a resolver dead-end as blocked, not as progress", async () => {
+  const { db, ticketId } = makeTestDb();
+  // implement stage with a unit that is neither actionable nor verified → resolver returns 'blocked'
+  // (control-loop §8-P1). It must be reported as blocked, NOT counted as an advance — otherwise the
+  // driver's stall guard never fires and it spins to the iteration cap.
+  setTicketStage(db, ticketId, "implement");
+  const u = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", verifyCheckTypes: ["test"] });
+  setUnitStatus(db, u.id, "blocked");
+  const summary = await tick(db, registry());
+  db.close();
+  expect(summary.blocked).toBe(true);
   expect(summary.advanced).toBe(0);
 });

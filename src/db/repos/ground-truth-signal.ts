@@ -32,6 +32,20 @@ export function listByTicket(db: Database, ticketId: number): GroundTruthSignalR
     .all(ticketId);
 }
 
+/** Rows with `id > afterId` (exclusive), in id order. For incremental streaming: signals are
+ *  insert-only and id is monotonic, so id is a safe watermark over a run's growing ledger. */
+export function listByTicketSince(
+  db: Database,
+  ticketId: number,
+  afterId: number,
+): GroundTruthSignalRow[] {
+  return db
+    .query<GroundTruthSignalRow, [number, number]>(
+      `SELECT ${COLS} FROM ground_truth_signal WHERE ticket_id = ? AND id > ? ORDER BY id`,
+    )
+    .all(ticketId, afterId);
+}
+
 export function insertSignal(
   db: Database,
   p: {

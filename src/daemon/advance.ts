@@ -9,7 +9,7 @@ import { runStep } from "../engine/step-journal.ts";
 import { applyFailurePolicy } from "./failure-policy.ts";
 import { enqueueStageProjection } from "./projector.ts";
 import { nextStepKey } from "./resolver.ts";
-import { applyReviewVerdict } from "./review-verdict.ts";
+import { type ReviewVerdictResult, applyReviewVerdict } from "./review-verdict.ts";
 import type { StepRegistry } from "./step-registry.ts";
 
 const MAX_TRANSITIONS = 100;
@@ -80,6 +80,11 @@ export async function advanceOneStep(
       throw new Error(`advanceOneStep: no handler registered for '${d.handlerKey}'`);
     }
     try {
+      // The review verdict is applied in the SAME transaction that marks the step succeeded
+      // (onSucceed). Otherwise a crash between the two would leave a `succeeded` review with an
+      // un-applied verdict, and resume would advance review→merge past blocking findings (the
+      // ground-truth verdict must survive crash-resume — invariants 3 + 4).
+      const verdictBox: { value: ReviewVerdictResult | null } = { value: null };
       await runStep(db, {
         ticketId,
         workUnitId: d.workUnitId,
@@ -94,19 +99,20 @@ export async function advanceOneStep(
             workUnitId: d.workUnitId,
             config: opts?.config ?? DEFAULT_RUNTIME_CONFIG,
           }),
+        onSucceed: VERDICT_BEARING_STEPS.has(d.stepKey)
+          ? () => {
+              verdictBox.value = applyReviewVerdict(
+                db,
+                ticketId,
+                opts?.config ?? DEFAULT_RUNTIME_CONFIG,
+                { stepKey: d.stepKey },
+              );
+            }
+          : undefined,
       });
-      if (VERDICT_BEARING_STEPS.has(d.stepKey)) {
-        const { decision } = applyReviewVerdict(
-          db,
-          ticketId,
-          opts?.config ?? DEFAULT_RUNTIME_CONFIG,
-          {
-            stepKey: d.stepKey,
-          },
-        );
-        if (decision !== "clean") {
-          return { kind: decision, stepKey: d.stepKey };
-        }
+      const verdict = verdictBox.value;
+      if (verdict !== null && verdict.decision !== "clean") {
+        return { kind: verdict.decision, stepKey: d.stepKey };
       }
       return { kind: "stepped", stepKey: d.stepKey };
     } catch (err) {

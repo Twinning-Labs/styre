@@ -20,6 +20,12 @@ export interface RunStepParams {
   effectful?: boolean;
   idempotencyKey?: string | null;
   execute: (step: steps.WorkflowStepRow) => unknown | Promise<unknown>;
+  /** Synchronous side effect committed ATOMICALLY with `markSucceeded` (one transaction). Use for a
+   *  decision that must never be separated from the step's success by a crash — e.g. applying the
+   *  review verdict: if it ran in a later transaction, a crash in between would leave a `succeeded`
+   *  review with an un-applied verdict and the resolver would advance past blocking findings. Runs
+   *  after the (effectful, non-transactional) `execute`, so it sees the persisted effect. */
+  onSucceed?: (step: steps.WorkflowStepRow) => void;
 }
 
 export interface RunStepResult {
@@ -91,7 +97,13 @@ export async function runStep(db: Database, params: RunStepParams): Promise<RunS
 
   try {
     const result = await params.execute(current);
-    steps.markSucceeded(db, step.id, result);
+    // markSucceeded + onSucceed commit together: a verdict-bearing step's decision is never split
+    // from its success by a crash (control-loop §3 / §6.2). bun:sqlite nests as a SAVEPOINT, so an
+    // onSucceed that opens its own transaction (applyReviewVerdict) composes correctly.
+    db.transaction(() => {
+      steps.markSucceeded(db, step.id, result);
+      params.onSucceed?.(current);
+    })();
     const finished = steps.getById(db, step.id);
     if (!finished) {
       throw new Error(`runStep: step ${step.id} vanished after success`);
