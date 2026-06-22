@@ -10,6 +10,7 @@ import {
 } from "../db/repos/projection-outbox.ts";
 import { insertPending as insertSignal, recordDelivered } from "../db/repos/signal.ts";
 import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
+import type { ChecksPort } from "../integrations/checks.ts";
 import type { ForgePort } from "../integrations/forge.ts";
 import type { IssueState, IssueTrackerPort } from "../integrations/issue-tracker.ts";
 
@@ -56,6 +57,7 @@ export function enqueueStageProjection(
 export interface ProjectorPorts {
   issueTracker: IssueTrackerPort;
   forge?: ForgePort;
+  checks?: ChecksPort;
 }
 
 /** Apply one outbox row to the configured port by NEUTRAL ROLE (never a vendor name). Returns the
