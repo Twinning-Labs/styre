@@ -79,6 +79,24 @@ function resolveOwnerRepo(repoPath: string): { owner: string; repo: string } {
   return parsed;
 }
 
+/** Build an authenticated Octokit client + resolve {owner,repo} from the repo's origin remote.
+ *  Shared by every GitHub adapter (forge, checks) so all `@octokit/*` imports stay in this one
+ *  file. Token from opts or GITHUB_TOKEN; a missing token is a setup/GOAL-INSTALL failure. */
+export function githubClient(opts: { repoPath: string; token?: string }): {
+  octokit: Octokit;
+  owner: string;
+  repo: string;
+} {
+  const token = opts.token ?? process.env.GITHUB_TOKEN;
+  if (!token) {
+    throw new Error(
+      "githubClient: no GitHub token. Set GITHUB_TOKEN (or pass opts.token) — this is a setup/GOAL-INSTALL touchpoint.",
+    );
+  }
+  const { owner, repo } = resolveOwnerRepo(opts.repoPath);
+  return { octokit: new Octokit({ auth: token }), owner, repo };
+}
+
 /**
  * The GitHub adapter. Backed by `new Octokit({ auth })` (token from opts or `GITHUB_TOKEN`; a
  * missing token is a setup/GOAL-INSTALL failure) plus the `git` CLI for the push. Owner/repo are
@@ -86,15 +104,8 @@ function resolveOwnerRepo(repoPath: string): { owner: string; repo: string } {
  * `{ github: () => githubForge({ repoPath: profile.targetRepo }) }`.
  */
 export function githubForge(opts: { repoPath: string; token?: string }): ForgePort {
-  const token = opts.token ?? process.env.GITHUB_TOKEN;
-  if (!token) {
-    throw new Error(
-      "githubForge: no GitHub token. Set GITHUB_TOKEN (or pass opts.token) — this is a setup/GOAL-INSTALL touchpoint.",
-    );
-  }
   const { repoPath } = opts;
-  const { owner, repo } = resolveOwnerRepo(repoPath);
-  const octokit = new Octokit({ auth: token });
+  const { octokit, owner, repo } = githubClient(opts);
 
   return {
     async push({ branch, sha }: { branch: string; sha: string }): Promise<void> {
@@ -107,7 +118,14 @@ export function githubForge(opts: { repoPath: string; token?: string }): ForgePo
         if ((err as { status?: number }).status !== 404) throw err;
       }
       // Only the daemon's authenticated git can transfer the commit objects. Feature branch only.
-      execFileSync("git", ["-C", repoPath, "push", "origin", branch], { stdio: "pipe" });
+      try {
+        execFileSync("git", ["-C", repoPath, "push", "origin", branch], { stdio: "pipe" });
+      } catch (cause) {
+        const stderr = (cause as { stderr?: Buffer }).stderr?.toString() ?? "";
+        throw new Error(`githubForge.push: git push failed for ${branch}: ${stderr}`.trim(), {
+          cause,
+        });
+      }
     },
 
     async ensurePr({
@@ -122,13 +140,13 @@ export function githubForge(opts: { repoPath: string; token?: string }): ForgePo
       body: string;
     }): Promise<{ ref: string; url: string }> {
       // Probe: reuse an existing open PR for head owner:branch.
-      const existing = await octokit.pulls.list({
+      const open = await octokit.paginate(octokit.pulls.list, {
         owner,
         repo,
         head: `${owner}:${branch}`,
         state: "open",
       });
-      const found = existing.data[0];
+      const found = open[0];
       if (found) return { ref: String(found.number), url: found.html_url };
       const created = await octokit.pulls.create({ owner, repo, head: branch, base, title, body });
       return { ref: String(created.data.number), url: created.data.html_url };
@@ -142,12 +160,12 @@ export function githubForge(opts: { repoPath: string; token?: string }): ForgePo
       const issueNumber = Number(prRef);
       const tag = projKeyTag(idempotencyKey);
       // Probe the PR's issue comments for the idempotency tag.
-      const existing = await octokit.issues.listComments({
+      const comments = await octokit.paginate(octokit.issues.listComments, {
         owner,
         repo,
         issue_number: issueNumber,
       });
-      if (existing.data.some((c) => (c.body ?? "").includes(tag))) return null;
+      if (comments.some((c) => (c.body ?? "").includes(tag))) return null;
       const created = await octokit.issues.createComment({
         owner,
         repo,

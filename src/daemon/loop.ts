@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { advanceOneStep } from "./advance.ts";
+import { pollChecks } from "./poll-checks.ts";
 import { type ProjectorPorts, drainOutbox } from "./projector.ts";
 import type { StepRegistry } from "./step-registry.ts";
 
@@ -21,7 +22,12 @@ export function readyTicketIds(db: Database): number[] {
 export async function tick(
   db: Database,
   registry: StepRegistry,
-  opts?: { maxConcurrent?: number; config?: RuntimeConfig; ports?: ProjectorPorts },
+  opts?: {
+    maxConcurrent?: number;
+    config?: RuntimeConfig;
+    ports?: ProjectorPorts;
+    profile?: { checksSystem: string };
+  },
 ): Promise<{ advanced: number }> {
   const max = opts?.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
   const ids = readyTicketIds(db).slice(0, max);
@@ -32,6 +38,9 @@ export async function tick(
   }
   if (opts?.ports) {
     await drainOutbox(db, opts.ports);
+  }
+  if (opts?.profile) {
+    await pollChecks(db, opts.profile, opts.ports?.checks);
   }
   return { advanced };
 }
