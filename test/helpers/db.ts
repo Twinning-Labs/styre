@@ -9,11 +9,26 @@ import { insertTicket } from "../../src/db/repos/ticket.ts";
 
 /** Migrate a fresh tmp DB, open it, and seed one project + one ticket.
  *  The caller is responsible for db.close(). */
-export function makeTestDb(): { db: Database; projectId: number; ticketId: number } {
+export function makeTestDb(): { db: Database; projectId: number; ticketId: number };
+/** Migrate a fresh tmp DB without seeding any rows. The caller is responsible for db.close(). */
+export function makeTestDb(opts: { seedTicket: false }): {
+  db: Database;
+  projectId: undefined;
+  ticketId: undefined;
+};
+export function makeTestDb(opts?: { seedTicket?: boolean }): {
+  db: Database;
+  projectId: number | undefined;
+  ticketId: number | undefined;
+} {
+  const seedTicket = opts?.seedTicket !== false;
   const path = join(mkdtempSync(join(tmpdir(), "styre-m1-")), "styre.db");
   migrate(path);
   const db = openDb(path);
-  const projectId = insertProject(db, { slug: "test-project", targetRepo: "/tmp/repo" });
-  const ticketId = insertTicket(db, { projectId, ident: "ENG-1" });
-  return { db, projectId, ticketId };
+  if (seedTicket) {
+    const projectId = insertProject(db, { slug: "test-project", targetRepo: "/tmp/repo" });
+    const ticketId = insertTicket(db, { projectId, ident: "ENG-1" });
+    return { db, projectId, ticketId };
+  }
+  return { db, projectId: undefined, ticketId: undefined };
 }
