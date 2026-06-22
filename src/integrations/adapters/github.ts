@@ -79,6 +79,24 @@ function resolveOwnerRepo(repoPath: string): { owner: string; repo: string } {
   return parsed;
 }
 
+/** Build an authenticated Octokit client + resolve {owner,repo} from the repo's origin remote.
+ *  Shared by every GitHub adapter (forge, checks) so all `@octokit/*` imports stay in this one
+ *  file. Token from opts or GITHUB_TOKEN; a missing token is a setup/GOAL-INSTALL failure. */
+export function githubClient(opts: { repoPath: string; token?: string }): {
+  octokit: Octokit;
+  owner: string;
+  repo: string;
+} {
+  const token = opts.token ?? process.env.GITHUB_TOKEN;
+  if (!token) {
+    throw new Error(
+      "githubClient: no GitHub token. Set GITHUB_TOKEN (or pass opts.token) — this is a setup/GOAL-INSTALL touchpoint.",
+    );
+  }
+  const { owner, repo } = resolveOwnerRepo(opts.repoPath);
+  return { octokit: new Octokit({ auth: token }), owner, repo };
+}
+
 /**
  * The GitHub adapter. Backed by `new Octokit({ auth })` (token from opts or `GITHUB_TOKEN`; a
  * missing token is a setup/GOAL-INSTALL failure) plus the `git` CLI for the push. Owner/repo are
@@ -86,15 +104,8 @@ function resolveOwnerRepo(repoPath: string): { owner: string; repo: string } {
  * `{ github: () => githubForge({ repoPath: profile.targetRepo }) }`.
  */
 export function githubForge(opts: { repoPath: string; token?: string }): ForgePort {
-  const token = opts.token ?? process.env.GITHUB_TOKEN;
-  if (!token) {
-    throw new Error(
-      "githubForge: no GitHub token. Set GITHUB_TOKEN (or pass opts.token) — this is a setup/GOAL-INSTALL touchpoint.",
-    );
-  }
   const { repoPath } = opts;
-  const { owner, repo } = resolveOwnerRepo(repoPath);
-  const octokit = new Octokit({ auth: token });
+  const { octokit, owner, repo } = githubClient(opts);
 
   return {
     async push({ branch, sha }: { branch: string; sha: string }): Promise<void> {
