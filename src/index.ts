@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { defineCommand, runMain } from "citty";
 import { migrateCommand } from "./cli/migrate.ts";
+import { runCommand } from "./cli/run.ts";
 import { VERSION } from "./version.ts";
 
 // citty delegates --version to consola, which suppresses output when not in a
@@ -21,6 +22,7 @@ const main = defineCommand({
   },
   subCommands: {
     migrate: migrateCommand,
+    run: runCommand,
   },
 });
 

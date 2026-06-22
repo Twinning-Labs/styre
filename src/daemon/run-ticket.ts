@@ -1,0 +1,115 @@
+import type { Database } from "bun:sqlite";
+import type { RuntimeConfig } from "../config/runtime-config.ts";
+import { listByTicket } from "../db/repos/event-log.ts";
+import { insertProject } from "../db/repos/project.ts";
+import { listPending } from "../db/repos/signal.ts";
+import { getTicket, insertTicket } from "../db/repos/ticket.ts";
+import type { Profile } from "../dispatch/profile.ts";
+import { branchPrefixFor } from "../integrations/ticket-source.ts";
+import { tick } from "./loop.ts";
+import type { ProjectorPorts } from "./projector.ts";
+import type { StepRegistry } from "./step-registry.ts";
+
+export type RunOutcome = "pr-ready" | "done" | "blocked" | "no-progress";
+export interface RunResult {
+  outcome: RunOutcome;
+  iterations: number;
+  stage: string;
+  status: string;
+}
+
+const DEFAULT_CAP = 200; // overall iteration budget for one ticket
+const IDLE_CAP = 3; // consecutive zero-advance ticks → stalled
+
+/** Drive ONE ticket through repeated ticks until a terminal state. `run` exits at PR-ready (the
+ *  ticket parked at merge on human_merge_approval — the PR is open, awaiting the human merge gate
+ *  which `run` never delivers). Passes `profile` so pollChecks delivers external_checks. */
+export async function driveToTerminal(
+  db: Database,
+  registry: StepRegistry,
+  opts: {
+    ticketId: number;
+    config: RuntimeConfig;
+    ports: ProjectorPorts;
+    profile: { checksSystem: string };
+    cap?: number;
+  },
+): Promise<RunResult> {
+  const cap = opts.cap ?? DEFAULT_CAP;
+  let idle = 0;
+  let last = { stage: "", status: "" };
+  for (let i = 1; i <= cap; i++) {
+    const r = await tick(db, registry, {
+      config: opts.config,
+      ports: opts.ports,
+      profile: opts.profile,
+    });
+    const t = getTicket(db, opts.ticketId);
+    if (!t) throw new Error(`driveToTerminal: ticket ${opts.ticketId} not found`);
+    last = { stage: t.stage, status: t.status };
+    const pending = listPending(db, opts.ticketId);
+
+    if (t.status === "done") return { outcome: "done", iterations: i, ...last };
+    if (pending.some((s) => s.signal_type === "human_resume"))
+      return { outcome: "blocked", iterations: i, ...last };
+    if (t.stage === "merge" && pending.some((s) => s.signal_type === "human_merge_approval"))
+      return { outcome: "pr-ready", iterations: i, ...last };
+
+    if (r.advanced === 0) {
+      idle += 1;
+      if (idle >= IDLE_CAP) return { outcome: "no-progress", iterations: i, ...last };
+    } else {
+      idle = 0;
+    }
+  }
+  return { outcome: "no-progress", iterations: cap, ...last };
+}
+
+/** Ingest ONE ticket (read from the tracker) into the SoT, then drive it to a terminal. The single
+ *  Linear read happens here, at trigger — never in the control loop. */
+export async function runTicket(deps: {
+  db: Database;
+  profile: Profile;
+  runtimeConfig: RuntimeConfig;
+  ports: ProjectorPorts;
+  registry: StepRegistry;
+  ticketRef: string;
+}): Promise<RunResult & { ticketId: number; summary: string }> {
+  const ingested = await deps.ports.issueTracker.fetchTicket(deps.ticketRef);
+  const projectId = insertProject(deps.db, {
+    slug: deps.profile.slug,
+    targetRepo: deps.profile.targetRepo,
+    defaultBranch: deps.profile.defaultBranch,
+  });
+  const ticketId = insertTicket(deps.db, {
+    projectId,
+    ident: ingested.ident,
+    title: ingested.title,
+    description: ingested.description,
+    typeLabel: ingested.typeLabel,
+    branchPrefix: branchPrefixFor(ingested.typeLabel),
+    linearIssueUuid: ingested.linearIssueUuid,
+  });
+  const result = await driveToTerminal(deps.db, deps.registry, {
+    ticketId,
+    config: deps.runtimeConfig,
+    ports: deps.ports,
+    profile: deps.profile,
+  });
+  return { ...result, ticketId, summary: formatRunSummary(deps.db, ticketId, result) };
+}
+
+/** A plain-text run summary from the durable SoT: outcome + final stage/status + the event timeline.
+ *  (Per-step cost/usage needs a metric_event writer — deferred.) */
+export function formatRunSummary(db: Database, ticketId: number, result: RunResult): string {
+  const events = listByTicket(db, ticketId);
+  const lines = [
+    `run: ${result.outcome} (stage=${result.stage}, status=${result.status}, ${result.iterations} ticks)`,
+    `events: ${events.length}`,
+    ...events.map(
+      (e) =>
+        `  #${e.seq} ${e.kind}${e.from_stage ? ` ${e.from_stage}→${e.to_stage}` : ""}${e.reason ? ` — ${e.reason}` : ""}`,
+    ),
+  ];
+  return lines.join("\n");
+}

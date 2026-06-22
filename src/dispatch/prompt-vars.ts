@@ -28,12 +28,13 @@ export function extractVars(
 }
 
 export function designVars(
-  ticket: { ident: string; title: string | null },
+  ticket: { ident: string; title: string | null; description: string | null },
   profile: Profile,
 ): Record<string, string> {
   return {
     ident: ticket.ident,
     title: ticket.title ?? "",
+    description: ticket.description ?? "",
     slug: profile.slug,
     stack: "",
     ...profile.promptVars,
