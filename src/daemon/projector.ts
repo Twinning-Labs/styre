@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { z } from "zod";
 import { appendEvent } from "../db/repos/event-log.ts";
 import {
   type OutboxRow,
@@ -13,6 +14,15 @@ import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
 import type { ChecksPort } from "../integrations/checks.ts";
 import type { ForgePort } from "../integrations/forge.ts";
 import type { IssueState, IssueTrackerPort } from "../integrations/issue-tracker.ts";
+
+const PushPayload = z.object({ branch: z.string(), sha: z.string() });
+const PrCreatePayload = z.object({
+  branch: z.string(),
+  base: z.string(),
+  title: z.string(),
+  body: z.string(),
+});
+const PrCommentPayload = z.object({ prRef: z.string(), body: z.string() });
 
 export const OUTBOX_RETRY_BUDGET = 5;
 
@@ -98,12 +108,10 @@ async function applyRow(
     const f = ports.forge;
     switch (row.op) {
       case "push":
-        await f.push(payload as { branch: string; sha: string });
+        await f.push(PushPayload.parse(payload));
         return null;
       case "pr_create": {
-        const pr = await f.ensurePr(
-          payload as { branch: string; base: string; title: string; body: string },
-        );
+        const pr = await f.ensurePr(PrCreatePayload.parse(payload));
         // The drainer delivers external_pr_result (control-loop §7): the durable PR-ref record the
         // deferred human-merge poll consumes. A data-carrier — recorded delivered, never pending.
         recordDelivered(db, {
@@ -114,12 +122,10 @@ async function applyRow(
         });
         return pr.ref; // → response_ref (the PR#)
       }
-      case "pr_comment":
-        return await f.addPrComment(
-          payload.prRef as string,
-          payload.body as string,
-          row.idempotency_key,
-        );
+      case "pr_comment": {
+        const c = PrCommentPayload.parse(payload);
+        return await f.addPrComment(c.prRef, c.body, row.idempotency_key);
+      }
       default:
         throw new Error(`projector: unknown forge op '${row.op}'`);
     }
