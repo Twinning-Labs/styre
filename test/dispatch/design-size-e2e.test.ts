@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
+import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
@@ -68,7 +69,9 @@ const gradeSidecar = (overall: number) =>
 
 const cleanPlanSidecar = `Reviewed the plan.\n\n\`\`\`styre-sidecar\n${JSON.stringify({ findings: [] })}\n\`\`\`\n`;
 
-const ON_CONFIG = { config: { onPlanDefect: "escalate" as const, complexityGrading: true } };
+const ON_CONFIG = {
+  config: { ...DEFAULT_RUNTIME_CONFIG, onPlanDefect: "escalate" as const, complexityGrading: true },
+};
 
 // ─── Flow 1: Grader OFF (default): 2-unit ticket → full → routes to design:review ────────────
 

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
+import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
@@ -94,7 +95,9 @@ const gradeRunner = (overall: number) =>
     tokensIn: null,
     tokensOut: null,
   }));
-const ON = { config: { onPlanDefect: "escalate" as const, complexityGrading: true } };
+const ON = {
+  config: { ...DEFAULT_RUNTIME_CONFIG, onPlanDefect: "escalate" as const, complexityGrading: true },
+};
 
 test("grader on: low overall + 3 units → fast (bidirectional: simple multi-piece)", async () => {
   const { db, ticketId, projectId } = makeTestDb();
