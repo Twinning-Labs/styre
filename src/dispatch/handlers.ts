@@ -1,3 +1,4 @@
+import type { Database } from "bun:sqlite";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { branchNameFor } from "../agent/branch.ts";
@@ -9,6 +10,7 @@ import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts
 import { listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { insertSignal, listByUnit } from "../db/repos/ground-truth-signal.ts";
 import { getProject } from "../db/repos/project.ts";
+import { enqueue } from "../db/repos/projection-outbox.ts";
 import { insertFinding } from "../db/repos/review-finding.ts";
 import { setTicketTrack } from "../db/repos/ticket.ts";
 import {
@@ -43,7 +45,7 @@ import { runAgentDispatch } from "./run-dispatch.ts";
 import { extractSidecar } from "./sidecar.ts";
 import { isTestFile } from "./test-file.ts";
 import { combineTrack, sizeTrack } from "./track-sizing.ts";
-import { changedFilesAt, ensureWorktree } from "./worktree.ts";
+import { changedFilesAt, ensureWorktree, removeWorktree } from "./worktree.ts";
 
 export interface RegistryDeps {
   runner: AgentRunner;
@@ -96,6 +98,24 @@ function depsFor(ctx: HandlerContext, deps: RegistryDeps, timeoutMs: number): Di
     branch: branchNameFor(ctx.ticket),
     timeoutMs,
   };
+}
+
+/** Deterministic templated PR description from facts the daemon already has (M6b-1; a cheap-LLM
+ *  write-up is a later polish). */
+function renderPrBody(
+  db: Database,
+  ticket: { id: number; ident: string; title: string | null },
+): string {
+  const units = listUnits(db, ticket.id);
+  const lines = units.map((u) => `- ${u.kind}${u.title ? `: ${u.title}` : ""}`);
+  return [
+    `Automated PR for ${ticket.ident}${ticket.title ? ` — ${ticket.title}` : ""}.`,
+    "",
+    "Work units:",
+    ...(lines.length > 0 ? lines : ["- (none)"]),
+    "",
+    "Verified against the project's checks and passed independent review.",
+  ].join("\n");
 }
 
 /** Register the real worktree-agent handlers (control-loop §4 S1a/S2b), provider-agnostic.
@@ -441,6 +461,49 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       });
     }
     return { findings: parsed.value.findings.length, blocking };
+  });
+
+  registry.register("merge:push", (ctx: HandlerContext) => {
+    const branch = branchNameFor(ctx.ticket);
+    const sha = getLatestForTicket(ctx.db, ctx.ticket.id)?.branch_head_sha;
+    if (!sha) {
+      throw new Error("merge:push: no branch head sha (no completed dispatch)");
+    }
+    enqueue(ctx.db, {
+      ticketId: ctx.ticket.id,
+      target: "forge",
+      op: "push",
+      payload: { branch, sha },
+      idempotencyKey: `${ctx.ticket.ident}:push:${sha}`,
+    });
+    return { enqueued: "push", sha };
+  });
+
+  registry.register("merge:pr-ensure", (ctx: HandlerContext) => {
+    const branch = branchNameFor(ctx.ticket);
+    const base = deps.profile.defaultBranch;
+    const title = `${ctx.ticket.ident}${ctx.ticket.title ? ` ${ctx.ticket.title}` : ""}`;
+    const body = renderPrBody(ctx.db, ctx.ticket);
+    enqueue(ctx.db, {
+      ticketId: ctx.ticket.id,
+      target: "forge",
+      op: "pr_create",
+      payload: { branch, base, title, body },
+      idempotencyKey: `${ctx.ticket.ident}:pr_create:${branch}`,
+    });
+    return { enqueued: "pr_create" };
+  });
+
+  registry.register("released:project", (ctx: HandlerContext) => {
+    // The Done projection is enqueued by the merge→released transition (enqueueStageProjection,
+    // released→done). Here we only clean up the per-ticket worktree (best-effort).
+    const { repoPath, worktreePath } = worktreeFor(ctx, deps);
+    try {
+      removeWorktree(repoPath, worktreePath);
+    } catch {
+      // already gone / never created — fine; cleanup must not fail the terminal step.
+    }
+    return { released: true };
   });
 
   return registry;

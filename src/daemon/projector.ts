@@ -10,6 +10,7 @@ import {
 } from "../db/repos/projection-outbox.ts";
 import { insertPending as insertSignal } from "../db/repos/signal.ts";
 import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
+import type { ForgePort } from "../integrations/forge.ts";
 import type { IssueState, IssueTrackerPort } from "../integrations/issue-tracker.ts";
 
 export const OUTBOX_RETRY_BUDGET = 5;
@@ -54,6 +55,7 @@ export function enqueueStageProjection(
 
 export interface ProjectorPorts {
   issueTracker: IssueTrackerPort;
+  forge?: ForgePort;
 }
 
 /** Apply one outbox row to the configured port by NEUTRAL ROLE (never a vendor name). Returns the
@@ -88,7 +90,29 @@ async function applyRow(
     }
   }
   if (row.target === "forge") {
-    throw new Error("no adapter for forge (M6b)");
+    if (!ports.forge) {
+      throw new Error("projector: forge outbox row but no forge port configured");
+    }
+    const f = ports.forge;
+    switch (row.op) {
+      case "push":
+        await f.push(payload as { branch: string; sha: string });
+        return null;
+      case "pr_create": {
+        const pr = await f.ensurePr(
+          payload as { branch: string; base: string; title: string; body: string },
+        );
+        return pr.ref; // → response_ref (the PR#); M6b-2 delivers it as external_pr_result
+      }
+      case "pr_comment":
+        return await f.addPrComment(
+          payload.prRef as string,
+          payload.body as string,
+          row.idempotency_key,
+        );
+      default:
+        throw new Error(`projector: unknown forge op '${row.op}'`);
+    }
   }
   throw new Error(`projector: no adapter for target '${row.target}'`);
 }
