@@ -397,7 +397,7 @@ CREATE TABLE linear_id_cache (
 CREATE TABLE projection_state (
     id                     INTEGER PRIMARY KEY,
     ticket_id              INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
-    target                 TEXT NOT NULL CHECK (target IN ('linear','github')),
+    target                 TEXT NOT NULL CHECK (target IN ('issue_tracker','forge')),
     projected_stage_label  TEXT,                        -- last 'stage:*' set
     projected_status_labels_json TEXT CHECK (projected_status_labels_json IS NULL
                                              OR json_valid(projected_status_labels_json)),
@@ -412,7 +412,7 @@ CREATE TABLE projection_state (
 CREATE TABLE projection_outbox (
     id              INTEGER PRIMARY KEY,
     ticket_id       INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
-    target          TEXT NOT NULL CHECK (target IN ('linear','github')),
+    target          TEXT NOT NULL CHECK (target IN ('issue_tracker','forge')),
     op              TEXT NOT NULL,                       -- 'set_labels'/'add_comment'/'set_state'
                                                          -- /'push'/'pr_create'/'pr_merge'/...
     payload_json    TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
