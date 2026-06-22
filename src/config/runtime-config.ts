@@ -10,6 +10,8 @@ export const RuntimeConfigSchema = z.object({
   onPlanDefect: z.enum(["escalate", "redesign"]).default("escalate"),
   // M5b-3: opt-in cold complexity grader for track sizing. Off = deterministic sprawl-only.
   complexityGrading: z.boolean().default(false),
+  // M6a: which issue-tracker adapter projects ticket state outward. Vendor-neutral; creds via env.
+  issueTracker: z.string().default("linear"),
 });
 
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;

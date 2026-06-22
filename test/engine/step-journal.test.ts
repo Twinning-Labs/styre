@@ -93,7 +93,7 @@ test("a keyed effect is exactly-once-effective across a crash + recovery re-run"
     effectCalls += 1;
     db.query(
       `INSERT INTO projection_outbox (ticket_id, target, op, idempotency_key, status, created_at)
-       VALUES ($t, 'github', 'push', $key, 'pending', $now)
+       VALUES ($t, 'forge', 'push', $key, 'pending', $now)
        ON CONFLICT(idempotency_key) DO NOTHING`,
     ).run({ $t: ticketId, $key: key, $now: new Date().toISOString() });
     return { applied: true };
