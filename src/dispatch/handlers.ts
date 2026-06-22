@@ -45,7 +45,7 @@ import { runAgentDispatch } from "./run-dispatch.ts";
 import { extractSidecar } from "./sidecar.ts";
 import { isTestFile } from "./test-file.ts";
 import { combineTrack, sizeTrack } from "./track-sizing.ts";
-import { changedFilesAt, ensureWorktree } from "./worktree.ts";
+import { changedFilesAt, ensureWorktree, removeWorktree } from "./worktree.ts";
 
 export interface RegistryDeps {
   runner: AgentRunner;
@@ -492,6 +492,18 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       idempotencyKey: `${ctx.ticket.ident}:pr_create:${branch}`,
     });
     return { enqueued: "pr_create" };
+  });
+
+  registry.register("released:project", (ctx: HandlerContext) => {
+    // The Done projection is enqueued by the merge→released transition (enqueueStageProjection,
+    // released→done). Here we only clean up the per-ticket worktree (best-effort).
+    const { repoPath, worktreePath } = worktreeFor(ctx, deps);
+    try {
+      removeWorktree(repoPath, worktreePath);
+    } catch {
+      // already gone / never created — fine; cleanup must not fail the terminal step.
+    }
+    return { released: true };
   });
 
   return registry;

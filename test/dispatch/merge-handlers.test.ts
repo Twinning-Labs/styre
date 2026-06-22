@@ -8,7 +8,7 @@ import { advanceOneStep } from "../../src/daemon/advance.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
 import { listPending } from "../../src/db/repos/projection-outbox.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
-import { insertPending } from "../../src/db/repos/workflow-step.ts";
+import { getByKey, insertPending } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { makeTestDb } from "../helpers/db.ts";
@@ -67,4 +67,13 @@ test("merge:pr-ensure enqueues a forge pr_create row with base + a non-empty bod
   expect(payload.base).toBe("main");
   expect(typeof payload.body).toBe("string");
   expect(payload.body.length).toBeGreaterThan(0);
+});
+
+test("released:project runs (best-effort worktree cleanup) and succeeds", async () => {
+  const { db, ticketId } = makeTestDb();
+  db.query("UPDATE ticket SET stage = 'released' WHERE id = ?").run(ticketId);
+  await advanceOneStep(db, ticketId, registryFor()); // resolver → released:project
+  const step = getByKey(db, ticketId, "released:project");
+  db.close();
+  expect(step?.status).toBe("succeeded"); // cleanup is best-effort; the step doesn't fail if the worktree is absent
 });
