@@ -47,8 +47,13 @@ async function driveUntil(
   reg: ReturnType<typeof registryFor>,
   opts: Parameters<typeof tick>[2],
   pred: () => boolean,
+  label: string,
 ) {
-  for (let i = 0; i < 20 && !pred(); i++) await tick(db, reg, opts);
+  for (let i = 0; i < 20; i++) {
+    if (pred()) return;
+    await tick(db, reg, opts);
+  }
+  if (!pred()) throw new Error(`driveUntil: '${label}' not reached within 20 ticks`);
 }
 
 test("merge → released completes: checksSystem none auto-passes, operator approves merge", async () => {
@@ -65,16 +70,27 @@ test("merge → released completes: checksSystem none auto-passes, operator appr
   const ports = { issueTracker: fakeIssueTracker(), forge: fakeForge() };
 
   // Poll auto-delivers external_checks; ticket then parks on human_merge_approval.
-  await driveUntil(db, reg, { ports, profile }, () =>
-    listPending(db, ticketId).some((s) => s.signal_type === "human_merge_approval"),
+  await driveUntil(
+    db,
+    reg,
+    { ports, profile },
+    () => listPending(db, ticketId).some((s) => s.signal_type === "human_merge_approval"),
+    "human_merge_approval pending",
   );
   expect(hasDelivered(db, ticketId, "external_checks")).toBe(true);
 
   // Operator approves the merge (the one human gate, delivered via the inbox in production).
   const approval = listPending(db, ticketId).find((s) => s.signal_type === "human_merge_approval");
-  deliverSignal(db, approval?.id ?? 0, { merged: true });
+  if (!approval) throw new Error("expected a pending human_merge_approval signal");
+  deliverSignal(db, approval.id, { merged: true });
 
-  await driveUntil(db, reg, { ports, profile }, () => getTicket(db, ticketId)?.status === "done");
+  await driveUntil(
+    db,
+    reg,
+    { ports, profile },
+    () => getTicket(db, ticketId)?.status === "done",
+    "ticket done",
+  );
 
   const t = getTicket(db, ticketId);
   expect(t?.stage).toBe("released");
@@ -103,14 +119,25 @@ test("merge → released completes: checksSystem github with passing checks", as
     checks: fakeChecks("passing"),
   };
 
-  await driveUntil(db, reg, { ports, profile }, () =>
-    listPending(db, ticketId).some((s) => s.signal_type === "human_merge_approval"),
+  await driveUntil(
+    db,
+    reg,
+    { ports, profile },
+    () => listPending(db, ticketId).some((s) => s.signal_type === "human_merge_approval"),
+    "human_merge_approval pending",
   );
   expect(hasDelivered(db, ticketId, "external_checks")).toBe(true);
 
   const approval = listPending(db, ticketId).find((s) => s.signal_type === "human_merge_approval");
-  deliverSignal(db, approval?.id ?? 0, { merged: true });
-  await driveUntil(db, reg, { ports, profile }, () => getTicket(db, ticketId)?.status === "done");
+  if (!approval) throw new Error("expected a pending human_merge_approval signal");
+  deliverSignal(db, approval.id, { merged: true });
+  await driveUntil(
+    db,
+    reg,
+    { ports, profile },
+    () => getTicket(db, ticketId)?.status === "done",
+    "ticket done",
+  );
 
   const t = getTicket(db, ticketId);
   expect(t?.stage).toBe("released");
