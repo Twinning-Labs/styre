@@ -9,7 +9,8 @@ test("configDir honors XDG_CONFIG_HOME", () => {
   try {
     expect(configDir()).toBe("/tmp/xdgcfg/styre");
   } finally {
-    if (prev === undefined) process.env.XDG_CONFIG_HOME = undefined;
+    // biome-ignore lint/performance/noDelete: process.env must be unset via delete; assigning undefined leaves the string "undefined"
+    if (prev === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = prev;
   }
 });
@@ -20,7 +21,8 @@ test("configDir falls back to ~/.config when XDG_CONFIG_HOME is unset/empty", ()
   try {
     expect(configDir()).toBe(join(homedir(), ".config", "styre"));
   } finally {
-    if (prev === undefined) process.env.XDG_CONFIG_HOME = undefined;
+    // biome-ignore lint/performance/noDelete: process.env must be unset via delete; assigning undefined leaves the string "undefined"
+    if (prev === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = prev;
   }
 });
