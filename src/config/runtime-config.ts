@@ -8,6 +8,8 @@ import { z } from "zod";
 export const RuntimeConfigSchema = z.object({
   // When code review finds a blocking PLAN-level defect: escalate to a human, or loop back to redesign.
   onPlanDefect: z.enum(["escalate", "redesign"]).default("escalate"),
+  // M5b-3: opt-in cold complexity grader for track sizing. Off = deterministic sprawl-only.
+  complexityGrading: z.boolean().default(false),
 });
 
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
