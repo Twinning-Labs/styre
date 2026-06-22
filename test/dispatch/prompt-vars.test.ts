@@ -20,7 +20,7 @@ const profile = parseProfile({
   commands: { test: "bun test" },
   promptVars: { stack: "Bun + SQLite" },
 });
-const ticket = { ident: "ENG-9", title: "Add widget" };
+const ticket = { ident: "ENG-9", title: "Add widget", description: "Add a widget feature" };
 const unit = { seq: 2, kind: "backend", title: "API" };
 
 test("designVars resolves every placeholder in the design template", () => {
