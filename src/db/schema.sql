@@ -85,6 +85,7 @@ CREATE TABLE ticket (
     ident                 TEXT    NOT NULL,                  -- 'ENG-5'
     linear_issue_uuid     TEXT,                              -- resolved lazily; for projection
     title                 TEXT,
+    description           TEXT,                              -- the ingested ticket body (design input)
 
     -- Branch shape (load-bearing — prefix derives from type_label).
     type_label            TEXT CHECK (type_label IN ('Bug','Feature','Improvement')),

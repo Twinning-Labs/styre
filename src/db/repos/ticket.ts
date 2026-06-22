@@ -6,6 +6,7 @@ export interface TicketRow {
   project_id: number;
   ident: string;
   title: string | null;
+  description: string | null;
   stage: string;
   status: string;
   track: string | null;
@@ -16,7 +17,7 @@ export interface TicketRow {
 }
 
 const COLS =
-  "id, project_id, ident, title, stage, status, track, needs_docs, branch_name, branch_prefix, type_label";
+  "id, project_id, ident, title, description, stage, status, track, needs_docs, branch_name, branch_prefix, type_label";
 
 export function insertTicket(
   db: Database,
@@ -27,17 +28,30 @@ export function insertTicket(
     status?: string;
     track?: string;
     needsDocs?: number;
+    title?: string | null;
+    description?: string | null;
+    typeLabel?: string | null;
+    branchPrefix?: string | null;
+    linearIssueUuid?: string | null;
   },
 ): number {
   const now = nowUtc();
   const res = db
     .query(
-      `INSERT INTO ticket (project_id, ident, stage, status, track, needs_docs, created_at, updated_at)
-       VALUES ($pid, $ident, $stage, $status, $track, $needsDocs, $now, $now)`,
+      `INSERT INTO ticket
+         (project_id, ident, title, description, type_label, branch_prefix, linear_issue_uuid,
+          stage, status, track, needs_docs, created_at, updated_at)
+       VALUES ($pid, $ident, $title, $description, $typeLabel, $branchPrefix, $linearIssueUuid,
+          $stage, $status, $track, $needsDocs, $now, $now)`,
     )
     .run({
       $pid: t.projectId,
       $ident: t.ident,
+      $title: t.title ?? null,
+      $description: t.description ?? null,
+      $typeLabel: t.typeLabel ?? null,
+      $branchPrefix: t.branchPrefix ?? null,
+      $linearIssueUuid: t.linearIssueUuid ?? null,
       $stage: t.stage ?? "design",
       $status: t.status ?? "active",
       $track: t.track ?? null,
