@@ -1,5 +1,19 @@
 import type { AgentRunInput, AgentRunResult, AgentRunner } from "../runner.ts";
 
+/** Creds the daemon holds and must NOT leak into the agent subprocess (capability isolation,
+ *  move-4: agents get no ambient LINEAR_API_KEY / GITHUB_TOKEN; the worktree is their only surface). */
+const AGENT_ENV_DENYLIST = ["LINEAR_API_KEY", "GITHUB_TOKEN"];
+
+/** A curated env for the agent subprocess: the parent env minus the daemon-held creds (and minus
+ *  undefined values). Denylist, not allowlist, so the `claude` CLI keeps whatever it needs to auth. */
+export function agentEnv(parentEnv: Record<string, string | undefined>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(parentEnv)) {
+    if (v !== undefined && !AGENT_ENV_DENYLIST.includes(k)) out[k] = v;
+  }
+  return out;
+}
+
 /** The Claude `claude -p` argv (pure). Flag names are CLI-version-specific — verified against a
  *  real `claude` run in the Task 7 smoke; the core never depends on these. */
 export function buildClaudeArgs(input: { model: string; allowedTools: string[] }): string[] {
@@ -43,6 +57,7 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
     async run(input: AgentRunInput): Promise<AgentRunResult> {
       const proc = Bun.spawn([command, ...buildClaudeArgs(input)], {
         cwd: input.cwd,
+        env: agentEnv(process.env),
         stdin: new TextEncoder().encode(input.prompt),
         stdout: "pipe",
         stderr: "pipe",
