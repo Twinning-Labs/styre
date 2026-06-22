@@ -3,6 +3,7 @@ import { appendEvent } from "../db/repos/event-log.ts";
 import {
   type OutboxRow,
   bumpAttempt,
+  enqueue,
   listPending,
   markFailed,
   markSent,
@@ -12,6 +13,44 @@ import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
 import type { IssueState, IssueTrackerPort } from "../integrations/issue-tracker.ts";
 
 export const OUTBOX_RETRY_BUDGET = 5;
+
+const STAGE_STATE: Record<string, IssueState> = {
+  design: "in_progress",
+  implement: "in_progress",
+  verify: "in_progress",
+  review: "in_review",
+  merge: "in_review",
+  released: "done",
+};
+
+export function stageToState(stage: string): IssueState {
+  return STAGE_STATE[stage] ?? "in_progress";
+}
+
+/** Enqueue the issue-tracker projection for a stage transition (projector §3): a mapped set_state
+ *  and a stage-label swap. Deterministic keys → re-enqueue is a no-op (idempotent). MUST be called
+ *  inside the same transaction as the stage change (advance.ts). */
+export function enqueueStageProjection(
+  db: Database,
+  ticket: { id: number; ident: string },
+  from: string,
+  to: string,
+): void {
+  enqueue(db, {
+    ticketId: ticket.id,
+    target: "issue_tracker",
+    op: "set_state",
+    payload: { state: stageToState(to) },
+    idempotencyKey: `${ticket.ident}:set_state:${to}`,
+  });
+  enqueue(db, {
+    ticketId: ticket.id,
+    target: "issue_tracker",
+    op: "set_labels",
+    payload: { add: [`stage:${to}`], remove: [`stage:${from}`] },
+    idempotencyKey: `${ticket.ident}:set_labels:${from}->${to}`,
+  });
+}
 
 export interface ProjectorPorts {
   issueTracker: IssueTrackerPort;

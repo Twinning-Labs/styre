@@ -7,6 +7,7 @@ import { getByKey } from "../db/repos/workflow-step.ts";
 import { awaitSignal } from "../engine/signals.ts";
 import { runStep } from "../engine/step-journal.ts";
 import { applyFailurePolicy } from "./failure-policy.ts";
+import { enqueueStageProjection } from "./projector.ts";
 import { nextStepKey } from "./resolver.ts";
 import { applyReviewVerdict } from "./review-verdict.ts";
 import type { StepRegistry } from "./step-registry.ts";
@@ -38,9 +39,14 @@ export async function advanceOneStep(
     const d = nextStepKey(db, ticketId);
 
     if (d.kind === "advance") {
+      const t = getTicket(db, ticketId);
+      if (!t) {
+        throw new Error(`advanceOneStep: ticket ${ticketId} not found`);
+      }
       db.transaction(() => {
         setTicketStage(db, ticketId, d.to);
         appendEvent(db, { ticketId, kind: "transition", fromStage: d.from, toStage: d.to });
+        enqueueStageProjection(db, t, d.from, d.to);
       })();
       continue;
     }
