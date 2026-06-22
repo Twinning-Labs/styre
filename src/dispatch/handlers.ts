@@ -19,15 +19,18 @@ import {
   setStatus as setUnitStatus,
 } from "../db/repos/work-unit.ts";
 import { runCommand } from "../util/run-command.ts";
+import { ComplexityGradeSchema } from "./complexity-schema.ts";
 import { ExtractOutputSchema, validateExtraction } from "./extract-schema.ts";
 import { implementFeedback } from "./feedback.ts";
 import type { Profile } from "./profile.ts";
 import {
+  DESIGN_COMPLEXITY_GRADE_TEMPLATE,
   DESIGN_REVIEW_TEMPLATE,
   DESIGN_TEMPLATE,
   EXTRACT_TEMPLATE,
   IMPLEMENT_TEMPLATE,
   REVIEW_TEMPLATE,
+  complexityGradeVars,
   designReviewVars,
   designVars,
   extractVars,
@@ -39,7 +42,7 @@ import type { DispatchDeps } from "./run-dispatch.ts";
 import { runAgentDispatch } from "./run-dispatch.ts";
 import { extractSidecar } from "./sidecar.ts";
 import { isTestFile } from "./test-file.ts";
-import { sizeTrack } from "./track-sizing.ts";
+import { combineTrack, sizeTrack } from "./track-sizing.ts";
 import { changedFilesAt, ensureWorktree } from "./worktree.ts";
 
 export interface RegistryDeps {
@@ -158,11 +161,29 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
 
   registry.register("design:size", async (ctx: HandlerContext) => {
     const units = listUnits(ctx.db, ctx.ticket.id);
-    // Off path (M5b-3 default): deterministic sprawl-only sizing, no agent. The grader on-path
-    // is added in Task 4 behind ctx.config.complexityGrading.
-    const track = sizeTrack(units);
+    if (!ctx.config.complexityGrading) {
+      const track = sizeTrack(units); // off: deterministic sprawl-only, no agent
+      setTicketTrack(ctx.db, ctx.ticket.id, track);
+      return { track, graded: false };
+    }
+    // on: cold cheap-tier grader → daemon combines the grade with sprawl.
+    const result = await runAgentDispatch(
+      ctx,
+      depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
+      {
+        handlerKey: "design:size",
+        template: DESIGN_COMPLEXITY_GRADE_TEMPLATE,
+        vars: complexityGradeVars(ctx.ticket, deps.profile, units),
+        postcondition: () => {}, // read-only: nothing commits
+      },
+    );
+    const parsed = extractSidecar(result.output, ComplexityGradeSchema);
+    if (!parsed.ok) {
+      throw new Error(`design:size grade sidecar ${parsed.reason}: ${parsed.detail}`);
+    }
+    const track = combineTrack(units.length, parsed.value.overall);
     setTicketTrack(ctx.db, ctx.ticket.id, track);
-    return { track, graded: false };
+    return { track, graded: true, overall: parsed.value.overall };
   });
 
   registry.register("design:review", async (ctx: HandlerContext) => {

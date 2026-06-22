@@ -1,3 +1,6 @@
+import complexityGradeTemplate from "../../prompts/design-complexity-grade.md" with {
+  type: "text",
+};
 import designExtractTemplate from "../../prompts/design-extract.md" with { type: "text" };
 import designReviewTemplate from "../../prompts/design-review.md" with { type: "text" };
 import designTemplate from "../../prompts/design.md" with { type: "text" };
@@ -7,6 +10,7 @@ import type { Profile } from "./profile.ts";
 
 export const DESIGN_TEMPLATE = designTemplate;
 export const DESIGN_REVIEW_TEMPLATE = designReviewTemplate;
+export const DESIGN_COMPLEXITY_GRADE_TEMPLATE = complexityGradeTemplate;
 export const EXTRACT_TEMPLATE = designExtractTemplate;
 export const IMPLEMENT_TEMPLATE = implementTemplate;
 export const REVIEW_TEMPLATE = reviewTemplate;
@@ -63,6 +67,21 @@ export function reviewVars(
     ident: ticket.ident,
     title: ticket.title ?? "",
     slug: profile.slug,
+    ...profile.promptVars,
+  };
+}
+
+export function complexityGradeVars(
+  ticket: { ident: string; title: string | null },
+  profile: Profile,
+  units: { kind: string }[],
+): Record<string, string> {
+  return {
+    ident: ticket.ident,
+    title: ticket.title ?? "",
+    slug: profile.slug,
+    unit_count: String(units.length),
+    unit_kinds: units.map((u) => u.kind).join(", "),
     ...profile.promptVars,
   };
 }

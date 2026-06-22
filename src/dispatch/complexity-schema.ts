@@ -10,7 +10,9 @@ export const ComplexityGradeSchema = z.object({
     difficulty: z.number().min(0).max(10),
   }),
   overall: z.number().min(0).max(10),
-  rationale: z.string().nullable(),
+  // Advisory free-text; never load-bearing for the daemon's combineTrack decision. Tolerated
+  // absent so a terse grader (no rationale key) is still a valid grade, not a transport failure.
+  rationale: z.string().nullable().optional(),
 });
 
 export type ComplexityGrade = z.infer<typeof ComplexityGradeSchema>;
