@@ -133,3 +133,45 @@ test("a keyed effect is exactly-once-effective across a crash + recovery re-run"
   expect(effectCalls).toBe(2); // at-least-once-attempted: effect was invoked on both runs
   expect(count?.n).toBe(1); // exactly-once-effective: keyed insert applied only once
 });
+
+test("onSucceed commits atomically with markSucceeded (a verdict-bearing step)", async () => {
+  const { db, ticketId } = makeTestDb();
+  let sideEffectRan = false;
+  const result = await runStep(db, {
+    ticketId,
+    stepKey: "review",
+    stepType: "dispatch",
+    effectful: true,
+    execute: () => ({ findings: 0 }),
+    onSucceed: (step) => {
+      sideEffectRan = true;
+      // a stand-in for applyReviewVerdict's state change — must land iff the step is marked succeeded
+      steps.setPid(db, step.id, 4242);
+    },
+  });
+  expect(sideEffectRan).toBe(true);
+  expect(result.step.status).toBe("succeeded");
+  expect(steps.getByKey(db, ticketId, "review")?.pid).toBe(4242);
+  db.close();
+});
+
+test("onSucceed throwing rolls back markSucceeded (no succeeded-without-verdict window)", async () => {
+  const { db, ticketId } = makeTestDb();
+  await expect(
+    runStep(db, {
+      ticketId,
+      stepKey: "review",
+      stepType: "dispatch",
+      effectful: true,
+      execute: () => ({ findings: 1 }),
+      onSucceed: () => {
+        throw new Error("verdict boom");
+      },
+    }),
+  ).rejects.toThrow("verdict boom");
+  // The step must NOT be left 'succeeded': markSucceeded was rolled back, then the step failed.
+  // This is the property that closes H2 — a crash/throw can never leave a succeeded review whose
+  // verdict never ran.
+  expect(steps.getByKey(db, ticketId, "review")?.status).toBe("failed");
+  db.close();
+});

@@ -108,9 +108,11 @@ export function markRunning(
 
 export function markSucceeded(db: Database, id: number, result: unknown): void {
   const now = nowUtc();
+  // pid is meaningful only while a step is 'running' (recover()'s orphan-kill target); null it on
+  // terminal states so a finished step never carries a now-defunct (and possibly recycled) pid.
   db.query(
     `UPDATE workflow_step
-       SET status = 'succeeded', result_json = $r, ended_at = $now, updated_at = $now
+       SET status = 'succeeded', result_json = $r, pid = NULL, ended_at = $now, updated_at = $now
      WHERE id = $id`,
   ).run({ $r: JSON.stringify(result === undefined ? null : result), $now: now, $id: id });
 }
@@ -119,7 +121,7 @@ export function markFailed(db: Database, id: number, error: unknown): void {
   const now = nowUtc();
   db.query(
     `UPDATE workflow_step
-       SET status = 'failed', error_json = $e, ended_at = $now, updated_at = $now
+       SET status = 'failed', error_json = $e, pid = NULL, ended_at = $now, updated_at = $now
      WHERE id = $id`,
   ).run({ $e: serializeError(error), $now: now, $id: id });
 }

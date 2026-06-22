@@ -64,6 +64,9 @@ export async function driveToTerminal(
       return finish({ outcome: "blocked", iterations: i, ...last });
     if (t.stage === "merge" && pending.some((s) => s.signal_type === "human_merge_approval"))
       return finish({ outcome: "pr-ready", iterations: i, ...last });
+    // A resolver dead-end ('blocked': no actionable unit and not all verified) is terminal, not a
+    // stall to grind on — surface it immediately rather than spinning to the iteration cap.
+    if (r.blocked) return finish({ outcome: "blocked", iterations: i, ...last });
 
     if (r.advanced === 0) {
       idle += 1;

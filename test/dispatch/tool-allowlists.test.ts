@@ -12,7 +12,19 @@ test("design:dispatch gets read tools + docs Write/Edit + web, no Bash/outward",
 test("implement:dispatch gets full edit + Bash, no git/outward", () => {
   const tools = allowlistFor("implement:dispatch");
   expect(tools).toContain("Edit");
-  expect(tools).toContain("Bash");
+  expect(tools).toContain("Bash"); // unscoped fallback when no runner commands are declared
+});
+
+test("implement:dispatch scopes Bash to the profile's declared runner commands", () => {
+  const tools = allowlistFor("implement:dispatch", {
+    runnerCommands: ["bun run build", "bun test", "  ", "bun test"],
+  });
+  // bare Bash is replaced by per-runner scoped grants (control-loop S2: runners only); deduped + trimmed.
+  expect(tools).not.toContain("Bash");
+  expect(tools).toContain("Bash(bun run build:*)");
+  expect(tools).toContain("Bash(bun test:*)");
+  expect(tools.filter((t) => t === "Bash(bun test:*)").length).toBe(1);
+  expect(tools).toContain("Read"); // read tools preserved
 });
 
 test("review and design:review are read-only (no Write/Edit/Bash)", () => {

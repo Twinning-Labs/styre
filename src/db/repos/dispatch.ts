@@ -56,6 +56,17 @@ export function listByTicket(db: Database, ticketId: number): DispatchRow[] {
     .all(ticketId);
 }
 
+/** Rows with `id > afterId` (exclusive), in id order. For incremental streaming: a ticket's
+ *  dispatches are created and completed within one tick (steps are serialized per ticket), so a row
+ *  with a lower id is never still in flight when a higher one appears — id is a safe watermark. */
+export function listByTicketSince(db: Database, ticketId: number, afterId: number): DispatchRow[] {
+  return db
+    .query<DispatchRow, [number, number]>(
+      `SELECT ${COLS} FROM dispatch WHERE ticket_id = ? AND id > ? ORDER BY id`,
+    )
+    .all(ticketId, afterId);
+}
+
 export function insertDispatch(
   db: Database,
   p: {

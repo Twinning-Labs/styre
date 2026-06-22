@@ -54,11 +54,14 @@ test("markSucceeded records a JSON result", () => {
     stepKey: "design:extract",
     stepType: "dispatch",
   });
+  steps.markRunning(db, step.id, { pid: 4242 });
   steps.markSucceeded(db, step.id, { units: 2 });
   const after = steps.getById(db, step.id);
   db.close();
   expect(after?.status).toBe("succeeded");
   expect(JSON.parse(after?.result_json ?? "null")).toEqual({ units: 2 });
+  // pid is meaningful only while running; a terminal step must not carry a defunct pid.
+  expect(after?.pid).toBeNull();
 });
 
 test("markFailed records a serialized error; resetToPending clears running state", () => {
@@ -71,6 +74,7 @@ test("markFailed records a serialized error; resetToPending clears running state
   const reset = steps.getById(db, step.id);
   db.close();
   expect(failed?.status).toBe("failed");
+  expect(failed?.pid).toBeNull(); // markFailed clears the pid too
   expect(JSON.parse(failed?.error_json ?? "{}").message).toBe("boom");
   expect(reset?.status).toBe("pending");
   expect(reset?.pid).toBeNull();
