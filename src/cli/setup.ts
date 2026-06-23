@@ -7,6 +7,18 @@ import { probeProfile } from "../setup/probe.ts";
 
 const CHECKS = new Set(["github", "external", "none"]);
 
+/** Runtime-context sections the probe couldn't determine — the operator should fill these in. */
+export function unknownRuntimeSections(profile: Profile): string[] {
+  const rc = profile.runtimeContext;
+  const out: string[] = [];
+  if (rc.topology.type === "unknown") out.push("topology");
+  for (const name of ["data", "caching", "observability", "configSecrets", "documentation"] as const) {
+    if (rc[name].presence === "unknown") out.push(name);
+  }
+  if (rc.releasePackaging.mechanism === "unknown") out.push("releasePackaging");
+  return out;
+}
+
 /** Probe a repo and write its profile JSON. Testable core (the citty command is a thin wrapper). */
 export function runSetup(args: {
   repo: string;
@@ -14,7 +26,7 @@ export function runSetup(args: {
   checks?: string;
   slug?: string;
   force?: boolean;
-}): { outPath: string; profile: Profile } {
+}): { outPath: string; profile: Profile; needsInput: string[] } {
   const repoDir = resolve(args.repo);
   if (!existsSync(repoDir)) throw new Error(`setup: repo path not found: ${repoDir}`);
   if (args.checks !== undefined && !CHECKS.has(args.checks)) {
@@ -33,7 +45,7 @@ export function runSetup(args: {
   }
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, `${JSON.stringify(profile, null, 2)}\n`);
-  return { outPath, profile };
+  return { outPath, profile, needsInput: unknownRuntimeSections(profile) };
 }
 
 /** Non-fatal note about creds a later `styre run` will need (setup itself touches no creds). */
@@ -59,7 +71,7 @@ export const setupCommand = defineCommand({
     force: { type: "boolean", description: "Overwrite an existing profile" },
   },
   run({ args }) {
-    const { outPath, profile } = runSetup({
+    const { outPath, profile, needsInput } = runSetup({
       repo: args.repo,
       out: args.out,
       checks: args.checks,
@@ -67,6 +79,13 @@ export const setupCommand = defineCommand({
       force: args.force,
     });
     console.log(`setup: wrote ${outPath}`);
+    if (needsInput.length > 0) {
+      console.log(
+        `setup: NEEDS INPUT — the probe could not determine these runtime-context sections.\n` +
+          `       Edit ${outPath} and set presence/detail (or re-run after adding tooling):\n` +
+          needsInput.map((s) => `         - ${s}`).join("\n"),
+      );
+    }
     const note = credNote(profile);
     if (note) console.log(`setup: ${note}`);
     console.log(`setup: run with  styre run <ticket> --profile ${outPath}`);

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runSetup } from "../../src/cli/setup.ts";
+import { runSetup, unknownRuntimeSections } from "../../src/cli/setup.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 
 function gitRepo(): string {
@@ -47,4 +47,24 @@ test("runSetup refuses to overwrite an existing profile unless force", () => {
   runSetup({ repo, out });
   expect(() => runSetup({ repo, out })).toThrow(/exists/i);
   expect(() => runSetup({ repo, out, force: true })).not.toThrow();
+});
+
+test("unknownRuntimeSections lists only the unknown flags", () => {
+  const p = parseProfile({
+    slug: "d",
+    targetRepo: "/t",
+    runtimeContext: {
+      topology: { type: "web-service" },
+      data: { presence: "present" },
+      caching: { presence: "unknown" },
+      observability: { presence: "unknown" },
+      documentation: { presence: "present" },
+    },
+  });
+  const u = unknownRuntimeSections(p);
+  expect(u).toContain("caching");
+  expect(u).toContain("observability");
+  expect(u).toContain("configSecrets"); // defaulted unknown
+  expect(u).not.toContain("data");
+  expect(u).not.toContain("topology");
 });
