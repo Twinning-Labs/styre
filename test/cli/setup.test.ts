@@ -41,12 +41,32 @@ test("runSetup defaults the path to configDir()/<slug>/profile.json", () => {
   }
 });
 
-test("runSetup refuses to overwrite an existing profile unless force", () => {
-  const repo = gitRepo();
-  const out = join(mkdtempSync(join(tmpdir(), "styre-out2-")), "profile.json");
+test("re-running setup preserves an operator-resolved section", () => {
+  const repo = mkdtempSync(join(tmpdir(), "styre-repo-"));
+  writeFileSync(join(repo, "package.json"), "{}");
+  const out = join(mkdtempSync(join(tmpdir(), "styre-cfg-")), "profile.json");
+
+  runSetup({ repo, out }); // first probe → caching unknown
+  // operator fills caching by hand:
+  const p = JSON.parse(readFileSync(out, "utf8"));
+  p.runtimeContext.caching = { presence: "present", detail: "redis (operator)" };
+  writeFileSync(out, JSON.stringify(p));
+
+  const { profile } = runSetup({ repo, out }); // re-run merges
+  expect(profile.runtimeContext.caching.presence).toBe("present");
+  expect(profile.runtimeContext.caching.detail).toBe("redis (operator)");
+});
+
+test("--reprobe discards operator edits", () => {
+  const repo = mkdtempSync(join(tmpdir(), "styre-repo-"));
+  writeFileSync(join(repo, "package.json"), "{}");
+  const out = join(mkdtempSync(join(tmpdir(), "styre-cfg-")), "profile.json");
   runSetup({ repo, out });
-  expect(() => runSetup({ repo, out })).toThrow(/exists/i);
-  expect(() => runSetup({ repo, out, force: true })).not.toThrow();
+  const p = JSON.parse(readFileSync(out, "utf8"));
+  p.runtimeContext.caching = { presence: "present", detail: "redis (operator)" };
+  writeFileSync(out, JSON.stringify(p));
+  const { profile } = runSetup({ repo, out, reprobe: true });
+  expect(profile.runtimeContext.caching.presence).toBe("unknown");
 });
 
 test("unknownRuntimeSections lists only the unknown flags", () => {

@@ -3,7 +3,9 @@ import { dirname, join, resolve } from "node:path";
 import { defineCommand } from "citty";
 import { configDir } from "../config/paths.ts";
 import type { Profile } from "../dispatch/profile.ts";
+import { loadProfile } from "../dispatch/profile.ts";
 import { probeProfile } from "../setup/probe.ts";
+import { mergeRuntimeContext } from "../setup/merge.ts";
 
 const CHECKS = new Set(["github", "external", "none"]);
 
@@ -26,13 +28,15 @@ export function runSetup(args: {
   checks?: string;
   slug?: string;
   force?: boolean;
+  reprobe?: boolean;
 }): { outPath: string; profile: Profile; needsInput: string[] } {
   const repoDir = resolve(args.repo);
   if (!existsSync(repoDir)) throw new Error(`setup: repo path not found: ${repoDir}`);
   if (args.checks !== undefined && !CHECKS.has(args.checks)) {
     throw new Error(`setup: --checks must be github|external|none (got '${args.checks}')`);
   }
-  const profile = probeProfile(repoDir, {
+  const clean = args.force === true || args.reprobe === true;
+  let profile = probeProfile(repoDir, {
     slug: args.slug,
     checksSystem: args.checks as "github" | "external" | "none" | undefined,
   });
@@ -40,8 +44,10 @@ export function runSetup(args: {
     args.out && args.out.length > 0
       ? resolve(args.out)
       : join(configDir(), profile.slug, "profile.json");
-  if (existsSync(outPath) && !args.force) {
-    throw new Error(`setup: profile already exists at ${outPath} (use --force to overwrite)`);
+  if (existsSync(outPath) && !clean) {
+    // Idempotent re-probe: enrich without clobbering operator-resolved runtime context.
+    const existing = loadProfile(outPath);
+    profile = { ...profile, runtimeContext: mergeRuntimeContext(existing.runtimeContext, profile.runtimeContext) };
   }
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, `${JSON.stringify(profile, null, 2)}\n`);
@@ -69,6 +75,7 @@ export const setupCommand = defineCommand({
     checks: { type: "string", description: "Override checks-system: github | external | none" },
     slug: { type: "string", description: "Override the derived project slug" },
     force: { type: "boolean", description: "Overwrite an existing profile" },
+    reprobe: { type: "boolean", description: "Re-probe from scratch, discarding operator-resolved runtime context" },
   },
   run({ args }) {
     const { outPath, profile, needsInput } = runSetup({
@@ -77,6 +84,7 @@ export const setupCommand = defineCommand({
       checks: args.checks,
       slug: args.slug,
       force: args.force,
+      reprobe: args.reprobe,
     });
     console.log(`setup: wrote ${outPath}`);
     if (needsInput.length > 0) {
