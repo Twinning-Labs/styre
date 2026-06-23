@@ -753,8 +753,18 @@ function out(o: unknown) {
   return ExtractOutputSchema.parse({ units: baseUnits, ...(o as object) });
 }
 
-const profileWith = (rc: unknown) =>
-  parseProfile({ slug: "d", targetRepo: "/t", runtimeContext: rc });
+// Default non-named sections to "absent" so each test isolates the rule under test
+// (a defaulted "unknown" would itself trip the coverage rule). A section named in `rc`
+// fully replaces its absent base.
+const ABSENT_BASE = {
+  data: { presence: "absent" },
+  caching: { presence: "absent" },
+  observability: { presence: "absent" },
+  configSecrets: { presence: "absent" },
+  documentation: { presence: "absent" },
+};
+const profileWith = (rc: object) =>
+  parseProfile({ slug: "d", targetRepo: "/t", runtimeContext: { ...ABSENT_BASE, ...rc } });
 
 test("isMigrationKind recognizes data/migration kinds", () => {
   expect(isMigrationKind("migration")).toBe(true);
