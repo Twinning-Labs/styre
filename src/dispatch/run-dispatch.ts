@@ -91,6 +91,8 @@ export async function runAgentDispatch(
     costUsd: result.costUsd,
     tokensIn: result.tokensIn,
     tokensOut: result.tokensOut,
+    cacheRead: result.cacheRead ?? null,
+    cacheCreate: result.cacheCreate ?? null,
   };
   try {
     spec.postcondition({ worktreePath: deps.worktreePath, changed, sha });

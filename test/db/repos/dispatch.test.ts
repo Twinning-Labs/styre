@@ -46,6 +46,8 @@ test("completeDispatch records outcome + usage; getByDispatchId reads it back", 
     endedAt: "2026-06-20T00:01:00.000Z",
     tokensIn: 100,
     tokensOut: 50,
+    cacheRead: 80,
+    cacheCreate: 20,
     costUsd: 0.42,
   });
   const after = dispatch.getByDispatchId(db, ticketId, "ENG-1-d0001");
@@ -53,6 +55,8 @@ test("completeDispatch records outcome + usage; getByDispatchId reads it back", 
   expect(after?.outcome).toBe("clean-success");
   expect(after?.branch_head_sha).toBe("abc123");
   expect(after?.tokens_in).toBe(100);
+  expect(after?.cache_read).toBe(80);
+  expect(after?.cache_create).toBe(20);
   expect(after?.cost_usd).toBe(0.42);
 });
 

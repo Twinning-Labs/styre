@@ -307,7 +307,11 @@ CREATE TABLE event_log (
 );
 CREATE INDEX idx_event_ticket_kind ON event_log (ticket_id, kind, seq);
 
--- metric_event — telemetry (replaces metrics/events.jsonl). Forensic / north-star; NOT control flow.
+-- metric_event — DEFERRED / OPTIONAL analytics denormalization (no writer; NOT an OSS carry).
+--   Per-step cost/tokens (incl. cache_read/cache_create) already live on the `dispatch` table and are
+--   emitted on the telemetry stream + summed in the run summary; lifecycle events live in `event_log`.
+--   This table is just a single-shape rollup a dashboard *could* prefer — the plane derives it from the
+--   emitted rows; the OSS core does not write it. Kept as a documented stub. Forensic; NOT control flow.
 CREATE TABLE metric_event (
     id           INTEGER PRIMARY KEY,
     project_id   INTEGER NOT NULL REFERENCES project(id),

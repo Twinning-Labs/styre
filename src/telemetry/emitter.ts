@@ -52,6 +52,8 @@ function toDispatch(r: DispatchRow): TelemetryEvent {
     duration_ms: r.duration_ms,
     tokens_in: r.tokens_in,
     tokens_out: r.tokens_out,
+    cache_read: r.cache_read,
+    cache_create: r.cache_create,
     cost_usd: r.cost_usd,
   };
 }
@@ -94,6 +96,8 @@ export function buildSummary(db: Database, ticketId: number, result: RunResult):
     cost_usd: sum(dispatches.map((d) => d.cost_usd)),
     tokens_in: sum(dispatches.map((d) => d.tokens_in)),
     tokens_out: sum(dispatches.map((d) => d.tokens_out)),
+    cache_read: sum(dispatches.map((d) => d.cache_read)),
+    cache_create: sum(dispatches.map((d) => d.cache_create)),
     dispatch_count: dispatches.length,
     dispatch_outcomes,
     cycle_count: events.filter((e) => e.kind === "loopback").length,

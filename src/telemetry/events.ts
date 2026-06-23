@@ -39,6 +39,8 @@ const DispatchEvent = z.object({
   duration_ms: z.number().nullable(),
   tokens_in: z.number().nullable(),
   tokens_out: z.number().nullable(),
+  cache_read: z.number().nullable(),
+  cache_create: z.number().nullable(),
   cost_usd: z.number().nullable(),
 });
 
@@ -70,6 +72,8 @@ const SummaryEvent = z.object({
   cost_usd: z.number(),
   tokens_in: z.number(),
   tokens_out: z.number(),
+  cache_read: z.number(),
+  cache_create: z.number(),
   dispatch_count: z.number(),
   dispatch_outcomes: z.record(z.string(), z.number()),
   cycle_count: z.number(),

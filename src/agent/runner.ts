@@ -16,6 +16,10 @@ export interface AgentRunResult {
   costUsd: number | null;
   tokensIn: number | null;
   tokensOut: number | null;
+  /** Prompt-cache token accounting (optional: not every provider reports it). Recorded on the
+   *  dispatch row for cost attribution; absent → treated as null. */
+  cacheRead?: number | null;
+  cacheCreate?: number | null;
 }
 
 /** The provider-neutral agent boundary. The core depends only on this; a provider

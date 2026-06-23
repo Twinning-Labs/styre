@@ -151,14 +151,18 @@ The plane integrates *only* through these. Treat them as the public API surface 
    it; the core reads it. Keep its schema stable.
 3. **Telemetry / state (output).** The SQLite DB (readable) + a documented **telemetry export** — the
    metrics the dashboards need (cycle count, unit cost per ticket, autonomous-fix ratio, first-time CI
-   pass rate, escalation reasons). Our `dispatch` / `metric_event` / `event_log` / `ground_truth_signal`
-   already hold this data; expose it cleanly + emit a per-ticket terminal/JSON summary.
+   pass rate, escalation reasons). Our `dispatch` / `event_log` / `ground_truth_signal` rows already
+   hold this data; expose it cleanly + emit a per-ticket terminal/JSON summary.
    - **The export's wire form is a structured event stream to stdout** `[DECIDED — operator 2026-06-20]`:
-     the core writes each `metric_event` / `event_log` / `ground_truth_signal` row to stdout (NDJSON)
-     as it is journaled, plus a final per-ticket summary on exit. This is container-native (the
+     the core writes each **`dispatch`** (per-step cost/tokens incl. `cache_read`/`cache_create`) /
+     `event_log` / `ground_truth_signal` row to stdout (NDJSON) as it is journaled, plus a final
+     per-ticket **summary** (cost/tokens/cache summed) on exit. This is container-native (the
      orchestrator's log pipeline ingests it), idempotent (rows keyed by `dispatch_id` so a re-spawned
      worker dedups cleanly), and **lives in the OSS core** — the GitHub Action and any self-hoster get
-     it too. The plane *consumes* this stream; it does not fork the core to produce it.
+     it too. The plane *consumes* this stream; it does not fork the core to produce it. `[implemented —
+     M9, PR #23]` *(The `metric_event` table is an OPTIONAL denormalized rollup the plane may derive
+     from this stream; the OSS core does not write it — see schema.sql. The earlier "writes each
+     `metric_event` row" phrasing predates the implemented shape, which emits `dispatch` rows.)*
 4. **(Later) a programmatic API.** The vision mentions "feeds into the harness API." At OSS cutover the
    artifact contracts (1–3) suffice; a thin REST/IPC API is a later addition for tighter coupling.
 
