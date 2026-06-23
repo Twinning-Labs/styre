@@ -124,13 +124,29 @@ Precedence: **ticket > workspace > profile > default**. The harness **reads the 
 so the plane can set per-ticket budgets/strictness without touching the binary. The vision's
 *N-cycles* and *strictness* map directly onto our **K_DISTINCT** and **review block-threshold**.
 
+> **Deferred to the commercial product `[DECIDED — operator 2026-06-23; brainstorm §11]`.** The
+> **per-ticket `styre_config` tier is NOT built in the OSS core** and is not planned for it. Because
+> OSS `styre run` is one-shot, the caller (a solo script *or* the plane) already sets each run's
+> config through the normal `--config`/RuntimeConfig path at launch, so a ticket-embedded block the
+> core must parse is redundant. The OSS core reads only **title + description + type** from a ticket
+> (`IngestedTicket`). The three lower tiers (workspace `config.json`, profile, defaults) are the live
+> OSS config surface; the per-ticket tier is a plane-owned enrichment. The *N-cycles/strictness →
+> K_DISTINCT/block-threshold* mapping still holds for whatever sets RuntimeConfig — just not via a
+> ticket block in OSS.
+
 ## 5. The open-core seam — stable contracts the plane plugs into `[BUILD THESE STABLE]`
 
 The plane integrates *only* through these. Treat them as the public API surface (versioned, documented):
 
-1. **Linear ticket contract (input).** The harness reads: the `styre_config` metadata block, the AC
-   checklist, the target-context-files list, and the `Ready for Agent` state as the trigger. (A solo dev
-   writes these by hand *or* uses the harness's own design stage; the SaaS writes them automatically.)
+1. **Linear ticket contract (input).** `[OSS scope narrowed — operator 2026-06-23; brainstorm §11]`
+   At OSS cutover the core reads only **title + description + type** (`IngestedTicket`). The richer
+   contract — the `styre_config` metadata block, the AC checklist, the target-context-files list, and
+   the `Ready for Agent` trigger state — is **owned by the commercial plane, not built in the OSS core**:
+   the plane writes/enriches the ticket and steers each one-shot `styre run` via per-invocation config;
+   AC criteria and context-file hints already ride as **prose in the `description`** (ingested → fed to
+   the design stage), so no OSS capability is lost. Keep this contract's *shape* stable for the plane,
+   but the parsing/ingestion lives plane-side. (A solo dev writes acceptance criteria + file hints as
+   description prose, or relies on the harness's own design stage.)
 2. **The profile artifact.** Canonical stack truth (`profile.md`). The plane reads/compacts/auto-updates
    it; the core reads it. Keep its schema stable.
 3. **Telemetry / state (output).** The SQLite DB (readable) + a documented **telemetry export** — the
@@ -159,8 +175,10 @@ The plane integrates *only* through these. Treat them as the public API surface 
   the harness decomposes *each ticket → work-units* — different granularities, no overlap.) The SaaS's
   candidate context-files become *advisory input* to design (→ `work_unit.files_to_touch`, reviewer-judged
   per A3), not a hard scope lock at cutover.
-- **Per-ticket budget/strictness** = the vision's N-cycles/strictness → our K_DISTINCT / block-threshold,
-  sourced from the ticket config block (§4).
+- **Per-ticket budget/strictness** = the vision's N-cycles/strictness → our K_DISTINCT / block-threshold.
+  In OSS these come from RuntimeConfig set per invocation (`--config`), **not** a ticket-embedded block —
+  the per-ticket `styre_config` tier is plane-owned and deferred out of OSS (§4 deferral note; brainstorm
+  §11 2026-06-23).
 - **Headless runner mode** ⇒ the durable-execution model spans **ephemeral per-run SQLite** (runner) and
   the **persistent daemon DB** (local) — both must work; the journal semantics are identical, only the
   DB lifetime differs. `[RESOLVED — operator 2026-06-20]` **One core, no fork.** SQLite is the system of
