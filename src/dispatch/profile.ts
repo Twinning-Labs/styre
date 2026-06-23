@@ -1,40 +1,47 @@
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 
+export const PresenceEnum = z.enum(["present", "absent", "unknown"]);
+export const TopologyTypeEnum = z.enum([
+  "web-service",
+  "web-n-tier",
+  "desktop",
+  "mobile-ios",
+  "mobile-android",
+  "cli",
+  "library",
+  "hybrid",
+  "unknown",
+]);
+export const ReleaseMechanismEnum = z.enum([
+  "semantic-release",
+  "app-store",
+  "installer",
+  "signed-binary",
+  "none",
+  "unknown",
+]);
+
 const _TriStateBase = z.object({
-  presence: z.enum(["present", "absent", "unknown"]).default("unknown"),
+  presence: PresenceEnum.default("unknown"),
   detail: z.string().default(""),
 });
 export const TriStateSchema = _TriStateBase.default(_TriStateBase.parse({}));
 
 const _DataStateBase = z.object({
-  presence: z.enum(["present", "absent", "unknown"]).default("unknown"),
+  presence: PresenceEnum.default("unknown"),
   detail: z.string().default(""),
   migrationTool: z.string().optional(), // free-text (DS-5): no enum
 });
 export const DataStateSchema = _DataStateBase.default(_DataStateBase.parse({}));
 
 const _TopologyBase = z.object({
-  type: z
-    .enum([
-      "web-service",
-      "web-n-tier",
-      "desktop",
-      "mobile-ios",
-      "mobile-android",
-      "cli",
-      "library",
-      "hybrid",
-      "unknown",
-    ])
-    .default("unknown"),
+  type: TopologyTypeEnum.default("unknown"),
   detail: z.string().default(""),
 });
 
 const _ReleasePackagingBase = z.object({
-  mechanism: z
-    .enum(["semantic-release", "app-store", "installer", "signed-binary", "none", "unknown"])
-    .default("unknown"),
+  mechanism: ReleaseMechanismEnum.default("unknown"),
   detail: z.string().default(""),
 });
 
