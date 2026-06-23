@@ -1,9 +1,14 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { defineCommand } from "citty";
+import { claudeAgentRunner } from "../agent/providers/claude.ts";
+import { selectAgentRunner } from "../agent/registry.ts";
+import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { configDir } from "../config/paths.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
+import type { EnrichDeps } from "../setup/enrich.ts";
+import { enrichRuntimeContext } from "../setup/enrich.ts";
 import { mergeRuntimeContext } from "../setup/merge.ts";
 import { probeProfile } from "../setup/probe.ts";
 
@@ -27,31 +32,37 @@ export function unknownRuntimeSections(profile: Profile): string[] {
   return out;
 }
 
-/** Probe a repo and write its profile JSON. Testable core (the citty command is a thin wrapper). */
-export function runSetup(args: {
+/** Probe a repo, enrich its runtime context via the agent, and write the profile JSON. Testable
+ *  core (the citty command is a thin wrapper that supplies the real runner + cred precondition). */
+export async function runSetup(args: {
   repo: string;
   out?: string;
   checks?: string;
   slug?: string;
   force?: boolean;
   reprobe?: boolean;
-}): { outPath: string; profile: Profile; needsInput: string[] } {
+  deps: EnrichDeps;
+}): Promise<{ outPath: string; profile: Profile; needsInput: string[] }> {
   const repoDir = resolve(args.repo);
   if (!existsSync(repoDir)) throw new Error(`setup: repo path not found: ${repoDir}`);
   if (args.checks !== undefined && !CHECKS.has(args.checks)) {
     throw new Error(`setup: --checks must be github|external|none (got '${args.checks}')`);
   }
   const clean = args.force === true || args.reprobe === true;
-  let profile = probeProfile(repoDir, {
+  const scanProfile = probeProfile(repoDir, {
     slug: args.slug,
     checksSystem: args.checks as "github" | "external" | "none" | undefined,
   });
+  // Layer 1+2: deterministic scan, then mandatory agent enrichment (throws on failure → no write).
+  const enriched = await enrichRuntimeContext(repoDir, scanProfile.runtimeContext, args.deps);
+  let profile: Profile = { ...scanProfile, runtimeContext: enriched };
+
   const outPath =
     args.out && args.out.length > 0
       ? resolve(args.out)
       : join(configDir(), profile.slug, "profile.json");
   if (existsSync(outPath) && !clean) {
-    // Idempotent re-probe: enrich without clobbering operator-resolved runtime context.
+    // Layer 3: idempotent re-probe — enrich without clobbering operator-resolved runtime context.
     const existing = loadProfile(outPath);
     profile = {
       ...profile,
@@ -63,13 +74,12 @@ export function runSetup(args: {
   return { outPath, profile, needsInput: unknownRuntimeSections(profile) };
 }
 
-/** Non-fatal note about creds a later `styre run` will need (setup itself touches no creds). */
+/** Non-fatal note about creds a later `styre run` will need. */
 function credNote(profile: Profile): string | null {
   const missing: string[] = [];
   if (profile.checksSystem === "github" && !process.env.GITHUB_TOKEN)
     missing.push("GITHUB_TOKEN (PR/push + checks)");
   if (!process.env.LINEAR_API_KEY) missing.push("LINEAR_API_KEY (ticket ingest + projection)");
-  if (!process.env.ANTHROPIC_API_KEY) missing.push("ANTHROPIC_API_KEY (headless agent auth)");
   return missing.length > 0 ? `note — not set for \`styre run\`: ${missing.join(", ")}` : null;
 }
 
@@ -89,14 +99,19 @@ export const setupCommand = defineCommand({
       description: "Re-probe from scratch, discarding operator-resolved runtime context",
     },
   },
-  run({ args }) {
-    const { outPath, profile, needsInput } = runSetup({
+  async run({ args }) {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      throw new Error("setup: ANTHROPIC_API_KEY is required (runtime-context prose enrichment)");
+    }
+    const runner = selectAgentRunner(DEFAULT_AGENT_CONFIG, { claude: () => claudeAgentRunner() });
+    const { outPath, profile, needsInput } = await runSetup({
       repo: args.repo,
       out: args.out,
       checks: args.checks,
       slug: args.slug,
       force: args.force,
       reprobe: args.reprobe,
+      deps: { runner, agentConfig: DEFAULT_AGENT_CONFIG },
     });
     console.log(`setup: wrote ${outPath}`);
     if (needsInput.length > 0) {
