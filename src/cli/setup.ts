@@ -4,8 +4,8 @@ import { defineCommand } from "citty";
 import { configDir } from "../config/paths.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
-import { probeProfile } from "../setup/probe.ts";
 import { mergeRuntimeContext } from "../setup/merge.ts";
+import { probeProfile } from "../setup/probe.ts";
 
 const CHECKS = new Set(["github", "external", "none"]);
 
@@ -14,7 +14,13 @@ export function unknownRuntimeSections(profile: Profile): string[] {
   const rc = profile.runtimeContext;
   const out: string[] = [];
   if (rc.topology.type === "unknown") out.push("topology");
-  for (const name of ["data", "caching", "observability", "configSecrets", "documentation"] as const) {
+  for (const name of [
+    "data",
+    "caching",
+    "observability",
+    "configSecrets",
+    "documentation",
+  ] as const) {
     if (rc[name].presence === "unknown") out.push(name);
   }
   if (rc.releasePackaging.mechanism === "unknown") out.push("releasePackaging");
@@ -47,7 +53,10 @@ export function runSetup(args: {
   if (existsSync(outPath) && !clean) {
     // Idempotent re-probe: enrich without clobbering operator-resolved runtime context.
     const existing = loadProfile(outPath);
-    profile = { ...profile, runtimeContext: mergeRuntimeContext(existing.runtimeContext, profile.runtimeContext) };
+    profile = {
+      ...profile,
+      runtimeContext: mergeRuntimeContext(existing.runtimeContext, profile.runtimeContext),
+    };
   }
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, `${JSON.stringify(profile, null, 2)}\n`);
@@ -75,7 +84,10 @@ export const setupCommand = defineCommand({
     checks: { type: "string", description: "Override checks-system: github | external | none" },
     slug: { type: "string", description: "Override the derived project slug" },
     force: { type: "boolean", description: "Overwrite an existing profile" },
-    reprobe: { type: "boolean", description: "Re-probe from scratch, discarding operator-resolved runtime context" },
+    reprobe: {
+      type: "boolean",
+      description: "Re-probe from scratch, discarding operator-resolved runtime context",
+    },
   },
   run({ args }) {
     const { outPath, profile, needsInput } = runSetup({
@@ -88,10 +100,9 @@ export const setupCommand = defineCommand({
     });
     console.log(`setup: wrote ${outPath}`);
     if (needsInput.length > 0) {
+      const lines = needsInput.map((s) => `         - ${s}`).join("\n");
       console.log(
-        `setup: NEEDS INPUT — the probe could not determine these runtime-context sections.\n` +
-          `       Edit ${outPath} and set presence/detail (or re-run after adding tooling):\n` +
-          needsInput.map((s) => `         - ${s}`).join("\n"),
+        `setup: NEEDS INPUT — the probe could not determine these runtime-context sections.\n       Edit ${outPath} and set presence/detail (or re-run after adding tooling):\n${lines}`,
       );
     }
     const note = credNote(profile);

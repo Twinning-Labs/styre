@@ -3,7 +3,10 @@ import type { RuntimeContext } from "../dispatch/profile.ts";
 type Tri = RuntimeContext["data"];
 
 /** present probe wins; otherwise an operator-resolved (non-unknown) existing value survives. */
-function mergeTri<T extends { presence: "present" | "absent" | "unknown" }>(existing: T, probed: T): T {
+function mergeTri<T extends { presence: "present" | "absent" | "unknown" }>(
+  existing: T,
+  probed: T,
+): T {
   if (probed.presence === "present") return probed;
   if (existing.presence !== "unknown") return existing;
   return probed;

@@ -1,6 +1,6 @@
-import { describe, expect, test } from "bun:test";
-import { mergeRuntimeContext } from "../../src/setup/merge.ts";
+import { expect, test } from "bun:test";
 import { RuntimeContextSchema } from "../../src/dispatch/profile.ts";
+import { mergeRuntimeContext } from "../../src/setup/merge.ts";
 
 const rc = (o: unknown) => RuntimeContextSchema.parse(o);
 
@@ -21,8 +21,14 @@ test("a confident probe overwrites a stale existing value", () => {
 });
 
 test("topology/release: a non-unknown probe wins, else existing survives", () => {
-  const existing = rc({ topology: { type: "desktop" }, releasePackaging: { mechanism: "app-store" } });
-  const probed = rc({ topology: { type: "unknown" }, releasePackaging: { mechanism: "semantic-release" } });
+  const existing = rc({
+    topology: { type: "desktop" },
+    releasePackaging: { mechanism: "app-store" },
+  });
+  const probed = rc({
+    topology: { type: "unknown" },
+    releasePackaging: { mechanism: "semantic-release" },
+  });
   const merged = mergeRuntimeContext(existing, probed);
   expect(merged.topology.type).toBe("desktop"); // probe unknown → keep operator
   expect(merged.releasePackaging.mechanism).toBe("semantic-release"); // probe confident → win

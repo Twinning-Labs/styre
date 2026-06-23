@@ -17,7 +17,10 @@ export const ExtractedWorkUnitSchema = z.object({
 
 export type ExtractedWorkUnit = z.infer<typeof ExtractedWorkUnitSchema>;
 
-const _ImpactBase = z.object({ applies: z.boolean().default(false), analysis: z.string().default("") });
+const _ImpactBase = z.object({
+  applies: z.boolean().default(false),
+  analysis: z.string().default(""),
+});
 const ImpactSchema = _ImpactBase.default(_ImpactBase.parse({}));
 
 const _DataImpactBase = z.object({

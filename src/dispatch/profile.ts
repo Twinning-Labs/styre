@@ -17,8 +17,15 @@ export const DataStateSchema = _DataStateBase.default(_DataStateBase.parse({}));
 const _TopologyBase = z.object({
   type: z
     .enum([
-      "web-service", "web-n-tier", "desktop", "mobile-ios",
-      "mobile-android", "cli", "library", "hybrid", "unknown",
+      "web-service",
+      "web-n-tier",
+      "desktop",
+      "mobile-ios",
+      "mobile-android",
+      "cli",
+      "library",
+      "hybrid",
+      "unknown",
     ])
     .default("unknown"),
   detail: z.string().default(""),
@@ -26,10 +33,7 @@ const _TopologyBase = z.object({
 
 const _ReleasePackagingBase = z.object({
   mechanism: z
-    .enum([
-      "semantic-release", "app-store", "installer",
-      "signed-binary", "none", "unknown",
-    ])
+    .enum(["semantic-release", "app-store", "installer", "signed-binary", "none", "unknown"])
     .default("unknown"),
   detail: z.string().default(""),
 });

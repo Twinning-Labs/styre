@@ -1,8 +1,8 @@
 import { basename, resolve } from "node:path";
 import { type Profile, parseProfile } from "../dispatch/profile.ts";
 import { parseGitHubRemote } from "../integrations/adapters/github.ts";
-import { detectChecksSystem, detectCommands } from "./detect.ts";
 import { detectRuntimeContext } from "./detect-runtime.ts";
+import { detectChecksSystem, detectCommands } from "./detect.ts";
 
 /** Run git in `cwd`, returning trimmed stdout, or null on any failure (probe-graceful). */
 function tryGit(args: string[], cwd: string): string | null {

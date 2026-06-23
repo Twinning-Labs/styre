@@ -76,8 +76,11 @@ test("design-review template renders with designReviewVars (no missing placehold
 
 test("extractVars surfaces runtime-context flags + detail", () => {
   const profile = parseProfile({
-    slug: "d", targetRepo: "/t",
-    runtimeContext: { data: { presence: "present", detail: "postgres/prisma", migrationTool: "prisma" } },
+    slug: "d",
+    targetRepo: "/t",
+    runtimeContext: {
+      data: { presence: "present", detail: "postgres/prisma", migrationTool: "prisma" },
+    },
   });
   const v = extractVars({ ident: "ENG-1", title: "t" }, profile);
   expect(v.runtime_data_presence).toBe("present");

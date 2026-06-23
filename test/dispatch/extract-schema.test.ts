@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { ExtractOutputSchema, validateExtraction, validateCdotImpact, isMigrationKind } from "../../src/dispatch/extract-schema.ts";
+import {
+  ExtractOutputSchema,
+  isMigrationKind,
+  validateCdotImpact,
+  validateExtraction,
+} from "../../src/dispatch/extract-schema.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 
 const unit = (over: Record<string, unknown> = {}) => ({
@@ -72,8 +77,17 @@ test("validateExtraction accepts a valid backward dependency", () => {
 // ─── cdotImpact schema + profile-consistency gate ────────────────────────────
 
 const baseUnits = [
-  { seq: 1, kind: "backend", title: "t", description: "d", behavioral: false,
-    test_plan: null, files_to_touch: [], verify_check_types: [], depends_on: [] },
+  {
+    seq: 1,
+    kind: "backend",
+    title: "t",
+    description: "d",
+    behavioral: false,
+    test_plan: null,
+    files_to_touch: [],
+    verify_check_types: [],
+    depends_on: [],
+  },
 ];
 
 function out(o: unknown) {
@@ -101,7 +115,10 @@ test("isMigrationKind recognizes data/migration kinds", () => {
 
 test("coverage: a flagged section with empty analysis fails", () => {
   const profile = profileWith({ caching: { presence: "present" } });
-  const errors = validateCdotImpact(out({ cdotImpact: { caching: { applies: false, analysis: "" } } }), profile);
+  const errors = validateCdotImpact(
+    out({ cdotImpact: { caching: { applies: false, analysis: "" } } }),
+    profile,
+  );
   expect(errors.some((e) => e.includes("caching"))).toBe(true);
 });
 
@@ -128,10 +145,28 @@ test("migration: schemaChange without a migration unit fails", () => {
 test("migration: a migration unit ordered first passes", () => {
   const profile = profileWith({ data: { presence: "present" } });
   const units = [
-    { seq: 1, kind: "migration", title: "m", description: "d", behavioral: false,
-      test_plan: null, files_to_touch: [], verify_check_types: [], depends_on: [] },
-    { seq: 2, kind: "backend", title: "b", description: "d", behavioral: true,
-      test_plan: "t", files_to_touch: [], verify_check_types: ["test"], depends_on: [1] },
+    {
+      seq: 1,
+      kind: "migration",
+      title: "m",
+      description: "d",
+      behavioral: false,
+      test_plan: null,
+      files_to_touch: [],
+      verify_check_types: [],
+      depends_on: [],
+    },
+    {
+      seq: 2,
+      kind: "backend",
+      title: "b",
+      description: "d",
+      behavioral: true,
+      test_plan: "t",
+      files_to_touch: [],
+      verify_check_types: ["test"],
+      depends_on: [1],
+    },
   ];
   const o = ExtractOutputSchema.parse({
     units,
@@ -143,10 +178,28 @@ test("migration: a migration unit ordered first passes", () => {
 test("migration: a migration unit ordered AFTER a domain unit fails", () => {
   const profile = profileWith({ data: { presence: "present" } });
   const units = [
-    { seq: 1, kind: "backend", title: "b", description: "d", behavioral: true,
-      test_plan: "t", files_to_touch: [], verify_check_types: ["test"], depends_on: [] },
-    { seq: 2, kind: "migration", title: "m", description: "d", behavioral: false,
-      test_plan: null, files_to_touch: [], verify_check_types: [], depends_on: [] },
+    {
+      seq: 1,
+      kind: "backend",
+      title: "b",
+      description: "d",
+      behavioral: true,
+      test_plan: "t",
+      files_to_touch: [],
+      verify_check_types: ["test"],
+      depends_on: [],
+    },
+    {
+      seq: 2,
+      kind: "migration",
+      title: "m",
+      description: "d",
+      behavioral: false,
+      test_plan: null,
+      files_to_touch: [],
+      verify_check_types: [],
+      depends_on: [],
+    },
   ];
   const o = ExtractOutputSchema.parse({
     units,

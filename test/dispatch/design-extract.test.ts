@@ -150,13 +150,26 @@ test("design:extract fails the step when a flagged CDOT section is unaddressed",
     stdout: sidecar(
       JSON.stringify({
         units: [
-          { seq: 1, kind: "backend", title: "x", description: "d", behavioral: false,
-            test_plan: null, files_to_touch: [], verify_check_types: [], depends_on: [] },
+          {
+            seq: 1,
+            kind: "backend",
+            title: "x",
+            description: "d",
+            behavioral: false,
+            test_plan: null,
+            files_to_touch: [],
+            verify_check_types: [],
+            depends_on: [],
+          },
         ],
         cdotImpact: { data: { applies: false, analysis: "" } }, // data flagged present, but empty
       }),
     ),
-    stderr: "", timedOut: false, costUsd: null, tokensIn: null, tokensOut: null,
+    stderr: "",
+    timedOut: false,
+    costUsd: null,
+    tokensIn: null,
+    tokensOut: null,
   }));
   const rc = { ...ABSENT_RC, data: { presence: "present", detail: "pg" } };
   await advanceOneStep(db, ticketId, registryFor(repo, runner, rc));
@@ -178,13 +191,26 @@ test("design:extract sets needs_docs when documentation impact applies", async (
     stdout: sidecar(
       JSON.stringify({
         units: [
-          { seq: 1, kind: "backend", title: "x", description: "d", behavioral: true,
-            test_plan: "t", files_to_touch: ["src/a.ts"], verify_check_types: ["test"], depends_on: [] },
+          {
+            seq: 1,
+            kind: "backend",
+            title: "x",
+            description: "d",
+            behavioral: true,
+            test_plan: "t",
+            files_to_touch: ["src/a.ts"],
+            verify_check_types: ["test"],
+            depends_on: [],
+          },
         ],
         cdotImpact: { documentation: { applies: true, analysis: "update README" } },
       }),
     ),
-    stderr: "", timedOut: false, costUsd: null, tokensIn: null, tokensOut: null,
+    stderr: "",
+    timedOut: false,
+    costUsd: null,
+    tokensIn: null,
+    tokensOut: null,
   }));
   // ABSENT_RC → docs absent → gate inert; applies:true still flips needs_docs.
   await advanceOneStep(db, ticketId, registryFor(repo, runner));
