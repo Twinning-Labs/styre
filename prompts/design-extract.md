@@ -35,6 +35,11 @@ changes the database schema, set `cdotImpact.data.schemaChange: true` AND includ
 migration work unit (kind `migration` or `data`) ordered before the units that use the new schema.
 Add a telemetry step to behavioral units and map each external boundary's failure mode to a test.
 
+Documentation is soft-gated: even when it is flagged `absent`, still consider whether a
+significant change warrants a doc note (README/changelog), and if so set
+`cdotImpact.documentation.applies: true` with a short `analysis`. This is a nudge, not a
+requirement — a trivial change legitimately leaves it `false`.
+
 Emit your answer as a single fenced block, exactly:
 
 ```styre-sidecar
