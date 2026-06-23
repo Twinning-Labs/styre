@@ -73,3 +73,21 @@ test("design-review template renders with designReviewVars (no missing placehold
     expect(name in designReviewVars({ ident: "ENG-1", title: "T" }, profile)).toBe(true);
   }
 });
+
+test("extractVars surfaces runtime-context flags + detail", () => {
+  const profile = parseProfile({
+    slug: "d", targetRepo: "/t",
+    runtimeContext: { data: { presence: "present", detail: "postgres/prisma", migrationTool: "prisma" } },
+  });
+  const v = extractVars({ ident: "ENG-1", title: "t" }, profile);
+  expect(v.runtime_data_presence).toBe("present");
+  expect(v.runtime_data_detail).toBe("postgres/prisma");
+  expect(v.runtime_data_migration_tool).toBe("prisma");
+  expect(v.runtime_caching_presence).toBe("unknown");
+});
+
+test("designVars also carries runtime vars", () => {
+  const profile = parseProfile({ slug: "d", targetRepo: "/t" });
+  const v = designVars({ ident: "ENG-1", title: "t", description: "" }, profile);
+  expect(v.runtime_documentation_presence).toBe("unknown");
+});
