@@ -115,7 +115,8 @@ export async function runTicket(deps: {
 }
 
 /** A plain-text run summary from the durable SoT: outcome + final stage/status + the event timeline.
- *  (Per-step cost/usage needs a metric_event writer — deferred.) */
+ *  Per-step cost/tokens (incl. cache) live on the `dispatch` rows and are summed into the machine
+ *  telemetry summary (buildSummary); this human stderr summary intentionally stays text-only. */
 export function formatRunSummary(db: Database, ticketId: number, result: RunResult): string {
   const events = listByTicket(db, ticketId);
   const lines = [

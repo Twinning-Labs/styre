@@ -21,13 +21,20 @@ test("flushNew emits each row once (dedup) across calls; summary sums cost + cou
     costUsd: 0.25,
     tokensIn: 100,
     tokensOut: 40,
+    cacheRead: 60,
+    cacheCreate: 15,
     endedAt: new Date().toISOString(),
   });
   emitter.flushNew(db, ticketId);
 
   const firstCount = sink.length;
   expect(sink.some((e) => e.type === "event" && e.kind === "transition")).toBe(true);
-  expect(sink.some((e) => e.type === "dispatch" && e.dispatch_id === "D1")).toBe(true);
+  const d1Event = sink.find((e) => e.type === "dispatch" && e.dispatch_id === "D1");
+  expect(d1Event).toBeDefined();
+  if (d1Event?.type === "dispatch") {
+    expect(d1Event.cache_read).toBe(60);
+    expect(d1Event.cache_create).toBe(15);
+  }
 
   // Re-flush with no new rows → nothing added (dedup).
   emitter.flushNew(db, ticketId);
@@ -56,6 +63,8 @@ test("flushNew emits each row once (dedup) across calls; summary sums cost + cou
   const summary = sink.find((e) => e.type === "summary");
   if (!summary || summary.type !== "summary") throw new Error("no summary emitted");
   expect(summary.cost_usd).toBeCloseTo(0.25);
+  expect(summary.cache_read).toBe(60);
+  expect(summary.cache_create).toBe(15);
   expect(summary.tokens_in).toBe(100);
   expect(summary.dispatch_count).toBe(1);
   expect(summary.cycle_count).toBe(1);

@@ -19,6 +19,8 @@ export interface DispatchRow {
   duration_ms: number | null;
   tokens_in: number | null;
   tokens_out: number | null;
+  cache_read: number | null;
+  cache_create: number | null;
   cost_usd: number | null;
   partial: number;
   created_at: string;
@@ -27,7 +29,7 @@ export interface DispatchRow {
 const COLS =
   "id, ticket_id, work_unit_id, step_id, dispatch_id, seq, stage, kind, model, outcome, " +
   "branch_head_sha, worktree_path, started_at, ended_at, duration_ms, tokens_in, tokens_out, " +
-  "cost_usd, partial, created_at";
+  "cache_read, cache_create, cost_usd, partial, created_at";
 
 export function nextSeq(db: Database, ticketId: number): number {
   const row = db
@@ -116,6 +118,8 @@ export function completeDispatch(
     durationMs?: number | null;
     tokensIn?: number | null;
     tokensOut?: number | null;
+    cacheRead?: number | null;
+    cacheCreate?: number | null;
     costUsd?: number | null;
     partial?: number;
   },
@@ -123,7 +127,8 @@ export function completeDispatch(
   db.query(
     `UPDATE dispatch
        SET outcome = $outcome, branch_head_sha = $sha, ended_at = $ended, duration_ms = $dur,
-           tokens_in = $tin, tokens_out = $tout, cost_usd = $cost, partial = $partial
+           tokens_in = $tin, tokens_out = $tout, cache_read = $cr, cache_create = $cc,
+           cost_usd = $cost, partial = $partial
      WHERE id = $id`,
   ).run({
     $outcome: p.outcome,
@@ -132,6 +137,8 @@ export function completeDispatch(
     $dur: p.durationMs ?? null,
     $tin: p.tokensIn ?? null,
     $tout: p.tokensOut ?? null,
+    $cr: p.cacheRead ?? null,
+    $cc: p.cacheCreate ?? null,
     $cost: p.costUsd ?? null,
     $partial: p.partial ?? 0,
     $id: id,

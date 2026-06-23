@@ -24,6 +24,8 @@ export function parseClaudeJson(stdout: string): {
   costUsd: number | null;
   tokensIn: number | null;
   tokensOut: number | null;
+  cacheRead: number | null;
+  cacheCreate: number | null;
 } {
   try {
     const obj = JSON.parse(stdout) as Record<string, unknown>;
@@ -33,9 +35,11 @@ export function parseClaudeJson(stdout: string): {
       costUsd: num(obj.total_cost_usd),
       tokensIn: num(usage.input_tokens),
       tokensOut: num(usage.output_tokens),
+      cacheRead: num(usage.cache_read_input_tokens),
+      cacheCreate: num(usage.cache_creation_input_tokens),
     };
   } catch {
-    return { costUsd: null, tokensIn: null, tokensOut: null };
+    return { costUsd: null, tokensIn: null, tokensOut: null, cacheRead: null, cacheCreate: null };
   }
 }
 
@@ -61,6 +65,8 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
         costUsd: null,
         tokensIn: null,
         tokensOut: null,
+        cacheRead: null,
+        cacheCreate: null,
       });
       const proc = Bun.spawn([command, ...buildClaudeArgs(input)], {
         cwd: input.cwd,

@@ -28,14 +28,34 @@ test("buildClaudeArgs assembles -p, json output, model, and allowed tools", () =
   expect(args.join(" ")).toContain("Read");
 });
 
-test("parseClaudeJson extracts usage, tolerating missing fields", () => {
+test("parseClaudeJson extracts usage incl. cache tokens, tolerating missing fields", () => {
   const good = parseClaudeJson(
-    JSON.stringify({ total_cost_usd: 0.5, usage: { input_tokens: 10, output_tokens: 3 } }),
+    JSON.stringify({
+      total_cost_usd: 0.5,
+      usage: {
+        input_tokens: 10,
+        output_tokens: 3,
+        cache_read_input_tokens: 7,
+        cache_creation_input_tokens: 2,
+      },
+    }),
   );
   expect(good.costUsd).toBe(0.5);
   expect(good.tokensIn).toBe(10);
+  expect(good.cacheRead).toBe(7);
+  expect(good.cacheCreate).toBe(2);
+  // cache fields absent → null (not every response reports them)
+  const noCache = parseClaudeJson(JSON.stringify({ usage: { input_tokens: 1 } }));
+  expect(noCache.cacheRead).toBeNull();
+  expect(noCache.cacheCreate).toBeNull();
   const bad = parseClaudeJson("not json");
-  expect(bad).toEqual({ costUsd: null, tokensIn: null, tokensOut: null });
+  expect(bad).toEqual({
+    costUsd: null,
+    tokensIn: null,
+    tokensOut: null,
+    cacheRead: null,
+    cacheCreate: null,
+  });
 });
 
 test("run captures a clean exit, parses usage, and journals the pid", async () => {
