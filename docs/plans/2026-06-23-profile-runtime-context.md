@@ -1204,7 +1204,9 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ## Deferred to a follow-up
 
-**Agent-prose enrichment of the probe (spec D4, second half).** The approved design is a *hybrid* probe: deterministic scan sets the flags (delivered in Task 2) and a setup-time **agent dispatch** writes richer `detail` prose. Today `styre setup` is a pure, creds-free, agent-free code probe; adding an agent dispatch pulls auth + dispatch infrastructure into setup and warrants its own design. The gating-critical half of D4 — the *evidence-grounded flags* — ships in this plan; the prose enrichment is a quality boost on the `detail` strings only and does not block the gate, bubble-up, or re-probe. Defer to a follow-up plan once setup-side dispatch is scoped.
+**Agent-prose enrichment of the probe (spec D4, second half).** The approved design is a *hybrid* probe: deterministic scan sets the flags (delivered in Task 2) and a setup-time **agent dispatch** writes richer `detail` prose. This plan delivered the deterministic flags only.
+
+**UPDATE (2026-06-23):** the deferral was reversed at the operator's direction — deferring a component the operator had explicitly chosen in brainstorming was not a properly-consulted call. The agent-prose half is now designed in `docs/brainstorms/2026-06-23-profile-runtime-context-enrichment-design.md` and is being built onto this same branch (PR #28) so the feature ships complete. Decisions: enrichment is **mandatory** (setup now requires `ANTHROPIC_API_KEY`), **retry-then-fail** on agent error (no degraded write), **read-only repo tools seeded** with scan findings, **Sonnet** tier; scan flags remain the gate's ground truth (the agent only enriches detail and resolves `unknown` sections).
 
 **Prompted invariants → review enforcement (ENG-176).** Telemetry-per-task and failure-mode→test-map remain prompt-level here (Task 6, Step 9). Their enforcement belongs to the review persona ticket, out of scope for this plan.
 
