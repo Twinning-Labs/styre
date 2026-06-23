@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { ExtractOutputSchema, validateExtraction } from "../../src/dispatch/extract-schema.ts";
+import { ExtractOutputSchema, validateExtraction, validateCdotImpact, isMigrationKind } from "../../src/dispatch/extract-schema.ts";
+import { parseProfile } from "../../src/dispatch/profile.ts";
 
 const unit = (over: Record<string, unknown> = {}) => ({
   seq: 1,
@@ -66,4 +67,90 @@ test("validateExtraction accepts a valid backward dependency", () => {
   expect(
     validateExtraction([unit({ seq: 1, depends_on: [] }), unit({ seq: 2, depends_on: [1] })]),
   ).toEqual([]);
+});
+
+// ─── cdotImpact schema + profile-consistency gate ────────────────────────────
+
+const baseUnits = [
+  { seq: 1, kind: "backend", title: "t", description: "d", behavioral: false,
+    test_plan: null, files_to_touch: [], verify_check_types: [], depends_on: [] },
+];
+
+function out(o: unknown) {
+  return ExtractOutputSchema.parse({ units: baseUnits, ...(o as object) });
+}
+
+// Default non-named sections to "absent" so each test isolates the rule under test
+// (a defaulted "unknown" would itself trip the coverage rule). A section named in `rc`
+// fully replaces its absent base.
+const ABSENT_BASE = {
+  data: { presence: "absent" },
+  caching: { presence: "absent" },
+  observability: { presence: "absent" },
+  configSecrets: { presence: "absent" },
+  documentation: { presence: "absent" },
+};
+const profileWith = (rc: object) =>
+  parseProfile({ slug: "d", targetRepo: "/t", runtimeContext: { ...ABSENT_BASE, ...rc } });
+
+test("isMigrationKind recognizes data/migration kinds", () => {
+  expect(isMigrationKind("migration")).toBe(true);
+  expect(isMigrationKind("Data")).toBe(true);
+  expect(isMigrationKind("frontend")).toBe(false);
+});
+
+test("coverage: a flagged section with empty analysis fails", () => {
+  const profile = profileWith({ caching: { presence: "present" } });
+  const errors = validateCdotImpact(out({ cdotImpact: { caching: { applies: false, analysis: "" } } }), profile);
+  expect(errors.some((e) => e.includes("caching"))).toBe(true);
+});
+
+test("coverage: an absent section is not forced", () => {
+  const profile = profileWith({ caching: { presence: "absent" } });
+  expect(validateCdotImpact(out({}), profile)).toEqual([]);
+});
+
+test("coverage: unknown is must-address (headless safety net)", () => {
+  const profile = profileWith({ data: { presence: "unknown" } });
+  const errors = validateCdotImpact(out({}), profile);
+  expect(errors.some((e) => e.includes("data"))).toBe(true);
+});
+
+test("migration: schemaChange without a migration unit fails", () => {
+  const profile = profileWith({ data: { presence: "present" } });
+  const errors = validateCdotImpact(
+    out({ cdotImpact: { data: { applies: true, analysis: "adds column", schemaChange: true } } }),
+    profile,
+  );
+  expect(errors.some((e) => e.includes("migration"))).toBe(true);
+});
+
+test("migration: a migration unit ordered first passes", () => {
+  const profile = profileWith({ data: { presence: "present" } });
+  const units = [
+    { seq: 1, kind: "migration", title: "m", description: "d", behavioral: false,
+      test_plan: null, files_to_touch: [], verify_check_types: [], depends_on: [] },
+    { seq: 2, kind: "backend", title: "b", description: "d", behavioral: true,
+      test_plan: "t", files_to_touch: [], verify_check_types: ["test"], depends_on: [1] },
+  ];
+  const o = ExtractOutputSchema.parse({
+    units,
+    cdotImpact: { data: { applies: true, analysis: "adds column", schemaChange: true } },
+  });
+  expect(validateCdotImpact(o, profile)).toEqual([]);
+});
+
+test("migration: a migration unit ordered AFTER a domain unit fails", () => {
+  const profile = profileWith({ data: { presence: "present" } });
+  const units = [
+    { seq: 1, kind: "backend", title: "b", description: "d", behavioral: true,
+      test_plan: "t", files_to_touch: [], verify_check_types: ["test"], depends_on: [] },
+    { seq: 2, kind: "migration", title: "m", description: "d", behavioral: false,
+      test_plan: null, files_to_touch: [], verify_check_types: [], depends_on: [] },
+  ];
+  const o = ExtractOutputSchema.parse({
+    units,
+    cdotImpact: { data: { applies: true, analysis: "x", schemaChange: true } },
+  });
+  expect(validateCdotImpact(o, profile).some((e) => e.includes("ordered before"))).toBe(true);
 });
