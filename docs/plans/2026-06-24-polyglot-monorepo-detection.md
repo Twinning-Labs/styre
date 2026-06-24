@@ -283,25 +283,33 @@ export function mergeComponents(scan: Component[], proposed: Component[]): Compo
   return scan.map((s) => {
     const p = byName.get(s.name);
     if (!p) return s;
+    // Agent may refine paths but cannot widen a component to a catch-all (a `**`/`*` would make it
+    // match every diff → run its commands on everything + widen the implement Bash scope). Drop
+    // those; the scan's workspace anchors are always preserved.
+    const agentPaths = p.paths.filter((g) => g !== "**" && g !== "*" && g !== "**/*");
     return {
       name: s.name,
       kind: p.kind || s.kind,
-      // Agent may refine path boundaries, but never drop the scan's workspace anchors.
-      paths: [...new Set([...s.paths, ...p.paths])],
+      paths: [...new Set([...s.paths, ...agentPaths])],
       commands: { ...s.commands, ...p.commands },
       ...(s.testFilePattern ? { testFilePattern: s.testFilePattern } : {}),
     };
   });
 }
 
-/** True if the command's program resolves (typo/missing-tool probe only — NOT correctness). For an
- *  `npm run X`, checks the script exists in the cwd package.json; otherwise checks the binary on PATH. */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+/** True if the command's program resolves (typo/missing-tool probe only — NOT correctness, NOT
+ *  safety). For an `npm run X`, checks the script exists in the cwd package.json; otherwise checks
+ *  the binary on PATH. */
 export function probeCommandExists(repoDir: string, command: string): boolean {
   const trimmed = command.trim();
   const npmRun = trimmed.match(/^npm run ([\w:-]+)/);
   if (npmRun) {
     try {
-      const pkg = JSON.parse(Bun.file(`${repoDir}/package.json`).text() as unknown as string);
+      // NOTE: Bun.file(...).text() is ASYNC (empirically confirmed) — MUST use sync readFileSync here.
+      const pkg = JSON.parse(readFileSync(join(repoDir, "package.json"), "utf8"));
       return Boolean(pkg.scripts?.[npmRun[1]]);
     } catch {
       return false;
@@ -311,7 +319,7 @@ export function probeCommandExists(repoDir: string, command: string): boolean {
   return Bun.spawnSync(["sh", "-c", `command -v ${bin}`], { cwd: repoDir }).success;
 }
 ```
-> If `Bun.file(...).text()` typing is awkward, read with `readFileSync(join(repoDir,"package.json"),"utf8")` instead (import from `node:fs`). Use whichever the codebase's biome config accepts.
+> The existence probe reduces the typo/missing-tool failure mode only. It does **not** validate that a command is correct or safe — a plausible-but-wrong or malicious string passes. The security control is the operator sign-off in Task 9 (which now displays the FULL command list, including agent-supplied ones).
 
 - [ ] **Step 4: Run, expect pass** — `bun test test/setup/discover-schema.test.ts` → PASS.
 
@@ -512,9 +520,9 @@ export function resolveCommands(
 
 - [ ] **Step 5: Wire discover + resolve into `runSetup` (`src/cli/setup.ts`)**
 
-After `probeProfile` and the runtime-context enrich (existing), add:
+After `probeProfile` and the runtime-context enrich (existing), and **before** the profile is written to disk (`setup.ts:73`), add (note the local repo-path variable in `runSetup` is `repoDir`, not `targetRepo`):
 ```typescript
-  const discovered = await discoverComponents(targetRepo, {
+  const discovered = await discoverComponents(repoDir, {
     components: scanProfile.components, repoCommands: scanProfile.repoCommands,
   }, { runner: deps.runner, agentConfig: DEFAULT_AGENT_CONFIG });
 
@@ -524,8 +532,25 @@ After `probeProfile` and the runtime-context enrich (existing), add:
     ask: (q) => (interactive ? (globalThis.prompt(q) ?? null) : null),
   });
   for (const w of warnings) console.warn(w);
+
+  // SECURITY-BEARING CONFIRM: every command (incl. agent-supplied ones) runs via `sh -c` at verify
+  // and seeds the implement Bash allowlist. Show the FULL final command list and require explicit
+  // operator sign-off — not just prompting for the ones that were missing.
+  if (interactive) {
+    console.log("\nResolved commands (will run with repo write + network access):");
+    for (const c of components) {
+      for (const [k, v] of Object.entries(c.commands)) {
+        console.log(`  ${c.name}.${k}: ${typeof v === "string" ? v : "(none)"}`);
+      }
+    }
+    for (const [name, cmd] of Object.entries(discovered.repoCommands)) console.log(`  repo.${name}: ${cmd}`);
+    const ok = globalThis.prompt("Approve these commands? [y/N]");
+    if (ok?.trim().toLowerCase() !== "y") {
+      throw new Error("setup aborted: operator did not approve the command list");
+    }
+  }
 ```
-Set the final profile's `components` to `components` and `repoCommands` to `discovered.repoCommands`. Imports: `discoverComponents` from `../setup/discover.ts`, `resolveCommands` from `../setup/resolve-commands.ts`.
+Set the final profile's `components` to `components` and `repoCommands` to `discovered.repoCommands`. Imports: `discoverComponents` from `../setup/discover.ts`, `resolveCommands` from `../setup/resolve-commands.ts`. (Non-TTY setup proceeds without the prompt but emits the warnings; the run-time guard below still blocks any unresolved must-have.)
 
 Add a **run-time hard-fail** so headless `styre run` never proceeds with an unresolved must-have. In `src/cli/run.ts` (where the profile is loaded via `loadProfile`), after load, assert:
 ```typescript
@@ -564,4 +589,15 @@ git commit -m "feat(setup): interactive command-resolution ladder + scriptRunner
 
 **Type consistency:** `detectComponents` return shape (`{components, repoCommands}`) is consumed identically by `probe.ts` (Task 7) and `discoverComponents` (Task 8). `mergeComponents`/`probeCommandExists`/`DiscoverSchema` defined in Task 8, used in `discover.ts`. `resolveCommands` signature defined in Task 9 and matches its test. `commandFor`/`isUnavailable`/`isScriptRunner` are Plan 1 exports.
 
-**Dependency:** Task 7 replaces the Plan-1 stopgap in `probe.ts`; do Plan 1 first. Tasks 7→8→9 are strictly ordered (8 consumes 7's output; 9 consumes 8's).
+**Dependency:** Task 7 replaces the Plan-1 N=1 `probe.ts` bridge with real multi-component detection; do Plan 1 first. Tasks 7→8→9 are strictly ordered (8 consumes 7's output; 9 consumes 8's).
+
+---
+
+## Revision log (post plan review — 4 independent reviewers)
+
+- **`probeCommandExists` async bug fixed (Task 8 Step 3):** `Bun.file().text()` is async (empirically confirmed) → now uses sync `readFileSync` mandatorily, not "if awkward."
+- **Agent path-injection capped (Task 8 `mergeComponents`):** the agent can refine paths but a catch-all (`**`/`*`/`**/*`) is dropped — it can't widen a component to match every diff (which would run its commands on everything + widen the implement Bash scope). Scan workspace anchors are always preserved.
+- **Security-bearing operator confirm (Task 9 Step 5):** setup now displays the FULL final command list — including agent-supplied commands for already-populated slots — and requires explicit `[y/N]` sign-off, closing the gap where agent-injected commands were never confirmed (they only get prompted when *missing*). The probe is explicitly noted as typo/missing-tool only, not a safety control.
+- **Wiring fix (Task 9 Step 5):** the local repo-path variable is `repoDir`, not `targetRepo`; the discover/resolve block runs before the profile write (`setup.ts:73`).
+- **Ordering note:** `allowlistFor("setup:discover")` throws if the key isn't registered; Task 8 Step 5 adds the `setup:discover` ALLOWLISTS entry, which must land with (before) the `discover.ts` that calls it.
+- (Coherence: `repoCommands` from the agent *replace* the scan's wholesale — intended, since they're free-text and unanchored; documented here rather than merged.)

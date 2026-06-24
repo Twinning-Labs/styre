@@ -13,8 +13,8 @@
 ## Global Constraints
 
 - **Verify gate is ground-truth only:** decisions come from exit codes + the committed diff; never from an agent blob. No agent runs in `verify:*`.
-- **"Pass" requires ≥1 real command ran and all that ran were green.** Zero runnable commands for a declared check-type ⇒ `result: "error"` (re-dispatch/halt-eligible), never `pass`. (The silent-green fix.)
-- **Implement Bash allowlist never widens to the union by default and never falls back to bare unscoped `Bash`.** Scope to the unit's expected components; fall back to the scoped union of all components' string commands only when the unit's expected set is empty.
+- **Three-way check resolution (silent-green fix + decision C).** For a declared check-type, per impacted component: (a) real command → run it; (b) explicitly `{ unavailable: true }` → reviewer-only degrade (do NOT fail) + a PR-visible `untested-merge-risk` signal; (c) absent/unknown → `result: "error"`, never a vacuous `pass`. Must-have classes `build`/`test`/`check` are forced to (a)/(b) at setup, so they never hit (c). "Pass" still requires ≥1 real command ran and all that ran were green. An **empty cumulative diff / no-component-matched** is a *distinct* error diagnostic, not (c).
+- **Implement Bash allowlist: scope to the unit's components; never bare unscoped `Bash`.** Scope to the unit's expected components (`files_to_touch ∩ paths`); fall back to the scoped union of all components' string commands when that set is empty; when there are **no string commands at all**, the implement agent gets **no `Bash`** (Write/Edit only). This requires modifying `allowlistFor` so `implement:dispatch` never returns the bare `"Bash"` token.
 - **No back-compat:** `profile.schemaVersion` is `2`; `parseProfile` hard-fails with a clear message on a legacy flat-`commands` profile.
 - **`CommandValue = string | { unavailable: true }`.** Never a blank/missing slot in a persisted must-have.
 - **Formatting:** biome, 2-space indent, line width 100. Run `bun run lint` and `bun run typecheck` before each commit.
@@ -240,11 +240,15 @@ test("isScriptRunner flags shell invocations", () => {
 Run: `bun test test/dispatch/profile.test.ts test/dispatch/components.test.ts`
 Expected: PASS.
 
-- [ ] **Step 6: Migrate existing profile fixtures to the components shape**
+- [ ] **Step 6: Migrate ALL old-shape sites + bridge `probe.ts` to one component**
 
-Find every test fixture using the old flat shape:
-Run: `grep -rln "commands:\s*{" test/ src/`
-For each `parseProfile({... commands: { ... } ...})`, rewrite to the N=1 component form. Canonical transformation:
+The whole tree must typecheck after this task (`bun run typecheck` compiles everything, including `test/setup/probe.test.ts`), so migrate every site now — not just literal fixtures. Find them with TWO greps:
+```bash
+grep -rln "commands:\s*{" test/ src/                 # fixtures that BUILD a flat profile
+grep -rnE "\.commands\b|\.testFilePattern\b|schemaVersion" test/ src/   # sites that READ removed fields
+```
+Fixes:
+1. **Fixtures (literal builders).** Rewrite each `parseProfile({... commands: {...} ...})` to the N=1 component form:
 ```typescript
 // BEFORE
 parseProfile({ slug: "demo", targetRepo: repo, commands: { test: "true" } })
@@ -254,10 +258,22 @@ parseProfile({
   components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
 })
 ```
-Also update any direct `profile.commands` reads in non-production code (e.g. setup tests) — Plan 2 owns `probe.ts`/`setup.ts`, so for now adjust only tests that fail to typecheck. Leave `src/setup/probe.ts` and `src/cli/setup.ts` to Plan 2; if they fail to typecheck after this task, that is expected and Plan 2 fixes them — but to keep the tree green between plans, temporarily make `probe.ts` emit `components: []` + `repoCommands: {}` instead of `commands` (a one-line stopgap noted in Plan 2 Task 7).
+2. **Empty-command fixtures change verdict — handle explicitly.** A fixture with `commands: {}` whose unit declares a check (e.g. `verifyCheckTypes:["test"]`) previously passed vacuously but now hits the three-way: the N=1 component has the check **absent** → `error`. For each such fixture (notably `test/helpers/run-harness.ts` ~`commands: {}` and the e2e harnesses), give the N=1 component a real command for every check-type its units declare (e.g. `commands: { build: "true", test: "true" }`), OR drop the declared check-type if the test never intended to gate on it. Do NOT leave `commands: {}` under a unit that declares a check.
+3. **Property reads.** Update assertions: `expect(p.schemaVersion).toBe(1)` → `toBe(2)`; `p.commands.test` → `p.components[0].commands.test`; `p.testFilePattern` → `p.components[0].testFilePattern`. This includes the existing assertions in `test/dispatch/profile.test.ts` (the Step 1 tests only ADD cases) and **`test/setup/probe.test.ts`** (migrate it here, in Plan 1).
+4. **Bridge `src/setup/probe.ts` to one component (real, not a throwaway).** `probe.ts` must keep typechecking under the new schema AND keep `detectCommands` used (`noUnusedLocals` is on). Replace the `commands:` field with a single synthesized component wrapping the detected commands:
+```typescript
+// in probeProfile(), replace `commands: detectCommands(targetRepo)` with:
+const detected = detectCommands(targetRepo);
+// ...and in the returned profile object:
+  components: Object.keys(detected).length > 0
+    ? [{ name: "app", kind: "app", paths: ["**"], commands: detected }]
+    : [],
+  repoCommands: {},
+```
+This is a functional N=1 bridge (single-stack repos work end-to-end after Plan 1); Plan 2 Task 7 replaces it with real multi-component detection. `src/cli/setup.ts` needs no change yet (it consumes the profile object).
 
 Run: `bun run typecheck` then `bun test`
-Expected: PASS (whole suite green).
+Expected: PASS (whole suite green — no deferred typecheck failures).
 
 - [ ] **Step 7: Commit**
 
@@ -282,7 +298,7 @@ git commit -m "feat(profile): components[] model + routing helpers (polyglot fou
 
 - [ ] **Step 1: Write failing test for `changedFilesBetween`**
 
-Create `test/dispatch/worktree.test.ts`:
+`test/dispatch/worktree.test.ts` ALREADY EXISTS (it tests `changedFilesAt`/`branchHeadSha`) — **extend** it, do not overwrite. Add this test (and its local `git` helper if the file doesn't already have one):
 ```typescript
 import { expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -350,8 +366,8 @@ In `src/db/schema.sql`, inside `CREATE TABLE work_unit`, add after the `depends_
 ```
 In `src/db/repos/work-unit.ts`:
 - Add `base_sha: string | null;` to `WorkUnitRow`.
-- Ensure the `SELECT` in `getById`/`listByTicket` uses `SELECT *` (confirm it does; if it lists columns explicitly, add `base_sha`).
-- Add:
+- This repo uses an **explicit column list (a `COLS` constant), NOT `SELECT *`** — add `base_sha` to that `COLS` constant so `getById`/`listByTicket` select it. The INSERT column list does not need it (the column is nullable and defaults null).
+- Add (`nowUtc` is imported from `../../util/time.ts`):
 ```typescript
 export function setBaseSha(db: Database, id: number, sha: string): void {
   db.query("UPDATE work_unit SET base_sha = ?, updated_at = ? WHERE id = ?").run(sha, nowUtc(), id);
@@ -470,9 +486,11 @@ test("declared check that hits NO component is an error, not a vacuous pass", as
 ```
 (For the no-match case, make the FakeAgentRunner write to a path no component glob matches, e.g. `docs/note.md` with components only covering `src-tauri/**`. Create parent dirs with `mkdirSync({recursive:true})` inside the runner before `writeFileSync`.)
 
-Add two more tests in the same file:
-- **"a stack with a real command runs and passes"**: component `paths:["**"]`, `commands:{test:"true"}`, behavioral 0 → after ticks, the `test` signal `result === "pass"` and unit `verified`.
-- **"behavioral unit in a test-unavailable stack emits untested-merge-risk and still passes"**: component `paths:["src/**"]`, `commands:{ test: { unavailable: true } }`, unit behavioral 1, agent writes `src/app.ts` → a `untested-merge-risk` signal exists for the unit AND the `test` signal `result === "pass"`.
+Add these tests in the same file (they cover the full three-way + the first-unit edge):
+- **"a stack with a real command runs and passes"**: component `paths:["**"]`, `commands:{test:"true"}`, behavioral 0 → after ticks, the `test` signal `result === "pass"` and unit `verified`. (Also exercises the FIRST-UNIT path: base_sha is the design commit, head is the first code commit, so `changedFilesBetween` is non-empty and impacted is non-empty — guards against the base==head misroute.)
+- **"behavioral unit in a test-unavailable stack degrades to reviewer-only"**: component `paths:["src/**"]`, `commands:{ test: { unavailable: true } }`, unit behavioral 1, agent writes `src/app.ts` → an `untested-merge-risk` signal exists AND the `test` signal `result === "pass"` (decision C — NOT an error).
+- **"a declared check absent on an impacted component errors (loud)"**: component `paths:["src/**"]`, `commands:{ build:"true" }` (NO `lint` key, not unavailable), unit `verifyCheckTypes:["lint"]`, agent writes `src/app.ts` → the `lint` signal `result === "error"` with `detail.reason === "check-absent"`. (Confirms (c); only non-must-have checks can reach it.)
+- **"mixed tested + untested behavioral unit: tested stack gates, untested stack flags"**: components rust `paths:["src-tauri/**"] commands:{test:"true"}` + fe `paths:["src/**"] commands:{test:{unavailable:true}}`, behavioral 1, agent writes BOTH `src-tauri/lib.rs` (with a rust test file) and `src/app.ts` → `test` signal `pass`, AND a `untested-merge-risk` signal exists for `fe`.
 
 - [ ] **Step 3: Run, expect failure**
 
@@ -487,29 +505,88 @@ Replace the body of `registry.register("verify:check", ...)` (after parsing `che
     if (!unit) throw new Error(`verify:check: work_unit ${ctx.workUnitId} not found`);
 
     const latestSha = getLatestByWorkUnit(ctx.db, ctx.workUnitId)?.branch_head_sha ?? undefined;
+
+    // Cumulative per-unit diff (base_sha..HEAD, across all the unit's commits incl. loopbacks).
+    // Empty-diff is a DISTINCT diagnostic, not a missing-command error — and when base==head (the
+    // first-unit edge), fall back to the latest commit's own files so a legitimate unit never
+    // misroutes to an empty impacted set.
     const changed =
-      unit.base_sha && latestSha ? changedFilesBetween(unit.base_sha, latestSha, worktreePath) : [];
+      unit.base_sha && latestSha && unit.base_sha !== latestSha
+        ? changedFilesBetween(unit.base_sha, latestSha, worktreePath)
+        : latestSha
+          ? changedFilesAt(latestSha, worktreePath)
+          : [];
     const impacted = impactedComponents(deps.profile.components, changed);
 
-    // Resolve the declared check-type to real per-component commands.
-    const toRun = impacted
-      .map((c) => ({ component: c.name, command: commandFor(c, checkType) }))
-      .filter((x): x is { component: string; command: string } => x.command !== undefined);
-
-    // Rule 4 — a declared check that resolves to ZERO runnable commands is an error, never a pass.
-    if (toRun.length === 0) {
+    // No impacted component → distinct diagnostic (empty diff vs. a diff that matched no component).
+    // NOT the "missing command" case; never a vacuous pass.
+    if (impacted.length === 0) {
       insertSignal(ctx.db, {
         ticketId: ctx.ticket.id,
         workUnitId: ctx.workUnitId,
         signalType: checkType,
         result: "error",
         branchHeadSha: latestSha,
-        detail: { reason: "no-runnable-command", checkType, impacted: impacted.map((c) => c.name), changed },
+        detail: { reason: changed.length === 0 ? "empty-diff" : "no-component-matched", checkType, changed },
       });
-      throw new Error(`verify:check ${checkType}: no runnable command in impacted components`);
+      throw new Error(
+        `verify:check ${checkType}: ${changed.length === 0 ? "no changes detected for unit" : "diff matched no component"}`,
+      );
     }
 
-    // Run each impacted component's command for this check-type; aggregate.
+    // THREE-WAY resolution per impacted component (the silent-green fix + decision C):
+    //   (a) real command → run it · (b) explicitly { unavailable } → reviewer-only degrade +
+    //   PR-visible untested-merge-risk · (c) absent/unknown → error (loud). Must-haves
+    //   build/test/check are forced to (a)/(b) at setup, so they never hit (c).
+    const toRun = impacted
+      .filter((c) => commandFor(c, checkType) !== undefined)
+      .map((c) => ({ component: c.name, command: commandFor(c, checkType) as string }));
+    const unavailable = impacted.filter((c) => isUnavailable(c, checkType));
+    const absent = impacted.filter(
+      (c) => commandFor(c, checkType) === undefined && !isUnavailable(c, checkType),
+    );
+
+    // (c) absent/unknown on an impacted component → loud error (e.g. a unit declares `lint` but a
+    // touched stack has no lint command and never marked it unavailable). Aligning the extract
+    // agent's declared check-types to the profile is follow-on (1).
+    if (absent.length > 0) {
+      insertSignal(ctx.db, {
+        ticketId: ctx.ticket.id,
+        workUnitId: ctx.workUnitId,
+        signalType: checkType,
+        result: "error",
+        branchHeadSha: latestSha,
+        detail: { reason: "check-absent", checkType, components: absent.map((c) => c.name) },
+      });
+      throw new Error(
+        `verify:check ${checkType}: no command configured on ${absent.map((c) => c.name).join(",")}`,
+      );
+    }
+
+    // (b) every impacted component marked this check unavailable → reviewer-only degrade, NOT error.
+    if (toRun.length === 0) {
+      for (const c of unavailable) {
+        insertSignal(ctx.db, {
+          ticketId: ctx.ticket.id,
+          workUnitId: ctx.workUnitId,
+          signalType: "untested-merge-risk",
+          result: "fail",
+          branchHeadSha: latestSha,
+          detail: { component: c.name, checkType, reason: "check-unavailable" },
+        });
+      }
+      insertSignal(ctx.db, {
+        ticketId: ctx.ticket.id,
+        workUnitId: ctx.workUnitId,
+        signalType: checkType,
+        result: "pass",
+        branchHeadSha: latestSha,
+        detail: { degraded: "reviewer-only", unavailable: unavailable.map((c) => c.name) },
+      });
+      return { check: checkType, result: "pass", degraded: true };
+    }
+
+    // (a) run each impacted component's real command; aggregate.
     const ran: Array<{ component: string; exitCode: number | null; timedOut: boolean }> = [];
     let result: "pass" | "fail" | "error" = "pass";
     let lastCommand = "";
@@ -526,24 +603,26 @@ Replace the body of `registry.register("verify:check", ...)` (after parsing `che
     }
     let detail: Record<string, unknown> = { ran, stderr: lastStderr };
 
-    // Per-component A1 behavioral gate + untested-merge-risk for test-unavailable stacks.
+    // Per-component A1 behavioral gate: each impacted component with a real test command needs a
+    // matching test file in its paths; impacted components with test unavailable emit a PR-visible
+    // untested-merge-risk (reviewer-only) without failing the aggregate (decision C).
     if (checkType === "test" && unit.behavioral === 1) {
-      for (const c of impacted) {
-        if (isUnavailable(c, "test")) {
-          insertSignal(ctx.db, {
-            ticketId: ctx.ticket.id,
-            workUnitId: ctx.workUnitId,
-            signalType: "untested-merge-risk",
-            result: "fail",
-            branchHeadSha: latestSha,
-            detail: { component: c.name, reason: "behavioral-unit-no-test-command" },
-          });
-          continue; // reviewer-only for this stack; does not fail the aggregate
-        }
-        if (result === "pass") {
+      for (const c of unavailable) {
+        insertSignal(ctx.db, {
+          ticketId: ctx.ticket.id,
+          workUnitId: ctx.workUnitId,
+          signalType: "untested-merge-risk",
+          result: "fail",
+          branchHeadSha: latestSha,
+          detail: { component: c.name, reason: "behavioral-unit-no-test-command" },
+        });
+      }
+      if (result === "pass") {
+        for (const c of impacted) {
+          if (commandFor(c, "test") === undefined) continue;
           const inComponent = changed.filter((p) => matchesComponent(c, p));
           const hasTest = inComponent.some((p) => isTestFile(p, c.testFilePattern));
-          if (commandFor(c, "test") !== undefined && !hasTest) {
+          if (!hasTest) {
             result = "fail";
             detail = { reason: "behavioral-no-test", component: c.name, changed: inComponent };
             break;
@@ -584,23 +663,35 @@ Replace the body of `registry.register("verify:check", ...)` (after parsing `che
     if (result !== "pass") throw new Error(`verify:check ${checkType}: ${result}`);
     return { check: checkType, result };
 ```
-Update the imports at the top of `handlers.ts`: add `changedFilesBetween` and `matchesComponent`; import `commandFor, impactedComponents, isUnavailable` from `./components.ts`. Remove the now-dead `command === undefined` block (the old `profile.commands[checkType]` lookup).
+Update the imports in `handlers.ts`: extend the existing `./worktree.ts` import with `changedFilesBetween` (`changedFilesAt` is already imported); add `commandFor, impactedComponents, isUnavailable, matchesComponent` from `./components.ts`. Delete the now-dead `command === undefined` block (the old `profile.commands[checkType]` lookup).
 
 - [ ] **Step 5: Run, expect pass**
 
 Run: `bun test test/dispatch/verify-routing.test.ts`
-Expected: PASS (all three: error-on-no-command, pass-on-real-command, untested-risk-signal).
+Expected: PASS (all four routing tests + the first-unit/mixed cases).
 
-- [ ] **Step 6: Full suite + lint**
+- [ ] **Step 6: Surface `untested-merge-risk` in the PR body (decision C — make the degrade visible)**
+
+The signal alone is not read by the resolver (intentionally — it must not gate). Make it visible where a human sees it: in `renderPrBody` (`handlers.ts`), list any `untested-merge-risk` signals for the ticket so the PR shows which stacks merged un-tested. Add to `renderPrBody`, after the work-unit lines:
+```typescript
+  const risks = listSignalsByTicket(db, ticket.id).filter((s) => s.signal_type === "untested-merge-risk");
+  const riskLines = risks.length > 0
+    ? ["", "⚠ Untested stacks (reviewer-only — no automated test gate):",
+       ...risks.map((s) => `- ${(JSON.parse(s.detail_json ?? "{}").component) ?? "?"}`)]
+    : [];
+```
+and splice `riskLines` into the returned body. Use the existing `listByTicket` from `../db/repos/ground-truth-signal.ts` (import as `listSignalsByTicket`). Add a test in `test/dispatch/verify-routing.test.ts` (or a `renderPrBody` test) asserting the body contains the untested component name when such a signal exists.
+
+- [ ] **Step 7: Full suite + lint**
 
 Run: `bun run typecheck && bun run lint && bun test`
 Expected: PASS. (Fix any fixture in `test/dispatch/handlers.test.ts`/`verify-e2e.test.ts` still on the old shape per Task 1 Step 6.)
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add src/dispatch/handlers.ts test/dispatch/verify-routing.test.ts
-git commit -m "feat(verify): per-component check routing; zero-runnable=error; untested-merge-risk signal"
+git commit -m "feat(verify): three-way per-component routing; absent=error; reviewer-only degrade + PR-visible untested-merge-risk"
 ```
 
 ---
@@ -683,13 +774,14 @@ git commit -m "feat(verify): integration runs all components' build/test + repoC
 ## Task 5: Implement Bash allowlist — scope to the unit's components, never unscoped
 
 **Files:**
+- Modify: `src/dispatch/tool-allowlists.ts` (`allowlistFor` — never return bare `Bash` for `implement`)
 - Modify: `src/dispatch/run-dispatch.ts:28-34` (`DispatchSpec`), `:84-93` (allowlist call)
 - Modify: `src/dispatch/handlers.ts` (`implement:dispatch` — compute + pass `runnerCommands`)
-- Test: `test/dispatch/implement-allowlist.test.ts` (create)
+- Test: `test/dispatch/implement-allowlist.test.ts` (create), `test/dispatch/tool-allowlists.test.ts` (extend)
 
 **Interfaces:**
 - Consumes: `scopedRunnersForFiles`, `realRunnerCommands` (Task 1); `parseFilesToTouch` (work-unit repo).
-- Produces: `DispatchSpec.runnerCommands?: string[]`; `run-dispatch` passes `spec.runnerCommands ?? []` to `allowlistFor` (no longer reads `profile.commands`).
+- Produces: `DispatchSpec.runnerCommands?: string[]`; `run-dispatch` passes `spec.runnerCommands ?? []` to `allowlistFor` (no longer reads `profile.commands`); `allowlistFor("implement:dispatch", {runnerCommands: []})` returns READ_ONLY+Write+Edit with **no `Bash`**.
 
 - [ ] **Step 1: Write failing test**
 
@@ -698,10 +790,20 @@ Create `test/dispatch/implement-allowlist.test.ts`. Build a profile with two com
 - does NOT include `Bash(vite build:*)`,
 - contains no bare `"Bash"` and no object/`[object Object]` artifact.
 Add a second case: a unit with empty `filesToTouch` → falls back to the scoped union (`cargo build`, `cargo test`, `vite build`), still no bare `"Bash"`.
+Add a THIRD case (the isolation hole the reviewers found): a profile whose every command is `{ unavailable: true }` (so `realRunnerCommands` returns `[]`) → `implement` `allowedTools` contains **no `Bash` token at all** (not bare `"Bash"`, not any `Bash(...)`), but still includes `Write`/`Edit`.
 
 - [ ] **Step 2: Run, expect failure** — FAIL (run-dispatch still reads `Object.values(profile.commands)`; no longer typechecks).
 
-- [ ] **Step 3: Thread `runnerCommands` through `DispatchSpec`**
+- [ ] **Step 3: Make `allowlistFor` never return bare `Bash` for `implement`**
+
+In `src/dispatch/tool-allowlists.ts`, the `implement:dispatch` entry currently contains a bare `"Bash"` that survives when `runnerCommands` is empty (`allowlistFor` returns `tools` unchanged). Change `allowlistFor` so that for `implement:dispatch`: when `runners.length > 0`, substitute `Bash(cmd:*)` per runner (as today); when `runners.length === 0`, **drop the `Bash` token entirely** (return the allowlist with no Bash — the agent can still `Write`/`Edit`). Concretely, in the `handlerKey === "implement:dispatch"` branch:
+```typescript
+    const bash = runners.map((c) => `Bash(${c}:*)`);
+    return tools.flatMap((t) => (t === "Bash" ? bash : [t])); // runners=[] ⇒ Bash removed, never bare
+```
+(The existing `runners.length > 0` guard that returned bare `tools` on empty must be removed — the `flatMap` above already yields no Bash when `runners` is empty.) Add a `tool-allowlists.test.ts` case: `allowlistFor("implement:dispatch", { runnerCommands: [] })` contains neither `"Bash"` nor any `"Bash("`-prefixed entry.
+
+- [ ] **Step 4: Thread `runnerCommands` through `DispatchSpec`**
 
 In `run-dispatch.ts`, add to `DispatchSpec`:
 ```typescript
@@ -715,25 +817,25 @@ Change the `allowedTools` call (lines 87-89) to:
 ```
 Remove the now-unused `Object.values(deps.profile.commands)`.
 
-- [ ] **Step 4: Compute the scoped runners in `implement:dispatch`**
+- [ ] **Step 5: Compute the scoped runners in `implement:dispatch`**
 
-In the `implement:dispatch` handler, build the scoped list before the dispatch and pass it on the spec:
+In the `implement:dispatch` handler — **after** the `base_sha` capture added in Task 3 Step 1, before `runAgentDispatch` — build the scoped list and pass it on the spec:
 ```typescript
     const filesToTouch = parseFilesToTouch(unit);
     const scoped = scopedRunnersForFiles(deps.profile.components, filesToTouch);
     const runnerCommands = scoped.length > 0 ? scoped : realRunnerCommands(deps.profile.components);
 ```
-Add `runnerCommands,` to the `DispatchSpec` object passed to `runAgentDispatch`. Add imports: `scopedRunnersForFiles, realRunnerCommands` from `./components.ts` (`parseFilesToTouch` is already imported).
+Add `runnerCommands,` to the `DispatchSpec` object passed to `runAgentDispatch`. Add imports: `scopedRunnersForFiles, realRunnerCommands` from `./components.ts` (`parseFilesToTouch` is already imported). (Note: when `runnerCommands` resolves to `[]` — an all-`unavailable` profile — Step 3 ensures the agent simply gets no Bash; never bare Bash.)
 
-- [ ] **Step 5: Run, expect pass** — `bun test test/dispatch/implement-allowlist.test.ts` → PASS.
+- [ ] **Step 6: Run, expect pass** — `bun test test/dispatch/implement-allowlist.test.ts test/dispatch/tool-allowlists.test.ts` → PASS.
 
-- [ ] **Step 6: Full suite** — `bun run typecheck && bun run lint && bun test` → PASS.
+- [ ] **Step 7: Full suite** — `bun run typecheck && bun run lint && bun test` → PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add src/dispatch/run-dispatch.ts src/dispatch/handlers.ts test/dispatch/implement-allowlist.test.ts
-git commit -m "fix(isolation): scope implement Bash allowlist to the unit's components, never unscoped"
+git add src/dispatch/tool-allowlists.ts src/dispatch/run-dispatch.ts src/dispatch/handlers.ts test/dispatch/implement-allowlist.test.ts test/dispatch/tool-allowlists.test.ts
+git commit -m "fix(isolation): scope implement Bash to the unit's components; never bare unscoped Bash"
 ```
 
 ---
@@ -764,11 +866,9 @@ test("implementVars sources test_command from the unit's impacted components", (
       { name: "fe", kind: "sveltekit", paths: ["src/**"], commands: { test: { unavailable: true } } },
     ],
   });
-  const vars = implementVars(
-    { ident: "ENG-1", title: "t" },
-    { seq: 1, kind: "backend", title: "x", files_to_touch: JSON.stringify(["src-tauri/lib.rs"]) },
-    profile,
-  );
+  // implementVars only reads seq/kind/title/files_to_touch; cast the partial literal to WorkUnitRow.
+  const unit = { seq: 1, kind: "backend", title: "x", files_to_touch: JSON.stringify(["src-tauri/lib.rs"]) } as unknown as import("../../src/db/repos/work-unit.ts").WorkUnitRow;
+  const vars = implementVars({ ident: "ENG-1", title: "t" }, unit, profile);
   expect(vars.test_command).toBe("cargo test");
 });
 ```
@@ -777,11 +877,11 @@ test("implementVars sources test_command from the unit's impacted components", (
 
 - [ ] **Step 3: Update `implementVars`**
 
-Change the signature's `unit` param to also carry `files_to_touch: string | null`, and replace `test_command`:
+Type the `unit` param as the full `WorkUnitRow` (the call site passes the full row — `handlers.ts:278`), so there is no narrowed-vs-full ambiguity, and replace `test_command`. Import `WorkUnitRow` from `../db/repos/work-unit.ts`:
 ```typescript
 export function implementVars(
   ticket: { ident: string; title: string | null },
-  unit: { seq: number; kind: string; title: string | null; files_to_touch: string | null },
+  unit: WorkUnitRow,
   profile: Profile,
   feedback = "",
 ): Record<string, string> {
@@ -829,4 +929,17 @@ git commit -m "feat(implement): source test_command from the unit's impacted com
 
 **Type consistency:** `CommandValue`, `Component`, `commandFor`/`impactedComponents`/`isUnavailable`/`matchesComponent`/`scopedRunnersForFiles`/`realRunnerCommands` are defined in Task 1 and used identically in Tasks 3/4/5/6. `setBaseSha`/`base_sha`/`changedFilesBetween` defined in Task 2, used in Task 3. `DispatchSpec.runnerCommands` defined and consumed in Task 5.
 
-**Cross-plan note:** between Plan 1 and Plan 2 the tree stays green because Task 1 Step 6 stopgaps `probe.ts` to emit `components: []` + `repoCommands: {}`. Plan 2 Task 7 replaces that stopgap with real detection.
+**Cross-plan note:** between Plan 1 and Plan 2 the tree stays green because Task 1 Step 6 bridges `probe.ts` to a single N=1 component wrapping `detectCommands` output (a real, functional single-stack profile — not a `components: []` stub). Plan 2 Task 7 replaces that bridge with real multi-component detection.
+
+---
+
+## Revision log (post plan review — 4 independent reviewers)
+
+- **CRITICAL — isolation never-bare-Bash now actually enforced (Task 5 Step 3, new):** `allowlistFor` is modified so `implement:dispatch` with empty runners drops the `Bash` token entirely (Write/Edit only) instead of falling back to bare `"Bash"`. Added the all-`unavailable`-profile test. (Reviewers: Adversarial F1/F2, Feasibility H3.)
+- **CRITICAL — silent-green fixed + reconciled with decision C (Task 3 Step 4 rewrite):** three-way per-component resolution — real→run, `{unavailable}`→reviewer-only degrade + PR-visible `untested-merge-risk`, absent/unknown→error. Fixes the mixed tested+untested behavioral case (no longer silent) and the single-untested case (now degrades, not errors). (Adversarial F3; Coherence #2 vocab.)
+- **HIGH — first-unit / empty-diff guard (Task 3 Step 4):** empty cumulative diff is a distinct diagnostic with a single-commit fallback, so a legitimate first unit can't misroute to Rule 4 and churn into a spurious escalation. Added first-unit + mixed-stack tests. (Adversarial F4/F5.)
+- **PR-visibility of the degrade (Task 3 Step 6, new):** `untested-merge-risk` is surfaced in `renderPrBody` (decision C promised PR-visible).
+- **Build-blockers (Task 1 Step 6):** migration now covers property-reads (`.commands`/`.schemaVersion`/`.testFilePattern`), migrates `probe.test.ts` in Plan 1, handles empty-command fixtures (they now error under the three-way), and replaces the non-typechecking stopgap with a real N=1 `probe.ts` bridge. (Feasibility C1/C2/C3.)
+- **Task 2:** extend (not create) `worktree.test.ts`; add `base_sha` to the explicit `COLS` constant (repo is not `SELECT *`). (Feasibility H1/H2.)
+- **Task 6:** `implementVars` param typed as full `WorkUnitRow` (removes the signature/call-site ambiguity). (Coherence #1.)
+- **Empirically validated (no change needed):** `Bun.Glob` co-located boundary holds (`src/**` ∌ `src-tauri/`), baseline green (409/0), `globalThis.prompt`/`extractSidecar({fence})`/`allowlistFor(one-arg)` all valid.
