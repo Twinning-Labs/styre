@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import * as steps from "../db/repos/workflow-step.ts";
+import { ParkSignal } from "./park-signal.ts";
 
 /** Thrown when a step is found 'running' — an in-flight or crash-interrupted run
  *  that recover() (control-loop §6.1) owns, not a fresh execution. */
@@ -110,6 +111,11 @@ export async function runStep(db: Database, params: RunStepParams): Promise<RunS
     }
     return { step: finished, result, replayed: false };
   } catch (err) {
+    if (err instanceof ParkSignal) {
+      // Leave the step 'running': advance() records the park and resume()/recover() re-dispatch it.
+      // Crucially, NOT markFailed → no attempt consumed (ENG-164: a quota pause is not a failure).
+      throw err;
+    }
     steps.markFailed(db, step.id, err);
     throw err;
   }

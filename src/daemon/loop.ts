@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
+import type { ParkInfo } from "../engine/park-signal.ts";
 import { advanceOneStep } from "./advance.ts";
 import { pollChecks } from "./poll-checks.ts";
 import { type ProjectorPorts, drainOutbox } from "./projector.ts";
@@ -28,7 +29,7 @@ export async function tick(
     ports?: ProjectorPorts;
     profile?: { checksSystem: string };
   },
-): Promise<{ advanced: number; blocked: boolean }> {
+): Promise<{ advanced: number; blocked: boolean; parked?: ParkInfo }> {
   const max = opts?.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
   const ids = readyTicketIds(db).slice(0, max);
   let advanced = 0;
@@ -36,9 +37,11 @@ export async function tick(
   // count it separately so the driver can terminate instead of spinning to the iteration cap
   // (control-loop §8-P1: never a dead end).
   let blocked = false;
+  let parked: ParkInfo | undefined;
   for (const id of ids) {
     const outcome = await advanceOneStep(db, id, registry, { config: opts?.config });
     if (outcome.kind === "blocked") blocked = true;
+    else if (outcome.kind === "parked") parked = outcome.park;
     else advanced++;
   }
   if (opts?.ports) {
@@ -47,5 +50,5 @@ export async function tick(
   if (opts?.profile) {
     await pollChecks(db, opts.profile, opts.ports?.checks);
   }
-  return { advanced, blocked };
+  return { advanced, blocked, parked };
 }
