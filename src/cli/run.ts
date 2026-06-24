@@ -15,7 +15,7 @@ import { getTicket } from "../db/repos/ticket.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import { loadProfile } from "../dispatch/profile.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
-import { dumpPark } from "./park.ts";
+import { finishRunResult, parkDir } from "./park.ts";
 
 export const runCommand = defineCommand({
   meta: { name: "run", description: "Ingest one ticket and drive it to PR-ready, then exit." },
@@ -59,20 +59,17 @@ export const runCommand = defineCommand({
       emit: stdoutSink,
     });
     console.error(out.summary); // human summary → stderr; stdout carries only NDJSON telemetry
+    const ident = getTicket(db, out.ticketId)?.ident ?? args.ticket;
     if (out.outcome === "parked" && out.park) {
-      const ident = getTicket(db, out.ticketId)?.ident ?? args.ticket;
-      const dir = dumpPark(db, dbPath, profile.slug, ident, out.park); // dumpPark closes db
+      // Print resume-hint before finishRunResult (which does dumpPark + sets exitCode).
+      // parkDir gives the path without touching the DB.
+      const dir = parkDir(profile.slug, ident);
       console.error(
         `Parked: ${out.park.cause}${out.park.resetAt ? ` (resets ${out.park.resetAt})` : ""}.\n` +
           `Resume with: styre run --resume ${ident} --profile ${args.profile}\n` +
           `Dump: ${dir}`,
       );
-      process.exitCode = 75;
-      return;
     }
-    db.close();
-    if (out.outcome === "blocked" || out.outcome === "no-progress") {
-      throw new Error(`run: ticket ${args.ticket} ended ${out.outcome}`);
-    }
+    finishRunResult(db, dbPath, profile.slug, ident, out);
   },
 });
