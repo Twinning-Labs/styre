@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { join } from "node:path";
+import { openDb } from "../../src/db/client.ts";
+import { migrate } from "../../src/db/migrate.ts";
 import { advanceBranchHead, resumeParkedTicket, runParkedTicket } from "../helpers/run-harness.ts";
 
 test("a moved HEAD refuses plain --resume with exit 65 and changes nothing", async () => {
@@ -36,4 +39,24 @@ test("park → resume → park → resume never exhausts maxAttempts (no attempt
   expect(third.result.outcome === "pr-ready" || third.result.outcome === "done").toBe(true);
   // And the run completed — a dispatch definitely happened
   expect(third.ran).toBe(true);
+
+  // ENG-164 invariant: open the dump DB and confirm parks burned no retry budget.
+  const dbPath = join(parked.dumpDir, "run.db");
+  migrate(dbPath);
+  const db = openDb(dbPath);
+  // The implement step should have attempt=1 (exactly one real successful execution, not 3).
+  const implStep = db
+    .query<{ attempt: number }, []>(
+      "SELECT attempt FROM workflow_step WHERE step_key LIKE 'implement%' ORDER BY id LIMIT 1",
+    )
+    .get();
+  expect(implStep).not.toBeNull();
+  expect(implStep?.attempt).toBe(1); // 2 parks (attempt-neutral) + 1 real run = attempt 1
+
+  // No escalation was raised: a human_resume signal means the failure policy fired on a park.
+  const escalation = db
+    .query<{ id: number }, []>("SELECT id FROM signal WHERE signal_type = 'human_resume' LIMIT 1")
+    .get();
+  expect(escalation).toBeNull(); // no escalation raised — retry budget was NOT exhausted
+  db.close();
 });

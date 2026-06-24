@@ -6,7 +6,7 @@ import { finishRunResult, parkDir, resumeRun } from "../../src/cli/park.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import { driveToTerminal } from "../../src/daemon/run-ticket.ts";
-import type { RunResult } from "../../src/daemon/run-ticket.ts";
+import type { RunOutcome, RunResult } from "../../src/daemon/run-ticket.ts";
 import { openDb } from "../../src/db/client.ts";
 import { migrate } from "../../src/db/migrate.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
@@ -133,10 +133,16 @@ export async function runParkedTicket(): Promise<ParkedRunResult> {
   }
 }
 
+/** A `RunOutcome` extended with `"refused"` for the exit-65 HEAD-guard refusal path.
+ *  The harness synthesises a minimal result from the observed process.exitCode; `"refused"` is
+ *  not a durable `RunOutcome` (it is never stored in the DB) but is a valid harness signal. */
+export type HarnessOutcome = RunOutcome | "refused";
+
 export interface ResumedRunResult {
   /** All prompts received by the FakeAgentRunner, in order. */
   prompts: string[];
-  result: RunResult;
+  /** Synthesised result from the observed exit code — use `exitCode` for precise refusal checks. */
+  result: Omit<RunResult, "outcome"> & { outcome: HarnessOutcome };
   /** The real observed process.exitCode after resumeRun completes. */
   exitCode: number;
   /** Whether any dispatch was actually attempted (FakeAgentRunner recorded at least one input). */
@@ -272,14 +278,15 @@ export async function resumeParkedTicket(
       },
     );
 
-    // resumeRun doesn't return RunResult directly; reconstruct a minimal RunResult for backward
+    // resumeRun doesn't return RunResult directly; reconstruct a minimal result for backward
     // compat with the test assertions.
     // exitCode 75 = parked again; 65 = refused (HEAD guard); 0 = pr-ready or inspect-no-op.
-    // NOTE: exit-65 maps to "refused" — NOT "done" — so callers can assert the real refusal.
+    // NOTE: exit-65 maps to "refused" — NOT a durable RunOutcome — use exitCode to assert it.
     const exitCode = process.exitCode;
-    const outcome = exitCode === 75 ? "parked" : exitCode === 65 ? "refused" : "pr-ready";
-    const result: RunResult = {
-      outcome: outcome as RunResult["outcome"],
+    const outcome: HarnessOutcome =
+      exitCode === 75 ? "parked" : exitCode === 65 ? "refused" : "pr-ready";
+    const result: Omit<RunResult, "outcome"> & { outcome: HarnessOutcome } = {
+      outcome,
       iterations: 0,
       stage: "released",
       status: "done",

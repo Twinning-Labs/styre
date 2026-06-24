@@ -3,7 +3,7 @@ import { DEFAULT_RUNTIME_CONFIG, type RuntimeConfig } from "../config/runtime-co
 import { appendEvent } from "../db/repos/event-log.ts";
 import { getTicket, setTicketStage, setTicketStatus } from "../db/repos/ticket.ts";
 import { setStatus as setUnitStatus } from "../db/repos/work-unit.ts";
-import { getByKey } from "../db/repos/workflow-step.ts";
+import { decrementAttempt, getByKey } from "../db/repos/workflow-step.ts";
 import { ParkSignal } from "../engine/park-signal.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { awaitSignal } from "../engine/signals.ts";
@@ -120,7 +120,14 @@ export async function advanceOneStep(
       return { kind: "stepped", stepKey: d.stepKey };
     } catch (err) {
       if (err instanceof ParkSignal) {
+        const parkedStep = getByKey(db, ticketId, d.stepKey);
         db.transaction(() => {
+          // Undo the attempt++ that markRunning applied: a quota pause is not a real attempt
+          // and must not consume retry budget (ENG-164). The step stays 'running' — recover()
+          // needs that status to reset it to pending on resume.
+          if (parkedStep) {
+            decrementAttempt(db, parkedStep.id);
+          }
           setTicketStatus(db, ticketId, "waiting");
           appendEvent(db, {
             ticketId,

@@ -43,7 +43,11 @@ test("a session-limit park sets status=waiting, leaves the step running, appends
   expect(result.outcome).toBe("parked");
   expect(result.park?.cause).toBe("session-limit");
   expect(getTicket(db, ticketId)?.status).toBe("waiting");
-  expect(listByStatus(db, "running").length).toBe(1); // interrupted step left running
+  const runningSteps = listByStatus(db, "running");
+  expect(runningSteps.length).toBe(1); // interrupted step left running
+  // ENG-164: a park must be attempt-neutral — markRunning's +1 is undone by decrementAttempt,
+  // so the step's attempt count reflects only real executions (0 here: no real attempt completed).
+  expect(runningSteps[0]?.attempt).toBe(0);
   expect(listEvents(db, ticketId).some((e) => e.kind === "parked")).toBe(true);
   db.close();
 });
