@@ -83,6 +83,39 @@ test("a session-limit cause throws ParkSignal and records dispatch outcome 'park
   db.close();
 });
 
+test("an out-of-credits cause throws ParkSignal and records dispatch outcome 'parked'", async () => {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-oc-${Date.now()}`);
+  const runner = new FakeAgentRunner(() => ({
+    completed: false,
+    exitCode: 1,
+    stdout: "some partial output",
+    stderr: "You are out of credits",
+    timedOut: false,
+    costUsd: null,
+    tokensIn: null,
+    tokensOut: null,
+    cause: "out-of-credits" as const,
+    resetAt: null,
+  }));
+  let signal: unknown;
+  try {
+    await runAgentDispatch(ctxFor(db, ticketId), deps(runner, repo, wt), {
+      handlerKey: "implement:dispatch",
+      template: "do {{ticket}}",
+      vars: { ticket: "ENG-1" },
+      postcondition: () => {},
+    });
+  } catch (e) {
+    signal = e;
+  }
+  expect(signal).toBeInstanceOf(ParkSignal);
+  expect((signal as ParkSignal).info.cause).toBe("out-of-credits");
+  expect(listByTicket(db, ticketId).at(-1)?.outcome).toBe("parked");
+  db.close();
+});
+
 test("a transient cause still throws a plain Error and records 'dispatch-failed'", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();

@@ -115,14 +115,28 @@ export interface ResumeArgs {
   inspect?: boolean;
 }
 
-/** The HEAD-guard baseline: the most recent operator-accepted head if any, else the last
- *  successful dispatch's branch head (the base the interrupted step started from). */
-function headBaseline(db: Database, ticketId: number): string | null {
+/** The HEAD-guard baseline: the most recent of {latest `accept-head:` resumed event, latest
+ *  dispatch row with a non-null branch_head_sha}, compared by `created_at` recency.
+ *
+ *  Rationale: after `--accept-head` records `accept-head:shaA`, the resumed dispatch commits and
+ *  advances the branch to shaB.  If the run parks again and the operator runs plain `--resume`,
+ *  the guard must compare against shaB (the sha Styre itself committed), not the stale shaA.
+ *  Whichever source is newer wins: a committed sha whose row is newer than the accept event means
+ *  Styre moved the branch itself → use the committed sha; an accept event that is newer means the
+ *  operator explicitly accepted a new HEAD → use the accepted sha. */
+export function headBaseline(db: Database, ticketId: number): string | null {
   const accepted = listEvents(db, ticketId)
     .filter((e) => e.kind === "resumed" && (e.reason?.startsWith("accept-head:") ?? false))
     .at(-1);
+  const dispatch = getLatestForTicket(db, ticketId);
+
+  if (accepted?.reason && dispatch?.branch_head_sha) {
+    // Both exist: pick the sha from whichever source has the later created_at.
+    const acceptedNewer = accepted.created_at >= dispatch.created_at;
+    return acceptedNewer ? accepted.reason.slice("accept-head:".length) : dispatch.branch_head_sha;
+  }
   if (accepted?.reason) return accepted.reason.slice("accept-head:".length);
-  return getLatestForTicket(db, ticketId)?.branch_head_sha ?? null;
+  return dispatch?.branch_head_sha ?? null;
 }
 
 export async function resumeRun(

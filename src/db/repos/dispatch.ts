@@ -166,7 +166,9 @@ export function getLatestForTicket(db: Database, ticketId: number): DispatchRow 
 }
 
 /** The worktree_path from the most recent dispatch row for `ticketId` that has a non-null
- *  worktree_path. Used by resumeRun to clean up the stale parked worktree before re-dispatch. */
+ *  worktree_path. Used by resumeRun to clean up the stale parked worktree before re-dispatch.
+ *  NOTE: orders by `id DESC` (latest row with a worktree_path) intentionally — distinct from
+ *  `getLatestForTicket`'s `seq DESC` + non-null branch_head_sha filter. */
 export function getLatestWorktreePath(db: Database, ticketId: number): string | null {
   return (
     db

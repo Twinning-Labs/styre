@@ -41,7 +41,8 @@ export async function tick(
   for (const id of ids) {
     const outcome = await advanceOneStep(db, id, registry, { config: opts?.config });
     if (outcome.kind === "blocked") blocked = true;
-    else if (outcome.kind === "parked") parked = outcome.park;
+    else if (outcome.kind === "parked")
+      parked = outcome.park; // `styre run` is single-ticket so at most one park per drive is possible; multi-ticket daemon park handling is future work
     else advanced++;
   }
   if (opts?.ports) {
