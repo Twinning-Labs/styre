@@ -1,5 +1,5 @@
 import { agentEnv } from "../agent-env.ts";
-import type { AgentRunInput, AgentRunResult, AgentRunner } from "../runner.ts";
+import type { AgentRunInput, AgentRunResult, AgentRunner, FailureCause } from "../runner.ts";
 
 // agentEnv (the cred scrub) is shared with the verify sink (run-command.ts); see ../agent-env.ts.
 export { agentEnv } from "../agent-env.ts";
@@ -43,6 +43,24 @@ export function parseClaudeJson(stdout: string): {
   }
 }
 
+/** Map a Claude `claude -p` death to a provider-neutral cause (ENG-164). The ONLY place that
+ *  knows Claude's marker strings. A session-limit death is a clean non-zero exit carrying the
+ *  marker on stderr/stdout, so both streams are searched. */
+export function classifyFailure(
+  stderr: string,
+  stdout: string,
+): { cause: FailureCause; resetAt: string | null } {
+  const text = `${stderr}\n${stdout}`;
+  if (/hit your session limit|session limit|usage limit reached/i.test(text)) {
+    const m = text.match(/resets?\s+([^\n]+)/i);
+    return { cause: "session-limit", resetAt: m ? m[1].trim() : null };
+  }
+  if (/out of credit|insufficient credit|credit balance is too low|billing/i.test(text)) {
+    return { cause: "out-of-credits", resetAt: null };
+  }
+  return { cause: "transient", resetAt: null };
+}
+
 /** The Claude adapter: spawn `<command> -p …` in the worktree, feed the prompt on stdin,
  *  capture stdout/exit under a timeout, parse usage. The ONLY place that knows Claude's CLI.
  *  Exercised by the manual smoke (Task 7), where flags + JSON fields are confirmed.
@@ -67,6 +85,8 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
         tokensOut: null,
         cacheRead: null,
         cacheCreate: null,
+        cause: "transient",
+        resetAt: null,
       });
       const proc = Bun.spawn([command, ...buildClaudeArgs(input)], {
         cwd: input.cwd,
@@ -94,7 +114,20 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
           new Response(proc.stderr).text(),
         ]);
         const usage = parseClaudeJson(stdout);
-        return { completed: exitCode === 0, exitCode, stdout, stderr, timedOut: false, ...usage };
+        if (exitCode === 0) {
+          return { completed: true, exitCode, stdout, stderr, timedOut: false, ...usage };
+        }
+        const { cause, resetAt } = classifyFailure(stderr, stdout);
+        return {
+          completed: false,
+          exitCode,
+          stdout,
+          stderr,
+          timedOut: false,
+          ...usage,
+          cause,
+          resetAt,
+        };
       } catch (err) {
         return transportFailure(String(err), false);
       } finally {
