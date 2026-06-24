@@ -164,3 +164,15 @@ export function getLatestForTicket(db: Database, ticketId: number): DispatchRow 
       .get(ticketId) ?? null
   );
 }
+
+/** The worktree_path from the most recent dispatch row for `ticketId` that has a non-null
+ *  worktree_path. Used by resumeRun to clean up the stale parked worktree before re-dispatch. */
+export function getLatestWorktreePath(db: Database, ticketId: number): string | null {
+  return (
+    db
+      .query<{ worktree_path: string }, [number]>(
+        `SELECT worktree_path FROM dispatch WHERE ticket_id = ? AND worktree_path IS NOT NULL ORDER BY id DESC LIMIT 1`,
+      )
+      .get(ticketId)?.worktree_path ?? null
+  );
+}
