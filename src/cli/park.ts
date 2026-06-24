@@ -16,8 +16,10 @@ import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { stateDir } from "../config/paths.ts";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
+import type { ProjectorPorts } from "../daemon/projector.ts";
 import { realRecoverDeps, recover } from "../daemon/recover.ts";
 import { driveToTerminal, formatRunSummary } from "../daemon/run-ticket.ts";
+import type { StepRegistry } from "../daemon/step-registry.ts";
 import { openDb } from "../db/client.ts";
 import { migrate } from "../db/migrate.ts";
 import { getLatestForTicket, getLatestWorktreePath } from "../db/repos/dispatch.ts";
@@ -28,8 +30,6 @@ import { listByStatus } from "../db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { branchHeadSha, removeWorktree } from "../dispatch/worktree.ts";
-import type { ProjectorPorts } from "../daemon/projector.ts";
-import type { StepRegistry } from "../daemon/step-registry.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
 
@@ -198,8 +198,7 @@ export async function resumeRun(
 
   recover(db, realRecoverDeps()); // resets the interrupted 'running' step → pending
 
-  const ports: ProjectorPorts =
-    deps?.ports ?? makeProjectorPorts(runtimeConfig, profile);
+  const ports: ProjectorPorts = deps?.ports ?? makeProjectorPorts(runtimeConfig, profile);
 
   const registry: StepRegistry = deps?.buildRegistry
     ? deps.buildRegistry(resumeContext)

@@ -171,7 +171,7 @@ export function getLatestWorktreePath(db: Database, ticketId: number): string | 
   return (
     db
       .query<{ worktree_path: string }, [number]>(
-        `SELECT worktree_path FROM dispatch WHERE ticket_id = ? AND worktree_path IS NOT NULL ORDER BY id DESC LIMIT 1`,
+        "SELECT worktree_path FROM dispatch WHERE ticket_id = ? AND worktree_path IS NOT NULL ORDER BY id DESC LIMIT 1",
       )
       .get(ticketId)?.worktree_path ?? null
   );

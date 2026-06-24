@@ -164,9 +164,7 @@ export async function resumeParkedTicket(
   const dbPath = join(parked.dumpDir, "run.db");
   migrate(dbPath);
   const db = openDb(dbPath);
-  const ticketRow = db
-    .query<{ id: number }, []>("SELECT id FROM ticket ORDER BY id LIMIT 1")
-    .get();
+  const ticketRow = db.query<{ id: number }, []>("SELECT id FROM ticket ORDER BY id LIMIT 1").get();
   if (!ticketRow) throw new Error("resumeParkedTicket: no ticket in dump DB");
   const ticketId = ticketRow.id;
   const projectRow = db
@@ -253,7 +251,8 @@ export async function resumeParkedTicket(
 
     // resumeRun doesn't return RunResult directly; reconstruct a minimal RunResult for backward
     // compat with the test assertions. exitCode 75 = parked again; 65 = refused; 0 = pr-ready.
-    const outcome = process.exitCode === 75 ? "parked" : process.exitCode === 65 ? "done" : "pr-ready";
+    const outcome =
+      process.exitCode === 75 ? "parked" : process.exitCode === 65 ? "done" : "pr-ready";
     const result: RunResult = {
       outcome: outcome as RunResult["outcome"],
       iterations: 0,
