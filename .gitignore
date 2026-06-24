@@ -150,3 +150,6 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+
+# subagent-driven-development scratch (ledger, briefs, reports, review packages)
+.superpowers/
