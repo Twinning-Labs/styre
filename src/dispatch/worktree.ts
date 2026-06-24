@@ -41,6 +41,15 @@ export function removeWorktree(repoPath: string, worktreePath: string): void {
   git(["worktree", "remove", "--force", worktreePath], repoPath);
 }
 
+/** The current commit sha of `branch` in `repoPath`, or null if the branch/ref is absent. */
+export function branchHeadSha(repoPath: string, branch: string): string | null {
+  try {
+    return git(["rev-parse", branch], repoPath);
+  } catch {
+    return null;
+  }
+}
+
 /** The files changed by commit `sha` (its diff vs its parent). Read-only; used by the verify
  *  gates to inspect what a coding attempt actually touched. */
 export function changedFilesAt(sha: string, worktreePath: string): string[] {
