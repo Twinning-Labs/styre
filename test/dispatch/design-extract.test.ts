@@ -25,11 +25,26 @@ function gitRepo(): string {
   return root;
 }
 
-function registryFor(repo: string, runner: FakeAgentRunner) {
+const ABSENT_RC = {
+  topology: { type: "cli" },
+  data: { presence: "absent" },
+  caching: { presence: "absent" },
+  observability: { presence: "absent" },
+  configSecrets: { presence: "absent" },
+  documentation: { presence: "absent" },
+  releasePackaging: { mechanism: "none" },
+};
+
+function registryFor(repo: string, runner: FakeAgentRunner, rc: unknown = ABSENT_RC) {
   return buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({ slug: "demo", targetRepo: repo, commands: { test: "bun test" } }),
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      commands: { test: "bun test" },
+      runtimeContext: rc,
+    }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wtroot-")),
   });
 }
@@ -122,6 +137,88 @@ test("design:extract fails the step when the sidecar is absent (transport failur
   db.close();
   expect(step?.status).not.toBe("succeeded");
   expect(units.length).toBe(0);
+});
+
+test("design:extract fails the step when a flagged CDOT section is unaddressed", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  readyForExtract(db, ticketId);
+  const runner = new FakeAgentRunner(() => ({
+    completed: true,
+    exitCode: 0,
+    stdout: sidecar(
+      JSON.stringify({
+        units: [
+          {
+            seq: 1,
+            kind: "backend",
+            title: "x",
+            description: "d",
+            behavioral: false,
+            test_plan: null,
+            files_to_touch: [],
+            verify_check_types: [],
+            depends_on: [],
+          },
+        ],
+        cdotImpact: { data: { applies: false, analysis: "" } }, // data flagged present, but empty
+      }),
+    ),
+    stderr: "",
+    timedOut: false,
+    costUsd: null,
+    tokensIn: null,
+    tokensOut: null,
+  }));
+  const rc = { ...ABSENT_RC, data: { presence: "present", detail: "pg" } };
+  await advanceOneStep(db, ticketId, registryFor(repo, runner, rc));
+  const step = getByKey(db, ticketId, "design:extract");
+  const units = listByTicket(db, ticketId);
+  db.close();
+  expect(step?.status).not.toBe("succeeded");
+  expect(units.length).toBe(0); // gate runs before insert → nothing persisted
+});
+
+test("design:extract sets needs_docs when documentation impact applies", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  readyForExtract(db, ticketId);
+  const runner = new FakeAgentRunner(() => ({
+    completed: true,
+    exitCode: 0,
+    stdout: sidecar(
+      JSON.stringify({
+        units: [
+          {
+            seq: 1,
+            kind: "backend",
+            title: "x",
+            description: "d",
+            behavioral: true,
+            test_plan: "t",
+            files_to_touch: ["src/a.ts"],
+            verify_check_types: ["test"],
+            depends_on: [],
+          },
+        ],
+        cdotImpact: { documentation: { applies: true, analysis: "update README" } },
+      }),
+    ),
+    stderr: "",
+    timedOut: false,
+    costUsd: null,
+    tokensIn: null,
+    tokensOut: null,
+  }));
+  // ABSENT_RC → docs absent → gate inert; applies:true still flips needs_docs.
+  await advanceOneStep(db, ticketId, registryFor(repo, runner));
+  const ticket = getTicket(db, ticketId);
+  const step = getByKey(db, ticketId, "design:extract");
+  db.close();
+  expect(step?.status).toBe("succeeded");
+  expect(ticket?.needs_docs).toBe(1);
 });
 
 test("design:extract fails the step when completeness checks fail (behavioral, no test_plan)", async () => {

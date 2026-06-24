@@ -20,6 +20,26 @@ For each work unit decide:
   `["lint"]`, `["build"]`. Behavioral units must include `"test"`.
 - **depends_on**: seqs of earlier units that must be verified before this one.
 
+## Runtime context (from the project profile — treat as ground truth)
+
+- Topology: {{runtime_topology}} — {{runtime_topology_detail}}
+- Data/persistence: {{runtime_data_presence}} — {{runtime_data_detail}} (migration tool: {{runtime_data_migration_tool}})
+- Caching: {{runtime_caching_presence}} — {{runtime_caching_detail}}
+- Observability: {{runtime_observability_presence}} — {{runtime_observability_detail}}
+- Config/secrets: {{runtime_config_secrets_presence}} — {{runtime_config_secrets_detail}}
+- Documentation: {{runtime_documentation_presence}} — {{runtime_documentation_detail}}
+
+For every section flagged `present` or `unknown`, you MUST fill the matching `cdotImpact` entry
+with a non-empty `analysis` (state "N/A — <reason>" if it genuinely does not apply). If your plan
+changes the database schema, set `cdotImpact.data.schemaChange: true` AND include a dedicated
+migration work unit (kind `migration` or `data`) ordered before the units that use the new schema.
+Add a telemetry step to behavioral units and map each external boundary's failure mode to a test.
+
+Documentation is soft-gated: even when it is flagged `absent`, still consider whether a
+significant change warrants a doc note (README/changelog), and if so set
+`cdotImpact.documentation.applies: true` with a short `analysis`. This is a nudge, not a
+requirement — a trivial change legitimately leaves it `false`.
+
 Emit your answer as a single fenced block, exactly:
 
 ```styre-sidecar
@@ -36,6 +56,13 @@ Emit your answer as a single fenced block, exactly:
       "verify_check_types": ["test"],
       "depends_on": []
     }
-  ]
+  ],
+  "cdotImpact": {
+    "data": { "applies": false, "analysis": "", "schemaChange": false },
+    "caching": { "applies": false, "analysis": "" },
+    "observability": { "applies": false, "analysis": "" },
+    "configSecrets": { "applies": false, "analysis": "" },
+    "documentation": { "applies": false, "analysis": "" }
+  }
 }
 ```

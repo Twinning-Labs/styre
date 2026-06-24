@@ -12,7 +12,7 @@ import { insertSignal, listByUnit } from "../db/repos/ground-truth-signal.ts";
 import { getProject } from "../db/repos/project.ts";
 import { enqueue } from "../db/repos/projection-outbox.ts";
 import { insertFinding } from "../db/repos/review-finding.ts";
-import { setTicketTrack } from "../db/repos/ticket.ts";
+import { setNeedsDocs, setTicketTrack } from "../db/repos/ticket.ts";
 import {
   getById as getUnit,
   insertWorkUnit,
@@ -22,7 +22,7 @@ import {
 } from "../db/repos/work-unit.ts";
 import { runCommand } from "../util/run-command.ts";
 import { ComplexityGradeSchema } from "./complexity-schema.ts";
-import { ExtractOutputSchema, validateExtraction } from "./extract-schema.ts";
+import { ExtractOutputSchema, validateCdotImpact, validateExtraction } from "./extract-schema.ts";
 import { implementFeedback } from "./feedback.ts";
 import type { Profile } from "./profile.ts";
 import {
@@ -161,6 +161,10 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     if (errors.length > 0) {
       throw new Error(`design:extract completeness failed: ${errors.join("; ")}`);
     }
+    const cdotErrors = validateCdotImpact(parsed.value, deps.profile);
+    if (cdotErrors.length > 0) {
+      throw new Error(`design:extract CDOT gate failed: ${cdotErrors.join("; ")}`);
+    }
 
     for (const u of parsed.value.units) {
       insertWorkUnit(ctx.db, {
@@ -175,6 +179,9 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         verifyCheckTypes: u.verify_check_types,
         dependsOn: u.depends_on,
       });
+    }
+    if (parsed.value.cdotImpact.documentation.applies) {
+      setNeedsDocs(ctx.db, ctx.ticket.id, 1);
     }
     return { units: parsed.value.units.length };
   });

@@ -27,11 +27,26 @@ function gitRepo(): string {
   return root;
 }
 
+const ABSENT_RC = {
+  topology: { type: "cli" },
+  data: { presence: "absent" },
+  caching: { presence: "absent" },
+  observability: { presence: "absent" },
+  configSecrets: { presence: "absent" },
+  documentation: { presence: "absent" },
+  releasePackaging: { mechanism: "none" },
+};
+
 function registryFor(repo: string, runner: FakeAgentRunner) {
   return buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({ slug: "demo", targetRepo: repo, commands: { test: "bun test" } }),
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      commands: { test: "bun test" },
+      runtimeContext: ABSENT_RC,
+    }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-drewt-")),
   });
 }

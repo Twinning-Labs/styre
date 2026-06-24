@@ -8,6 +8,27 @@ import implementTemplate from "../../prompts/implement.md" with { type: "text" }
 import reviewTemplate from "../../prompts/review.md" with { type: "text" };
 import type { Profile } from "./profile.ts";
 
+function runtimeVars(profile: Profile): Record<string, string> {
+  const rc = profile.runtimeContext;
+  return {
+    runtime_topology: rc.topology.type,
+    runtime_topology_detail: rc.topology.detail,
+    runtime_data_presence: rc.data.presence,
+    runtime_data_detail: rc.data.detail,
+    runtime_data_migration_tool: rc.data.migrationTool ?? "",
+    runtime_caching_presence: rc.caching.presence,
+    runtime_caching_detail: rc.caching.detail,
+    runtime_observability_presence: rc.observability.presence,
+    runtime_observability_detail: rc.observability.detail,
+    runtime_config_secrets_presence: rc.configSecrets.presence,
+    runtime_config_secrets_detail: rc.configSecrets.detail,
+    runtime_documentation_presence: rc.documentation.presence,
+    runtime_documentation_detail: rc.documentation.detail,
+    runtime_release_mechanism: rc.releasePackaging.mechanism,
+    runtime_release_detail: rc.releasePackaging.detail,
+  };
+}
+
 export const DESIGN_TEMPLATE = designTemplate;
 export const DESIGN_REVIEW_TEMPLATE = designReviewTemplate;
 export const DESIGN_COMPLEXITY_GRADE_TEMPLATE = complexityGradeTemplate;
@@ -24,6 +45,7 @@ export function extractVars(
     title: ticket.title ?? "",
     slug: profile.slug,
     ...profile.promptVars,
+    ...runtimeVars(profile),
   };
 }
 
@@ -38,6 +60,7 @@ export function designVars(
     slug: profile.slug,
     stack: "",
     ...profile.promptVars,
+    ...runtimeVars(profile),
   };
 }
 

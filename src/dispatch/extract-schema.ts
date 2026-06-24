@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { Profile } from "./profile.ts";
 
 /** One work-unit as proposed by design:extract (control-loop §3a). The daemon assigns nothing
  *  the agent can fake: completeness is checked deterministically by validateExtraction. */
@@ -16,11 +17,83 @@ export const ExtractedWorkUnitSchema = z.object({
 
 export type ExtractedWorkUnit = z.infer<typeof ExtractedWorkUnitSchema>;
 
+const _ImpactBase = z.object({
+  applies: z.boolean().default(false),
+  analysis: z.string().default(""),
+});
+const ImpactSchema = _ImpactBase.default(_ImpactBase.parse({}));
+
+const _DataImpactBase = z.object({
+  applies: z.boolean().default(false),
+  analysis: z.string().default(""),
+  schemaChange: z.boolean().default(false),
+});
+const DataImpactSchema = _DataImpactBase.default(_DataImpactBase.parse({}));
+
+const _CdotImpactBase = z.object({
+  data: DataImpactSchema,
+  caching: ImpactSchema,
+  observability: ImpactSchema,
+  configSecrets: ImpactSchema,
+  documentation: ImpactSchema,
+});
+export const CdotImpactSchema = _CdotImpactBase.default(_CdotImpactBase.parse({}));
+
 export const ExtractOutputSchema = z.object({
   units: z.array(ExtractedWorkUnitSchema),
+  cdotImpact: CdotImpactSchema,
 });
 
 export type ExtractOutput = z.infer<typeof ExtractOutputSchema>;
+
+const MIGRATION_KINDS = new Set(["migration", "data", "db", "schema"]);
+
+/** A work unit whose kind denotes a schema/data migration. Kind is open text (DS-5); this is a
+ *  recognizer, not an enum. */
+export function isMigrationKind(kind: string): boolean {
+  return MIGRATION_KINDS.has(kind.trim().toLowerCase());
+}
+
+/** Profile-consistency gate (S1b postcondition, sibling to validateExtraction). Enforces only
+ *  state-computable facts: flagged-section coverage + migration-unit ordering. Never grades
+ *  analysis quality. Returns human-readable errors; empty array = pass. Never throws. */
+export function validateCdotImpact(output: ExtractOutput, profile: Profile): string[] {
+  const errors: string[] = [];
+  const rc = profile.runtimeContext;
+  const ci = output.cdotImpact;
+
+  // Coverage: present|unknown ⇒ must be addressed (non-empty analysis). absent ⇒ not forced.
+  const sections: Array<[string, "present" | "absent" | "unknown", { analysis: string }]> = [
+    ["data", rc.data.presence, ci.data],
+    ["caching", rc.caching.presence, ci.caching],
+    ["observability", rc.observability.presence, ci.observability],
+    ["configSecrets", rc.configSecrets.presence, ci.configSecrets],
+    ["documentation", rc.documentation.presence, ci.documentation],
+  ];
+  for (const [name, presence, impact] of sections) {
+    if ((presence === "present" || presence === "unknown") && impact.analysis.trim() === "") {
+      errors.push(
+        `cdotImpact.${name} must be addressed (profile flags it '${presence}') but analysis is empty`,
+      );
+    }
+  }
+
+  // Migration ordering: schemaChange ⇒ a migration unit exists and precedes all domain units.
+  if (ci.data.schemaChange) {
+    const migrationSeqs = output.units.filter((u) => isMigrationKind(u.kind)).map((u) => u.seq);
+    if (migrationSeqs.length === 0) {
+      errors.push(
+        "cdotImpact.data.schemaChange is true but no migration work unit (kind: migration/data/db/schema) exists",
+      );
+    } else {
+      const domainSeqs = output.units.filter((u) => !isMigrationKind(u.kind)).map((u) => u.seq);
+      if (domainSeqs.length > 0 && Math.min(...migrationSeqs) > Math.min(...domainSeqs)) {
+        errors.push("migration work unit must be ordered before domain-logic units (lower seq)");
+      }
+    }
+  }
+  return errors;
+}
 
 /** Deterministic completeness gate (S1b postcondition). Returns human-readable errors;
  *  an empty array means the extraction is well-formed. Never throws. */
