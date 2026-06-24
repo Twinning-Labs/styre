@@ -5,6 +5,7 @@ import { modelForTier } from "../config/agent-config.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../db/repos/dispatch.ts";
 import { setPid } from "../db/repos/workflow-step.ts";
+import { ParkSignal } from "../engine/park-signal.ts";
 import { nowUtc } from "../util/time.ts";
 import type { Profile } from "./profile.ts";
 import { renderPrompt } from "./render-prompt.ts";
@@ -78,6 +79,17 @@ export async function runAgentDispatch(
   });
 
   if (!result.completed || result.timedOut) {
+    // A timeout never carries a marker (no drained output) → always transient.
+    const cause = result.timedOut ? "transient" : (result.cause ?? "transient");
+    if (cause === "session-limit" || cause === "out-of-credits") {
+      completeDispatch(ctx.db, inserted.id, { outcome: "parked", endedAt: nowUtc() });
+      throw new ParkSignal({
+        cause,
+        resetAt: result.resetAt ?? null,
+        dispatchId: did,
+        transcript: result.stdout ?? "",
+      });
+    }
     completeDispatch(ctx.db, inserted.id, { outcome: "dispatch-failed", endedAt: nowUtc() });
     throw new Error(
       `dispatch ${did} transport failure (exit ${result.exitCode}, timedOut=${result.timedOut})`,
