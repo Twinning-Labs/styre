@@ -53,6 +53,7 @@ export interface RegistryDeps {
   profile: Profile;
   worktreeRoot: string;
   timeoutMs?: number;
+  resumeContext?: { stepKey: string; transcript: string };
 }
 
 const DESIGN_TIMEOUT_MS = 60 * 60 * 1000;
@@ -97,6 +98,7 @@ function depsFor(ctx: HandlerContext, deps: RegistryDeps, timeoutMs: number): Di
     worktreePath: join(deps.worktreeRoot, ctx.ticket.ident),
     branch: branchNameFor(ctx.ticket),
     timeoutMs,
+    resumeContext: deps.resumeContext,
   };
 }
 

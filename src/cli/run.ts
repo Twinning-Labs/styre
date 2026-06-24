@@ -20,12 +20,38 @@ import { finishRunResult, parkDir } from "./park.ts";
 export const runCommand = defineCommand({
   meta: { name: "run", description: "Ingest one ticket and drive it to PR-ready, then exit." },
   args: {
-    ticket: { type: "positional", required: true, description: "Ticket ref (e.g. ENG-123)" },
+    ticket: { type: "positional", required: false, description: "Ticket ref (e.g. ENG-123)" },
     profile: { type: "string", required: true, description: "Path to the project-profile JSON" },
     config: { type: "string", description: "Path to a runtime config.json (optional)" },
     db: { type: "string", description: "DB path (default: a fresh per-run temp DB)" },
+    resume: { type: "string", description: "Resume a parked run by ticket ident" },
+    "accept-head": {
+      type: "boolean",
+      description: "Resume even though the branch HEAD moved (drops carryover)",
+    },
+    inspect: { type: "boolean", description: "Print resume diagnostics and exit without running" },
   },
   async run({ args }) {
+    const profile = loadProfile(args.profile);
+    const runtimeConfig =
+      args.config && args.config.length > 0
+        ? RuntimeConfigSchema.parse(JSON.parse(readFileSync(args.config, "utf8")))
+        : DEFAULT_RUNTIME_CONFIG;
+
+    if (args.resume && args.resume.length > 0) {
+      const { resumeRun } = await import("./park.ts");
+      await resumeRun(
+        { resume: args.resume, acceptHead: args["accept-head"], inspect: args.inspect },
+        profile,
+        runtimeConfig,
+      );
+      return;
+    }
+
+    if (!args.ticket || args.ticket.length === 0) {
+      throw new Error("run: --ticket is required when not using --resume");
+    }
+
     const dbPath =
       args.db && args.db.length > 0
         ? args.db
@@ -33,12 +59,6 @@ export const runCommand = defineCommand({
     migrate(dbPath);
     const db = openDb(dbPath);
     recover(db, realRecoverDeps());
-
-    const profile = loadProfile(args.profile);
-    const runtimeConfig =
-      args.config && args.config.length > 0
-        ? RuntimeConfigSchema.parse(JSON.parse(readFileSync(args.config, "utf8")))
-        : DEFAULT_RUNTIME_CONFIG;
 
     const ports = makeProjectorPorts(runtimeConfig, profile);
     const runner = selectAgentRunner(DEFAULT_AGENT_CONFIG, { claude: () => claudeAgentRunner() });

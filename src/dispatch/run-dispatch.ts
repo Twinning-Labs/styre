@@ -20,6 +20,9 @@ export interface DispatchDeps {
   worktreePath: string;
   branch: string;
   timeoutMs: number;
+  /** Set only when resuming a parked run: the interrupted step's prior partial output, injected
+   *  as an advisory (non-authoritative) continuity hint into THAT step's re-dispatch prompt. */
+  resumeContext?: { stepKey: string; transcript: string };
 }
 
 export interface DispatchSpec {
@@ -29,6 +32,12 @@ export interface DispatchSpec {
   loopback?: boolean;
   postcondition: (args: { worktreePath: string; changed: boolean; sha: string }) => void;
 }
+
+const CARRYOVER_PREFIX =
+  "A previous attempt was interrupted (quota/billing pause). Below is its partial output, for " +
+  "context only — it may be incomplete or stale. The repository and journal are the source of " +
+  "truth; verify the current state before redoing or relying on anything it claims to have done.";
+const CARRYOVER_SUFFIX = "--- end of interrupted attempt's partial output ---";
 
 function dispatchId(ident: string, seq: number): string {
   return `${ident}-d${String(seq).padStart(4, "0")}`;
@@ -47,6 +56,11 @@ export async function runAgentDispatch(
   const rendered = renderPrompt(spec.template, spec.vars);
   if (!rendered.ok) {
     throw new Error(`CL-PROFILE: unresolved prompt vars: ${rendered.missing.join(", ")}`);
+  }
+
+  let prompt = rendered.prompt;
+  if (deps.resumeContext && deps.resumeContext.stepKey === ctx.step.step_key) {
+    prompt = `${CARRYOVER_PREFIX}\n\n${deps.resumeContext.transcript}\n\n${CARRYOVER_SUFFIX}\n\n${rendered.prompt}`;
   }
 
   ensureWorktree(deps.repoPath, deps.branch, deps.worktreePath);
@@ -68,7 +82,7 @@ export async function runAgentDispatch(
   });
 
   const result = await deps.runner.run({
-    prompt: rendered.prompt,
+    prompt,
     model,
     allowedTools: allowlistFor(spec.handlerKey, {
       runnerCommands: Object.values(deps.profile.commands),
