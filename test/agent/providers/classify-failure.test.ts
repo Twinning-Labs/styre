@@ -23,3 +23,9 @@ test("a marker appearing on stdout (not stderr) is still classified", () => {
     "session-limit",
   );
 });
+
+test("session-limit with no reset text yields resetAt null", () => {
+  const r = classifyFailure("You've hit your session limit", "");
+  expect(r.cause).toBe("session-limit");
+  expect(r.resetAt).toBeNull();
+});

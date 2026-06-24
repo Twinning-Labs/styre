@@ -55,7 +55,7 @@ export function classifyFailure(
     const m = text.match(/resets?\s+([^\n]+)/i);
     return { cause: "session-limit", resetAt: m ? m[1].trim() : null };
   }
-  if (/out of credit|insufficient credit|credit balance is too low|billing/i.test(text)) {
+  if (/out of credit|insufficient credit|credit balance is too low/i.test(text)) {
     return { cause: "out-of-credits", resetAt: null };
   }
   return { cause: "transient", resetAt: null };
