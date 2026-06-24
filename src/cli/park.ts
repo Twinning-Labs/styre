@@ -20,14 +20,16 @@ import { realRecoverDeps, recover } from "../daemon/recover.ts";
 import { driveToTerminal, formatRunSummary } from "../daemon/run-ticket.ts";
 import { openDb } from "../db/client.ts";
 import { migrate } from "../db/migrate.ts";
-import { getLatestForTicket } from "../db/repos/dispatch.ts";
+import { getLatestForTicket, getLatestWorktreePath } from "../db/repos/dispatch.ts";
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { getProject } from "../db/repos/project.ts";
 import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
 import { listByStatus } from "../db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
-import { branchHeadSha } from "../dispatch/worktree.ts";
+import { branchHeadSha, removeWorktree } from "../dispatch/worktree.ts";
+import type { ProjectorPorts } from "../daemon/projector.ts";
+import type { StepRegistry } from "../daemon/step-registry.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
 
@@ -122,6 +124,12 @@ export async function resumeRun(
   args: ResumeArgs,
   profile: Profile,
   runtimeConfig: RuntimeConfig,
+  deps?: {
+    buildRegistry?: (
+      resumeContext: { stepKey: string; transcript: string } | undefined,
+    ) => StepRegistry;
+    ports?: ProjectorPorts;
+  },
 ): Promise<void> {
   const dir = parkDir(profile.slug, args.resume);
   const dbPath = join(dir, "run.db");
@@ -159,6 +167,20 @@ export async function resumeRun(
     return;
   }
 
+  // --- Stale-worktree cleanup (Fix B) ---
+  // The parked run left its worktree checked out. git will refuse `worktree add -B <branch>`
+  // if the branch is already checked out in another worktree. Remove it best-effort.
+  const staleWorktreePath = getLatestWorktreePath(db, ticketId);
+  if (staleWorktreePath) {
+    try {
+      removeWorktree(project.target_repo, staleWorktreePath);
+    } catch {
+      // Already gone / never registered — fine; cleanup must not abort the resume.
+    }
+    // Belt-and-suspenders: prune dangling worktree refs in git's internal tracking.
+    Bun.spawnSync(["git", "worktree", "prune"], { cwd: project.target_repo });
+  }
+
   setTicketStatus(db, ticketId, "active");
   let resumeContext: { stepKey: string; transcript: string } | undefined;
   if (moved && args.acceptHead) {
@@ -176,15 +198,18 @@ export async function resumeRun(
 
   recover(db, realRecoverDeps()); // resets the interrupted 'running' step → pending
 
-  const ports = makeProjectorPorts(runtimeConfig, profile);
-  const runner = selectAgentRunner(DEFAULT_AGENT_CONFIG, { claude: () => claudeAgentRunner() });
-  const registry = buildDispatchRegistry({
-    runner,
-    agentConfig: DEFAULT_AGENT_CONFIG,
-    profile,
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-")),
-    resumeContext,
-  });
+  const ports: ProjectorPorts =
+    deps?.ports ?? makeProjectorPorts(runtimeConfig, profile);
+
+  const registry: StepRegistry = deps?.buildRegistry
+    ? deps.buildRegistry(resumeContext)
+    : buildDispatchRegistry({
+        runner: selectAgentRunner(DEFAULT_AGENT_CONFIG, { claude: () => claudeAgentRunner() }),
+        agentConfig: DEFAULT_AGENT_CONFIG,
+        profile,
+        worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-")),
+        resumeContext,
+      });
 
   const result = await driveToTerminal(db, registry, {
     ticketId,
