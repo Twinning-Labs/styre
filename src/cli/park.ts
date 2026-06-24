@@ -84,7 +84,12 @@ export function dumpPark(
   mkdirSync(dir, { recursive: true });
   db.exec("PRAGMA wal_checkpoint(TRUNCATE);"); // fold WAL into the main file before copy
   db.close();
-  copyFileSync(dbPath, join(dir, "run.db"));
+  const destPath = join(dir, "run.db");
+  // Skip the copy when resuming in-place: dbPath and destPath are the same file (re-park from
+  // an existing dump — the DB is already at the correct location, no copy needed).
+  if (dbPath !== destPath) {
+    copyFileSync(dbPath, destPath);
+  }
   writeFileSync(
     join(dir, "transcript.json"),
     JSON.stringify({

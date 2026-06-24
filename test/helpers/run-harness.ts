@@ -137,6 +137,10 @@ export interface ResumedRunResult {
   /** All prompts received by the FakeAgentRunner, in order. */
   prompts: string[];
   result: RunResult;
+  /** The real observed process.exitCode after resumeRun completes. */
+  exitCode: number;
+  /** Whether any dispatch was actually attempted (FakeAgentRunner recorded at least one input). */
+  ran: boolean;
 }
 
 /** Re-open a parked dump by calling the REAL `resumeRun` with injected test doubles.
@@ -145,13 +149,14 @@ export interface ResumedRunResult {
  *  no bespoke worktree cleanup here.
  *
  *  FakeAgentRunner strategy:
- *  - First call (implement:dispatch): writes a file to cwd, returns success.
- *  - All other calls (review, etc.): returns a valid empty-findings sidecar.
+ *  - `parkAgain: true`: runner returns session-limit again so the run re-parks (exit 75).
+ *  - Normal (default): first call writes a file + returns success; subsequent calls return an
+ *    empty-findings sidecar so the full run completes.
  *
  *  Profile: uses `commands: { build: "true", test: "true" }` so verify:integration passes. */
 export async function resumeParkedTicket(
   parked: ParkedRunResult,
-  opts?: { acceptHead?: boolean; inspect?: boolean },
+  opts?: { acceptHead?: boolean; inspect?: boolean; parkAgain?: boolean },
 ): Promise<ResumedRunResult> {
   // Restore the same XDG_STATE_HOME the park used so parkDir resolves to the same dumpDir.
   const xdgStateHome = join(parked.dumpDir, "..", "..", "..");
@@ -185,6 +190,8 @@ export async function resumeParkedTicket(
 
   const prompts: string[] = [];
   let callCount = 0;
+  // Track the runner constructed in buildRegistry so we can read .inputs for the `ran` flag.
+  let lastRunner: FakeAgentRunner | null = null;
 
   const fakePorts = {
     issueTracker: fakeIssueTracker({
@@ -211,6 +218,21 @@ export async function resumeParkedTicket(
           const runner = new FakeAgentRunner((input) => {
             prompts.push(input.prompt);
             callCount++;
+            if (opts?.parkAgain) {
+              // Simulate session-limit again to produce a second park (exit 75).
+              return {
+                completed: false,
+                exitCode: 1,
+                stdout: "partial work from second session-limit",
+                stderr: "You have reached your session limit · resets tomorrow",
+                timedOut: false,
+                costUsd: null,
+                tokensIn: null,
+                tokensOut: null,
+                cause: "session-limit" as const,
+                resetAt: "tomorrow",
+              };
+            }
             if (callCount === 1) {
               // implement:dispatch — write a file so the diff is non-empty (postcondition)
               writeFileSync(join(input.cwd, "harness-impl.ts"), "// harness-written impl\n");
@@ -237,6 +259,7 @@ export async function resumeParkedTicket(
               tokensOut: null,
             };
           });
+          lastRunner = runner;
           return buildDispatchRegistry({
             runner,
             agentConfig: DEFAULT_AGENT_CONFIG,
@@ -250,16 +273,19 @@ export async function resumeParkedTicket(
     );
 
     // resumeRun doesn't return RunResult directly; reconstruct a minimal RunResult for backward
-    // compat with the test assertions. exitCode 75 = parked again; 65 = refused; 0 = pr-ready.
-    const outcome =
-      process.exitCode === 75 ? "parked" : process.exitCode === 65 ? "done" : "pr-ready";
+    // compat with the test assertions.
+    // exitCode 75 = parked again; 65 = refused (HEAD guard); 0 = pr-ready or inspect-no-op.
+    // NOTE: exit-65 maps to "refused" — NOT "done" — so callers can assert the real refusal.
+    const exitCode = process.exitCode;
+    const outcome = exitCode === 75 ? "parked" : exitCode === 65 ? "refused" : "pr-ready";
     const result: RunResult = {
       outcome: outcome as RunResult["outcome"],
       iterations: 0,
       stage: "released",
       status: "done",
     };
-    return { prompts, result };
+    const ran = ((lastRunner as FakeAgentRunner | null)?.inputs.length ?? 0) > 0;
+    return { prompts, result, exitCode, ran };
   } finally {
     if (prevXdgStateHome === undefined) {
       process.env.XDG_STATE_HOME = undefined;
@@ -267,4 +293,99 @@ export async function resumeParkedTicket(
       process.env.XDG_STATE_HOME = prevXdgStateHome;
     }
   }
+}
+
+/**
+ * Simulate an operator committing to the ticket branch after a park.
+ *
+ * Two things must be true for the HEAD guard to fire:
+ *  1. The dump DB's baseline sha (`headBaseline`) must be non-null — i.e. at least one dispatch
+ *     row must carry a `branch_head_sha`. The parked dispatch never records one (parking happens
+ *     before `commitWorktree`), so we seed it here by updating that dispatch row.
+ *  2. The branch's current HEAD must differ from the baseline.
+ *
+ * This function:
+ *  a. Opens the dump DB and reads project.target_repo + ticket ident.
+ *  b. Resolves the ticket branch name (feat/ENG-1 etc.) and reads its current sha.
+ *  c. Updates the parked dispatch row to record that sha as the baseline.
+ *  d. Makes a new empty commit on the branch so current HEAD > baseline.
+ *  e. Closes the dump DB.
+ */
+export function advanceBranchHead(parked: ParkedRunResult): void {
+  const dbPath = join(parked.dumpDir, "run.db");
+  migrate(dbPath);
+  const db = openDb(dbPath);
+
+  // Read target_repo + ticket ident + branch naming columns
+  const ticketRow = db
+    .query<
+      { id: number; ident: string; branch_name: string | null; branch_prefix: string | null },
+      []
+    >("SELECT id, ident, branch_name, branch_prefix FROM ticket ORDER BY id LIMIT 1")
+    .get();
+  if (!ticketRow) throw new Error("advanceBranchHead: no ticket in dump DB");
+
+  const projectRow = db
+    .query<{ target_repo: string }, [number]>(
+      "SELECT target_repo FROM project WHERE id = (SELECT project_id FROM ticket WHERE id = ?)",
+    )
+    .get(ticketRow.id);
+  if (!projectRow) throw new Error("advanceBranchHead: no project in dump DB");
+
+  const branch = ticketRow.branch_name ?? `${ticketRow.branch_prefix ?? "feat"}/${ticketRow.ident}`;
+  const repoPath = projectRow.target_repo;
+
+  // Get the branch's current sha (the branch may exist from the parked worktree creation,
+  // or we need to create it first from main's HEAD).
+  const refResult = Bun.spawnSync(["git", "rev-parse", branch], { cwd: repoPath });
+  let baselineSha: string;
+  if (refResult.success) {
+    baselineSha = refResult.stdout.toString().trim();
+  } else {
+    // Branch doesn't exist yet — create it from main's HEAD so we have a baseline.
+    const headResult = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repoPath });
+    if (!headResult.success) throw new Error("advanceBranchHead: can't get HEAD sha");
+    baselineSha = headResult.stdout.toString().trim();
+    const branchResult = Bun.spawnSync(["git", "branch", branch], { cwd: repoPath });
+    if (!branchResult.success)
+      throw new Error(`advanceBranchHead: git branch failed: ${branchResult.stderr.toString()}`);
+  }
+
+  // Seed the baseline sha into the most recent parked dispatch row so headBaseline() returns it.
+  db.query(
+    "UPDATE dispatch SET branch_head_sha = ? WHERE id = (SELECT id FROM dispatch WHERE ticket_id = ? AND branch_head_sha IS NULL ORDER BY id DESC LIMIT 1)",
+  ).run(baselineSha, ticketRow.id);
+  // Ensure WAL is flushed so the resumed run sees the update.
+  db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+  db.close();
+
+  // Create a new commit on the branch so current HEAD != baseline.
+  // Use git commit-tree + update-ref to avoid touching any checked-out worktree.
+  const treeResult = Bun.spawnSync(["git", "rev-parse", `${branch}^{tree}`], { cwd: repoPath });
+  if (!treeResult.success) throw new Error("advanceBranchHead: can't get tree sha");
+  const treeSha = treeResult.stdout.toString().trim();
+
+  const commitResult = Bun.spawnSync(
+    ["git", "commit-tree", "-p", branch, "-m", "operator: post-park change", treeSha],
+    {
+      cwd: repoPath,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "T",
+        GIT_AUTHOR_EMAIL: "t@s.dev",
+        GIT_COMMITTER_NAME: "T",
+        GIT_COMMITTER_EMAIL: "t@s.dev",
+      },
+    },
+  );
+  if (!commitResult.success)
+    throw new Error(`advanceBranchHead: commit-tree failed: ${commitResult.stderr.toString()}`);
+  const newSha = commitResult.stdout.toString().trim();
+
+  // Update the branch ref to point to the new commit.
+  const updateRef = Bun.spawnSync(["git", "update-ref", `refs/heads/${branch}`, newSha], {
+    cwd: repoPath,
+  });
+  if (!updateRef.success)
+    throw new Error(`advanceBranchHead: update-ref failed: ${updateRef.stderr.toString()}`);
 }
