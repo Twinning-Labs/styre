@@ -110,6 +110,9 @@ const profileWith = (rc: object) =>
 test("isMigrationKind recognizes data/migration kinds", () => {
   expect(isMigrationKind("migration")).toBe(true);
   expect(isMigrationKind("Data")).toBe(true);
+  expect(isMigrationKind("db")).toBe(true);
+  expect(isMigrationKind("schema")).toBe(true);
+  expect(isMigrationKind("SCHEMA")).toBe(true);
   expect(isMigrationKind("frontend")).toBe(false);
 });
 

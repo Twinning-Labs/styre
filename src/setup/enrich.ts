@@ -18,7 +18,7 @@ export type EnrichDeps = {
 
 const ENRICH_TIMEOUT_MS = 300_000; // 5 min
 const MAX_ATTEMPTS = 3;
-const BACKOFF_MS = [2_000, 8_000, 20_000];
+const BACKOFF_MS = [2_000, 8_000];
 const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** Seed the scan findings into the enrichment prompt. */

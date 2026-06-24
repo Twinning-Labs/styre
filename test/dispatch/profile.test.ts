@@ -56,6 +56,8 @@ describe("runtimeContext", () => {
     expect(p.runtimeContext.documentation.presence).toBe("unknown");
     expect(p.runtimeContext.releasePackaging.mechanism).toBe("unknown");
     expect(p.runtimeContext.data.migrationTool).toBeUndefined();
+    expect(p.runtimeContext.observability.presence).toBe("unknown");
+    expect(p.runtimeContext.configSecrets.presence).toBe("unknown");
   });
 
   test("a populated v1 runtimeContext round-trips", () => {

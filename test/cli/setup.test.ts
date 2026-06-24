@@ -97,6 +97,18 @@ test("--reprobe discards operator edits", async () => {
   expect(profile.runtimeContext.caching.presence).toBe("unknown");
 });
 
+test("--force discards operator edits", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "styre-repo-"));
+  writeFileSync(join(repo, "package.json"), "{}");
+  const out = join(mkdtempSync(join(tmpdir(), "styre-cfg-")), "profile.json");
+  await runSetup({ repo, out, deps: fakeDeps() });
+  const p = JSON.parse(readFileSync(out, "utf8"));
+  p.runtimeContext.caching = { presence: "present", detail: "redis (operator)" };
+  writeFileSync(out, JSON.stringify(p));
+  const { profile } = await runSetup({ repo, out, force: true, deps: fakeDeps() });
+  expect(profile.runtimeContext.caching.presence).toBe("unknown");
+});
+
 test("runSetup writes the agent-enriched detail into the profile", async () => {
   const repo = mkdtempSync(join(tmpdir(), "styre-repo-"));
   writeFileSync(join(repo, "package.json"), "{}");
@@ -104,6 +116,32 @@ test("runSetup writes the agent-enriched detail into the profile", async () => {
   const enrichment = { ...NOOP_ENRICH, documentation: { detail: "README + docs/ with mkdocs" } };
   const { profile } = await runSetup({ repo, out, deps: fakeDeps(enrichment) });
   expect(profile.runtimeContext.documentation.detail).toBe("README + docs/ with mkdocs");
+});
+
+test("re-probe failure leaves existing file byte-unchanged", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "styre-repo-"));
+  writeFileSync(join(repo, "package.json"), "{}");
+  const out = join(mkdtempSync(join(tmpdir(), "styre-cfg-")), "profile.json");
+  await runSetup({ repo, out, deps: fakeDeps() });
+  const before = readFileSync(out, "utf8");
+  const failing: EnrichDeps = {
+    runner: new FakeAgentRunner(() => ({
+      completed: true,
+      exitCode: 0,
+      stdout: "no sidecar",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    })),
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    sleep: () => Promise.resolve(),
+  };
+  await expect(runSetup({ repo, out, reprobe: true, deps: failing })).rejects.toThrow(
+    /failed after 3 attempts/,
+  );
+  expect(readFileSync(out, "utf8")).toBe(before);
 });
 
 test("runSetup throws and writes no profile when enrichment fails", async () => {

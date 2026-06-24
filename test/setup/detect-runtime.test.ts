@@ -51,9 +51,10 @@ test("a bare repo yields all-unknown (never guesses absent)", () => {
 
 test("topology = desktop when tauri config present", () => {
   const dir = fixture({
-    "package.json": "{}",
     "src-tauri/tauri.conf.json": "{}",
   });
-  expect(detectRuntimeContext(dir).topology.type).toBe("desktop");
-  expect(detectRuntimeContext(dir).releasePackaging.mechanism).toBe("installer");
+  const rc = detectRuntimeContext(dir);
+  expect(rc.topology.type).toBe("desktop");
+  expect(rc.topology.detail).toBe("tauri desktop app");
+  expect(rc.releasePackaging.mechanism).toBe("installer");
 });

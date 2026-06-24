@@ -113,7 +113,13 @@ export function detectRuntimeContext(repoDir: string): RuntimeContext {
   return {
     topology: {
       type: topologyType,
-      detail: hasPkg ? "node package" : hasCargo ? "cargo crate" : "",
+      detail: hasPkg
+        ? "node package"
+        : hasTauri
+          ? "tauri desktop app"
+          : hasCargo
+            ? "cargo crate"
+            : "",
     },
     data: {
       ...flag(dataPresent, dataDetail),
