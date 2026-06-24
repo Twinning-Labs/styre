@@ -257,6 +257,8 @@ test("probeCommandExists is false for a missing binary", () => {
 - [ ] **Step 3: Implement `src/setup/discover-schema.ts`**
 
 ```typescript
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { z } from "zod";
 import type { Component } from "../dispatch/profile.ts";
 
@@ -283,10 +285,11 @@ export function mergeComponents(scan: Component[], proposed: Component[]): Compo
   return scan.map((s) => {
     const p = byName.get(s.name);
     if (!p) return s;
-    // Agent may refine paths but cannot widen a component to a catch-all (a `**`/`*` would make it
-    // match every diff → run its commands on everything + widen the implement Bash scope). Drop
-    // those; the scan's workspace anchors are always preserved.
-    const agentPaths = p.paths.filter((g) => g !== "**" && g !== "*" && g !== "**/*");
+    // Agent may refine paths but cannot widen a component via an UNANCHORED glob (one starting with
+    // `*`/`**` — e.g. `**`, `*`, `**/*.ts`, `*/**` — which matches broadly across the tree and would
+    // run the component's commands on every diff + widen the implement Bash scope). Keep only globs
+    // anchored to a literal first path segment. The scan's workspace anchors are always preserved.
+    const agentPaths = p.paths.filter((g) => !/^\*/.test(g.trim()));
     return {
       name: s.name,
       kind: p.kind || s.kind,
@@ -297,12 +300,9 @@ export function mergeComponents(scan: Component[], proposed: Component[]): Compo
   });
 }
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
 /** True if the command's program resolves (typo/missing-tool probe only — NOT correctness, NOT
  *  safety). For an `npm run X`, checks the script exists in the cwd package.json; otherwise checks
- *  the binary on PATH. */
+ *  the binary on PATH. (`readFileSync`/`join` imported at the top of the file.) */
 export function probeCommandExists(repoDir: string, command: string): boolean {
   const trimmed = command.trim();
   const npmRun = trimmed.match(/^npm run ([\w:-]+)/);
@@ -524,7 +524,8 @@ After `probeProfile` and the runtime-context enrich (existing), and **before** t
 ```typescript
   const discovered = await discoverComponents(repoDir, {
     components: scanProfile.components, repoCommands: scanProfile.repoCommands,
-  }, { runner: deps.runner, agentConfig: DEFAULT_AGENT_CONFIG });
+  }, { runner: args.deps.runner, agentConfig: DEFAULT_AGENT_CONFIG });
+  // ^ runSetup's param is `args.deps` (see the existing enrich call at setup.ts:57), not a local `deps`.
 
   const interactive = Boolean(process.stdin.isTTY);
   const { components, warnings } = resolveCommands(discovered.components, {
@@ -537,14 +538,15 @@ After `probeProfile` and the runtime-context enrich (existing), and **before** t
   // and seeds the implement Bash allowlist. Show the FULL final command list and require explicit
   // operator sign-off — not just prompting for the ones that were missing.
   if (interactive) {
-    console.log("\nResolved commands (will run with repo write + network access):");
+    console.log("\nResolved components (commands run with repo write + network; paths drive verify routing):");
     for (const c of components) {
+      console.log(`  ${c.name} [${c.kind}]  paths: ${c.paths.join(", ")}`);
       for (const [k, v] of Object.entries(c.commands)) {
-        console.log(`  ${c.name}.${k}: ${typeof v === "string" ? v : "(none)"}`);
+        console.log(`    ${k}: ${typeof v === "string" ? v : "(none)"}`);
       }
     }
     for (const [name, cmd] of Object.entries(discovered.repoCommands)) console.log(`  repo.${name}: ${cmd}`);
-    const ok = globalThis.prompt("Approve these commands? [y/N]");
+    const ok = globalThis.prompt("Approve these components (commands + paths)? [y/N]");
     if (ok?.trim().toLowerCase() !== "y") {
       throw new Error("setup aborted: operator did not approve the command list");
     }
@@ -601,3 +603,10 @@ git commit -m "feat(setup): interactive command-resolution ladder + scriptRunner
 - **Wiring fix (Task 9 Step 5):** the local repo-path variable is `repoDir`, not `targetRepo`; the discover/resolve block runs before the profile write (`setup.ts:73`).
 - **Ordering note:** `allowlistFor("setup:discover")` throws if the key isn't registered; Task 8 Step 5 adds the `setup:discover` ALLOWLISTS entry, which must land with (before) the `discover.ts` that calls it.
 - (Coherence: `repoCommands` from the agent *replace* the scan's wholesale — intended, since they're free-text and unanchored; documented here rather than merged.)
+
+### Round 3 (second plan review)
+- **Glob filter hardened (Task 8 `mergeComponents`):** the exact-string denylist (`**`/`*`/`**/*`) was bypassable by `**/*.ts`, `*/**`, etc. Now rejects any **unanchored** agent glob (one starting with `*`/`**`), keeping only literal-anchored paths. (Adversarial N1.)
+- **Paths shown in the security confirm (Task 9 Step 5):** the `[y/N]` sign-off now lists each component's `paths` *and* commands, so a widened-`paths` injection is visible to the operator, not just commands. (Adversarial N1.)
+- **Imports moved to top of `discover-schema.ts`** (cosmetic; mid-file was valid + lint-clean, but conventional placement removes the dispute). (Adversarial N5 / Feasibility #3.)
+- **Wiring typo fixed (Task 9 Step 5):** `args.deps.runner`, not `deps.runner` (runSetup's param is `args.deps`). (Feasibility #4.)
+- **Known footgun (accepted, per operator):** a non-must-have check (e.g. `lint`) declared on a stack with no such command → `check-absent` error → `failure-policy` retries 3× then escalates. Consistent with the confirmed "error loudly now; align extract-agent check-type vocab in follow-on (1)" stance. (Adversarial N3.)

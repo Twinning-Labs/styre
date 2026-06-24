@@ -682,15 +682,19 @@ The signal alone is not read by the resolver (intentionally — it must not gate
 ```
 and splice `riskLines` into the returned body. Use the existing `listByTicket` from `../db/repos/ground-truth-signal.ts` (import as `listSignalsByTicket`). Add a test in `test/dispatch/verify-routing.test.ts` (or a `renderPrBody` test) asserting the body contains the untested component name when such a signal exists.
 
-- [ ] **Step 7: Full suite + lint**
+- [ ] **Step 7: Migrate `verify-handlers.test.ts` (a real behavioral-contract change, not a fixture rename)**
+
+`test/dispatch/verify-handlers.test.ts` has a `seedVerifying()` helper that puts a unit straight into `verifying` **without** an `implement:dispatch` — so there is no commit and no `base_sha`. The new `verify:check` requires a cumulative diff: with no `base_sha`/dispatch, `changed = []` → `impacted = []` → it now records `error` (correct in production — a unit only reaches `verifying` after `implement` commits). The existing "pass"/"fail" tests there will now error. Migrate them to **drive implement-first** so a real commit + `base_sha` exist before verify: replace `seedVerifying()` with the `gitRepo()` + `FakeAgentRunner` (writes a file) + `advanceOneStep` pattern from `verify-routing.test.ts` (Step 2), and give the profile an N=1 component `{ name:"app", paths:["**"], commands:{ test:"true"/"false" } }` to exercise pass/fail. The "missing profile command" test becomes the **absent-check → error** case (Step 2's third test) — fold it in or delete the now-redundant one.
+
+- [ ] **Step 8: Full suite + lint**
 
 Run: `bun run typecheck && bun run lint && bun test`
-Expected: PASS. (Fix any fixture in `test/dispatch/handlers.test.ts`/`verify-e2e.test.ts` still on the old shape per Task 1 Step 6.)
+Expected: PASS. (Also fix any fixture in `test/dispatch/handlers.test.ts`/`verify-e2e.test.ts` still on the old shape per Task 1 Step 6.)
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add src/dispatch/handlers.ts test/dispatch/verify-routing.test.ts
+git add src/dispatch/handlers.ts test/dispatch/verify-routing.test.ts test/dispatch/verify-handlers.test.ts
 git commit -m "feat(verify): three-way per-component routing; absent=error; reviewer-only degrade + PR-visible untested-merge-risk"
 ```
 
@@ -801,7 +805,11 @@ In `src/dispatch/tool-allowlists.ts`, the `implement:dispatch` entry currently c
     const bash = runners.map((c) => `Bash(${c}:*)`);
     return tools.flatMap((t) => (t === "Bash" ? bash : [t])); // runners=[] ⇒ Bash removed, never bare
 ```
-(The existing `runners.length > 0` guard that returned bare `tools` on empty must be removed — the `flatMap` above already yields no Bash when `runners` is empty.) Add a `tool-allowlists.test.ts` case: `allowlistFor("implement:dispatch", { runnerCommands: [] })` contains neither `"Bash"` nor any `"Bash("`-prefixed entry.
+(The existing `runners.length > 0` guard that returned bare `tools` on empty must be removed — the `flatMap` above already yields no Bash when `runners` is empty.) Also **update the now-false comments** in `tool-allowlists.ts` (the "falls back to unscoped `Bash`" lines at the top and in `allowlistFor`) to say empty runners → no `Bash`.
+
+Two `tool-allowlists.test.ts` changes (this is a behavioral contract change, not just an addition):
+- **FIX the existing assertion** (`test/dispatch/tool-allowlists.test.ts`, currently `expect(allowlistFor("implement:dispatch")).toContain("Bash")`): it must now assert the bare `"Bash"` is **absent** when no runners are supplied.
+- **ADD** a case: `allowlistFor("implement:dispatch", { runnerCommands: ["cargo test"] })` contains `"Bash(cargo test:*)"`, and `allowlistFor("implement:dispatch", { runnerCommands: [] })` contains neither `"Bash"` nor any `"Bash("`-prefixed entry (but still includes `"Write"`/`"Edit"`).
 
 - [ ] **Step 4: Thread `runnerCommands` through `DispatchSpec`**
 
@@ -943,3 +951,8 @@ git commit -m "feat(implement): source test_command from the unit's impacted com
 - **Task 2:** extend (not create) `worktree.test.ts`; add `base_sha` to the explicit `COLS` constant (repo is not `SELECT *`). (Feasibility H1/H2.)
 - **Task 6:** `implementVars` param typed as full `WorkUnitRow` (removes the signature/call-site ambiguity). (Coherence #1.)
 - **Empirically validated (no change needed):** `Bun.Glob` co-located boundary holds (`src/**` ∌ `src-tauri/`), baseline green (409/0), `globalThis.prompt`/`extractSidecar({fence})`/`allowlistFor(one-arg)` all valid.
+
+### Round 3 (second plan review — both CRITICAL fixes confirmed HOLD)
+- **Existing-test contract migration (Task 3 Step 7, new):** `verify-handlers.test.ts` seeded units into `verifying` with no commit/`base_sha`; under the three-way that now errors. Migrate those tests to drive implement-first (real commit + `base_sha`). (Feasibility blocker #1.)
+- **Existing-test assertion fix (Task 5 Step 3):** `tool-allowlists.test.ts` asserted implement `.toContain("Bash")`; the never-bare-Bash fix makes that false — the assertion is now updated, plus the stale "falls back to unscoped Bash" comments. (Feasibility blocker #2 + N4.)
+- **Confirmed non-issues (empirical):** the early `return {…, degraded:true}` compiles (`StepHandler` returns `unknown`); the mid-file import passes `tsc` + `biome check`; `allowlistFor` flatMap yields no Bash for empty runners. Both CRITICAL fixes (isolation, silent-green three-way) re-traced and HOLD.
