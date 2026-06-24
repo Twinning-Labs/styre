@@ -7,6 +7,7 @@ import { completeDispatch, insertDispatch, nextSeq } from "../db/repos/dispatch.
 import { setPid } from "../db/repos/workflow-step.ts";
 import { ParkSignal } from "../engine/park-signal.ts";
 import { nowUtc } from "../util/time.ts";
+import { realRunnerCommands } from "./components.ts";
 import type { Profile } from "./profile.ts";
 import { renderPrompt } from "./render-prompt.ts";
 import { allowlistFor } from "./tool-allowlists.ts";
@@ -85,7 +86,7 @@ export async function runAgentDispatch(
     prompt,
     model,
     allowedTools: allowlistFor(spec.handlerKey, {
-      runnerCommands: Object.values(deps.profile.commands),
+      runnerCommands: realRunnerCommands(deps.profile.components),
     }),
     cwd: deps.worktreePath,
     timeoutMs: deps.timeoutMs,

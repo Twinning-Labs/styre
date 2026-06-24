@@ -55,7 +55,11 @@ test("behavioral unit converges after the add-a-test bounce-back", async () => {
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({ slug: "demo", targetRepo: repo, commands: { test: "true" } }),
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+    }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-dgwt-")),
   });
 
@@ -108,7 +112,14 @@ test("integration fails then a reconcile unit makes it pass", async () => {
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      commands: { test: "true", build: "test -f RECONCILED || test -f STOP" },
+      components: [
+        {
+          name: "app",
+          kind: "app",
+          paths: ["**"],
+          commands: { test: "true", build: "test -f RECONCILED || test -f STOP" },
+        },
+      ],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-dgint-")),
   });

@@ -29,7 +29,11 @@ function registryFor(repo: string, runner: FakeAgentRunner) {
   return buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({ slug: "demo", targetRepo: repo, commands: { test: "bun test" } }),
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "bun test" } }],
+    }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wtroot-")),
   });
 }
@@ -128,7 +132,11 @@ test("implement:dispatch escalates to the deep tier after a bounce-back", async 
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({ slug: "demo", targetRepo: repo, commands: { test: "true" } }),
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+    }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-lbwt-")),
   });
 

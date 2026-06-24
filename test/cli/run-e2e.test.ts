@@ -18,7 +18,6 @@ test("runTicket ingests a Linear ticket and drives it to pr-ready", async () => 
     slug: "demo",
     targetRepo: "/tmp/x",
     defaultBranch: "main",
-    commands: {},
     checksSystem: "none",
   });
   const ports = {
@@ -66,7 +65,6 @@ test("runTicket emits a telemetry stream (events + summary) to the sink", async 
     slug: "demo",
     targetRepo: "/tmp/x",
     defaultBranch: "main",
-    commands: {},
     checksSystem: "none",
   });
   const ports = {

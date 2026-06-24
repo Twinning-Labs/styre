@@ -4,12 +4,40 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProfileSchema, loadProfile, parseProfile } from "../../src/dispatch/profile.ts";
 
+test("parses a v2 components profile", () => {
+  const p = parseProfile({
+    slug: "demo",
+    targetRepo: "/tmp/repo",
+    components: [
+      { name: "core", kind: "rust", paths: ["src-tauri/**"], commands: { test: "cargo test" } },
+      {
+        name: "fe",
+        kind: "sveltekit",
+        paths: ["src/**"],
+        commands: { test: { unavailable: true } },
+      },
+    ],
+    repoCommands: { integration: "playwright test" },
+  });
+  expect(p.schemaVersion).toBe(2);
+  expect(p.components).toHaveLength(2);
+  expect(p.components[1].commands.test).toEqual({ unavailable: true });
+  expect(p.repoCommands.integration).toBe("playwright test");
+});
+
+test("hard-fails on a legacy flat-commands profile", () => {
+  expect(() =>
+    parseProfile({ slug: "demo", targetRepo: "/tmp/repo", commands: { test: "true" } }),
+  ).toThrow(/legacy flat .commands/i);
+});
+
 test("parseProfile fills defaults for optional fields", () => {
   const p = parseProfile({ slug: "demo", targetRepo: "/tmp/demo" });
   expect(p.slug).toBe("demo");
   expect(p.defaultBranch).toBe("main");
   expect(p.checksSystem).toBe("none");
-  expect(p.commands).toEqual({});
+  expect(p.components).toEqual([]);
+  expect(p.repoCommands).toEqual({});
   expect(p.promptVars).toEqual({});
 });
 
@@ -19,12 +47,12 @@ test("parseProfile keeps provided values", () => {
     targetRepo: "/tmp/demo",
     defaultBranch: "trunk",
     checksSystem: "github",
-    commands: { test: "bun test" },
+    components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "bun test" } }],
     promptVars: { stack: "bun" },
   });
   expect(p.defaultBranch).toBe("trunk");
   expect(p.checksSystem).toBe("github");
-  expect(p.commands.test).toBe("bun test");
+  expect(p.components[0].commands.test).toBe("bun test");
   expect(p.promptVars.stack).toBe("bun");
 });
 
@@ -40,17 +68,21 @@ test("loadProfile reads + validates a JSON file", () => {
   expect(p.slug).toBe("demo");
 });
 
-test("testFilePattern is optional and parses when present", () => {
-  expect(parseProfile({ slug: "s", targetRepo: "/r" }).testFilePattern).toBeUndefined();
-  expect(
-    parseProfile({ slug: "s", targetRepo: "/r", testFilePattern: "\\.spec\\." }).testFilePattern,
-  ).toBe("\\.spec\\.");
+test("testFilePattern on a component is optional and parses when present", () => {
+  const p1 = parseProfile({ slug: "s", targetRepo: "/r" });
+  expect(p1.components).toHaveLength(0);
+  const p2 = parseProfile({
+    slug: "s",
+    targetRepo: "/r",
+    components: [{ name: "app", kind: "app", paths: ["**"], testFilePattern: "\\.spec\\." }],
+  });
+  expect(p2.components[0].testFilePattern).toBe("\\.spec\\.");
 });
 
 describe("runtimeContext", () => {
-  test("a legacy profile (no runtimeContext) validates as all-unknown", () => {
+  test("a v2 profile (no runtimeContext) validates as all-unknown", () => {
     const p = parseProfile({ slug: "demo", targetRepo: "/tmp/demo" });
-    expect(p.schemaVersion).toBe(1);
+    expect(p.schemaVersion).toBe(2);
     expect(p.runtimeContext.topology.type).toBe("unknown");
     expect(p.runtimeContext.data.presence).toBe("unknown");
     expect(p.runtimeContext.documentation.presence).toBe("unknown");

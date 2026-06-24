@@ -32,12 +32,17 @@ export function probeProfile(
   overrides?: { slug?: string; checksSystem?: "github" | "external" | "none" },
 ): Profile {
   const targetRepo = resolve(repoDir);
+  const detected = detectCommands(targetRepo);
   return parseProfile({
     slug: overrides?.slug ?? deriveSlug(targetRepo),
     targetRepo,
     defaultBranch: detectDefaultBranch(targetRepo),
     checksSystem: overrides?.checksSystem ?? detectChecksSystem(targetRepo),
-    commands: detectCommands(targetRepo),
+    components:
+      Object.keys(detected).length > 0
+        ? [{ name: "app", kind: "app", paths: ["**"], commands: detected }]
+        : [],
+    repoCommands: {},
     runtimeContext: detectRuntimeContext(targetRepo),
   });
 }

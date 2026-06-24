@@ -42,7 +42,7 @@ function registryFor(repo: string, runner: FakeAgentRunner, rc: unknown = ABSENT
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      commands: { test: "bun test" },
+      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "bun test" } }],
       runtimeContext: rc,
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wtroot-")),

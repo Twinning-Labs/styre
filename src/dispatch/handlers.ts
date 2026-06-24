@@ -22,6 +22,7 @@ import {
 } from "../db/repos/work-unit.ts";
 import { runCommand } from "../util/run-command.ts";
 import { ComplexityGradeSchema } from "./complexity-schema.ts";
+import { commandFor } from "./components.ts";
 import { ExtractOutputSchema, validateCdotImpact, validateExtraction } from "./extract-schema.ts";
 import { implementFeedback } from "./feedback.ts";
 import type { Profile } from "./profile.ts";
@@ -299,7 +300,10 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
     ensureWorktree(repoPath, branch, worktreePath);
 
-    const command = deps.profile.commands[checkType];
+    // Find the first component that declares a real string command for this check-type.
+    const command = deps.profile.components
+      .map((c) => commandFor(c, checkType))
+      .find((v) => v !== undefined);
     if (command === undefined) {
       insertSignal(ctx.db, {
         ticketId: ctx.ticket.id,
@@ -331,7 +335,8 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       if (unit && unit.behavioral === 1) {
         const changed =
           branchHeadSha === undefined ? [] : changedFilesAt(branchHeadSha, worktreePath);
-        const hasTest = changed.some((p) => isTestFile(p, deps.profile.testFilePattern));
+        const testFilePattern = deps.profile.components[0]?.testFilePattern;
+        const hasTest = changed.some((p) => isTestFile(p, testFilePattern));
         if (!hasTest) {
           result = "fail";
           detail = { reason: "behavioral-no-test", changed };
@@ -381,8 +386,16 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
     ensureWorktree(repoPath, branch, worktreePath);
 
+    // Gather build/test commands from repo-level repoCommands, then fall back to component-level.
     const commands = (["build", "test"] as const)
-      .map((key) => ({ key, command: deps.profile.commands[key] }))
+      .map((key) => {
+        const repoCmd = deps.profile.repoCommands[key];
+        const compCmd = deps.profile.components
+          .map((c) => commandFor(c, key))
+          .find((v) => v !== undefined);
+        const command = repoCmd ?? compCmd;
+        return { key, command };
+      })
       .filter((c): c is { key: "build" | "test"; command: string } => c.command !== undefined);
 
     if (commands.length === 0) {

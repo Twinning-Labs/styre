@@ -64,7 +64,6 @@ export async function runParkedTicket(): Promise<ParkedRunResult> {
     targetRepo: repoPath,
     defaultBranch: "main",
     checksSystem: "none",
-    commands: {},
   });
 
   // FakeAgentRunner that immediately returns session-limit (triggers ParkSignal in runAgentDispatch)
@@ -208,7 +207,14 @@ export async function resumeParkedTicket(
     targetRepo: projectRow.target_repo,
     defaultBranch: projectRow.default_branch,
     checksSystem: "none",
-    commands: { build: "true", test: "true" },
+    components: [
+      {
+        name: "app",
+        kind: "app",
+        paths: ["**"],
+        commands: { build: "true", test: "true" },
+      },
+    ],
   });
 
   const prompts: string[] = [];

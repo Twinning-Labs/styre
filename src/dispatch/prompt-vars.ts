@@ -6,6 +6,7 @@ import designReviewTemplate from "../../prompts/design-review.md" with { type: "
 import designTemplate from "../../prompts/design.md" with { type: "text" };
 import implementTemplate from "../../prompts/implement.md" with { type: "text" };
 import reviewTemplate from "../../prompts/review.md" with { type: "text" };
+import { commandFor } from "./components.ts";
 import type { Profile } from "./profile.ts";
 
 function runtimeVars(profile: Profile): Record<string, string> {
@@ -76,7 +77,8 @@ export function implementVars(
     unit_seq: String(unit.seq),
     unit_kind: unit.kind,
     unit_title: unit.title ?? "",
-    test_command: profile.commands.test ?? "",
+    test_command:
+      profile.components.map((c) => commandFor(c, "test")).find((v) => v !== undefined) ?? "",
     stack: "",
     feedback,
     ...profile.promptVars,

@@ -31,7 +31,11 @@ function registryFor(repo: string, runner: FakeAgentRunner) {
   return buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({ slug: "demo", targetRepo: repo, commands: { test: "bun test" } }),
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "bun test" } }],
+    }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-dsewt-")),
   });
 }

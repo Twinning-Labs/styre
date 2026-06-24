@@ -44,7 +44,14 @@ function registryFor(repo: string, commands: Record<string, string>) {
       tokensOut: null,
     })),
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({ slug: "demo", targetRepo: repo, commands }),
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components:
+        Object.keys(commands).length > 0
+          ? [{ name: "app", kind: "app", paths: ["**"], commands }]
+          : [],
+    }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfywt-")),
   });
 }
@@ -188,7 +195,11 @@ test("a timed-out check records an error signal (not fail)", async () => {
       tokensOut: null,
     })),
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({ slug: "demo", targetRepo: repo, commands: { test: "sleep 5" } }),
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "sleep 5" } }],
+    }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfywt2-")),
     timeoutMs: 200,
   });
@@ -252,7 +263,11 @@ test("behavioral unit: green test command but no test in the diff fails with beh
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({ slug: "demo", targetRepo: repo, commands: { test: "true" } }),
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+    }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-a1-")),
   });
 
@@ -295,7 +310,11 @@ test("behavioral unit: a test file in the diff passes the test check", async () 
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({ slug: "demo", targetRepo: repo, commands: { test: "true" } }),
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+    }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-a1ok-")),
   });
   await advanceOneStep(db, ticketId, registry); // implement
@@ -336,7 +355,11 @@ test("scope_diff records an advisory fail for out-of-scope files but does NOT fa
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({ slug: "demo", targetRepo: repo, commands: { test: "true" } }),
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+    }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-sd-")),
   });
   await advanceOneStep(db, ticketId, registry); // implement

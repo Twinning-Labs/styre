@@ -63,7 +63,6 @@ test("merge → released completes: checksSystem none auto-passes, operator appr
     slug: "demo",
     targetRepo: "/tmp/x",
     defaultBranch: "main",
-    commands: {},
     checksSystem: "none",
   });
   const reg = registryFor(profile);
@@ -109,7 +108,6 @@ test("merge → released completes: checksSystem github with passing checks", as
     slug: "demo",
     targetRepo: "/tmp/x",
     defaultBranch: "main",
-    commands: {},
     checksSystem: "github",
   });
   const reg = registryFor(profile);

@@ -23,7 +23,6 @@ function registryFor() {
       slug: "demo",
       targetRepo: "/tmp/x",
       defaultBranch: "main",
-      commands: {},
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-mh-")),
   });

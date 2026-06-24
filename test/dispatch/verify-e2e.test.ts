@@ -51,7 +51,11 @@ test("implement then real verify:check drives a work-unit to verified", async ()
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({ slug: "demo", targetRepo: repo, commands: { test: "true" } }),
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+    }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-ve2ewt-")),
   });
 
