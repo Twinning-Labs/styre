@@ -1,11 +1,14 @@
 import type { Database } from "bun:sqlite";
 import { nowUtc } from "../../util/time.ts";
 
+/** The exhaustive set of values permitted by the event_log.kind CHECK constraint in schema.sql. */
+export type EventKind = "transition" | "loopback" | "escalated" | "resumed" | "note" | "parked";
+
 export interface EventLogRow {
   id: number;
   ticket_id: number;
   seq: number;
-  kind: string;
+  kind: EventKind;
   actor: string | null;
   from_stage: string | null;
   to_stage: string | null;
@@ -49,7 +52,7 @@ export function appendEvent(
   db: Database,
   e: {
     ticketId: number;
-    kind: string;
+    kind: EventKind;
     actor?: string;
     fromStage?: string;
     toStage?: string;

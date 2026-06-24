@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
@@ -28,6 +28,16 @@ export interface ParkedRunResult {
   result: RunResult;
   /** The resolved dump directory path (captured while XDG_STATE_HOME is still set) */
   dumpDir: string;
+  /** Temp dirs that must survive until the test is fully done (call cleanupParkedRun when done). */
+  _tempDirs: string[];
+}
+
+/** Best-effort removal of all temp dirs created by runParkedTicket / resumeParkedTicket.
+ *  Call this in an afterAll (or after the last assertion) to avoid leaking temp dirs. */
+export function cleanupParkedRun(parked: ParkedRunResult): void {
+  for (const dir of parked._tempDirs) {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /** Drive a ticket to a `parked` outcome in-process, using the same wiring as `src/cli/run.ts`
@@ -44,6 +54,8 @@ export async function runParkedTicket(): Promise<ParkedRunResult> {
   process.exitCode = 0;
 
   // A real git repo + on-disk SQLite DB seeded with ticket ENG-1 at stage='implement' + work_unit.
+  // repoPath and stateRoot must outlive this function (needed by resumeParkedTicket); they are
+  // tracked in _tempDirs so the caller can clean them up after the full test via cleanupParkedRun.
   const { db, ticketId, repoPath } = gitRepoWithProject();
   const dbPath = db.filename; // bun:sqlite exposes the file path
 
@@ -69,6 +81,7 @@ export async function runParkedTicket(): Promise<ParkedRunResult> {
     resetAt: "tomorrow",
   }));
 
+  // worktreeRoot is only needed during driveToTerminal; cleaned up in the finally below.
   const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-wt-harness-"));
   const registry = buildDispatchRegistry({
     runner,
@@ -122,6 +135,8 @@ export async function runParkedTicket(): Promise<ParkedRunResult> {
       exitCode: process.exitCode, // observed — not hardcoded
       result,
       dumpDir,
+      // stateRoot and repoPath must survive until the caller is fully done with the parked run.
+      _tempDirs: [stateRoot, repoPath],
     };
   } finally {
     // Restore XDG_STATE_HOME so the global side-effect doesn't leak to subsequent tests.
@@ -130,6 +145,8 @@ export async function runParkedTicket(): Promise<ParkedRunResult> {
     } else {
       process.env.XDG_STATE_HOME = prevXdgStateHome;
     }
+    // worktreeRoot is no longer needed once driveToTerminal has returned.
+    rmSync(worktreeRoot, { recursive: true, force: true });
   }
 }
 
@@ -198,6 +215,8 @@ export async function resumeParkedTicket(
   let callCount = 0;
   // Track the runner constructed in buildRegistry so we can read .inputs for the `ran` flag.
   let lastRunner: FakeAgentRunner | null = null;
+  // Collect worktreeRoot dirs created inside buildRegistry for cleanup in the finally block.
+  const resumeWorktreeDirs: string[] = [];
 
   const fakePorts = {
     issueTracker: fakeIssueTracker({
@@ -266,11 +285,13 @@ export async function resumeParkedTicket(
             };
           });
           lastRunner = runner;
+          const wtRoot = mkdtempSync(join(tmpdir(), "styre-wt-resume-"));
+          resumeWorktreeDirs.push(wtRoot);
           return buildDispatchRegistry({
             runner,
             agentConfig: DEFAULT_AGENT_CONFIG,
             profile: realProfile,
-            worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-resume-")),
+            worktreeRoot: wtRoot,
             resumeContext,
           });
         },
@@ -299,6 +320,13 @@ export async function resumeParkedTicket(
     } else {
       process.env.XDG_STATE_HOME = prevXdgStateHome;
     }
+    // Clean up worktreeRoot dirs created during this resume.
+    for (const dir of resumeWorktreeDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    // Note: stateRoot (dumpDir) and repoPath from the parked run are NOT cleaned here because
+    // the caller may need the dumpDir after this call (e.g. to open the DB for assertions, or
+    // to call resumeParkedTicket again). Call cleanupParkedRun(parked) when fully done.
   }
 }
 

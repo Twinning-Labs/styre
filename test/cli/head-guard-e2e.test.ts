@@ -2,7 +2,12 @@ import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { openDb } from "../../src/db/client.ts";
 import { migrate } from "../../src/db/migrate.ts";
-import { advanceBranchHead, resumeParkedTicket, runParkedTicket } from "../helpers/run-harness.ts";
+import {
+  advanceBranchHead,
+  cleanupParkedRun,
+  resumeParkedTicket,
+  runParkedTicket,
+} from "../helpers/run-harness.ts";
 
 test("a moved HEAD refuses plain --resume with exit 65 and changes nothing", async () => {
   const parked = await runParkedTicket();
@@ -10,6 +15,7 @@ test("a moved HEAD refuses plain --resume with exit 65 and changes nothing", asy
   const { exitCode, ran } = await resumeParkedTicket(parked, {}); // no flags
   expect(exitCode).toBe(65);
   expect(ran).toBe(false); // no dispatch happened
+  cleanupParkedRun(parked);
 });
 
 test("--inspect on a moved HEAD prints diagnostics, exits 0, changes nothing", async () => {
@@ -18,6 +24,7 @@ test("--inspect on a moved HEAD prints diagnostics, exits 0, changes nothing", a
   const { exitCode, ran } = await resumeParkedTicket(parked, { inspect: true });
   expect(exitCode).toBe(0);
   expect(ran).toBe(false); // no dispatch happened
+  cleanupParkedRun(parked);
 });
 
 test("--accept-head resumes against the new HEAD WITHOUT carryover", async () => {
@@ -27,6 +34,7 @@ test("--accept-head resumes against the new HEAD WITHOUT carryover", async () =>
   // The carryover advisory must NOT appear — it was dropped because the base changed.
   expect(prompts.some((p) => p.includes("previous attempt was interrupted"))).toBe(false);
   expect(result.outcome === "pr-ready" || result.outcome === "done").toBe(true);
+  cleanupParkedRun(parked);
 });
 
 test("park → resume → park → resume never exhausts maxAttempts (no attempt burned by a park)", async () => {
@@ -59,4 +67,5 @@ test("park → resume → park → resume never exhausts maxAttempts (no attempt
     .get();
   expect(escalation).toBeNull(); // no escalation raised — retry budget was NOT exhausted
   db.close();
+  cleanupParkedRun(parked);
 });

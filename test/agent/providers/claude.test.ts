@@ -88,4 +88,19 @@ test("run SIGKILLs and returns promptly on a process that traps SIGTERM and hang
   expect(r.timedOut).toBe(true);
   expect(r.completed).toBe(false);
   expect(elapsed).toBeLessThan(5000); // returned on the timer, not after the 30s sleep
+  // ENG-164: timeout path must classify as transient with no reset date
+  expect(r.cause).toBe("transient");
+  expect(r.resetAt).toBeNull();
+});
+
+test("run classifies spawn failure as transient (non-existent command)", async () => {
+  const r = await claudeAgentRunner("/nonexistent-styre-claude-cli").run({
+    ...runInput,
+    timeoutMs: 5000,
+  });
+  expect(r.completed).toBe(false);
+  expect(r.timedOut).toBe(false);
+  // ENG-164: spawn failure goes through the catch branch → transportFailure → cause: "transient"
+  expect(r.cause).toBe("transient");
+  expect(r.resetAt).toBeNull();
 });

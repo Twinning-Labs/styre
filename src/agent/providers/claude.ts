@@ -88,21 +88,21 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
         cause: "transient",
         resetAt: null,
       });
-      const proc = Bun.spawn([command, ...buildClaudeArgs(input)], {
-        cwd: input.cwd,
-        env: agentEnv(process.env),
-        stdin: new TextEncoder().encode(input.prompt),
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      if (input.onSpawn && typeof proc.pid === "number") {
-        input.onSpawn(proc.pid);
-      }
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeoutP = new Promise<"timeout">((resolve) => {
-        timer = setTimeout(() => resolve("timeout"), input.timeoutMs);
-      });
       try {
+        const proc = Bun.spawn([command, ...buildClaudeArgs(input)], {
+          cwd: input.cwd,
+          env: agentEnv(process.env),
+          stdin: new TextEncoder().encode(input.prompt),
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        if (input.onSpawn && typeof proc.pid === "number") {
+          input.onSpawn(proc.pid);
+        }
+        const timeoutP = new Promise<"timeout">((resolve) => {
+          timer = setTimeout(() => resolve("timeout"), input.timeoutMs);
+        });
         const outcome = await Promise.race([proc.exited.then(() => "exited" as const), timeoutP]);
         if (outcome === "timeout") {
           proc.kill("SIGKILL");
