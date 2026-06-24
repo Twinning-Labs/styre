@@ -284,7 +284,7 @@ CREATE TABLE event_log (
     ticket_id    INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
     seq          INTEGER NOT NULL,                      -- monotonic per ticket (ordering)
     kind         TEXT NOT NULL CHECK (kind IN (
-                     'transition','loopback','escalated','resumed','note')),
+                     'transition','loopback','escalated','resumed','note','parked')),
     actor        TEXT CHECK (actor IS NULL OR actor IN ('daemon','operator')),
     dispatch_id  TEXT,                                  -- the dispatch this relates to (if any)
 

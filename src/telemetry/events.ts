@@ -18,6 +18,7 @@ const EventEvent = z.object({
   route_to: z.string().nullable(),
   signature: z.string().nullable(),
   reason: z.string().nullable(),
+  payload_json: z.string().nullable().optional(),
   created_at: z.string(),
 });
 

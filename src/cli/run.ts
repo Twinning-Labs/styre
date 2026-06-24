@@ -11,19 +11,47 @@ import { realRecoverDeps, recover } from "../daemon/recover.ts";
 import { runTicket } from "../daemon/run-ticket.ts";
 import { openDb } from "../db/client.ts";
 import { migrate } from "../db/migrate.ts";
+import { getTicket } from "../db/repos/ticket.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import { loadProfile } from "../dispatch/profile.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
+import { finishRunResult, parkDir } from "./park.ts";
 
 export const runCommand = defineCommand({
   meta: { name: "run", description: "Ingest one ticket and drive it to PR-ready, then exit." },
   args: {
-    ticket: { type: "positional", required: true, description: "Ticket ref (e.g. ENG-123)" },
+    ticket: { type: "positional", required: false, description: "Ticket ref (e.g. ENG-123)" },
     profile: { type: "string", required: true, description: "Path to the project-profile JSON" },
     config: { type: "string", description: "Path to a runtime config.json (optional)" },
     db: { type: "string", description: "DB path (default: a fresh per-run temp DB)" },
+    resume: { type: "string", description: "Resume a parked run by ticket ident" },
+    "accept-head": {
+      type: "boolean",
+      description: "Resume even though the branch HEAD moved (drops carryover)",
+    },
+    inspect: { type: "boolean", description: "Print resume diagnostics and exit without running" },
   },
   async run({ args }) {
+    const profile = loadProfile(args.profile);
+    const runtimeConfig =
+      args.config && args.config.length > 0
+        ? RuntimeConfigSchema.parse(JSON.parse(readFileSync(args.config, "utf8")))
+        : DEFAULT_RUNTIME_CONFIG;
+
+    if (args.resume && args.resume.length > 0) {
+      const { resumeRun } = await import("./park.ts");
+      await resumeRun(
+        { resume: args.resume, acceptHead: args["accept-head"], inspect: args.inspect },
+        profile,
+        runtimeConfig,
+      );
+      return;
+    }
+
+    if (!args.ticket || args.ticket.length === 0) {
+      throw new Error("run: --ticket is required when not using --resume");
+    }
+
     const dbPath =
       args.db && args.db.length > 0
         ? args.db
@@ -31,12 +59,6 @@ export const runCommand = defineCommand({
     migrate(dbPath);
     const db = openDb(dbPath);
     recover(db, realRecoverDeps());
-
-    const profile = loadProfile(args.profile);
-    const runtimeConfig =
-      args.config && args.config.length > 0
-        ? RuntimeConfigSchema.parse(JSON.parse(readFileSync(args.config, "utf8")))
-        : DEFAULT_RUNTIME_CONFIG;
 
     const ports = makeProjectorPorts(runtimeConfig, profile);
     const runner = selectAgentRunner(DEFAULT_AGENT_CONFIG, { claude: () => claudeAgentRunner() });
@@ -57,9 +79,17 @@ export const runCommand = defineCommand({
       emit: stdoutSink,
     });
     console.error(out.summary); // human summary → stderr; stdout carries only NDJSON telemetry
-    db.close();
-    if (out.outcome === "blocked" || out.outcome === "no-progress") {
-      throw new Error(`run: ticket ${args.ticket} ended ${out.outcome}`);
+    const ident = getTicket(db, out.ticketId)?.ident ?? args.ticket;
+    if (out.outcome === "parked" && out.park) {
+      // Print resume-hint before finishRunResult (which does dumpPark + sets exitCode).
+      // parkDir gives the path without touching the DB.
+      const dir = parkDir(profile.slug, ident);
+      console.error(
+        `Parked: ${out.park.cause}${out.park.resetAt ? ` (resets ${out.park.resetAt})` : ""}.\n` +
+          `Resume with: styre run --resume ${ident} --profile ${args.profile}\n` +
+          `Dump: ${dir}`,
+      );
     }
+    finishRunResult(db, dbPath, profile.slug, ident, out);
   },
 });

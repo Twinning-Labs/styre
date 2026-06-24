@@ -30,6 +30,7 @@ function toEvent(r: EventLogRow): TelemetryEvent {
     route_to: r.route_to,
     signature: r.signature,
     reason: r.reason,
+    payload_json: r.payload_json,
     created_at: r.created_at,
   };
 }

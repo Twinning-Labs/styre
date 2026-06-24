@@ -5,6 +5,7 @@ import { insertProject } from "../db/repos/project.ts";
 import { listPending } from "../db/repos/signal.ts";
 import { getTicket, insertTicket } from "../db/repos/ticket.ts";
 import type { Profile } from "../dispatch/profile.ts";
+import type { ParkInfo } from "../engine/park-signal.ts";
 import { branchPrefixFor } from "../integrations/ticket-source.ts";
 import { type TelemetrySink, noopSink } from "../telemetry/emit.ts";
 import { createTelemetryEmitter } from "../telemetry/emitter.ts";
@@ -12,12 +13,13 @@ import { tick } from "./loop.ts";
 import type { ProjectorPorts } from "./projector.ts";
 import type { StepRegistry } from "./step-registry.ts";
 
-export type RunOutcome = "pr-ready" | "done" | "blocked" | "no-progress";
+export type RunOutcome = "pr-ready" | "done" | "blocked" | "no-progress" | "parked";
 export interface RunResult {
   outcome: RunOutcome;
   iterations: number;
   stage: string;
   status: string;
+  park?: ParkInfo;
 }
 
 const DEFAULT_CAP = 200; // overall iteration budget for one ticket
@@ -59,6 +61,7 @@ export async function driveToTerminal(
     last = { stage: t.stage, status: t.status };
     const pending = listPending(db, opts.ticketId);
 
+    if (r.parked) return finish({ outcome: "parked", iterations: i, ...last, park: r.parked });
     if (t.status === "done") return finish({ outcome: "done", iterations: i, ...last });
     if (pending.some((s) => s.signal_type === "human_resume"))
       return finish({ outcome: "blocked", iterations: i, ...last });

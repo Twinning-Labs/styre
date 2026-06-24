@@ -132,6 +132,16 @@ export function resetToPending(db: Database, id: number): void {
   ).run({ $now: nowUtc(), $id: id });
 }
 
+/** Undo the `attempt = attempt + 1` that `markRunning` applied at execution start.
+ *  Called in the ParkSignal catch block (advance.ts) to make a park attempt-neutral —
+ *  a quota pause is NOT a real attempt and must not consume retry budget (ENG-164). */
+export function decrementAttempt(db: Database, id: number): void {
+  db.query("UPDATE workflow_step SET attempt = attempt - 1, updated_at = $now WHERE id = $id").run({
+    $now: nowUtc(),
+    $id: id,
+  });
+}
+
 export function listStepsForUnit(
   db: Database,
   ticketId: number,

@@ -3,7 +3,9 @@ import { DEFAULT_RUNTIME_CONFIG, type RuntimeConfig } from "../config/runtime-co
 import { appendEvent } from "../db/repos/event-log.ts";
 import { getTicket, setTicketStage, setTicketStatus } from "../db/repos/ticket.ts";
 import { setStatus as setUnitStatus } from "../db/repos/work-unit.ts";
-import { getByKey } from "../db/repos/workflow-step.ts";
+import { decrementAttempt, getByKey } from "../db/repos/workflow-step.ts";
+import { ParkSignal } from "../engine/park-signal.ts";
+import type { ParkInfo } from "../engine/park-signal.ts";
 import { awaitSignal } from "../engine/signals.ts";
 import { runStep } from "../engine/step-journal.ts";
 import { applyFailurePolicy } from "./failure-policy.ts";
@@ -23,7 +25,8 @@ export type AdvanceOutcome =
   | { kind: "blocked"; reason: string }
   | { kind: "retry"; stepKey: string }
   | { kind: "loopback"; stepKey: string }
-  | { kind: "escalated"; stepKey: string };
+  | { kind: "escalated"; stepKey: string }
+  | { kind: "parked"; stepKey: string; park: ParkInfo };
 
 /** Interpret M2a's pure descriptors, advancing one ticket by one real step per call.
  *  Pure transitions (advance / mark-verified) collapse inline; a step runs via runStep
@@ -116,6 +119,32 @@ export async function advanceOneStep(
       }
       return { kind: "stepped", stepKey: d.stepKey };
     } catch (err) {
+      if (err instanceof ParkSignal) {
+        const parkedStep = getByKey(db, ticketId, d.stepKey);
+        db.transaction(() => {
+          // Undo the attempt++ that markRunning applied: a quota pause is not a real attempt
+          // and must not consume retry budget (ENG-164). The step stays 'running' — recover()
+          // needs that status to reset it to pending on resume.
+          if (parkedStep) {
+            decrementAttempt(db, parkedStep.id);
+          }
+          setTicketStatus(db, ticketId, "waiting");
+          appendEvent(db, {
+            ticketId,
+            kind: "parked",
+            reason:
+              err.info.cause === "session-limit"
+                ? `session-limit${err.info.resetAt ? `; resets ${err.info.resetAt}` : ""}`
+                : "out-of-credits; top up to resume",
+            payload: {
+              cause: err.info.cause,
+              resetAt: err.info.resetAt,
+              dispatchId: err.info.dispatchId,
+            },
+          });
+        })();
+        return { kind: "parked", stepKey: d.stepKey, park: err.info };
+      }
       const failed = getByKey(db, ticketId, d.stepKey);
       if (!failed || failed.status !== "failed") {
         // Not a handler failure — e.g. StepInFlightError (a running step; recover() owns it). Propagate.

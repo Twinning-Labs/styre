@@ -531,6 +531,12 @@ await step then succeeds.
 | V3 | S5 | blocking finding, **plan-defect** category (impl correct, plan wrong) | → S1a re-design | plan | K_distinct → escalate |
 | V-def | S5 | a `major` tagged `deferral_candidate` | escalate that finding to the human | — | — |
 | V4 | S5 | reviewer death / transport (dispatch didn't complete) | retry dispatch | — | K_retry → escalate |
+
+> ENG-164: a transport death is now classified by cause. session-limit / out-of-credits →
+> `parked` (resumable, attempt NOT consumed); crash / timeout / unknown → `transient` retry as
+> before. The `parked` dispatch outcome + `event_log.kind='parked'` make a quota pause countable
+> separately from a real failure.
+
 | V6 | across reviews | same finding (`finding_class_key`) persists N cold rounds | escalate (agent can't fix it) | — | fast |
 | **Checks (CI)** ||||||
 | P1 | S8 | checks red — real failure | → ticket-scoped reconcile (then verify+review+re-push) | ticket | K_distinct → escalate |

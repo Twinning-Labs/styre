@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r 'if ((.tool_input.file_path // \"\") | test(\"docs/(superpowers|specs)/\")) then {hookSpecificOutput:{hookEventName:\"PreToolUse\",permissionDecision:\"deny\",permissionDecisionReason:\"Styre docs convention (CLAUDE.md): brainstorm specs -> docs/brainstorms/, plans -> docs/plans/, design docs -> docs/design/. Do NOT write under docs/superpowers/ or docs/specs/ (the superpowers skill default).\"}} else empty end'",
+            "statusMessage": "Checking docs path convention"
+          }
+        ]
+      }
+    ]
+  }
+}

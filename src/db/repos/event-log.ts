@@ -1,11 +1,14 @@
 import type { Database } from "bun:sqlite";
 import { nowUtc } from "../../util/time.ts";
 
+/** The exhaustive set of values permitted by the event_log.kind CHECK constraint in schema.sql. */
+export type EventKind = "transition" | "loopback" | "escalated" | "resumed" | "note" | "parked";
+
 export interface EventLogRow {
   id: number;
   ticket_id: number;
   seq: number;
-  kind: string;
+  kind: EventKind;
   actor: string | null;
   from_stage: string | null;
   to_stage: string | null;
@@ -13,11 +16,12 @@ export interface EventLogRow {
   route_to: string | null;
   signature: string | null;
   reason: string | null;
+  payload_json: string | null;
   created_at: string;
 }
 
 const COLS =
-  "id, ticket_id, seq, kind, actor, from_stage, to_stage, loop, route_to, signature, reason, created_at";
+  "id, ticket_id, seq, kind, actor, from_stage, to_stage, loop, route_to, signature, reason, payload_json, created_at";
 
 export function nextSeq(db: Database, ticketId: number): number {
   const row = db
@@ -48,7 +52,7 @@ export function appendEvent(
   db: Database,
   e: {
     ticketId: number;
-    kind: string;
+    kind: EventKind;
     actor?: string;
     fromStage?: string;
     toStage?: string;
@@ -56,13 +60,14 @@ export function appendEvent(
     routeTo?: string;
     signature?: string;
     reason?: string;
+    payload?: Record<string, unknown>;
   },
 ): EventLogRow {
   const res = db
     .query(
       `INSERT INTO event_log
-         (ticket_id, seq, kind, actor, from_stage, to_stage, loop, route_to, signature, reason, created_at)
-       VALUES ($t, $seq, $kind, $actor, $from, $to, $loop, $route, $sig, $reason, $now)`,
+         (ticket_id, seq, kind, actor, from_stage, to_stage, loop, route_to, signature, reason, payload_json, created_at)
+       VALUES ($t, $seq, $kind, $actor, $from, $to, $loop, $route, $sig, $reason, $payload, $now)`,
     )
     .run({
       $t: e.ticketId,
@@ -75,6 +80,7 @@ export function appendEvent(
       $route: e.routeTo ?? null,
       $sig: e.signature ?? null,
       $reason: e.reason ?? null,
+      $payload: e.payload ? JSON.stringify(e.payload) : null,
       $now: nowUtc(),
     });
   const created = db
