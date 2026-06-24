@@ -60,6 +60,12 @@ Per `build-operations.md` §3 — three run modes on the single binary:
 - `styre setup <repo>` — idempotent probe: discover project profile + checks-system, create+migrate the DB, refresh Linear id-cache, install the host service (launchd on macOS, systemd on Linux).
 - `styre daemon` — persistent local supervised mode (solo/local-team).
 - `styre run <ticket>` — one-shot headless runner (the CI/cloud/fleet primitive; ephemeral per-run SQLite).
+  - On a session-limit / out-of-credits dispatch death, `run` parks: it dumps the SoT + transcript
+    to `~/.local/state/styre/<project-stub>/<ticket-ident>/` and exits `75` (EX_TEMPFAIL) without
+    burning a retry attempt. Resume with `styre run --resume <ticket> --profile <p>` (re-runs only
+    the interrupted step, carrying its partial context forward). If the branch HEAD moved since the
+    park, resume refuses (exit `65`); use `--accept-head` (resume against new HEAD, drops carryover)
+    or `--inspect` (diagnostics only, exit `0`).
 - Management CLI: `status` · `inbox` (resume / `--after-fix` / abandon) · `config` · `pause`/`resume` · `logs` · `uninstall`.
 
 macOS and Linux are both first-class targets; paths follow the XDG Base Directory spec on both. Auth supports a subscription session (local) **or** `ANTHROPIC_API_KEY` (required for headless). Model tiers: design/review = Opus 4.8, implement = Sonnet 4.6, build = Haiku 4.5.
