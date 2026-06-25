@@ -152,3 +152,130 @@ jobs:
             ${{ env.ARTIFACT }}.sha256
           if-no-files-found: error
           retention-days: 7
+
+  publish:
+    needs: [compute, build]
+    if: ${{ !inputs.dry_run && needs.compute.outputs.should_release == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint styre-scoped App token (commit + tag + release)
+        id: styre_token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2
+        with:
+          app-id: ${{ secrets.STYRE_RELEASE_APP_ID }}
+          private-key: ${{ secrets.STYRE_RELEASE_APP_PRIVATE_KEY }}
+          owner: Twinning-Labs
+          repositories: styre
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ needs.compute.outputs.sha0 }}
+          fetch-depth: 0
+          token: ${{ steps.styre_token.outputs.token }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - name: Install git-cliff
+        uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3  # v2
+        with:
+          tool: git-cliff
+      - run: git fetch origin main   # so the commit probe can read origin/main
+      - name: Download all build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Render changelog file (always — needed for Release notes)
+        env:
+          V: ${{ needs.compute.outputs.version }}
+        run: git cliff --tag "$V" -o CHANGELOG.md
+      - name: Stamp + commit (probe-then-apply; FF push, abort if main moved)
+        id: commit
+        env:
+          V: ${{ needs.compute.outputs.version }}
+          RESUMING: ${{ needs.compute.outputs.resuming }}
+        run: |
+          set -e
+          git config user.name "styre-release-bot[bot]"
+          git config user.email "styre-release-bot[bot]@users.noreply.github.com"
+          # PROBE: is the release commit already on main? (resume after a prior
+          # run pushed it but failed a downstream effect). If so, skip commit+push
+          # so a re-run HEALS rather than aborting on "nothing to commit" or
+          # duplicating the commit.
+          if [ "$RESUMING" = "true" ] || git log origin/main -1 --format=%s | grep -qxF "chore(release): $V"; then
+            echo "::notice::release commit for $V already on main; skipping commit+push"
+            echo "release_sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bun run scripts/stamp-version.ts "$V"
+          git add package.json CHANGELOG.md
+          git commit -m "chore(release): $V"
+          # Fast-forward push only. If main advanced since sha0, this is NOT a
+          # fast-forward and the push is rejected -> abort, nothing published.
+          git push origin "HEAD:main"
+          echo "release_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Tag (probe-then-apply)
+        env:
+          V: ${{ needs.compute.outputs.version }}
+        run: |
+          if git ls-remote --tags origin "refs/tags/$V" | grep -q "$V"; then
+            echo "::notice::tag $V already exists, skipping"
+          else
+            git tag "$V" "${{ steps.commit.outputs.release_sha }}"
+            git push origin "$V"
+          fi
+      - name: Create/repair GitHub Release (probe-then-apply assets)
+        env:
+          GH_TOKEN: ${{ steps.styre_token.outputs.token }}
+          V: ${{ needs.compute.outputs.version }}
+        run: |
+          set -e
+          if ! gh release view "$V" -R Twinning-Labs/styre >/dev/null 2>&1; then
+            gh release create "$V" -R Twinning-Labs/styre \
+              --title "$V" --notes-file CHANGELOG.md --verify-tag
+          fi
+          # Upload any of the 8 files (4 tarballs + 4 sha256) not already attached.
+          existing="$(gh release view "$V" -R Twinning-Labs/styre --json assets --jq '.assets[].name')"
+          for f in artifacts/styre-*.tar.gz artifacts/styre-*.tar.gz.sha256; do
+            base="$(basename "$f")"
+            if echo "$existing" | grep -qx "$base"; then
+              echo "asset $base present"
+            else
+              gh release upload "$V" -R Twinning-Labs/styre "$f"
+            fi
+          done
+      - name: Mint tap-scoped App token
+        id: tap_token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2
+        with:
+          app-id: ${{ secrets.STYRE_RELEASE_APP_ID }}
+          private-key: ${{ secrets.STYRE_RELEASE_APP_PRIVATE_KEY }}
+          owner: Twinning-Labs
+          repositories: homebrew-styre
+      - name: Bump tap formula (probe-then-apply; shas from PUBLISHED assets)
+        env:
+          V: ${{ needs.compute.outputs.version }}
+          GH_TOKEN: ${{ steps.styre_token.outputs.token }}
+          TAP_TOKEN: ${{ steps.tap_token.outputs.token }}
+        run: |
+          set -e
+          v="${V#v}"
+          # Read sha256 from the Release assets actually published (write-once),
+          # NOT from this run's local rebuild — guarantees the formula matches
+          # what users download even on a heal re-run.
+          mkdir -p relsha
+          gh release download "$V" -R Twinning-Labs/styre --pattern '*.tar.gz.sha256' --dir relsha
+          read_sha() { cat "relsha/styre-v${v}-$1.tar.gz.sha256"; }
+          DA="$(read_sha darwin-arm64)"; DX="$(read_sha darwin-x64)"
+          LA="$(read_sha linux-arm64)";  LX="$(read_sha linux-x64)"
+          bun run scripts/render-formula.ts "$v" "$DA" "$DX" "$LA" "$LX" > /tmp/styre.rb
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/Twinning-Labs/homebrew-styre.git" /tmp/tap
+          if cmp -s /tmp/styre.rb /tmp/tap/Formula/styre.rb; then
+            echo "::notice::tap already at this build, skipping"
+          else
+            cp /tmp/styre.rb /tmp/tap/Formula/styre.rb
+            git -C /tmp/tap config user.name "styre-release-bot[bot]"
+            git -C /tmp/tap config user.email "styre-release-bot[bot]@users.noreply.github.com"
+            git -C /tmp/tap commit -am "styre $V"
+            git -C /tmp/tap push origin HEAD
+          fi
