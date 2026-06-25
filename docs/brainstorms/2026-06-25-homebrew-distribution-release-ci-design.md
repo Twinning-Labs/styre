@@ -154,9 +154,10 @@ external state before applying), not by a coarse "tag exists → no-op" guard. R
 | partial state after a failed run         | re-run behavior                                                        |
 |------------------------------------------|------------------------------------------------------------------------|
 | FF push rejected (main advanced)         | nothing published; abort; re-dispatch picks new `SHA0`/recomputes `vX`  |
+| commit pushed, tag/downstream failed     | compute detects `chore(release): vX` is HEAD → pins `SHA0` to its parent (`resuming`); publish probes `origin/main` and SKIPS the commit effect, then heals tag+Release+tap. Never re-commits (no "nothing to commit" abort, no duplicate commit). |
 | commit+tag done, Release assets partial  | probe Release → upload only the missing tarballs/checksums              |
-| commit+tag+Release done, tap push failed | probe tap formula sha256 ≠ this build → push the formula bump (heals it) |
-| tag exists but build was a no-op rerun   | per-effect probes find everything present → genuine no-op exit          |
+| commit+tag+Release done, tap push failed | tap shas read from the published Release assets; probe tap formula ≠ that → push the formula bump (heals it) |
+| tag exists at HEAD (fully released)      | compute short-circuits to a clean no-op exit                            |
 
 The key change from the original design: a re-run **never blanket-exits on "tag `vX` exists."** That would
 have cemented the "tag exists but tap stale" state the ticket explicitly fears. The placeholder tap formula

@@ -124,7 +124,7 @@ git commit -m "feat(release): artifact-name single source for tarball filenames"
 - Test: `test/release/stamp-version.test.ts`
 
 **Interfaces:**
-- Produces: `stampVersion(pkgJson: string, version: string): string` — returns the `package.json` text with `"version"` set to the bare version (no leading `v`), preserving 2-space indentation and trailing newline. CLI: `bun run scripts/stamp-version.ts <version> [path=package.json]` writes the file in place. Consumed by the publish job (Task 9) before the build/commit.
+- Produces: `stampVersion(pkgJson: string, version: string): string` — returns the `package.json` text with `"version"` set to the bare version (no leading `v`), preserving 2-space indentation and trailing newline. CLI: `bun run scripts/stamp-version.ts <version> [path=package.json]` writes the file in place. Consumed by the publish job (Task 8) before the build/commit.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -259,7 +259,7 @@ git commit -m "feat(release): parameterize build.sh with TARGET and OUTFILE"
 
 **Interfaces:**
 - Consumes: `artifactName()` from Task 1.
-- Produces: `renderFormula(version: string, shas: { darwinArm64: string; darwinX64: string; linuxArm64: string; linuxX64: string }): string` returning the full `Formula/styre.rb` text. CLI: `bun run scripts/render-formula.ts <version> <darwinArm64Sha> <darwinX64Sha> <linuxArm64Sha> <linuxX64Sha>` prints the formula. Consumed by the publish job (Task 9) tap-bump step. The four `url`s are built from `artifactName()` against `https://github.com/Twinning-Labs/styre/releases/download/v<version>/`.
+- Produces: `renderFormula(version: string, shas: { darwinArm64: string; darwinX64: string; linuxArm64: string; linuxX64: string }): string` returning the full `Formula/styre.rb` text. CLI: `bun run scripts/render-formula.ts <version> <darwinArm64Sha> <darwinX64Sha> <linuxArm64Sha> <linuxX64Sha>` prints the formula. Consumed by the publish job (Task 8) tap-bump step. The four `url`s are built from `artifactName()` against `https://github.com/Twinning-Labs/styre/releases/download/v<version>/`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -455,6 +455,7 @@ commit_parsers = [
 filter_commits = false
 
 [bump]
+initial_tag = "0.1.0"          # deterministic first version (no fragile fallback)
 features_always_bump_minor = true
 breaking_always_bump_major = true
 ```
@@ -565,7 +566,7 @@ Expected: repo created and pushed.
 - [ ] **Step 6: Confirm the App is installed on the tap repo**
 
 Run: `gh api repos/Twinning-Labs/homebrew-styre --jq '.full_name'`
-Expected: `Twinning-Labs/homebrew-styre`. (The `styre-release-bot` App install on this repo was done per the ticket; if a later token-mint in Task 9 fails with "not installed", install the App on `homebrew-styre` via the App settings page.)
+Expected: `Twinning-Labs/homebrew-styre`. (The `styre-release-bot` App install on this repo was done per the ticket; if the tap token-mint in Task 8 fails with "not installed", install the App on `homebrew-styre` via the App settings page.)
 
 - [ ] **Step 7: Commit the CI change**
 
@@ -592,9 +593,11 @@ Run:
 gh api repos/actions/checkout/commits/v4 --jq '.sha'
 gh api repos/oven-sh/setup-bun/commits/v2 --jq '.sha'
 gh api repos/actions/upload-artifact/commits/v4 --jq '.sha'
-gh api repos/orhun/git-cliff-action/commits/v4 --jq '.sha'
+gh api repos/taiki-e/install-action/commits/v2 --jq '.sha'
 ```
-Record as `CHECKOUT_SHA`, `SETUP_BUN_SHA`, `UPLOAD_SHA`, `CLIFF_SHA`. Substitute below.
+Record as `CHECKOUT_SHA`, `SETUP_BUN_SHA`, `UPLOAD_SHA`, `INSTALL_ACTION_SHA`. Substitute below.
+
+> **Why `taiki-e/install-action` instead of `orhun/git-cliff-action`:** the git-cliff-action's `version` output is "the latest release", NOT the bumped next version — its own README computes the bump via `git cliff --bumped-version` command substitution. So we install the `git-cliff` binary and call it directly in `run:` steps, which also lets the preview and the committed changelog use the identical command.
 
 - [ ] **Step 2: Write `release.yml` (compute + build jobs)**
 
@@ -627,50 +630,73 @@ jobs:
   compute:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.cliff.outputs.version }}
+      version: ${{ steps.ver.outputs.version }}
       sha0: ${{ steps.pin.outputs.sha0 }}
-      should_release: ${{ steps.guard.outputs.should_release }}
+      should_release: ${{ steps.ver.outputs.should_release }}
+      resuming: ${{ steps.pin.outputs.resuming }}
     steps:
       - uses: actions/checkout@<CHECKOUT_SHA>  # v4
         with:
           fetch-depth: 0  # full history + tags for git-cliff
-      - id: pin
-        run: echo "sha0=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Abort if main moved since the previewed dispatch
-        if: inputs.expected_sha != ''
-        run: |
-          if [ "$(git rev-parse HEAD)" != "${{ inputs.expected_sha }}" ]; then
-            echo "::error::main HEAD $(git rev-parse HEAD) != expected_sha ${{ inputs.expected_sha }}"; exit 1
-          fi
-      - id: cliff
-        uses: orhun/git-cliff-action@<CLIFF_SHA>  # v4
+      - name: Install git-cliff
+        uses: taiki-e/install-action@<INSTALL_ACTION_SHA>  # v2
         with:
-          args: --bumped-version
-      - name: Abort if computed version != expected_version
-        if: inputs.expected_version != ''
+          tool: git-cliff
+      - id: ver
+        # Compute the bumped version DIRECTLY from git-cliff (the action's
+        # `version` output is "latest release", not the bump). Short-circuit to a
+        # no-op if HEAD is already a published tag (re-dispatch of a finished
+        # release) or there is nothing to release.
         run: |
-          if [ "${{ steps.cliff.outputs.version }}" != "${{ inputs.expected_version }}" ]; then
-            echo "::error::computed ${{ steps.cliff.outputs.version }} != expected ${{ inputs.expected_version }}"; exit 1
+          if git describe --exact-match --tags HEAD >/dev/null 2>&1; then
+            T="$(git describe --exact-match --tags HEAD)"
+            echo "version=$T" >> "$GITHUB_OUTPUT"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::HEAD already released as $T; nothing to do"; exit 0
           fi
-      - id: guard
-        env:
-          GH_TOKEN: ${{ github.token }}
-          V: ${{ steps.cliff.outputs.version }}
-        run: |
-          # Per-effect idempotency starts here: if the tag already exists, a real
-          # run still proceeds to the publish job, which probes each effect. But
-          # if there is nothing to release, stop.
+          V="$(git cliff --bumped-version)"
           if [ -z "$V" ] || [ "$V" = "null" ]; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
             echo "::notice::nothing to release since last tag"; exit 0
           fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "should_release=true" >> "$GITHUB_OUTPUT"
           echo "::notice::next version = $V"
-      - name: Dry-run preview (version + changelog + bump drivers)
-        if: inputs.dry_run
-        uses: orhun/git-cliff-action@<CLIFF_SHA>  # v4
-        with:
-          args: --unreleased --tag ${{ steps.cliff.outputs.version }} -o -
+      - id: pin
+        # Resume-safe SHA pin (D5 across runs): if HEAD is already this release's
+        # chore(release) commit (a prior run pushed it but a downstream effect
+        # failed), pin sha0 to its PARENT so the rebuild reproduces run A's base
+        # bit-for-bit and the publish job skips the commit effect. Else pin HEAD.
+        env:
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          if [ "$(git log -1 --format=%s)" = "chore(release): $V" ]; then
+            echo "sha0=$(git rev-parse HEAD~1)" >> "$GITHUB_OUTPUT"
+            echo "resuming=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::resuming release $V (release commit already on main)"
+          else
+            echo "sha0=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            echo "resuming=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Abort if main moved since the previewed dispatch
+        if: inputs.expected_sha != '' && steps.pin.outputs.resuming == 'false'
+        run: |
+          if [ "$(git rev-parse HEAD)" != "${{ inputs.expected_sha }}" ]; then
+            echo "::error::main HEAD $(git rev-parse HEAD) != expected_sha ${{ inputs.expected_sha }}"; exit 1
+          fi
+      - name: Abort if computed version != expected_version
+        if: inputs.expected_version != ''
+        run: |
+          if [ "${{ steps.ver.outputs.version }}" != "${{ inputs.expected_version }}" ]; then
+            echo "::error::computed ${{ steps.ver.outputs.version }} != expected ${{ inputs.expected_version }}"; exit 1
+          fi
+      - name: Dry-run preview (version + full committed changelog)
+        if: inputs.dry_run && steps.ver.outputs.should_release == 'true'
+        # Render the SAME full-file form the publish job commits (not just the
+        # unreleased fragment), so the operator previews exactly what will land.
+        run: |
+          echo "next version = ${{ steps.ver.outputs.version }}"
+          git cliff --tag "${{ steps.ver.outputs.version }}" -o -
 
   build:
     needs: compute
@@ -746,7 +772,7 @@ git push
 gh workflow run release.yml --ref "$(git rev-parse --abbrev-ref HEAD)" -f dry_run=true
 gh run watch "$(gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
 ```
-Expected: `compute` prints `next version = v0.1.0` and a changelog preview; all 4 `build` jobs succeed and upload artifacts; **nothing is committed, tagged, or published.** Download an artifact and confirm:
+Expected: `compute` prints `next version = v0.1.0` and a changelog preview; all 4 `build` jobs succeed and upload artifacts; **nothing is committed, tagged, or published.** (Note: a dry-run on the *branch* validates build + plumbing and the computed version; the authoritative changelog preview is the `--ref main` dry-run in Task 9 Step 3, since the branch carries release-tooling commits that collapse on squash-merge to `main`.) Download an artifact and confirm:
 ```bash
 gh run download "$(gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[0].databaseId')" -n styre-linux-x64
 ls styre-v0.1.0-linux-x64.tar.gz styre-v0.1.0-linux-x64.tar.gz.sha256
@@ -783,8 +809,9 @@ Run:
 ```bash
 gh api repos/actions/create-github-app-token/commits/v2 --jq '.sha'
 gh api repos/actions/download-artifact/commits/v4 --jq '.sha'
+gh api repos/taiki-e/install-action/commits/v2 --jq '.sha'
 ```
-Record as `APP_TOKEN_SHA`, `DOWNLOAD_SHA`.
+Record as `APP_TOKEN_SHA`, `DOWNLOAD_SHA`, `INSTALL_ACTION_SHA` (same `CHECKOUT_SHA`/`SETUP_BUN_SHA` from Task 7).
 
 - [ ] **Step 3: Add the `publish` job to `release.yml`**
 
@@ -813,24 +840,39 @@ Append under `jobs:` (after `build`), substituting SHAs:
         with:
           bun-version: latest
       - run: bun install --frozen-lockfile
+      - name: Install git-cliff
+        uses: taiki-e/install-action@<INSTALL_ACTION_SHA>  # v2
+        with:
+          tool: git-cliff
+      - run: git fetch origin main   # so the commit probe can read origin/main
       - name: Download all build artifacts
         uses: actions/download-artifact@<DOWNLOAD_SHA>  # v4
         with:
           path: artifacts
           merge-multiple: true
-      - name: Render changelog file
-        uses: orhun/git-cliff-action@<CLIFF_SHA>  # v4
-        with:
-          args: --tag ${{ needs.compute.outputs.version }} -o CHANGELOG.md
-      - name: Stamp version + commit (FF push, abort if main moved)
+      - name: Render changelog file (always — needed for Release notes)
+        env:
+          V: ${{ needs.compute.outputs.version }}
+        run: git cliff --tag "$V" -o CHANGELOG.md
+      - name: Stamp + commit (probe-then-apply; FF push, abort if main moved)
         id: commit
         env:
           V: ${{ needs.compute.outputs.version }}
+          RESUMING: ${{ needs.compute.outputs.resuming }}
         run: |
           set -e
-          bun run scripts/stamp-version.ts "$V"
           git config user.name "styre-release-bot[bot]"
           git config user.email "styre-release-bot[bot]@users.noreply.github.com"
+          # PROBE: is the release commit already on main? (resume after a prior
+          # run pushed it but failed a downstream effect). If so, skip commit+push
+          # so a re-run HEALS rather than aborting on "nothing to commit" or
+          # duplicating the commit.
+          if [ "$RESUMING" = "true" ] || git log origin/main -1 --format=%s | grep -qxF "chore(release): $V"; then
+            echo "::notice::release commit for $V already on main; skipping commit+push"
+            echo "release_sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bun run scripts/stamp-version.ts "$V"
           git add package.json CHANGELOG.md
           git commit -m "chore(release): $V"
           # Fast-forward push only. If main advanced since sha0, this is NOT a
@@ -875,14 +917,20 @@ Append under `jobs:` (after `build`), substituting SHAs:
           private-key: ${{ secrets.STYRE_RELEASE_APP_PRIVATE_KEY }}
           owner: Twinning-Labs
           repositories: homebrew-styre
-      - name: Bump tap formula (probe-then-apply)
+      - name: Bump tap formula (probe-then-apply; shas from PUBLISHED assets)
         env:
           V: ${{ needs.compute.outputs.version }}
+          GH_TOKEN: ${{ steps.styre_token.outputs.token }}
           TAP_TOKEN: ${{ steps.tap_token.outputs.token }}
         run: |
           set -e
           v="${V#v}"
-          read_sha() { cat "artifacts/styre-v${v}-$1.tar.gz.sha256"; }
+          # Read sha256 from the Release assets actually published (write-once),
+          # NOT from this run's local rebuild — guarantees the formula matches
+          # what users download even on a heal re-run.
+          mkdir -p relsha
+          gh release download "$V" -R Twinning-Labs/styre --pattern '*.tar.gz.sha256' --dir relsha
+          read_sha() { cat "relsha/styre-v${v}-$1.tar.gz.sha256"; }
           DA="$(read_sha darwin-arm64)"; DX="$(read_sha darwin-x64)"
           LA="$(read_sha linux-arm64)";  LX="$(read_sha linux-x64)"
           bun run scripts/render-formula.ts "$v" "$DA" "$DX" "$LA" "$LX" > /tmp/styre.rb
@@ -930,20 +978,23 @@ Expected: `compute` + `build` run; `publish` shows as skipped.
 
 **Interfaces:**
 - Consumes: the published Release + bumped tap from the `publish` job.
-- Produces: a `smoke` job that `brew install`s on all four targets and runs `brew audit --strict`.
+- Produces: a `smoke` job that `brew install`s on the three brew-capable arches + a `smoke-linux-arm64` job that tarball-smokes the published linux-arm64 asset (Homebrew is x86_64-only on Linux).
 
-- [ ] **Step 1: Add the `smoke` job to `release.yml`**
+- [ ] **Step 1: Add the `smoke` jobs to `release.yml`**
 
-Append under `jobs:`, substituting `CHECKOUT_SHA`:
+Append under `jobs:`:
 
 ```yaml
   smoke:
+    # Homebrew is unsupported on linux-arm64 (x86_64 only), so the tap is
+    # brew-smoked on the three brew-capable arches. linux-arm64 is smoked
+    # separately below against the published tarball.
     needs: publish
     if: ${{ !inputs.dry_run }}
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-14, macos-13, ubuntu-latest, ubuntu-24.04-arm]
+        runner: [macos-14, macos-13, ubuntu-latest]
     runs-on: ${{ matrix.runner }}
     steps:
       - name: brew install from the tap + smoke
@@ -953,6 +1004,27 @@ Append under `jobs:`, substituting `CHECKOUT_SHA`:
           styre --version
       - name: brew audit (strict)
         run: brew audit --strict --online twinning-labs/styre/styre
+
+  smoke-linux-arm64:
+    needs: [compute, publish]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Tarball-extract smoke of the published linux-arm64 asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ needs.compute.outputs.version }}
+        run: |
+          set -e
+          v="${V#v}"
+          gh release download "$V" -R Twinning-Labs/styre \
+            --pattern "styre-v${v}-linux-arm64.tar.gz*" --dir dl
+          got="$(shasum -a 256 "dl/styre-v${v}-linux-arm64.tar.gz" | awk '{print $1}')"
+          want="$(cat "dl/styre-v${v}-linux-arm64.tar.gz.sha256")"
+          test "$got" = "$want" || { echo "::error::sha mismatch on linux-arm64"; exit 1; }
+          tar -C dl -xzf "dl/styre-v${v}-linux-arm64.tar.gz"
+          got_v="$(dl/styre --version)"
+          test "$got_v" = "$v" || { echo "::error::version $got_v != $v"; exit 1; }
 ```
 
 - [ ] **Step 2: Validate + commit + push**
@@ -960,7 +1032,7 @@ Append under `jobs:`, substituting `CHECKOUT_SHA`:
 ```bash
 actionlint .github/workflows/release.yml
 git add .github/workflows/release.yml
-git commit -m "feat(release): post-release brew install smoke + audit on all four targets"
+git commit -m "feat(release): post-release brew smoke (3 arches) + linux-arm64 tarball smoke"
 git push
 ```
 
@@ -973,7 +1045,7 @@ gh workflow run release.yml --ref main -f dry_run=true
 gh workflow run release.yml --ref main -f dry_run=false -f expected_version=v0.1.0
 gh run watch "$(gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
 ```
-Expected: a `v0.1.0` GitHub Release with 4 tarballs + 4 `.sha256`; `CHANGELOG.md` + version bump committed to `main` as `styre-release-bot[bot]`; the tap formula bumped; the `smoke` matrix green.
+Expected: a `v0.1.0` GitHub Release with 4 tarballs + 4 `.sha256`; `CHANGELOG.md` + version bump committed to `main` as `styre-release-bot[bot]`; the tap formula bumped; both `smoke` (3 arches) and `smoke-linux-arm64` green. The `--ref main -f dry_run=true` preview is the authoritative one — eyeball the full changelog + `v0.1.0` here before the real run.
 
 - [ ] **Step 4: Verify the end-user install path**
 
@@ -1003,7 +1075,7 @@ Expected: publish job runs but every probe reports "already present / already at
 - D2 versioning (v0.1.0, breaking→major non-default) → Task 5 (`cliff.toml`) + Global Constraints. ✓
 - D3 FF changelog push → Task 8 commit step. ✓
 - D4 FF-only bypass → Global Constraints + already-configured; the FF push relies on it (Task 8). ✓
-- D5 immutable SHA pin → `compute.sha0` threaded into `build`/`publish` (Tasks 7/8). ✓
+- D5 immutable SHA pin (+ resume-safe across runs) → `compute.sha0`/`resuming` threaded into `build`/`publish` (Tasks 7/8). ✓
 - Release flow ordering + dry_run binding → Tasks 7/8. ✓
 - Recovery / per-effect idempotency → Task 8 probe-then-apply steps + Task 9 Step 5. ✓
 - cliff.toml (pre-1.0 config, chore(release) skip, baseline) → Task 5. ✓
@@ -1019,9 +1091,12 @@ Expected: publish job runs but every probe reports "already present / already at
 
 **2. Placeholder scan:** Action SHAs are intentionally resolved-and-substituted via explicit `gh api` commands (not hand-waved). No "TBD"/"add error handling"/"write tests for the above" — every code step shows real code. ✓
 
-**3. Type consistency:** `artifactName(version,os,arch)` used identically in Tasks 1, 4, 7. `renderFormula(version, {darwinArm64,darwinX64,linuxArm64,linuxX64})` keys match between Task 4 definition and Task 8 invocation order (DA,DX,LA,LX). `compute` outputs `version`/`sha0`/`should_release` consumed consistently in `build`/`publish`. ✓
+**3. Type consistency:** `artifactName(version,os,arch)` used identically in Tasks 1, 4, 7. `renderFormula(version, {darwinArm64,darwinX64,linuxArm64,linuxX64})` keys match between Task 4 definition and Task 8 invocation order (DA,DX,LA,LX). `compute` outputs `version`/`sha0`/`should_release`/`resuming` consumed consistently in `build`/`publish`/`smoke`. ✓
 
 ## Known sequencing notes (not gaps)
 
-- **git-cliff baseline:** with no prior tag the first run parses all history (pre-lint commits). `v0.1.0` is the hardcoded floor, so version is safe; the first changelog is best-effort over historical commits. Acceptable for the first release (spec "Open follow-ups").
-- **Real-release ordering:** Tasks 7–8 are verifiable on the feature branch via `--ref <branch>` dry-runs; the first non-dry release (Task 9 Step 3) must run from `main` after merge so the FF commit targets `main`. This is called out in each task.
+- **git-cliff baseline:** `initial_tag = "0.1.0"` in `cliff.toml` pins the first version deterministically; with no prior tag the first run parses all history (pre-lint commits), so the first changelog is best-effort over historical commits. Acceptable for the first release (spec "Open follow-ups").
+- **Resume model (per-effect idempotency across runs):** `compute` detects when HEAD is already this release's `chore(release): vX` commit and pins `sha0` to its parent (`resuming=true`), so a heal re-run rebuilds run A's base bit-for-bit; `publish` then probes `origin/main` and skips the commit effect. A fully-tagged HEAD short-circuits to a clean no-op. This closes the "commit pushed, downstream failed" recovery cell. Verified by Task 9 Step 5.
+- **Second-release (N+1) verification is deferred to the actual second release.** Tasks 7–9 verify release 1 + a heal re-run of release 1, but not a genuine N+1 (range starts at `vN`, `chore(release): vN` skipped, changelog appends not clobbers). git-cliff's tag-boundary + the `chore(release)` skip parser make this correct by construction, but the first real N+1 release should be eyeballed via its `--ref main` dry-run before publishing.
+- **`macos-13` (darwin-x64 build runner) is on GitHub's deprecation path.** Fine today; when removed, build darwin-x64 by cross-compiling from a `macos-14` (arm64) runner via `--target=bun-darwin-x64` (Bun supports it) and ad-hoc codesign there.
+- **Real-release ordering:** Tasks 7–8 are verifiable on the feature branch via `--ref <branch>` dry-runs (plumbing + version only); the first non-dry release (Task 9 Step 3) must run from `main` after merge so the FF commit targets `main`. Called out in each task.
