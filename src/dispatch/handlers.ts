@@ -507,45 +507,41 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
     ensureWorktree(repoPath, branch, worktreePath);
 
-    // Gather build/test commands from repo-level repoCommands, then fall back to component-level.
-    const commands = (["build", "test"] as const)
-      .map((key) => {
-        const repoCmd = deps.profile.repoCommands[key];
-        const compCmd = deps.profile.components
-          .map((c) => commandFor(c, key))
-          .find((v) => v !== undefined);
-        const command = repoCmd ?? compCmd;
-        return { key, command };
-      })
-      .filter((c): c is { key: "build" | "test"; command: string } => c.command !== undefined);
-
-    if (commands.length === 0) {
+    const jobs: Array<{ label: string; command: string }> = [];
+    for (const c of deps.profile.components) {
+      for (const key of ["build", "test"] as const) {
+        const cmd = commandFor(c, key);
+        if (cmd) jobs.push({ label: `${c.name}:${key}`, command: cmd });
+      }
+    }
+    for (const [name, cmd] of Object.entries(deps.profile.repoCommands)) {
+      jobs.push({ label: `repo:${name}`, command: cmd });
+    }
+    if (jobs.length === 0) {
       insertSignal(ctx.db, {
         ticketId: ctx.ticket.id,
         signalType: "integration",
         result: "error",
-        detail: { reason: "no build/test profile command declared" },
+        detail: { reason: "no component build/test or repoCommands declared" },
       });
-      throw new Error("verify:integration: no build/test profile command declared");
+      throw new Error("verify:integration: nothing to run");
     }
-
     const branchHeadSha = getLatestForTicket(ctx.db, ctx.ticket.id)?.branch_head_sha ?? undefined;
-    const ran: Array<{ key: string; exitCode: number | null; timedOut: boolean }> = [];
+    const ran: Array<{ label: string; exitCode: number | null; timedOut: boolean }> = [];
     let result: "pass" | "fail" | "error" = "pass";
     let lastCommand = "";
-    for (const { key, command } of commands) {
+    for (const { label, command } of jobs) {
       lastCommand = command;
       const run = await runCommand(command, {
         cwd: worktreePath,
         timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
       });
-      ran.push({ key, exitCode: run.exitCode, timedOut: run.timedOut });
+      ran.push({ label, exitCode: run.exitCode, timedOut: run.timedOut });
       if (run.exitCode !== 0) {
         result = run.timedOut || run.exitCode === null ? "error" : "fail";
         break;
       }
     }
-
     insertSignal(ctx.db, {
       ticketId: ctx.ticket.id,
       signalType: "integration",
@@ -554,9 +550,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       branchHeadSha,
       detail: { ran },
     });
-    if (result !== "pass") {
-      throw new Error(`verify:integration: ${result}`);
-    }
+    if (result !== "pass") throw new Error(`verify:integration: ${result}`);
     return { integration: result };
   });
 
