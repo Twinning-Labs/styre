@@ -287,15 +287,16 @@ jobs:
           fi
 
   smoke:
-    # Homebrew is unsupported on linux-arm64 (x86_64 only), so the tap is
-    # brew-smoked on the three brew-capable arches. linux-arm64 is smoked
-    # separately below against the published tarball.
+    # Homebrew is preinstalled only on GitHub's macOS runners (NOT on
+    # ubuntu-24.04 — `brew` is absent there), so the tap is brew-smoked on the
+    # two macOS arches we ship. Both Linux arches are smoked against the
+    # published tarball in `smoke-linux` below.
     needs: publish
     if: ${{ !inputs.dry_run }}
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-15, macos-15-intel, ubuntu-latest]
+        runner: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
     steps:
       - name: brew install from the tap + smoke
@@ -306,23 +307,34 @@ jobs:
       - name: brew audit (strict)
         run: brew audit --strict --online twinning-labs/styre/styre
 
-  smoke-linux-arm64:
+  smoke-linux:
+    # No Homebrew on GitHub's Linux runners — validate the published Linux
+    # tarballs (the artifact linuxbrew/curl would download) directly, on each
+    # native arch: checksum + extract + run.
     needs: [compute, publish]
     if: ${{ !inputs.dry_run }}
-    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
-      - name: Tarball-extract smoke of the published linux-arm64 asset
+      - name: Tarball-extract smoke of the published linux-${{ matrix.arch }} asset
         env:
           GH_TOKEN: ${{ github.token }}
           V: ${{ needs.compute.outputs.version }}
         run: |
           set -e
           v="${V#v}"
-          gh release download "$V" -R Twinning-Labs/styre \
-            --pattern "styre-v${v}-linux-arm64.tar.gz*" --dir dl
-          got="$(shasum -a 256 "dl/styre-v${v}-linux-arm64.tar.gz" | awk '{print $1}')"
-          want="$(cat "dl/styre-v${v}-linux-arm64.tar.gz.sha256")"
-          test "$got" = "$want" || { echo "::error::sha mismatch on linux-arm64"; exit 1; }
-          tar -C dl -xzf "dl/styre-v${v}-linux-arm64.tar.gz"
+          asset="styre-v${v}-linux-${{ matrix.arch }}.tar.gz"
+          gh release download "$V" -R Twinning-Labs/styre --pattern "${asset}*" --dir dl
+          got="$(shasum -a 256 "dl/${asset}" | awk '{print $1}')"
+          want="$(cat "dl/${asset}.sha256")"
+          test "$got" = "$want" || { echo "::error::sha mismatch on linux-${{ matrix.arch }}"; exit 1; }
+          tar -C dl -xzf "dl/${asset}"
           got_v="$(dl/styre --version)"
           test "$got_v" = "$v" || { echo "::error::version $got_v != $v"; exit 1; }

@@ -984,7 +984,7 @@ Expected: `compute` + `build` run; `publish` shows as skipped.
 
 **Interfaces:**
 - Consumes: the published Release + bumped tap from the `publish` job.
-- Produces: a `smoke` job that `brew install`s on the three brew-capable arches + a `smoke-linux-arm64` job that tarball-smokes the published linux-arm64 asset (Homebrew is x86_64-only on Linux).
+- Produces: a `smoke` job that `brew install`s on the two macOS arches (`brew` is preinstalled only on macOS runners, NOT on ubuntu-24.04) + a `smoke-linux` matrix job that tarball-smokes both published Linux assets (x64 + arm64).
 
 - [ ] **Step 1: Add the `smoke` jobs to `release.yml`**
 
@@ -992,15 +992,16 @@ Append under `jobs:`:
 
 ```yaml
   smoke:
-    # Homebrew is unsupported on linux-arm64 (x86_64 only), so the tap is
-    # brew-smoked on the three brew-capable arches. linux-arm64 is smoked
-    # separately below against the published tarball.
+    # Homebrew is preinstalled only on GitHub's macOS runners (NOT on
+    # ubuntu-24.04 — `brew` is absent there), so the tap is brew-smoked on the
+    # two macOS arches we ship. Both Linux arches are smoked against the
+    # published tarball in `smoke-linux` below.
     needs: publish
     if: ${{ !inputs.dry_run }}
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-15, macos-15-intel, ubuntu-latest]
+        runner: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
     steps:
       - name: brew install from the tap + smoke
@@ -1011,24 +1012,35 @@ Append under `jobs:`:
       - name: brew audit (strict)
         run: brew audit --strict --online twinning-labs/styre/styre
 
-  smoke-linux-arm64:
+  smoke-linux:
+    # No Homebrew on GitHub's Linux runners — validate the published Linux
+    # tarballs (the artifact linuxbrew/curl would download) directly, on each
+    # native arch: checksum + extract + run.
     needs: [compute, publish]
     if: ${{ !inputs.dry_run }}
-    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
-      - name: Tarball-extract smoke of the published linux-arm64 asset
+      - name: Tarball-extract smoke of the published linux-${{ matrix.arch }} asset
         env:
           GH_TOKEN: ${{ github.token }}
           V: ${{ needs.compute.outputs.version }}
         run: |
           set -e
           v="${V#v}"
-          gh release download "$V" -R Twinning-Labs/styre \
-            --pattern "styre-v${v}-linux-arm64.tar.gz*" --dir dl
-          got="$(shasum -a 256 "dl/styre-v${v}-linux-arm64.tar.gz" | awk '{print $1}')"
-          want="$(cat "dl/styre-v${v}-linux-arm64.tar.gz.sha256")"
-          test "$got" = "$want" || { echo "::error::sha mismatch on linux-arm64"; exit 1; }
-          tar -C dl -xzf "dl/styre-v${v}-linux-arm64.tar.gz"
+          asset="styre-v${v}-linux-${{ matrix.arch }}.tar.gz"
+          gh release download "$V" -R Twinning-Labs/styre --pattern "${asset}*" --dir dl
+          got="$(shasum -a 256 "dl/${asset}" | awk '{print $1}')"
+          want="$(cat "dl/${asset}.sha256")"
+          test "$got" = "$want" || { echo "::error::sha mismatch on linux-${{ matrix.arch }}"; exit 1; }
+          tar -C dl -xzf "dl/${asset}"
           got_v="$(dl/styre --version)"
           test "$got_v" = "$v" || { echo "::error::version $got_v != $v"; exit 1; }
 ```
@@ -1038,7 +1050,7 @@ Append under `jobs:`:
 ```bash
 actionlint .github/workflows/release.yml
 git add .github/workflows/release.yml
-git commit -m "feat(release): post-release brew smoke (3 arches) + linux-arm64 tarball smoke"
+git commit -m "feat(release): post-release brew smoke (2 macOS arches) + linux tarball smoke (2 arches)"
 git push
 ```
 
@@ -1051,7 +1063,7 @@ gh workflow run release.yml --ref main -f dry_run=true
 gh workflow run release.yml --ref main -f dry_run=false -f expected_version=v0.1.0
 gh run watch "$(gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
 ```
-Expected: a `v0.1.0` GitHub Release with 4 tarballs + 4 `.sha256`; `CHANGELOG.md` + version bump committed to `main` as `styre-release-bot[bot]`; the tap formula bumped; both `smoke` (3 arches) and `smoke-linux-arm64` green. The `--ref main -f dry_run=true` preview is the authoritative one — eyeball the full changelog + `v0.1.0` here before the real run.
+Expected: a `v0.1.0` GitHub Release with 4 tarballs + 4 `.sha256`; `CHANGELOG.md` + version bump committed to `main` as `styre-release-bot[bot]`; the tap formula bumped; `smoke` (2 macOS arches) and `smoke-linux` (2 linux arches) all green. The `--ref main -f dry_run=true` preview is the authoritative one — eyeball the full changelog + `v0.1.0` here before the real run.
 
 - [ ] **Step 4: Verify the end-user install path**
 
