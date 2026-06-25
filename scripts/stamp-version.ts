@@ -2,7 +2,7 @@
 export function stampVersion(pkgJson: string, version: string): string {
   const v = version.replace(/^v/, "");
   // Replace only the top-level "version" field; preserve everything else byte-for-byte.
-  return pkgJson.replace(/("version":\s*")[^"]*(")/, `$1${v}$2`);
+  return pkgJson.replace(/^(\s*"version":\s*")[^"]*(")/m, `$1${v}$2`);
 }
 
 if (import.meta.main) {
