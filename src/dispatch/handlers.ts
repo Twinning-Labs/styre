@@ -8,7 +8,11 @@ import { StepRegistry } from "../daemon/step-registry.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
 import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";
 import { listByTicket as listEvents } from "../db/repos/event-log.ts";
-import { insertSignal, listByUnit } from "../db/repos/ground-truth-signal.ts";
+import {
+  insertSignal,
+  listByUnit,
+  listByTicket as listSignalsByTicket,
+} from "../db/repos/ground-truth-signal.ts";
 import { getProject } from "../db/repos/project.ts";
 import { enqueue } from "../db/repos/projection-outbox.ts";
 import { insertFinding } from "../db/repos/review-finding.ts";
@@ -18,11 +22,12 @@ import {
   insertWorkUnit,
   listByTicket as listUnits,
   parseFilesToTouch,
+  setBaseSha,
   setStatus as setUnitStatus,
 } from "../db/repos/work-unit.ts";
 import { runCommand } from "../util/run-command.ts";
 import { ComplexityGradeSchema } from "./complexity-schema.ts";
-import { commandFor } from "./components.ts";
+import { commandFor, impactedComponents, isUnavailable, matchesComponent } from "./components.ts";
 import { ExtractOutputSchema, validateCdotImpact, validateExtraction } from "./extract-schema.ts";
 import { implementFeedback } from "./feedback.ts";
 import type { Profile } from "./profile.ts";
@@ -46,7 +51,13 @@ import { runAgentDispatch } from "./run-dispatch.ts";
 import { extractSidecar } from "./sidecar.ts";
 import { isTestFile } from "./test-file.ts";
 import { combineTrack, sizeTrack } from "./track-sizing.ts";
-import { changedFilesAt, ensureWorktree, removeWorktree } from "./worktree.ts";
+import {
+  branchHeadSha,
+  changedFilesAt,
+  changedFilesBetween,
+  ensureWorktree,
+  removeWorktree,
+} from "./worktree.ts";
 
 export interface RegistryDeps {
   runner: AgentRunner;
@@ -111,11 +122,23 @@ function renderPrBody(
 ): string {
   const units = listUnits(db, ticket.id);
   const lines = units.map((u) => `- ${u.kind}${u.title ? `: ${u.title}` : ""}`);
+  const risks = listSignalsByTicket(db, ticket.id).filter(
+    (s) => s.signal_type === "untested-merge-risk",
+  );
+  const riskLines =
+    risks.length > 0
+      ? [
+          "",
+          "⚠ Untested stacks (reviewer-only — no automated test gate):",
+          ...risks.map((s) => `- ${JSON.parse(s.detail_json ?? "{}").component ?? "?"}`),
+        ]
+      : [];
   return [
     `Automated PR for ${ticket.ident}${ticket.title ? ` — ${ticket.title}` : ""}.`,
     "",
     "Work units:",
     ...(lines.length > 0 ? lines : ["- (none)"]),
+    ...riskLines,
     "",
     "Verified against the project's checks and passed independent review.",
   ].join("\n");
@@ -270,6 +293,16 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     if (!unit) {
       throw new Error(`implement:dispatch: work_unit ${ctx.workUnitId} not found`);
     }
+    const {
+      repoPath: implRepoPath,
+      worktreePath: implWorktreePath,
+      branch: implBranch,
+    } = worktreeFor(ctx, deps);
+    ensureWorktree(implRepoPath, implBranch, implWorktreePath);
+    if (unit.base_sha === null) {
+      const base = branchHeadSha(implRepoPath, implBranch);
+      if (base !== null) setBaseSha(ctx.db, unit.id, base);
+    }
     const result = await runAgentDispatch(
       ctx,
       depsFor(ctx, deps, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS),
@@ -300,46 +333,139 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
     ensureWorktree(repoPath, branch, worktreePath);
 
-    // Find the first component that declares a real string command for this check-type.
-    const command = deps.profile.components
-      .map((c) => commandFor(c, checkType))
-      .find((v) => v !== undefined);
-    if (command === undefined) {
+    const unit = getUnit(ctx.db, ctx.workUnitId);
+    if (!unit) throw new Error(`verify:check: work_unit ${ctx.workUnitId} not found`);
+
+    const latestSha = getLatestByWorkUnit(ctx.db, ctx.workUnitId)?.branch_head_sha ?? undefined;
+
+    // Cumulative per-unit diff (base_sha..HEAD, across all the unit's commits incl. loopbacks).
+    // Empty-diff is a DISTINCT diagnostic, not a missing-command error — and when base==head (the
+    // first-unit edge), fall back to the latest commit's own files so a legitimate unit never
+    // misroutes to an empty impacted set.
+    const changed =
+      unit.base_sha && latestSha && unit.base_sha !== latestSha
+        ? changedFilesBetween(unit.base_sha, latestSha, worktreePath)
+        : latestSha
+          ? changedFilesAt(latestSha, worktreePath)
+          : [];
+    const impacted = impactedComponents(deps.profile.components, changed);
+
+    // No impacted component → distinct diagnostic (empty diff vs. a diff that matched no component).
+    // NOT the "missing command" case; never a vacuous pass.
+    if (impacted.length === 0) {
       insertSignal(ctx.db, {
         ticketId: ctx.ticket.id,
         workUnitId: ctx.workUnitId,
         signalType: checkType,
         result: "error",
-        detail: { reason: `no profile command for check-type '${checkType}'` },
+        branchHeadSha: latestSha,
+        detail: {
+          reason: changed.length === 0 ? "empty-diff" : "no-component-matched",
+          checkType,
+          changed,
+        },
       });
-      throw new Error(`verify:check: no profile command for '${checkType}'`);
+      throw new Error(
+        `verify:check ${checkType}: ${changed.length === 0 ? "no changes detected for unit" : "diff matched no component"}`,
+      );
     }
 
-    const run = await runCommand(command, {
-      cwd: worktreePath,
-      timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
-    });
-    const branchHeadSha = getLatestByWorkUnit(ctx.db, ctx.workUnitId)?.branch_head_sha ?? undefined;
-    let result =
-      run.exitCode === 0 ? "pass" : run.timedOut || run.exitCode === null ? "error" : "fail";
-    let detail: Record<string, unknown> = {
-      exitCode: run.exitCode,
-      timedOut: run.timedOut,
-      stderr: run.stderr.slice(0, 2000),
-    };
+    // THREE-WAY resolution per impacted component (the silent-green fix + decision C):
+    //   (a) real command → run it · (b) explicitly { unavailable } → reviewer-only degrade +
+    //   PR-visible untested-merge-risk · (c) absent/unknown → error (loud). Must-haves
+    //   build/test/check are forced to (a)/(b) at setup, so they never hit (c).
+    const toRun = impacted
+      .filter((c) => commandFor(c, checkType) !== undefined)
+      .map((c) => ({ component: c.name, command: commandFor(c, checkType) as string }));
+    const unavailable = impacted.filter((c) => isUnavailable(c, checkType));
+    const absent = impacted.filter(
+      (c) => commandFor(c, checkType) === undefined && !isUnavailable(c, checkType),
+    );
 
-    // Behavioral gate (A1): a behavioral unit's green test check still fails if the coding diff
-    // added no test file. Deterministic; "is the test good?" is the reviewer's job (M5).
-    if (result === "pass" && checkType === "test") {
-      const unit = getUnit(ctx.db, ctx.workUnitId);
-      if (unit && unit.behavioral === 1) {
-        const changed =
-          branchHeadSha === undefined ? [] : changedFilesAt(branchHeadSha, worktreePath);
-        const testFilePattern = deps.profile.components[0]?.testFilePattern;
-        const hasTest = changed.some((p) => isTestFile(p, testFilePattern));
-        if (!hasTest) {
-          result = "fail";
-          detail = { reason: "behavioral-no-test", changed };
+    // (c) absent/unknown on an impacted component → loud error (e.g. a unit declares `lint` but a
+    // touched stack has no lint command and never marked it unavailable). Aligning the extract
+    // agent's declared check-types to the profile is follow-on (1).
+    if (absent.length > 0) {
+      insertSignal(ctx.db, {
+        ticketId: ctx.ticket.id,
+        workUnitId: ctx.workUnitId,
+        signalType: checkType,
+        result: "error",
+        branchHeadSha: latestSha,
+        detail: { reason: "check-absent", checkType, components: absent.map((c) => c.name) },
+      });
+      throw new Error(
+        `verify:check ${checkType}: no command configured on ${absent.map((c) => c.name).join(",")}`,
+      );
+    }
+
+    // (b) every impacted component marked this check unavailable → reviewer-only degrade, NOT error.
+    if (toRun.length === 0) {
+      for (const c of unavailable) {
+        insertSignal(ctx.db, {
+          ticketId: ctx.ticket.id,
+          workUnitId: ctx.workUnitId,
+          signalType: "untested-merge-risk",
+          result: "fail",
+          branchHeadSha: latestSha,
+          detail: { component: c.name, checkType, reason: "check-unavailable" },
+        });
+      }
+      insertSignal(ctx.db, {
+        ticketId: ctx.ticket.id,
+        workUnitId: ctx.workUnitId,
+        signalType: checkType,
+        result: "pass",
+        branchHeadSha: latestSha,
+        detail: { degraded: "reviewer-only", unavailable: unavailable.map((c) => c.name) },
+      });
+      return { check: checkType, result: "pass", degraded: true };
+    }
+
+    // (a) run each impacted component's real command; aggregate.
+    const ran: Array<{ component: string; exitCode: number | null; timedOut: boolean }> = [];
+    let result: "pass" | "fail" | "error" = "pass";
+    let lastCommand = "";
+    let lastStderr = "";
+    for (const { component, command } of toRun) {
+      lastCommand = command;
+      const run = await runCommand(command, {
+        cwd: worktreePath,
+        timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
+      });
+      ran.push({ component, exitCode: run.exitCode, timedOut: run.timedOut });
+      if (run.exitCode !== 0) {
+        result = run.timedOut || run.exitCode === null ? "error" : "fail";
+        lastStderr = run.stderr.slice(0, 2000);
+        break;
+      }
+    }
+    let detail: Record<string, unknown> = { ran, stderr: lastStderr };
+
+    // Per-component A1 behavioral gate: each impacted component with a real test command needs a
+    // matching test file in its paths; impacted components with test unavailable emit a PR-visible
+    // untested-merge-risk (reviewer-only) without failing the aggregate (decision C).
+    if (checkType === "test" && unit.behavioral === 1) {
+      for (const c of unavailable) {
+        insertSignal(ctx.db, {
+          ticketId: ctx.ticket.id,
+          workUnitId: ctx.workUnitId,
+          signalType: "untested-merge-risk",
+          result: "fail",
+          branchHeadSha: latestSha,
+          detail: { component: c.name, reason: "behavioral-unit-no-test-command" },
+        });
+      }
+      if (result === "pass") {
+        for (const c of impacted) {
+          if (commandFor(c, "test") === undefined) continue;
+          const inComponent = changed.filter((p) => matchesComponent(c, p));
+          const hasTest = inComponent.some((p) => isTestFile(p, c.testFilePattern));
+          if (!hasTest) {
+            result = "fail";
+            detail = { reason: "behavioral-no-test", component: c.name, changed: inComponent };
+            break;
+          }
         }
       }
     }
@@ -349,36 +475,31 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       workUnitId: ctx.workUnitId,
       signalType: checkType,
       result,
-      command,
-      branchHeadSha,
+      command: lastCommand,
+      branchHeadSha: latestSha,
       detail,
     });
 
-    // scope_diff (A3) — advisory only: compare the coding diff against the unit's declared files.
-    // Recorded once per (unit, commit); NEVER throws, NEVER gates the step.
-    if (branchHeadSha !== undefined) {
-      const unitRow = getUnit(ctx.db, ctx.workUnitId);
-      const declared = unitRow ? parseFilesToTouch(unitRow) : [];
+    // scope_diff (A3) — advisory; now over the cumulative diff. Recorded once per (unit, sha).
+    if (latestSha !== undefined) {
+      const declared = parseFilesToTouch(unit);
       const already = listByUnit(ctx.db, ctx.workUnitId).some(
-        (s) => s.signal_type === "scope_diff" && s.branch_head_sha === branchHeadSha,
+        (s) => s.signal_type === "scope_diff" && s.branch_head_sha === latestSha,
       );
       if (declared.length > 0 && !already) {
-        const changed = changedFilesAt(branchHeadSha, worktreePath);
         const outOfScope = changed.filter((p) => !declared.includes(p));
         insertSignal(ctx.db, {
           ticketId: ctx.ticket.id,
           workUnitId: ctx.workUnitId,
           signalType: "scope_diff",
           result: outOfScope.length === 0 ? "pass" : "fail",
-          branchHeadSha,
+          branchHeadSha: latestSha,
           detail: { changed, out_of_scope: outOfScope },
         });
       }
     }
 
-    if (result !== "pass") {
-      throw new Error(`verify:check ${checkType}: ${result}`);
-    }
+    if (result !== "pass") throw new Error(`verify:check ${checkType}: ${result}`);
     return { check: checkType, result };
   });
 
