@@ -10,13 +10,15 @@
 
 **Design spec:** `docs/brainstorms/2026-06-25-homebrew-distribution-release-ci-design.md` (read it; this plan implements it).
 
+> **Amendment (2026-06-25, post-implementation):** GitHub **retired the `macos-13` runner**, so the macOS labels are updated to current ones — **`macos-15`** (darwin-arm64) and **`macos-15-intel`** (darwin-x64, the free successor to macos-13 for public repos). All 4 native slices stay (Intel Mac support retained). Also: node-runtime actions bumped to node24 majors (checkout v7, upload-artifact v7, download-artifact v8, create-github-app-token v3) to clear the Node-20 deprecation warning. Labels are pinned (not `-latest`) per GitHub's own recommendation to avoid surprise image migrations mid-release.
+
 ## Global Constraints
 
 Every task implicitly includes these. Exact values copied from the spec:
 
 - **First release version:** `v0.1.0`. No tags exist yet. `package.json` is pinned at `0.0.0` and must never ship in a released binary.
 - **Version bumping (non-default — must be configured):** `feat:`→minor, `fix:`/`chore:`→patch, `BREAKING CHANGE:`→**major** even while pre-1.0. git-cliff defaults to minor pre-1.0, so `cliff.toml` must set `breaking_always_bump_major = true`.
-- **Native-per-arch runners (exact labels):** `macos-14` (darwin-arm64), `macos-13` (darwin-x64), `ubuntu-latest` (linux-x64), `ubuntu-24.04-arm` (linux-arm64). Every slice is `styre --version`-smoked on its own arch before publish.
+- **Native-per-arch runners (exact labels):** `macos-15` (darwin-arm64), `macos-15-intel` (darwin-x64), `ubuntu-latest` (linux-x64), `ubuntu-24.04-arm` (linux-arm64). Every slice is `styre --version`-smoked on its own arch before publish.
 - **Artifact filename template (single source):** `styre-v<version>-<os>-<arch>.tar.gz` + a sibling `.sha256`, where `<os> ∈ {darwin, linux}`, `<arch> ∈ {arm64, x64}`. Build step and formula renderer share one implementation.
 - **Auth:** org GitHub App `styre-release-bot`. Mint short-lived installation tokens via `actions/create-github-app-token` — one scoped to `styre` (FF commit + tag + Release create), one scoped to `homebrew-styre` (tap bump). Never a PAT, never `GITHUB_TOKEN` for cross-repo writes. Tokens minted in the publish job only.
 - **Branch protection (already configured + verified 2026-06-25):** `styre-release-bot` is the sole PR-bypass actor on `main`; `allow_force_pushes=false`; `required_linear_history=true`. The release uses a plain fast-forward push and **aborts loudly** if `main` advanced.
@@ -705,11 +707,11 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             os: darwin
             arch: arm64
             target: bun-darwin-arm64
-          - runner: macos-13
+          - runner: macos-15-intel
             os: darwin
             arch: x64
             target: bun-darwin-x64
@@ -998,7 +1000,7 @@ Append under `jobs:`:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-14, macos-13, ubuntu-latest]
+        runner: [macos-15, macos-15-intel, ubuntu-latest]
     runs-on: ${{ matrix.runner }}
     steps:
       - name: brew install from the tap + smoke
@@ -1102,5 +1104,5 @@ Expected: publish job runs but every probe reports "already present / already at
 - **git-cliff baseline:** `initial_tag = "0.1.0"` in `cliff.toml` pins the first version deterministically; with no prior tag the first run parses all history (pre-lint commits), so the first changelog is best-effort over historical commits. Acceptable for the first release (spec "Open follow-ups").
 - **Resume model (per-effect idempotency across runs):** `compute` detects when HEAD is already this release's `chore(release): vX` commit and pins `sha0` to its parent (`resuming=true`), so a heal re-run rebuilds run A's base bit-for-bit; `publish` then probes `origin/main` and skips the commit effect. A fully-tagged HEAD short-circuits to a clean no-op. This closes the "commit pushed, downstream failed" recovery cell. Verified by Task 9 Step 5.
 - **Second-release (N+1) verification is deferred to the actual second release.** Tasks 7–9 verify release 1 + a heal re-run of release 1, but not a genuine N+1 (range starts at `vN`, `chore(release): vN` skipped, changelog appends not clobbers). git-cliff's tag-boundary + the `chore(release)` skip parser make this correct by construction, but the first real N+1 release should be eyeballed via its `--ref main` dry-run before publishing.
-- **`macos-13` (darwin-x64 build runner) is on GitHub's deprecation path.** Fine today; when removed, build darwin-x64 by cross-compiling from a `macos-14` (arm64) runner via `--target=bun-darwin-x64` (Bun supports it) and ad-hoc codesign there.
+- **macOS runner labels (resolved 2026-06-25):** `macos-13` was retired by GitHub (caused an allocation hang on the first release). Moved to `macos-15` (darwin-arm64) and `macos-15-intel` (darwin-x64) — the latter is the free successor to macos-13 for public repos, so Intel-Mac support is kept natively. `macos-15-intel` is registered in `.github/actionlint.yaml` (actionlint's bundled label list lags).
 - **Real-release ordering:** Tasks 7–8 are verifiable on the feature branch via `--ref <branch>` dry-runs (plumbing + version only); the first non-dry release (Task 9 Step 3) must run from `main` after merge so the FF commit targets `main`. Called out in each task.

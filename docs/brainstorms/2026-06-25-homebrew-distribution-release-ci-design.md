@@ -2,8 +2,10 @@
 
 - **Ticket:** ENG-222
 - **Date:** 2026-06-25
-- **Status:** brainstorm complete; independently reviewed (feasibility + security + adversarial); findings incorporated
+- **Status:** brainstorm complete; independently reviewed (feasibility + security + adversarial); findings incorporated; **runner labels amended 2026-06-25 (macos-13 retired → macos-15/macos-15-intel).**
 - **Scope:** the OSS release engine (cross-platform build + publish CI) with a Homebrew formula as the last mile.
+
+> **Amendment (2026-06-25):** GitHub retired the `macos-13` runner (the original x64 macОS label), which hung the first release. The macOS labels are now **`macos-15`** (darwin-arm64) and **`macos-15-intel`** (darwin-x64 — the free Intel successor for public repos). All 4 native slices remain; Intel-Mac support is kept. Node-runtime actions were also bumped to node24 majors to clear the Node-20 deprecation warning.
 
 ## Goal
 
@@ -40,8 +42,8 @@ cross-compile). Chosen instead: a **4-job matrix, each slice built on its true a
 
 | runner            | target        | codesign       | smoke              |
 |-------------------|---------------|----------------|--------------------|
-| `macos-14`        | darwin-arm64  | ad-hoc, native | `./styre --version`|
-| `macos-13`        | darwin-x64    | ad-hoc, native | `./styre --version`|
+| `macos-15`        | darwin-arm64  | ad-hoc, native | `./styre --version`|
+| `macos-15-intel`  | darwin-x64    | ad-hoc, native | `./styre --version`|
 | `ubuntu-latest`   | linux-x64     | n/a            | `./styre --version`|
 | `ubuntu-24.04-arm`| linux-arm64   | n/a            | `./styre --version`|
 
@@ -238,8 +240,9 @@ advisory.
 
 - **App private key has no rotation** (settled pillar). A leaked or expired key silently breaks all releases;
   FF-only bypass (D4) caps the leak blast-radius to "can publish a release," not "can rewrite history."
-- **Runner-label longevity:** D1 assumes `macos-13` (x64) and free `ubuntu-24.04-arm` stay available; GitHub
-  periodically deprecates older macOS images. Low near-term risk; no fallback wired.
+- **Runner-label longevity:** GitHub periodically retires macOS images — `macos-13` was retired and the labels
+  moved to `macos-15` (arm64) + `macos-15-intel` (free x64 successor) on 2026-06-25. Labels are pinned (not
+  `-latest`) per GitHub's recommendation; re-pin to the then-current versions when GitHub retires these.
 
 ## Acceptance criteria (from ENG-222)
 
