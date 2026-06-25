@@ -24,7 +24,7 @@ Once a fix is released you are welcome to publish a write-up; we will coordinate
 When Styre drives a ticket, it dispatches agents to implement code. Those agents operate inside a strict sandbox:
 
 - **No `gh` or Linear tools.** Dispatched agents have no access to the GitHub CLI and no Linear API surface.
-- **No ambient credentials.** `LINEAR_API_KEY`, GitHub tokens, and Anthropic keys are held exclusively by the daemon/runner process. They are never injected into an agent's environment.
+- **No ambient credentials.** `LINEAR_API_KEY`, GitHub tokens, and Anthropic keys are held exclusively by the runner process. They are never injected into an agent's environment.
 - **Worktree-only write surface.** The only thing an agent can write to is the isolated git worktree assigned for the run. It cannot push branches, open PRs, or modify repository settings.
 - **The runner commits.** Every git commit is performed by the Styre runner process — not by a dispatched agent — after validating the agent's output through a typed, schema-validated interface.
 

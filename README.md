@@ -90,8 +90,7 @@ See [`docs/architecture/execution-model.md`](docs/architecture/execution-model.m
 The OSS surface has three commands:
 
 ```sh
-# Probe the repo, create and migrate the SQLite database, install the host service
-styre setup <repo>
+styre setup <repo>    # Probe the repo and write its Styre profile (profile.json) — the project-shape artifact runs use
 
 # Run one ticket end-to-end, exit when a PR is ready
 styre run <TICKET-ID>
