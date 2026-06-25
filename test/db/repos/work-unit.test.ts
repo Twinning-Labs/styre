@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { insertWorkUnit, parseFilesToTouch } from "../../../src/db/repos/work-unit.ts";
+import {
+  getById,
+  insertWorkUnit,
+  parseFilesToTouch,
+  setBaseSha,
+} from "../../../src/db/repos/work-unit.ts";
 import * as workUnits from "../../../src/db/repos/work-unit.ts";
 import { makeTestDb } from "../../helpers/db.ts";
 
@@ -57,4 +62,13 @@ test("parseFilesToTouch returns the declared paths, [] when null", () => {
   db.close();
   expect(parseFilesToTouch(u1)).toEqual(["a.ts", "b.ts"]);
   expect(parseFilesToTouch(u2)).toEqual([]);
+});
+
+test("setBaseSha persists and reads back", () => {
+  const { db, ticketId } = makeTestDb();
+  const u = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend" });
+  expect(getById(db, u.id)?.base_sha).toBeNull();
+  setBaseSha(db, u.id, "abc123");
+  expect(getById(db, u.id)?.base_sha).toBe("abc123");
+  db.close();
 });
