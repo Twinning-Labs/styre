@@ -86,12 +86,16 @@ jobs:
           if [ "${{ steps.ver.outputs.version }}" != "${{ inputs.expected_version }}" ]; then
             echo "::error::computed ${{ steps.ver.outputs.version }} != expected ${{ inputs.expected_version }}"; exit 1
           fi
-      - name: Dry-run preview (version + full committed changelog)
+      - name: Dry-run preview (version + release notes + full committed changelog)
         if: inputs.dry_run && steps.ver.outputs.should_release == 'true'
-        # Render the SAME full-file form the publish job commits (not just the
-        # unreleased fragment), so the operator previews exactly what will land.
+        # Preview BOTH artifacts the publish job produces: the release-notes
+        # fragment (this version only — the GitHub Release body) and the full
+        # committed changelog, so the operator previews exactly what will land.
         run: |
           echo "next version = ${{ steps.ver.outputs.version }}"
+          echo "===== GitHub Release body (this version only) ====="
+          git cliff --unreleased --tag "${{ steps.ver.outputs.version }}" --strip all -o -
+          echo "===== Full committed CHANGELOG.md ====="
           git cliff --tag "${{ steps.ver.outputs.version }}" -o -
 
   build:
@@ -189,10 +193,17 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-      - name: Render changelog file (always — needed for Release notes)
+      - name: Render full changelog file (committed to the repo)
         env:
           V: ${{ needs.compute.outputs.version }}
         run: git cliff --tag "$V" -o CHANGELOG.md
+      - name: Render release notes (THIS version only — for the GitHub Release body)
+        # --unreleased scopes to commits since the last published tag (i.e. exactly
+        # this release); --strip all drops the "# Changelog" preamble. Without this
+        # the Release body would carry the entire project history every time.
+        env:
+          V: ${{ needs.compute.outputs.version }}
+        run: git cliff --unreleased --tag "$V" --strip all -o RELEASE_NOTES.md
       - name: Stamp + commit (probe-then-apply; FF push, abort if main moved)
         id: commit
         env:
@@ -237,7 +248,7 @@ jobs:
           set -e
           if ! gh release view "$V" -R Twinning-Labs/styre >/dev/null 2>&1; then
             gh release create "$V" -R Twinning-Labs/styre \
-              --title "$V" --notes-file CHANGELOG.md --verify-tag
+              --title "$V" --notes-file RELEASE_NOTES.md --verify-tag
           fi
           # Upload any of the 8 files (4 tarballs + 4 sha256) not already attached.
           existing="$(gh release view "$V" -R Twinning-Labs/styre --json assets --jq '.assets[].name')"
