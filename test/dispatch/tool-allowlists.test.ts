@@ -9,10 +9,13 @@ test("design:dispatch gets read tools + docs Write/Edit + web, no Bash/outward",
   expect(tools).not.toContain("Bash");
 });
 
-test("implement:dispatch gets full edit + Bash, no git/outward", () => {
+test("implement:dispatch gets full edit + Write; bare Bash is absent when no runners supplied", () => {
   const tools = allowlistFor("implement:dispatch");
   expect(tools).toContain("Edit");
-  expect(tools).toContain("Bash"); // unscoped fallback when no runner commands are declared
+  expect(tools).toContain("Write");
+  // No runners → Bash token dropped entirely (never bare unscoped Bash)
+  expect(tools).not.toContain("Bash");
+  expect(tools.some((t) => t.startsWith("Bash("))).toBe(false);
 });
 
 test("implement:dispatch scopes Bash to the profile's declared runner commands", () => {
@@ -25,6 +28,20 @@ test("implement:dispatch scopes Bash to the profile's declared runner commands",
   expect(tools).toContain("Bash(bun test:*)");
   expect(tools.filter((t) => t === "Bash(bun test:*)").length).toBe(1);
   expect(tools).toContain("Read"); // read tools preserved
+});
+
+test("implement:dispatch with non-empty runners contains scoped Bash(cargo test:*)", () => {
+  const tools = allowlistFor("implement:dispatch", { runnerCommands: ["cargo test"] });
+  expect(tools).toContain("Bash(cargo test:*)");
+  expect(tools).not.toContain("Bash");
+});
+
+test("implement:dispatch with empty runners has no Bash at all but keeps Write/Edit", () => {
+  const tools = allowlistFor("implement:dispatch", { runnerCommands: [] });
+  expect(tools).not.toContain("Bash");
+  expect(tools.some((t) => t.startsWith("Bash("))).toBe(false);
+  expect(tools).toContain("Write");
+  expect(tools).toContain("Edit");
 });
 
 test("review and design:review are read-only (no Write/Edit/Bash)", () => {

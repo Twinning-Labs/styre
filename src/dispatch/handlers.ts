@@ -27,7 +27,14 @@ import {
 } from "../db/repos/work-unit.ts";
 import { runCommand } from "../util/run-command.ts";
 import { ComplexityGradeSchema } from "./complexity-schema.ts";
-import { commandFor, impactedComponents, isUnavailable, matchesComponent } from "./components.ts";
+import {
+  commandFor,
+  impactedComponents,
+  isUnavailable,
+  matchesComponent,
+  realRunnerCommands,
+  scopedRunnersForFiles,
+} from "./components.ts";
 import { ExtractOutputSchema, validateCdotImpact, validateExtraction } from "./extract-schema.ts";
 import { implementFeedback } from "./feedback.ts";
 import type { Profile } from "./profile.ts";
@@ -303,6 +310,9 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       const base = branchHeadSha(implRepoPath, implBranch);
       if (base !== null) setBaseSha(ctx.db, unit.id, base);
     }
+    const filesToTouch = parseFilesToTouch(unit);
+    const scoped = scopedRunnersForFiles(deps.profile.components, filesToTouch);
+    const runnerCommands = scoped.length > 0 ? scoped : realRunnerCommands(deps.profile.components);
     const result = await runAgentDispatch(
       ctx,
       depsFor(ctx, deps, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS),
@@ -311,6 +321,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         template: IMPLEMENT_TEMPLATE,
         vars: implementVars(ctx.ticket, unit, deps.profile, implementFeedback(ctx.db, unit.id)),
         loopback: isUnitLoopback(ctx, unit.seq),
+        runnerCommands,
         postcondition: ({ changed }) => {
           if (!changed) {
             throw new Error("implement:dispatch postcondition: empty diff");

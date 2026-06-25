@@ -7,7 +7,6 @@ import { completeDispatch, insertDispatch, nextSeq } from "../db/repos/dispatch.
 import { setPid } from "../db/repos/workflow-step.ts";
 import { ParkSignal } from "../engine/park-signal.ts";
 import { nowUtc } from "../util/time.ts";
-import { realRunnerCommands } from "./components.ts";
 import type { Profile } from "./profile.ts";
 import { renderPrompt } from "./render-prompt.ts";
 import { allowlistFor } from "./tool-allowlists.ts";
@@ -32,6 +31,9 @@ export interface DispatchSpec {
   vars: Record<string, string>;
   loopback?: boolean;
   postcondition: (args: { worktreePath: string; changed: boolean; sha: string }) => void;
+  /** Bash runner commands to scope the implement allowlist to (string commands only). Other
+   *  handlers omit this (their allowlists do not scope Bash). */
+  runnerCommands?: string[];
 }
 
 const CARRYOVER_PREFIX =
@@ -85,9 +87,7 @@ export async function runAgentDispatch(
   const result = await deps.runner.run({
     prompt,
     model,
-    allowedTools: allowlistFor(spec.handlerKey, {
-      runnerCommands: realRunnerCommands(deps.profile.components),
-    }),
+    allowedTools: allowlistFor(spec.handlerKey, { runnerCommands: spec.runnerCommands ?? [] }),
     cwd: deps.worktreePath,
     timeoutMs: deps.timeoutMs,
     onSpawn: (pid) => setPid(ctx.db, ctx.step.id, pid),
