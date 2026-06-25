@@ -6,7 +6,8 @@ import designReviewTemplate from "../../prompts/design-review.md" with { type: "
 import designTemplate from "../../prompts/design.md" with { type: "text" };
 import implementTemplate from "../../prompts/implement.md" with { type: "text" };
 import reviewTemplate from "../../prompts/review.md" with { type: "text" };
-import { commandFor } from "./components.ts";
+import type { WorkUnitRow } from "../db/repos/work-unit.ts";
+import { commandFor, impactedComponents } from "./components.ts";
 import type { Profile } from "./profile.ts";
 
 function runtimeVars(profile: Profile): Record<string, string> {
@@ -67,18 +68,23 @@ export function designVars(
 
 export function implementVars(
   ticket: { ident: string; title: string | null },
-  unit: { seq: number; kind: string; title: string | null },
+  unit: WorkUnitRow,
   profile: Profile,
   feedback = "",
 ): Record<string, string> {
+  const files: string[] = unit.files_to_touch ? JSON.parse(unit.files_to_touch) : [];
+  const impacted = impactedComponents(profile.components, files);
+  const source = impacted.length > 0 ? impacted : profile.components;
+  const testCommands = source
+    .map((c) => commandFor(c, "test"))
+    .filter((c): c is string => c !== undefined);
   return {
     ident: ticket.ident,
     slug: profile.slug,
     unit_seq: String(unit.seq),
     unit_kind: unit.kind,
     unit_title: unit.title ?? "",
-    test_command:
-      profile.components.map((c) => commandFor(c, "test")).find((v) => v !== undefined) ?? "",
+    test_command: testCommands.join(" && "),
     stack: "",
     feedback,
     ...profile.promptVars,
