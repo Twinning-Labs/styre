@@ -1,0 +1,70 @@
+name: Bug Report
+description: Report a bug in Styre
+labels:
+  - bug
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Styre version
+      description: Output of `styre --version`
+      placeholder: "e.g. 0.1.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: dropdown
+    id: subcommand
+    attributes:
+      label: Subcommand involved
+      options:
+        - run
+        - setup
+        - migrate
+    validations:
+      required: false
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Minimal steps to reproduce the issue, including the command you ran.
+      placeholder: |
+        1. Run `styre run <ticket>`
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: stderr
+    attributes:
+      label: Relevant stderr output / NDJSON lines
+      description: Paste any relevant error output or NDJSON telemetry lines from stdout. Redact secrets before pasting.
+      render: text
+    validations:
+      required: false
