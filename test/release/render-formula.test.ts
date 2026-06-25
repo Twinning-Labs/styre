@@ -17,6 +17,11 @@ test("renderFormula embeds version, license, and all four url/sha pairs", () => 
   // urls
   expect(f).toContain("releases/download/v0.1.0/styre-v0.1.0-darwin-arm64.tar.gz");
   expect(f).toContain("releases/download/v0.1.0/styre-v0.1.0-linux-x64.tar.gz");
+  // the two middle slices (guard against a darwin-x64 / linux-arm64 transposition)
+  expect(f).toContain("releases/download/v0.1.0/styre-v0.1.0-darwin-x64.tar.gz");
+  expect(f).toContain("releases/download/v0.1.0/styre-v0.1.0-linux-arm64.tar.gz");
+  expect(f).toContain(`sha256 "${"b".repeat(64)}"`);
+  expect(f).toContain(`sha256 "${"c".repeat(64)}"`);
   // shas, one per slice
   expect(f).toContain(`sha256 "${"a".repeat(64)}"`);
   expect(f).toContain(`sha256 "${"d".repeat(64)}"`);
