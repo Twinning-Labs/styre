@@ -1,8 +1,9 @@
 import { basename, resolve } from "node:path";
 import { type Profile, parseProfile } from "../dispatch/profile.ts";
 import { parseGitHubRemote } from "../integrations/adapters/github.ts";
+import { detectComponents } from "./detect-components.ts";
 import { detectRuntimeContext } from "./detect-runtime.ts";
-import { detectChecksSystem, detectCommands } from "./detect.ts";
+import { detectChecksSystem } from "./detect.ts";
 
 /** Run git in `cwd`, returning trimmed stdout, or null on any failure (probe-graceful). */
 function tryGit(args: string[], cwd: string): string | null {
@@ -32,17 +33,14 @@ export function probeProfile(
   overrides?: { slug?: string; checksSystem?: "github" | "external" | "none" },
 ): Profile {
   const targetRepo = resolve(repoDir);
-  const detected = detectCommands(targetRepo);
+  const { components, repoCommands } = detectComponents(targetRepo);
   return parseProfile({
     slug: overrides?.slug ?? deriveSlug(targetRepo),
     targetRepo,
     defaultBranch: detectDefaultBranch(targetRepo),
     checksSystem: overrides?.checksSystem ?? detectChecksSystem(targetRepo),
-    components:
-      Object.keys(detected).length > 0
-        ? [{ name: "app", kind: "app", paths: ["**"], commands: detected }]
-        : [],
-    repoCommands: {},
+    components,
+    repoCommands,
     runtimeContext: detectRuntimeContext(targetRepo),
   });
 }
