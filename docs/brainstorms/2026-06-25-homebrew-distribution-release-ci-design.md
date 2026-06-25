@@ -222,12 +222,17 @@ have cemented the "tag exists but tap stale" state the ticket explicitly fears. 
 
 ## Post-release verification
 
-A smoke job (after publish, after all Release assets are uploaded so `--online` audit can resolve every
-`url`): `brew tap twinning-labs/styre` + `brew install` + `styre --version` on **macOS-arm64, macOS-x64,
-Linux-x64, and Linux-arm64** (all four, so every formula branch's url/sha selection is exercised, not just
-the binary — closing the same gap D1 exists to close), plus `brew audit --strict --online styre`. If
-`--online` proves flaky on asset-upload timing, gate on `brew audit --strict` and treat `--online` as
-advisory.
+After publish (once all Release assets are uploaded so `--online` audit can resolve every `url`):
+- **`smoke`** — `brew tap` + `brew install` + `styre --version` + `brew audit --strict --online` on the two
+  **macOS** arches (`macos-15`, `macos-15-intel`). Homebrew is preinstalled only on GitHub's macOS runners,
+  so this exercises the formula's `on_macos` url/sha branches end-to-end.
+- **`smoke-linux`** — a matrix over both **Linux** arches (`ubuntu-latest` x64, `ubuntu-24.04-arm` arm64):
+  download the published tarball + `.sha256`, verify the checksum, extract, run `styre --version`. (No
+  Homebrew on GitHub's Linux runners, so the Linux formula branches are validated via the published
+  artifact — what linuxbrew/curl would fetch — rather than `brew install`.)
+
+If `--online` audit proves flaky on asset-upload timing, gate on `brew audit --strict` and treat `--online`
+as advisory.
 
 ## Out of scope (separate specs)
 
@@ -256,7 +261,7 @@ advisory.
 - [ ] A `dry_run` run computes version + changelog and builds + checksums all 4 targets, publishing nothing and committing nothing.
 - [ ] A real run produces a GitHub Release (notes from git-cliff) with 4 signed/checksummed tarballs and bumps the tap formula in one flow; partial-arch failure publishes nothing; post-gate partial failure is resumable to a consistent state.
 - [ ] Version embedded in the released binary (`styre --version`) matches the release tag (no `0.0.0`).
-- [ ] `brew install twinning-labs/styre` succeeds and `styre --version` runs on all four targets; `brew audit --strict` passes.
+- [ ] `brew install twinning-labs/styre` + `brew audit --strict` succeed on the macOS arches; the published Linux tarballs (x64 + arm64) pass checksum + `styre --version` (no `brew` on GitHub Linux runners).
 - [ ] Re-running a release is per-effect idempotent: it heals missing effects and is a genuine no-op only when tag + all Release assets + tap formula already match this build.
 
 ## Deviations from the ticket to fold back into ENG-222
@@ -269,7 +274,7 @@ advisory.
 4. **git-cliff pre-1.0 config** → breaking-→-major is non-default and must be pinned in `cliff.toml` (D2).
 5. **Release pinned to an immutable dispatch SHA**; `dry_run` preview optionally binding via `expected_sha`
    (D5 + Binding the preview).
-6. Post-release `brew install` smoke covers all four targets (was two).
+6. Post-release smoke: `brew install` on the two macOS arches (brew is macOS-only on GitHub runners) + tarball-extract validation on the two Linux arches.
 
 ## Review findings incorporated (independent feasibility + security + adversarial pass, 2026-06-25)
 
