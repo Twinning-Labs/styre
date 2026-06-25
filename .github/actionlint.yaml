@@ -1,6 +1,8 @@
-# macos-13 is a real GitHub-hosted runner (Intel x64 macOS), but actionlint's
-# bundled runner-label list (1.7.x) omits it, flagging it as unknown. Register
-# it here so the x64 darwin build slice in release.yml lints clean.
+# macos-15-intel is a real GitHub-hosted runner (free Intel x64 macOS, the
+# successor to the retired macos-13), but actionlint's bundled runner-label
+# list (1.7.x) omits it, flagging it as unknown. Register it (and macos-15)
+# here so the darwin build slices in release.yml lint clean.
 self-hosted-runner:
   labels:
-    - macos-13
+    - macos-15
+    - macos-15-intel
