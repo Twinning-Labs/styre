@@ -94,9 +94,15 @@ export function detectComponents(repoDir: string): {
   // --- Node/JS: one component per package.json (skip workspace-member packages already covered).
   for (const rel of findManifests(repoDir, "package.json")) {
     const dir = rel.replace(/package\.json$/, "").replace(/\/$/, "");
-    const pkg = JSON.parse(readFileSync(join(repoDir, rel), "utf8")) as {
-      scripts?: Record<string, string>;
-    };
+    let pkg: { scripts?: Record<string, string> };
+    try {
+      pkg = JSON.parse(readFileSync(join(repoDir, rel), "utf8")) as {
+        scripts?: Record<string, string>;
+      };
+    } catch {
+      // Malformed package.json — skip this component rather than crashing styre setup.
+      continue;
+    }
     const scripts = pkg.scripts ?? {};
     const commands: Component["commands"] = {};
     if (scripts.build) commands.build = "npm run build";

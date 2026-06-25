@@ -26,6 +26,16 @@ test("tauri app → one frontend (root package.json) + one rust (src-tauri) comp
   expect(components.some((c) => c.paths.some((p) => p.startsWith("src-tauri")))).toBe(true);
 });
 
+test("malformed package.json is skipped (component absent, no throw)", () => {
+  const root = fixture({
+    "package.json": "{ this is not valid json {{",
+  });
+  expect(() => detectComponents(root)).not.toThrow();
+  const { components } = detectComponents(root);
+  // No node/sveltekit component should be produced from the malformed file
+  expect(components.filter((c) => c.kind === "node" || c.kind === "sveltekit")).toHaveLength(0);
+});
+
 test("cargo workspace collapses members into ONE rust component", () => {
   const root = fixture({
     "Cargo.toml": '[workspace]\nmembers = ["src-tauri", "crates/a", "crates/b"]\n',

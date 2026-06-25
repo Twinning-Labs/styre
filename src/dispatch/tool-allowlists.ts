@@ -16,6 +16,7 @@ const ALLOWLISTS: Record<string, string[]> = {
   review: [...READ_ONLY],
   "merge:pr-ensure": [...READ_ONLY],
   "setup:enrich": [...READ_ONLY],
+  "setup:discover": [...READ_ONLY],
 };
 
 /** Resolve the tool allowlist for a step. For `implement:dispatch`, bare `Bash` is replaced with
