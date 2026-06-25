@@ -883,6 +883,7 @@ Append under `jobs:` (after `build`), substituting SHAs:
         env:
           V: ${{ needs.compute.outputs.version }}
         run: |
+          set -e
           if git ls-remote --tags origin "refs/tags/$V" | grep -q "$V"; then
             echo "::notice::tag $V already exists, skipping"
           else
@@ -941,7 +942,8 @@ Append under `jobs:` (after `build`), substituting SHAs:
             cp /tmp/styre.rb /tmp/tap/Formula/styre.rb
             git -C /tmp/tap config user.name "styre-release-bot[bot]"
             git -C /tmp/tap config user.email "styre-release-bot[bot]@users.noreply.github.com"
-            git -C /tmp/tap commit -am "styre $V"
+            git -C /tmp/tap add Formula/styre.rb
+            git -C /tmp/tap commit -m "styre $V"
             git -C /tmp/tap push origin HEAD
           fi
 ```
