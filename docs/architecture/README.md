@@ -25,9 +25,9 @@ Read in this order. Each doc builds on the ones before it.
 3. **`projector.md`** — the one-way projector: the sole outward write path from SQLite to
    Linear and GitHub. Drains `projection_outbox`; never reads Linear/GitHub for control flow.
 
-4. **`schema.sql`** — the SQLite source of truth (15 tables). Loads clean; invariants
-   smoke-tested. The Memory/UGL tables are a deferred `-- DEFERRED` stub, intentionally
-   out of scope for the substrate.
+4. **`schema.sql`** — the SQLite source of truth: **14 active tables**; the Memory/UGL
+   `memory_record` table is a deferred (`-- DEFERRED`) stub, intentionally out of scope for
+   the substrate.
 
 5. **`brainstorm.md`** — the running decision log and rationale. §10 Open Decisions Register
    is the ADR-style DECIDED/OPEN/SUPERSEDED status of every design item. Append-only — never
@@ -45,9 +45,8 @@ These are the load-bearing NOTs. Code that violates them is wrong even if it wor
 - There is exactly **one writer**: only the daemon writes SQLite. Workers and agents return
   results; they never persist.
 
-- Linear and GitHub are **never read for control flow** — they are one-way projections.
-  Inbound facts (CI green, merged, human action) arrive only as signals, never through the
-  projector.
+- Linear and GitHub are never read for control flow — they are one-way projections. Inbound facts
+  (CI green, merged, human action) arrive only as signals.
 
 - A succeeded `workflow_step` is **never re-run** — the resolver returns its recorded result
   on replay (exactly-once semantics; crash-resume re-enters at the interrupted step, not before it).
