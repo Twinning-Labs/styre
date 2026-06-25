@@ -1,6 +1,11 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.1.1] - 2026-06-25
+
+### Bug Fixes
+- MacOS-only brew smoke + unified linux tarball smoke matrix (#36)
+
 ## [0.1.0] - 2026-06-25
 
 ### Bug Fixes
