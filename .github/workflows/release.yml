@@ -1,0 +1,154 @@
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Compute + build + checksum only; publish nothing, commit nothing."
+        type: boolean
+        default: true
+      expected_sha:
+        description: "Optional: abort if main HEAD != this SHA (bind a previewed dry-run)."
+        type: string
+        default: ""
+      expected_version:
+        description: "Optional: abort if the computed version != this (e.g. v0.1.0)."
+        type: string
+        default: ""
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      sha0: ${{ steps.pin.outputs.sha0 }}
+      should_release: ${{ steps.ver.outputs.should_release }}
+      resuming: ${{ steps.pin.outputs.resuming }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0  # full history + tags for git-cliff
+      - name: Install git-cliff
+        uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3  # v2
+        with:
+          tool: git-cliff
+      - id: ver
+        # Compute the bumped version DIRECTLY from git-cliff (the action's
+        # `version` output is "latest release", not the bump). Short-circuit to a
+        # no-op if HEAD is already a published tag (re-dispatch of a finished
+        # release) or there is nothing to release.
+        run: |
+          if git describe --exact-match --tags HEAD >/dev/null 2>&1; then
+            T="$(git describe --exact-match --tags HEAD)"
+            echo "version=$T" >> "$GITHUB_OUTPUT"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::HEAD already released as $T; nothing to do"; exit 0
+          fi
+          V="$(git cliff --bumped-version)"
+          if [ -z "$V" ] || [ "$V" = "null" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::nothing to release since last tag"; exit 0
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::next version = $V"
+      - id: pin
+        # Resume-safe SHA pin (D5 across runs): if HEAD is already this release's
+        # chore(release) commit (a prior run pushed it but a downstream effect
+        # failed), pin sha0 to its PARENT so the rebuild reproduces run A's base
+        # bit-for-bit and the publish job skips the commit effect. Else pin HEAD.
+        env:
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          if [ "$(git log -1 --format=%s)" = "chore(release): $V" ]; then
+            echo "sha0=$(git rev-parse HEAD~1)" >> "$GITHUB_OUTPUT"
+            echo "resuming=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::resuming release $V (release commit already on main)"
+          else
+            echo "sha0=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            echo "resuming=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Abort if main moved since the previewed dispatch
+        if: inputs.expected_sha != '' && steps.pin.outputs.resuming == 'false'
+        run: |
+          if [ "$(git rev-parse HEAD)" != "${{ inputs.expected_sha }}" ]; then
+            echo "::error::main HEAD $(git rev-parse HEAD) != expected_sha ${{ inputs.expected_sha }}"; exit 1
+          fi
+      - name: Abort if computed version != expected_version
+        if: inputs.expected_version != ''
+        run: |
+          if [ "${{ steps.ver.outputs.version }}" != "${{ inputs.expected_version }}" ]; then
+            echo "::error::computed ${{ steps.ver.outputs.version }} != expected ${{ inputs.expected_version }}"; exit 1
+          fi
+      - name: Dry-run preview (version + full committed changelog)
+        if: inputs.dry_run && steps.ver.outputs.should_release == 'true'
+        # Render the SAME full-file form the publish job commits (not just the
+        # unreleased fragment), so the operator previews exactly what will land.
+        run: |
+          echo "next version = ${{ steps.ver.outputs.version }}"
+          git cliff --tag "${{ steps.ver.outputs.version }}" -o -
+
+  build:
+    needs: compute
+    if: needs.compute.outputs.should_release == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: macos-14
+            os: darwin
+            arch: arm64
+            target: bun-darwin-arm64
+          - runner: macos-13
+            os: darwin
+            arch: x64
+            target: bun-darwin-x64
+          - runner: ubuntu-latest
+            os: linux
+            arch: x64
+            target: bun-linux-x64
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: arm64
+            target: bun-linux-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ needs.compute.outputs.sha0 }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - name: Stamp version (build-time, working tree only)
+        run: bun run scripts/stamp-version.ts "${{ needs.compute.outputs.version }}"
+      - name: Build native slice
+        env:
+          TARGET: ${{ matrix.target }}
+          OUTFILE: dist/styre
+        run: bun run scripts/build.sh
+      - name: Smoke on real arch
+        run: |
+          GOT="$(./dist/styre --version)"
+          WANT="${{ needs.compute.outputs.version }}"; WANT="${WANT#v}"
+          test "$GOT" = "$WANT" || { echo "::error::version $GOT != $WANT"; exit 1; }
+      - name: Tarball + sha256
+        run: |
+          NAME="$(bun run scripts/artifact-name.ts "${{ needs.compute.outputs.version }}" "${{ matrix.os }}" "${{ matrix.arch }}")"
+          tar -C dist -czf "$NAME" styre
+          shasum -a 256 "$NAME" | awk '{print $1}' > "$NAME.sha256"
+          echo "ARTIFACT=$NAME" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: styre-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            ${{ env.ARTIFACT }}
+            ${{ env.ARTIFACT }}.sha256
+          if-no-files-found: error
+          retention-days: 7

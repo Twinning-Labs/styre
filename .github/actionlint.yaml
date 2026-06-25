@@ -1,0 +1,6 @@
+# macos-13 is a real GitHub-hosted runner (Intel x64 macOS), but actionlint's
+# bundled runner-label list (1.7.x) omits it, flagging it as unknown. Register
+# it here so the x64 darwin build slice in release.yml lints clean.
+self-hosted-runner:
+  labels:
+    - macos-13
