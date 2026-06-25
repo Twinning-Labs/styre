@@ -736,7 +736,9 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           OUTFILE: dist/styre
-        run: bun run scripts/build.sh
+        # POSIX sh, NOT `bun run scripts/build.sh` (Bun Shell lacks `set` + POSIX
+        # `${VAR:-default}` expansion → binary written to a literal filename).
+        run: sh scripts/build.sh
       - name: Smoke on real arch
         run: |
           GOT="$(./dist/styre --version)"
