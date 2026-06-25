@@ -455,7 +455,7 @@ commit_parsers = [
 filter_commits = false
 
 [bump]
-initial_tag = "0.1.0"          # deterministic first version (no fragile fallback)
+initial_tag = "v0.1.0"         # deterministic first version; MUST be v-prefixed to match tag_pattern
 features_always_bump_minor = true
 breaking_always_bump_major = true
 ```
