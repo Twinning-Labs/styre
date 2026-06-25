@@ -57,5 +57,5 @@ export function probeCommandExists(repoDir: string, command: string): boolean {
     }
   }
   const bin = trimmed.split(/\s+/)[0];
-  return Bun.spawnSync(["sh", "-c", `command -v ${bin}`], { cwd: repoDir }).success;
+  return Bun.spawnSync(["sh", "-c", 'command -v "$1"', "sh", bin], { cwd: repoDir }).success;
 }

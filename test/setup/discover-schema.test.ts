@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { existsSync, mkdtempSync, rmdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Component } from "../../src/dispatch/profile.ts";
 import { mergeComponents, probeCommandExists } from "../../src/setup/discover-schema.ts";
 
@@ -95,4 +98,26 @@ test("mergeComponents preserves a scan component the agent didn't mention", () =
 test("probeCommandExists is false for a missing binary", () => {
   expect(probeCommandExists(process.cwd(), "definitely-not-a-real-binary-xyz --help")).toBe(false);
   expect(probeCommandExists(process.cwd(), "git status")).toBe(true);
+});
+
+test("probeCommandExists: command injection in bin name does not execute and returns false", () => {
+  // Create a fresh temp directory as both the repoDir and the target for a potential PWNED file.
+  const dir = mkdtempSync(join(tmpdir(), "styre-injection-test-"));
+  try {
+    const pwned = join(dir, "PWNED");
+    // This is the injection payload: split(/\s+/)[0] yields "foo$(touch${IFS}<dir>/PWNED)"
+    // which under the old interpolated sh -c would expand and execute `touch <dir>/PWNED`.
+    const maliciousBin = `foo$(touch\${IFS}${pwned})`;
+    const result = probeCommandExists(dir, maliciousBin);
+    // Must return false — no such binary exists.
+    expect(result).toBe(false);
+    // The injection must NOT have executed — PWNED file must not exist.
+    expect(existsSync(pwned)).toBe(false);
+  } finally {
+    try {
+      rmdirSync(dir);
+    } catch {
+      // cleanup best-effort
+    }
+  }
 });
