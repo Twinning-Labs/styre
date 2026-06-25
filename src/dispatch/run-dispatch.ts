@@ -31,6 +31,9 @@ export interface DispatchSpec {
   vars: Record<string, string>;
   loopback?: boolean;
   postcondition: (args: { worktreePath: string; changed: boolean; sha: string }) => void;
+  /** Bash runner commands to scope the implement allowlist to (string commands only). Other
+   *  handlers omit this (their allowlists do not scope Bash). */
+  runnerCommands?: string[];
 }
 
 const CARRYOVER_PREFIX =
@@ -84,9 +87,7 @@ export async function runAgentDispatch(
   const result = await deps.runner.run({
     prompt,
     model,
-    allowedTools: allowlistFor(spec.handlerKey, {
-      runnerCommands: Object.values(deps.profile.commands),
-    }),
+    allowedTools: allowlistFor(spec.handlerKey, { runnerCommands: spec.runnerCommands ?? [] }),
     cwd: deps.worktreePath,
     timeoutMs: deps.timeoutMs,
     onSpawn: (pid) => setPid(ctx.db, ctx.step.id, pid),

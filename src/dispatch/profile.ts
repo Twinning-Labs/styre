@@ -58,24 +58,44 @@ export const RuntimeContextSchema = _RuntimeContextBase.default(_RuntimeContextB
 
 export type RuntimeContext = z.infer<typeof RuntimeContextSchema>;
 
+export const CommandValueSchema = z.union([
+  z.string().min(1),
+  z.object({ unavailable: z.literal(true) }).strict(),
+]);
+export type CommandValue = z.infer<typeof CommandValueSchema>;
+
+export const ComponentSchema = z.object({
+  name: z.string().min(1),
+  kind: z.string().min(1),
+  paths: z.array(z.string().min(1)).min(1),
+  commands: z.record(z.string(), CommandValueSchema).default({}),
+  testFilePattern: z.string().optional(),
+});
+export type Component = z.infer<typeof ComponentSchema>;
+
 /** The project-profile: canonical stack truth the daemon reads (build-operations §5).
- *  M3a defines the minimal fields render-prompt + dispatch need; the full versioned
- *  artifact contract is M7. Validated via zod (§3a / SC-3). */
+ *  schemaVersion 2 introduces the components[] model (polyglot-monorepo support). */
 export const ProfileSchema = z.object({
-  schemaVersion: z.number().int().default(1),
+  schemaVersion: z.literal(2).default(2),
   slug: z.string(),
   targetRepo: z.string(),
   defaultBranch: z.string().default("main"),
   checksSystem: z.enum(["github", "external", "none"]).default("none"),
-  commands: z.record(z.string(), z.string()).default({}),
+  components: z.array(ComponentSchema).default([]),
+  repoCommands: z.record(z.string(), z.string()).default({}),
   promptVars: z.record(z.string(), z.string()).default({}),
-  testFilePattern: z.string().optional(),
   runtimeContext: RuntimeContextSchema,
 });
 
 export type Profile = z.infer<typeof ProfileSchema>;
 
 export function parseProfile(raw: unknown): Profile {
+  if (raw && typeof raw === "object" && "commands" in raw) {
+    throw new Error(
+      "profile: legacy flat `commands` field (schemaVersion 1) is no longer supported. " +
+        "Re-run `styre setup` to regenerate a components[] profile (schemaVersion 2).",
+    );
+  }
   return ProfileSchema.parse(raw);
 }
 

@@ -3,7 +3,7 @@ import { parseProfile } from "../../src/dispatch/profile.ts";
 import { DESIGN_TEMPLATE, designVars } from "../../src/dispatch/prompt-vars.ts";
 import { placeholders, renderPrompt } from "../../src/dispatch/render-prompt.ts";
 
-const profile = parseProfile({ slug: "demo", targetRepo: "/tmp/x", commands: {} });
+const profile = parseProfile({ slug: "demo", targetRepo: "/tmp/x" });
 
 test("designVars supplies description", () => {
   const vars = designVars({ ident: "ENG-1", title: "T", description: "the body" }, profile);

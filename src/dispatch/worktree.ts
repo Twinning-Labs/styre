@@ -56,3 +56,15 @@ export function changedFilesAt(sha: string, worktreePath: string): string[] {
   const out = git(["diff-tree", "--no-commit-id", "-r", "--name-only", sha], worktreePath);
   return out === "" ? [] : out.split("\n").filter((l) => l !== "");
 }
+
+/** Files changed between two commits (cumulative, `base..head`). Used by verify to attribute a
+ *  work-unit's FULL diff — across all its commits, including loopback re-codes — to components. */
+export function changedFilesBetween(
+  baseSha: string,
+  headSha: string,
+  worktreePath: string,
+): string[] {
+  if (baseSha === headSha) return [];
+  const out = git(["diff", "--name-only", `${baseSha}..${headSha}`], worktreePath);
+  return out === "" ? [] : out.split("\n").filter((l) => l !== "");
+}

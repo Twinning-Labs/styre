@@ -21,7 +21,7 @@ test("probeProfile derives slug from the git remote and detects commands", () =>
   const p = probeProfile(repo);
   expect(p.slug).toBe("widget"); // from git@github.com:acme/widget.git
   expect(p.targetRepo).toBe(repo);
-  expect(p.commands.test).toBe("npm run test"); // no lockfile → npm
+  expect(p.components[0]?.commands.test).toBe("npm run test"); // no lockfile → npm
   expect(p.checksSystem).toBe("none"); // no .github/workflows
 });
 
@@ -33,5 +33,5 @@ test("probeProfile honors overrides and falls back to dir basename for slug", ()
   const p2 = probeProfile(bare); // no remote → basename
   const bareName = bare.split("/").at(-1) ?? "";
   expect(p2.slug).toBe(bareName);
-  expect(p2.commands).toEqual({}); // no package.json
+  expect(p2.components).toEqual([]); // no package.json → no detected commands → empty components
 });

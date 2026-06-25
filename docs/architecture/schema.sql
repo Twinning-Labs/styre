@@ -149,6 +149,9 @@ CREATE TABLE work_unit (
 
     depends_on        TEXT CHECK (depends_on IS NULL OR json_valid(depends_on)),  -- [seq,...]; acyclicity
                                                          -- enforced by the daemon (S1b), not the schema.
+    base_sha          TEXT,                              -- HEAD before the unit's first implement
+                                                         -- commit; verify diffs base_sha..HEAD (all
+                                                         -- the unit's commits, incl. loopbacks).
     status            TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
                           'pending','implementing','verifying','verified','blocked')),
     created_at        TEXT NOT NULL,

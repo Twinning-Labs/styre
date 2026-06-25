@@ -20,7 +20,6 @@ const profile = parseProfile({
   slug: "demo",
   targetRepo: "/tmp/x",
   defaultBranch: "main",
-  commands: {},
   checksSystem: "none",
 });
 
@@ -89,7 +88,6 @@ test("reports no-progress when nothing advances and no terminal is reached", asy
   const stalledProfile = parseProfile({
     slug: "demo",
     targetRepo: "/tmp/x",
-    commands: {},
     checksSystem: "external",
   });
   seedAtMerge(db, ticketId);

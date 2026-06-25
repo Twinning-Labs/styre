@@ -14,12 +14,13 @@ export interface WorkUnitRow {
   test_plan: string | null;
   verify_check_types: string | null;
   depends_on: string | null;
+  base_sha: string | null;
   created_at: string;
   updated_at: string;
 }
 
 const COLS =
-  "id, ticket_id, seq, kind, title, description, status, behavioral, files_to_touch, test_plan, verify_check_types, depends_on, created_at, updated_at";
+  "id, ticket_id, seq, kind, title, description, status, behavioral, files_to_touch, test_plan, verify_check_types, depends_on, base_sha, created_at, updated_at";
 
 export function getById(db: Database, id: number): WorkUnitRow | null {
   return (
@@ -83,6 +84,10 @@ export function setStatus(db: Database, id: number, status: string): void {
     $now: nowUtc(),
     $id: id,
   });
+}
+
+export function setBaseSha(db: Database, id: number, sha: string): void {
+  db.query("UPDATE work_unit SET base_sha = ?, updated_at = ? WHERE id = ?").run(sha, nowUtc(), id);
 }
 
 export function deleteByTicket(db: Database, ticketId: number): void {

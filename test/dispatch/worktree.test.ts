@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   changedFilesAt,
+  changedFilesBetween,
   commitWorktree,
   ensureWorktree,
   removeWorktree,
@@ -95,4 +96,30 @@ test("changedFilesAt returns the files a commit touched", () => {
   const sha = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: root }).stdout.toString().trim();
   const files = changedFilesAt(sha, root);
   expect(files.sort()).toEqual(["feature.test.ts", "feature.ts"]);
+});
+
+test("changedFilesBetween returns the cumulative diff across commits", () => {
+  const repo = mkdtempSync(join(tmpdir(), "styre-cfb-"));
+  roots.push(repo);
+  function git(a: string[], cwd: string) {
+    const r = Bun.spawnSync(["git", ...a], { cwd });
+    if (!r.success) throw new Error(r.stderr.toString());
+    return r.stdout.toString().trim();
+  }
+  git(["init", "-b", "main"], repo);
+  git(["config", "user.email", "t@s.dev"], repo);
+  git(["config", "user.name", "T"], repo);
+  writeFileSync(join(repo, "base.txt"), "x");
+  git(["add", "-A"], repo);
+  git(["commit", "-m", "base"], repo);
+  const base = git(["rev-parse", "HEAD"], repo);
+  writeFileSync(join(repo, "a.ts"), "1");
+  git(["add", "-A"], repo);
+  git(["commit", "-m", "c1"], repo);
+  writeFileSync(join(repo, "b.ts"), "2");
+  git(["add", "-A"], repo);
+  git(["commit", "-m", "c2"], repo);
+  const head = git(["rev-parse", "HEAD"], repo);
+
+  expect(changedFilesBetween(base, head, repo).sort()).toEqual(["a.ts", "b.ts"]);
 });

@@ -56,7 +56,11 @@ test("a unit that fails then passes ends verified, with both results on record",
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({ slug: "demo", targetRepo: repo, commands: { test: "test -f PASS" } }),
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "test -f PASS" } }],
+    }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vrwt-")),
   });
 

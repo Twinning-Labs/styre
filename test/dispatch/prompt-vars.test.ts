@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import type { WorkUnitRow } from "../../src/db/repos/work-unit.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import {
   DESIGN_REVIEW_TEMPLATE,
@@ -17,11 +18,16 @@ import { placeholders, renderPrompt } from "../../src/dispatch/render-prompt.ts"
 const profile = parseProfile({
   slug: "demo",
   targetRepo: "/tmp/demo",
-  commands: { test: "bun test" },
+  components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "bun test" } }],
   promptVars: { stack: "Bun + SQLite" },
 });
 const ticket = { ident: "ENG-9", title: "Add widget", description: "Add a widget feature" };
-const unit = { seq: 2, kind: "backend", title: "API" };
+const unit = {
+  seq: 2,
+  kind: "backend",
+  title: "API",
+  files_to_touch: null,
+} as unknown as WorkUnitRow;
 
 test("designVars resolves every placeholder in the design template", () => {
   const vars = designVars(ticket, profile);
@@ -40,21 +46,30 @@ test("implementVars resolves every placeholder in the implement template", () =>
 });
 
 test("extract template renders with extractVars (no missing placeholders)", () => {
-  const profile = parseProfile({ slug: "demo", targetRepo: "/tmp/x", commands: {} });
+  const profile = parseProfile({ slug: "demo", targetRepo: "/tmp/x" });
   const r = renderPrompt(EXTRACT_TEMPLATE, extractVars({ ident: "ENG-1", title: "T" }, profile));
   expect(r.ok).toBe(true);
 });
 
 test("implementVars carries the feedback var (empty by default)", () => {
-  const profile = parseProfile({ slug: "demo", targetRepo: "/r", commands: { test: "bun test" } });
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: "/r",
+    components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "bun test" } }],
+  });
   const ticket = { ident: "ENG-1", title: "T" };
-  const unit = { seq: 1, kind: "backend", title: "U" };
+  const unit = {
+    seq: 1,
+    kind: "backend",
+    title: "U",
+    files_to_touch: null,
+  } as unknown as WorkUnitRow;
   expect(implementVars(ticket, unit, profile).feedback).toBe("");
   expect(implementVars(ticket, unit, profile, "fix the build").feedback).toBe("fix the build");
 });
 
 test("review template renders with reviewVars (no missing placeholders)", () => {
-  const profile = parseProfile({ slug: "demo", targetRepo: "/tmp/x", commands: {} });
+  const profile = parseProfile({ slug: "demo", targetRepo: "/tmp/x" });
   const r = renderPrompt(REVIEW_TEMPLATE, reviewVars({ ident: "ENG-1", title: "T" }, profile));
   expect(r.ok).toBe(true);
   for (const name of placeholders(REVIEW_TEMPLATE)) {
@@ -63,7 +78,7 @@ test("review template renders with reviewVars (no missing placeholders)", () => 
 });
 
 test("design-review template renders with designReviewVars (no missing placeholders)", () => {
-  const profile = parseProfile({ slug: "demo", targetRepo: "/tmp/x", commands: {} });
+  const profile = parseProfile({ slug: "demo", targetRepo: "/tmp/x" });
   const r = renderPrompt(
     DESIGN_REVIEW_TEMPLATE,
     designReviewVars({ ident: "ENG-1", title: "T" }, profile),
@@ -93,4 +108,29 @@ test("designVars also carries runtime vars", () => {
   const profile = parseProfile({ slug: "d", targetRepo: "/t" });
   const v = designVars({ ident: "ENG-1", title: "t", description: "" }, profile);
   expect(v.runtime_documentation_presence).toBe("unknown");
+});
+
+test("implementVars sources test_command from the unit's impacted components", () => {
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: "/tmp/r",
+    components: [
+      { name: "rust", kind: "rust", paths: ["src-tauri/**"], commands: { test: "cargo test" } },
+      {
+        name: "fe",
+        kind: "sveltekit",
+        paths: ["src/**"],
+        commands: { test: { unavailable: true } },
+      },
+    ],
+  });
+  // implementVars only reads seq/kind/title/files_to_touch; cast the partial literal to WorkUnitRow.
+  const unit = {
+    seq: 1,
+    kind: "backend",
+    title: "x",
+    files_to_touch: JSON.stringify(["src-tauri/lib.rs"]),
+  } as unknown as WorkUnitRow;
+  const vars = implementVars({ ident: "ENG-1", title: "t" }, unit, profile);
+  expect(vars.test_command).toBe("cargo test");
 });
