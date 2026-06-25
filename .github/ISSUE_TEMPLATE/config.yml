@@ -1,0 +1,7 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability report
+    url: https://github.com/Twinning-Labs/styre/security/advisories/new
+    about: >
+      Please report security vulnerabilities through GitHub's private Security Advisory flow,
+      not as a public issue.
