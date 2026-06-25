@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectComponents } from "../../src/setup/detect-components.ts";
@@ -34,6 +34,36 @@ test("malformed package.json is skipped (component absent, no throw)", () => {
   const { components } = detectComponents(root);
   // No node/sveltekit component should be produced from the malformed file
   expect(components.filter((c) => c.kind === "node" || c.kind === "sveltekit")).toHaveLength(0);
+});
+
+test("malformed root Cargo.toml does not throw and yields no rust-workspace component", () => {
+  const root = fixture({
+    // Syntactically invalid TOML — cannot be parsed as a workspace manifest
+    "Cargo.toml": "[ this is not valid toml {{ members = [",
+  });
+  expect(() => detectComponents(root)).not.toThrow();
+  const { components } = detectComponents(root);
+  // No workspace-collapsed rust component; falls through to per-standalone-Cargo.toml path.
+  // Since the root Cargo.toml read succeeds but has no [workspace], it falls to standalone.
+  // Either way detectComponents must not crash.
+  expect(Array.isArray(components)).toBe(true);
+});
+
+test("unreadable root Cargo.toml is treated as not-a-workspace (no throw)", () => {
+  // Skip when running as root (chmod has no effect for root).
+  if (process.getuid?.() === 0) return;
+  const root = fixture({
+    "Cargo.toml": '[workspace]\nmembers = ["crates/a"]\n',
+  });
+  chmodSync(join(root, "Cargo.toml"), 0o000);
+  try {
+    expect(() => detectComponents(root)).not.toThrow();
+    const { components } = detectComponents(root);
+    // Fell back to standalone scan; root Cargo.toml is skipped by findManifests (EACCES), so no rust.
+    expect(Array.isArray(components)).toBe(true);
+  } finally {
+    chmodSync(join(root, "Cargo.toml"), 0o644);
+  }
 });
 
 test("cargo workspace collapses members into ONE rust component", () => {

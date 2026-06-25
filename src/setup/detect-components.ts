@@ -23,7 +23,13 @@ function findManifests(repoDir: string, name: string, maxDepth = 3): string[] {
 
 /** Parse `members = [ "a", "b" ]` from a Cargo [workspace] manifest (best-effort). */
 function cargoWorkspaceMembers(cargoTomlAbs: string): string[] | null {
-  const text = readFileSync(cargoTomlAbs, "utf8");
+  let text: string;
+  try {
+    text = readFileSync(cargoTomlAbs, "utf8");
+  } catch {
+    // Unreadable or permission-denied Cargo.toml — treat as "not a workspace".
+    return null;
+  }
   if (!/\[workspace\]/.test(text)) return null;
   const m = text.match(/members\s*=\s*\[([\s\S]*?)\]/);
   if (!m) return [];
