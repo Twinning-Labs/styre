@@ -22,3 +22,16 @@ jobs:
           bun run build
           ./dist/styre --version
           ./dist/styre migrate --db ./ci.db
+
+  pr-title:
+    # Conventional-Commits lint on the PR title. Squash-merge makes the PR title
+    # the commit + changelog line git-cliff parses, so a malformed title would
+    # silently corrupt version/changelog computation.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@e32d7e603df1aa1ba07e981f2a23455dee596825  # v5.x
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
