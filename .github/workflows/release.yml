@@ -155,6 +155,7 @@ jobs:
             ${{ env.ARTIFACT }}.sha256
           if-no-files-found: error
           retention-days: 7
+          overwrite: true  # re-run-safe (GitHub "re-run failed jobs" reuses the run's artifact namespace)
 
   publish:
     needs: [compute, build]
