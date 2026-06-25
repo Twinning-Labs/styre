@@ -7,10 +7,12 @@ import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { configDir } from "../config/paths.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
+import { discoverComponents } from "../setup/discover.ts";
 import type { EnrichDeps } from "../setup/enrich.ts";
 import { enrichRuntimeContext } from "../setup/enrich.ts";
 import { mergeRuntimeContext } from "../setup/merge.ts";
 import { probeProfile } from "../setup/probe.ts";
+import { resolveCommands } from "../setup/resolve-commands.ts";
 
 const CHECKS = new Set(["github", "external", "none"]);
 
@@ -69,6 +71,44 @@ export async function runSetup(args: {
       runtimeContext: mergeRuntimeContext(existing.runtimeContext, profile.runtimeContext),
     };
   }
+  // Layer: agent-assisted discovery + interactive command-resolution ladder.
+  const discovered = await discoverComponents(
+    repoDir,
+    { components: profile.components, repoCommands: profile.repoCommands },
+    { runner: args.deps.runner, agentConfig: args.deps.agentConfig },
+  );
+
+  const interactive = Boolean(process.stdin.isTTY);
+  const { components, warnings } = resolveCommands(discovered.components, {
+    interactive,
+    ask: (q) => (interactive ? (globalThis.prompt(q) ?? null) : null),
+  });
+  for (const w of warnings) console.warn(w);
+
+  // SECURITY-BEARING CONFIRM: every command (incl. agent-supplied ones) runs via `sh -c` at verify
+  // and seeds the implement Bash allowlist. Show the FULL final command list and require explicit
+  // operator sign-off — not just prompting for the ones that were missing.
+  if (interactive) {
+    console.log(
+      "\nResolved components (commands run with repo write + network; paths drive verify routing):",
+    );
+    for (const c of components) {
+      console.log(`  ${c.name} [${c.kind}]  paths: ${c.paths.join(", ")}`);
+      for (const [k, v] of Object.entries(c.commands)) {
+        console.log(`    ${k}: ${typeof v === "string" ? v : "(none)"}`);
+      }
+    }
+    for (const [name, cmd] of Object.entries(discovered.repoCommands)) {
+      console.log(`  repo.${name}: ${cmd}`);
+    }
+    const ok = globalThis.prompt("Approve these components (commands + paths)? [y/N]");
+    if (ok?.trim().toLowerCase() !== "y") {
+      throw new Error("setup aborted: operator did not approve the command list");
+    }
+  }
+
+  profile = { ...profile, components, repoCommands: discovered.repoCommands };
+
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, `${JSON.stringify(profile, null, 2)}\n`);
   return { outPath, profile, needsInput: unknownRuntimeSections(profile) };

@@ -16,12 +16,14 @@ function gitRepo(): string {
   return root;
 }
 
-test("probeProfile derives slug from the git remote and detects commands", () => {
+test("probeProfile derives slug from the git remote and produces components + repoCommands", () => {
   const repo = gitRepo();
   const p = probeProfile(repo);
   expect(p.slug).toBe("widget"); // from git@github.com:acme/widget.git
   expect(p.targetRepo).toBe(repo);
+  // package.json with scripts.test → node component with test command
   expect(p.components[0]?.commands.test).toBe("npm run test"); // no lockfile → npm
+  expect(p.repoCommands).toEqual({}); // no repo-level commands from manifest scan
   expect(p.checksSystem).toBe("none"); // no .github/workflows
 });
 
@@ -34,4 +36,5 @@ test("probeProfile honors overrides and falls back to dir basename for slug", ()
   const bareName = bare.split("/").at(-1) ?? "";
   expect(p2.slug).toBe(bareName);
   expect(p2.components).toEqual([]); // no package.json → no detected commands → empty components
+  expect(p2.repoCommands).toEqual({}); // no repo-level commands
 });
