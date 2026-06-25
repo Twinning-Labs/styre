@@ -13,9 +13,28 @@ import { openDb } from "../db/client.ts";
 import { migrate } from "../db/migrate.ts";
 import { getTicket } from "../db/repos/ticket.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
+import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
 import { finishRunResult, parkDir } from "./park.ts";
+
+const MUST_HAVE = ["build", "test", "check"] as const;
+
+/** Assert that every component's must-have commands are resolved (either a string command or
+ *  `{ unavailable: true }`). Throws if any are undefined (absent) — the unresolved state that
+ *  indicates setup was not run or was incomplete. */
+export function assertResolved(profile: Profile): void {
+  for (const c of profile.components) {
+    for (const k of MUST_HAVE) {
+      const v = c.commands[k];
+      if (v === undefined) {
+        throw new Error(
+          `profile component '${c.name}' has an unresolved '${k}' command — re-run \`styre setup\`.`,
+        );
+      }
+    }
+  }
+}
 
 export const runCommand = defineCommand({
   meta: { name: "run", description: "Ingest one ticket and drive it to PR-ready, then exit." },
@@ -33,6 +52,7 @@ export const runCommand = defineCommand({
   },
   async run({ args }) {
     const profile = loadProfile(args.profile);
+    assertResolved(profile);
     const runtimeConfig =
       args.config && args.config.length > 0
         ? RuntimeConfigSchema.parse(JSON.parse(readFileSync(args.config, "utf8")))
