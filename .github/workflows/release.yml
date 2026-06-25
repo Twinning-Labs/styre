@@ -281,3 +281,44 @@ jobs:
             git -C /tmp/tap commit -m "styre $V"
             git -C /tmp/tap push origin HEAD
           fi
+
+  smoke:
+    # Homebrew is unsupported on linux-arm64 (x86_64 only), so the tap is
+    # brew-smoked on the three brew-capable arches. linux-arm64 is smoked
+    # separately below against the published tarball.
+    needs: publish
+    if: ${{ !inputs.dry_run }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, macos-13, ubuntu-latest]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: brew install from the tap + smoke
+        run: |
+          brew tap twinning-labs/styre
+          brew install twinning-labs/styre/styre
+          styre --version
+      - name: brew audit (strict)
+        run: brew audit --strict --online twinning-labs/styre/styre
+
+  smoke-linux-arm64:
+    needs: [compute, publish]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Tarball-extract smoke of the published linux-arm64 asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ needs.compute.outputs.version }}
+        run: |
+          set -e
+          v="${V#v}"
+          gh release download "$V" -R Twinning-Labs/styre \
+            --pattern "styre-v${v}-linux-arm64.tar.gz*" --dir dl
+          got="$(shasum -a 256 "dl/styre-v${v}-linux-arm64.tar.gz" | awk '{print $1}')"
+          want="$(cat "dl/styre-v${v}-linux-arm64.tar.gz.sha256")"
+          test "$got" = "$want" || { echo "::error::sha mismatch on linux-arm64"; exit 1; }
+          tar -C dl -xzf "dl/styre-v${v}-linux-arm64.tar.gz"
+          got_v="$(dl/styre --version)"
+          test "$got_v" = "$v" || { echo "::error::version $got_v != $v"; exit 1; }
