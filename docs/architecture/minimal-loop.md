@@ -1,8 +1,8 @@
 # The Minimal Loop
 
-> **This describes the per-ticket minimal loop that **`styre run`** executes (the OSS core). The
+> **OSS core.** This describes the per-ticket minimal loop that `styre run` executes. The
 > **needs-you inbox** and multi-ticket orchestration are the **commercial Control Plane**, fenced
-> below.**
+> below.
 
 > **Artifact for §9.4 checklist #5** of [`brainstorm.md`](brainstorm.md). Wires the pieces into the
 > first end-to-end `design → released` run on the new substrate: the concrete **`next_step_key`
