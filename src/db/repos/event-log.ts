@@ -73,7 +73,7 @@ export function appendEvent(
       $t: e.ticketId,
       $seq: nextSeq(db, e.ticketId),
       $kind: e.kind,
-      $actor: e.actor ?? "daemon",
+      $actor: e.actor ?? "runner",
       $from: e.fromStage ?? null,
       $to: e.toStage ?? null,
       $loop: e.loop ?? null,

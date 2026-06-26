@@ -22,7 +22,7 @@ test("appendEvent assigns monotonic seq per ticket", () => {
   expect(a.kind).toBe("transition");
   expect(a.from_stage).toBe("design");
   expect(a.to_stage).toBe("implement");
-  expect(a.actor).toBe("daemon");
+  expect(a.actor).toBe("runner");
 });
 
 test("appendEvent records loopback fields; listByTicket returns in order", () => {
