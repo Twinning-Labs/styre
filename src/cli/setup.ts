@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { defineCommand } from "citty";
@@ -5,6 +6,9 @@ import { claudeAgentRunner } from "../agent/providers/claude.ts";
 import { selectAgentRunner } from "../agent/registry.ts";
 import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { configDir } from "../config/paths.ts";
+import { DEFAULT_RUNTIME_CONFIG } from "../config/runtime-config.ts";
+import { createAnalytics } from "../telemetry/analytics/index.ts";
+import type { SetupInput } from "../telemetry/analytics/properties.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
 import { discoverComponents } from "../setup/discover.ts";
@@ -32,6 +36,41 @@ export function unknownRuntimeSections(profile: Profile): string[] {
   }
   if (rc.releasePackaging.mechanism === "unknown") out.push("releasePackaging");
   return out;
+}
+
+/** Ensure the profile carries a stable analytics id (random UUID; never encodes the slug). */
+export function ensureAnalyticsId(profile: Profile): Profile {
+  return profile.analyticsId ? profile : { ...profile, analyticsId: randomUUID() };
+}
+
+const STACK_KEYWORDS: Array<[RegExp, string]> = [
+  [/node|typescript|javascript|express|nest|bun|deno/i, "node"],
+  [/python|django|flask|fastapi/i, "python"],
+  [/\bgo\b|golang/i, "go"],
+  [/rust|cargo/i, "rust"],
+  [/java|kotlin|spring/i, "jvm"],
+  [/ruby|rails/i, "ruby"],
+  [/php|laravel/i, "php"],
+  [/\.net|c#|dotnet/i, "dotnet"],
+];
+
+/** Coarse stack bucket from the probed TECHNOLOGY_STACK promptVar (never the raw string). */
+function stackBucket(profile: Profile): string {
+  const raw = profile.promptVars.TECHNOLOGY_STACK ?? "";
+  for (const [re, label] of STACK_KEYWORDS) if (re.test(raw)) return label;
+  return "other";
+}
+
+/** Map a profile to the allow-listed setup_completed inputs. */
+export function deriveSetupInput(profile: Profile): SetupInput {
+  return {
+    projectId: profile.analyticsId ?? "",
+    checksSystem: profile.checksSystem,
+    componentCount: profile.components.length,
+    componentKinds: [...new Set(profile.components.map((c) => c.kind))],
+    stackBucket: stackBucket(profile),
+    topologyType: profile.runtimeContext.topology.type,
+  };
 }
 
 /** Probe a repo, enrich its runtime context via the agent, and write the profile JSON. Testable
@@ -68,6 +107,7 @@ export async function runSetup(args: {
     const existing = loadProfile(outPath);
     profile = {
       ...profile,
+      analyticsId: existing.analyticsId ?? profile.analyticsId,
       runtimeContext: mergeRuntimeContext(existing.runtimeContext, profile.runtimeContext),
     };
   }
@@ -107,7 +147,7 @@ export async function runSetup(args: {
     }
   }
 
-  profile = { ...profile, components, repoCommands: discovered.repoCommands };
+  profile = ensureAnalyticsId({ ...profile, components, repoCommands: discovered.repoCommands });
 
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, `${JSON.stringify(profile, null, 2)}\n`);
@@ -163,5 +203,9 @@ export const setupCommand = defineCommand({
     const note = credNote(profile);
     if (note) console.log(`setup: ${note}`);
     console.log(`setup: run with  styre run <ticket> --profile ${outPath}`);
+
+    const analytics = createAnalytics(DEFAULT_RUNTIME_CONFIG);
+    analytics.setupCompleted(deriveSetupInput(profile));
+    await analytics.shutdown();
   },
 });
