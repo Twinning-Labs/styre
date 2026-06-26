@@ -122,7 +122,7 @@ All operator-tunable in `config.json`; these are the cutover defaults.
 | per-stage dispatch timeout | design/review **60m**, others **30m** | ports ENG-65; under `gtimeout` |
 | `OUTBOX_RETRY_BUDGET` | **~10 attempts / ~30m backoff** | then escalate X1 (service down) |
 | `POLL_INTERVAL` | **60s** | loop idle + checks-system poll cadence |
-| `K` concurrency | **2** | `CLAUDE_MAX_CONCURRENT` → `orchestrator.max_concurrent_features` → 2 |
+| `K` concurrency | **2** | `CLAUDE_MAX_CONCURRENT` → `orchestrator.max_concurrent_features` → 2 *(commercial Control Plane)* |
 
 Spend/wall-clock per ticket are **derived**: `SUM(dispatch.cost_usd)` and `now − ticket.created_at`
 (or summed dispatch durations). The median is a rolling window over `done` tickets per project.

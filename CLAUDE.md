@@ -22,7 +22,7 @@ When you add code, the canonical layout decisions live in `build-operations.md` 
 Everything authoritative lives in `docs/architecture/`. Read top-to-bottom before changing anything:
 
 1. **`minimal-loop.md`** — the concrete `next_step_key` state machine, loopback resets, budget numbers, the needs-you inbox. Start here; it's the most concrete.
-2. **`control-loop.md`** — durable control-loop semantics: the daemon, event loop, step catalog (S1–S10) with per-step guards/inputs/outputs/tools, the structured-output interface (§3a), the Loopback Atlas (§8), invariants a step author must hold (§9).
+2. **`control-loop.md`** — durable control-loop semantics: the control loop, the per-ticket event loop, step catalog (S1–S10) with per-step guards/inputs/outputs/tools, the structured-output interface (§3a), the Loopback Atlas (§8), invariants a step author must hold (§9).
 3. **`projector.md`** — the one-way projector: the sole outward write path from SQLite to Linear/GitHub.
 4. **`schema.sql`** — the SQLite SoT (16 tables). Loads clean; invariants smoke-tested. Memory/UGL tables are a deferred `-- DEFERRED` stub.
 5. **`brainstorm.md`** — the running decision log / rationale. §4 gate taxonomy, §5 supervisor+memory (post-cutover), §9 migration plan, **§10 Open Decisions Register** (the DECIDED/OPEN status of every design item), §12 schema overview. It's append-only — **never rewrite its history**; add new entries to the §11 changelog.

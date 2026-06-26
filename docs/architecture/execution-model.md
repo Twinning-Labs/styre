@@ -163,10 +163,15 @@ profile's declared command. Frontend work is a work-unit kind, not a separate st
 
 The operator interacts with Styre in two places:
 
-**The merge gate.** After review passes, the runner pushes the branch, opens a pull request, waits
-for the project's checks system to go green, and parks — polling GitHub until the operator merges.
-The operator reviews the pull request and merges it. The runner detects the merge by polling GitHub
-and advances the ticket to `released`. Auto-merge is off at the substrate level.
+**The merge gate.** After review passes, the runner pushes the branch, opens a pull request, and
+waits for the project's checks system to go green. Once checks pass, `styre run` exits — the PR
+is open and ready. The operator reviews the pull request and merges it manually. Auto-merge is off
+at the substrate level.
+
+> **Commercial Control Plane only.** Waiting for the human merge, polling GitHub until the branch
+> lands, and advancing the ticket to `released` are features of the commercial Control Plane. The
+> OSS runner's job ends at PR-ready — it does not poll GitHub for the merge and does not advance
+> the ticket beyond that point. This mirrors the S9/S10 fencing in `control-loop.md`.
 
 **Escalations and session interruptions.** When the loop exhausts its retry budget or reaches an
 escalation point it structurally cannot resolve autonomously, `styre run` **exits nonzero** — the

@@ -103,16 +103,6 @@ styre migrate
 
 ---
 
-## Documentation
-
-- [Architecture index](docs/architecture/README.md) — start here for the full substrate overview
-- [Execution model](docs/architecture/execution-model.md) — step catalog, state machine, loopback atlas
-- [Security policy](SECURITY.md) — capability model, threat surface, reporting vulnerabilities
-- [Contributing](CONTRIBUTING.md) — how to contribute, branch conventions, PR process
-- [Plans](docs/plans/) — milestone implementation plans
-
----
-
 ## Install
 
 Styre ships as a single self-contained binary via Homebrew (macOS & Linux):
@@ -122,6 +112,16 @@ brew install twinning-labs/styre
 ```
 
 Upgrade with `brew upgrade styre`; remove with `brew uninstall styre` (and `brew untap twinning-labs/styre` to drop the tap). Prebuilt binaries for macOS (arm64/x64) and Linux (arm64/x64) are also attached to each [GitHub Release](https://github.com/Twinning-Labs/styre/releases).
+
+---
+
+## Documentation
+
+- [Architecture index](docs/architecture/README.md) — start here for the full substrate overview
+- [Execution model](docs/architecture/execution-model.md) — step catalog, state machine, loopback atlas
+- [Security policy](SECURITY.md) — capability model, threat surface, reporting vulnerabilities
+- [Contributing](CONTRIBUTING.md) — how to contribute, branch conventions, PR process
+- [Plans](docs/plans/) — milestone implementation plans
 
 ---
 
