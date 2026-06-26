@@ -15,7 +15,10 @@ import { getTicket } from "../db/repos/ticket.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
+import { createAnalytics } from "../telemetry/analytics/index.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
+import { buildSummary } from "../telemetry/emitter.ts";
+import type { TelemetryEvent } from "../telemetry/events.ts";
 import { finishRunResult, parkDir } from "./park.ts";
 
 const MUST_HAVE = ["build", "test", "check"] as const;
@@ -58,58 +61,88 @@ export const runCommand = defineCommand({
         ? RuntimeConfigSchema.parse(JSON.parse(readFileSync(args.config, "utf8")))
         : DEFAULT_RUNTIME_CONFIG;
 
-    if (args.resume && args.resume.length > 0) {
-      const { resumeRun } = await import("./park.ts");
-      await resumeRun(
-        { resume: args.resume, acceptHead: args["accept-head"], inspect: args.inspect },
+    const analytics = createAnalytics(runtimeConfig);
+    const startedAt = Date.now();
+    try {
+      if (args.resume && args.resume.length > 0) {
+        const { resumeRun } = await import("./park.ts");
+        await resumeRun(
+          { resume: args.resume, acceptHead: args["accept-head"], inspect: args.inspect },
+          profile,
+          runtimeConfig,
+        );
+        return;
+      }
+
+      if (!args.ticket || args.ticket.length === 0) {
+        throw new Error("run: --ticket is required when not using --resume");
+      }
+
+      const dbPath =
+        args.db && args.db.length > 0
+          ? args.db
+          : join(mkdtempSync(join(tmpdir(), "styre-run-")), "run.db");
+      migrate(dbPath);
+      const db = openDb(dbPath);
+      recover(db, realRecoverDeps());
+
+      const ports = makeProjectorPorts(runtimeConfig, profile);
+      const runner = selectAgentRunner(DEFAULT_AGENT_CONFIG, { claude: () => claudeAgentRunner() });
+      const registry = buildDispatchRegistry({
+        runner,
+        agentConfig: DEFAULT_AGENT_CONFIG,
+        profile,
+        worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-")),
+      });
+
+      analytics.runStarted({
+        projectId: profile.analyticsId ?? "",
+        resumed: false,
+        tracker: runtimeConfig.issueTracker,
+        forge: runtimeConfig.forge,
+      });
+
+      const out = await runTicket({
+        db,
         profile,
         runtimeConfig,
+        ports,
+        registry,
+        ticketRef: args.ticket,
+        emit: stdoutSink,
+      });
+
+      analytics.runCompleted(
+        buildSummary(db, out.ticketId, out) as Extract<TelemetryEvent, { type: "summary" }>,
+        Date.now() - startedAt,
+        {
+          complexityGrading: runtimeConfig.complexityGrading,
+          onPlanDefect: runtimeConfig.onPlanDefect,
+        },
       );
-      return;
+
+      console.error(out.summary); // human summary → stderr; stdout carries only NDJSON telemetry
+      const ident = getTicket(db, out.ticketId)?.ident ?? args.ticket;
+      if (out.outcome === "parked" && out.park) {
+        // Print resume-hint before finishRunResult (which does dumpPark + sets exitCode).
+        // parkDir gives the path without touching the DB.
+        const dir = parkDir(profile.slug, ident);
+        console.error(
+          `Parked: ${out.park.cause}${out.park.resetAt ? ` (resets ${out.park.resetAt})` : ""}.\n` +
+            `Resume with: styre run --resume ${ident} --profile ${args.profile}\n` +
+            `Dump: ${dir}`,
+        );
+      }
+      finishRunResult(db, dbPath, profile.slug, ident, out);
+    } catch (err) {
+      analytics.cliError({
+        command: "run",
+        exitCode: typeof process.exitCode === "number" ? process.exitCode : 1,
+        errorClass: err instanceof Error ? err.constructor.name : "Unknown",
+      });
+      throw err;
+    } finally {
+      await analytics.shutdown();
     }
-
-    if (!args.ticket || args.ticket.length === 0) {
-      throw new Error("run: --ticket is required when not using --resume");
-    }
-
-    const dbPath =
-      args.db && args.db.length > 0
-        ? args.db
-        : join(mkdtempSync(join(tmpdir(), "styre-run-")), "run.db");
-    migrate(dbPath);
-    const db = openDb(dbPath);
-    recover(db, realRecoverDeps());
-
-    const ports = makeProjectorPorts(runtimeConfig, profile);
-    const runner = selectAgentRunner(DEFAULT_AGENT_CONFIG, { claude: () => claudeAgentRunner() });
-    const registry = buildDispatchRegistry({
-      runner,
-      agentConfig: DEFAULT_AGENT_CONFIG,
-      profile,
-      worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-")),
-    });
-
-    const out = await runTicket({
-      db,
-      profile,
-      runtimeConfig,
-      ports,
-      registry,
-      ticketRef: args.ticket,
-      emit: stdoutSink,
-    });
-    console.error(out.summary); // human summary → stderr; stdout carries only NDJSON telemetry
-    const ident = getTicket(db, out.ticketId)?.ident ?? args.ticket;
-    if (out.outcome === "parked" && out.park) {
-      // Print resume-hint before finishRunResult (which does dumpPark + sets exitCode).
-      // parkDir gives the path without touching the DB.
-      const dir = parkDir(profile.slug, ident);
-      console.error(
-        `Parked: ${out.park.cause}${out.park.resetAt ? ` (resets ${out.park.resetAt})` : ""}.\n` +
-          `Resume with: styre run --resume ${ident} --profile ${args.profile}\n` +
-          `Dump: ${dir}`,
-      );
-    }
-    finishRunResult(db, dbPath, profile.slug, ident, out);
   },
 });

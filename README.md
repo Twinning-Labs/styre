@@ -125,6 +125,24 @@ Upgrade with `brew upgrade styre`; remove with `brew uninstall styre` (and `brew
 
 ---
 
+## Telemetry
+
+`styre` collects anonymous usage analytics (via PostHog) to understand adoption and improve the
+tool. It sends a small set of coarse events — `setup_completed`, `run_started`, `run_completed`,
+`cli_error` — with an anonymous random ID. It **never** sends source code, repo names/paths,
+ticket IDs, commands, branch SHAs, costs, or tokens.
+
+**Opt out** at any time:
+
+- `export STYRE_TELEMETRY=0`, or
+- `export DO_NOT_TRACK=1`, or
+- set `"telemetry": false` in your runtime `config.json`.
+
+The anonymous ID lives at `~/.local/state/styre/telemetry.json`. In ephemeral CI, cache
+`~/.local/state/styre/` to keep a stable ID across runs (otherwise each CI run is counted as new).
+
+---
+
 ## Develop
 
 Prerequisites: [Bun](https://bun.sh). (Nothing else to install: on macOS, `bun run build` ad-hoc re-signs the compiled binary with `codesign` so Apple Silicon won't kill it on launch — `codesign` ships with the Command Line Tools that `git` already relies on, and the build does it for you.)
