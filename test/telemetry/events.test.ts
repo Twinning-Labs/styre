@@ -38,7 +38,7 @@ test("an event row variant round-trips (nullable fields allowed)", () => {
     ticket_id: 1,
     seq: 3,
     kind: "transition",
-    actor: "daemon",
+    actor: "runner",
     from_stage: "design",
     to_stage: "implement",
     loop: null,

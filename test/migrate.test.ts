@@ -27,10 +27,10 @@ const CORE_TABLES = [
 ];
 
 describe("migrate", () => {
-  test("bootstraps a fresh DB at schema v2", () => {
+  test("bootstraps a fresh DB at schema v3", () => {
     const result = migrate(tmpDbPath());
     expect(result.created).toBe(true);
-    expect(result.version).toBe(2);
+    expect(result.version).toBe(3);
   });
 
   test("creates the core SoT tables", () => {
@@ -52,6 +52,6 @@ describe("migrate", () => {
     migrate(path);
     const second = migrate(path);
     expect(second.created).toBe(false);
-    expect(second.version).toBe(2);
+    expect(second.version).toBe(3);
   });
 });

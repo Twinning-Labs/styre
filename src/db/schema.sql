@@ -1,5 +1,5 @@
 -- ============================================================================
--- Styre — SQLite Schema  (substrate, v2)
+-- Styre — SQLite Schema  (substrate, v3)
 -- ----------------------------------------------------------------------------
 -- Artifact for §9.4 checklist #1 of docs/redesign/brainstorm.md.
 -- Single transactional Source-of-Truth (design move 2). Replaces the current
@@ -15,18 +15,18 @@
 --       transition / loopback / escalated / resumed) — verdicts are now DERIVED
 --       from review_finding, not stored as markers.
 --     * **`review_finding` realigned** to the new finding shape (single severity,
---       category, factors, deferral_candidate, daemon-computed blocks_ship,
+--       category, factors, deferral_candidate, runner-computed blocks_ship,
 --       review_kind plan|code) — dropped the ENG-191 cold/adjudicated/decision shape.
 --     * added `ticket.needs_docs`, `project.checks_system` (+config),
 --       `ground_truth_signal.signal_type` now the open declared check-type.
---     * removed `dispatch.verdict_emitted`/`verdict_target` (daemon derives verdicts).
+--     * removed `dispatch.verdict_emitted`/`verdict_target` (runner derives verdicts).
 --
 -- SCOPE (hard boundary, §9.1 + §10): substrate only. The UGL / supervisor /
 --   memory-RAG tables are post-cutover increments I-C/I-D — sketched (commented,
 --   NOT created) at the end so the substrate stays forward-compatible.
 --
 -- INVARIANTS:
---   * Only the daemon writes this DB (B2). Workers return results; the daemon
+--   * Only the runner writes this DB (B2). Workers return results; the runner
 --     journals them. Single-writer by construction. WAL gives concurrent readers.
 --   * Idempotency keys are **globally unique BY CONSTRUCTION** (prefixed with the
 --     dispatch_id / ticket ident), so the global UNIQUE is the dedup mechanism.
@@ -39,7 +39,7 @@
 -- ============================================================================
 
 PRAGMA journal_mode = WAL;        -- persistent; single-writer + concurrent readers
-PRAGMA foreign_keys = ON;         -- per-connection: the daemon MUST set this each open
+PRAGMA foreign_keys = ON;         -- per-connection: the runner MUST set this each open
 PRAGMA busy_timeout = 5000;       -- per-connection hint
 
 -- ----------------------------------------------------------------------------
@@ -51,14 +51,14 @@ CREATE TABLE schema_meta (
     note        TEXT
 );
 INSERT INTO schema_meta (version, applied_at, note)
-VALUES (2, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-        'v2: align with control-loop walkthrough — event_log, review_finding realign, drop skip-policy');
+VALUES (3, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+        'v3: event_log.actor enum daemon→runner (OSS single-writer terminology)');
 
 -- ============================================================================
 -- §A  PROJECT + TICKET   (replaces issue-state.json + stage:* / pipeline:* labels)
 -- ============================================================================
 
--- project — per-PROJECT_SLUG namespace (the harness runs many targets; one daemon).
+-- project — per-PROJECT_SLUG namespace (the harness runs many targets; one runner).
 CREATE TABLE project (
     id                  INTEGER PRIMARY KEY,
     slug                TEXT    NOT NULL UNIQUE,        -- PROJECT_SLUG (frozen at setup)
@@ -148,7 +148,7 @@ CREATE TABLE work_unit (
     verify_check_types TEXT CHECK (verify_check_types IS NULL OR json_valid(verify_check_types)),
 
     depends_on        TEXT CHECK (depends_on IS NULL OR json_valid(depends_on)),  -- [seq,...]; acyclicity
-                                                         -- enforced by the daemon (S1b), not the schema.
+                                                         -- enforced by the runner (S1b), not the schema.
     base_sha          TEXT,                              -- HEAD before the unit's first implement
                                                          -- commit; verify diffs base_sha..HEAD (all
                                                          -- the unit's commits, incl. loopbacks).
@@ -277,7 +277,7 @@ CREATE INDEX idx_dispatch_ticket ON dispatch (ticket_id, seq);
 -- ============================================================================
 -- §E  EVENT LOG   (control-decision audit; was pipeline_event — v2 repurpose)
 -- ============================================================================
--- Append-only log of what the DAEMON decided: stage transitions, loopbacks (with
+-- Append-only log of what the RUNNER decided: stage transitions, loopbacks (with
 -- the failure signature, for distinct-counting + the needs-you trace), escalations,
 -- and operator resumes. Verdicts are DERIVED from review_finding (not stored here);
 -- transitions are ticket.stage updates mirrored here for the audit trail. Feeds the
@@ -288,7 +288,7 @@ CREATE TABLE event_log (
     seq          INTEGER NOT NULL,                      -- monotonic per ticket (ordering)
     kind         TEXT NOT NULL CHECK (kind IN (
                      'transition','loopback','escalated','resumed','note','parked')),
-    actor        TEXT CHECK (actor IS NULL OR actor IN ('daemon','operator')),
+    actor        TEXT CHECK (actor IS NULL OR actor IN ('runner','operator')),
     dispatch_id  TEXT,                                  -- the dispatch this relates to (if any)
 
     -- transition: from_stage -> to_stage
@@ -342,7 +342,7 @@ CREATE TABLE ground_truth_signal (
     id              INTEGER PRIMARY KEY,
     ticket_id       INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
     work_unit_id    INTEGER REFERENCES work_unit(id) ON DELETE CASCADE,
-    dispatch_id     TEXT,                               -- the verify dispatch (NULL for daemon command runs)
+    dispatch_id     TEXT,                               -- the verify dispatch (NULL for runner command runs)
     signal_type     TEXT NOT NULL,                      -- the declared CHECK-TYPE run (open vocab, matches
                                                         -- work_unit.verify_check_types): 'build'/'test'/'unit'
                                                         -- /'integration'/'visual'/'scope_diff'/'ci'/...
@@ -376,12 +376,12 @@ CREATE TABLE review_finding (
                                                         -- {in_changed_code,is_regression,user_visible,
                                                         --  reversible_post_ship,has_workaround}
     deferral_candidate INTEGER NOT NULL DEFAULT 0 CHECK (deferral_candidate IN (0,1)),  -- reviewer-flagged
-    blocks_ship        INTEGER CHECK (blocks_ship IN (0,1)),  -- DAEMON-computed (critical-floor + major-not-deferred)
+    blocks_ship        INTEGER CHECK (blocks_ship IN (0,1)),  -- RUNNER-computed (critical-floor + major-not-deferred)
     location           TEXT,                            -- file:line
     rationale          TEXT,
     status             TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','fixed','deferred','wont-fix')),
     created_at         TEXT NOT NULL,
-    -- critical-floor guard (defense-in-depth; the daemon also enforces it):
+    -- critical-floor guard (defense-in-depth; the runner also enforces it):
     CHECK (blocks_ship IS NULL OR severity <> 'critical' OR blocks_ship = 1)
 );
 CREATE INDEX idx_finding_open ON review_finding (ticket_id, status, blocks_ship);
@@ -454,7 +454,7 @@ WHERE e.kind = 'loopback'
         WHERE r.ticket_id = e.ticket_id AND r.kind = 'resumed'), 0)
 GROUP BY e.ticket_id, e.loop;
 
--- Tickets the daemon may pick this tick (active, project not paused, not parked).
+-- Tickets the runner may pick this tick (active, project not paused, not parked).
 CREATE VIEW v_ready_tickets AS
 SELECT t.*
 FROM ticket t
