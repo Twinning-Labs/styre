@@ -29,10 +29,11 @@ export function createPosthogClient(): AnalyticsClient {
       }
     },
     async shutdown() {
-      await Promise.race([
-        ph.shutdown().catch(() => {}),
-        new Promise<void>((resolve) => setTimeout(resolve, FLUSH_TIMEOUT_MS)),
-      ]);
+      try {
+        await ph.shutdown(FLUSH_TIMEOUT_MS);
+      } catch {
+        // never let telemetry shutdown throw or hang the CLI
+      }
     },
   };
 }
