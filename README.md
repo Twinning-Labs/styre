@@ -127,7 +127,7 @@ Upgrade with `brew upgrade styre`; remove with `brew uninstall styre` (and `brew
 
 ## Develop
 
-Prerequisites: [Bun](https://bun.sh). On macOS you also need the Xcode Command Line Tools (`xcode-select --install`) — the build re-signs the compiled binary with `codesign`, without which macOS (Apple Silicon) kills it on launch.
+Prerequisites: [Bun](https://bun.sh). (Nothing else to install: on macOS, `bun run build` ad-hoc re-signs the compiled binary with `codesign` so Apple Silicon won't kill it on launch — `codesign` ships with the Command Line Tools that `git` already relies on, and the build does it for you.)
 
 ```sh
 git clone https://github.com/Twinning-Labs/styre.git
