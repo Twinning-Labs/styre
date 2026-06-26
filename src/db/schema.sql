@@ -359,7 +359,7 @@ CREATE INDEX idx_gts_ticket ON ground_truth_signal (ticket_id, signal_type, meas
 
 -- review_finding — the cold reviewer's output (A2), realigned to the new review
 -- model (v2): the reviewer FILES findings via the validated tool interface; the
--- daemon computes `blocks_ship`. Covers BOTH the plan review (S1c) and the code
+-- runner computes `blocks_ship`. Covers BOTH the plan review (S1c) and the code
 -- review (S5), distinguished by `review_kind`. First-class (the loop iterates
 -- over open blocking findings; V6 counts persistence by `finding_class_key`).
 CREATE TABLE review_finding (
