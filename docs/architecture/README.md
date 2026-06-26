@@ -2,7 +2,7 @@
 
 Styre is the open-source execution core of an open-core autonomous-SDLC product (GPLv3,
 [github.com/Twinning-Labs/styre](https://github.com/Twinning-Labs/styre)). Its substrate is a
-single TypeScript daemon driving a local SQLite journal through a deterministic state machine:
+single-process control loop (`styre run`) driving a local SQLite journal through a deterministic state machine:
 `design → implement → verify → review → merge → released`. The substrate is the contributor's
 concern; a commercial Control Plane wraps it without forking it. The docs in this directory are
 the substrate spec — frozen, mutually coherent, and written to be read top-to-bottom. Start here
@@ -18,7 +18,7 @@ Read in this order. Each doc builds on the ones before it.
    numbers, and the needs-you inbox. The most grounded starting point: you can read the whole
    ticket lifecycle as code.
 
-2. **`control-loop.md`** — durable control-loop semantics: the daemon, the event loop,
+2. **`control-loop.md`** — durable control-loop semantics: the control loop, the per-ticket event loop,
    the full step catalog S1–S10 (per-step guards, inputs, outputs, tools), the structured-output
    interface (§3a), the Loopback Atlas (§8), and the invariants every step author must hold (§9).
 
@@ -42,7 +42,7 @@ open-core seam — read it for operational and deployment context, not for the e
 
 These are the load-bearing NOTs. Code that violates them is wrong even if it works.
 
-- There is exactly **one writer**: only the daemon writes SQLite. Workers and agents return
+- There is exactly **one writer**: only the runner writes SQLite. Workers and agents return
   results; they never persist.
 
 - Linear and GitHub are never read for control flow — they are one-way projections. Inbound facts
@@ -61,7 +61,7 @@ These are the load-bearing NOTs. Code that violates them is wrong even if it wor
 - Agents have **no** `gh` or Linear tools and **no** ambient `LINEAR_API_KEY`. The worktree is
   the only writable surface available to a worker.
 
-- The daemon's default response to an anomaly is **not** halt-to-human — it is loop (bounded
+- The runner's default response to an anomaly is **not** halt-to-human — it is loop (bounded
   retry against ground truth). Human gates are MERGE approval and escalations only.
 
 ---
@@ -69,4 +69,8 @@ These are the load-bearing NOTs. Code that violates them is wrong even if it wor
 ## Codemap
 
 Canonical code-layout decisions live in `build-operations.md`. The `src/` top-level directories
-are: `engine`, `daemon`, `dispatch`, `db`, `integrations`, `agent`, `telemetry`, `setup`, `cli`.
+are: `engine`, `daemon` (the control-loop engine), `dispatch`, `db`, `integrations`, `agent`,
+`telemetry`, `setup`, `cli`.
+
+Multi-ticket orchestration, persistent supervision, the needs-you inbox, and K-concurrency are
+**not** part of this core — see the "How the commercial plane fits" section in the root `README.md`.
