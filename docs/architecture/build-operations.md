@@ -52,17 +52,28 @@ the *service-install* edge. The same TS core compiles to per-platform binaries.
   - **Container** — a small OCI (Linux) image; the primary cloud / fleet / CI artifact.
   - **GitHub Action** — wraps the container/binary for CI.
   - **Upgrade** (any target): replace the binary/image; `migrate()` self-applies schema migrations on start.
-- **Run modes:**
+- **OSS run modes (`styre` binary):**
   - **`styre setup <repo>`** — the probe: discover the project-profile, discover/ask the checks-system,
-    create+migrate the DB, refresh the Linear id-cache + projection labels, and **install the host
-    service for the detected OS** (launchd on macOS, systemd on Linux). Idempotent. *The developer hook.*
-  - **`styre daemon`** — persistent local, supervised by the host service manager (**launchd / systemd**),
-    watches the SQLite queue, K-concurrency, one DB / all projects (CL-1). The **solo-dev / local-team** mode.
-  - **`styre run <ticket>`** — a **one-shot headless runner**: execute ONE ticket to PR-ready and exit,
-    emitting telemetry. The **CI / cloud / fleet primitive** (the SaaS spins up N in parallel; ephemeral
-    per-run SQLite — the journal still gives in-run crash-resume; durable output = the git branch + telemetry).
-  - **management CLI:** `status` · `inbox` (resume/`--after-fix`/abandon) · `config` · `pause`/`resume` ·
-    `logs` · `uninstall`.
+    write the project profile (`profile.json`). Idempotent. *The developer hook.*
+  - **`styre migrate`** — bootstraps and migrates the SQLite SoT under `$XDG_STATE_HOME/styre/`.
+  - **`styre run <ticket>`** — a **one-shot runner**: execute ONE ticket to PR-ready and exit,
+    emitting NDJSON telemetry to stdout. Ephemeral per-run SQLite — the journal gives in-run
+    crash-resume; durable output = the git branch + telemetry stream.
+    - **Park on session interruption (exit 75):** if the run is interrupted (credits/limit), it parks:
+      dumps the SoT + transcript to `~/.local/state/styre/<project-stub>/<ticket-ident>/` and exits
+      `75` (EX_TEMPFAIL) without burning a retry. Resume with `styre run --resume <ticket> --profile <p>`
+      (re-runs only the interrupted step; `--accept-head` accepts a moved HEAD; `--inspect` is
+      diagnostics-only, exit `0`).
+  - **management CLI (OSS):** `status` · `config` · `logs`.
+
+- **Commercial Control Plane run modes** *(not part of the OSS binary — the persistent orchestration
+  layer lives in the separate `control-plane` repo):*
+  - **`styre daemon`** — persistent local service, supervised by the host service manager
+    (**launchd / systemd**), watches the SQLite queue, K-concurrency, one DB / all projects (CL-1).
+    Orchestrates many `styre run` invocations for multi-ticket pickup, dependency-aware scheduling,
+    and persistent supervision. **This command does NOT exist in the OSS binary.**
+  - **commercial management CLI:** `inbox` (resume/`--after-fix`/abandon) · `pause`/`resume` ·
+    `uninstall`.
 
 ### 3.1 The install matrix (macOS · Linux · container)
 
@@ -70,17 +81,19 @@ the *service-install* edge. The same TS core compiles to per-platform binaries.
 |---|---|---|---|
 | Get it | `brew install styre` / release binary | `curl … \| sh` / release tarball (static/musl) | OCI image (Linux) |
 | Arch | arm64 + x64 | x86_64 + arm64 | per-arch images |
-| Daemon supervisor | launchd LaunchAgent | **systemd** (`--user` or system unit) | orchestrator (k8s / Fargate) |
+| Daemon supervisor | launchd LaunchAgent *(commercial plane)* | **systemd** *(commercial plane)* | orchestrator (k8s / Fargate) *(commercial plane)* |
 | State / config paths | XDG | XDG | mounted volume (persistent) or ephemeral (runner) |
-| Primary mode | `daemon` (persistent) | `daemon` (persistent) | `run <ticket>` (ephemeral worker) |
+| Primary mode | `styre run` (ephemeral, one ticket) | `styre run` (ephemeral, one ticket) | `styre run <ticket>` (ephemeral worker) |
 | Auth | subscription session *or* API key | either | `ANTHROPIC_API_KEY` (headless) |
 
 - **One path model on both OSes** — the **XDG Base Directory spec** (Linux-native, works cleanly on
   macOS): DB at `$XDG_STATE_HOME/styre/`, config at `$XDG_CONFIG_HOME/styre/`. No per-OS path forks.
 - **Host deps (all targets):** `git`, `gh`, the `claude` CLI; node is bundled in the binary.
-- **`styre setup` is OS-aware:** it renders the **launchd plist** (macOS) or the **systemd unit** (Linux)
-  from the *same* daemon definition — the daemon logic is identical; only the supervisor unit differs.
-- **No-init environments** (bare containers, minimal images): run `styre daemon` directly under the
+- **`styre setup` is OS-aware:** it probes the repo and writes the project profile (`profile.json`).
+  The commercial Control Plane's host-service installer (launchd plist on macOS / systemd unit on Linux)
+  is rendered by the plane, not the OSS `setup` command — the control-loop engine is identical; only
+  the supervisor wiring differs.
+- **No-init environments** (bare containers, minimal images): run `styre run` directly under the
   orchestrator / as PID 1 — no service manager required.
 
 ### 3.2 Cloud-native operation (the fleet)
@@ -94,9 +107,10 @@ the *service-install* edge. The same TS core compiles to per-platform binaries.
     not local disk; a killed worker is just re-spawned on the same ticket.
   - logs to **stdout** (container-native); secrets via env / a secret manager.
   - the **GitHub Action** is this same runner on GitHub's Linux runners.
-- **Persistent-daemon mode** (one box, one SQLite, K-concurrency) stays the **local/solo** model on Mac
-  *or* Linux. `Postgres`-on-concurrency-demand (schema §9.2) is the upgrade path only if anyone ever
-  wants a single shared multi-worker daemon — the fleet model avoids needing it.
+- **Persistent-daemon mode** (one box, one SQLite, K-concurrency) is the **commercial Control Plane**
+  model on Mac *or* Linux — it orchestrates many `styre run` invocations. `Postgres`-on-concurrency-demand
+  (schema §9.2) is the upgrade path only if anyone ever wants a single shared multi-worker daemon — the
+  fleet model avoids needing it.
 
 ## 4. Auth + config (re-thought for both audiences)
 
@@ -135,6 +149,11 @@ so the plane can set per-ticket budgets/strictness without touching the binary. 
 > ticket block in OSS.
 
 ## 5. The open-core seam — stable contracts the plane plugs into `[BUILD THESE STABLE]`
+
+> **This is the OSS↔commercial integration boundary.** The commercial Control Plane integrates with the
+> OSS core *exclusively* through these contracts. They are versioned, stable, and public — the plane must
+> never fork or import the core; the core has zero knowledge of the plane. A solo dev can run the OSS
+> core forever without the plane. Build these stable from day one so the plane never needs a fork.
 
 The plane integrates *only* through these. Treat them as the public API surface (versioned, documented):
 
@@ -183,15 +202,16 @@ The plane integrates *only* through these. Treat them as the public API surface 
   In OSS these come from RuntimeConfig set per invocation (`--config`), **not** a ticket-embedded block —
   the per-ticket `styre_config` tier is plane-owned and deferred out of OSS (§4 deferral note; brainstorm
   §11 2026-06-23).
-- **Headless runner mode** ⇒ the durable-execution model spans **ephemeral per-run SQLite** (runner) and
-  the **persistent daemon DB** (local) — both must work; the journal semantics are identical, only the
-  DB lifetime differs. `[RESOLVED — operator 2026-06-20]` **One core, no fork.** SQLite is the system of
-  record in *both* modes — persistent (daemon = the OSS solo/local model) and ephemeral-per-run (`run` =
-  the container/CI/fleet model). The ephemeral DB is the in-run journal; durable output that survives the
-  runner is **git branch + the stdout telemetry stream** (§5.3, option B). The commercial value stays
-  entirely in the *plane* (Autonomous PM, dashboards, fleet orchestrator, escalation routing, retro
-  portal — §2) which wraps the unmodified core; there is **no closed-source fork of styre** (CLAUDE.md
-  invariant; §1). The DB-lifetime switch is run-mode config, not a second codebase.
+- **Headless runner mode** ⇒ the durable-execution model spans **ephemeral per-run SQLite** (`styre run`)
+  and the **persistent daemon DB** *(commercial Control Plane)* — both must work; the journal semantics
+  are identical, only the DB lifetime differs. `[RESOLVED — operator 2026-06-20]` **One core, no fork.**
+  SQLite is the system of record in *both* modes — the OSS model is `styre run` (ephemeral per-run DB,
+  one ticket, exits at PR-ready); the persistent daemon DB is the **commercial plane** (long-lived, multi-ticket
+  orchestration). The ephemeral DB is the in-run journal; durable output that survives the runner is
+  **git branch + the stdout telemetry stream** (§5.3, option B). The commercial value stays entirely in
+  the *plane* (Autonomous PM, dashboards, fleet orchestrator, escalation routing, retro portal — §2)
+  which wraps the unmodified core; there is **no closed-source fork of styre** (CLAUDE.md invariant; §1).
+  The DB-lifetime switch is run-mode config, not a second codebase.
 - **Telemetry is first-class**, not an afterthought — it's a paid-product input, so the per-ticket
   summary + the export schema get designed deliberately.
 
@@ -206,3 +226,12 @@ core serves both SoR modes (persistent daemon DB + ephemeral per-run DB); the §
 is a **structured stdout event stream (option B)** that ships in the OSS core; commercial value lives
 only in the plane (§6 resolved). Remaining §6 flag for a later spec pass: the per-ticket-config →
 K_DISTINCT/threshold mapping. Get the §5 contracts stable early so the plane never has to fork the core.
+
+> **NOTE — superseded by OSS/commercial boundary (2026-06-26):** The 2026-06-20 "three run modes
+> (setup / daemon / run)" decision predates the OSS boundary split. The persistent `daemon` is **not**
+> an OSS run mode — it is the commercial Control Plane's runtime. The OSS binary's run modes are
+> **`setup` / `run` / `migrate`** only. The "daemon = the OSS solo/local model" and "persistent daemon DB
+> (local)" framings in this doc are similarly superseded: the OSS model is `styre run` (one ticket,
+> ephemeral DB, exits at PR-ready); the persistent daemon and its long-lived DB belong to the commercial
+> plane. This historical decision record is preserved as-is; the §3 run-mode section above reflects the
+> corrected boundary.

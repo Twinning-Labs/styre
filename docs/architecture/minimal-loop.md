@@ -1,5 +1,9 @@
 # The Minimal Loop
 
+> **OSS core.** This describes the per-ticket minimal loop that `styre run` executes. The
+> **needs-you inbox** and multi-ticket orchestration are the **commercial Control Plane**, fenced
+> below.
+
 > **Artifact for §9.4 checklist #5** of [`brainstorm.md`](brainstorm.md). Wires the pieces into the
 > first end-to-end `design → released` run on the new substrate: the concrete **`next_step_key`
 > state machine**, the **dispatch shell-out** to the kept leaves, the **budget numbers** (the
@@ -15,7 +19,7 @@
 
 The resolver's heart (control-loop §2.3 gave the shape; here is the concrete function). Given a
 ticket's `stage` + work-unit states + the journal, it returns the next `step_key`. Transitions are
-inline: the resolver advances `ticket.stage`, the daemon enqueues the projection in the same tx
+inline: the resolver advances `ticket.stage`, the runner enqueues the projection in the same tx
 (projector §2), writes an `event_log` transition row, and recurses.
 
 ```
@@ -70,7 +74,7 @@ forward function.
 The atlas (control-loop §8) says *where* a failure routes; the loop must set the state that makes
 `next_step_key` go there. Per route:
 
-| Route | Daemon resets | `event_log` |
+| Route | Runner resets | `event_log` |
 |---|---|---|
 | → implement, unit-scope (I3/I4/I5, V1) | the named unit(s) → `status='pending'`; `stage='implement'` | `loopback{loop, route_to, signature}` |
 | → implement, ticket-scope (N1, P1) | spawn a ticket-scoped reconcile unit (kind=`reconcile`); `stage='implement'` | `loopback` |
@@ -87,17 +91,17 @@ signature trips the consecutive-identical cap faster (control-loop §8.2).
 > adapter*, not a core assumption. The agent runs behind a generic `AgentRunner` selected from
 > config; see `docs/brainstorms/2026-06-21-provider-agnostic-agent-design.md`.
 
-The TS daemon owns control; the agent *work* runs through the kept bash leaves. For an agent step the
-daemon: resolves model (F1) + the step's tool allowlist (§4 catalog) + timeout (§4 below), renders
+The runner owns control; the agent *work* runs through the kept bash leaves. For an agent step the
+runner: resolves model (F1) + the step's tool allowlist (§4 catalog) + timeout (§4 below), renders
 the prompt (`render-prompt.sh` + project-profile), invokes `dispatch.sh` (`claude -p --allowed-tools
 … --model …` under `gtimeout`), **journals the spawned pid** (recover() orphan-kill), awaits, and
 writes the result into SQLite (B2 — the worker never writes the DB).
 
 **Two dispatch modes:**
 - **Worktree agent (CLI leaf).** Steps that read/write the worktree — `design:dispatch` (plan doc),
-  `implement`, conflict-resolution, `docs:revise`. The agent edits files; the daemon commits (CL-COMMIT).
+  `implement`, conflict-resolution, `docs:revise`. The agent edits files; the runner commits (CL-COMMIT).
 - **Structured judgment.** `design:extract`, `design:review`, `review` produce schema rows from
-  artifacts. **At cutover** they use the CLI leaf with a **content-body sidecar** the daemon
+  artifacts. **At cutover** they use the CLI leaf with a **content-body sidecar** the runner
   zod-validates — and the §3a disambiguation still holds: an absent/malformed sidecar is a
   *transport* failure (re-dispatch, V4-class), a valid sidecar with findings is the verdict (no
   "bad-blob vs deny" ambiguity). The **in-context self-correction** of forced tool calls (the cost
@@ -118,27 +122,41 @@ All operator-tunable in `config.json`; these are the cutover defaults.
 | per-stage dispatch timeout | design/review **60m**, others **30m** | ports ENG-65; under `gtimeout` |
 | `OUTBOX_RETRY_BUDGET` | **~10 attempts / ~30m backoff** | then escalate X1 (service down) |
 | `POLL_INTERVAL` | **60s** | loop idle + checks-system poll cadence |
-| `K` concurrency | **2** | `CLAUDE_MAX_CONCURRENT` → `orchestrator.max_concurrent_features` → 2 |
+| `K` concurrency | **2** | `CLAUDE_MAX_CONCURRENT` → `orchestrator.max_concurrent_features` → 2 *(commercial Control Plane)* |
 
 Spend/wall-clock per ticket are **derived**: `SUM(dispatch.cost_usd)` and `now − ticket.created_at`
 (or summed dispatch durations). The median is a rolling window over `done` tickets per project.
 
 ## 5. The needs-you inbox (D3)
 
+> **[Commercial Control Plane]** The persistent needs-you inbox described in this section — including
+> `styre inbox`, `styre status`, `styre resume --after-fix`, and `styre abandon` — is a **commercial
+> Control Plane** feature. It requires a persistent service that can hold escalated tickets across
+> runs. The design record below is preserved for reference.
+>
+> **OSS equivalent (`styre run` only):** an escalation that the loop cannot resolve makes
+> `styre run` exit nonzero. A session-interruption (credits/limit hit) **parks (exit 75)** and
+> resumes with `styre run --resume <ticket> --profile <p>` (see also `--accept-head`, `--inspect`).
+
 The actionable surface for escalations — **SQLite-backed, not Linear** (Linear is the tracking mirror).
 - **Source:** tickets with `status='waiting'` on a `human_*` signal, joined to their `event_log`
   `escalated` row and full trace.
-- **Surface:** `styre inbox` / `styre status` (the single binary; reads SQLite; renders **local
-  tz**, DS-1). Each entry shows the reason, the failure history (the loopback signatures, the
-  ground-truth signals, the failed dispatch), and the available actions.
+- **Surface:** `styre inbox` / `styre status` (reads SQLite; renders **local tz**, DS-1). Each
+  entry shows the reason, the failure history (the loopback signatures, the ground-truth signals,
+  the failed dispatch), and the available actions.
 - **Notify:** Slack on each new escalation (the kept `slack.sh` leaf).
 - **Actions (CLI, deliver the `human_resume` signal):**
   - `styre resume <ticket>` — re-enter the parked step; reset per-loop + B2 counters; fresh B3 allowance.
-  - `styre resume <ticket> --after-fix` — operator edited plan/code/config by hand; the daemon
+  - `styre resume <ticket> --after-fix` — operator edited plan/code/config by hand; the runner
     picks up the changed worktree/SoT state.
   - `styre abandon <ticket>` — terminal (`status='abandoned'`; projector → Canceled).
 
 ## 6. End-to-end — the cutover acceptance run
+
+> **[Commercial Control Plane — partial]** The flip criterion referencing **launchd** (repointing the
+> host service) and the persistent daemon supervision apply to the commercial plane. The acceptance
+> run itself — watching one full ticket `design → released` — is valid for the OSS `styre run` as
+> a one-shot headless run.
 
 The flip criterion (§9.4): repoint launchd → **watch one full ticket `design → released` on the new
 loop** → if green, decommission the old write paths. A clean fast-track backend ticket exercises the
@@ -146,8 +164,8 @@ whole spine:
 
 ```
 design:dispatch(Opus,plan) → design:extract(Haiku,work_units)            # fast-track: skip design:review
- → implement:wu1:rebase(daemon) → implement:wu1:dispatch(Sonnet,code+tests; daemon commits)
- → verify:wu1:build,test(daemon,ground-truth) → verify:integration(daemon)
+ → implement:wu1:rebase(runner) → implement:wu1:dispatch(Sonnet,code+tests; runner commits)
+ → verify:wu1:build,test(runner,ground-truth) → verify:integration(runner)
  → review(Opus,findings via interface → 0 blocking) → merge:push → merge:pr-ensure(cheap-AI body)
  → merge:await-checks(poll) → merge:await-human(operator merges) → released:project(→ Done)
 ```

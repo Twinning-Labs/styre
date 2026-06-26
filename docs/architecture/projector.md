@@ -1,5 +1,10 @@
 # The One-Way Projector
 
+> **OSS core.** The projector is part of `styre run` — the one-way outward-write subsystem that
+> drains the `projection_outbox` to Linear and GitHub. It runs inside the OSS runner. The
+> **needs-you inbox** and **Slack notification** referenced below are the **commercial Control
+> Plane** and are fenced as such.
+
 > **Artifact for §9.4 checklist #4** of [`brainstorm.md`](brainstorm.md). The component that makes
 > "Linear/GitHub are one-way projections" (move 2) real: the **single outward write path** from the
 > SQLite SoT to Linear + GitHub. It **drains [`schema.sql`](schema.sql)'s `projection_outbox`** and
@@ -16,12 +21,12 @@
 
 - **Sole outward writer (move 2).** Every per-ticket write to Linear/GitHub goes through the
   projector; nothing else holds write credentials. Agents have none (capability isolation, move 4);
-  the **daemon holds the creds and the projector is its outward-write subsystem** — it is *not* a
+  the **runner holds the creds and the projector is its outward-write subsystem** — it is *not* a
   separate process (GOAL-INSTALL: one binary). `drain_outbox()` is the projector, called each loop
   (control-loop §2.2).
-- **No control-flow reads (CL-INV-5).** The projector only *writes* outward. The daemon never reads
+- **No control-flow reads (CL-INV-5).** The projector only *writes* outward. The runner never reads
   Linear/GitHub to decide what to do next — that's the bug class move 2 deletes. The closed-loop
-  facts the daemon *does* need (checks green? merged?) enter as **delivered signals** (control-loop §7.3).
+  facts the runner *does* need (checks green? merged?) enter as **delivered signals** (control-loop §7.3).
 - **Idempotent (B3 / CL-3).** Two layers: the outbox row's `idempotency_key` (globally unique by
   construction → enqueue-twice is a no-op insert) **and** a per-adapter **probe** of external state
   before applying (§5).
@@ -30,23 +35,25 @@
   Setup's one-time bootstrap (create the `stage:*` labels, refresh the id cache) is the *only* other
   Linear write, and it's not control flow.
 
-## 2. Enqueue (daemon, write-half) vs drain (projector, read-half)
+## 2. Enqueue (the runner, write-half) vs drain (projector, read-half)
 
 The split keeps the SoT and its projection atomic:
 
-- **Enqueue — the daemon, in the SAME transaction as the state change.** When a step commits a state
-  change (stage transition, escalation, PR-ready, done), the daemon computes the **projection delta**
+- **Enqueue — the runner, in the SAME transaction as the state change.** When a step commits a state
+  change (stage transition, escalation, PR-ready, done), the runner computes the **projection delta**
   vs `projection_state` (the last-projected snapshot) and inserts `projection_outbox` rows in that
   same tx. State and the intent-to-project can never disagree → the ~30-ticket reconciliation class
   is gone by construction. A delta that matches the snapshot enqueues nothing (no-op projections
   suppressed).
-- **Drain — the projector.** Reads pending rows and applies them. Decoupled from the daemon's control
+- **Drain — the projector.** Reads pending rows and applies them. Decoupled from the runner's control
   decisions; a Linear outage delays projection but never blocks the loop.
 
 ## 3. The projection mapping (SoT → external)
 
-What the daemon enqueues for a given SoT change. Linear is the **human tracking mirror** (D3); the
-*actionable* needs-you queue is the SQLite inbox + Slack + `status`, **not** Linear.
+What the runner enqueues for a given SoT change. Linear is the **human tracking mirror** (D3); the
+outward projection (comment/label/state) is OSS. The *actionable* persistent needs-you queue
+(SQLite inbox + Slack notifications) is the **commercial Control Plane** — not Linear, and not part
+of `styre run`.
 
 | SoT change | Linear (op) | GitHub (op) |
 |---|---|---|
@@ -54,7 +61,7 @@ What the daemon enqueues for a given SoT change. Linear is the **human tracking 
 | stage transition X → Y | `set_labels` swap `stage:X`→`stage:Y` | — |
 | stage → `merge` (PR-ready) | `set_state` In Review | `push`; `pr_create` (→ `response_ref`=PR#) |
 | review produced findings (any) | `add_comment` review summary (on the PR) | `pr_comment` review summary |
-| escalation (a `human_resume` raised) | `add_comment` "needs you: <reason>" (mirror; the *action* is the inbox) | — |
+| escalation (a `human_resume` raised) | `add_comment` "needs you: <reason>" (mirror; OSS runner writes this comment — the persistent needs-you inbox is the **commercial Control Plane**) | — |
 | status → `done` (merged) | `set_state` Done | — (the human merged) |
 | status → `abandoned` | `set_state` Canceled + `add_comment` rationale | — |
 
@@ -117,7 +124,7 @@ projector resolves via `linear_id_cache` and **refreshes on a miss** (one networ
 - **Persistent** (outage past `OUTBOX_RETRY_BUDGET`) → **escalate the ticket (atlas X1)**: it parks,
   and the operator is told the *external service* is down — never a silent infinite retry, never a
   lost projection (the row is durable; it drains when the service returns).
-- A projection failure **never** blocks control flow — the daemon's loop runs on the SoT regardless.
+- A projection failure **never** blocks control flow — the runner's loop runs on the SoT regardless.
 
 ## 8. Setup integration (GOAL-INSTALL)
 

@@ -21,8 +21,10 @@ a no-op insert. (control-loop §3; schema.sql)
 
 ### K (concurrency cap)
 
-the limit on concurrent in-flight tickets the daemon will advance at once.
-The default at cutover is K=2, set via `orchestrator.max_concurrent_features`. (minimal-loop.md §4)
+*(Commercial Control Plane.)* The limit on concurrent in-flight tickets the persistent plane
+advances at once, set via `orchestrator.max_concurrent_features`. K is a scheduling parameter for
+the outer multi-ticket loop that the commercial Control Plane operates. `styre run` is
+single-ticket by definition, so K does not apply to the OSS core. (minimal-loop.md §4)
 
 ### loopback
 
@@ -32,9 +34,14 @@ every route, its scope (unit / ticket / plan), and its escalation cap.
 
 ### needs-you inbox
 
-the queue of tickets parked on a `human_resume` signal, requiring an operator
-action (resume / resume-after-fix / abandon). Backed by SQLite, surfaced via `styre inbox`; Linear is
-only the tracking mirror. (minimal-loop.md §5; control-loop §7)
+*(Commercial Control Plane.)* The persistent queue of tickets parked on a `human_resume` signal,
+requiring an operator action (resume / resume-after-fix / abandon). Backed by SQLite and surfaced
+via `styre inbox`; Linear is only the tracking mirror. `styre inbox` and `styre abandon` are
+commercial-plane commands, not part of the OSS core. In OSS run-only mode the equivalent
+behavior is: an escalation the loop cannot resolve makes `styre run` exit nonzero; a
+session-interruption (credits/limit exhausted) parks the run (exit code 75) and the operator
+resumes with `styre run --resume <ticket> --profile <p>` (with `--accept-head` or `--inspect`
+available). (minimal-loop.md §5; control-loop §7)
 
 ### next_step_key
 
@@ -62,7 +69,7 @@ projector.md §2; schema.sql)
 
 the component that drains `projection_outbox` and applies each row idempotently to
 Linear and GitHub. It is the sole outward write path from SQLite; it never reads Linear or GitHub to
-decide control flow. Implemented as `drain_outbox()` inside the daemon (not a separate process).
+decide control flow. Implemented as `drain_outbox()` inside the runner (not a separate process).
 (projector.md §1–§4)
 
 ### signal
@@ -70,11 +77,11 @@ decide control flow. Implemented as `drain_outbox()` inside the daemon (not a se
 an inbound ground-truth fact delivered to the loop: e.g. checks green
 (`external_checks`), PR merged (`external_pr_result`), or a human action (`human_merge_approval`,
 `human_resume`). Signals are the *only* channel through which external facts reach the control loop;
-the daemon never reads Linear or GitHub directly for control-flow decisions. (control-loop §7)
+the runner never reads Linear or GitHub directly for control-flow decisions. (control-loop §7)
 
 ### SoT (Source of Truth)
 
-the single transactional SQLite database. Only the daemon writes it;
+the single transactional SQLite database. Only the runner writes it;
 workers and agents return results but never persist to it. The schema has 14 active tables; the
 `memory_record` table is a deferred stub, intentionally out of scope for the substrate.
 (control-loop §2; schema.sql; README.md invariants)
@@ -90,7 +97,7 @@ vocabulary. (control-loop §2.3; README.md invariants; schema.sql)
 
 a per-`kind` decomposition of the implement stage (kinds include `backend`,
 `frontend`, `data`, `reconcile`, etc.). The `design:extract` step produces one `work_unit` row per
-kind from the plan; the daemon then orchestrates a separate implement → verify dispatch sequence for
+kind from the plan; the runner then orchestrates a separate implement → verify dispatch sequence for
 each unit. One ticket fans into multiple work-unit dispatches; units with `depends_on` relationships
 are sequenced accordingly. (control-loop §4 S1b; schema.sql; minimal-loop.md §1)
 
