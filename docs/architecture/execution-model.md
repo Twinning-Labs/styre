@@ -73,13 +73,13 @@ Every unit of progress is a [`workflow_step`](glossary.md#workflow_step) row in 
 `step_key` derived from the ticket and the logical position in the sequence. The journal is the
 system's memo table.
 
-When the daemon picks up a ticket, the resolver checks the journal first. If a step already
+When `styre run` starts on a ticket, the resolver checks the journal first. If a step already
 succeeded, the resolver reads its recorded `result_json` and moves on — it never re-executes the
-step. This is what makes crash-resume work: restart the daemon, run the resolver, and the loop
-re-enters at exactly the interrupted step, not at the beginning of the ticket.
+step. This is what makes crash-resume work: `styre run --resume`, which runs the resolver, and the
+loop re-enters at exactly the interrupted step, not at the beginning of the ticket.
 
 For steps with external effects (pushing a branch, opening a pull request, posting to Linear), the
-daemon writes its *intent* to the journal before the effect and makes the effect idempotent:
+runner writes its *intent* to the journal before the effect and makes the effect idempotent:
 
 1. Begin a transaction: mark the step `running`, record the `attempt` count and the
    [`idempotency_key`](glossary.md#idempotency-key), commit.
@@ -95,15 +95,15 @@ the re-applied effect is a safe no-op if it already landed.
 
 ## One writer
 
-Only the daemon writes SQLite. Agents and workers return results; they never persist anything
+Only the runner writes SQLite. Agents and workers return results; they never persist anything
 themselves.
 
 This constraint eliminates an entire class of bugs. The legacy harness allowed multiple concurrent
 writers (documented as ENG-217: stage drift, marker-write races, state disagreements between
-concurrent shell processes). With one daemon and one database, two-authoritative-writers is
+concurrent shell processes). With one runner process and one database, two-authoritative-writers is
 impossible by construction, not by discipline.
 
-The same principle applies to git. Agents edit files in the worktree. The daemon reads those files,
+The same principle applies to git. Agents edit files in the worktree. The runner reads those files,
 runs the build and tests, and commits — the agent never runs `git commit` or `git push`. Every
 commit carries a deterministic message including the `dispatch_id`, so every piece of code on the
 branch is traceable to a journaled step.
@@ -117,17 +117,17 @@ decide what to do next — that is the bug class move 2 deletes. All control dec
 from SQLite alone.
 
 When a state change happens — a stage transition, a PR becoming ready, a ticket completing — the
-daemon computes the projection delta and inserts rows into [`projection_outbox`](glossary.md#projection_outbox) in
+runner computes the projection delta and inserts rows into [`projection_outbox`](glossary.md#projection_outbox) in
 the **same transaction** as the state change. State and the intent-to-project can never disagree:
 either both commit or neither does.
 
 The [projector](glossary.md#projector) drains the outbox on every loop iteration, applying each pending row
 idempotently to Linear or GitHub (declarative label/state updates, comment deduplication via a
 `proj-key` tag, push with-lease, PR create-or-reuse). A Linear outage delays projection but never
-blocks the control loop — the daemon continues advancing tickets; the outbox rows wait until the
+blocks the control loop — the runner keeps advancing the ticket; the outbox rows wait until the
 service returns.
 
-Inbound facts — checks green, PR merged, human action — arrive as [signals](glossary.md#signal): the daemon
+Inbound facts — checks green, PR merged, human action — arrive as [signals](glossary.md#signal): the runner
 polls the checks system and GitHub on an interval and delivers the results as structured rows in the
 `signal` table. The loop waits on a signal by parking the ticket (`status='waiting'`); when the
 signal is delivered the ticket re-enters `v_ready_tickets` and the resolver picks it up.
@@ -139,16 +139,16 @@ signal is delivered the ticket re-enters `v_ready_tickets` and the resolver pick
 When the ticket advances from `design` to `implement`, it does not dispatch a single agent to write
 all the code. The `design:extract` step has already decomposed the plan into one [`work_unit`](glossary.md#work_unit)
 row per kind (`backend`, `frontend`, `data`, `reconcile`, …). The implement stage is a
-daemon-orchestrated sequence of focused dispatches, one per unit, respecting `depends_on` ordering.
+runner-orchestrated sequence of focused dispatches, one per unit, respecting `depends_on` ordering.
 
-For each unit, the daemon runs: rebase → implement dispatch → per-check verify. The agent that
-implements a unit edits only files; the daemon commits each dispatch's changes with a `dispatch_id`
-in the message. Verify steps are daemon-executed, not agent self-report: the daemon runs the
+For each unit, the runner executes: rebase → implement dispatch → per-check verify. The agent that
+implements a unit edits only files; the runner commits each dispatch's changes with a `dispatch_id`
+in the message. Verify steps are runner-executed, not agent self-report: the runner runs the
 profile's declared build and test commands against the committed SHA and records a structured
 `ground_truth_signal` row. A unit's implement dispatch cannot silently declare itself done — the
 ground-truth check catches hallucinated runs, weakened tests, and dirty-environment passes.
 
-Once all units pass their per-unit checks, the daemon runs integration verification across the
+Once all units pass their per-unit checks, the runner executes integration verification across the
 whole branch (`verify:integration`). Only then does the ticket advance to `review`.
 
 A frontend unit's visual check runs during verify, as one check-type among others, driven by the
@@ -160,21 +160,31 @@ profile's declared command. Frontend work is a work-unit kind, not a separate st
 
 The operator interacts with Styre in two places:
 
-**The merge gate.** After review passes, the daemon pushes the branch, opens a pull request, waits
-for the project's checks system to go green, and parks the ticket in the [needs-you inbox](glossary.md#needs-you-inbox).
-The operator reviews the pull request and merges it. The daemon detects the merge by polling GitHub
+**The merge gate.** After review passes, the runner pushes the branch, opens a pull request, waits
+for the project's checks system to go green, and parks — polling GitHub until the operator merges.
+The operator reviews the pull request and merges it. The runner detects the merge by polling GitHub
 and advances the ticket to `released`. Auto-merge is off at the substrate level.
 
-**The needs-you inbox.** When the loop exhausts its retry budget, encounters an infrastructure
-outage, or reaches an escalation point it cannot resolve autonomously, it parks the ticket on a
-`human_resume` signal and adds it to the inbox (surfaced via `styre inbox` and mirrored as a
-comment on the Linear issue). Each inbox entry shows the full trace: the failure history, the
-loopback signatures, the ground-truth signals, and the available actions:
+**Escalations and session interruptions.** When the loop exhausts its retry budget or reaches an
+escalation point it structurally cannot resolve autonomously, `styre run` **exits nonzero** — the
+run terminates with an error describing the escalation and the point it reached.
 
-- `styre resume <ticket>` — re-enter the parked step; retry counters reset.
-- `styre resume <ticket> --after-fix` — the operator edited the plan, code, or config by hand; the
-  daemon picks up the changed state.
-- `styre abandon <ticket>` — terminal; the ticket is projected to Canceled.
+When a session is interrupted mid-flight (out of credits, session-limit hit), the runner
+**parks**: it dumps the SQLite SoT and transcript to
+`~/.local/state/styre/<project-stub>/<ticket-ident>/` and exits **75** (`EX_TEMPFAIL`) without
+burning a retry attempt. Resume with:
+
+```
+styre run --resume <ticket> --profile <p>
+```
+
+Additional flags: `--accept-head` (resume against a branch HEAD that moved since the park, drops
+carryover context) and `--inspect` (diagnostics only, exits 0 without executing any steps).
+
+> **Commercial Control Plane only.** The persistent [needs-you inbox](glossary.md#needs-you-inbox),
+> `styre inbox`, and `styre abandon` are features of the commercial Control Plane — not OSS
+> commands. In run-only mode the exit code and state dump are the signal; the operator acts by
+> inspecting the dump and re-running with `styre run --resume`.
 
 Every other situation — build failures, test regressions, review findings, flaky CI, merge
 conflicts, docs that need updating — the loop handles itself.
