@@ -38,9 +38,12 @@ export function unknownRuntimeSections(profile: Profile): string[] {
   return out;
 }
 
-/** Ensure the profile carries a stable analytics id (random UUID; never encodes the slug). */
-export function ensureAnalyticsId(profile: Profile): Profile {
-  return profile.analyticsId ? profile : { ...profile, analyticsId: randomUUID() };
+/** Ensure the profile carries a stable analytics id. Resolution order: the profile's own id →
+ *  a fallback (e.g. an existing on-disk id, preserved across --force/--reprobe) → a fresh UUID.
+ *  Never encodes the slug. */
+export function ensureAnalyticsId(profile: Profile, fallbackId?: string): Profile {
+  const analyticsId = profile.analyticsId ?? fallbackId ?? randomUUID();
+  return profile.analyticsId === analyticsId ? profile : { ...profile, analyticsId };
 }
 
 const STACK_KEYWORDS: Array<[RegExp, string]> = [
@@ -102,6 +105,9 @@ export async function runSetup(args: {
     args.out && args.out.length > 0
       ? resolve(args.out)
       : join(configDir(), profile.slug, "profile.json");
+  // Preserve an existing project's analytics id whenever a profile is already on disk — even under
+  // --force/--reprobe — so the same project keeps a STABLE id and is never double-counted.
+  const priorAnalyticsId = existsSync(outPath) ? loadProfile(outPath).analyticsId : undefined;
   if (existsSync(outPath) && !clean) {
     // Layer 3: idempotent re-probe — enrich without clobbering operator-resolved runtime context.
     const existing = loadProfile(outPath);
@@ -147,7 +153,10 @@ export async function runSetup(args: {
     }
   }
 
-  profile = ensureAnalyticsId({ ...profile, components, repoCommands: discovered.repoCommands });
+  profile = ensureAnalyticsId(
+    { ...profile, components, repoCommands: discovered.repoCommands },
+    priorAnalyticsId,
+  );
 
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, `${JSON.stringify(profile, null, 2)}\n`);
@@ -204,8 +213,12 @@ export const setupCommand = defineCommand({
     if (note) console.log(`setup: ${note}`);
     console.log(`setup: run with  styre run <ticket> --profile ${outPath}`);
 
-    const analytics = createAnalytics(DEFAULT_RUNTIME_CONFIG);
-    analytics.setupCompleted(deriveSetupInput(profile));
-    await analytics.shutdown();
+    try {
+      const analytics = createAnalytics(DEFAULT_RUNTIME_CONFIG);
+      analytics.setupCompleted(deriveSetupInput(profile));
+      await analytics.shutdown();
+    } catch {
+      /* telemetry must never fail a completed setup */
+    }
   },
 });

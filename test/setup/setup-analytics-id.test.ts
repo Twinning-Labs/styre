@@ -35,6 +35,21 @@ test("ensureAnalyticsId generates when absent, preserves when present", () => {
   expect(b.analyticsId).toBe("keep-me");
 });
 
+test("ensureAnalyticsId: profile's own id wins over the fallback", () => {
+  const a = ensureAnalyticsId({ ...profile, analyticsId: "own-id" }, "fallback-id");
+  expect(a.analyticsId).toBe("own-id");
+});
+
+test("ensureAnalyticsId: falls back to the prior id when the profile has none (preservation)", () => {
+  const a = ensureAnalyticsId(profile, "prior-id");
+  expect(a.analyticsId).toBe("prior-id");
+});
+
+test("ensureAnalyticsId: mints a fresh UUID when neither own id nor fallback is present", () => {
+  const a = ensureAnalyticsId(profile);
+  expect(a.analyticsId).toMatch(/^[0-9a-f-]{36}$/);
+});
+
 test("deriveSetupInput maps to coarse, allow-listed inputs", () => {
   const input = deriveSetupInput({ ...profile, analyticsId: "pid" });
   expect(input.projectId).toBe("pid");
