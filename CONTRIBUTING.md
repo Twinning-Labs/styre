@@ -20,7 +20,7 @@ bun run build        # compile → dist/styre
 
 Read the architecture docs in order, starting at [`docs/architecture/README.md`](docs/architecture/README.md). That index lists the five files and the order to read them. The load-bearing invariants are non-negotiable:
 
-- **Single writer.** Only the daemon writes SQLite; workers return results.
+- **Single writer.** Only the runner (`styre run`) writes SQLite; workers return results.
 - **One-way projection.** Linear and GitHub are never read for control flow — they are write-only projections.
 - **Ground-truth verdicts.** Build/test/CI output decides outcomes; agent self-scoring is discarded.
 - **Clean-break stage vocab.** Stages are `design → implement → verify → review → merge → released`. No legacy gerund stages, no hardcoded `ui` stage.

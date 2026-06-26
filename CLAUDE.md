@@ -43,22 +43,22 @@ Use the **superpowers brainstorming and planning skills** for that work, not ad-
 
 These are the load-bearing decisions. Code that violates them is wrong even if it works:
 
-- **Single transactional SoT (SQLite). Only the daemon writes it** (B2). Workers/agents return results; the daemon persists them. Two authoritative writers is the bug class (legacy ENG-217) this deletes by construction. Concurrency cap K=2.
+- **Single transactional SoT (SQLite). Only the runner writes it** (B2). Workers/agents return results; the runner persists them. Two authoritative writers is the bug class (legacy ENG-217) this deletes by construction. (Multi-ticket concurrency cap K=2 is the commercial Control Plane; OSS `styre run` is single-ticket.)
 - **Linear/GitHub are one-way projections, never read for control flow** (move 2). All outward writes go through the projector draining `projection_outbox`, enqueued in the *same transaction* as the state change. Inbound facts (CI green, merged, human action) arrive only as **signals** (control-loop §7) — never by reading Linear.
 - **Durable step journal = exactly-once + crash-resume.** A succeeded `workflow_step` returns its recorded result on replay (the resolver never re-runs it). Every external effect carries an idempotency key + a probe of external state before applying (B3 / CL-3).
 - **Ground truth over self-report** (move 5). Verdicts come from build/tests/CI/scope-diff/independent-reviewer — never agent self-scoring. Dimensional/self-scored grading is discarded.
 - **Loop-not-halt.** The default response to any anomaly is absorb-and-continue (bounded retry against ground truth), not halt-to-human. Human gates wired at cutover are **MERGE only** + escalations.
-- **Capability isolation** (move 4): agents get no `gh`/Linear/branch tools and no ambient `LINEAR_API_KEY`; the worktree is the only writable surface. The daemon holds creds and commits (CL-COMMIT).
-- **Structured agent output goes through a validated (zod) interface; the daemon computes decisions from state, never parses a free-form blob** (§3a). An absent/malformed payload is a *transport failure* (re-dispatch), not a "no".
+- **Capability isolation** (move 4): agents get no `gh`/Linear/branch tools and no ambient `LINEAR_API_KEY`; the worktree is the only writable surface. The runner holds creds and commits (CL-COMMIT).
+- **Structured agent output goes through a validated (zod) interface; the runner computes decisions from state, never parses a free-form blob** (§3a). An absent/malformed payload is a *transport failure* (re-dispatch), not a "no".
 - **Clean-break stage vocab from day one** (DS-2): `ticket.stage ∈ {design, implement, verify, review, merge, released}` — NOT the legacy gerund stages. Implement decomposes into per-`work_unit` dispatches tagged by `kind` (backend/frontend/data/…). **There is no hardcoded `ui` stage** — UI is a frontend work-unit + a visual verify check-type.
 - **Timestamps: store UTC, display in the host's local timezone** at the render edge only (DS-1).
 - **The autonomy layer (supervisor, memory/RAG, the Unified Gate Layer, learning loop — brainstorm §5/§5.8) is explicitly post-cutover.** The minimal loop is deterministic routing only. Don't build it into the substrate.
 
 ## Intended commands (once code exists)
 
-Per `build-operations.md` §3 — three run modes on the single binary:
-- `styre setup <repo>` — idempotent probe: discover project profile + checks-system, create+migrate the DB, refresh Linear id-cache, install the host service (launchd on macOS, systemd on Linux).
-- `styre daemon` — persistent local supervised mode (solo/local-team).
+OSS binary — three commands:
+- `styre setup <repo>` — probe the repo and write the project profile (`profile.json`).
+- `styre migrate` — bootstrap (create + migrate) the SQLite SoT.
 - `styre run <ticket>` — one-shot headless runner (the CI/cloud/fleet primitive; ephemeral per-run SQLite).
   - On a session-limit / out-of-credits dispatch death, `run` parks: it dumps the SoT + transcript
     to `~/.local/state/styre/<project-stub>/<ticket-ident>/` and exits `75` (EX_TEMPFAIL) without
@@ -66,7 +66,8 @@ Per `build-operations.md` §3 — three run modes on the single binary:
     the interrupted step, carrying its partial context forward). If the branch HEAD moved since the
     park, resume refuses (exit `65`); use `--accept-head` (resume against new HEAD, drops carryover)
     or `--inspect` (diagnostics only, exit `0`).
-- Management CLI: `status` · `inbox` (resume / `--after-fix` / abandon) · `config` · `pause`/`resume` · `logs` · `uninstall`.
+
+**(Commercial Control Plane only — not OSS):** `styre daemon` (persistent local supervised mode, multi-ticket scheduling, K-concurrency); the management CLI `status` · `inbox` · `config` · `pause`/`resume` · `logs` · `uninstall`; the needs-you inbox.
 
 macOS and Linux are both first-class targets; paths follow the XDG Base Directory spec on both. Auth supports a subscription session (local) **or** `ANTHROPIC_API_KEY` (required for headless). Model tiers: design/review = Opus 4.8, implement = Sonnet 4.6, build = Haiku 4.5.
 
