@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import type { TelemetryEvent } from "../../../src/telemetry/events.ts";
 import {
   ALLOWED_KEYS,
   bucket,
@@ -11,6 +10,7 @@ import {
   setupProperties,
   superProperties,
 } from "../../../src/telemetry/analytics/properties.ts";
+import type { TelemetryEvent } from "../../../src/telemetry/events.ts";
 
 type SummaryEvent = Extract<TelemetryEvent, { type: "summary" }>;
 
@@ -55,7 +55,10 @@ test("failureBucket: success → null; parked → parked-credits; keyword maps b
 });
 
 test("run_completed derives first_time_ci_pass and autonomous_fix from dispatch_outcomes", () => {
-  const clean = runCompletedProperties(summary({}), 1000, { complexityGrading: false, onPlanDefect: "escalate" });
+  const clean = runCompletedProperties(summary({}), 1000, {
+    complexityGrading: false,
+    onPlanDefect: "escalate",
+  });
   expect(clean.first_time_ci_pass).toBe(true);
   expect(clean.autonomous_fix).toBe(false);
   expect(clean.terminal_stage).toBe("merge");
@@ -72,9 +75,20 @@ test("run_completed derives first_time_ci_pass and autonomous_fix from dispatch_
 test("ALLOW-LIST GUARD: every builder emits only allow-listed keys", () => {
   const bags: Record<string, unknown>[] = [
     superProperties(),
-    setupProperties({ projectId: "p", checksSystem: "github", componentCount: 2, componentKinds: ["backend"], stackBucket: "node", topologyType: "web-service" }),
+    setupProperties({
+      projectId: "p",
+      checksSystem: "github",
+      componentCount: 2,
+      componentKinds: ["backend"],
+      stackBucket: "node",
+      topologyType: "web-service",
+    }),
     runStartedProperties({ projectId: "p", resumed: false, tracker: "linear", forge: "github" }),
-    runCompletedProperties(summary({ outcome: "blocked", escalation_reasons: ["budget exhausted"] }), 5000, { complexityGrading: true, onPlanDefect: "redesign" }),
+    runCompletedProperties(
+      summary({ outcome: "blocked", escalation_reasons: ["budget exhausted"] }),
+      5000,
+      { complexityGrading: true, onPlanDefect: "redesign" },
+    ),
     cliErrorProperties({ command: "run", exitCode: 1, errorClass: "TypeError" }),
   ];
   for (const bag of bags) {

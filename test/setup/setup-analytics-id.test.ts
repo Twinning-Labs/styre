@@ -1,8 +1,5 @@
 import { expect, test } from "bun:test";
-import {
-  deriveSetupInput,
-  ensureAnalyticsId,
-} from "../../src/cli/setup.ts";
+import { deriveSetupInput, ensureAnalyticsId } from "../../src/cli/setup.ts";
 import type { Profile } from "../../src/dispatch/profile.ts";
 
 const profile: Profile = {

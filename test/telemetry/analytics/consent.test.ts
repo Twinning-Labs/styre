@@ -3,7 +3,7 @@ import { telemetryEnabled } from "../../../src/telemetry/analytics/consent.ts";
 
 const ENV_KEYS = ["DO_NOT_TRACK", "STYRE_TELEMETRY"] as const;
 afterEach(() => {
-  for (const k of ENV_KEYS) delete process.env[k];
+  for (const k of ENV_KEYS) Reflect.deleteProperty(process.env, k);
 });
 
 test("enabled by default when config.telemetry is true and no env set", () => {

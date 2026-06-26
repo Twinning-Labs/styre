@@ -7,8 +7,6 @@ import { selectAgentRunner } from "../agent/registry.ts";
 import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { configDir } from "../config/paths.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../config/runtime-config.ts";
-import { createAnalytics } from "../telemetry/analytics/index.ts";
-import type { SetupInput } from "../telemetry/analytics/properties.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
 import { discoverComponents } from "../setup/discover.ts";
@@ -17,6 +15,8 @@ import { enrichRuntimeContext } from "../setup/enrich.ts";
 import { mergeRuntimeContext } from "../setup/merge.ts";
 import { probeProfile } from "../setup/probe.ts";
 import { resolveCommands } from "../setup/resolve-commands.ts";
+import { createAnalytics } from "../telemetry/analytics/index.ts";
+import type { SetupInput } from "../telemetry/analytics/properties.ts";
 
 const CHECKS = new Set(["github", "external", "none"]);
 

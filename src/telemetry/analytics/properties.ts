@@ -1,5 +1,5 @@
-import type { TelemetryEvent } from "../events.ts";
 import { VERSION } from "../../version.ts";
+import type { TelemetryEvent } from "../events.ts";
 
 type SummaryEvent = Extract<TelemetryEvent, { type: "summary" }>;
 
@@ -126,15 +126,35 @@ export function cliErrorProperties(p: CliErrorInput): Record<string, unknown> {
  *  runtime assertion in index.ts. Adding a property REQUIRES adding it here. */
 export const ALLOWED_KEYS: ReadonlySet<string> = new Set([
   // super properties
-  "styre_version", "os", "arch", "ci",
+  "styre_version",
+  "os",
+  "arch",
+  "ci",
   // setup_completed
-  "project_id", "checks_system", "component_count", "component_kinds", "stack_bucket", "topology_type",
+  "project_id",
+  "checks_system",
+  "component_count",
+  "component_kinds",
+  "stack_bucket",
+  "topology_type",
   // run_started
-  "resumed", "tracker", "forge",
+  "resumed",
+  "tracker",
+  "forge",
   // run_completed
-  "outcome", "terminal_stage", "ticks_bucket", "dispatch_count_bucket", "cycle_count_bucket",
-  "duration_bucket", "first_time_ci_pass", "autonomous_fix", "failure_bucket",
-  "complexity_grading", "on_plan_defect",
+  "outcome",
+  "terminal_stage",
+  "ticks_bucket",
+  "dispatch_count_bucket",
+  "cycle_count_bucket",
+  "duration_bucket",
+  "first_time_ci_pass",
+  "autonomous_fix",
+  "failure_bucket",
+  "complexity_grading",
+  "on_plan_defect",
   // cli_error
-  "exit_code", "error_class", "command",
+  "exit_code",
+  "error_class",
+  "command",
 ]);

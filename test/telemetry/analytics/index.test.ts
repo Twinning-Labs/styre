@@ -1,7 +1,7 @@
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { AnalyticsClient } from "../../../src/telemetry/analytics/client.ts";
 import { createAnalytics } from "../../../src/telemetry/analytics/index.ts";
 import { ALLOWED_KEYS } from "../../../src/telemetry/analytics/properties.ts";
@@ -28,7 +28,7 @@ beforeEach(() => {
   process.env.XDG_STATE_HOME = mkdtempSync(join(tmpdir(), "styre-an-"));
 });
 afterEach(() => {
-  if (prev === undefined) delete process.env.XDG_STATE_HOME;
+  if (prev === undefined) Reflect.deleteProperty(process.env, "XDG_STATE_HOME");
   else process.env.XDG_STATE_HOME = prev;
 });
 
