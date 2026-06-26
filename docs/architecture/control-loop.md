@@ -380,7 +380,7 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 - **Delivery = polling, not webhooks (`[CL-POLL]`):** the runner *reaches out* to the checks system
   periodically. This serves GOAL-INSTALL — works behind any firewall, no public endpoint. The
   checks/merge facts enter as **delivered signals** (§7.3), never a control-flow read.
-- **Output:** green → proceed to S9; failing → loop back through the normal coding-and-review steps
+- **Output:** green → in OSS the run exits here (PR-ready); in the commercial Control Plane, proceed to S9. failing → loop back through the normal coding-and-review steps
   (P1); flaky/infra → re-run the checks (P2); **none configured → skip** (human merge stays the gate).
 - **Timeout:** bounded wait; stuck/unreachable → escalate to the human.
 
@@ -416,8 +416,8 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 **S10 · `released:project`** — wrap up (runner; external via outbox)
 > **OSS boundary.** Released is reached only *after* a human merge, which in OSS happens outside the
 > run (the run already exited at PR-ready). The released-stage projection (tracker → Done, worktree
-> cleanup) is driven by the **commercial Control Plane**, or by a fresh `styre run --resume` once the
-> merge signal exists. The step semantics below are the design record.
+> cleanup) is driven by the **commercial Control Plane**, which delivers the merge signal; the OSS
+> `styre run` has already exited at PR-ready and does not drive it. The step semantics below are the design record.
 - **Guard:** PR merged (signal delivered).
 - **Output:** ticket recorded done; tracker (Linear) projected to **Done**; the per-ticket worktree
   cleaned up. `ticket.stage='released'`, `status='done'`. ("Done" = merged + tracked at cutover;
