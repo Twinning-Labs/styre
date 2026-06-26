@@ -1,8 +1,16 @@
 # Durable Control-Loop Semantics
 
+> **OSS boundary.** This describes the per-ticket control loop that **`styre run`** executes (the OSS
+> core): resolve `next_step_key` → dispatch → persist → project → loopback, driving **one** ticket to
+> PR-ready, then exit. The **outer multi-ticket loop** — ready-ticket pickup, K-concurrency, persistent
+> host-service supervision, and the needs-you inbox — is the **commercial Control Plane** and is fenced
+> as such below (§2.1, §2.2, §10, and the human-merge/inbox passages). The OSS core has zero knowledge
+> of the plane; the plane integrates only through the versioned seam.
+
 > **Artifact for §9.4 checklist #2** of [`brainstorm.md`](brainstorm.md). The execution semantics of
-> the single TypeScript daemon (decision **B1**) that drives [`schema.sql`](schema.sql). Substrate
-> only — NOT the autonomy layer (no LLM supervisor / memory; those are post-cutover increments).
+> the single-process control loop — **the runner** (decision **B1**) — that drives
+> [`schema.sql`](schema.sql). Substrate only — NOT the autonomy layer (no LLM supervisor / memory;
+> those are post-cutover increments).
 >
 > **Acceptance (§9.4 #2), discharged in §6–§7:** (1) a step that already ran returns its recorded
 > result on replay; (2) external side-effects carry idempotency keys; (3) crash mid-step resumes
@@ -15,8 +23,10 @@
 
 ## 0. Vocabulary
 
-- **Daemon** — the long-running TS process (kept alive by the host service manager — launchd on macOS,
-  systemd on Linux; **B4**). The only writer of the SQLite SoT (**B2**).
+- **The runner** — the single-process control loop, `styre run` (decision **B1**). The only writer of
+  the SQLite SoT (**B2**). It drives one ticket to PR-ready and exits. *(Commercial Control Plane: in
+  the plane, many such runs are kept alive / orchestrated by a persistent host service — launchd on
+  macOS, systemd on Linux; **B4**. The persistent service is not part of the OSS core.)*
 - **Workflow** — the lifecycle of one `ticket`, `design → released`. Long-running; many dispatches
   and human waits.
 - **Step** — one durable unit of progress, a `workflow_step` row. Deterministic `step_key`; carries
@@ -34,7 +44,7 @@
 1. **Recover, don't halt.** Any anomaly is absorbed, looped with feedback, or parked as a resumable
    wait — never a dead halt that strands a ticket.
 2. **Durable + replayable.** Crash anywhere resumes from the journal; effects are exactly-once.
-3. **Single-writer simplicity (B2).** One daemon writes one SQLite file.
+3. **Single-writer simplicity (B2).** One runner writes one SQLite file.
 4. **Trivial to install (`GOAL-INSTALL`).** A new operator brings up the whole system with one
    command, no servers, no runtime dance (§10). A hard constraint that shapes real choices below
    (e.g. polling over webhooks in S8).
@@ -43,14 +53,25 @@
 
 ## 2. Execution model (B1 / B2 / B4)
 
-### 2.1 One daemon, one SoT, all projects `[CL-1 — DECIDED 2026-06-19]`
-A single daemon serves all projects against one SQLite file (a shift from today's per-project
-launchd jobs). The single-writer invariant only means something with exactly one writer; one DB +
-one daemon makes two-authoritative-writers (ENG-217) impossible globally. K=2–3 concurrency makes
-contention a non-issue, and it serves GOAL-INSTALL (one service, not N). Projects stay isolated by
-the `project_id` FK and the per-project `project.paused` breaker.
+### 2.1 One process, one SoT, all projects `[CL-1 — DECIDED 2026-06-19]` *(commercial Control Plane)*
+> **Commercial Control Plane.** This §2.1 multi-project pickup model is the *outer* loop and lives in
+> the commercial plane, not the OSS core. In the OSS core, `styre run` drives **one** ticket against a
+> single (ephemeral, per-run) SQLite SoT and exits; there is no multi-project, always-on process.
 
-### 2.2 The event loop
+A single process serves all projects against one SQLite file (a shift from today's per-project
+launchd jobs). The single-writer invariant only means something with exactly one writer; one DB +
+one writing process makes two-authoritative-writers (ENG-217) impossible globally. K=2–3 concurrency
+makes contention a non-issue, and it serves GOAL-INSTALL (one service, not N). Projects stay isolated
+by the `project_id` FK and the per-project `project.paused` breaker.
+
+### 2.2 The multi-ticket event loop *(commercial Control Plane)*
+> **Commercial Control Plane.** The `while`-poll/`v_ready_tickets`/K-concurrency event loop below is
+> the *outer* multi-ticket loop — it belongs to the commercial plane. The OSS `styre run` does **not**
+> poll for ready tickets or run multiple tickets concurrently; it bootstraps (`on_start`), recovers
+> (§6.1), then runs the **inner** per-ticket loop (`advance_one_step`, §2.3) on its single ticket to
+> PR-ready and exits. The inner-step mechanics referenced here — `drain_outbox` (§5),
+> `advance_one_step` (§2.3), result journaling — *are* OSS-core; only the multi-ticket scheduling
+> wrapper is commercial.
 ```
 on_start():
   open_db(); PRAGMA foreign_keys=ON; busy_timeout=5000
@@ -58,7 +79,7 @@ on_start():
   recover()                       # §6.1 reconcile crash-interrupted steps + drain outbox
   loop()
 
-loop():
+loop():                           # (commercial Control Plane: the multi-ticket scheduler)
   while running:
     drain_outbox()                # §5 execute pending external effects idempotently
     poll_external_signals()       # §7.3 checks-system status, PR-merged -> deliver signals
@@ -69,7 +90,7 @@ loop():
     await_any_completion_or(timeout=POLL_INTERVAL)
 ```
 `v_ready_tickets` already excludes paused projects and tickets parked on a pending signal. Workers
-run concurrently; the daemon journals each result as it returns. **No worker touches SQLite.**
+run concurrently; the runner journals each result as it returns. **No worker touches SQLite.**
 
 ### 2.3 `advance_one_step(ticket)` — the resolver
 A pure resolver maps current state + journal to the next `step_key`; the workflow definition is code.
@@ -115,22 +136,22 @@ signal `recover()` needs (§6.1).
 
 The single most load-bearing reliability rule, and the reason the review stage was redesigned:
 
-> **An agent never emits a serialized decision for the daemon to parse. It takes actions through a
-> schema-validated tool interface, and the daemon computes the decision from the resulting state.**
+> **An agent never emits a serialized decision for the runner to parse. It takes actions through a
+> schema-validated tool interface, and the runner computes the decision from the resulting state.**
 
-Why: a serialized JSON verdict conflates two failure modes the daemon must distinguish — *malformed
+Why: a serialized JSON verdict conflates two failure modes the runner must distinguish — *malformed
 output* vs *a real "no" decision*. If they share one channel, a formatting slip masquerades as a
-deny, the daemon conservatively re-runs an expensive agent, and the format-error rate is
+deny, the runner conservatively re-runs an expensive agent, and the format-error rate is
 unmeasurable (so unhardenable). The validated-interface pattern dissolves this:
 
 - structured values are submitted via **forced-schema tool calls** (Anthropic SDK constrained
   decoding): the model **cannot** emit a shape that violates the schema; a malformed call returns a
   tool-error and the model **self-corrects in-context** (cheap, same dispatch — no re-run).
-- the daemon then only ever observes two unambiguous states: **completed** (a clean dispatch end /
+- the runner then only ever observes two unambiguous states: **completed** (a clean dispatch end /
   an explicit `complete()` call → state present → deterministic decision) or **transport failure**
   (dispatch died / never completed → retry the dispatch). These are separately counted and
   separately hardenable.
-- the daemon **computes** the decision from the accumulated state, never from a parsed blob.
+- the runner **computes** the decision from the accumulated state, never from a parsed blob.
 
 **Reason/extract, refined.** The expensive reasoner emits rich content (its strength). Turning that
 into schema rows happens via the validated interface, by one of two means:
@@ -153,29 +174,30 @@ correctness mechanism.
 > `docs/brainstorms/2026-06-21-provider-agnostic-agent-design.md`.
 
 Each step declares **Guard** (precondition to fire), **Input**, **Output** (postcondition + rows),
-**Tools** (agent steps) or **Commands/Capability** (daemon steps), **Model** (agent steps), and
-**Failure → route** (see the Loopback Atlas, §8). An unmet guard *parks or blocks*, it does not fail.
+**Tools** (agent steps) or **Commands/Capability** (runner-executed steps), **Model** (agent steps),
+and **Failure → route** (see the Loopback Atlas, §8). An unmet guard *parks or blocks*, it does not
+fail.
 
 Capability frame (move 4) applies to every agent step: the **worktree is the only writable surface**;
 agents have **no outward tools** — no `gh`, no `git push`, no Linear, no ambient key, no `curl`.
-Every external effect is the daemon's (§5). **The daemon commits, not the agent** (`[CL-COMMIT]`):
-agents only edit files; the daemon commits each dispatch's worktree changes with a deterministic
+Every external effect is the runner's (§5). **The runner commits, not the agent** (`[CL-COMMIT]`):
+agents only edit files; the runner commits each dispatch's worktree changes with a deterministic
 message (incl. `dispatch_id`) and records the SHA — so agents need no git tool at all.
 
-> **Orchestration is the daemon's, not a master agent's (`[CL-ORCH]`).** The implement phase is a
-> *sequence of focused steps the daemon orchestrates* (rebase → implement → verify …), not one
+> **Orchestration is the runner's, not a master agent's (`[CL-ORCH]`).** The implement phase is a
+> *sequence of focused steps the runner orchestrates* (rebase → implement → verify …), not one
 > LLM "master agent" driving sub-agents. An LLM orchestrator would be non-deterministic, unjournaled,
-> and un-resumable mid-sequence, and would need broad spawn authority. The daemon owns the
+> and un-resumable mid-sequence, and would need broad spawn authority. The runner owns the
 > *between-step* orchestration; an agent owns only its *within-step* loop (e.g. implement's
 > code↔test iteration).
 
-**Per-step postcondition (`[CL-POSTCOND]`).** Every dispatch step has a concrete daemon-checked
+**Per-step postcondition (`[CL-POSTCOND]`).** Every dispatch step has a concrete runner-checked
 postcondition — *did this step actually produce its output?* (design → plan committed; implement →
 non-empty diff; review → completed with a findings ledger). A clean dispatch that fails its
 postcondition is that step's failure, routed per §8 — **no step can silently no-op.** (This
 decomposes the legacy `agent-contract-missing` into per-step checks.)
 
-**Pre-dispatch profile-completeness gate (`[CL-PROFILE]`).** Before *any* dispatch, the daemon
+**Pre-dispatch profile-completeness gate (`[CL-PROFILE]`).** Before *any* dispatch, the runner
 verifies the project-profile resolves every input the rendered prompt needs (no unresolved
 placeholder). An incomplete profile **does not dispatch** — it escalates as a setup error (a
 GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
@@ -185,7 +207,7 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 **S1a · `design:dispatch`** — fused brainstorm + plan (Opus 4.8)
 - **Guard:** `stage='design'`; worktree exists (else `worktree-ensure` runs first); no succeeded
   `design:dispatch` unless a re-design loopback was requested.
-- **Input:** ticket identity/title/`type_label` + description **injected by the daemon** (the agent
+- **Input:** ticket identity/title/`type_label` + description **injected by the runner** (the agent
   does not read Linear); the design prompt (`render-prompt.sh`) + project-profile.
 - **Output:** a committed **plan artifact** (`docs/plans/<date>-<eng-n>-*.md`, `linear: ENG-N`
   frontmatter). The plan must *contain*, per work-unit, the facts S1b needs (kind, files, behavioral?
@@ -199,7 +221,7 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 - **Guard:** S1a succeeded (plan committed).
 - **Input:** the committed plan doc + the `work_unit` schema.
 - **Output:** validated **`work_unit` rows** (kind / files_to_touch / behavioral / test_plan /
-  verify_check_types / depends_on). The daemon then runs the **mechanical completeness check** (zod
+  verify_check_types / depends_on). The runner then runs the **mechanical completeness check** (zod
   shape + required fields present + behavioral⇒`test_plan` present + `depends_on` acyclic & valid) —
   deterministic, no LLM. **Postcondition: ≥1 work_unit, completeness clean.** **Track** (fast/full,
   C2) is set here from the sizing rubric: fast-track → `stage='implement'`; full-track → S1c first.
@@ -213,13 +235,13 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 - **Guard:** S1b completeness clean; `track='full'`.
 - **Input — cold (anti-anchoring):** the plan + the ticket requirements + the codebase. **NOT** the
   designer's reasoning.
-- **Mechanism (§3a):** files findings via tool calls (`file_finding` / `complete_review`); the daemon
+- **Mechanism (§3a):** files findings via tool calls (`file_finding` / `complete_review`); the runner
   derives the verdict from the ledger — the **same machinery as code-review (S5)**, applied to the
   plan.
 - **Dimensions:** feasibility/correctness · completeness-of-substance · internal consistency · scope
   (over/under, vs the sizing rubric) · conciseness/anti-slop · testability (a *meaningful* test_plan,
   not just present) · decomposition quality.
-- **Verdict (daemon-derived):** any blocking plan-finding → loop back to **S1a re-design** with the
+- **Verdict (runner-derived):** any blocking plan-finding → loop back to **S1a re-design** with the
   findings; else → `stage='implement'`.
 - **Tools:** `Read`, `Grep`, `Glob` (+ read-only git); `file_finding`, `complete_review`. ❌ no
   `Write`/`Edit`, no execution, no outward tools.
@@ -228,16 +250,16 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   principle (§8 P3/P4).
 - **Failure → route:** DV1/DV2 in §8.
 
-### Implement (per work-unit; daemon-orchestrated sequence)
+### Implement (per work-unit; runner-orchestrated sequence)
 
-**S2a · `implement:wuN:rebase`** — keep the branch current (hybrid: daemon-first, agent-on-conflict)
+**S2a · `implement:wuN:rebase`** — keep the branch current (hybrid: runner-first, agent-on-conflict)
 - **Guard:** branch is behind `origin/<base>`.
-- **Daemon path (common, no LLM):** `git rebase origin/<base>`; clean → done, journal new HEAD.
+- **Runner path (common, no LLM):** `git rebase origin/<base>`; clean → done, journal new HEAD.
 - **Conflict → conflict-resolution agent (Sonnet 4.6; Opus on repeat):**
   - **Input:** conflicted files (markers), the plan doc (intent), both sides, profile.
-  - **Output:** resolved files. The **daemon** then `git add` + `rebase --continue` and re-runs verify.
+  - **Output:** resolved files. The **runner** then `git add` + `rebase --continue` and re-runs verify.
   - **Tools:** `Read`, `Grep`, `Glob`, `Write`, `Edit` (worktree); scoped `Bash` = read-only git +
-    profile test/build self-check. ❌ no git-write (daemon drives `--continue`), no push/`gh`.
+    profile test/build self-check. ❌ no git-write (runner drives `--continue`), no push/`gh`.
 - **Note:** during implement the branch is local-only (push is at merge), so rebase needs no
   force-push. A rebase *after* push uses **force-push-with-lease to the feature branch only — never
   `main`/protected** (`hard_deny`).
@@ -247,7 +269,7 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 - **Guard:** `stage='implement'`; `wuN.status='pending'`; every `wuN.depends_on` unit `verified`;
   plan committed; rebase current.
 - **Input:** the `work_unit` spec; the plan doc; implement prompt + profile; worktree at branch HEAD.
-- **Output:** code **+ the unit's tests** edited in the worktree → **daemon commits** → SHA recorded,
+- **Output:** code **+ the unit's tests** edited in the worktree → **runner commits** → SHA recorded,
   `dispatch` row, `wuN.status='verifying'`. **Postcondition: branch HEAD advanced; diff non-empty.**
   No schema-extraction step — implement's output is code, judged by ground-truth verify, not a payload.
 - **Tools:** `Read`, `Grep`, `Glob`; `Write`/`Edit` **full worktree** (`files_to_touch` is advisory,
@@ -256,7 +278,7 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   no arbitrary Bash.
 - **Failure → route:** I1/I2 in §8.
 
-### Verify (ground truth; daemon-executed, no LLM)
+### Verify (ground truth; runner-executed, no LLM)
 
 **S3 · `verify:wuN:<check>`** — per-work-unit ground truth (one step per check-type)
 - **Guard:** `wuN.status='verifying'`; `<check> ∈ wuN.verify_check_types`; profile declares a command
@@ -269,7 +291,7 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   timeout — never arbitrary shell.
 - **Behavioral gate (A1), deterministic:** when `wuN.behavioral=1`, the test check requires *the
   dispatch diff touched a test file* (path-classified via the profile) **and** tests green — both
-  deterministic. Whether the test is *good* is the reviewer's job (S5), never the daemon's.
+  deterministic. Whether the test is *good* is the reviewer's job (S5), never the runner's.
 - **`scope_diff` is advisory (A3):** produces a signal that becomes an input to review; it never
   fails S3.
 - **Value (vs the agent's inner loop):** the agent's loop is self-report on its working tree with a
@@ -291,7 +313,7 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 **`docs:revise`** — ticket-level documentation sync (conditional; Haiku 4.5)
 - **Guard:** S4 passed **and** S1 set `needs_docs=true`. (Otherwise skipped.)
 - **Input:** the full ticket diff + plan + existing docs + profile (doc locations).
-- **Output:** updated `docs/**` → daemon commits; a `dispatch` row. Output is content, not a payload.
+- **Output:** updated `docs/**` → runner commits; a `dispatch` row. Output is content, not a payload.
 - **Tools:** `Read`, `Grep`, `Glob`; `Write`/`Edit` **`docs/**` only** (cannot touch source/tests, so
   it can't invalidate S4's pass — no re-verify needed). ❌ no `Bash`, no outward tools.
 - **Doc quality:** judged by the reviewer at cutover (no separate `docs:verify`).
@@ -311,7 +333,7 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   perf | maintainability | test-quality | scope | **plan-defect** | …), `location`, `rationale`,
   `factors{in_changed_code, is_regression, user_visible, reversible_post_ship, has_workaround}`,
   optional `deferral_candidate`. → written as **`review_finding`** rows.
-- **Verdict — daemon-derived from the ledger, never a reviewer self-pass:**
+- **Verdict — runner-derived from the ledger, never a reviewer self-pass:**
   - any open finding `severity ∈ {critical,major}` → **loopback**, routed by `category`:
     `plan-defect` → **design (pivot, V3)**, else → **implement (V1)**. **Critical-floor: critical
     always blocks** (non-deferrable).
@@ -326,7 +348,7 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   `Write`/`Edit`, no execution, no outward tools.
 - **Failure → route:** V1–V6 in §8.
 
-### Merge (daemon; external effects via the outbox)
+### Merge (runner; external effects via the outbox)
 
 **S6 · `merge:push`** — put the reviewed branch on GitHub
 - **Guard:** review ship-ready; branch local-only with commits ahead of base (push-once-after-review:
@@ -340,7 +362,7 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 **S7 · `merge:pr-ensure`** — ensure a pull request exists (result-bearing)
 - **Guard:** branch pushed.
 - **Input:** branch, base, and a PR title/description. The **description is written by a cheap AI**
-  (smoother write-up) from facts the daemon already has — the changed work-units, test results,
+  (smoother write-up) from facts the runner already has — the changed work-units, test results,
   review outcome. (Facts are assembled deterministically; only the prose is the cheap model's.)
 - **Output:** a PR exists; `response_ref` = PR number/url; **delivers the parked signal** so the
   workflow resumes with the PR ref (§5.3). Opening the PR is what makes the checks-system start.
@@ -355,7 +377,7 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   asks one **standard question** — *"for this change, are the checks passing, failing, or still
   running?"* — answered by a small **per-system translator**. Build the GitHub translator + the
   "none" case now; other systems are added later as new translators, **this step unchanged.**
-- **Delivery = polling, not webhooks (`[CL-POLL]`):** the daemon *reaches out* to the checks system
+- **Delivery = polling, not webhooks (`[CL-POLL]`):** the runner *reaches out* to the checks system
   periodically. This serves GOAL-INSTALL — works behind any firewall, no public endpoint. The
   checks/merge facts enter as **delivered signals** (§7.3), never a control-flow read.
 - **Output:** green → proceed to S9; failing → loop back through the normal coding-and-review steps
@@ -363,13 +385,21 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 - **Timeout:** bounded wait; stuck/unreachable → escalate to the human.
 
 **S9 · `merge:await-human`** — the single human gate (D2)
+> **OSS boundary.** The OSS `styre run` is **PR-ready terminal**: once the PR exists with checks
+> green (S7/S8), the run has done its job and exits — it does **not** wait indefinitely for a human
+> merge, does not maintain a persistent needs-you inbox, and does not keep the branch current across a
+> slow human approval. Everything in this S9 step — the indefinite park in the **needs-you inbox**,
+> polling GitHub for the merge, and the `[CL-STALE]` keep-branch-current-while-waiting behavior — is
+> the **commercial Control Plane**'s outer loop. It is the design record for that plane; it is fenced,
+> not deleted.
 - **Guard:** checks green (or none).
-- **Behavior:** parks the work in the operator's **needs-you inbox** with full context (what changed,
-  test/check results, review outcome). **No deadline** — waits indefinitely (optional gentle
-  reminder). Detected by polling GitHub for the merge.
+- **Behavior *(commercial Control Plane)*:** parks the work in the operator's **needs-you inbox** with
+  full context (what changed, test/check results, review outcome). **No deadline** — waits indefinitely
+  (optional gentle reminder). Detected by polling GitHub for the merge.
 - **Auto-merge fully off at cutover** — earned later, per ticket-class, via the learning layer.
-- **Stale-branch handling while waiting (`[CL-STALE]`)** — main may advance during a slow approval:
-  the daemon keeps the branch current and re-validates, tiered to risk:
+- **Stale-branch handling while waiting (`[CL-STALE]`)** *(commercial Control Plane)* — main may
+  advance during a slow approval: the runner keeps the branch current and re-validates, tiered to
+  risk:
   - **clean catch-up** → re-run tests (S4) + re-run checks (S8); if green, mergeable and the prior
     review stands (the change's own diff is unchanged);
   - **catch-up needs conflict resolution** → re-run tests + checks **and re-review (S5)**, and **flag
@@ -378,12 +408,16 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   - **invariants:** the human always merges a branch **current with main and green**; if the change
     was altered while catching up, the human is told; if main moves faster than the branch can be
     kept current (repeated thrash), **stop and hand the merge to the human**.
-- **Output:** operator merges → transition `merge → released`. Operator requests changes → loop back
-  (H1).
+- **Output *(commercial Control Plane)*:** operator merges → transition `merge → released`. Operator
+  requests changes → loop back (H1).
 
 ### Released
 
-**S10 · `released:project`** — wrap up (daemon; external via outbox)
+**S10 · `released:project`** — wrap up (runner; external via outbox)
+> **OSS boundary.** Released is reached only *after* a human merge, which in OSS happens outside the
+> run (the run already exited at PR-ready). The released-stage projection (tracker → Done, worktree
+> cleanup) is driven by the **commercial Control Plane**, or by a fresh `styre run --resume` once the
+> merge signal exists. The step semantics below are the design record.
 - **Guard:** PR merged (signal delivered).
 - **Output:** ticket recorded done; tracker (Linear) projected to **Done**; the per-ticket worktree
   cleaned up. `ticket.stage='released'`, `status='done'`. ("Done" = merged + tracked at cutover;
@@ -397,7 +431,7 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 ## 5. External effects — the outbox (B3) `[CL-2: all external effects via the outbox]`
 
 Every external effect (Linear, GitHub API, git push) is a `projection_outbox` row, enqueued in the
-**same transaction** as the state change that motivates it, and drained idempotently by the daemon.
+**same transaction** as the state change that motivates it, and drained idempotently by the runner.
 Local effects (dispatch, verify, local git) use the §3 write-ahead discipline but execute inline.
 
 ```
@@ -448,14 +482,17 @@ await step then succeeds.
 
 | Signal | Delivered by |
 |---|---|
-| `human_merge_approval` (D2) | operator, via the needs-you inbox (D3) |
+| `human_merge_approval` (D2) | operator, via the needs-you inbox (D3) *(commercial Control Plane)* |
 | `human_resume` (escalation, §8) | operator |
 | `external_checks` | §7.3 poll of the project's checks system (CL-CHECKS/CL-POLL) |
 | `external_pr_result` | the outbox drainer completing `pr_create` (delivers `response_ref`) |
 
-**7.3 External delivery = polling.** Checks-system status and PR-merged are obtained by the daemon
+**7.3 External delivery = polling.** Checks-system status and PR-merged are obtained by the runner
 *reaching out* on an interval (no inbound endpoint → GOAL-INSTALL). Budget fields (`attempts`,
-`max_attempts`, `first_attempt_at`) bound the wait; exhaustion → `human_resume` escalation.
+`max_attempts`, `first_attempt_at`) bound the wait; exhaustion → `human_resume` escalation. *(The
+indefinite human-merge wait and PR-merged polling are the commercial Control Plane's outer loop, §9;
+in OSS, `styre run` exits at PR-ready. The OSS escalation/park semantics — exit nonzero, or park at
+exit 75 on a session interruption, resumable with `styre run --resume` — are in execution-model.md.)*
 
 ---
 
@@ -493,10 +530,12 @@ await step then succeeds.
   — the **thrash catcher** for stage ping-pong where each loop stays under its own cap ③ **B3**, the
   P3 spend/time ceiling. B2/B3 reset only on operator resume.
 - **What "escalate" *does* (post-escalation lifecycle):** the ticket parks (`status='waiting'`) on a
-  `human_resume` signal and appears in the needs-you inbox **with the full trace**. You can: **(a)
-  resume as-is** (re-enter the parked step, counters reset); **(b) fix by hand then resume** (edit
-  plan/code/config; the daemon picks up the changed state); **(c) abandon** (terminal). Worst case =
-  *parked, with the whole story, you decide* — never "stuck."
+  `human_resume` signal **with the full trace**. *In OSS*, `styre run` surfaces the escalation by
+  exiting nonzero with the trace (a session-interruption parks at exit 75; resume with `styre run
+  --resume`). *In the commercial Control Plane*, the parked ticket appears in the **needs-you inbox**
+  and the operator can: **(a) resume as-is** (re-enter the parked step, counters reset); **(b) fix by
+  hand then resume** (edit plan/code/config; the runner picks up the changed state); **(c) abandon**
+  (terminal). Worst case = *parked, with the whole story, you decide* — never "stuck."
 
 ### 8.3 The atlas (Scope per P5; **first match** within a phase)
 
@@ -505,7 +544,7 @@ await step then succeeds.
 | CFG | pre-dispatch | profile incomplete (unresolved prompt input) | escalate (setup error) | — | immediate (CL-PROFILE) |
 | **Design** ||||||
 | D1 | design:extract | JSON shape invalid (rare; forced output) | re-run extract (cheap) | — | K_shape → escalate |
-| D2 | daemon completeness check | empty *required* field — the plan lacks the info | → S1a re-design | plan | K_distinct → escalate |
+| D2 | runner completeness check | empty *required* field — the plan lacks the info | → S1a re-design | plan | K_distinct → escalate |
 | D3 | post-design postcondition | no plan committed / zero work-units | → S1a re-design | plan | K_distinct → escalate |
 | DV1 | S1c plan-review | blocking plan-finding | → S1a re-design with findings | plan | K_distinct → escalate |
 | DV2 | S1c plan-review | reviewer death / transport | retry dispatch | — | K_retry → escalate |
@@ -526,7 +565,7 @@ await step then succeeds.
 | **Docs** ||||||
 | C1 | docs:revise | claude death | retry | — | K_retry → escalate |
 | **Code review** ||||||
-| V1 | S5 | blocking finding, **code** category (daemon `blocks_ship`: critical-floor, or major-not-deferred) | → S2b, targeted | unit | K_distinct → escalate |
+| V1 | S5 | blocking finding, **code** category (runner `blocks_ship`: critical-floor, or major-not-deferred) | → S2b, targeted | unit | K_distinct → escalate |
 | V2 | S5 | reviewer judges scope expansion **unjustified** → files a `scope` finding ² | = V1 (justify or revert) | unit | K_distinct → escalate |
 | V3 | S5 | blocking finding, **plan-defect** category (impl correct, plan wrong) | → S1a re-design | plan | K_distinct → escalate |
 | V-def | S5 | a `major` tagged `deferral_candidate` | escalate that finding to the human | — | — |
@@ -564,7 +603,8 @@ There is no automatic "diff expanded → loopback."
 ### 8.4 Loopback targets, by meaning
 **→ implement** (unit or ticket scope — the code is wrong; most failures). **→ design / re-design**
 (plan scope — the plan is wrong; caught early at DV1, or late at V3). **→ escalate** (a resumable
-inbox wait — budget exhausted, or an inherently human case: R3/R4, V-def, V6, P3, H1, X1/X2).
+park — budget exhausted, or an inherently human case: R3/R4, V-def, V6, P3, H1, X1/X2; in OSS the run
+exits with the trace, in the commercial Control Plane it surfaces in the needs-you inbox).
 
 ### 8.5 Deleted by design (why most current failure reasons need no row)
 
@@ -580,8 +620,8 @@ missing":
 - **Single SoT (move 2):** `stage-drift`, `legacy-marker-write`, `protocol-violation`,
   `linear-post-failed`-as-halt (now X1, a delayed projection, not a control halt).
 - **Ground truth over self-report (move 5):** the entire `qa-payload` (39–41), `qa-predicate` (42–44),
-  and `dimensional-threshold-not-met` classes — the qa *stage* is gone; verify = daemon-run commands.
-- **Daemon owns the envelope + validated tool interface (move 3):** `plan-contract` (33–35),
+  and `dimensional-threshold-not-met` classes — the qa *stage* is gone; verify = runner-run commands.
+- **Runner owns the envelope + validated tool interface (move 3):** `plan-contract` (33–35),
   `review-payload` (36–38), `review-ledger` (48–50), `init-sh` (45–47, → a verify check-type),
   `agent-contract-missing` (→ per-step postconditions, CL-POSTCOND), `summary_*` (→ the journal).
 
@@ -600,12 +640,12 @@ half is V-def). **New rows the audit surfaced:** CFG, X1, X2.
 - **CL-INV-3 — one transaction.** Every state transition + its outbox enqueues commit in one tx;
   effects sit outside it behind write-ahead intent.
 - **CL-INV-4 — validated interface, not parsed blobs.** Structured agent output is submitted via
-  forced-schema tool calls; the daemon computes decisions from state (§3a). Never parse a free-form
+  forced-schema tool calls; the runner computes decisions from state (§3a). Never parse a free-form
   verdict.
 - **CL-INV-5 — keyed/probed effects.** External effects are idempotent via probe + key (§5).
 - **CL-INV-6 — DB is the only control input.** Control flow reads SQLite only; external facts (checks,
   human, merge) arrive as delivered signals, never a live read.
-- **CL-INV-7 — single writer.** Only the daemon writes SQLite (B2); the daemon commits, not agents.
+- **CL-INV-7 — single writer.** Only the runner writes SQLite (B2); the runner commits, not agents.
 - **CL-INV-8 — display-local.** Timestamps stored UTC; every operator-facing surface renders host
   local time (DS-1).
 
@@ -613,19 +653,28 @@ half is V-def). **New rows the audit surfaced:** CFG, X1, X2.
 
 ## 10. Installation & operability `[GOAL-INSTALL]`
 
-One command, no server setup. Implications the daemon owns:
+> **OSS / commercial split.** The binary-shaped properties below (single self-contained binary,
+> embedded SQLite, self-bootstrapping schema, reach-out-only networking) are **OSS-core**. The
+> **persistent host-service supervision** (launchd/systemd keep-alive), the always-on multi-ticket
+> process, and the **needs-you inbox** are the **commercial Control Plane**'s outer loop — fenced
+> below, not deleted. In OSS, `styre setup` probes the repo and writes the project profile; `styre run`
+> is an ephemeral per-ticket process (no host service); `styre migrate` bootstraps the SoT.
+
+One command, no server setup. Implications the runner owns *(OSS-core unless marked commercial)*:
 - **Single self-contained binary** (TS compiled, node bundled) — no global installs; escapes the
   bash-3.2 curse entirely.
 - **Embedded SQLite, zero-ops** — no DB server; WAL on by default.
 - **Self-bootstrapping schema** — `migrate()` creates/upgrades the DB on start; no manual SQL.
-- **One idempotent `setup <target-repo>`** — creates+migrates the DB, seeds the `project` row,
-  refreshes the `linear_id_cache`, **discovers/asks the checks system**, and installs the host service
-  (**launchd on macOS, systemd on Linux** — both first-class install targets; see build-operations §3.1).
+- **One idempotent `setup <target-repo>`** — seeds the `project` row, refreshes the `linear_id_cache`,
+  and **discovers/asks the checks system**. *(Commercial Control Plane: setup also creates+migrates a
+  shared DB and installs the host service — **launchd on macOS, systemd on Linux**, both first-class
+  install targets; see build-operations §3.1. The OSS `setup` does not install a host service.)*
 - **Minimal host contract** — the binary + `claude` + `git` + `gh`; one config file + one secrets
   file; no ambient `LINEAR_API_KEY`.
 - **Reach-out-only networking** — polling (not webhooks) for checks/merge → works behind any
   firewall, no public endpoint.
-- **Built-in `status` (local-tz, DS-1) + needs-you inbox** — no extra dashboards.
+- **Built-in `status` (local-tz, DS-1)** — no extra dashboards. *(Commercial Control Plane: the
+  persistent **needs-you inbox** surface.)*
 
 ---
 
@@ -636,21 +685,23 @@ One command, no server setup. Implications the daemon owns:
 | 1 | `design:dispatch` | Opus | plan doc committed; `needs_docs=true`; `track=full` |
 | 2 | `design:extract` | Haiku | `work_unit` wu1(backend), wu2(frontend); completeness clean |
 | 3 | `design:review` | Opus | files plan-findings; 0 blocking → `stage=implement` |
-| 4 | `implement:wu1:rebase` | daemon | clean (no-op if current) |
-| 5 | `implement:wu1:dispatch` | Sonnet | backend code + tests; daemon commits (d-row) |
-| 6 | `verify:wu1:build` / `:test` | daemon | ground-truth pass; wu1 verified |
-| 7 | `implement:wu2:dispatch` | Sonnet | frontend code + tests; daemon commits |
-| 8 | `verify:wu2:visual` | daemon | Playwright pass; wu2 verified |
-| 9 | `verify:integration` | daemon | full suite pass |
-| 10 | `docs:revise` | Haiku | docs updated (needs_docs was set); daemon commits |
+| 4 | `implement:wu1:rebase` | runner | clean (no-op if current) |
+| 5 | `implement:wu1:dispatch` | Sonnet | backend code + tests; runner commits (d-row) |
+| 6 | `verify:wu1:build` / `:test` | runner | ground-truth pass; wu1 verified |
+| 7 | `implement:wu2:dispatch` | Sonnet | frontend code + tests; runner commits |
+| 8 | `verify:wu2:visual` | runner | Playwright pass; wu2 verified |
+| 9 | `verify:integration` | runner | full suite pass |
+| 10 | `docs:revise` | Haiku | docs updated (needs_docs was set); runner commits |
 | 11 | `review` | Opus | files findings via tools; 0 blocking → ship-ready; `stage=merge` |
-| 12 | `merge:push` | daemon/outbox | branch pushed (probe on SHA) |
-| 13 | `merge:pr-ensure` | daemon/outbox + Haiku | PR opened (probe), cheap-AI description |
-| 14 | `merge:await-checks` | daemon (poll) | checks green |
-| 15 | `merge:await-human` | operator | merges (branch kept current meanwhile); `stage=released` |
-| 16 | `released:project` | daemon/outbox | tracker → Done; worktree cleaned; `status=done` |
+| 12 | `merge:push` | runner/outbox | branch pushed (probe on SHA) |
+| 13 | `merge:pr-ensure` | runner/outbox + Haiku | PR opened (probe), cheap-AI description |
+| 14 | `merge:await-checks` | runner (poll) | checks green — **OSS `styre run` exits PR-ready here** |
+| 15 | `merge:await-human` | operator | *(commercial)* merges (branch kept current meanwhile); `stage=released` |
+| 16 | `released:project` | runner/outbox | *(commercial)* tracker → Done; worktree cleaned; `status=done` |
 
-A **fast-track** ticket skips step 3 (plan-review); a backend-only ticket drops 7–8 and (no doc
+The OSS `styre run` drives steps 1–14 (through PR-ready + checks-green) and exits; steps 15–16
+(indefinite human-merge wait, released-stage projection) are the **commercial Control Plane**'s outer
+loop. A **fast-track** ticket skips step 3 (plan-review); a backend-only ticket drops 7–8 and (no doc
 impact) 10; **1 work-unit = 1 implement dispatch.**
 
 ---
@@ -660,8 +711,9 @@ impact) 10; **1 work-unit = 1 implement dispatch.**
 **Discharged:** ✅ replay returns recorded result (§6.2) · ✅ external effects keyed (§5) · ✅ crash
 mid-step resumes (§6.1).
 
-**Decided in the walkthrough:** CL-1 (one daemon) · CL-COMMIT (daemon-commits) · CL-ORCH
-(daemon-orchestrates, no master agent) · validated-interface for structured output (§3a) · review
+**Decided in the walkthrough:** CL-1 (one process serves all projects — the multi-ticket variant is
+the commercial outer loop, §2.1) · CL-COMMIT (runner-commits) · CL-ORCH (runner-orchestrates, no
+master agent) · validated-interface for structured output (§3a) · review
 redesign (findings via tool calls; verdict from state) · CL-NODEFER (no deferral dictionary;
 record-now-learn-later) · CL-CHECKS/CL-POLL (generic checks system, polling) · CL-STALE
 (stale-branch handling) · **S1c plan-review** (shift-left semantic plan gate, full-track) ·
@@ -675,13 +727,14 @@ harness).
 realigned the schema to the frozen loop model: dropped the ticket skip-policy block + `status=halted`
 (P1); `pipeline_event` → lean **`event_log`** (transition/loopback/escalated/resumed — verdicts are
 derived, not stored); **`review_finding` realigned** (single severity + category + factors +
-`deferral_candidate` + daemon-computed `blocks_ship` + `review_kind` plan|code, with a critical-floor
+`deferral_candidate` + runner-computed `blocks_ship` + `review_kind` plan|code, with a critical-floor
 CHECK); added `ticket.needs_docs`, `project.checks_system`, `workflow_step.pid`; `ground_truth_signal.
 signal_type` = the open check-type; signal vocab (`external_checks`/`external_pr_result`). Idempotency
 keys stay globally-unique-by-construction (§3). Re-verified: loads clean, all invariants smoke-tested.
 
 **Resolved downstream:** the per-ticket budget numbers (K_DISTINCT, the P3 cost/time ceiling) and
-the needs-you inbox surface (D3) are now pinned in [`minimal-loop.md`](minimal-loop.md) §4/§5.
+the needs-you inbox surface (D3, **commercial Control Plane**) are now pinned in
+[`minimal-loop.md`](minimal-loop.md) §4/§5.
 
 **Substrate spec status:** §9.4 #1 schema(v2) · #2 (this) · **#3 dropped** (no state-import mechanism
 — the in-flight tickets were obsolete and were abandoned) · #4 [`projector.md`](projector.md) ·
