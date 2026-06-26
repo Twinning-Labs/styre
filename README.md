@@ -14,10 +14,10 @@ The free, open-source execution core that drives a structured ticket `design →
   Linear ticket
        │
        ▼
-  ┌─────────────────────────────────────┐
-  │  daemon (single writer / SQLite SoT) │
-  │  orchestrates the control loop       │
-  └──────────────┬──────────────────────┘
+  ┌──────────────────────────────────────────────┐
+  │  styre run (single writer / SQLite SoT)       │
+  │  orchestrates the control loop                │
+  └──────────────┬───────────────────────────────┘
                  │  dispatches
         ┌────────┴────────┐
         ▼                 ▼
@@ -27,7 +27,7 @@ The free, open-source execution core that drives a structured ticket `design →
   Linear tools      Linear tools
         │                 │
         └────────┬────────┘
-                 │  results returned to daemon
+                 │  results returned to the runner
                  ▼
           ┌────────────┐
           │  projector  │  (one-way write path)
@@ -69,7 +69,7 @@ When the run completes, a PR is open and ready. You merge it.
 
 ## What it is
 
-Styre is open-core. The OSS core — `styre run` — is the full execution engine: it reads a ticket, drives the `design → implement → verify → review → merge → released` loop, and exits when a PR is ready. The commercial Control Plane is the layer above: continuous ticket pickup, the persistent daemon, inbox management, and scheduling. The core software is identical in both.
+Styre is open-core. The OSS core — `styre run` — is the full execution engine: it reads a ticket, drives the `design → implement → verify → review → merge → released` loop, and exits when a PR is ready. The core software is identical in the OSS release and the commercial plane.
 
 License: GPLv3.
 
@@ -77,7 +77,7 @@ License: GPLv3.
 
 ## How it works
 
-Styre's trust story starts with capability isolation: dispatched agents receive no credentials, no `gh` binary, no Linear API key, and no shell access outside their dedicated worktree. The worktree is the only writable surface. The daemon — running in your terminal or as a local service — holds credentials, commits the results, and is the sole writer to the SQLite state-of-truth.
+Styre's trust story starts with capability isolation: dispatched agents receive no credentials, no `gh` binary, no Linear API key, and no shell access outside their dedicated worktree. The worktree is the only writable surface. The runner (`styre run`) holds credentials, commits the results, and is the sole writer to the SQLite state-of-truth.
 
 Each step in the control loop is journaled before it runs. If a step has already succeeded, replay returns the recorded result — the step never re-executes. This gives you crash-resume for free. Verdicts (design sound? tests green? diff in scope?) come from build output, CI, and an independent reviewer step — never from the agent self-reporting success.
 
@@ -113,11 +113,25 @@ styre migrate
 
 ---
 
-## Develop
+## Install
 
-Requires [Bun](https://bun.sh).
+Styre ships as a single self-contained binary via Homebrew (macOS & Linux):
 
 ```sh
+brew install twinning-labs/styre
+```
+
+Upgrade with `brew upgrade styre`; remove with `brew uninstall styre` (and `brew untap twinning-labs/styre` to drop the tap). Prebuilt binaries for macOS (arm64/x64) and Linux (arm64/x64) are also attached to each [GitHub Release](https://github.com/Twinning-Labs/styre/releases).
+
+---
+
+## Develop
+
+Prerequisites: [Bun](https://bun.sh). On macOS you also need the Xcode Command Line Tools (`xcode-select --install`) — the build re-signs the compiled binary with `codesign`, without which macOS (Apple Silicon) kills it on launch.
+
+```sh
+git clone https://github.com/Twinning-Labs/styre.git
+cd styre
 bun install
 bun test
 bun run lint
@@ -125,6 +139,12 @@ bun run build         # → dist/styre (single self-contained binary)
 ./dist/styre --version
 ./dist/styre migrate  # bootstraps the SQLite SoT under $XDG_STATE_HOME/styre/
 ```
+
+---
+
+## How the commercial plane fits
+
+Styre's core is free, open source, and ends at PR-ready. A commercial **Control Plane** (a separate product in its own repository — not yet public) runs *on top of* this core: a persistent service that orchestrates many `styre run` invocations with multi-ticket scheduling, dependency-aware ticket selection, a needs-you inbox, and dashboards. It plugs in only through Styre's versioned seam — the Linear ticket contract, the project-profile artifact, and the NDJSON telemetry/state export — and never forks or imports the core. The core has no knowledge of the plane; you can run the OSS core on its own, forever.
 
 ---
 
