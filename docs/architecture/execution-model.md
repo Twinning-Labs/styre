@@ -58,12 +58,14 @@ red, the loop hands the failing test names to the agent and tries again. The def
 any correctable failure is "absorb and loop," bounded by per-ticket retry budgets (capped by spend,
 wall-clock, and distinct-failure counts — described in [minimal-loop.md §4](minimal-loop.md#4-budget-numbers-the-deferred-loose-ends-pinned)).
 
-**Human gates are narrow by design.** The only wired human gate is MERGE approval
-(`human_merge_approval`): the operator reviews the pull request and merges it personally. Escalations
-reach the [needs-you inbox](glossary.md#needs-you-inbox) only when the loop has exhausted its retry budget or
-encountered something it structurally cannot decide (a `major` finding flagged as a deferral
-candidate, a persistent conflict the agent cannot resolve, an infrastructure outage). Every other
-situation loops.
+**Human gates are narrow by design.** The only wired human gate is MERGE approval: `styre run`
+exits at PR-ready and the operator reviews the pull request and merges it personally. The second
+touch point is escalation: when the loop exhausts its retry budget or reaches something it
+structurally cannot decide (a `major` finding flagged as a deferral candidate, a persistent conflict
+the agent cannot resolve, an infrastructure outage), `styre run` exits nonzero — the run terminates
+with an error describing the escalation and the point it reached. The persistent
+[needs-you inbox](glossary.md#needs-you-inbox) (resume-after-fix / abandon) is the commercial
+Control Plane; in OSS, the exit code and state dump are the signal. Every other situation loops.
 
 ---
 
@@ -75,8 +77,8 @@ system's memo table.
 
 When `styre run` starts on a ticket, the resolver checks the journal first. If a step already
 succeeded, the resolver reads its recorded `result_json` and moves on — it never re-executes the
-step. This is what makes crash-resume work: `styre run --resume`, which runs the resolver, and the
-loop re-enters at exactly the interrupted step, not at the beginning of the ticket.
+step. This is what makes crash-resume work: `styre run --resume` runs the resolver, and the loop
+re-enters at exactly the interrupted step — nothing is re-executed.
 
 For steps with external effects (pushing a branch, opening a pull request, posting to Linear), the
 runner writes its *intent* to the journal before the effect and makes the effect idempotent:
@@ -87,9 +89,9 @@ runner writes its *intent* to the journal before the effect and makes the effect
 3. Begin a second transaction: mark the step `succeeded`, record the result, enqueue any
    downstream projection rows in the same transaction, commit.
 
-A crash between steps 1 and 3 leaves the row in `running` state with a known key. On restart,
-`recover()` finds it, kills any orphaned dispatch process, and re-queues the step — the key ensures
-the re-applied effect is a safe no-op if it already landed.
+A crash between steps 1 and 3 leaves the row in `running` state with a known key. On the next
+`styre run --resume`, `recover()` finds it, kills any orphaned dispatch process, and re-queues the
+step — the key ensures the re-applied effect is a safe no-op if it already landed.
 
 ---
 
@@ -130,7 +132,8 @@ service returns.
 Inbound facts — checks green, PR merged, human action — arrive as [signals](glossary.md#signal): the runner
 polls the checks system and GitHub on an interval and delivers the results as structured rows in the
 `signal` table. The loop waits on a signal by parking the ticket (`status='waiting'`); when the
-signal is delivered the ticket re-enters `v_ready_tickets` and the resolver picks it up.
+awaited signal arrives, the resolver advances the ticket and the loop continues from where it
+parked.
 
 ---
 
