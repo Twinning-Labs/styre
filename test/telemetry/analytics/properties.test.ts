@@ -39,6 +39,7 @@ function summary(partial: Partial<SummaryEvent>): SummaryEvent {
 }
 
 test("bucket and durationBucket map to coarse strings", () => {
+  expect(bucket(0)).toBe("0");
   expect(bucket(3)).toBe("1-5");
   expect(bucket(40)).toBe("21-50");
   expect(bucket(99)).toBe("50+");
@@ -96,6 +97,25 @@ test("ALLOW-LIST GUARD: every builder emits only allow-listed keys", () => {
       expect(ALLOWED_KEYS.has(key)).toBe(true);
     }
   }
+});
+
+test("setupProperties buckets unknown component_kinds to 'other' and dedupes", () => {
+  const bag = setupProperties({
+    projectId: "p",
+    checksSystem: "github",
+    componentCount: 3,
+    componentKinds: ["backend", "sveltekit", "rust"],
+    stackBucket: "node",
+    topologyType: "web-service",
+  });
+  const kinds = bag.component_kinds as string[];
+  expect(kinds).toContain("backend");
+  expect(kinds).toContain("other");
+  expect(kinds).not.toContain("sveltekit");
+  expect(kinds).not.toContain("rust");
+  // the two unknowns collapse to a single deduped "other"
+  expect(kinds.filter((k) => k === "other")).toHaveLength(1);
+  expect(kinds).toHaveLength(2);
 });
 
 test("cli_error never carries a message field", () => {

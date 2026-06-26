@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AnalyticsClient } from "../../../src/telemetry/analytics/client.ts";
@@ -38,6 +38,9 @@ test("disabled config → no-op: no capture, no client needed", async () => {
   a.runStarted({ projectId: "p", resumed: false, tracker: "linear", forge: "github" });
   await a.shutdown();
   expect(events.length).toBe(0);
+  // disabled path must not touch the state dir / mint a telemetry id
+  const stateHome = process.env.XDG_STATE_HOME as string;
+  expect(existsSync(join(stateHome, "styre", "telemetry.json"))).toBe(false);
 });
 
 test("enabled → events carry super-props + a distinct_id, all keys allow-listed", async () => {

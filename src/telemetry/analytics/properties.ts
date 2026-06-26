@@ -6,6 +6,26 @@ type SummaryEvent = Extract<TelemetryEvent, { type: "summary" }>;
 /** Dispatch outcomes that mean a unit went red and needed rework. */
 const RED_OUTCOMES = ["build-red", "reviewer-blocking", "dispatch-failed"];
 
+/** Canonical component kinds; anything else collapses to "other" so no agent-authored free-text
+ *  value reaches the wire. */
+const KNOWN_COMPONENT_KINDS = new Set([
+  "backend",
+  "frontend",
+  "fullstack",
+  "data",
+  "mobile",
+  "infra",
+  "cli",
+  "library",
+  "api",
+  "worker",
+  "ml",
+  "docs",
+]);
+function bucketKind(kind: string): string {
+  return KNOWN_COMPONENT_KINDS.has(kind) ? kind : "other";
+}
+
 function isCi(): boolean {
   const ci = process.env.CI;
   return ci === "true" || ci === "1" || Boolean(process.env.GITHUB_ACTIONS);
@@ -22,6 +42,7 @@ export function superProperties(): Record<string, unknown> {
 }
 
 export function bucket(n: number): string {
+  if (n <= 0) return "0";
   if (n <= 5) return "1-5";
   if (n <= 20) return "6-20";
   if (n <= 50) return "21-50";
@@ -66,7 +87,7 @@ export function setupProperties(p: SetupInput): Record<string, unknown> {
     project_id: p.projectId,
     checks_system: p.checksSystem,
     component_count: p.componentCount,
-    component_kinds: p.componentKinds,
+    component_kinds: [...new Set(p.componentKinds.map(bucketKind))],
     stack_bucket: p.stackBucket,
     topology_type: p.topologyType,
   };

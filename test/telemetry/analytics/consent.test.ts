@@ -25,3 +25,18 @@ test("STYRE_TELEMETRY=0 disables", () => {
   process.env.STYRE_TELEMETRY = "0";
   expect(telemetryEnabled({ telemetry: true })).toBe(false);
 });
+
+test('STYRE_TELEMETRY="false" disables', () => {
+  process.env.STYRE_TELEMETRY = "false";
+  expect(telemetryEnabled({ telemetry: true })).toBe(false);
+});
+
+test('DO_NOT_TRACK="" is NOT opt-out (stays enabled)', () => {
+  process.env.DO_NOT_TRACK = "";
+  expect(telemetryEnabled({ telemetry: true })).toBe(true);
+});
+
+test('DO_NOT_TRACK="false" is NOT opt-out (stays enabled)', () => {
+  process.env.DO_NOT_TRACK = "false";
+  expect(telemetryEnabled({ telemetry: true })).toBe(true);
+});
