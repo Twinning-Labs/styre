@@ -1,4 +1,4 @@
-# Styre
+# Styre (ᛋᛏᚢᚱᛁ or ᛋᛏᚢᚱᛅ)
 
 The free, open-source execution core that drives a structured ticket `design → implement → verify → review → merge → released` with minimal human involvement.
 
@@ -15,8 +15,8 @@ The free, open-source execution core that drives a structured ticket `design →
        │
        ▼
   ┌──────────────────────────────────────────────┐
-  │  styre run (single writer / SQLite SoT)       │
-  │  orchestrates the control loop                │
+  │  styre run (single writer / SQLite SoT)      │
+  │  orchestrates the control loop               │
   └──────────────┬───────────────────────────────┘
                  │  dispatches
         ┌────────┴────────┐
@@ -29,7 +29,7 @@ The free, open-source execution core that drives a structured ticket `design →
         └────────┬────────┘
                  │  results returned to the runner
                  ▼
-          ┌────────────┐
+          ┌────────────-┐
           │  projector  │  (one-way write path)
           └──────┬──────┘
                  │
