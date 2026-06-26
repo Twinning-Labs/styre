@@ -17,6 +17,7 @@
     "@linear/sdk": "86.0.0",
     "@octokit/rest": "22.0.1",
     "citty": "^0.1.6",
+    "posthog-node": "5.38.6",
     "zod": "4.4.3"
   },
   "devDependencies": {
