@@ -80,6 +80,9 @@ export const ProfileSchema = z.object({
   slug: z.string(),
   targetRepo: z.string(),
   defaultBranch: z.string().default("main"),
+  // Stable random analytics id for this project (sent to PostHog as project_id). Never encodes the
+  // slug/name. Generated at `styre setup`; absent in legacy profiles (lazily added on next run).
+  analyticsId: z.string().optional(),
   checksSystem: z.enum(["github", "external", "none"]).default("none"),
   components: z.array(ComponentSchema).default([]),
   repoCommands: z.record(z.string(), z.string()).default({}),

@@ -14,6 +14,8 @@ export const RuntimeConfigSchema = z.object({
   issueTracker: z.string().default("linear"),
   // M6b: which forge (code-host) adapter handles push/PR ops. Vendor-neutral; creds via env.
   forge: z.string().default("github"),
+  // OSS adoption analytics (PostHog). On by default; honors DO_NOT_TRACK / STYRE_TELEMETRY too.
+  telemetry: z.boolean().default(true),
 });
 
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
