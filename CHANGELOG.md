@@ -1,6 +1,16 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.2.0] - 2026-06-27
+
+### Documentation
+- Update README.md with the runes for the noun and verb forms of styre (#41)
+
+
+### Features
+- Anonymized opt-out PostHog adoption analytics for the OSS CLI (#42)
+
+
 ## [0.1.2] - 2026-06-26
 
 ### Bug Fixes
