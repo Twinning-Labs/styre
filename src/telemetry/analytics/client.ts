@@ -3,7 +3,7 @@ import { PostHog } from "posthog-node";
 /** PostHog US Cloud ingestion host. */
 export const POSTHOG_HOST = "https://us.i.posthog.com";
 /** Write-only project API key — safe to ship in the OSS binary. REPLACE with your project key. */
-export const POSTHOG_TOKEN = "phc_REPLACE_WITH_PROJECT_KEY";
+export const POSTHOG_TOKEN = "phc_mgazZnUVoGmNXjiNzC8zXK6eEqsdet5TnjZ8W3mFxvd9";
 
 const FLUSH_TIMEOUT_MS = 2000;
 
