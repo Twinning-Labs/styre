@@ -171,5 +171,15 @@ export function detectComponents(repoDir: string): {
     });
   }
 
+  // --- Go: root go.mod → one component (single-module; multi-module/go.work deferred §5.4).
+  if (existsSync(join(repoDir, "go.mod"))) {
+    components.push({
+      name: "go",
+      kind: "go",
+      paths: ["**"],
+      commands: { build: "go build ./...", test: "go test ./..." },
+    });
+  }
+
   return { components, repoCommands: {} };
 }
