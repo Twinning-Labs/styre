@@ -1,7 +1,22 @@
 import { expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { isCommandSafe } from "../../src/setup/command-safety.ts";
 import { runRegistry } from "../../src/setup/detect-components.ts";
 import type { LangDef } from "../../src/setup/lang/types.ts";
 import { isSafePath, safeMember } from "../../src/setup/manifests.ts";
+import { REGISTRY } from "../../src/setup/registry.ts";
+
+function fixture(files: Record<string, string>): string {
+  const root = mkdtempSync(join(tmpdir(), "styre-eng-"));
+  for (const [rel, content] of Object.entries(files)) {
+    const p = join(root, rel);
+    mkdirSync(join(p, ".."), { recursive: true });
+    writeFileSync(p, content);
+  }
+  return root;
+}
 
 test("isSafePath: allows lone ** and anchored globs; rejects leading-slash / unanchored / traversal", () => {
   for (const ok of ["**", "src/**", "Cargo.toml", "pkgs/api/**", "crates/**"])
@@ -42,4 +57,20 @@ test("runRegistry: Invariant 2 filters unsafe paths and drops zero-path componen
   const out = runRegistry("/tmp/x", [def]);
   expect(out.map((c) => c.name)).toEqual(["keep"]);
   expect(out[0].paths).toEqual(["src/**"]); // unsafe globs stripped
+});
+
+test("CONFORMANCE: every registry def over an adversarial polyglot fixture emits only safe commands + anchored paths", () => {
+  const root = fixture({
+    "Cargo.toml": '[workspace]\nmembers = ["*","../x","/abs","ok"]\n',
+    "package.json": JSON.stringify({ scripts: { test: "x" } }),
+    "go.mod": "module x\n",
+    "pyproject.toml": "[project]\n",
+  });
+  for (const def of REGISTRY) {
+    for (const c of def.detect(root)) {
+      for (const v of Object.values(c.commands))
+        if (typeof v === "string") expect(isCommandSafe(v)).toBe(true);
+      for (const p of c.paths) expect(isSafePath(p)).toBe(true); // reuse the engine guard as the oracle
+    }
+  }
 });
