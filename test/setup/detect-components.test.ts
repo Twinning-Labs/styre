@@ -117,6 +117,23 @@ test("python: no python manifest → no python component", () => {
   ).toBeUndefined();
 });
 
+test("go: root go.mod → one go component with build/test", () => {
+  const go = detectComponents(fixture({ "go.mod": "module x\n\ngo 1.22\n" })).components.find(
+    (c) => c.kind === "go",
+  );
+  expect(go?.paths).toEqual(["**"]);
+  expect(go?.commands.build).toBe("go build ./...");
+  expect(go?.commands.test).toBe("go test ./...");
+});
+
+test("go: nested-only go.mod (no root) → no go component (single-module first)", () => {
+  expect(
+    detectComponents(fixture({ "backend/go.mod": "module x\n" })).components.find(
+      (c) => c.kind === "go",
+    ),
+  ).toBeUndefined();
+});
+
 test("cargo workspace collapses members into ONE rust component", () => {
   const root = fixture({
     "Cargo.toml": '[workspace]\nmembers = ["src-tauri", "crates/a", "crates/b"]\n',
