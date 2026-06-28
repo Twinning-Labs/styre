@@ -76,6 +76,47 @@ test("manifests inside dependency/build dirs are skipped (no phantom components)
   expect(components).toHaveLength(0);
 });
 
+test("python: pyproject.toml → one python component, default runner", () => {
+  const root = fixture({ "pyproject.toml": "[project]\nname='x'\n" });
+  const py = detectComponents(root).components.find((c) => c.kind === "python");
+  expect(py?.paths).toEqual(["**"]);
+  expect(py?.commands.test).toBe("python -m pytest");
+});
+
+test("python: runner detection precedence tox > nox > pytest-config > default", () => {
+  expect(
+    detectComponents(fixture({ "setup.py": "", "tox.ini": "[tox]\n" })).components.find(
+      (c) => c.kind === "python",
+    )?.commands.test,
+  ).toBe("tox");
+  expect(
+    detectComponents(fixture({ "setup.py": "", "noxfile.py": "" })).components.find(
+      (c) => c.kind === "python",
+    )?.commands.test,
+  ).toBe("nox");
+  expect(
+    detectComponents(fixture({ "setup.py": "", "pytest.ini": "[pytest]\n" })).components.find(
+      (c) => c.kind === "python",
+    )?.commands.test,
+  ).toBe("pytest");
+  expect(
+    detectComponents(fixture({ "pyproject.toml": "[tool.pytest.ini_options]\n" })).components.find(
+      (c) => c.kind === "python",
+    )?.commands.test,
+  ).toBe("pytest");
+  expect(
+    detectComponents(fixture({ "requirements.txt": "pytest\n" })).components.find(
+      (c) => c.kind === "python",
+    )?.commands.test,
+  ).toBe("python -m pytest");
+});
+
+test("python: no python manifest → no python component", () => {
+  expect(
+    detectComponents(fixture({ "README.md": "x" })).components.find((c) => c.kind === "python"),
+  ).toBeUndefined();
+});
+
 test("cargo workspace collapses members into ONE rust component", () => {
   const root = fixture({
     "Cargo.toml": '[workspace]\nmembers = ["src-tauri", "crates/a", "crates/b"]\n',

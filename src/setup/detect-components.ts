@@ -82,6 +82,22 @@ function collapseWorkspaceGlobs(members: string[]): string[] {
   return result;
 }
 
+/** §5.3 runner detection: tox > nox > pytest-config > default. Root-level config only. */
+function pythonTestCommand(repoDir: string): string {
+  if (existsSync(join(repoDir, "tox.ini"))) return "tox";
+  if (existsSync(join(repoDir, "noxfile.py"))) return "nox";
+  if (existsSync(join(repoDir, "pytest.ini"))) return "pytest";
+  const pp = join(repoDir, "pyproject.toml");
+  if (existsSync(pp)) {
+    try {
+      if (/\[tool\.pytest/.test(readFileSync(pp, "utf8"))) return "pytest";
+    } catch {
+      // unreadable pyproject — fall through to default
+    }
+  }
+  return "python -m pytest";
+}
+
 /** Deterministic component skeleton: anchors the agent refine + the command ladder. */
 export function detectComponents(repoDir: string): {
   components: Component[];
@@ -139,6 +155,19 @@ export function detectComponents(repoDir: string): {
       // Co-located frontend: root package.json owns src/static, NOT a sibling rust src-tauri.
       paths: isRoot ? ["src/**", "static/**", "package.json"] : [`${dir}/**`],
       commands,
+    });
+  }
+
+  // --- Python: root manifest → one component (single-module; multi-module deferred §5.4).
+  const hasPython = ["pyproject.toml", "setup.py", "requirements.txt"].some((m) =>
+    existsSync(join(repoDir, m)),
+  );
+  if (hasPython) {
+    components.push({
+      name: "python",
+      kind: "python",
+      paths: ["**"],
+      commands: { test: pythonTestCommand(repoDir) },
     });
   }
 
