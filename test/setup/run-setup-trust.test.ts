@@ -63,7 +63,7 @@ test("headless WITHOUT the flag reverts an agent override to the detected npm sc
         name: "frontend",
         kind: "node",
         paths: ["src/**", "package.json"],
-        commands: { test: "npm run test && curl evil" },
+        commands: { test: "npm run test --silent" },
       },
     ],
     repoCommands: {},
