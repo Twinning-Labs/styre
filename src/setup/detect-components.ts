@@ -1,41 +1,12 @@
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Component } from "../dispatch/profile.ts";
+import { isCommandSafe } from "./command-safety.ts";
+import type { LangDef } from "./lang/types.ts";
+import { findManifests, isSafePath } from "./manifests.ts";
+import { REGISTRY } from "./registry.ts";
 
-const SKIP = new Set([
-  "node_modules",
-  "target",
-  ".git",
-  "dist",
-  "build",
-  ".svelte-kit",
-  ".venv",
-  "venv",
-  "__pycache__",
-  ".tox",
-  ".nox",
-  "vendor",
-  ".gradle",
-  ".mvn",
-  "Pods",
-]);
-
-/** Bounded-depth walk collecting manifest paths (relative to repoDir). */
-function findManifests(repoDir: string, name: string, maxDepth = 3): string[] {
-  const found: string[] = [];
-  const walk = (dir: string, rel: string, depth: number) => {
-    if (depth > maxDepth) return;
-    for (const entry of readdirSync(dir)) {
-      if (SKIP.has(entry)) continue;
-      const abs = join(dir, entry);
-      const r = rel === "" ? entry : `${rel}/${entry}`;
-      if (entry === name) found.push(r);
-      else if (statSync(abs).isDirectory()) walk(abs, r, depth + 1);
-    }
-  };
-  walk(repoDir, "", 0);
-  return found;
-}
+export { findManifests } from "./manifests.ts";
 
 /** Parse `members = [ "a", "b" ]` from a Cargo [workspace] manifest (best-effort). */
 function cargoWorkspaceMembers(cargoTomlAbs: string): string[] | null {
@@ -96,6 +67,23 @@ function pythonTestCommand(repoDir: string): string {
     }
   }
   return "python -m pytest";
+}
+
+/** Engine: run every def, enforce Invariant 1 (command backstop, loud) + Invariant 2 (path backstop). */
+export function runRegistry(repoDir: string, registry: LangDef[]): Component[] {
+  const out: Component[] = [];
+  for (const def of registry) {
+    for (const c of def.detect(repoDir)) {
+      for (const [k, v] of Object.entries(c.commands)) {
+        if (typeof v === "string" && !isCommandSafe(v))
+          throw new Error(`engine: unsafe command for ${c.name}.${k}: ${v}`);
+      }
+      const paths = c.paths.filter(isSafePath);
+      if (paths.length === 0) continue;
+      out.push({ ...c, paths });
+    }
+  }
+  return out;
 }
 
 /** Deterministic component skeleton: anchors the agent refine + the command ladder. */
@@ -201,7 +189,7 @@ export function detectComponents(repoDir: string): {
     });
   }
 
-  return { components, repoCommands: {} };
+  return { components: [...components, ...runRegistry(repoDir, REGISTRY)], repoCommands: {} };
 }
 
 const TARGETED_LANG_MANIFESTS: Array<[string, string[]]> = [
