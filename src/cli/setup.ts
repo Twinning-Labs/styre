@@ -85,6 +85,7 @@ export async function runSetup(args: {
   slug?: string;
   force?: boolean;
   reprobe?: boolean;
+  trustAgentCommands?: boolean;
   deps: EnrichDeps;
 }): Promise<{ outPath: string; profile: Profile; needsInput: string[] }> {
   const repoDir = resolve(args.repo);
@@ -118,13 +119,14 @@ export async function runSetup(args: {
     };
   }
   // Layer: agent-assisted discovery + interactive command-resolution ladder.
+  const interactive = Boolean(process.stdin.isTTY);
   const discovered = await discoverComponents(
     repoDir,
     { components: profile.components, repoCommands: profile.repoCommands },
     { runner: args.deps.runner, agentConfig: args.deps.agentConfig },
+    { interactive, trustAgentCommands: args.trustAgentCommands === true },
   );
-
-  const interactive = Boolean(process.stdin.isTTY);
+  for (const w of discovered.warnings) console.warn(w);
   const { components, warnings } = resolveCommands(discovered.components, {
     interactive,
     ask: (q) => (interactive ? (globalThis.prompt(q) ?? null) : null),
@@ -187,6 +189,11 @@ export const setupCommand = defineCommand({
       type: "boolean",
       description: "Re-probe from scratch, discarding operator-resolved runtime context",
     },
+    "trust-agent-commands": {
+      type: "boolean",
+      description:
+        "Headless only: accept agent-refined command strings. These run as code at verify — the metacharacter filter is hygiene, not a sandbox. Use only on trusted repos / isolated environments. Off by default.",
+    },
   },
   async run({ args }) {
     if (!process.env.ANTHROPIC_API_KEY) {
@@ -200,6 +207,7 @@ export const setupCommand = defineCommand({
       slug: args.slug,
       force: args.force,
       reprobe: args.reprobe,
+      trustAgentCommands: args["trust-agent-commands"] === true,
       deps: { runner, agentConfig: DEFAULT_AGENT_CONFIG },
     });
     console.log(`setup: wrote ${outPath}`);
