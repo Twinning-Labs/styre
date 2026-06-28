@@ -9,6 +9,7 @@ import { configDir } from "../config/paths.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../config/runtime-config.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
+import { unrootedManifestWarnings } from "../setup/detect-components.ts";
 import { discoverComponents } from "../setup/discover.ts";
 import type { EnrichDeps } from "../setup/enrich.ts";
 import { enrichRuntimeContext } from "../setup/enrich.ts";
@@ -127,6 +128,7 @@ export async function runSetup(args: {
     { interactive, trustAgentCommands: args.trustAgentCommands === true },
   );
   for (const w of discovered.warnings) console.warn(w);
+  for (const w of unrootedManifestWarnings(repoDir)) console.warn(w);
   const { components, warnings } = resolveCommands(discovered.components, {
     interactive,
     ask: (q) => (interactive ? (globalThis.prompt(q) ?? null) : null),
