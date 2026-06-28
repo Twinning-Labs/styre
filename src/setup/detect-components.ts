@@ -181,5 +181,25 @@ export function detectComponents(repoDir: string): {
     });
   }
 
+  // --- JVM (single-module; multi-module reactor deferred §5.4). Prefer the repo's wrapper.
+  if (existsSync(join(repoDir, "pom.xml"))) {
+    const mvn = existsSync(join(repoDir, "mvnw")) ? "./mvnw" : "mvn";
+    components.push({
+      name: "jvm-maven",
+      kind: "jvm-maven",
+      paths: ["**"],
+      commands: { build: `${mvn} -q -DskipTests compile`, test: `${mvn} -q test` },
+    });
+  }
+  if (existsSync(join(repoDir, "build.gradle")) || existsSync(join(repoDir, "build.gradle.kts"))) {
+    const gradle = existsSync(join(repoDir, "gradlew")) ? "./gradlew" : "gradle";
+    components.push({
+      name: "jvm-gradle",
+      kind: "jvm-gradle",
+      paths: ["**"],
+      commands: { build: `${gradle} build -x test`, test: `${gradle} test` },
+    });
+  }
+
   return { components, repoCommands: {} };
 }
