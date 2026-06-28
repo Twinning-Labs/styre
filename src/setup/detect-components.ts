@@ -203,3 +203,30 @@ export function detectComponents(repoDir: string): {
 
   return { components, repoCommands: {} };
 }
+
+const TARGETED_LANG_MANIFESTS: Array<[string, string[]]> = [
+  ["python", ["pyproject.toml", "setup.py", "requirements.txt"]],
+  ["go", ["go.mod"]],
+  ["jvm-maven", ["pom.xml"]],
+  ["jvm-gradle", ["build.gradle", "build.gradle.kts"]],
+];
+
+/** §5.4 loud note: warn when a targeted-language manifest exists only in subdirs (no root match),
+ *  so root-only detection's deferral is surfaced rather than silent. */
+export function unrootedManifestWarnings(repoDir: string): string[] {
+  const out: string[] = [];
+  for (const [lang, names] of TARGETED_LANG_MANIFESTS) {
+    if (names.some((n) => existsSync(join(repoDir, n)))) continue; // detected at root — fine
+    for (const n of names) {
+      const nested = findManifests(repoDir, n);
+      if (nested.length > 0) {
+        const dir = nested[0].replace(/\/?[^/]+$/, "") || ".";
+        out.push(
+          `⚠ ${n} found under ${dir}/ but not at repo root — multi-module detection deferred (§5.4); no ${lang} component emitted.`,
+        );
+        break;
+      }
+    }
+  }
+  return out;
+}

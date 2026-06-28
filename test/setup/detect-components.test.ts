@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { detectComponents } from "../../src/setup/detect-components.ts";
+import { detectComponents, unrootedManifestWarnings } from "../../src/setup/detect-components.ts";
 
 function fixture(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "styre-dc-"));
@@ -169,6 +169,23 @@ test("jvm: build.gradle(.kts) → jvm-gradle; gradlew preferred when present", (
 test("jvm: no jvm manifest → no jvm component", () => {
   const comps = detectComponents(fixture({ "README.md": "x" })).components;
   expect(comps.find((c) => c.kind === "jvm-maven" || c.kind === "jvm-gradle")).toBeUndefined();
+});
+
+test("loud note: subdir-only go.mod warns; root go.mod does not", () => {
+  const nested = unrootedManifestWarnings(fixture({ "backend/go.mod": "module x\n" }));
+  expect(nested.some((w) => /go\.mod/.test(w) && /backend/.test(w) && /deferred/i.test(w))).toBe(
+    true,
+  );
+  expect(unrootedManifestWarnings(fixture({ "go.mod": "module x\n" }))).toEqual([]);
+});
+
+test("loud note: subdir-only pyproject warns; non-targeted nested files do not", () => {
+  expect(
+    unrootedManifestWarnings(fixture({ "src/pyproject.toml": "[project]\n" })).some((w) =>
+      /pyproject\.toml/.test(w),
+    ),
+  ).toBe(true);
+  expect(unrootedManifestWarnings(fixture({ "README.md": "x" }))).toEqual([]);
 });
 
 test("cargo workspace collapses members into ONE rust component", () => {
