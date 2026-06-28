@@ -66,6 +66,16 @@ test("unreadable root Cargo.toml is treated as not-a-workspace (no throw)", () =
   }
 });
 
+test("manifests inside dependency/build dirs are skipped (no phantom components)", () => {
+  const root = fixture({
+    ".tox/py311/lib/package.json": JSON.stringify({ scripts: { test: "x" } }),
+    "vendor/github.com/foo/Cargo.toml": '[package]\nname="dep"\n',
+    ".gradle/tmp/package.json": JSON.stringify({ scripts: { build: "x" } }),
+  });
+  const { components } = detectComponents(root);
+  expect(components).toHaveLength(0);
+});
+
 test("cargo workspace collapses members into ONE rust component", () => {
   const root = fixture({
     "Cargo.toml": '[workspace]\nmembers = ["src-tauri", "crates/a", "crates/b"]\n',
