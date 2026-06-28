@@ -2,7 +2,23 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Component } from "../dispatch/profile.ts";
 
-const SKIP = new Set(["node_modules", "target", ".git", "dist", "build", ".svelte-kit"]);
+const SKIP = new Set([
+  "node_modules",
+  "target",
+  ".git",
+  "dist",
+  "build",
+  ".svelte-kit",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".tox",
+  ".nox",
+  "vendor",
+  ".gradle",
+  ".mvn",
+  "Pods",
+]);
 
 /** Bounded-depth walk collecting manifest paths (relative to repoDir). */
 function findManifests(repoDir: string, name: string, maxDepth = 3): string[] {
