@@ -134,6 +134,43 @@ test("go: nested-only go.mod (no root) → no go component (single-module first)
   ).toBeUndefined();
 });
 
+test("jvm: root pom.xml → jvm-maven (bare mvn when no wrapper)", () => {
+  const m = detectComponents(fixture({ "pom.xml": "<project/>" })).components.find(
+    (c) => c.kind === "jvm-maven",
+  );
+  expect(m?.paths).toEqual(["**"]);
+  expect(m?.commands.build).toBe("mvn -q -DskipTests compile");
+  expect(m?.commands.test).toBe("mvn -q test");
+});
+
+test("jvm: pom.xml + mvnw → prefers the maven wrapper", () => {
+  const m = detectComponents(
+    fixture({ "pom.xml": "<project/>", mvnw: "#!/bin/sh\n" }),
+  ).components.find((c) => c.kind === "jvm-maven");
+  expect(m?.commands.build).toBe("./mvnw -q -DskipTests compile");
+  expect(m?.commands.test).toBe("./mvnw -q test");
+});
+
+test("jvm: build.gradle(.kts) → jvm-gradle; gradlew preferred when present", () => {
+  for (const f of ["build.gradle", "build.gradle.kts"]) {
+    const g = detectComponents(fixture({ [f]: "" })).components.find(
+      (c) => c.kind === "jvm-gradle",
+    );
+    expect(g?.commands.build).toBe("gradle build -x test");
+    expect(g?.commands.test).toBe("gradle test");
+  }
+  const gw = detectComponents(
+    fixture({ "build.gradle": "", gradlew: "#!/bin/sh\n" }),
+  ).components.find((c) => c.kind === "jvm-gradle");
+  expect(gw?.commands.test).toBe("./gradlew test");
+  expect(gw?.commands.build).toBe("./gradlew build -x test");
+});
+
+test("jvm: no jvm manifest → no jvm component", () => {
+  const comps = detectComponents(fixture({ "README.md": "x" })).components;
+  expect(comps.find((c) => c.kind === "jvm-maven" || c.kind === "jvm-gradle")).toBeUndefined();
+});
+
 test("cargo workspace collapses members into ONE rust component", () => {
   const root = fixture({
     "Cargo.toml": '[workspace]\nmembers = ["src-tauri", "crates/a", "crates/b"]\n',
