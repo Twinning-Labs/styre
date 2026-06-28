@@ -48,35 +48,6 @@ export function detectComponents(repoDir: string): {
 } {
   const components: Component[] = [];
 
-  // --- Node/JS: one component per package.json (skip workspace-member packages already covered).
-  for (const rel of findManifests(repoDir, "package.json")) {
-    const dir = rel.replace(/package\.json$/, "").replace(/\/$/, "");
-    let pkg: { scripts?: Record<string, string> };
-    try {
-      pkg = JSON.parse(readFileSync(join(repoDir, rel), "utf8")) as {
-        scripts?: Record<string, string>;
-      };
-    } catch {
-      // Malformed package.json — skip this component rather than crashing styre setup.
-      continue;
-    }
-    const scripts = pkg.scripts ?? {};
-    const commands: Component["commands"] = {};
-    if (scripts.build) commands.build = "npm run build";
-    if (scripts.test) commands.test = "npm run test";
-    if (scripts.check) commands.check = "npm run check";
-    const isRoot = dir === "";
-    const fe =
-      existsSync(join(repoDir, "svelte.config.js")) || existsSync(join(repoDir, "vite.config.js"));
-    components.push({
-      name: isRoot ? "frontend" : dir.replace(/\//g, "-"),
-      kind: isRoot && fe ? "sveltekit" : "node",
-      // Co-located frontend: root package.json owns src/static, NOT a sibling rust src-tauri.
-      paths: isRoot ? ["src/**", "static/**", "package.json"] : [`${dir}/**`],
-      commands,
-    });
-  }
-
   // --- Python: root manifest → one component (single-module; multi-module deferred §5.4).
   const hasPython = ["pyproject.toml", "setup.py", "requirements.txt"].some((m) =>
     existsSync(join(repoDir, m)),
