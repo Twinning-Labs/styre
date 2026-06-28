@@ -30,7 +30,7 @@ export function detectComponents(repoDir: string): {
   components: Component[];
   repoCommands: Record<string, string>;
 } {
-  return { components: [...runRegistry(repoDir, REGISTRY)], repoCommands: {} };
+  return { components: runRegistry(repoDir, REGISTRY), repoCommands: {} };
 }
 
 const TARGETED_LANG_MANIFESTS: Array<[string, string[]]> = [
