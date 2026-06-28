@@ -95,6 +95,22 @@ test("mergeComponents preserves a scan component the agent didn't mention", () =
   expect(rust?.kind).toBe("rust"); // unchanged from scan
 });
 
+test("mergeComponents rejects path-traversal globs (.. segment)", () => {
+  const scan: Component[] = [{ name: "frontend", kind: "node", paths: ["src/**"], commands: {} }];
+  const proposed: Component[] = [
+    {
+      name: "frontend",
+      kind: "node",
+      paths: ["src/**", "src/../**", "../sibling/**"],
+      commands: {},
+    },
+  ];
+  const fe = mergeComponents(scan, proposed).find((c) => c.name === "frontend");
+  expect(fe?.paths).toContain("src/**");
+  expect(fe?.paths).not.toContain("src/../**");
+  expect(fe?.paths).not.toContain("../sibling/**");
+});
+
 test("probeCommandExists is false for a missing binary", () => {
   expect(probeCommandExists(process.cwd(), "definitely-not-a-real-binary-xyz --help")).toBe(false);
   expect(probeCommandExists(process.cwd(), "git status")).toBe(true);
