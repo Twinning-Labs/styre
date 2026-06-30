@@ -194,3 +194,25 @@ test("ruby component routes .rb/.rake/.gemspec files; does not match .py", () =>
   // must not match a Python file
   expect(matchesComponent(ruby, "a.py")).toBe(false);
 });
+
+// ─── WO-3 Task 2: PHP file-identity routing ──────────────────────────────────
+
+test("EXTENSIONS_BY_KIND has php entry with .php", () => {
+  expect(EXTENSIONS_BY_KIND.php).toContain(".php");
+});
+
+test("php component routes .php files (incl. test file); does not match .rb", () => {
+  const php: Component = {
+    name: "php",
+    kind: "php",
+    paths: ["**"],
+    commands: { test: "./vendor/bin/phpunit" },
+    extensions: [".php"],
+  };
+  // regular source file
+  expect(matchesComponent(php, "src/a.php")).toBe(true);
+  // test file — matches testFilePattern AND extension
+  expect(matchesComponent(php, "src/CalculatorTest.php")).toBe(true);
+  // must not match a Ruby file
+  expect(matchesComponent(php, "a.rb")).toBe(false);
+});

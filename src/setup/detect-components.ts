@@ -43,6 +43,7 @@ const TARGETED_LANG_MANIFESTS: Array<[string, string[]]> = [
   ["jvm-maven", ["pom.xml"]],
   ["jvm-gradle", ["build.gradle", "build.gradle.kts"]],
   ["ruby", ["Gemfile"]],
+  ["php", ["composer.json"]],
 ];
 
 /** §5.4 loud note: warn when a targeted-language manifest exists only in subdirs (no root match),
