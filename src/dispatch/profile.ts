@@ -64,6 +64,8 @@ export const CommandValueSchema = z.union([
 ]);
 export type CommandValue = z.infer<typeof CommandValueSchema>;
 
+/** A single detected stack component. schemaVersion 3 adds per-component `extensions[]` for
+ *  file-identity routing and the optional detect-only `prepare` field (stored, never run by styre). */
 export const ComponentSchema = z.object({
   name: z.string().min(1),
   kind: z.string().min(1),

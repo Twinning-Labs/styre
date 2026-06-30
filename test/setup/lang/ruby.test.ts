@@ -31,8 +31,7 @@ test("ruby: Gemfile + .rspec → bundle exec rspec; every field correct", () => 
   expect(c.kind).toBe("ruby");
   expect(c.paths).toEqual(["**"]);
   expect(c.commands.test).toBe("bundle exec rspec");
-  // prepare is on the object at runtime even before the type carries it
-  expect((c as Record<string, unknown>).prepare).toBe("bundle install");
+  expect(c.prepare).toBe("bundle install");
   expect(c.testFilePattern).toBe("_(test|spec)\\.rb$");
 });
 
@@ -42,7 +41,7 @@ test("ruby: Gemfile + spec/ dir → bundle exec rspec", () => {
   expect(components).toHaveLength(1);
   const [c] = components;
   expect(c.commands.test).toBe("bundle exec rspec");
-  expect((c as Record<string, unknown>).prepare).toBe("bundle install");
+  expect(c.prepare).toBe("bundle install");
   expect(c.testFilePattern).toBe("_(test|spec)\\.rb$");
   expect(c.kind).toBe("ruby");
   expect(c.paths).toEqual(["**"]);
@@ -54,7 +53,7 @@ test("ruby: Gemfile + Rakefile (no .rspec, no spec/) → bundle exec rake test",
   expect(components).toHaveLength(1);
   const [c] = components;
   expect(c.commands.test).toBe("bundle exec rake test");
-  expect((c as Record<string, unknown>).prepare).toBe("bundle install");
+  expect(c.prepare).toBe("bundle install");
   expect(c.testFilePattern).toBe("_(test|spec)\\.rb$");
   expect(c.kind).toBe("ruby");
   expect(c.paths).toEqual(["**"]);
@@ -66,7 +65,7 @@ test("ruby: Gemfile only (no .rspec, no spec/, no Rakefile) → test: { unavaila
   expect(components).toHaveLength(1);
   const [c] = components;
   expect(c.commands.test).toEqual({ unavailable: true });
-  expect((c as Record<string, unknown>).prepare).toBe("bundle install");
+  expect(c.prepare).toBe("bundle install");
   expect(c.testFilePattern).toBe("_(test|spec)\\.rb$");
   expect(c.kind).toBe("ruby");
   expect(c.paths).toEqual(["**"]);
