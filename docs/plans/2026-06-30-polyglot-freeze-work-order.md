@@ -112,7 +112,7 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 ### WO-4 · Command discovery sources (freeze §9.5)
 - [x] ✅ Conventions / ecosystem-default rung (hardcoded commands per LangDef)
 - [x] ✅ Operator-confirm + `{unavailable}` ladder (`resolve-commands.ts`)
-- [ ] ⬜ **Consume `AGENTS.md`** as a command source — *gated on confirming AGENTS.md adoption/governance (freeze §13)*
+- [x] ✅ **Consume `AGENTS.md`** as a command source — read root AGENTS.md (symlink-safe `lstatSync`, 16 KB cap) → inject into the discovery prompt via `{{agents_md}}`; commands ride the existing M-A gate (headless value needs `--trust-agent-commands`). Commit `de4c80d` (TDD + Opus security crux + overall review). *(§13 adoption/governance number still to confirm; Phase-1 sequencing made this an independent start.)*
 - [ ] ⬜ **Read the repo's CI** — scoped to **extracting test/build/lint commands from the primary non-matrix workflow**, agent-drafts → operator-confirms. *Pending the Q2 pilot (does it beat AGENTS.md+conventions in OSS?). The env-replay slice is commercial, NOT here.*
   - [ ] 🔵 *Deferred follow-ups (out of this scope):* CI matrix collapse (Q2), matrix-config selection, deploy/publish/notify filtering across CI styles (Q3).
 - [ ] ⬜ **Precedence wiring:** CI > `AGENTS.md` > conventions; agent drafts → confirm → frozen
@@ -188,9 +188,9 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 
 ## Part D — Done-vs-remaining at a glance
 
-- **Fully landed & aligned (✅):** WO-1 (M-A security), WO-2 (M-C1 registry/engine/invariants), the 6 detectors + SKIP + warning in WO-3, the conventions rung + confirm ladder in WO-4, Rust reactor in WO-8, the per-verify recompute in WO-7, the existing PR-body gap surfacing + MERGE gate in WO-11, and **WO-13's stack-grounded prompt decomposition (commits `5dc7960`, `38b9603`; TDD + two Opus reviews)**.
+- **Fully landed & aligned (✅):** WO-1 (M-A security), WO-2 (M-C1 registry/engine/invariants), the 6 detectors + SKIP + warning in WO-3, the conventions rung + confirm ladder in WO-4, Rust reactor in WO-8, the per-verify recompute in WO-7, the existing PR-body gap surfacing + MERGE gate in WO-11, **WO-13's stack-grounded prompt decomposition (commits `5dc7960`, `38b9603`)**, and **WO-4's AGENTS.md command source (commit `de4c80d`; TDD + Opus security crux + overall review)**.
 - **Interim (🟡 — landed, mechanism to be replaced):** folder-glob routing (WO-5/WO-6), the Node co-located carve, the Node per-member walk.
-- **In-feature, not started (⬜):** Ruby/PHP/`prepare` (WO-3); AGENTS.md + scoped CI-reading (WO-4); file-identity rung-1 **and the Bash-allowlist/test-file re-expression + schemaVersion bump** (WO-5); gates/triggers + run-more-when-unsure + the cost branch (WO-6); Python/Go/JVM non-root via identity (WO-9); explicit-artifact contract gates (WO-10 items 1–2).
+- **In-feature, not started (⬜):** Ruby/PHP/`prepare` (WO-3); scoped CI-reading + precedence wiring (WO-4; AGENTS.md half done); file-identity rung-1 **and the Bash-allowlist/test-file re-expression + schemaVersion bump** (WO-5); gates/triggers + run-more-when-unsure + the cost branch (WO-6); Python/Go/JVM non-root via identity (WO-9); explicit-artifact contract gates (WO-10 items 1–2).
 - **Named follow-on milestone (🔵 first-class, separate):** **Milestone M-D — cross-stack design/implement coordination** (implement-time cross-stack context, coupled-cluster one-context, dependency-graph blast-radius, implicit-contract design-gate). Modifies the closed S1–S10 catalog; needs its own spec + `control-loop.md` revision + review; depends on WO-13.
 - **Out-of-feature (🔵 — reframe / run-loop / commercial):** persist+watch the graph (WO-7); JVM/Go reactors (WO-8); rung-2/rung-3 classification (WO-5); the pre-PR interactive hold (WO-11); the OSS env-bubble belongs to the run-loop (WO-12).
 - **Rejected (❌):** `scopeColocatedRoots` (WO-9); commercial env-provisioning (WO-12).

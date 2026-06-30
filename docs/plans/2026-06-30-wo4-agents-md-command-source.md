@@ -45,7 +45,7 @@ Under **bare headless (no flag)**, AGENTS.md influences the prompt but all resul
 - Modify: `prompts/setup-discover.md` (add the `{{agents_md}}` block)
 - Test: `test/setup/agents-md.test.ts` (new — unit), `test/setup/discover.test.ts` (add integration + headless-no-op cases)
 
-**Interface:** `export function readAgentsMd(repoDir: string): string` — root `AGENTS.md`, **rejects symlinks** (`lstatSync`), capped at `AGENTS_MD_CAP` (16384) bytes with a `\n…[truncated]` marker; `""` when absent/symlink/unreadable/not-a-file. Never throws.
+**Interface:** `export function readAgentsMd(repoDir: string): string` — root `AGENTS.md`, **rejects symlinks** (`lstatSync`), capped at `AGENTS_MD_CAP` (16384 UTF-16 code units, ~16 KB) with a `\n…[truncated]` marker; `""` when absent/symlink/unreadable/not-a-file. Never throws.
 
 - [ ] **Step 1: Write the failing unit tests** — `test/setup/agents-md.test.ts`:
 

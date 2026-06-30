@@ -1,8 +1,8 @@
 import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-/** Cap injected AGENTS.md content — bounds prompt growth and prompt-injection surface (not a
- *  security control). */
+/** Cap injected AGENTS.md content (UTF-16 code units; ~16 KB) — bounds prompt growth and
+ *  prompt-injection surface (not a security control). */
 export const AGENTS_MD_CAP = 16_384;
 
 /** Read the repo's root AGENTS.md (the agent-onboarding standard). Returns "" when absent,
