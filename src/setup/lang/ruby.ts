@@ -22,7 +22,11 @@ export const rubyDef: LangDef = {
         kind: "ruby",
         paths: ["**"],
         commands: rubyTestCommand(repoDir),
-        testFilePattern: "_(test|spec)\\.rb$",
+        // Anchored to spec/|test/ dir: A1 only credits a *_test.rb/*_spec.rb
+        // that bare rspec/rake actually discovers (inside spec/ or test/).
+        // A co-located test (e.g. lib/foo_spec.rb) fails A1 loud rather than
+        // passing vacuously when rspec/rake never ran it.
+        testFilePattern: "(^|/)(spec|test)/.*_(test|spec)\\.rb$",
         prepare: "bundle install",
       },
     ];
