@@ -154,6 +154,12 @@ test("stackSummary is empty for no components; lists kind/name/paths/test otherw
   expect(s).toContain("sveltekit");
   expect(s).toContain("go test ./...");
   expect(s).toContain("src/**");
+  // pin the rendered line shape (a format regression guard, not just substrings)
+  expect(s.split("\n")[0]).toBe("- go (kind: go) — paths: **; test: go test ./...");
+  // the `; test: …` segment is omitted when the component has no (or an unavailable) test command
+  expect(stackSummary([{ name: "x", kind: "go", paths: ["**"], commands: {} }])).toBe(
+    "- x (kind: go) — paths: **",
+  );
 });
 
 test("designVars + extractVars carry detected_stacks from the profile components", () => {
