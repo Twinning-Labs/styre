@@ -28,8 +28,11 @@ export const phpDef: LangDef = {
         kind: "php",
         paths: ["**"],
         commands: { test: usesPest(repoDir) ? "./vendor/bin/pest" : "./vendor/bin/phpunit" },
-        // PSR *Test.php co-located outside tests/ — pattern covers both
-        testFilePattern: "Test\\.php$",
+        // Anchored to tests?/ dir: A1 only credits a *Test.php that bare
+        // phpunit/pest actually discovers (inside tests/ or test/).
+        // A co-located test (e.g. src/CalculatorTest.php) fails A1 loud
+        // rather than passing vacuously when phpunit never ran it.
+        testFilePattern: "(^|/)tests?/.*Test\\.php$",
         prepare: "composer install",
       },
     ];

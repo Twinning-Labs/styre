@@ -211,7 +211,7 @@ test("php component routes .php files (incl. test file); does not match .rb", ()
   };
   // regular source file
   expect(matchesComponent(php, "src/a.php")).toBe(true);
-  // test file — matches testFilePattern AND extension
+  // .php extension routes it; testFilePattern is asserted in php.test.ts, not consulted by matchesComponent
   expect(matchesComponent(php, "src/CalculatorTest.php")).toBe(true);
   // must not match a Ruby file
   expect(matchesComponent(php, "a.rb")).toBe(false);
