@@ -18,6 +18,7 @@ test("assertResolved throws for a component with an undefined must-have", () => 
       kind: "node",
       paths: ["src/**"],
       commands: { build: "npm run build" }, // test and check are absent (undefined)
+      extensions: [],
     },
   ]);
   expect(() => assertResolved(profile)).toThrow(
@@ -36,6 +37,7 @@ test("assertResolved does not throw when must-haves are { unavailable: true }", 
         test: { unavailable: true },
         check: { unavailable: true },
       },
+      extensions: [],
     },
   ]);
   expect(() => assertResolved(profile)).not.toThrow();
@@ -52,6 +54,7 @@ test("assertResolved does not throw when all must-haves are strings", () => {
         test: "jest",
         check: "eslint .",
       },
+      extensions: [],
     },
   ]);
   expect(() => assertResolved(profile)).not.toThrow();
@@ -64,6 +67,7 @@ test("assertResolved includes the re-run hint in the error message", () => {
       kind: "rust",
       paths: ["src/**"],
       commands: { build: "cargo build" }, // missing test + check
+      extensions: [],
     },
   ]);
   expect(() => assertResolved(profile)).toThrow(/re-run `styre setup`/);

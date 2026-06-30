@@ -1,11 +1,10 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { Component } from "../../dispatch/profile.ts";
-import type { LangDef } from "./types.ts";
+import type { ComponentDraft, LangDef } from "./types.ts";
 
 export const goDef: LangDef = {
   kind: "go",
-  detect(repoDir: string): Component[] {
+  detect(repoDir: string): ComponentDraft[] {
     if (!existsSync(join(repoDir, "go.mod"))) return [];
     return [
       {

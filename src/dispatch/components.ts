@@ -1,6 +1,22 @@
 import { extname } from "node:path";
 import type { Component } from "./profile.ts";
 
+const NODE_EXTS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cts", ".mts"] as const;
+const JVM_EXTS = [".java", ".kt", ".kts", ".scala", ".groovy"] as const;
+
+/** Authoritative map from component `kind` → file extensions that belong to it.
+ *  Built at setup time and materialized into each `Component.extensions[]`.
+ *  Kinds not in this map (custom/unknown) use empty extensions → path-only routing. */
+export const EXTENSIONS_BY_KIND: Record<string, readonly string[]> = {
+  rust: [".rs"],
+  node: NODE_EXTS,
+  sveltekit: [...NODE_EXTS, ".svelte"],
+  python: [".py", ".pyi"],
+  go: [".go"],
+  "jvm-maven": JVM_EXTS,
+  "jvm-gradle": [...JVM_EXTS, ".gradle"],
+};
+
 /** File extensions that identify documentation-only files (conservative prose set).
  *  Files with these extensions are excluded from the advisory sweep (they cannot break code). */
 export const DOCS_EXTS = [".md", ".markdown", ".rst", ".adoc"] as const;
@@ -30,9 +46,18 @@ export function isUnavailable(c: Component, checkType: string): boolean {
   return typeof v === "object" && v.unavailable === true;
 }
 
-/** True if any of the component's path-globs matches `path`. */
-export function matchesComponent(c: Component, path: string): boolean {
-  return c.paths.some((g) => new Bun.Glob(g).match(path));
+/** True iff `file`'s extension is in the component's `extensions[]`, or the component has no
+ *  extensions (undefined or empty → path-only routing; treats custom/unknown kinds as unfiltered).
+ *  Undefined-safe: a fixture without `extensions` is treated the same as `extensions: []`. */
+export function extMatches(c: Component, file: string): boolean {
+  const exts = c.extensions ?? [];
+  if (exts.length === 0) return true;
+  return exts.includes(extname(file).toLowerCase());
+}
+
+/** True iff the file is owned by the component: extension matches AND at least one path-glob matches. */
+export function matchesComponent(c: Component, file: string): boolean {
+  return extMatches(c, file) && c.paths.some((g) => new Bun.Glob(g).match(file));
 }
 
 /** Components whose paths the changed-file set touches (union — a file matching several

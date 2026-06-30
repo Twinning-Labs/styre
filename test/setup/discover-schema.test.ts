@@ -12,12 +12,14 @@ test("mergeComponents keeps scan's workspace paths but adopts agent's refined bo
       kind: "rust",
       paths: ["src-tauri/**", "crates/**"],
       commands: { test: "cargo test --workspace" },
+      extensions: [],
     },
     {
       name: "frontend",
       kind: "node",
       paths: ["src/**", "static/**", "package.json"],
       commands: { build: "npm run build" },
+      extensions: [],
     },
   ];
   const proposed: Component[] = [
@@ -26,12 +28,14 @@ test("mergeComponents keeps scan's workspace paths but adopts agent's refined bo
       kind: "rust",
       paths: ["src-tauri/**", "crates/**"],
       commands: { test: "cargo test --workspace", check: "cargo clippy --workspace" },
+      extensions: [],
     },
     {
       name: "frontend",
       kind: "sveltekit",
       paths: ["src/**", "static/**", "package.json", "vite.config.js"],
       commands: { build: "vite build", check: "svelte-check" },
+      extensions: [],
     },
   ];
   const merged = mergeComponents(scan, proposed);
@@ -43,14 +47,17 @@ test("mergeComponents keeps scan's workspace paths but adopts agent's refined bo
 });
 
 test("mergeComponents drops agent-proposed components not in scan (scan anchors existence)", () => {
-  const scan: Component[] = [{ name: "frontend", kind: "node", paths: ["src/**"], commands: {} }];
+  const scan: Component[] = [
+    { name: "frontend", kind: "node", paths: ["src/**"], commands: {}, extensions: [] },
+  ];
   const proposed: Component[] = [
-    { name: "frontend", kind: "sveltekit", paths: ["src/**"], commands: {} },
+    { name: "frontend", kind: "sveltekit", paths: ["src/**"], commands: {}, extensions: [] },
     {
       name: "invented-backend",
       kind: "go",
       paths: ["server/**"],
       commands: { test: "go test ./..." },
+      extensions: [],
     },
   ];
   const merged = mergeComponents(scan, proposed);
@@ -60,7 +67,13 @@ test("mergeComponents drops agent-proposed components not in scan (scan anchors 
 
 test("mergeComponents rejects unanchored agent globs (** prefix) but keeps scan anchors", () => {
   const scan: Component[] = [
-    { name: "frontend", kind: "node", paths: ["src/**", "package.json"], commands: {} },
+    {
+      name: "frontend",
+      kind: "node",
+      paths: ["src/**", "package.json"],
+      commands: {},
+      extensions: [],
+    },
   ];
   const proposed: Component[] = [
     {
@@ -68,6 +81,7 @@ test("mergeComponents rejects unanchored agent globs (** prefix) but keeps scan 
       kind: "sveltekit",
       paths: ["src/**", "**/*.ts", "**/config.js"],
       commands: {},
+      extensions: [],
     },
   ];
   const merged = mergeComponents(scan, proposed);
@@ -82,11 +96,17 @@ test("mergeComponents rejects unanchored agent globs (** prefix) but keeps scan 
 
 test("mergeComponents preserves a scan component the agent didn't mention", () => {
   const scan: Component[] = [
-    { name: "rust-core", kind: "rust", paths: ["src-tauri/**"], commands: { test: "cargo test" } },
-    { name: "frontend", kind: "node", paths: ["src/**"], commands: {} },
+    {
+      name: "rust-core",
+      kind: "rust",
+      paths: ["src-tauri/**"],
+      commands: { test: "cargo test" },
+      extensions: [],
+    },
+    { name: "frontend", kind: "node", paths: ["src/**"], commands: {}, extensions: [] },
   ];
   const proposed: Component[] = [
-    { name: "frontend", kind: "sveltekit", paths: ["src/**"], commands: {} },
+    { name: "frontend", kind: "sveltekit", paths: ["src/**"], commands: {}, extensions: [] },
     // rust-core deliberately absent from agent proposal
   ];
   const merged = mergeComponents(scan, proposed);
@@ -96,13 +116,16 @@ test("mergeComponents preserves a scan component the agent didn't mention", () =
 });
 
 test("mergeComponents rejects path-traversal globs (.. segment)", () => {
-  const scan: Component[] = [{ name: "frontend", kind: "node", paths: ["src/**"], commands: {} }];
+  const scan: Component[] = [
+    { name: "frontend", kind: "node", paths: ["src/**"], commands: {}, extensions: [] },
+  ];
   const proposed: Component[] = [
     {
       name: "frontend",
       kind: "node",
       paths: ["src/**", "src/../**", "../sibling/**"],
       commands: {},
+      extensions: [],
     },
   ];
   const fe = mergeComponents(scan, proposed).find((c) => c.name === "frontend");

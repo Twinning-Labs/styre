@@ -138,12 +138,13 @@ test("implementVars sources test_command from the unit's impacted components", (
 });
 
 const COMPS: Component[] = [
-  { name: "go", kind: "go", paths: ["**"], commands: { test: "go test ./..." } },
+  { name: "go", kind: "go", paths: ["**"], commands: { test: "go test ./..." }, extensions: [] },
   {
     name: "frontend",
     kind: "sveltekit",
     paths: ["src/**", "static/**", "package.json"],
     commands: { test: "npm run test" },
+    extensions: [],
   },
 ];
 
@@ -157,9 +158,9 @@ test("stackSummary is empty for no components; lists kind/name/paths/test otherw
   // pin the rendered line shape (a format regression guard, not just substrings)
   expect(s.split("\n")[0]).toBe("- go (kind: go) — paths: **; test: go test ./...");
   // the `; test: …` segment is omitted when the component has no (or an unavailable) test command
-  expect(stackSummary([{ name: "x", kind: "go", paths: ["**"], commands: {} }])).toBe(
-    "- x (kind: go) — paths: **",
-  );
+  expect(
+    stackSummary([{ name: "x", kind: "go", paths: ["**"], commands: {}, extensions: [] }]),
+  ).toBe("- x (kind: go) — paths: **");
 });
 
 test("designVars + extractVars carry detected_stacks from the profile components", () => {

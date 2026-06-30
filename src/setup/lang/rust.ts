@@ -1,8 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Component } from "../../dispatch/profile.ts";
 import { findManifests, safeMember } from "../manifests.ts";
-import type { LangDef } from "./types.ts";
+import type { ComponentDraft, LangDef } from "./types.ts";
 
 /** Parse `members = [ "a", "b" ]` from a Cargo [workspace] manifest (best-effort). */
 function cargoWorkspaceMembers(cargoTomlAbs: string): string[] | null {
@@ -51,7 +50,7 @@ function collapseWorkspaceGlobs(members: string[]): string[] {
 
 export const rustDef: LangDef = {
   kind: "rust",
-  detect(repoDir: string): Component[] {
+  detect(repoDir: string): ComponentDraft[] {
     const cargoRoot = join(repoDir, "Cargo.toml");
     const workspaceMembers = existsSync(cargoRoot) ? cargoWorkspaceMembers(cargoRoot) : null;
     if (workspaceMembers) {
@@ -66,7 +65,7 @@ export const rustDef: LangDef = {
         },
       ];
     }
-    const components: Component[] = [];
+    const components: ComponentDraft[] = [];
     for (const rel of findManifests(repoDir, "Cargo.toml")) {
       const dir = rel.replace(/Cargo\.toml$/, "").replace(/\/$/, "");
       components.push({
