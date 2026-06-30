@@ -4,6 +4,7 @@ import {
   commandFor,
   extMatches,
   impactedComponents,
+  isInertFile,
   isScriptRunner,
   isUnavailable,
   matchesComponent,
@@ -139,6 +140,22 @@ test("extMatches: undefined or empty extensions → path-only fallback (always t
   expect(extMatches(noExts, "anything.yaml")).toBe(true);
   expect(extMatches(noExts, "Makefile")).toBe(true);
   expect(extMatches(undefinedExts, "anything.yaml")).toBe(true);
+});
+
+// ─── WO-6 Task 1: isInertFile ────────────────────────────────────────────────
+
+test("isInertFile: true for license/notice/docs files", () => {
+  expect(isInertFile("LICENSE")).toBe(true);
+  expect(isInertFile("docs/x.md")).toBe(true);
+  expect(isInertFile("sub/NOTICE")).toBe(true);
+});
+
+test("isInertFile: false for build-affecting files that must stay swept", () => {
+  expect(isInertFile(".editorconfig")).toBe(false);
+  expect(isInertFile(".gitignore")).toBe(false);
+  expect(isInertFile("config.yaml")).toBe(false);
+  expect(isInertFile("Cargo.lock")).toBe(false);
+  expect(isInertFile("src/a.py")).toBe(false);
 });
 
 test("matchesComponent: path still scopes the component (ext matches but path doesn't)", () => {

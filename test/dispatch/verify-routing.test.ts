@@ -75,9 +75,9 @@ test("docs-only diff with no owned files passes for non-behavioral unit", async 
   await advanceOneStep(db, ticketId, registry); // verify:check test → pure-docs path
   const sig = listByUnit(db, unit.id).find((s) => s.signal_type === "test");
   db.close();
-  // pure-docs + non-behavioral → pass (no hard gate ran, no sweep triggered)
+  // pure-inert + non-behavioral → pass (no hard gate ran, no sweep triggered)
   expect(sig?.result).toBe("pass");
-  expect(JSON.parse(sig?.detail_json ?? "{}").reason).toBe("docs-only");
+  expect(JSON.parse(sig?.detail_json ?? "{}").reason).toBe("inert-only");
 });
 
 test("a stack with a real command runs and passes", async () => {
@@ -655,6 +655,153 @@ test("advisory sweep silently skips absent command on untouched stack (no error)
   db.close();
   expect(testSig?.result).toBe("pass"); // hard gate on app passed
   expect(sweepSig).toBeUndefined(); // svc absent test → skipped, no signal or error
+});
+
+// ── WO-6 Task 1: inert-file skip ──────────────────────────────────────────────
+
+test("inert-only diff (LICENSE) non-behavioral → passes via inert-only path, no sweep", async () => {
+  // LICENSE is inert → goes through the pure-inert pass path, no sweep runs.
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    behavioral: 0,
+    verifyCheckTypes: ["test"],
+  });
+  const runner = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "LICENSE"), "MIT License\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: "{}",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const { profile, worktreeRoot } = rig(repo, {
+    components: [
+      { name: "app", kind: "app", paths: ["app/**"], commands: { test: "true" } },
+      { name: "svc", kind: "svc", paths: ["svc/**"], commands: { test: "false" } },
+    ],
+  });
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile,
+    worktreeRoot,
+  });
+  await advanceOneStep(db, ticketId, registry); // implement:dispatch (writes LICENSE)
+  await advanceOneStep(db, ticketId, registry); // verify:check test → pure-inert path
+  const sigs = listByUnit(db, unit.id);
+  const testSig = sigs.find((s) => s.signal_type === "test");
+  const sweepSig = sigs.find((s) => s.signal_type === "ran-all-unowned");
+  db.close();
+  // pure-inert + non-behavioral → pass
+  expect(testSig?.result).toBe("pass");
+  expect(JSON.parse(testSig?.detail_json ?? "{}").reason).toBe("inert-only");
+  // no sweep should have run
+  expect(sweepSig).toBeUndefined();
+});
+
+test("inert-only diff (LICENSE) behavioral → behavioral-no-code fail", async () => {
+  // A behavioral unit whose entire diff is LICENSE (inert) must still fail behavioral-no-code.
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    behavioral: 1,
+    verifyCheckTypes: ["test"],
+  });
+  const runner = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "LICENSE"), "MIT License\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: "{}",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const { profile, worktreeRoot } = rig(repo, {
+    components: [{ name: "app", kind: "app", paths: ["src/**"], commands: { test: "true" } }],
+  });
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile,
+    worktreeRoot,
+  });
+  await advanceOneStep(db, ticketId, registry); // implement:dispatch (writes LICENSE)
+  await advanceOneStep(db, ticketId, registry); // verify:check test → behavioral-no-code
+  const sig = listByUnit(db, unit.id).find((s) => s.signal_type === "test");
+  db.close();
+  expect(sig?.result).toBe("fail");
+  expect(JSON.parse(sig?.detail_json ?? "{}").reason).toBe("behavioral-no-code");
+});
+
+test("non-inert unowned file (cfg.yaml) still triggers advisory sweep", async () => {
+  // other/cfg.yaml is unowned and non-inert → sweep must still run.
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    behavioral: 0,
+    verifyCheckTypes: ["test"],
+  });
+  const runner = new FakeAgentRunner((input) => {
+    mkdirSync(join(input.cwd, "other"), { recursive: true });
+    writeFileSync(join(input.cwd, "other", "cfg.yaml"), "env: prod\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: "{}",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const { profile, worktreeRoot } = rig(repo, {
+    components: [
+      { name: "app", kind: "app", paths: ["app/**"], commands: { test: "true" } },
+      { name: "svc", kind: "svc", paths: ["svc/**"], commands: { test: "false" } },
+    ],
+  });
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile,
+    worktreeRoot,
+  });
+  await advanceOneStep(db, ticketId, registry); // implement:dispatch (writes other/cfg.yaml)
+  await advanceOneStep(db, ticketId, registry); // verify:check test → sweep runs
+  const sigs = listByUnit(db, unit.id);
+  const testSig = sigs.find((s) => s.signal_type === "test");
+  const sweepSig = sigs.find((s) => s.signal_type === "ran-all-unowned");
+  db.close();
+  expect(testSig?.result).toBe("pass");
+  // svc fails sweep → ran-all-unowned signal
+  expect(sweepSig).toBeTruthy();
+  expect(JSON.parse(sweepSig?.detail_json ?? "{}").component).toBe("svc");
 });
 
 test("renderPrBody renders ran-all-unowned under its own section, separate from untested stacks", async () => {

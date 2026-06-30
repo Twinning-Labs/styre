@@ -1,4 +1,4 @@
-import { extname } from "node:path";
+import { basename, extname } from "node:path";
 import type { Component } from "./profile.ts";
 
 const NODE_EXTS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cts", ".mts"] as const;
@@ -25,6 +25,25 @@ export const DOCS_EXTS = [".md", ".markdown", ".rst", ".adoc"] as const;
  *  Unowned docs files skip the advisory sweep — they cannot break a foreign stack. */
 export function isDocsFile(file: string): boolean {
   return (DOCS_EXTS as readonly string[]).includes(extname(file).toLowerCase());
+}
+
+/** Basenames of clearly-non-build-affecting files (strict set — licence/attribution/git metadata only).
+ *  Deliberately EXCLUDED: .editorconfig, .gitignore, .gitattributes, and all .json/.yaml/.toml/.lock/.mod
+ *  — those are build-affecting and must remain swept. */
+export const INERT_BASENAMES = new Set([
+  "LICENSE",
+  "LICENSE.txt",
+  "NOTICE",
+  "AUTHORS",
+  "COPYING",
+  ".mailmap",
+]);
+
+/** True iff `file` is inert: a docs file (by extension) OR a known-inert basename.
+ *  Used both to skip the advisory sweep AND as the zero-gate pure-inert pass condition —
+ *  the set must therefore contain ONLY files that can never flip any stack's gate. */
+export function isInertFile(file: string): boolean {
+  return isDocsFile(file) || INERT_BASENAMES.has(basename(file));
 }
 
 /** True if `cmd` is itself a shell invocation (`bash x.sh`, `./x`) — it cannot be tightly
