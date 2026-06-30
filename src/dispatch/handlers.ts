@@ -140,7 +140,7 @@ export function renderPrBody(
           ...risks.map((s) => `- ${JSON.parse(s.detail_json ?? "{}").component ?? "?"}`),
         ]
       : [];
-  // Advisory sweep failures: unowned non-docs files triggered a precautionary run of an untouched
+  // Advisory sweep failures: unowned non-inert files triggered a precautionary run of an untouched
   // stack that failed. Surfaced here for reviewer awareness; never a hard gate.
   const sweeps = allSignals.filter((s) => s.signal_type === "ran-all-unowned");
   const sweepLines =
@@ -546,11 +546,16 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     // as a precaution so the unowned change cannot slip through silently. Failures are surfaced
     // via "ran-all-unowned" signals and appear in the PR body. The sweep NEVER fails/wedges the
     // unit — absent commands on swept stacks are silently skipped (no "check-absent" error).
+    // Cost is recorded as a "sweep-cost" (result:"pass") signal for every triggered sweep so
+    // the T1 frequency risk (freeze §13 #1) becomes observable data.
     if (unownedNonInert.length > 0) {
       const untouched = components.filter((c) => !realImpacted.includes(c));
+      const sweepStart = Date.now();
+      let stacksSwept = 0;
       for (const c of untouched) {
         const cmd = commandFor(c, checkType);
         if (cmd === undefined) continue; // absent on untouched stack → skip, no error
+        stacksSwept++;
         const sweepRun = await runCommand(cmd, {
           cwd: worktreePath,
           timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
@@ -570,6 +575,19 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           });
         }
       }
+      insertSignal(ctx.db, {
+        ticketId: ctx.ticket.id,
+        workUnitId: ctx.workUnitId,
+        branchHeadSha: latestSha,
+        signalType: "sweep-cost",
+        result: "pass",
+        detail: {
+          checkType,
+          stacksSwept,
+          wallClockMs: Date.now() - sweepStart,
+          unownedTriggers: unownedNonInert.length,
+        },
+      });
     }
 
     insertSignal(ctx.db, {
