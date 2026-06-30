@@ -9,6 +9,15 @@ is behavioral (and how it's tested), the verify check-types, and dependencies �
 
 Project stack notes: {{stack}}
 
+## Detected stacks (from `styre setup` — ground truth)
+
+{{detected_stacks}}
+
+When a work unit is specific to one of these stacks, use that stack's **kind** as the unit `kind`
+(e.g. `go`, `sveltekit`) rather than a generic label. Cross-cutting kinds (`docs`, `config`,
+`migration`) remain valid. If a unit must change files in **more than one** of these stacks, say so
+explicitly in the plan — it is a cross-stack change the build system will need to verify carefully.
+
 ## Runtime context (from the project profile — treat as ground truth)
 
 - Topology: {{runtime_topology}} — {{runtime_topology_detail}}

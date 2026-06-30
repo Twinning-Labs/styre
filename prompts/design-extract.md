@@ -5,10 +5,19 @@ files it references) and decompose it into an ordered list of work units the bui
 implement and verify one at a time. Do NOT write or edit any files — your only output is the
 sidecar block described below.
 
+## Detected stacks (from `styre setup` — ground truth)
+
+{{detected_stacks}}
+
+When a work unit is specific to one of these stacks, use that stack's **kind** as the unit `kind`
+(e.g. `go`, `sveltekit`) rather than a generic label. Cross-cutting kinds (`docs`, `config`,
+`migration`) remain valid. If a unit must change files in **more than one** of these stacks, say so
+explicitly in the plan — it is a cross-stack change the build system will need to verify carefully.
+
 For each work unit decide:
 - **seq**: 1-based position. Number units 1..N with no gaps. A unit may only depend on
   strictly-earlier seqs (`depends_on`).
-- **kind**: the work type, e.g. `backend`, `frontend`, `data`, `docs`, `config`.
+- **kind**: the work type — **prefer one of the project's detected stacks above** when the unit is stack-specific (e.g. `go`, `sveltekit`); otherwise a role like `docs`, `config`, `migration`.
 - **title** / **description**: a short title and a one-paragraph description.
 - **behavioral**: `true` if the unit changes observable program behavior and therefore must be
   covered by a test; `false` for docs-only, config-only, or pure-scaffolding units that cannot
