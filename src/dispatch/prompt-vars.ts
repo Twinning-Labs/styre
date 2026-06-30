@@ -22,6 +22,14 @@ export function stackSummary(components: Component[]): string {
     .join("\n");
 }
 
+/** The `{{detected_stacks}}` prompt value: the component summary, or an explicit no-detect note so
+ *  the prompt's stack guidance still reads sensibly on repos `styre setup` could not classify. */
+function detectedStacksVar(profile: Profile): string {
+  return profile.components.length > 0
+    ? stackSummary(profile.components)
+    : "(no stacks auto-detected — infer the stack(s) and their build/test commands from the repo and its CI)";
+}
+
 function runtimeVars(profile: Profile): Record<string, string> {
   const rc = profile.runtimeContext;
   return {
@@ -58,7 +66,7 @@ export function extractVars(
     ident: ticket.ident,
     title: ticket.title ?? "",
     slug: profile.slug,
-    detected_stacks: stackSummary(profile.components),
+    detected_stacks: detectedStacksVar(profile),
     ...profile.promptVars,
     ...runtimeVars(profile),
   };
@@ -74,7 +82,7 @@ export function designVars(
     description: ticket.description ?? "",
     slug: profile.slug,
     stack: "",
-    detected_stacks: stackSummary(profile.components),
+    detected_stacks: detectedStacksVar(profile),
     ...profile.promptVars,
     ...runtimeVars(profile),
   };

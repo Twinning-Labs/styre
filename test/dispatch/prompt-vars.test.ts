@@ -172,7 +172,9 @@ test("designVars + extractVars carry detected_stacks from the profile components
   expect(dv.stack).toBe(""); // {{stack}} (free-text note) unchanged; no promptVars.stack in this fixture
 });
 
-test("detected_stacks is empty when the profile has no components", () => {
+test("detected_stacks falls back to a no-detect note when the profile has no components", () => {
   const profile = parseProfile({ slug: "d", targetRepo: "/t" });
-  expect(extractVars({ ident: "E", title: "T" }, profile).detected_stacks).toBe("");
+  const v = extractVars({ ident: "E", title: "T" }, profile).detected_stacks;
+  expect(v).toContain("no stacks auto-detected");
+  expect(stackSummary([])).toBe(""); // the pure helper still returns "" — the fallback is var-level
 });
