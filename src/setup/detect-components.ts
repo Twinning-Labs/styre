@@ -19,6 +19,8 @@ export function runRegistry(repoDir: string, registry: LangDef[]): Component[] {
         if (typeof v === "string" && !isCommandSafe(v))
           throw new Error(`engine: unsafe command for ${c.name}.${k}: ${v}`);
       }
+      if (c.prepare !== undefined && !isCommandSafe(c.prepare))
+        throw new Error(`engine: unsafe prepare command for ${c.name}: ${c.prepare}`);
       const paths = c.paths.filter(isSafePath);
       if (paths.length === 0) continue;
       out.push({ ...c, paths, extensions: [...(EXTENSIONS_BY_KIND[c.kind] ?? [])] });
@@ -40,6 +42,7 @@ const TARGETED_LANG_MANIFESTS: Array<[string, string[]]> = [
   ["go", ["go.mod"]],
   ["jvm-maven", ["pom.xml"]],
   ["jvm-gradle", ["build.gradle", "build.gradle.kts"]],
+  ["ruby", ["Gemfile"]],
 ];
 
 /** §5.4 loud note: warn when a targeted-language manifest exists only in subdirs (no root match),

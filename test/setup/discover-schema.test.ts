@@ -3,7 +3,11 @@ import { existsSync, mkdtempSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Component } from "../../src/dispatch/profile.ts";
-import { mergeComponents, probeCommandExists } from "../../src/setup/discover-schema.ts";
+import {
+  DiscoverSchema,
+  mergeComponents,
+  probeCommandExists,
+} from "../../src/setup/discover-schema.ts";
 
 test("mergeComponents keeps scan's workspace paths but adopts agent's refined boundaries/commands", () => {
   const scan: Component[] = [
@@ -132,6 +136,53 @@ test("mergeComponents rejects path-traversal globs (.. segment)", () => {
   expect(fe?.paths).toContain("src/**");
   expect(fe?.paths).not.toContain("src/../**");
   expect(fe?.paths).not.toContain("../sibling/**");
+});
+
+// ─── WO-3 Task 1: prepare plumbing ───────────────────────────────────────────
+
+test("mergeComponents carries the scanned prepare field (genuinely red until carry lands)", () => {
+  const scan: Component[] = [
+    {
+      name: "ruby",
+      kind: "ruby",
+      paths: ["**"],
+      commands: { test: "bundle exec rspec" },
+      extensions: [".rb", ".rake", ".gemspec"],
+      prepare: "bundle install",
+    } as Component,
+  ];
+  // Agent proposes the same component (no prepare field — DiscoverSchema strips it)
+  const proposed: Component[] = [
+    {
+      name: "ruby",
+      kind: "ruby",
+      paths: ["**"],
+      commands: { test: "bundle exec rspec" },
+      extensions: [".rb", ".rake", ".gemspec"],
+    },
+  ];
+  const merged = mergeComponents(scan, proposed);
+  expect(merged).toHaveLength(1);
+  // prepare must survive the merge even though agent proposal didn't carry it
+  expect((merged[0] as Record<string, unknown>).prepare).toBe("bundle install");
+});
+
+test("DiscoverSchema strips prepare from agent proposal (agent-unauthorable, guard)", () => {
+  // DiscoverSchema is a z.object() with strip mode: unknown keys are removed.
+  const parsed = DiscoverSchema.parse({
+    components: [
+      {
+        name: "ruby",
+        kind: "ruby",
+        paths: ["**"],
+        commands: {},
+        prepare: "rm -rf /",
+      },
+    ],
+    repoCommands: {},
+  });
+  // prepare must NOT appear in the parsed proposal — it's not in DiscoverSchema
+  expect((parsed.components[0] as Record<string, unknown>).prepare).toBeUndefined();
 });
 
 test("probeCommandExists is false for a missing binary", () => {

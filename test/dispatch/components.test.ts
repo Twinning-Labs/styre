@@ -171,3 +171,26 @@ test("matchesComponent: path still scopes the component (ext matches but path do
   // .py file inside the path glob
   expect(matchesComponent(python, "api/routes.py")).toBe(true);
 });
+
+// ─── WO-3 Task 1: Ruby file-identity routing ─────────────────────────────────
+
+test("EXTENSIONS_BY_KIND has ruby entry with .rb/.rake/.gemspec", () => {
+  expect(EXTENSIONS_BY_KIND.ruby).toContain(".rb");
+  expect(EXTENSIONS_BY_KIND.ruby).toContain(".rake");
+  expect(EXTENSIONS_BY_KIND.ruby).toContain(".gemspec");
+});
+
+test("ruby component routes .rb/.rake/.gemspec files; does not match .py", () => {
+  const ruby: Component = {
+    name: "ruby",
+    kind: "ruby",
+    paths: ["**"],
+    commands: { test: "bundle exec rspec" },
+    extensions: [".rb", ".rake", ".gemspec"],
+  };
+  expect(matchesComponent(ruby, "src/a.rb")).toBe(true);
+  expect(matchesComponent(ruby, "x.rake")).toBe(true);
+  expect(matchesComponent(ruby, "y.gemspec")).toBe(true);
+  // must not match a Python file
+  expect(matchesComponent(ruby, "a.py")).toBe(false);
+});
