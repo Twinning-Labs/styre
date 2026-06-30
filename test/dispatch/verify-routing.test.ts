@@ -443,7 +443,7 @@ test("behavioral unit with docs-only diff → behavioral-no-code fail", async ()
 
 test("advisory sweep records ran-all-unowned for failing untouched stack, unit still passes", async () => {
   // app/main.ts is owned by `app` component (hard-gated, passes).
-  // deploy/cfg.yaml is unowned non-docs → triggers advisory sweep of `svc`.
+  // deploy/cfg.yaml is unowned non-inert → triggers advisory sweep of `svc`.
   // svc's test command is `false` (fails) → ran-all-unowned signal emitted.
   // The unit itself must still pass (advisory sweep never hard-fails).
   const { db, ticketId, projectId } = makeTestDb();
@@ -551,9 +551,9 @@ test("advisory sweep with passing untouched stack emits no signal and unit passe
   expect(sweepSig).toBeUndefined(); // sweep passed → no signal emitted
 });
 
-test("all changed files unowned non-docs → no hard gate runs, advisory sweep, unit passes", async () => {
+test("all changed files unowned non-inert → no hard gate runs, advisory sweep, unit passes", async () => {
   // config/settings.yaml is not owned by any component.
-  // realImpacted = [] → no hard gate. unownedNonDocs = [config/settings.yaml].
+  // realImpacted = [] → no hard gate. unownedNonInert = [config/settings.yaml].
   // Advisory sweep: `app` (test:"true") passes — no signal. `svc` (test:"false") fails → signal.
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
@@ -857,4 +857,174 @@ test("renderPrBody renders ran-all-unowned under its own section, separate from 
   expect(body).toContain("svc:test");
   // Must NOT confuse this with the untested-merge-risk section
   expect(body).not.toContain("⚠ Untested stacks");
+});
+
+// ── WO-6 Task 2: sweep cost instrumentation ───────────────────────────────────
+
+test("sweep-cost signal fires with stacksSwept count when untouched stack has the command", async () => {
+  // app/main.ts owned by `app` (hard gate, test:"true" passes).
+  // config/settings.yaml is unowned non-inert → advisory sweep runs on `svc`.
+  // `svc` has test:"true" → commandFor present → stacksSwept = 1.
+  // After the loop a sweep-cost signal must exist with the correct detail fields.
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    behavioral: 0,
+    verifyCheckTypes: ["test"],
+  });
+  const runner = new FakeAgentRunner((input) => {
+    mkdirSync(join(input.cwd, "app"), { recursive: true });
+    mkdirSync(join(input.cwd, "config"), { recursive: true });
+    writeFileSync(join(input.cwd, "app", "main.ts"), "export const x = 1;\n");
+    writeFileSync(join(input.cwd, "config", "settings.yaml"), "debug: false\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: "{}",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const { profile, worktreeRoot } = rig(repo, {
+    components: [
+      { name: "app", kind: "app", paths: ["app/**"], commands: { test: "true" } },
+      { name: "svc", kind: "svc", paths: ["svc/**"], commands: { test: "true" } },
+    ],
+  });
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile,
+    worktreeRoot,
+  });
+  await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // verify:check test
+  const sigs = listByUnit(db, unit.id);
+  const costSig = sigs.find((s) => s.signal_type === "sweep-cost");
+  db.close();
+  expect(costSig).toBeTruthy();
+  expect(costSig?.result).toBe("pass");
+  const detail = JSON.parse(costSig?.detail_json ?? "{}");
+  expect(detail.checkType).toBe("test");
+  expect(typeof detail.stacksSwept).toBe("number");
+  expect(detail.stacksSwept).toBe(1);
+  expect(typeof detail.wallClockMs).toBe("number");
+  expect(detail.wallClockMs).toBeGreaterThanOrEqual(0);
+  expect(typeof detail.unownedTriggers).toBe("number");
+  expect(detail.unownedTriggers).toBeGreaterThanOrEqual(1);
+});
+
+test("sweep-cost positive-trace: fires with stacksSwept:0 when untouched stacks all lack the command", async () => {
+  // config/settings.yaml is unowned non-inert → sweep block is entered.
+  // `svc` has only `build`, no `test` → commandFor(svc, "test") = undefined → loop skips.
+  // sweep-cost must still fire (positive trace), with stacksSwept: 0.
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    behavioral: 0,
+    verifyCheckTypes: ["test"],
+  });
+  const runner = new FakeAgentRunner((input) => {
+    mkdirSync(join(input.cwd, "app"), { recursive: true });
+    mkdirSync(join(input.cwd, "config"), { recursive: true });
+    writeFileSync(join(input.cwd, "app", "main.ts"), "export const x = 1;\n");
+    writeFileSync(join(input.cwd, "config", "settings.yaml"), "debug: false\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: "{}",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const { profile, worktreeRoot } = rig(repo, {
+    components: [
+      { name: "app", kind: "app", paths: ["app/**"], commands: { test: "true" } },
+      // svc has only build, no test — sweep loop will skip it via `continue`
+      { name: "svc", kind: "svc", paths: ["svc/**"], commands: { build: "true" } },
+    ],
+  });
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile,
+    worktreeRoot,
+  });
+  await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // verify:check test
+  const sigs = listByUnit(db, unit.id);
+  const costSig = sigs.find((s) => s.signal_type === "sweep-cost");
+  db.close();
+  // positive-trace: sweep block was entered (unownedNonInert non-empty) → signal must fire
+  expect(costSig).toBeTruthy();
+  expect(costSig?.result).toBe("pass");
+  const detail = JSON.parse(costSig?.detail_json ?? "{}");
+  expect(detail.stacksSwept).toBe(0);
+  expect(detail.unownedTriggers).toBeGreaterThanOrEqual(1);
+});
+
+test("no sweep-cost signal when all changed files are owned or inert", async () => {
+  // app/main.ts is owned by `app`, LICENSE is inert.
+  // unownedNonInert = [] → sweep block is never entered → no sweep-cost signal.
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    behavioral: 0,
+    verifyCheckTypes: ["test"],
+  });
+  const runner = new FakeAgentRunner((input) => {
+    mkdirSync(join(input.cwd, "app"), { recursive: true });
+    writeFileSync(join(input.cwd, "app", "main.ts"), "export const x = 1;\n");
+    writeFileSync(join(input.cwd, "LICENSE"), "MIT License\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: "{}",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const { profile, worktreeRoot } = rig(repo, {
+    components: [
+      { name: "app", kind: "app", paths: ["app/**"], commands: { test: "true" } },
+      { name: "svc", kind: "svc", paths: ["svc/**"], commands: { test: "true" } },
+    ],
+  });
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile,
+    worktreeRoot,
+  });
+  await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // verify:check test
+  const sigs = listByUnit(db, unit.id);
+  const costSig = sigs.find((s) => s.signal_type === "sweep-cost");
+  db.close();
+  // No unowned non-inert files → sweep block not entered → no sweep-cost signal
+  expect(costSig).toBeUndefined();
 });
