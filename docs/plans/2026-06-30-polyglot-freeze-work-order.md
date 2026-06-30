@@ -62,13 +62,25 @@
 
 **Net:** keep the brainstorms as historical decision logs; only the co-located-scoping solution is replaced.
 
+### B4. Design & implement across stacks — audit (sub-problem #4; from a two-tracer code read)
+
+The polyglot work so far makes *detection* and *verify* multi-stack-aware. The **design** and **implement** phases are a separate problem, and the audit found them weakly handled:
+
+| Phase | Multi-stack today? | Evidence |
+|---|---|---|
+| **Design / extract** | **Stack-blind.** Splits the ticket by agent judgment over generic example kinds; `profile.components` never reach the prompt; `kind` is free text validated against nothing stack-related; no design-time unit→component link. | `prompt-vars.ts:41-67` (components not passed; `stack:""`), `prompts/design-extract.md:11` (generic `kind` examples), `schema.sql:133` ("NOT a CHECK enum (stack-agnostic)") |
+| **Implement** | **Capable but context-blind.** One dispatch per unit over a fully-writable worktree (so a unit *can* touch many stacks); Bash allowlist = union of impacted components' commands. But the prompt carries no `files_to_touch`, no sibling/`depends_on`, no contract notes, and an empty `stack`. | `resolver.ts:106` (per-unit), `worktree.ts:15-20` (whole-tree writable), `components.ts:45` (union scope), `prompt-vars.ts:69-92` + `prompts/implement.md` (minimal context) |
+| **Verify** | **Multi-stack-aware.** Fans out per impacted component from the diff; ticket-scope `verify:integration`; `untested-merge-risk` for unverifiable stacks. | `handlers.ts:356-413` |
+
+→ Fix split per operator decision: **stack-grounded decomposition = WO-13 (in-feature, DONE line); cross-stack implement coordination = Milestone M-D (first-class follow-on).**
+
 ---
 
 ## Part C — Work order (re-scoped to the DONE line)
 
 Grouped by the frozen design (executed work §4, decisions §6–7, research §8, converged model §9). Done = landed **and** aligned.
 
-> **"Polyglot setup is DONE" = WO-1…WO-6.** WO-7+ are additive / reframe / out-of-feature (see each group and Part D).
+> **"Polyglot setup is DONE" = WO-1…WO-6 + WO-13** (stack-grounded decomposition). WO-7+ and Milestone M-D are additive / reframe / follow-on / out-of-feature (see each group and Part D).
 
 ### WO-1 · Security & command pipeline (M-A) — ✅ COMPLETE
 - [x] ✅ Metachar command gate (F1)
@@ -144,9 +156,7 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 ### WO-10 · Cross-stack contract gates (freeze §9.6) — **explicit-artifact-only**
 - [ ] ⬜ Detect explicit contract artifacts (`.proto` / OpenAPI / Pact / GraphQL)
 - [ ] ⬜ **Contract gates on artifact-in-diff** — buf / oasdiff / Pact; **missing tool degrades via the existing `{unavailable}` → `untested-merge-risk` path** (ship with WO-6's trigger→gate model)
-- [ ] 🔵 *Attach dependency-graph blast-radius before dispatch* — **control-loop milestone**; blocked on WO-5 rung-3 import-inference
-- [ ] 🔵 *Coupled-cluster = one unit (reverses the per-`work_unit` split)* — **control-loop milestone** (modifies the closed S1–S10 catalog); reground on Styre's own drift evidence; >context-budget cluster → bubble-to-human "too big to verify atomically"
-- [ ] 🔵 *Implicit-contract + no integration test → human gate at design* — **control-loop milestone** (changes S2)
+- [ ] 🔵 *The former items 3–5 (blast-radius before dispatch, coupled-cluster = one unit, implicit-contract design-gate) are consolidated into **Milestone M-D** below — they modify the closed S1–S10 catalog and belong with the implement-context work.*
 
 ### WO-11 · Cross-stack ceiling (T2) — **plane-split**
 - [x] ✅ Surface verify gaps in the PR body (untested stacks) — *largely exists via `renderPrBody` "⚠ Untested stacks" from `untested-merge-risk`*
@@ -158,16 +168,33 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 - [ ] 🔵 **OSS:** surface gap + allow skip + open PR when no env/CI/tests — *this is the `styre run` terminal behavior (run-loop milestone), overlaps WO-11*
 - [ ] ❌ **Commercial-plane (out of OSS scope):** single-Dockerfile env, Repo2Run-style provisioning, snapshot-cache
 
+### WO-13 · Stack-grounded design & extract (sub-problem #4, items 1–2) — ⬜ IN-FEATURE (DONE line)
+*Make the planner aware of the stacks `setup` detected. Cheap, high-leverage; today the planner is stack-blind (freeze §9 item 8). Additive — no schema break (`kind` stays free text; validation is additive).*
+- [ ] ⬜ Feed `profile.components` (kind + paths + commands) into `designVars` and `extractVars`; fill the empty `{{stack}}` slot (`prompt-vars.ts:41-67` — currently `stack:""` and components not passed; `prompts/design.md`, `prompts/design-extract.md`)
+- [ ] ⬜ Validate/guide `work_unit.kind` against `profile.components[].kind` in extract validation (`extract-schema.ts`): warn when a unit's `kind` isn't a detected stack, or when its `files_to_touch` span multiple stacks (the latter is a **coupling signal** feeding M-D)
+- [ ] ⬜ *(optional)* compute + persist a design-time unit→component hint for downstream context
+- *Acceptance:* on a multi-stack fixture, the plan + units reflect the real detected stacks, and extract flags an off-stack `kind`.
+
+### Milestone M-D · Cross-stack design & implement coordination (sub-problem #4, items 3–4) — 🔵 FOLLOW-ON, first-class, separate
+*The heavier half of sub-problem #4: make implement aware of the other side of a contract, and stop splitting coupled work into mutually-blind dispatches. **Modifies the closed S1–S10 control-loop catalog** → requires its own brainstorm/spec + `control-loop.md` revision + independent review before implementation. Consolidates the former WO-10 items 3–5. **Depends on WO-13 landing first.***
+- [ ] ⬜ **Attach cross-stack context to the implement prompt** — the unit's own `files_to_touch`, its `depends_on` siblings (and what they changed), and any shared contract artifact (`prompt-vars.ts:69-92`, `prompts/implement.md`; today all absent, `stack` is `""`)
+- [ ] ⬜ **Coupled-cluster = one unit in one context** — don't split contract-coupled work into separate blind dispatches; regrounded on Styre's *own* contract-drift evidence (not a vendor multi-agent claim). Touches `design:extract` decomposition + the resolver (`resolver.ts`).
+- [ ] ⬜ **Dependency-graph blast-radius before dispatch** — blocked on WO-5 rung-3 import-inference (no cross-language graph exists yet)
+- [ ] ⬜ **Implicit-contract + no integration test → human gate at design** — changes S2; the design-time analogue of the T2 gap
+- [ ] ⬜ A >context-budget coupled cluster bubbles to the human checkpoint as "too big to verify atomically"
+- *Interim safety net until M-D ships:* `verify:integration` + T2 PR-body gap-surfacing — catches drift only when the repo has integration tests (else it's the T2 ceiling, freeze §13 #5).
+
 ---
 
 ## Part D — Done-vs-remaining at a glance
 
 - **Fully landed & aligned (✅):** WO-1 (M-A security), WO-2 (M-C1 registry/engine/invariants), the 6 detectors + SKIP + warning in WO-3, the conventions rung + confirm ladder in WO-4, Rust reactor in WO-8, the per-verify recompute in WO-7, and the existing PR-body gap surfacing + MERGE gate in WO-11.
 - **Interim (🟡 — landed, mechanism to be replaced):** folder-glob routing (WO-5/WO-6), the Node co-located carve, the Node per-member walk.
-- **In-feature, not started (⬜):** Ruby/PHP/`prepare` (WO-3); AGENTS.md + scoped CI-reading (WO-4); file-identity rung-1 **and the Bash-allowlist/test-file re-expression + schemaVersion bump** (WO-5); gates/triggers + run-more-when-unsure + the cost branch (WO-6); Python/Go/JVM non-root via identity (WO-9); explicit-artifact contract gates (WO-10 items 1–2).
-- **Out-of-feature (🔵 — reframe / run-loop / control-loop / commercial):** persist+watch the graph (WO-7); JVM/Go reactors (WO-8); rung-2/rung-3 classification (WO-5); the transitive cross-stack graph + coupled-cluster dispatch + design-time gate (WO-10 items 3–5); the pre-PR interactive hold (WO-11); the OSS env-bubble belongs to the run-loop (WO-12).
+- **In-feature, not started (⬜):** Ruby/PHP/`prepare` (WO-3); AGENTS.md + scoped CI-reading (WO-4); file-identity rung-1 **and the Bash-allowlist/test-file re-expression + schemaVersion bump** (WO-5); gates/triggers + run-more-when-unsure + the cost branch (WO-6); Python/Go/JVM non-root via identity (WO-9); explicit-artifact contract gates (WO-10 items 1–2); **stack-grounded design/extract decomposition (WO-13).**
+- **Named follow-on milestone (🔵 first-class, separate):** **Milestone M-D — cross-stack design/implement coordination** (implement-time cross-stack context, coupled-cluster one-context, dependency-graph blast-radius, implicit-contract design-gate). Modifies the closed S1–S10 catalog; needs its own spec + `control-loop.md` revision + review; depends on WO-13.
+- **Out-of-feature (🔵 — reframe / run-loop / commercial):** persist+watch the graph (WO-7); JVM/Go reactors (WO-8); rung-2/rung-3 classification (WO-5); the pre-PR interactive hold (WO-11); the OSS env-bubble belongs to the run-loop (WO-12).
 - **Rejected (❌):** `scopeColocatedRoots` (WO-9); commercial env-provisioning (WO-12).
 
-**The DONE line.** Polyglot setup is *complete* at **WO-1…WO-6** (security, registry, detectors, command discovery incl. AGENTS.md + scoped CI, file-identity rung-1 + the two re-expressions, gates/triggers + run-more-when-unsure) **plus WO-9's non-root via identity**. Everything from WO-7's persistence on is additive, run-loop, control-loop, or commercial.
+**The DONE line.** Polyglot setup is *complete* at **WO-1…WO-6** (security, registry, detectors, command discovery incl. AGENTS.md + scoped CI, file-identity rung-1 + the two re-expressions, gates/triggers + run-more-when-unsure) **plus WO-9's non-root via identity and WO-13's stack-grounded decomposition**. Everything from WO-7's persistence on — including **Milestone M-D** (cross-stack implement coordination) — is additive, follow-on, run-loop, control-loop, or commercial.
 
 **The single most load-bearing remaining item:** **WO-6 (run-more-when-unsure) layered on WO-5 (file-identity rung-1 + the two re-expressions).** Until those land, the branch's verify **silently under-verifies the unmatched files in a *mixed* diff** (a fully-unmatched diff already errors loudly) — the exact failure the freeze exists to prevent. Its open cost risk (freeze §13 #1) must be measured as it's built, not after.
