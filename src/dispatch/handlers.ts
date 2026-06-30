@@ -30,7 +30,7 @@ import { ComplexityGradeSchema } from "./complexity-schema.ts";
 import {
   commandFor,
   impactedComponents,
-  isDocsFile,
+  isInertFile,
   isUnavailable,
   matchesComponent,
   realRunnerCommands,
@@ -404,14 +404,15 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     }
 
     // Partition the diff into: owned (a component claims the file), realImpacted (those components),
-    // and unownedNonDocs (everything else that is NOT a prose-docs file).
+    // and unownedNonInert (everything else that is NOT an inert file — docs, licence/attribution/
+    // git-metadata basenames). Inert files cannot flip any stack's gate, so they skip the sweep.
     const owned = changed.filter((f) => components.some((c) => matchesComponent(c, f)));
     const realImpacted = impactedComponents(components, owned);
-    const unownedNonDocs = changed.filter((f) => !owned.includes(f) && !isDocsFile(f));
+    const unownedNonInert = changed.filter((f) => !owned.includes(f) && !isInertFile(f));
 
-    // Pure-docs path: no owned file, nothing to sweep (all unowned files are docs).
+    // Pure-inert path: no owned file, nothing to sweep (all unowned files are inert).
     // Behavioral units MUST have code changes → fail. Non-behavioral units pass with a note.
-    if (realImpacted.length === 0 && unownedNonDocs.length === 0) {
+    if (realImpacted.length === 0 && unownedNonInert.length === 0) {
       if (unit.behavioral === 1) {
         insertSignal(ctx.db, {
           ticketId: ctx.ticket.id,
@@ -421,7 +422,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           branchHeadSha: latestSha,
           detail: { reason: "behavioral-no-code", checkType, changed },
         });
-        throw new Error(`verify:check ${checkType}: behavioral unit changed only docs files`);
+        throw new Error(`verify:check ${checkType}: behavioral unit changed only inert files`);
       }
       insertSignal(ctx.db, {
         ticketId: ctx.ticket.id,
@@ -430,8 +431,8 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         result: "pass",
         branchHeadSha: latestSha,
         detail: {
-          reason: "docs-only",
-          note: "docs-only change, no code gates ran",
+          reason: "inert-only",
+          note: "inert-only change (docs/licence/attribution), no code gates ran",
           checkType,
           changed,
         },
@@ -541,11 +542,11 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       }
     }
 
-    // ADVISORY SWEEP: any unowned non-docs file → run the UNTOUCHED stacks' available commands
+    // ADVISORY SWEEP: any unowned non-inert file → run the UNTOUCHED stacks' available commands
     // as a precaution so the unowned change cannot slip through silently. Failures are surfaced
     // via "ran-all-unowned" signals and appear in the PR body. The sweep NEVER fails/wedges the
     // unit — absent commands on swept stacks are silently skipped (no "check-absent" error).
-    if (unownedNonDocs.length > 0) {
+    if (unownedNonInert.length > 0) {
       const untouched = components.filter((c) => !realImpacted.includes(c));
       for (const c of untouched) {
         const cmd = commandFor(c, checkType);
@@ -564,7 +565,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
             detail: {
               component: c.name,
               checkType,
-              note: `unowned files ${unownedNonDocs.join(", ")} triggered a precautionary run of this untouched stack, which failed — review`,
+              note: `unowned files ${unownedNonInert.join(", ")} triggered a precautionary run of this untouched stack, which failed — review`,
             },
           });
         }
