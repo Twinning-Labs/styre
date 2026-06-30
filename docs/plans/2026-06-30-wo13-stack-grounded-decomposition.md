@@ -27,7 +27,7 @@ Net: WO-13 = prompt grounding. The "validate/guide `kind` + coupling signal" tas
 
 - **Additive / behavior-preserving:** no `ComponentSchema`/`ProfileSchema`/`work_unit` change; nothing persisted changes. The only observable delta is richer `design`/`design-extract` prompts.
 - **Existing suites stay green:** `test/dispatch/prompt-vars.test.ts`, `design-vars.test.ts`, `render-prompt.test.ts`. These assert "every placeholder in the template is present in the vars" (`prompt-vars.test.ts:35-37, 75-77, 87-89`) — `renderPrompt` returns `ok:false` for a placeholder **absent from vars** (`render-prompt.ts:22-24`; the `?? ""` on line 26 only covers an in-vars-but-`undefined` value). So adding `{{detected_stacks}}` to a template **requires** adding `detected_stacks` to the corresponding vars; this plan does both, and the existing "resolves every placeholder" tests are the regression guard. TDD ordering: add the var (Step 3) before the template block (Step 4) so no existing test transiently goes red.
-- **Empty-components safety.** A repo with no detected stacks (`profile.components == []`) yields an empty `detected_stacks` block — renders blank, the prompt still reads naturally; never an error.
+- **Empty-components safety.** A repo with no detected stacks (`profile.components == []`) yields a `detected_stacks` **no-detect note** (a var-level fallback added during the overall review — `stackSummary` itself still returns `""`), so the prompt's stack guidance still reads sensibly; never an error.
 
 ---
 
@@ -42,7 +42,7 @@ Net: WO-13 = prompt grounding. The "validate/guide `kind` + coupling signal" tas
 - Produces: `export function stackSummary(components: Component[]): string` — one line per component (`name`, `kind`, `paths`, and the `test` command when present); `""` when no components.
 - `designVars(...)` and `extractVars(...)` gain `detected_stacks: stackSummary(profile.components)`. `designVars`'s existing `stack: ""` line is **kept** (behavior preserved — `promptVars` may still override it).
 
-- [ ] **Step 1: Write the failing tests** (append to `test/dispatch/prompt-vars.test.ts`; it already imports `Component` from `profile.ts` and a block from `prompt-vars.ts` — fold `stackSummary` into that existing import, don't add a duplicate line):
+- [x] **Step 1: Write the failing tests** (append to `test/dispatch/prompt-vars.test.ts`; it already imports `Component` from `profile.ts` and a block from `prompt-vars.ts` — fold `stackSummary` into that existing import, don't add a duplicate line):
 
 ```ts
 const COMPS: Component[] = [
@@ -75,9 +75,9 @@ test("detected_stacks is empty when the profile has no components", () => {
 });
 ```
 
-- [ ] **Step 2: Run — FAIL** (`stackSummary` undefined; `detected_stacks` undefined). `bun test test/dispatch/prompt-vars.test.ts`
+- [x] **Step 2: Run — FAIL** (`stackSummary` undefined; `detected_stacks` undefined). `bun test test/dispatch/prompt-vars.test.ts`
 
-- [ ] **Step 3: Implement** in `src/dispatch/prompt-vars.ts` (`commandFor` is already imported from `./components.ts`; add `import type { Component } from "./profile.ts"` — `Profile` is already imported there):
+- [x] **Step 3: Implement** in `src/dispatch/prompt-vars.ts` (`commandFor` is already imported from `./components.ts`; add `import type { Component } from "./profile.ts"` — `Profile` is already imported there):
 
 ```ts
 /** One line per detected component for the `{{detected_stacks}}` prompt slot: name, kind, paths,
@@ -94,7 +94,7 @@ export function stackSummary(components: Component[]): string {
 ```
 Add `detected_stacks: stackSummary(profile.components)` to the returned object of **both** `designVars` and `extractVars` (keep every existing key, including `designVars`'s `stack: ""`).
 
-- [ ] **Step 4: Add the prompt blocks.** In `prompts/design.md`, after the existing `Project stack notes: {{stack}}` line, add:
+- [x] **Step 4: Add the prompt blocks.** In `prompts/design.md`, after the existing `Project stack notes: {{stack}}` line, add:
 
 ```markdown
 ## Detected stacks (from `styre setup` — ground truth)
@@ -108,8 +108,8 @@ explicitly in the plan — it is a cross-stack change the build system will need
 ```
 In `prompts/design-extract.md`, add the same `## Detected stacks …` block immediately before the `For each work unit decide:` list, and amend the `**kind**` bullet to: *"the work type — **prefer one of the project's detected stacks above** when the unit is stack-specific (e.g. `go`, `sveltekit`); otherwise a role like `docs`, `config`, `migration`."* (Leave the example sidecar JSON's `"kind": "backend"` as a shape example — it is not validated, and no advisory flags it.)
 
-- [ ] **Step 5: Run — PASS** + full suite. The existing "resolves every placeholder" tests for `DESIGN_TEMPLATE` and `EXTRACT_TEMPLATE` are the guard that `detected_stacks` is wired into both vars. `bun test && bun run lint && bun run typecheck`.
-- [ ] **Step 6: Commit** — `git commit -m "feat(design): feed detected stacks into design + extract prompts (WO-13)"`
+- [x] **Step 5: Run — PASS** + full suite. The existing "resolves every placeholder" tests for `DESIGN_TEMPLATE` and `EXTRACT_TEMPLATE` are the guard that `detected_stacks` is wired into both vars. `bun test && bun run lint && bun run typecheck`.
+- [x] **Step 6: Commit** — `git commit -m "feat(design): feed detected stacks into design + extract prompts (WO-13)"`
 
 ---
 
