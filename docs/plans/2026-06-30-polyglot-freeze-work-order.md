@@ -127,12 +127,13 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 - [ ] 🔵 *Manifest-association rung 2* — **additive; add when over-verify is *observed***.
 - [ ] 🔵 *Import-inference rung 3 (Pants-grade)* — **deferred**; the cross-stack dep-graph depends on it.
 
-### WO-6 · Gates + triggers + run-more-when-unsure (freeze §9.2–9.3) — **mutually prerequisite with WO-5**
-- [ ] ⬜ Model the repo as **gates** (commands) + **triggers** (identity sets)
-- [ ] ⬜ **Explicit global-file set** (lockfiles, root configs, CI file, base Dockerfile) → change runs **all** gates
-- [ ] ⬜ **Unowned-and-not-obviously-docs → run all** (default conservative — avoid the Nx footgun)
+### WO-6 · Gates + triggers + run-more-when-unsure (freeze §9.2–9.3) — 🟡 PARTIALLY LANDED (inert-skip + measurement; bound deferred)
+- [x] ✅ Model the repo as **gates** (commands) + **triggers** (identity sets) — *already literal in code: `owned = changed.filter(matchesComponent)` = triggers, `commandFor(c, checkType)` = gates (`handlers.ts`); no refactor*
+- [ ] 🟡 **Explicit global-file set** (lockfiles, root configs, CI file, base Dockerfile) → runs **all** gates — *subsumed at **advisory** strength: non-inert files already trigger the WO-5 sweep; a hard-gate-for-globals decision is not settled here*
+- [x] ✅ **Unowned-and-not-obviously-inert → run all** (default conservative — avoid the Nx footgun) — *WO-5 sweep, narrowed docs→inert by WO-6 (commit `d29f138`): `isInertFile` skips LICENSE/NOTICE/AUTHORS/COPYING/.mailmap; strict set (no `.editorconfig`/`.gitignore`/configs/lockfiles — those stay swept)*
 - [ ] ⬜ **Never claim "verified" if a relevant gate couldn't run** — surface as a reported gap
-- [ ] ⬜ **Cost branch (freeze §13 risk #1):** run-all is bounded but un-costed and *frequent* under the coarse classifier — measure it; over budget → run the cheap tier, **defer the expensive tier to the gap-surfaced merge, never silently narrow**
+- [x] ✅ **Cost branch — MEASUREMENT (freeze §13 risk #1):** every triggered sweep emits a `sweep-cost` signal (`result:"pass"`, non-gating, excluded from `implementFeedback`) carrying `stacksSwept`/`wallClockMs`/`unownedTriggers`; fires even at `stacksSwept:0` (positive-trace invariant). Commit `7759451`. The T1 cost is now **instrumented (measurable)**, not yet **bounded**.
+- [ ] 🔵 **Cost branch — BOUND (deferred calibrated fast-follow):** the over-budget branch that *bounds* the sweep — count-based on cumulative `stacksSwept` (not noisy wall-clock), a backstop-level default tuned to the measured data, bounds **only the advisory sweep** (never the hard gates), surfaces a `sweep-skipped-over-budget` signal (`renderPrBody` branch + `implementFeedback` exclusion). The full §9.3 *tiered* branch (run cheap tier, defer expensive) + **content-hash sweep dedup** are its prerequisites, also deferred until Task 2 data exists. Interim bound = the existing B3 wall-clock ceiling (no regression).
 - [ ] 🟡 Retire the mixed-diff under-verify path — *current `impactedComponents` behavior*
 
 ### WO-7 · Per-verify recompute (freeze §9.4) — **reframed**
@@ -190,14 +191,15 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 
 - **Fully landed & aligned (✅):** WO-1 (M-A security), WO-2 (M-C1 registry/engine/invariants), the 6 detectors + SKIP + warning in WO-3, the conventions rung + confirm ladder in WO-4, Rust reactor in WO-8, the per-verify recompute in WO-7, the existing PR-body gap surfacing + MERGE gate in WO-11, **WO-13's stack-grounded prompt decomposition (commits `5dc7960`, `38b9603`)**, **WO-4's AGENTS.md command source (commit `de4c80d`)**, and **WO-5's file-identity routing + run-all safety (commits `0b941c0`/`0b1e9ea`/`6384811`; TDD + per-task + overall Opus reviews)**.
 - **Interim (🟡 — landed, mechanism to be replaced):** folder-glob routing (WO-5/WO-6), the Node co-located carve, the Node per-member walk.
-- **In-feature, not started (⬜):** Ruby/PHP/`prepare` (WO-3); scoped CI-reading + precedence wiring (WO-4; AGENTS.md half done); **the cost refinement** (WO-6: the *named* global-file set + the T1 over-budget branch + cost measurement — the safety mechanism itself landed in WO-5); Python/Go/JVM non-root via identity (WO-9); explicit-artifact contract gates (WO-10 items 1–2).
+- **In-feature, not started (⬜):** Ruby/PHP/`prepare` (WO-3); scoped CI-reading + precedence wiring (WO-4; AGENTS.md half done); Python/Go/JVM non-root via identity (WO-9); explicit-artifact contract gates (WO-10 items 1–2).
+- **In-feature, partially landed (🟡):** **the cost refinement** (WO-6: inert-skip + `sweep-cost` measurement **landed**, commits `d29f138`/`7759451`; the T1 over-budget **bound** + the *named hard-gate* global-file set + content-hash dedup deferred to a calibrated fast-follow; the safety mechanism itself landed in WO-5).
 - **Named follow-on milestone (🔵 first-class, separate):** **Milestone M-D — cross-stack design/implement coordination** (implement-time cross-stack context, coupled-cluster one-context, dependency-graph blast-radius, implicit-contract design-gate). Modifies the closed S1–S10 catalog; needs its own spec + `control-loop.md` revision + review; depends on WO-13.
 - **Out-of-feature (🔵 — reframe / run-loop / commercial):** persist+watch the graph (WO-7); JVM/Go reactors (WO-8); rung-2/rung-3 classification (WO-5); the pre-PR interactive hold (WO-11); the OSS env-bubble belongs to the run-loop (WO-12).
 - **Rejected (❌):** `scopeColocatedRoots` (WO-9); commercial env-provisioning (WO-12).
 
 **The DONE line.** Polyglot setup is *complete* at **WO-1…WO-6** (security, registry, detectors, command discovery incl. AGENTS.md + scoped CI, file-identity rung-1 + the two re-expressions, gates/triggers + run-more-when-unsure) **plus WO-9's non-root via identity and WO-13's stack-grounded decomposition**. Everything from WO-7's persistence on — including **Milestone M-D** (cross-stack implement coordination) — is additive, follow-on, run-loop, control-loop, or commercial.
 
-**The cardinal sin is now killed (WO-5, landed).** File-identity routing + the run-all advisory sweep mean an unowned file in a mixed diff can no longer ride through silently. **The single most load-bearing *remaining* item is WO-6's cost work:** the run-all sweep is un-costed and frequent in polyglot repos (freeze §13 #1) — measure it, add the over-budget branch + the named global-file set. (Also un-recorded today: a *passing/empty* sweep leaves no positive trace that an unowned file was present — a WO-6 surfacing nuance.)
+**The cardinal sin is now killed (WO-5, landed).** File-identity routing + the run-all advisory sweep mean an unowned file in a mixed diff can no longer ride through silently. **The single most load-bearing *remaining* item is WO-6's cost *bound*:** the run-all sweep is now **measured** (the `sweep-cost` signal, commit `7759451`) but not yet **bounded** — the over-budget branch + the *named hard-gate* global-file set remain (deferred calibrated fast-follow, freeze §13 #1). (The passing/empty-sweep positive-trace nuance is now **closed**: `sweep-cost` fires even at `stacksSwept:0`.)
 
 ---
 
