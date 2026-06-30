@@ -1,4 +1,15 @@
+import { extname } from "node:path";
 import type { Component } from "./profile.ts";
+
+/** File extensions that identify documentation-only files (conservative prose set).
+ *  Files with these extensions are excluded from the advisory sweep (they cannot break code). */
+export const DOCS_EXTS = [".md", ".markdown", ".rst", ".adoc"] as const;
+
+/** True iff `file` is a documentation-only file (extension-based, case-insensitive).
+ *  Unowned docs files skip the advisory sweep — they cannot break a foreign stack. */
+export function isDocsFile(file: string): boolean {
+  return (DOCS_EXTS as readonly string[]).includes(extname(file).toLowerCase());
+}
 
 /** True if `cmd` is itself a shell invocation (`bash x.sh`, `./x`) — it cannot be tightly
  *  Bash-scoped via `Bash(cmd:*)`, so callers warn when one is used as a runner. */

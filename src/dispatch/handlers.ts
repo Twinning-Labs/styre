@@ -30,6 +30,7 @@ import { ComplexityGradeSchema } from "./complexity-schema.ts";
 import {
   commandFor,
   impactedComponents,
+  isDocsFile,
   isUnavailable,
   matchesComponent,
   realRunnerCommands,
@@ -122,16 +123,15 @@ function depsFor(ctx: HandlerContext, deps: RegistryDeps, timeoutMs: number): Di
 }
 
 /** Deterministic templated PR description from facts the daemon already has (M6b-1; a cheap-LLM
- *  write-up is a later polish). */
-function renderPrBody(
+ *  write-up is a later polish). Exported for unit-testing the rendered sections. */
+export function renderPrBody(
   db: Database,
   ticket: { id: number; ident: string; title: string | null },
 ): string {
   const units = listUnits(db, ticket.id);
   const lines = units.map((u) => `- ${u.kind}${u.title ? `: ${u.title}` : ""}`);
-  const risks = listSignalsByTicket(db, ticket.id).filter(
-    (s) => s.signal_type === "untested-merge-risk",
-  );
+  const allSignals = listSignalsByTicket(db, ticket.id);
+  const risks = allSignals.filter((s) => s.signal_type === "untested-merge-risk");
   const riskLines =
     risks.length > 0
       ? [
@@ -140,12 +140,30 @@ function renderPrBody(
           ...risks.map((s) => `- ${JSON.parse(s.detail_json ?? "{}").component ?? "?"}`),
         ]
       : [];
+  // Advisory sweep failures: unowned non-docs files triggered a precautionary run of an untouched
+  // stack that failed. Surfaced here for reviewer awareness; never a hard gate.
+  const sweeps = allSignals.filter((s) => s.signal_type === "ran-all-unowned");
+  const sweepLines =
+    sweeps.length > 0
+      ? [
+          "",
+          "Precautionary runs on unowned-file changes — review:",
+          ...sweeps.map((s) => {
+            const d = JSON.parse(s.detail_json ?? "{}") as {
+              component?: string;
+              checkType?: string;
+            };
+            return `- ${d.component ?? "?"}:${d.checkType ?? "?"}`;
+          }),
+        ]
+      : [];
   return [
     `Automated PR for ${ticket.ident}${ticket.title ? ` — ${ticket.title}` : ""}.`,
     "",
     "Work units:",
     ...(lines.length > 0 ? lines : ["- (none)"]),
     ...riskLines,
+    ...sweepLines,
     "",
     "Verified against the project's checks and passed independent review.",
   ].join("\n");
@@ -353,74 +371,57 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     // Empty-diff is a DISTINCT diagnostic, not a missing-command error — and when base==head (the
     // first-unit edge), fall back to the latest commit's own files so a legitimate unit never
     // misroutes to an empty impacted set.
+    const components = deps.profile.components;
     const changed =
       unit.base_sha && latestSha && unit.base_sha !== latestSha
         ? changedFilesBetween(unit.base_sha, latestSha, worktreePath)
         : latestSha
           ? changedFilesAt(latestSha, worktreePath)
           : [];
-    const impacted = impactedComponents(deps.profile.components, changed);
 
-    // No impacted component → distinct diagnostic (empty diff vs. a diff that matched no component).
-    // NOT the "missing command" case; never a vacuous pass.
-    if (impacted.length === 0) {
+    // Guard: empty diff (unchanged) and zero components (unchanged intent) — always hard errors.
+    if (changed.length === 0) {
       insertSignal(ctx.db, {
         ticketId: ctx.ticket.id,
         workUnitId: ctx.workUnitId,
         signalType: checkType,
         result: "error",
         branchHeadSha: latestSha,
-        detail: {
-          reason: changed.length === 0 ? "empty-diff" : "no-component-matched",
-          checkType,
-          changed,
-        },
+        detail: { reason: "empty-diff", checkType, changed },
       });
-      throw new Error(
-        `verify:check ${checkType}: ${changed.length === 0 ? "no changes detected for unit" : "diff matched no component"}`,
-      );
+      throw new Error(`verify:check ${checkType}: no changes detected for unit`);
     }
-
-    // THREE-WAY resolution per impacted component (the silent-green fix + decision C):
-    //   (a) real command → run it · (b) explicitly { unavailable } → reviewer-only degrade +
-    //   PR-visible untested-merge-risk · (c) absent/unknown → error (loud). Must-haves
-    //   build/test/check are forced to (a)/(b) at setup, so they never hit (c).
-    const toRun = impacted
-      .filter((c) => commandFor(c, checkType) !== undefined)
-      .map((c) => ({ component: c.name, command: commandFor(c, checkType) as string }));
-    const unavailable = impacted.filter((c) => isUnavailable(c, checkType));
-    const absent = impacted.filter(
-      (c) => commandFor(c, checkType) === undefined && !isUnavailable(c, checkType),
-    );
-
-    // (c) absent/unknown on an impacted component → loud error (e.g. a unit declares `lint` but a
-    // touched stack has no lint command and never marked it unavailable). Aligning the extract
-    // agent's declared check-types to the profile is follow-on (1).
-    if (absent.length > 0) {
+    if (components.length === 0) {
       insertSignal(ctx.db, {
         ticketId: ctx.ticket.id,
         workUnitId: ctx.workUnitId,
         signalType: checkType,
         result: "error",
         branchHeadSha: latestSha,
-        detail: { reason: "check-absent", checkType, components: absent.map((c) => c.name) },
+        detail: { reason: "no-components-detected", checkType },
       });
-      throw new Error(
-        `verify:check ${checkType}: no command configured on ${absent.map((c) => c.name).join(",")}`,
-      );
+      throw new Error(`verify:check ${checkType}: no components detected in profile`);
     }
 
-    // (b) every impacted component marked this check unavailable → reviewer-only degrade, NOT error.
-    if (toRun.length === 0) {
-      for (const c of unavailable) {
+    // Partition the diff into: owned (a component claims the file), realImpacted (those components),
+    // and unownedNonDocs (everything else that is NOT a prose-docs file).
+    const owned = changed.filter((f) => components.some((c) => matchesComponent(c, f)));
+    const realImpacted = impactedComponents(components, owned);
+    const unownedNonDocs = changed.filter((f) => !owned.includes(f) && !isDocsFile(f));
+
+    // Pure-docs path: no owned file, nothing to sweep (all unowned files are docs).
+    // Behavioral units MUST have code changes → fail. Non-behavioral units pass with a note.
+    if (realImpacted.length === 0 && unownedNonDocs.length === 0) {
+      if (unit.behavioral === 1) {
         insertSignal(ctx.db, {
           ticketId: ctx.ticket.id,
           workUnitId: ctx.workUnitId,
-          signalType: "untested-merge-risk",
+          signalType: checkType,
           result: "fail",
           branchHeadSha: latestSha,
-          detail: { component: c.name, checkType, reason: "check-unavailable" },
+          detail: { reason: "behavioral-no-code", checkType, changed },
         });
+        throw new Error(`verify:check ${checkType}: behavioral unit changed only docs files`);
       }
       insertSignal(ctx.db, {
         ticketId: ctx.ticket.id,
@@ -428,55 +429,144 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         signalType: checkType,
         result: "pass",
         branchHeadSha: latestSha,
-        detail: { degraded: "reviewer-only", unavailable: unavailable.map((c) => c.name) },
+        detail: {
+          reason: "docs-only",
+          note: "docs-only change, no code gates ran",
+          checkType,
+          changed,
+        },
       });
-      return { check: checkType, result: "pass", degraded: true };
+      return { check: checkType, result: "pass" };
     }
 
-    // (a) run each impacted component's real command; aggregate.
-    const ran: Array<{ component: string; exitCode: number | null; timedOut: boolean }> = [];
+    // HARD GATES over realImpacted only (the stacks whose files this unit owns).
+    // THREE-WAY resolution: (a) real command → run it, (b) unavailable → reviewer-only degrade +
+    // untested-merge-risk, (c) absent/unknown → loud error. These can fail → loopback.
     let result: "pass" | "fail" | "error" = "pass";
     let lastCommand = "";
     let lastStderr = "";
-    for (const { component, command } of toRun) {
-      lastCommand = command;
-      const run = await runCommand(command, {
-        cwd: worktreePath,
-        timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
-      });
-      ran.push({ component, exitCode: run.exitCode, timedOut: run.timedOut });
-      if (run.exitCode !== 0) {
-        result = run.timedOut || run.exitCode === null ? "error" : "fail";
-        lastStderr = run.stderr.slice(0, 2000);
-        break;
-      }
-    }
-    let detail: Record<string, unknown> = { ran, stderr: lastStderr };
+    let detail: Record<string, unknown> = {};
 
-    // Per-component A1 behavioral gate: each impacted component with a real test command needs a
-    // matching test file in its paths; impacted components with test unavailable emit a PR-visible
-    // untested-merge-risk (reviewer-only) without failing the aggregate (decision C).
-    if (checkType === "test" && unit.behavioral === 1) {
-      for (const c of unavailable) {
+    if (realImpacted.length > 0) {
+      const toRun = realImpacted
+        .filter((c) => commandFor(c, checkType) !== undefined)
+        .map((c) => ({ component: c.name, command: commandFor(c, checkType) as string }));
+      const unavailable = realImpacted.filter((c) => isUnavailable(c, checkType));
+      const absent = realImpacted.filter(
+        (c) => commandFor(c, checkType) === undefined && !isUnavailable(c, checkType),
+      );
+
+      // (c) absent/unknown on a realImpacted component → loud error (unit declared a check-type
+      // but the stack that owns the changed files has no command for it, not even "unavailable").
+      if (absent.length > 0) {
         insertSignal(ctx.db, {
           ticketId: ctx.ticket.id,
           workUnitId: ctx.workUnitId,
-          signalType: "untested-merge-risk",
-          result: "fail",
+          signalType: checkType,
+          result: "error",
           branchHeadSha: latestSha,
-          detail: { component: c.name, reason: "behavioral-unit-no-test-command" },
+          detail: { reason: "check-absent", checkType, components: absent.map((c) => c.name) },
         });
+        throw new Error(
+          `verify:check ${checkType}: no command configured on ${absent.map((c) => c.name).join(",")}`,
+        );
       }
-      if (result === "pass") {
-        for (const c of impacted) {
-          if (commandFor(c, "test") === undefined) continue;
-          const inComponent = changed.filter((p) => matchesComponent(c, p));
-          const hasTest = inComponent.some((p) => isTestFile(p, c.testFilePattern));
-          if (!hasTest) {
-            result = "fail";
-            detail = { reason: "behavioral-no-test", component: c.name, changed: inComponent };
-            break;
+
+      // (b) every realImpacted component marked this check unavailable → reviewer-only degrade.
+      if (toRun.length === 0) {
+        for (const c of unavailable) {
+          insertSignal(ctx.db, {
+            ticketId: ctx.ticket.id,
+            workUnitId: ctx.workUnitId,
+            signalType: "untested-merge-risk",
+            result: "fail",
+            branchHeadSha: latestSha,
+            detail: { component: c.name, checkType, reason: "check-unavailable" },
+          });
+        }
+        insertSignal(ctx.db, {
+          ticketId: ctx.ticket.id,
+          workUnitId: ctx.workUnitId,
+          signalType: checkType,
+          result: "pass",
+          branchHeadSha: latestSha,
+          detail: { degraded: "reviewer-only", unavailable: unavailable.map((c) => c.name) },
+        });
+        return { check: checkType, result: "pass", degraded: true };
+      }
+
+      // (a) run each realImpacted component's real command; aggregate.
+      const ran: Array<{ component: string; exitCode: number | null; timedOut: boolean }> = [];
+      for (const { component, command } of toRun) {
+        lastCommand = command;
+        const run = await runCommand(command, {
+          cwd: worktreePath,
+          timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
+        });
+        ran.push({ component, exitCode: run.exitCode, timedOut: run.timedOut });
+        if (run.exitCode !== 0) {
+          result = run.timedOut || run.exitCode === null ? "error" : "fail";
+          lastStderr = run.stderr.slice(0, 2000);
+          break;
+        }
+      }
+      detail = { ran, stderr: lastStderr };
+
+      // Per-component A1 behavioral gate: each realImpacted component with a real test command
+      // needs a matching test file among the owned files for this unit. Components with test
+      // unavailable emit a PR-visible untested-merge-risk (reviewer-only, decision C).
+      if (checkType === "test" && unit.behavioral === 1) {
+        for (const c of unavailable) {
+          insertSignal(ctx.db, {
+            ticketId: ctx.ticket.id,
+            workUnitId: ctx.workUnitId,
+            signalType: "untested-merge-risk",
+            result: "fail",
+            branchHeadSha: latestSha,
+            detail: { component: c.name, reason: "behavioral-unit-no-test-command" },
+          });
+        }
+        if (result === "pass") {
+          for (const c of realImpacted) {
+            if (commandFor(c, "test") === undefined) continue;
+            const inComponent = owned.filter((p) => matchesComponent(c, p));
+            const hasTest = inComponent.some((p) => isTestFile(p, c.testFilePattern));
+            if (!hasTest) {
+              result = "fail";
+              detail = { reason: "behavioral-no-test", component: c.name, changed: inComponent };
+              break;
+            }
           }
+        }
+      }
+    }
+
+    // ADVISORY SWEEP: any unowned non-docs file → run the UNTOUCHED stacks' available commands
+    // as a precaution so the unowned change cannot slip through silently. Failures are surfaced
+    // via "ran-all-unowned" signals and appear in the PR body. The sweep NEVER fails/wedges the
+    // unit — absent commands on swept stacks are silently skipped (no "check-absent" error).
+    if (unownedNonDocs.length > 0) {
+      const untouched = components.filter((c) => !realImpacted.includes(c));
+      for (const c of untouched) {
+        const cmd = commandFor(c, checkType);
+        if (cmd === undefined) continue; // absent on untouched stack → skip, no error
+        const sweepRun = await runCommand(cmd, {
+          cwd: worktreePath,
+          timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
+        });
+        if (sweepRun.exitCode !== 0) {
+          insertSignal(ctx.db, {
+            ticketId: ctx.ticket.id,
+            workUnitId: ctx.workUnitId,
+            signalType: "ran-all-unowned",
+            result: "fail",
+            branchHeadSha: latestSha,
+            detail: {
+              component: c.name,
+              checkType,
+              note: `unowned files ${unownedNonDocs.join(", ")} triggered a precautionary run of this untouched stack, which failed — review`,
+            },
+          });
         }
       }
     }
