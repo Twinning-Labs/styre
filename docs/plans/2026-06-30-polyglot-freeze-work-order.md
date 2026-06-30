@@ -198,3 +198,51 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 **The DONE line.** Polyglot setup is *complete* at **WO-1…WO-6** (security, registry, detectors, command discovery incl. AGENTS.md + scoped CI, file-identity rung-1 + the two re-expressions, gates/triggers + run-more-when-unsure) **plus WO-9's non-root via identity and WO-13's stack-grounded decomposition**. Everything from WO-7's persistence on — including **Milestone M-D** (cross-stack implement coordination) — is additive, follow-on, run-loop, control-loop, or commercial.
 
 **The single most load-bearing remaining item:** **WO-6 (run-more-when-unsure) layered on WO-5 (file-identity rung-1 + the two re-expressions).** Until those land, the branch's verify **silently under-verifies the unmatched files in a *mixed* diff** (a fully-unmatched diff already errors loudly) — the exact failure the freeze exists to prevent. Its open cost risk (freeze §13 #1) must be measured as it's built, not after.
+
+---
+
+## Part E — Prescribed sequencing (build order)
+
+Two facts drive the order: **(1) WO-5 + WO-6 are the foundation** — they change the routing primitive (folder-glob → file-identity) *and* bump the profile schema, so all routing-touching work (more detectors, non-root, contract gates, the gap report) must be built on the new shape or it gets reworked. **(2) WO-13 → M-D is an independent track** — stack-grounded decomposition doesn't touch routing; it can run in parallel and it unblocks M-D.
+
+Only three items have **no upstream dependency** (possible starting points): **WO-13**, **WO-4/AGENTS.md**, and **WO-5/6**. Everything else hangs off WO-5/6 or WO-13.
+
+### Dependency graph (compact)
+
+```
+WO-13 (indep) ───────────────► Milestone M-D
+WO-4 / AGENTS.md (indep)
+WO-5 ⇔ WO-6 (foundation) ─────► WO-3, WO-9, WO-10(1–2), WO-11-extend, WO-8
+CI-reading ── gated by the §13 pilot (a decision, not a WO dependency)
+```
+
+### Recommended linear order (single implementer)
+
+**Phase 1 — cheap, independent wins (no dependency on the routing change):**
+1. **WO-13** — stack-grounded decomposition. The 6 detectors already landed but the planner ignores them today; closes that gap cheaply and is the prerequisite for M-D.
+2. **WO-4 (AGENTS.md half)** — consume `AGENTS.md`. Independent, standards-compliance. *(CI-reading stays gated behind the §13 pilot — do the pilot, then decide; don't build it blind.)*
+
+**Phase 2 — the foundation (the load-bearing correctness fix):**
+3. **WO-5 + WO-6 together** — file-identity rung-1, re-express the implement Bash allowlist + the A1 test-file gate, the `schemaVersion` bump; gates/triggers + run-more-when-unsure + the cost branch. **Start with the T1 cost spike** (measure run-all before committing the design — freeze §13 #1). Fold in WO-7's snapshot-store. Kills the mixed-diff silent under-verify.
+
+**Phase 3 — conform breadth + contracts to the new model:**
+4. **WO-3** — Ruby/PHP detectors + the `prepare` class, authored clean in the identity model (avoids folder-glob-then-rework).
+5. **WO-9** — Python/Go/JVM non-root via identity + `uniquifyNames` (bundled; uniquify has no consumer until dir-named components exist).
+6. **WO-10 items 1–2** — explicit-artifact contract gates (ride WO-6's trigger→gate model).
+7. **WO-11 extension** — extend the PR-body gap report to the full set (untested seam / couldn't-run / skipped-for-cost); needs WO-6's gap signals.
+8. **WO-8** — JVM/Go reactor parsers, *reconciled* with identity (likely shrinks to minimal/optional once classification is by identity).
+
+**Phase 4 — the follow-on milestone (separate, first-class):**
+9. **Milestone M-D** — cross-stack implement coordination. Own spec + `control-loop.md` revision + independent review; depends on WO-13.
+
+**Not in this sequence (commercial / run-loop / additive-on-demand):** WO-7 persist+watch, WO-11 pre-PR hold, WO-12 (commercial/run-loop); WO-5 rung-2/rung-3 (add only when over-verify is observed / a repo forces it).
+
+### Parallel-track split (if two implementers / two plans)
+
+- **Track A — foundation:** WO-5/6 → conform breadth/contracts (WO-3, WO-9, WO-10(1–2), WO-11-ext, WO-8).
+- **Track B — planner/cross-stack:** WO-13 → Milestone M-D.
+- The tracks converge only when M-D wants WO-5's rung-3 import-inference for the dependency-graph blast-radius.
+
+### The one judgment call (operator)
+
+The order above leads with **cheap independent wins (Phase 1), then the foundation (Phase 2)** — chosen because WO-13 is days not weeks, makes the landed detection immediately useful, and unblocks the M-D track. The **correctness-first** alternative is to do **WO-5/6 immediately** (it's the actual silent-under-verify fix) and slot WO-13 + AGENTS.md alongside/after. Pick Phase-1-first for momentum + planner value; pick correctness-first if the mixed-diff under-verify risk is the more urgent concern.
