@@ -3,14 +3,14 @@ import { deriveSetupInput, ensureAnalyticsId } from "../../src/cli/setup.ts";
 import type { Profile } from "../../src/dispatch/profile.ts";
 
 const profile: Profile = {
-  schemaVersion: 2 as const,
+  schemaVersion: 3 as const,
   slug: "demo",
   targetRepo: "/repo",
   defaultBranch: "main",
   checksSystem: "github" as const,
   components: [
-    { name: "api", kind: "backend", paths: ["api/"], commands: {} },
-    { name: "web", kind: "frontend", paths: ["web/"], commands: {} },
+    { name: "api", kind: "backend", paths: ["api/"], commands: {}, extensions: [] },
+    { name: "web", kind: "frontend", paths: ["web/"], commands: {}, extensions: [] },
   ],
   repoCommands: {},
   promptVars: { TECHNOLOGY_STACK: "Node.js + Express" },

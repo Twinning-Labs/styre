@@ -40,12 +40,14 @@ const SCAN_COMPONENTS: Component[] = [
     kind: "rust",
     paths: ["src-tauri/**", "crates/**"],
     commands: { build: "cargo build --workspace", test: "cargo test --workspace" },
+    extensions: [],
   },
   {
     name: "frontend",
     kind: "node",
     paths: ["src/**", "static/**", "package.json"],
     commands: { build: "npm run build" },
+    extensions: [],
   },
 ];
 
@@ -159,7 +161,13 @@ test("repoCommands from agent are adopted in result", async () => {
 
 const GIT_SCAN = {
   components: [
-    { name: "core", kind: "rust", paths: ["crates/**"], commands: { test: "git status" } },
+    {
+      name: "core",
+      kind: "rust",
+      paths: ["crates/**"],
+      commands: { test: "git status" },
+      extensions: [] as string[],
+    },
   ],
   repoCommands: {},
 };

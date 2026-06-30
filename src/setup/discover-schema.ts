@@ -40,6 +40,7 @@ export function mergeComponents(scan: Component[], proposed: Component[]): Compo
       paths: [...new Set([...s.paths, ...agentPaths])],
       commands: { ...s.commands, ...p.commands },
       ...(s.testFilePattern ? { testFilePattern: s.testFilePattern } : {}),
+      extensions: s.extensions,
     };
   });
 }

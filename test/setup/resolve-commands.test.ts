@@ -10,8 +10,15 @@ const base = (): Component[] => [
     kind: "rust",
     paths: ["src-tauri/**"],
     commands: { build: "cargo build", test: "cargo test", check: { unavailable: true } },
+    extensions: [],
   },
-  { name: "fe", kind: "sveltekit", paths: ["src/**"], commands: { build: "vite build" } },
+  {
+    name: "fe",
+    kind: "sveltekit",
+    paths: ["src/**"],
+    commands: { build: "vite build" },
+    extensions: [],
+  },
 ];
 
 test("operator supplies a missing test command", () => {
@@ -42,6 +49,7 @@ test("script-runner commands trigger a warning", () => {
         test: { unavailable: true },
         check: { unavailable: true },
       },
+      extensions: [],
     },
   ];
   const { warnings } = resolveCommands(comps, { interactive: false, ask: () => null });

@@ -4,25 +4,41 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProfileSchema, loadProfile, parseProfile } from "../../src/dispatch/profile.ts";
 
-test("parses a v2 components profile", () => {
+test("parses a v3 components profile", () => {
   const p = parseProfile({
     slug: "demo",
     targetRepo: "/tmp/repo",
+    schemaVersion: 3,
     components: [
-      { name: "core", kind: "rust", paths: ["src-tauri/**"], commands: { test: "cargo test" } },
+      {
+        name: "core",
+        kind: "rust",
+        paths: ["src-tauri/**"],
+        commands: { test: "cargo test" },
+        extensions: [".rs"],
+      },
       {
         name: "fe",
         kind: "sveltekit",
         paths: ["src/**"],
         commands: { test: { unavailable: true } },
+        extensions: [".ts", ".svelte"],
       },
     ],
     repoCommands: { integration: "playwright test" },
   });
-  expect(p.schemaVersion).toBe(2);
+  expect(p.schemaVersion).toBe(3);
   expect(p.components).toHaveLength(2);
+  expect(p.components[0].extensions).toEqual([".rs"]);
+  expect(p.components[1].extensions).toEqual([".ts", ".svelte"]);
   expect(p.components[1].commands.test).toEqual({ unavailable: true });
   expect(p.repoCommands.integration).toBe("playwright test");
+});
+
+test("schemaVersion 2 profile is rejected with re-run message", () => {
+  expect(() => parseProfile({ slug: "demo", targetRepo: "/tmp/repo", schemaVersion: 2 })).toThrow(
+    /schemaVersion 2.*re-run.*styre setup/i,
+  );
 });
 
 test("hard-fails on a legacy flat-commands profile", () => {
@@ -80,9 +96,9 @@ test("testFilePattern on a component is optional and parses when present", () =>
 });
 
 describe("runtimeContext", () => {
-  test("a v2 profile (no runtimeContext) validates as all-unknown", () => {
+  test("a v3 profile (no runtimeContext) validates as all-unknown", () => {
     const p = parseProfile({ slug: "demo", targetRepo: "/tmp/demo" });
-    expect(p.schemaVersion).toBe(2);
+    expect(p.schemaVersion).toBe(3);
     expect(p.runtimeContext.topology.type).toBe("unknown");
     expect(p.runtimeContext.data.presence).toBe("unknown");
     expect(p.runtimeContext.documentation.presence).toBe("unknown");

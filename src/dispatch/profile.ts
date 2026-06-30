@@ -70,13 +70,14 @@ export const ComponentSchema = z.object({
   paths: z.array(z.string().min(1)).min(1),
   commands: z.record(z.string(), CommandValueSchema).default({}),
   testFilePattern: z.string().optional(),
+  extensions: z.array(z.string()).default([]),
 });
 export type Component = z.infer<typeof ComponentSchema>;
 
 /** The project-profile: canonical stack truth the daemon reads (build-operations §5).
- *  schemaVersion 2 introduces the components[] model (polyglot-monorepo support). */
+ *  schemaVersion 3 adds per-component `extensions[]` for file-identity routing. */
 export const ProfileSchema = z.object({
-  schemaVersion: z.literal(2).default(2),
+  schemaVersion: z.literal(3).default(3),
   slug: z.string(),
   targetRepo: z.string(),
   defaultBranch: z.string().default("main"),
@@ -96,7 +97,13 @@ export function parseProfile(raw: unknown): Profile {
   if (raw && typeof raw === "object" && "commands" in raw) {
     throw new Error(
       "profile: legacy flat `commands` field (schemaVersion 1) is no longer supported. " +
-        "Re-run `styre setup` to regenerate a components[] profile (schemaVersion 2).",
+        "Re-run `styre setup` to regenerate a components[] profile (schemaVersion 3).",
+    );
+  }
+  if (raw && typeof raw === "object" && (raw as { schemaVersion?: unknown }).schemaVersion === 2) {
+    throw new Error(
+      "profile: schemaVersion 2 profile does not carry per-component extensions[] required for " +
+        "file-identity routing. Re-run `styre setup` to regenerate a schemaVersion-3 profile.",
     );
   }
   return ProfileSchema.parse(raw);

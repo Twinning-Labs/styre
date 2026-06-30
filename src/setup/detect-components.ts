@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { EXTENSIONS_BY_KIND } from "../dispatch/components.ts";
 import type { Component } from "../dispatch/profile.ts";
 import { isCommandSafe } from "./command-safety.ts";
 import type { LangDef } from "./lang/types.ts";
@@ -8,7 +9,8 @@ import { REGISTRY } from "./registry.ts";
 
 export { findManifests } from "./manifests.ts";
 
-/** Engine: run every def, enforce Invariant 1 (command backstop, loud) + Invariant 2 (path backstop). */
+/** Engine: run every def, enforce Invariant 1 (command backstop, loud) + Invariant 2 (path backstop).
+ *  Attaches `extensions` from `EXTENSIONS_BY_KIND` for the detected `kind` (file-identity routing). */
 export function runRegistry(repoDir: string, registry: LangDef[]): Component[] {
   const out: Component[] = [];
   for (const def of registry) {
@@ -19,7 +21,7 @@ export function runRegistry(repoDir: string, registry: LangDef[]): Component[] {
       }
       const paths = c.paths.filter(isSafePath);
       if (paths.length === 0) continue;
-      out.push({ ...c, paths });
+      out.push({ ...c, paths, extensions: [...(EXTENSIONS_BY_KIND[c.kind] ?? [])] });
     }
   }
   return out;
