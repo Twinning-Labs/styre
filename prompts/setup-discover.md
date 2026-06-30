@@ -14,6 +14,15 @@ For each component, correct:
   wherever they live (e.g. a `lint:rust` script in package.json belongs to the Rust component).
 Also propose **repoCommands**: commands that span/own no single component (e.g. an end-to-end suite).
 
+## AGENTS.md (the repo's agent-onboarding standard — authoritative for commands)
+
+{{agents_md}}
+
+If the AGENTS.md above states build/test/lint/check commands, PREFER them over ecosystem defaults
+when refining each component's `commands` and `repoCommands` — it is the maintainers' own declaration
+of how to build and test this repo. (Your proposed commands are still validated and, in headless
+mode, gated — never propose unsafe shell.)
+
 Emit exactly one fenced block (use triple backticks with the tag below):
 
 ```styre-setup-discover
