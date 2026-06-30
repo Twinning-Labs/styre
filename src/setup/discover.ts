@@ -5,6 +5,7 @@ import type { Component } from "../dispatch/profile.ts";
 import { renderPrompt } from "../dispatch/render-prompt.ts";
 import { extractSidecar } from "../dispatch/sidecar.ts";
 import { allowlistFor } from "../dispatch/tool-allowlists.ts";
+import { readAgentsMd } from "./agents-md.ts";
 import { isCommandSafe } from "./command-safety.ts";
 import { DiscoverSchema, mergeComponents, probeCommandExists } from "./discover-schema.ts";
 
@@ -24,7 +25,10 @@ export async function discoverComponents(
   const warnings: string[] = [];
   const fallback = { components: scan.components, repoCommands: scan.repoCommands, warnings };
 
-  const rendered = renderPrompt(discoverTemplate, { draft: JSON.stringify(scan.components) });
+  const rendered = renderPrompt(discoverTemplate, {
+    draft: JSON.stringify(scan.components),
+    agents_md: readAgentsMd(repoDir),
+  });
   if (!rendered.ok) return fallback;
   const result = await deps.runner.run({
     prompt: rendered.prompt,

@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import type { AgentRunResult } from "../../src/agent/runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -323,4 +326,46 @@ test("headless without trust drops agent repoCommands entirely", async () => {
     { interactive: false, trustAgentCommands: false },
   );
   expect(out.repoCommands).toEqual({});
+});
+
+test("AGENTS.md content is injected into the discovery prompt", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "styre-discover-agents-"));
+  writeFileSync(join(dir, "AGENTS.md"), "Run `bun run test` for tests.");
+  const runner = new FakeAgentRunner(() =>
+    ok(sidecar(JSON.stringify({ components: [], repoCommands: {} }))),
+  );
+  await discoverComponents(
+    dir,
+    { components: SCAN_COMPONENTS, repoCommands: {} },
+    { runner, agentConfig: DEFAULT_AGENT_CONFIG },
+  );
+  expect(runner.inputs[0].prompt).toContain("bun run test");
+});
+
+// Security review item 5: AGENTS.md does NOT elevate trust — a headless-untrusted override is
+// still rejected and falls back to the deterministic scan command.
+test("headless without --trust-agent-commands: AGENTS.md-influenced override is rejected", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "styre-discover-headless-"));
+  writeFileSync(join(dir, "AGENTS.md"), "Test with `true`.");
+  const proposal = {
+    components: [
+      {
+        name: "rust-core",
+        kind: "rust",
+        paths: ["src-tauri/**", "crates/**"],
+        commands: { test: "true" },
+      },
+    ], // a safe override the agent took from AGENTS.md
+    repoCommands: {},
+  };
+  const runner = new FakeAgentRunner(() => ok(sidecar(JSON.stringify(proposal))));
+  const out = await discoverComponents(
+    dir,
+    { components: SCAN_COMPONENTS, repoCommands: {} },
+    { runner, agentConfig: DEFAULT_AGENT_CONFIG },
+    { interactive: false, trustAgentCommands: false },
+  );
+  const rust = out.components.find((c) => c.name === "rust-core");
+  expect(rust?.commands.test).toBe("cargo test --workspace"); // scan value kept, not "true"
+  expect(out.warnings.some((w) => w.includes("headless"))).toBe(true);
 });
