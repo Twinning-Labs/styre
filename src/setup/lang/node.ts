@@ -35,6 +35,7 @@ export const nodeDef: LangDef = {
         // Co-located frontend: root package.json owns src/static, NOT a sibling rust src-tauri.
         paths: isRoot ? ["src/**", "static/**", "package.json"] : [`${dir}/**`],
         commands,
+        prepare: "npm install",
       });
     }
     return components;
