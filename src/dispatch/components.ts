@@ -15,6 +15,7 @@ export const EXTENSIONS_BY_KIND: Record<string, readonly string[]> = {
   go: [".go"],
   "jvm-maven": JVM_EXTS,
   "jvm-gradle": [...JVM_EXTS, ".gradle"],
+  ruby: [".rb", ".rake", ".gemspec"],
 };
 
 /** File extensions that identify documentation-only files (conservative prose set).

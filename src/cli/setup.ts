@@ -147,6 +147,9 @@ export async function runSetup(args: {
       for (const [k, v] of Object.entries(c.commands)) {
         console.log(`    ${k}: ${typeof v === "string" ? v : "(none)"}`);
       }
+      if (c.prepare) {
+        console.log(`    prepare: ${c.prepare} (stored, not run)`);
+      }
     }
     for (const [name, cmd] of Object.entries(discovered.repoCommands)) {
       console.log(`  repo.${name}: ${cmd}`);

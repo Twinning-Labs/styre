@@ -84,6 +84,25 @@ test("loadProfile reads + validates a JSON file", () => {
   expect(p.slug).toBe("demo");
 });
 
+// ─── WO-3 Task 1: prepare round-trip (genuinely red until ComponentSchema adds the field) ──
+
+test("prepare field on a component round-trips through parseProfile", () => {
+  const p = parseProfile({
+    slug: "s",
+    targetRepo: "/r",
+    components: [
+      {
+        name: "ruby",
+        kind: "ruby",
+        paths: ["**"],
+        commands: { test: "bundle exec rspec" },
+        prepare: "bundle install",
+      },
+    ],
+  });
+  expect(p.components[0].prepare).toBe("bundle install");
+});
+
 test("testFilePattern on a component is optional and parses when present", () => {
   const p1 = parseProfile({ slug: "s", targetRepo: "/r" });
   expect(p1.components).toHaveLength(0);

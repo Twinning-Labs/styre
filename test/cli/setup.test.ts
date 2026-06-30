@@ -166,6 +166,59 @@ test("runSetup throws and writes no profile when enrichment fails", async () => 
   expect(existsSync(out)).toBe(false);
 });
 
+// ─── WO-3 Task 1: confirm-block prepare line ─────────────────────────────────
+
+test("interactive confirm block prints prepare line for components that carry it", async () => {
+  // Set up a ruby-only git repo (Gemfile + .rspec → ruby component with prepare: "bundle install")
+  const repo = mkdtempSync(join(tmpdir(), "styre-setup-ruby-"));
+  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: repo });
+  run(["init", "-b", "main"]);
+  run(["remote", "add", "origin", "git@github.com:acme/myapp.git"]);
+  writeFileSync(join(repo, "Gemfile"), "source 'https://rubygems.org'\ngem 'rspec'\n");
+  writeFileSync(join(repo, ".rspec"), "--format documentation\n");
+
+  const out = join(mkdtempSync(join(tmpdir(), "styre-out-ruby-")), "profile.json");
+
+  // Capture console.log output
+  const logs: string[] = [];
+  const origLog = console.log;
+  console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+
+  // Mock globalThis.prompt: return "" for missing-command prompts (→ unavailable),
+  // return "y" for the approval prompt.
+  const origPrompt = globalThis.prompt;
+  (globalThis as Record<string, unknown>).prompt = (q: string) =>
+    q?.includes("Approve") ? "y" : "";
+
+  // Make the runSetup loop see interactive = true
+  const origDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+  Object.defineProperty(process.stdin, "isTTY", {
+    value: true,
+    configurable: true,
+    writable: true,
+  });
+
+  try {
+    await runSetup({ repo, out, deps: fakeDeps() });
+    // The confirm block must print a "prepare: bundle install (stored, not run)" line
+    expect(
+      logs.some(
+        (l) =>
+          l.includes("prepare:") && l.includes("bundle install") && l.includes("stored, not run"),
+      ),
+    ).toBe(true);
+  } finally {
+    console.log = origLog;
+    (globalThis as Record<string, unknown>).prompt = origPrompt;
+    if (origDescriptor !== undefined) {
+      Object.defineProperty(process.stdin, "isTTY", origDescriptor);
+    } else {
+      // biome-ignore lint/performance/noDelete: restoring undefined property requires delete
+      delete (process.stdin as unknown as Record<string, unknown>).isTTY;
+    }
+  }
+});
+
 test("unknownRuntimeSections lists only the unknown flags", () => {
   const p = parseProfile({
     slug: "d",

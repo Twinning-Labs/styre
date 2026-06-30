@@ -41,6 +41,8 @@ export function mergeComponents(scan: Component[], proposed: Component[]): Compo
       commands: { ...s.commands, ...p.commands },
       ...(s.testFilePattern ? { testFilePattern: s.testFilePattern } : {}),
       extensions: s.extensions,
+      // prepare is scan-authoritative (agent-unauthorable — not in DiscoverSchema); carry it verbatim.
+      ...(s.prepare ? { prepare: s.prepare } : {}),
     };
   });
 }

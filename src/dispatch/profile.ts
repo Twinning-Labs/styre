@@ -71,6 +71,8 @@ export const ComponentSchema = z.object({
   commands: z.record(z.string(), CommandValueSchema).default({}),
   testFilePattern: z.string().optional(),
   extensions: z.array(z.string()).default([]),
+  /** Detect-only install command (never run by styre; env-provisioning workstream WO-12). */
+  prepare: z.string().optional(),
 });
 export type Component = z.infer<typeof ComponentSchema>;
 
