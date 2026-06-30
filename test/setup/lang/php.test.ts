@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isTestFile } from "../../../src/dispatch/test-file.ts";
 import { phpDef } from "../../../src/setup/lang/php.ts";
 import { resolveCommands } from "../../../src/setup/resolve-commands.ts";
 
@@ -37,7 +38,7 @@ test("php: composer.json (no pest dep, no tests/Pest.php) → phpunit; every fie
   expect(c.paths).toEqual(["**"]);
   expect(c.commands.test).toBe("./vendor/bin/phpunit");
   expect(c.prepare).toBe("composer install");
-  expect(c.testFilePattern).toBe("Test\\.php$");
+  expect(c.testFilePattern).toBe("(^|/)tests?/.*Test\\.php$");
 });
 
 test("php: pestphp/pest in require → pest", () => {
@@ -47,7 +48,7 @@ test("php: pestphp/pest in require → pest", () => {
   const [c] = phpDef.detect(root);
   expect(c.commands.test).toBe("./vendor/bin/pest");
   expect(c.prepare).toBe("composer install");
-  expect(c.testFilePattern).toBe("Test\\.php$");
+  expect(c.testFilePattern).toBe("(^|/)tests?/.*Test\\.php$");
   expect(c.kind).toBe("php");
   expect(c.paths).toEqual(["**"]);
 });
@@ -59,7 +60,7 @@ test("php: pestphp/pest in require-dev → pest", () => {
   const [c] = phpDef.detect(root);
   expect(c.commands.test).toBe("./vendor/bin/pest");
   expect(c.prepare).toBe("composer install");
-  expect(c.testFilePattern).toBe("Test\\.php$");
+  expect(c.testFilePattern).toBe("(^|/)tests?/.*Test\\.php$");
   expect(c.kind).toBe("php");
   expect(c.paths).toEqual(["**"]);
 });
@@ -72,7 +73,7 @@ test("php: tests/Pest.php present (no composer dep) → pest", () => {
   const [c] = phpDef.detect(root);
   expect(c.commands.test).toBe("./vendor/bin/pest");
   expect(c.prepare).toBe("composer install");
-  expect(c.testFilePattern).toBe("Test\\.php$");
+  expect(c.testFilePattern).toBe("(^|/)tests?/.*Test\\.php$");
   expect(c.kind).toBe("php");
   expect(c.paths).toEqual(["**"]);
 });
@@ -87,7 +88,7 @@ test("php: malformed composer.json → still detected, defaults to phpunit", () 
   const [c] = components;
   expect(c.commands.test).toBe("./vendor/bin/phpunit");
   expect(c.prepare).toBe("composer install");
-  expect(c.testFilePattern).toBe("Test\\.php$");
+  expect(c.testFilePattern).toBe("(^|/)tests?/.*Test\\.php$");
   expect(c.kind).toBe("php");
   expect(c.paths).toEqual(["**"]);
 });
@@ -116,4 +117,23 @@ test("php: script-runner warning fires for pest (./vendor/bin/pest is ./-prefixe
   // every ./vendor/bin/* command is a script runner — warning must fire
   expect(warnings.some((w) => w.includes("./vendor/bin/pest"))).toBe(true);
   expect(warnings.some((w) => w.includes("shell script"))).toBe(true);
+});
+
+// ─── Durable A1 contract: testFilePattern anchored to tests?/ dir ─────────────
+
+test("php testFilePattern: A1 behavioral gate anchoring contract", () => {
+  const root = fixture({
+    "composer.json": JSON.stringify({ require: { php: "^8.1" } }),
+  });
+  const [c] = phpDef.detect(root);
+  const pattern = c.testFilePattern ?? "";
+
+  // phpunit discovers these — A1 must credit them
+  expect(isTestFile("tests/FooTest.php", pattern)).toBe(true);
+  expect(isTestFile("tests/Unit/FooTest.php", pattern)).toBe(true);
+  expect(isTestFile("packages/x/test/FooTest.php", pattern)).toBe(true);
+
+  // cardinal-sin guard: co-located test that phpunit never discovers
+  // must NOT satisfy A1 — loud failure beats vacuous pass
+  expect(isTestFile("src/CalculatorTest.php", pattern)).toBe(false);
 });
