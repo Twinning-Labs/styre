@@ -168,17 +168,17 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 - [ ] 🔵 **OSS:** surface gap + allow skip + open PR when no env/CI/tests — *this is the `styre run` terminal behavior (run-loop milestone), overlaps WO-11*
 - [ ] ❌ **Commercial-plane (out of OSS scope):** single-Dockerfile env, Repo2Run-style provisioning, snapshot-cache
 
-### WO-13 · Stack-grounded design & extract (sub-problem #4, items 1–2) — ⬜ IN-FEATURE (DONE line)
-*Make the planner aware of the stacks `setup` detected. Cheap, high-leverage; today the planner is stack-blind (freeze §9 item 8). Additive — no schema break (`kind` stays free text; validation is additive).*
-- [ ] ⬜ Feed `profile.components` (kind + paths + commands) into `designVars` and `extractVars`; fill the empty `{{stack}}` slot (`prompt-vars.ts:41-67` — currently `stack:""` and components not passed; `prompts/design.md`, `prompts/design-extract.md`)
-- [ ] ⬜ Validate/guide `work_unit.kind` against `profile.components[].kind` in extract validation (`extract-schema.ts`): warn when a unit's `kind` isn't a detected stack, or when its `files_to_touch` span multiple stacks (the latter is a **coupling signal** feeding M-D)
-- [ ] ⬜ *(optional)* compute + persist a design-time unit→component hint for downstream context
-- *Acceptance:* on a multi-stack fixture, the plan + units reflect the real detected stacks, and extract flags an off-stack `kind`.
+### WO-13 · Stack-grounded design & extract (sub-problem #4, item 1) — ⬜ IN-FEATURE (DONE line)
+*Make the planner aware of the stacks `setup` detected. Cheap, high-leverage; today the planner is stack-blind (freeze §9 item 8). Additive — no schema break. **Plan:** `docs/plans/2026-06-30-wo13-stack-grounded-decomposition.md` (v2, independently reviewed: feasibility/adversarial/scope).*
+- [ ] ⬜ Feed `profile.components` (kind + paths + commands) into `designVars` and `extractVars` via a **new `{{detected_stacks}}` prompt block** (`prompt-vars.ts`, `prompts/design.md`, `prompts/design-extract.md`). *(Use a NEW placeholder, not `{{stack}}` — that slot is populated by `promptVars` and would be clobbered.)*
+- [ ] 🔵 *Validate/guide `kind` + the cross-stack coupling signal → **DEFERRED to WO-5/M-D** (operator decision, post-review).* Coupling cannot be computed honestly while detectors emit whole-repo `["**"]` paths (folder-glob → ≈100% false positive, or silent misses); it becomes reliable only with **WO-5 file-identity**, and **M-D** (which already depends on WO-5) consumes it. The off-stack-kind warning is redundant given the prompt grounding above.
+- *Acceptance:* on a multi-stack fixture, the `design`/`design-extract` prompts list the real detected stacks; existing prompt/render suites stay green.
 
 ### Milestone M-D · Cross-stack design & implement coordination (sub-problem #4, items 3–4) — 🔵 FOLLOW-ON, first-class, separate
 *The heavier half of sub-problem #4: make implement aware of the other side of a contract, and stop splitting coupled work into mutually-blind dispatches. **Modifies the closed S1–S10 control-loop catalog** → requires its own brainstorm/spec + `control-loop.md` revision + independent review before implementation. Consolidates the former WO-10 items 3–5. **Depends on WO-13 landing first.***
 - [ ] ⬜ **Attach cross-stack context to the implement prompt** — the unit's own `files_to_touch`, its `depends_on` siblings (and what they changed), and any shared contract artifact (`prompt-vars.ts:69-92`, `prompts/implement.md`; today all absent, `stack` is `""`)
 - [ ] ⬜ **Coupled-cluster = one unit in one context** — don't split contract-coupled work into separate blind dispatches; regrounded on Styre's *own* contract-drift evidence (not a vendor multi-agent claim). Touches `design:extract` decomposition + the resolver (`resolver.ts`).
+- [ ] ⬜ **Cross-stack coupling signal** (a unit whose files map to >1 stack) — computed on **WO-5 file-identity** (moved here from WO-13; folder-glob `["**"]` can't compute it honestly). Feeds the coupled-cluster + blast-radius items.
 - [ ] ⬜ **Dependency-graph blast-radius before dispatch** — blocked on WO-5 rung-3 import-inference (no cross-language graph exists yet)
 - [ ] ⬜ **Implicit-contract + no integration test → human gate at design** — changes S2; the design-time analogue of the T2 gap
 - [ ] ⬜ A >context-budget coupled cluster bubbles to the human checkpoint as "too big to verify atomically"
