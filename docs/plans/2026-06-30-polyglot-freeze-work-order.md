@@ -105,8 +105,8 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 - [x] ✅ JVM-Gradle detector (wrapper-aware)
 - [x] ✅ Extended manifest-walk `SKIP` set
 - [x] ✅ Subdir-only-manifest loud warning (`unrootedManifestWarnings`)
-- [ ] ⬜ **Ruby `LangDef`** (Gemfile; rspec/rake ladder) — *M-C3, first-class set*
-- [ ] ⬜ **PHP `LangDef`** (composer.json; Pest-before-phpunit ladder) — *M-C3, first-class set*
+- [ ] ⬜ **Ruby `LangDef`** (Gemfile; rspec/rake ladder) **+ its `EXTENSIONS_BY_KIND` entry** (`.rb/.rake/.gemspec`) — *M-C3, first-class set. Without the map entry, `.rb` files route path-only (the interleaving fix won't apply).*
+- [ ] ⬜ **PHP `LangDef`** (composer.json; Pest-before-phpunit ladder) **+ its `EXTENSIONS_BY_KIND` entry** (`.php`) — *M-C3, first-class set.*
 - [ ] ⬜ **Detect-only `prepare` command class** (install/bootstrap, stored not run) — *M-C3*
 
 ### WO-4 · Command discovery sources (freeze §9.5)
@@ -117,15 +117,15 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
   - [ ] 🔵 *Deferred follow-ups (out of this scope):* CI matrix collapse (Q2), matrix-config selection, deploy/publish/notify filtering across CI styles (Q3).
 - [ ] ⬜ **Precedence wiring:** CI > `AGENTS.md` > conventions; agent drafts → confirm → frozen
 
-### WO-5 · File→stack classification by identity (freeze §9.1) — replaces folder routing
-- [ ] ⬜ **Extension→stack classifier** (depth-ladder rung 1; CODEOWNERS-grade, last-match-wins) — *the minimum that kills mixed-diff under-verify, with WO-6*
-- [ ] ⬜ **Re-express the two other `Component.paths` consumers under identity** (NOT optional — they break otherwise):
-  - the **implement Bash allowlist** (`scopedRunnersForFiles`) → runner commands of stacks whose identity matches `files_to_touch`
-  - the **A1 behavioral test-file gate** (`testFilePattern`) → "a test file of this stack's identity exists"
-- [ ] ⬜ **`ComponentSchema`/`schemaVersion` bump** + migration of `schemaVersion: 2` profiles (the seam revision)
-- [ ] 🟡 **Replace folder-glob routing** (`impactedComponents`/`matchesComponent`) with identity classification — *current code is B2 interim*
-- [ ] 🔵 *Manifest-association rung 2* — **additive; add when over-verify is *observed***, not upfront (rung 1 + run-all already kills under-verify)
-- [ ] 🔵 *Import-inference rung 3 (Pants-grade)* — **deferred**; the only rung that earns "content-based"; the cross-stack dep-graph depends on it
+### WO-5 · File→stack classification by identity (freeze §9.1) — ✅ DONE (rung-1 + run-all safety)
+*Shipped via TDD + per-task Opus crux + overall Opus review (579 green). Commits `0b941c0` (verify algorithm) · `0b1e9ea` (feedback fix) · `6384811` (identity/schema). Plan: `docs/plans/2026-06-30-wo5-file-identity-routing.md` (v3, two review rounds).*
+- [x] ✅ **Extension→stack classifier** — `EXTENSIONS_BY_KIND` keyed off detected `kind`, materialized onto each component at scan; `matchesComponent` = extension-AND-path.
+- [x] ✅ **Two other `Component.paths` consumers re-express for free** (implement Bash allowlist `scopedRunnersForFiles`; A1 test-file gate) — both route through `matchesComponent`.
+- [x] ✅ **`ComponentSchema`/`schemaVersion` 2→3 bump** — `extensions` field materialized at scan (immune to agent kind-drift; closes the v1-blocking hole); old v2 profiles hard-rejected → re-run setup.
+- [x] ✅ **Replaced folder-glob routing** with identity classification.
+- [x] ✅ **Run-all safety (the WO-6 core, folded in per operator decision D2):** any unowned non-docs file → an **advisory sweep** of untouched stacks (`ran-all-unowned` signal, non-wedging) + docs-skip — kills the mixed-diff silent under-verify (the cardinal sin) without wedging on unrelated red.
+- [ ] 🔵 *Manifest-association rung 2* — **additive; add when over-verify is *observed***.
+- [ ] 🔵 *Import-inference rung 3 (Pants-grade)* — **deferred**; the cross-stack dep-graph depends on it.
 
 ### WO-6 · Gates + triggers + run-more-when-unsure (freeze §9.2–9.3) — **mutually prerequisite with WO-5**
 - [ ] ⬜ Model the repo as **gates** (commands) + **triggers** (identity sets)
@@ -188,16 +188,16 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 
 ## Part D — Done-vs-remaining at a glance
 
-- **Fully landed & aligned (✅):** WO-1 (M-A security), WO-2 (M-C1 registry/engine/invariants), the 6 detectors + SKIP + warning in WO-3, the conventions rung + confirm ladder in WO-4, Rust reactor in WO-8, the per-verify recompute in WO-7, the existing PR-body gap surfacing + MERGE gate in WO-11, **WO-13's stack-grounded prompt decomposition (commits `5dc7960`, `38b9603`)**, and **WO-4's AGENTS.md command source (commit `de4c80d`; TDD + Opus security crux + overall review)**.
+- **Fully landed & aligned (✅):** WO-1 (M-A security), WO-2 (M-C1 registry/engine/invariants), the 6 detectors + SKIP + warning in WO-3, the conventions rung + confirm ladder in WO-4, Rust reactor in WO-8, the per-verify recompute in WO-7, the existing PR-body gap surfacing + MERGE gate in WO-11, **WO-13's stack-grounded prompt decomposition (commits `5dc7960`, `38b9603`)**, **WO-4's AGENTS.md command source (commit `de4c80d`)**, and **WO-5's file-identity routing + run-all safety (commits `0b941c0`/`0b1e9ea`/`6384811`; TDD + per-task + overall Opus reviews)**.
 - **Interim (🟡 — landed, mechanism to be replaced):** folder-glob routing (WO-5/WO-6), the Node co-located carve, the Node per-member walk.
-- **In-feature, not started (⬜):** Ruby/PHP/`prepare` (WO-3); scoped CI-reading + precedence wiring (WO-4; AGENTS.md half done); file-identity rung-1 **and the Bash-allowlist/test-file re-expression + schemaVersion bump** (WO-5); gates/triggers + run-more-when-unsure + the cost branch (WO-6); Python/Go/JVM non-root via identity (WO-9); explicit-artifact contract gates (WO-10 items 1–2).
+- **In-feature, not started (⬜):** Ruby/PHP/`prepare` (WO-3); scoped CI-reading + precedence wiring (WO-4; AGENTS.md half done); **the cost refinement** (WO-6: the *named* global-file set + the T1 over-budget branch + cost measurement — the safety mechanism itself landed in WO-5); Python/Go/JVM non-root via identity (WO-9); explicit-artifact contract gates (WO-10 items 1–2).
 - **Named follow-on milestone (🔵 first-class, separate):** **Milestone M-D — cross-stack design/implement coordination** (implement-time cross-stack context, coupled-cluster one-context, dependency-graph blast-radius, implicit-contract design-gate). Modifies the closed S1–S10 catalog; needs its own spec + `control-loop.md` revision + review; depends on WO-13.
 - **Out-of-feature (🔵 — reframe / run-loop / commercial):** persist+watch the graph (WO-7); JVM/Go reactors (WO-8); rung-2/rung-3 classification (WO-5); the pre-PR interactive hold (WO-11); the OSS env-bubble belongs to the run-loop (WO-12).
 - **Rejected (❌):** `scopeColocatedRoots` (WO-9); commercial env-provisioning (WO-12).
 
 **The DONE line.** Polyglot setup is *complete* at **WO-1…WO-6** (security, registry, detectors, command discovery incl. AGENTS.md + scoped CI, file-identity rung-1 + the two re-expressions, gates/triggers + run-more-when-unsure) **plus WO-9's non-root via identity and WO-13's stack-grounded decomposition**. Everything from WO-7's persistence on — including **Milestone M-D** (cross-stack implement coordination) — is additive, follow-on, run-loop, control-loop, or commercial.
 
-**The single most load-bearing remaining item:** **WO-6 (run-more-when-unsure) layered on WO-5 (file-identity rung-1 + the two re-expressions).** Until those land, the branch's verify **silently under-verifies the unmatched files in a *mixed* diff** (a fully-unmatched diff already errors loudly) — the exact failure the freeze exists to prevent. Its open cost risk (freeze §13 #1) must be measured as it's built, not after.
+**The cardinal sin is now killed (WO-5, landed).** File-identity routing + the run-all advisory sweep mean an unowned file in a mixed diff can no longer ride through silently. **The single most load-bearing *remaining* item is WO-6's cost work:** the run-all sweep is un-costed and frequent in polyglot repos (freeze §13 #1) — measure it, add the over-budget branch + the named global-file set. (Also un-recorded today: a *passing/empty* sweep leaves no positive trace that an unowned file was present — a WO-6 surfacing nuance.)
 
 ---
 
