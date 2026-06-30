@@ -88,3 +88,21 @@ test("advisory scope_diff failure is excluded from re-coding feedback; real gati
   expect(fb).not.toContain("scope_diff");
   expect(fb).toContain("build");
 });
+
+test("advisory ran-all-unowned (untouched-stack red) is excluded from re-coding feedback", () => {
+  const { db, ticketId } = makeTestDb();
+  const u = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend" });
+  seedAttempt(db, ticketId, u.id, "sha1");
+  // A precautionary sweep of an UNTOUCHED stack failed — the agent must not be told to fix it.
+  insertSignal(db, {
+    ticketId,
+    workUnitId: u.id,
+    signalType: "ran-all-unowned",
+    result: "fail",
+    branchHeadSha: "sha1",
+    detail: { component: "go", checkType: "test" },
+  });
+  const fb = implementFeedback(db, u.id);
+  db.close();
+  expect(fb).toBe(""); // the only signal is advisory → no corrective feedback
+});
