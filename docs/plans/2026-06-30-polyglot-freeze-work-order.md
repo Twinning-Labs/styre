@@ -96,7 +96,7 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 - [x] ✅ Invariant 2 — path backstop + `safeMember` member sanitization
 - [x] ✅ Behavior-preserving migration of the 5 stacks + invariant/conformance tests
 
-### WO-3 · Deterministic detection / first-class set
+### WO-3 · Deterministic detection / first-class set — ✅ COMPLETE (Ruby/PHP/`prepare` shipped; plan `docs/plans/2026-06-30-wo3-ruby-php-prepare.md`)
 - [x] ✅ Rust detector (+ workspace collapse) — *detection done; glob emission is interim (WO-5/6)*
 - [x] ✅ Node **detection** (scripts-aware) — *glob emission (root carve / per-member) is 🟡 interim (WO-5/6)*
 - [x] ✅ Python detector (+ runner ladder tox → nox → `pytest.ini` → `pyproject` → `python -m pytest`) — *no `manage.py` rung; that was never built*
@@ -105,9 +105,9 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 - [x] ✅ JVM-Gradle detector (wrapper-aware)
 - [x] ✅ Extended manifest-walk `SKIP` set
 - [x] ✅ Subdir-only-manifest loud warning (`unrootedManifestWarnings`)
-- [ ] ⬜ **Ruby `LangDef`** (Gemfile; rspec/rake ladder) **+ its `EXTENSIONS_BY_KIND` entry** (`.rb/.rake/.gemspec`) — *M-C3, first-class set. Without the map entry, `.rb` files route path-only (the interleaving fix won't apply).*
-- [ ] ⬜ **PHP `LangDef`** (composer.json; Pest-before-phpunit ladder) **+ its `EXTENSIONS_BY_KIND` entry** (`.php`) — *M-C3, first-class set.*
-- [ ] ⬜ **Detect-only `prepare` command class** (install/bootstrap, stored not run) — *M-C3*
+- [x] ✅ **Ruby `LangDef`** (Gemfile; signal-gated rspec→rake→`{unavailable}` ladder) **+ `EXTENSIONS_BY_KIND["ruby"]=[".rb",".rake",".gemspec"]`** + anchored `testFilePattern` `(^|/)(spec|test)/.*_(test|spec)\.rb$` — *WO-3 SHIPPED (commits `60b5b13`/`be08341`); verify inert until WO-12.*
+- [x] ✅ **PHP `LangDef`** (composer.json; Pest-before-phpunit ladder) **+ `EXTENSIONS_BY_KIND["php"]=[".php"]`** + anchored `testFilePattern` `(^|/)tests?/.*Test\.php$` — *WO-3 SHIPPED (commits `8ecbdcc`/`c32992d`); verify inert until WO-12.*
+- [x] ✅ **Detect-only `prepare` command class** (install/bootstrap, **stored never run**) — separate `Component.prepare?` field (inert/agent-unauthorable/Invariant-1-backstopped/shown-at-sign-off); populated Ruby/PHP/Node (`bundle`/`composer`/`npm install`); python/go/jvm/rust deferred. *WO-3 SHIPPED (commits `60b5b13`/`6215b82`).*
 
 ### WO-4 · Command discovery sources (freeze §9.5)
 - [x] ✅ Conventions / ecosystem-default rung (hardcoded commands per LangDef)
@@ -191,7 +191,7 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 
 - **Fully landed & aligned (✅):** WO-1 (M-A security), WO-2 (M-C1 registry/engine/invariants), the 6 detectors + SKIP + warning in WO-3, the conventions rung + confirm ladder in WO-4, Rust reactor in WO-8, the per-verify recompute in WO-7, the existing PR-body gap surfacing + MERGE gate in WO-11, **WO-13's stack-grounded prompt decomposition (commits `5dc7960`, `38b9603`)**, **WO-4's AGENTS.md command source (commit `de4c80d`)**, and **WO-5's file-identity routing + run-all safety (commits `0b941c0`/`0b1e9ea`/`6384811`; TDD + per-task + overall Opus reviews)**.
 - **Interim (🟡 — landed, mechanism to be replaced):** folder-glob routing (WO-5/WO-6), the Node co-located carve, the Node per-member walk.
-- **In-feature, not started (⬜):** Ruby/PHP/`prepare` (WO-3); scoped CI-reading + precedence wiring (WO-4; AGENTS.md half done); Python/Go/JVM non-root via identity (WO-9); explicit-artifact contract gates (WO-10 items 1–2).
+- **In-feature, not started (⬜):** scoped CI-reading + precedence wiring (WO-4; AGENTS.md half done); Python/Go/JVM non-root via identity (WO-9); explicit-artifact contract gates (WO-10 items 1–2). *(WO-3 Ruby/PHP/`prepare` now ✅ SHIPPED.)*
 - **In-feature, partially landed (🟡):** **the cost refinement** (WO-6: inert-skip + `sweep-cost` measurement **landed**, commits `d29f138`/`7759451`; the T1 over-budget **bound** + the *named hard-gate* global-file set + content-hash dedup deferred to a calibrated fast-follow; the safety mechanism itself landed in WO-5).
 - **Named follow-on milestone (🔵 first-class, separate):** **Milestone M-D — cross-stack design/implement coordination** (implement-time cross-stack context, coupled-cluster one-context, dependency-graph blast-radius, implicit-contract design-gate). Modifies the closed S1–S10 catalog; needs its own spec + `control-loop.md` revision + review; depends on WO-13.
 - **Out-of-feature (🔵 — reframe / run-loop / commercial):** persist+watch the graph (WO-7); JVM/Go reactors (WO-8); rung-2/rung-3 classification (WO-5); the pre-PR interactive hold (WO-11); the OSS env-bubble belongs to the run-loop (WO-12).
