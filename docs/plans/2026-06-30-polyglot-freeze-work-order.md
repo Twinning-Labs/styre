@@ -148,10 +148,11 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 - [ ] 🔵 `go.work` reactor — additive, same reconcile gate
 - [ ] 🔵 Degrade-to-over-verify (`["**"]` workspace root) on low-confidence member parse
 
-### WO-9 · Non-root detection & naming
-- [x] 🟡 Rust/Node emit non-root dir components (folder-glob — B2 interim)
-- [ ] ⬜ Python/Go/JVM non-root — *via the WO-5 file-identity model (currently warning-only)*
-- [ ] 🔵 **`uniquifyNames`** pass (sound, specced in M-C2a, **unshipped**) — RETAIN; **additive, lands *with* non-root** (no consumer until dir-named components exist)
+### WO-9 · Non-root detection & naming — *design: `docs/brainstorms/2026-07-01-wo9-non-root-detection-design.md` (v2, reviewed)*
+- [x] 🟡 Rust/Node emit non-root dir components (folder-glob — B2 interim; WO-9 retrofits `dir` for correct command cwd)
+- [ ] ⬜ **Python/Go non-root — via file-identity, per-manifest (root + nested), each dir-scoped + a `Component.dir?` field driving per-component command cwd** (closes the root+nested vacuous pass; operator-signed-off). *WO-9 scope.*
+- [ ] 🔵 **JVM non-root → moved to WO-8** (not self-contained: `<parent>`/`<relativePath>` + root wrapper = reactor/parent resolution). JVM subdir-only stays **warning-only** until then.
+- [ ] 🔵 **`uniquifyNames`** pass (sound, specced in M-C2a, **unshipped**) — RETAIN; **lands *with* non-root** (real consumer once dir-named components exist). *WO-9 scope.*
 - [ ] ❌ **`scopeColocatedRoots`** (folder carve) — **REJECTED**, do not build (silent under-verify; freeze §5)
 
 ### WO-10 · Cross-stack contract gates (freeze §9.6) — **explicit-artifact-only**
@@ -197,7 +198,7 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 - **Out-of-feature (🔵 — reframe / run-loop / commercial):** persist+watch the graph (WO-7); JVM/Go reactors (WO-8); rung-2/rung-3 classification (WO-5); the pre-PR interactive hold (WO-11); the OSS env-bubble belongs to the run-loop (WO-12).
 - **Rejected (❌):** `scopeColocatedRoots` (WO-9); commercial env-provisioning (WO-12).
 
-**The DONE line.** Polyglot setup is *complete* at **WO-1…WO-6** (security, registry, detectors, command discovery incl. AGENTS.md + scoped CI, file-identity rung-1 + the two re-expressions, gates/triggers + run-more-when-unsure) **plus WO-9's non-root via identity and WO-13's stack-grounded decomposition**. Everything from WO-7's persistence on — including **Milestone M-D** (cross-stack implement coordination) — is additive, follow-on, run-loop, control-loop, or commercial.
+**The DONE line.** Polyglot setup is *complete* at **WO-1…WO-6** (security, registry, detectors, command discovery incl. AGENTS.md + scoped CI, file-identity rung-1 + the two re-expressions, gates/triggers + run-more-when-unsure) **plus WO-9's Python/Go non-root via identity and WO-13's stack-grounded decomposition**. **JVM non-root folds into WO-8** (reactor/parent resolution) — the DONE line does **not** block on it. Everything from WO-7's persistence on — including **Milestone M-D** (cross-stack implement coordination) — is additive, follow-on, run-loop, control-loop, or commercial.
 
 **The cardinal sin is now killed (WO-5, landed).** File-identity routing + the run-all advisory sweep mean an unowned file in a mixed diff can no longer ride through silently. **The single most load-bearing *remaining* item is WO-6's cost *bound*:** the run-all sweep is now **measured** (the `sweep-cost` signal, commit `7759451`) but not yet **bounded** — the over-budget branch + the *named hard-gate* global-file set remain (deferred calibrated fast-follow, freeze §13 #1). (The passing/empty-sweep positive-trace nuance is now **closed**: `sweep-cost` fires even at `stacksSwept:0`.)
 
