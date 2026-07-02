@@ -8,11 +8,11 @@
 
 **Tech Stack:** TypeScript, Bun (`bun test`), Biome (`bun run lint` · `bun run typecheck`). Bare `biome`/`tsc` are NOT on PATH — use the bun scripts.
 
-**Design:** `docs/brainstorms/2026-07-01-wo9-non-root-detection-design.md` (v2, independently reviewed). Reviews: feasibility/adversarial/scope, all SHIP-WITH-FIXES; fixes folded into the design and this plan.
+**Design:** `docs/brainstorms/2026-07-01-wo9-non-root-detection-design.md` (v2, independently reviewed). This plan was itself independently reviewed (feasibility + adversarial/TDD, both SHIP-WITH-FIXES): the adversarial pass **confirmed the root+nested vacuous-pass closure holds end-to-end in the real code**; both passes' fixes are folded in here (v2): corrected the "matrix unchanged" claim (5 old-behavior tests are rewritten in Tasks 4/5), fixed the `mergeComponents` sentinel test to exercise the agent-*mentions* rebuild path (genuinely red), made Task 2's cwd test use a committed-subdir marker command (no `runCommand` stub seam exists), kept `prepare` in the Node retrofit, dropped the unused `join` import, and pinned the `requirements.txt`-warning placement.
 
 ## Global Constraints
 
-- **Behavior-preserving for existing repos:** the `test/setup/detect-components.test.ts` matrix must pass **unchanged** (its repos are root/single-stack; per-manifest emission yields the same single `["**"]` component when only a root manifest exists).
+- **Behavior-preserving for ROOT-ONLY repos:** per-manifest emission yields the same single `["**"]` component when only a root manifest exists, so root/single-stack rows of the matrix stay green. **BUT five existing tests encode the old root-only behavior the feature intentionally inverts and MUST be rewritten** (in Tasks 4/5): `test/setup/detect-components.test.ts:129` (nested-only go.mod → no component), `:174` (subdir-only go.mod warns), `:182` (subdir-only pyproject warns); `test/setup/lang/go.test.ts:34` (nested-only go.mod → no component); `test/setup/lang/python.test.ts:66` (nested-only pyproject → no component). "Suite green after each task" holds only if the task that changes the behavior also rewrites its old-behavior test in the same commit.
 - **`dir` is execution-only, never routing:** `matchesComponent` (`src/dispatch/components.ts`) must stay `extMatches && paths.glob`. No consumer may route on `dir`.
 - **`dir` is scan-authoritative:** it is NOT in `DiscoverSchema`; `mergeComponents` reads `s.dir` (scan), never `p.dir` (agent). The agent cannot author `dir`.
 - **Machine-channel backstop:** `runRegistry` throws on an unsafe `dir` (`..`/absolute) via `isSafePath`, same loud posture as the command backstop.
@@ -50,12 +50,17 @@ test("a component without dir parses (dir undefined)", () => {
 });
 ```
 
-`test/setup/discover-schema.test.ts` (carry — genuinely red until the carry lands):
+`test/setup/discover-schema.test.ts` — the **carry sentinel** (this guards the whole WO's reason to exist). **CRITICAL (review):** the agent-*mentions* case is the at-risk branch and the common production path (`discover.ts:28-31` feeds the scan components to the agent as the draft to refine → the agent returns the same component by name → it flows into the field-by-field rebuild `discover-schema.ts:37-46`, which drops `dir` without the carry). The agent-*omits* case hits the `if (!p) return s` early-return and is already safe (returns the scan verbatim), so it is NOT a red→green test — keep it only as a bonus.
 ```ts
-test("mergeComponents preserves the scanned dir even when the agent omits the component", () => {
+test("mergeComponents preserves scanned dir when the agent REFINES the component (rebuild path)", () => {
   const scan: Component[] = [{ name: "svc", kind: "go", paths: ["svc/**"], commands: {}, extensions: [".go"], dir: "svc" }];
-  const merged = mergeComponents(scan, []); // agent proposed nothing
-  expect(merged[0].dir).toBe("svc");
+  // agent proposes the same component by name → rebuild path → dir dropped WITHOUT the carry:
+  const merged = mergeComponents(scan, [{ name: "svc", kind: "go", paths: ["svc/**"], commands: {} } as unknown as Component]);
+  expect(merged[0].dir).toBe("svc"); // GENUINELY RED without the carry; green with it
+});
+test("mergeComponents preserves scanned dir when the agent omits the component (bonus, green pre-change)", () => {
+  const scan: Component[] = [{ name: "svc", kind: "go", paths: ["svc/**"], commands: {}, extensions: [".go"], dir: "svc" }];
+  expect(mergeComponents(scan, [])[0].dir).toBe("svc"); // early-return branch — already safe
 });
 test("an agent proposal cannot introduce dir (not in DiscoverSchema)", () => {
   const parsed = DiscoverSchema.parse({ components: [{ name: "svc", kind: "go", paths: ["svc/**"], commands: {}, dir: "../evil" }], repoCommands: {} });
@@ -114,9 +119,7 @@ Make `dir` actually scope command execution. Without a non-root detector yet, a 
 - Consumes: `Component.dir` (Task 1).
 - `join` is already imported in `handlers.ts`.
 
-- [ ] **Step 1: Write failing tests.** Add a verify test on a profile whose impacted component has `dir: "services/api"` and a `test` command; assert the command runs with `cwd` ending in `services/api` (spy/stub `runCommand` to capture `opts.cwd`, or use a fixture whose command writes its cwd). Add the mirror: a root component (`dir` undefined) runs with `cwd === worktreePath`. Cover the `verify:integration` path too: a non-root component job runs with the module cwd while a `repoCommands` job runs at worktree root.
-
-*(Match the existing verify-test harness in the file — it already stubs `runCommand`/uses a temp worktree. Assert on the captured `cwd`.)*
+- [ ] **Step 1: Write failing tests.** **`runCommand` is a static module import (`handlers.ts:28`), NOT injected via `RegistryDeps`, and the existing harness (`test/dispatch/verify-handlers.test.ts`) runs REAL spawned commands in a temp git worktree — there is no stub seam (review).** So bind the assertion to cwd with a **cwd-sensitive command**: in the fixture worktree, **actually create AND commit** a `services/api/` subdir containing a marker file (e.g. `services/api/MARKER`), give the impacted component `dir: "services/api"` and a `test` command that succeeds **only** at that cwd (e.g. `test -f MARKER` — passes only when cwd is `services/api`, fails at repo root where no top-level `MARKER` exists). Assert the verify passes. Mirror: a root component (`dir` undefined) with a `test`-command keyed to a root-only marker passes at `worktreePath`. **Why the subdir must be committed:** `runCommand` does `Bun.spawn(["sh","-c",cmd], { cwd })`; if `join(worktree, dir)` doesn't exist the spawn errors (exit null → `"error"`), which would mask the real assertion. Cover `verify:integration` the same way: a non-root component's build/test job runs at the module cwd (marker resolves), a `repoCommands` job runs at repo root.
 
 - [ ] **Step 2: Run — FAIL** (commands currently run at `worktreePath` for non-root dirs).
 
@@ -236,13 +239,13 @@ In `runRegistry`, change `return out;` → `return uniquifyNames(out);`.
 
 **Files:**
 - Modify: `src/setup/lang/go.ts`
-- Modify: `src/setup/detect-components.ts` (remove `go` from `TARGETED_LANG_MANIFESTS` — now detected)
-- Test: `test/setup/lang/go.test.ts` (create if absent), `test/setup/detect-components.test.ts` (warning)
+- Modify: `src/setup/detect-components.ts` (remove `["go", ["go.mod"]]` from `TARGETED_LANG_MANIFESTS` — now detected)
+- Test: `test/setup/lang/go.test.ts` (EXISTS — has a local `fixture()`; **rewrite** `:34` "nested-only go.mod → no component"), `test/setup/detect-components.test.ts` (**rewrite** `:129` nested-only→no-component and `:174` subdir-only-go.mod-warns — the feature inverts both)
 
 **Interfaces:**
 - Consumes: `findManifests` (`../manifests.ts`), `Component.dir` (Task 1).
 
-- [ ] **Step 1: Write failing tests** (use the `fixture()` helper from `test/setup/detect-components.test.ts`):
+- [ ] **Step 1: Write failing tests** (use the **local** `fixture()` in `test/setup/lang/go.test.ts` — do NOT import from `detect-components.test.ts`, its `fixture` isn't exported). **Also rewrite the old-behavior tests named above** so they assert the new per-manifest detection (nested-only → components; no go warning). New cases:
 ```ts
 test("go: single root go.mod → one root component (unchanged)", () => {
   const root = fixture({ "go.mod": "module x\n", "main.go": "" });
@@ -267,9 +270,8 @@ test("go: root + nested go.mod → root ['**'] AND a nested dir-scoped component
 
 - [ ] **Step 2: Run — FAIL.**
 
-- [ ] **Step 3: Implement** — replace `src/setup/lang/go.ts`:
+- [ ] **Step 3: Implement** — replace `src/setup/lang/go.ts` (NO `join`/`existsSync` import — the new body only uses `findManifests`; leaving `join` unused fails `bun run lint`):
 ```ts
-import { join } from "node:path";
 import { findManifests } from "../manifests.ts";
 import type { ComponentDraft, LangDef } from "./types.ts";
 
@@ -291,7 +293,7 @@ export const goDef: LangDef = {
   },
 };
 ```
-(`join` may be unused now — drop the import if lint flags it.) In `detect-components.ts`, remove the `["go", ["go.mod"]]` entry from `TARGETED_LANG_MANIFESTS` (every `go.mod` is now detected — the Go warning is retired).
+In `detect-components.ts`, remove the `["go", ["go.mod"]]` entry from `TARGETED_LANG_MANIFESTS` (every `go.mod` is now detected — the Go warning is retired).
 
 - [ ] **Step 4: Run — PASS** + full `bun test` + lint + typecheck.
 - [ ] **Step 5: Commit** — `feat(setup): Go non-root detection (per-manifest, dir-scoped) (WO-9)`
@@ -302,13 +304,13 @@ export const goDef: LangDef = {
 
 **Files:**
 - Modify: `src/setup/lang/python.ts`
-- Modify: `src/setup/detect-components.ts` (`TARGETED_LANG_MANIFESTS` — remove `python`; add the `requirements.txt`-only warning to `unrootedManifestWarnings`)
-- Test: `test/setup/lang/python.test.ts` (create if absent), `test/setup/detect-components.test.ts` (warning)
+- Modify: `src/setup/detect-components.ts` (`TARGETED_LANG_MANIFESTS` — remove the `["python", …]` entry; add the `requirements.txt`-only warning after the loop, before `return out`)
+- Test: `test/setup/lang/python.test.ts` (EXISTS — local `fixture()`; **rewrite** `:66` "nested-only pyproject → no component"), `test/setup/detect-components.test.ts` (**rewrite** `:182` subdir-only-pyproject-warns)
 
 **Interfaces:**
 - Consumes: `findManifests`, `pythonTestCommand` (already in `python.ts`), `Component.dir`.
 
-- [ ] **Step 1: Write failing tests.**
+- [ ] **Step 1: Write failing tests** (use the **local** `fixture()` in `test/setup/lang/python.test.ts`; also **rewrite the old-behavior tests named above**).
 ```ts
 test("python: single root pyproject → one root component (unchanged)", () => {
   const root = fixture({ "pyproject.toml": "[project]\n" });
@@ -379,7 +381,7 @@ export const pythonDef: LangDef = {
 ```
 Add `import { findManifests } from "../manifests.ts";` to `python.ts` (it already imports `existsSync`/`join`).
 
-`src/setup/detect-components.ts` — remove the `["python", […]]` entry from `TARGETED_LANG_MANIFESTS`, and add the Python `requirements.txt` rule to `unrootedManifestWarnings` (after the JVM loop):
+`src/setup/detect-components.ts` — remove the `["python", […]]` entry from `TARGETED_LANG_MANIFESTS`, and add the Python `requirements.txt` rule to `unrootedManifestWarnings` **after the `TARGETED_LANG_MANIFESTS` loop, before `return out`** (`existsSync`/`join`/`findManifests` are already imported in this file):
 ```ts
   // Python: a subdir requirements.txt with NO sibling pyproject.toml/setup.py is not a detectable
   // module — surface it (loud) rather than emitting nothing (would be a silent under-detection).
@@ -425,7 +427,7 @@ Rust's `findManifests` branch and Node's subdir members already emit dir-scoped 
 ```
 (The workspace-collapse branch emits a root component — leave it without `dir`.)
 
-`src/setup/lang/node.ts` — in the `components.push`, add `dir` for non-root members:
+`src/setup/lang/node.ts` — in the `components.push`, add `dir` for non-root members. **KEEP the shipped `prepare: "npm install"` (WO-3) — do NOT drop it** (`test/setup/lang/node.test.ts:117,129` assert it):
 ```ts
       components.push({
         name: isRoot ? "frontend" : dir.replace(/\//g, "-"),
@@ -433,6 +435,7 @@ Rust's `findManifests` branch and Node's subdir members already emit dir-scoped 
         ...(isRoot ? {} : { dir }),
         paths: isRoot ? ["src/**", "static/**", "package.json"] : [`${dir}/**`],
         commands,
+        prepare: "npm install",
       });
 ```
 
@@ -445,7 +448,7 @@ Rust's `findManifests` branch and Node's subdir members already emit dir-scoped 
 
 - **Spec coverage:** design §4.1→Task 1; §4.2→Task 2; §4.4→Task 3; §4.3 Go→Task 4; §4.3 Python + §4.6 warning→Task 5; §4.5 retrofit→Task 6. All four decisions (per-manifest, `dir`+cwd, Python+Go, `uniquifyNames`) covered.
 - **Type consistency:** `Component.dir?: string` defined in Task 1, consumed in Tasks 2/4/5/6; `uniquifyNames(Component[]): Component[]` defined in Task 3.
-- **Behavior-preservation:** Tasks 1/3 are no-ops for existing fixtures; Task 2's cwd resolves to `worktreePath` when `dir` is undefined; Tasks 4/5 emit the same single `["**"]` component for a root-only repo. The `detect-components.test.ts` matrix should pass unchanged after each task (verify at Step 4).
+- **Behavior-preservation:** Tasks 1/3 are no-ops for existing fixtures; Task 2's cwd resolves to `worktreePath` when `dir` is undefined (`join(x,"")===x`, verified); Tasks 4/5 emit the same single `["**"]` component for a **root-only** repo. **NOT unchanged:** Tasks 4/5 intentionally invert 5 old-behavior tests (nested-only detection + go/python warnings) and rewrite them in the same commit (see Global Constraints). Everything else in the matrix stays green.
 - **The vacuous-pass fix:** root+nested now emits a nested dir-scoped component (Task 4/5) whose command runs in its dir (Task 2) — the nested module is really gated. The `mergeComponents` `dir` round-trip test (Task 1) guards against silently reverting to root-cwd.
 - **Ordering:** 1 (field) → 2 (cwd) → 3 (uniquify) → 4 (Go) → 5 (Python) → 6 (retrofit). Each task's suite stays green.
 - **Not shipped:** `scopeColocatedRoots` (rejected); JVM non-root (WO-8). `verify:integration` `repoCommands` stay at worktree root (Task 2c).
