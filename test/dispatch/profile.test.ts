@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProfileSchema, loadProfile, parseProfile } from "../../src/dispatch/profile.ts";
+import {
+  ComponentSchema,
+  ProfileSchema,
+  loadProfile,
+  parseProfile,
+} from "../../src/dispatch/profile.ts";
 
 test("parses a v3 components profile", () => {
   const p = parseProfile({
@@ -153,4 +158,14 @@ describe("runtimeContext", () => {
       }),
     ).toThrow();
   });
+});
+
+test("ComponentSchema round-trips an optional dir", () => {
+  const c = ComponentSchema.parse({ name: "svc", kind: "go", paths: ["svc/**"], dir: "svc" });
+  expect(c.dir).toBe("svc");
+});
+
+test("a component without dir parses (dir undefined)", () => {
+  const c = ComponentSchema.parse({ name: "go", kind: "go", paths: ["**"] });
+  expect(c.dir).toBeUndefined();
 });

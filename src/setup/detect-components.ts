@@ -21,6 +21,8 @@ export function runRegistry(repoDir: string, registry: LangDef[]): Component[] {
       }
       if (c.prepare !== undefined && !isCommandSafe(c.prepare))
         throw new Error(`engine: unsafe prepare command for ${c.name}: ${c.prepare}`);
+      if (c.dir !== undefined && !isSafePath(c.dir))
+        throw new Error(`engine: unsafe dir for ${c.name}: ${c.dir}`);
       const paths = c.paths.filter(isSafePath);
       if (paths.length === 0) continue;
       out.push({ ...c, paths, extensions: [...(EXTENSIONS_BY_KIND[c.kind] ?? [])] });

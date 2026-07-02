@@ -75,6 +75,8 @@ export const ComponentSchema = z.object({
   extensions: z.array(z.string()).default([]),
   /** Detect-only install command (never run by styre; env-provisioning workstream WO-12). */
   prepare: z.string().optional(),
+  /** Module root directory, relative to repo root; absent means root (WO-9 non-root modules). */
+  dir: z.string().optional(),
 });
 export type Component = z.infer<typeof ComponentSchema>;
 
