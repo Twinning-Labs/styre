@@ -57,7 +57,6 @@ export function detectComponents(repoDir: string): {
 }
 
 const TARGETED_LANG_MANIFESTS: Array<[string, string[]]> = [
-  ["python", ["pyproject.toml", "setup.py", "requirements.txt"]],
   ["jvm-maven", ["pom.xml"]],
   ["jvm-gradle", ["build.gradle", "build.gradle.kts"]],
   ["ruby", ["Gemfile"]],
@@ -80,6 +79,19 @@ export function unrootedManifestWarnings(repoDir: string): string[] {
         break;
       }
     }
+  }
+  // Python: a subdir requirements.txt with NO sibling pyproject.toml/setup.py is not a detectable
+  // module — surface it (loud) rather than emitting nothing (would be a silent under-detection).
+  for (const rel of findManifests(repoDir, "requirements.txt")) {
+    const dir = rel.slice(0, -"requirements.txt".length).replace(/\/$/, "");
+    if (dir === "") continue; // root → root component handles it
+    const hasAnchor =
+      existsSync(join(repoDir, dir, "pyproject.toml")) ||
+      existsSync(join(repoDir, dir, "setup.py"));
+    if (!hasAnchor)
+      out.push(
+        `⚠ requirements.txt under ${dir}/ has no pyproject.toml/setup.py — not a detectable Python module; no component emitted.`,
+      );
   }
   return out;
 }

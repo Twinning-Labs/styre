@@ -177,13 +177,18 @@ test("loud note: subdir-only go.mod does NOT warn (Go warning retired — every 
   expect(unrootedManifestWarnings(fixture({ "go.mod": "module x\n" }))).toEqual([]);
 });
 
-test("loud note: subdir-only pyproject warns; non-targeted nested files do not", () => {
+test("loud note: subdir-only pyproject does NOT warn (Python non-root detected); non-targeted nested files do not warn either", () => {
   expect(
     unrootedManifestWarnings(fixture({ "src/pyproject.toml": "[project]\n" })).some((w) =>
       /pyproject\.toml/.test(w),
     ),
-  ).toBe(true);
+  ).toBe(false);
   expect(unrootedManifestWarnings(fixture({ "README.md": "x" }))).toEqual([]);
+});
+
+test("loud note: subdir requirements.txt with no pyproject/setup.py sibling warns (undetectable Python module)", () => {
+  const warnings = unrootedManifestWarnings(fixture({ "svc/requirements.txt": "flask\n" }));
+  expect(warnings.some((w) => w.includes("svc") && w.includes("requirements.txt"))).toBe(true);
 });
 
 test("cargo workspace collapses members into ONE rust component", () => {
