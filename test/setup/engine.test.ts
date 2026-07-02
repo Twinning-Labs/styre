@@ -2,8 +2,9 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Component } from "../../src/dispatch/profile.ts";
 import { isCommandSafe } from "../../src/setup/command-safety.ts";
-import { runRegistry } from "../../src/setup/detect-components.ts";
+import { runRegistry, uniquifyNames } from "../../src/setup/detect-components.ts";
 import type { LangDef } from "../../src/setup/lang/types.ts";
 import { isSafePath, safeMember } from "../../src/setup/manifests.ts";
 import { REGISTRY } from "../../src/setup/registry.ts";
@@ -107,4 +108,41 @@ test("runRegistry passes a safe dir through", () => {
     detect: () => [{ name: "svc", kind: "go", paths: ["svc/**"], commands: {}, dir: "svc" }],
   };
   expect(runRegistry("/tmp", [ok])[0].dir).toBe("svc");
+});
+
+// WO-9 m-c2a Task 1: uniquifyNames engine post-pass
+test("uniquifyNames qualifies colliding names by kind, leaves unique names alone", () => {
+  const cs: Component[] = [
+    {
+      name: "services-api",
+      kind: "go",
+      paths: ["services/api/**"],
+      commands: {},
+      extensions: [".go"],
+    },
+    {
+      name: "services-api",
+      kind: "python",
+      paths: ["services/api/**"],
+      commands: {},
+      extensions: [".py"],
+    },
+    { name: "frontend", kind: "node", paths: ["src/**"], commands: {}, extensions: [".ts"] },
+  ];
+  expect(
+    uniquifyNames(cs)
+      .map((c) => c.name)
+      .sort(),
+  ).toEqual(["frontend", "go-services-api", "python-services-api"]);
+});
+test("uniquifyNames handles a kind-qualified name that itself collides", () => {
+  const cs: Component[] = [
+    { name: "api", kind: "go", paths: ["api/**"], commands: {}, extensions: [".go"] },
+    { name: "api", kind: "go", paths: ["api2/**"], commands: {}, extensions: [".go"] },
+  ];
+  expect(
+    uniquifyNames(cs)
+      .map((c) => c.name)
+      .sort(),
+  ).toEqual(["go-api", "go-api-2"]);
 });
