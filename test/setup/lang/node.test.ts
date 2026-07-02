@@ -67,6 +67,28 @@ test("node: non-root package.json → name from dir, kind node, paths [dir/**]",
   expect(c.commands.build).toBeUndefined();
 });
 
+// ─── WO-9 Task 6: dir retrofit on non-root Node components ───────────────────
+
+test("node: non-root package.json member carries dir for correct cwd", () => {
+  const root = fixture({
+    "packages/x/package.json": JSON.stringify({ scripts: { test: "jest" } }),
+  });
+  const components = nodeDef.detect(root);
+  expect(components).toHaveLength(1);
+  expect(components[0].dir).toBe("packages/x");
+});
+
+test("node: root frontend component carries no dir", () => {
+  const root = fixture({
+    "package.json": JSON.stringify({ scripts: { build: "vite build" } }),
+    "svelte.config.js": "export default {}",
+  });
+  const components = nodeDef.detect(root);
+  expect(components).toHaveLength(1);
+  expect(components[0].name).toBe("frontend");
+  expect(components[0].dir).toBeUndefined();
+});
+
 test("node: only scripts present in package.json are added as commands", () => {
   const root = fixture({
     "package.json": JSON.stringify({ scripts: { build: "tsc", test: "vitest", check: "check" } }),

@@ -47,6 +47,7 @@ test("rust: standalone Cargo.toml at repo root → one rust component", () => {
   expect(c.paths).toEqual(["**"]);
   expect(c.commands.build).toBe("cargo build");
   expect(c.commands.test).toBe("cargo test");
+  expect(c.dir).toBeUndefined();
 });
 
 test("rust: standalone Cargo.toml in subdirectory → component named by dir", () => {
@@ -58,6 +59,29 @@ test("rust: standalone Cargo.toml in subdirectory → component named by dir", (
   const [c] = components;
   expect(c.name).toBe("src-tauri");
   expect(c.paths).toEqual(["src-tauri/**"]);
+});
+
+// ─── WO-9 Task 6: dir retrofit on non-root Rust components ───────────────────
+
+test("rust: non-workspace subdir Cargo.toml → component carries dir for correct cwd", () => {
+  const root = fixture({
+    "crates/a/Cargo.toml": '[package]\nname="a"\n',
+  });
+  const components = rustDef.detect(root);
+  expect(components).toHaveLength(1);
+  const [c] = components;
+  expect(c.name).toBe("crates-a");
+  expect(c.dir).toBe("crates/a");
+});
+
+test("rust: workspace-collapse root component carries no dir", () => {
+  const root = fixture({
+    "Cargo.toml": '[workspace]\nmembers = ["crates/a"]\n',
+    "crates/a/Cargo.toml": '[package]\nname="a"\n',
+  });
+  const components = rustDef.detect(root);
+  expect(components).toHaveLength(1);
+  expect(components[0].dir).toBeUndefined();
 });
 
 test("rust: no Cargo.toml → no components", () => {
