@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
@@ -25,6 +25,21 @@ function gitRepo(): string {
   writeFileSync(join(root, "README.md"), "x");
   run(["add", "-A"]);
   run(["commit", "-m", "init"]);
+  return root;
+}
+
+/** A repo like `gitRepo()`, plus a COMMITTED `services/api/MARKER` (module-local marker, absent
+ *  at repo root) and a COMMITTED root-level `ROOT_MARKER` (absent under services/api). Used to
+ *  prove a command actually ran at a specific cwd — `test -f MARKER` only succeeds when cwd is
+ *  `services/api`; `test -f ROOT_MARKER` only succeeds at the worktree root (WO-9 Task 2). */
+function gitRepoWithModuleDir(): string {
+  const root = gitRepo();
+  mkdirSync(join(root, "services", "api"), { recursive: true });
+  writeFileSync(join(root, "services", "api", "MARKER"), "x");
+  writeFileSync(join(root, "ROOT_MARKER"), "x");
+  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
+  run(["add", "-A"]);
+  run(["commit", "-m", "add module dir + root marker"]);
   return root;
 }
 
@@ -485,4 +500,225 @@ test("scope_diff records an advisory fail for out-of-scope files but does NOT fa
   expect(testSig?.result).toBe("pass");
   expect(scope?.result).toBe("fail");
   expect(JSON.parse(scope?.detail_json ?? "{}").out_of_scope).toEqual(["sneaky.ts"]);
+});
+
+// --- WO-9 Task 2: per-component command cwd (Component.dir) at all three verify run sites ---
+
+test("hard-gate: verify:check runs a non-root component's command in its module dir", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepoWithModuleDir();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    behavioral: 0,
+    verifyCheckTypes: ["test"],
+  });
+  const runner = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "feature.ts"), "export const x = 1;\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: "{}",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [
+        {
+          name: "api",
+          kind: "node",
+          paths: ["**"],
+          dir: "services/api",
+          // Only passes when cwd is services/api — proves the run used the module dir, not root.
+          commands: { test: "test -f MARKER" },
+        },
+      ],
+    }),
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-dircwd-")),
+  });
+
+  await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test
+  const sigs = listByUnit(db, unit.id);
+  db.close();
+  expect(outcome.kind).toBe("stepped");
+  expect(sigs[0]?.result).toBe("pass");
+});
+
+test("hard-gate: a root component (no dir) still runs at the worktree root (no regression)", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepoWithModuleDir();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    behavioral: 0,
+    verifyCheckTypes: ["test"],
+  });
+  const runner = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "feature.ts"), "export const x = 1;\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: "{}",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [
+        {
+          name: "app",
+          kind: "node",
+          paths: ["**"],
+          // no dir → root; only passes at worktree root.
+          commands: { test: "test -f ROOT_MARKER" },
+        },
+      ],
+    }),
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-dircwd-root-")),
+  });
+
+  await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test
+  const sigs = listByUnit(db, unit.id);
+  db.close();
+  expect(outcome.kind).toBe("stepped");
+  expect(sigs[0]?.result).toBe("pass");
+});
+
+test("advisory sweep: the swept untouched component's command runs in its module dir", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepoWithModuleDir();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    behavioral: 0,
+    verifyCheckTypes: ["test"],
+  });
+  // The coding attempt writes a root-level, unowned, non-inert file (owned by no component's
+  // paths), which triggers the advisory sweep over ALL untouched components.
+  const runner = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "unowned.ts"), "export const x = 1;\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: "{}",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [
+        {
+          name: "api",
+          kind: "node",
+          paths: ["services/api/**"], // does NOT match unowned.ts → stays untouched → swept
+          dir: "services/api",
+          // Only passes when cwd is services/api.
+          commands: { test: "test -f MARKER" },
+        },
+      ],
+    }),
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-sweepdir-")),
+  });
+
+  await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test (sweep only)
+  const sigs = db
+    .query(
+      "SELECT signal_type, result FROM ground_truth_signal WHERE ticket_id = ? AND signal_type = 'ran-all-unowned'",
+    )
+    .all(ticketId) as Array<{ signal_type: string; result: string }>;
+  db.close();
+  expect(outcome.kind).toBe("stepped");
+  // If the sweep ran at the wrong cwd (worktree root), "test -f MARKER" would fail and record a
+  // ran-all-unowned signal. With the fix (cwd = module dir), the sweep passes — no such signal.
+  expect(sigs).toHaveLength(0);
+});
+
+test("verify:integration runs a component job in its module dir and a repoCommands job at repo root", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepoWithModuleDir();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+  });
+  setUnitStatus(db, unit.id, "verified");
+  const registry = buildDispatchRegistry({
+    runner: new FakeAgentRunner(() => ({
+      completed: true,
+      exitCode: 0,
+      stdout: "{}",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    })),
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [
+        {
+          name: "api",
+          kind: "node",
+          paths: ["services/api/**"],
+          dir: "services/api",
+          // Only passes when cwd is services/api.
+          commands: { build: "test -f MARKER", test: "true" },
+        },
+      ],
+      repoCommands: { lint: "test -f ROOT_MARKER" }, // repo-wide → must run at worktree root
+    }),
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-intdir-")),
+  });
+
+  const outcome = await advanceOneStep(db, ticketId, registry); // verify:integration
+  const sigs = db
+    .query(
+      "SELECT signal_type, result FROM ground_truth_signal WHERE ticket_id = ? AND signal_type = 'integration'",
+    )
+    .all(ticketId) as Array<{ signal_type: string; result: string }>;
+  db.close();
+  expect(outcome.kind).toBe("stepped");
+  expect(sigs[0]?.result).toBe("pass");
 });

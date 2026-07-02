@@ -169,3 +169,35 @@ test("a component without dir parses (dir undefined)", () => {
   const c = ComponentSchema.parse({ name: "go", kind: "go", paths: ["**"] });
   expect(c.dir).toBeUndefined();
 });
+
+test("ComponentSchema rejects a traversal dir (parse-boundary safety, WO-9 Task 2)", () => {
+  expect(() =>
+    ComponentSchema.parse({ name: "svc", kind: "go", paths: ["svc/**"], dir: "../.." }),
+  ).toThrow();
+});
+
+test("ComponentSchema rejects an absolute dir", () => {
+  expect(() =>
+    ComponentSchema.parse({ name: "svc", kind: "go", paths: ["svc/**"], dir: "/etc" }),
+  ).toThrow();
+});
+
+test("ComponentSchema accepts a safe nested dir", () => {
+  const c = ComponentSchema.parse({
+    name: "svc",
+    kind: "go",
+    paths: ["svc/**"],
+    dir: "services/api",
+  });
+  expect(c.dir).toBe("services/api");
+});
+
+test("parseProfile rejects a hand-edited profile with a traversal dir on a component", () => {
+  expect(() =>
+    parseProfile({
+      slug: "demo",
+      targetRepo: "/tmp/repo",
+      components: [{ name: "svc", kind: "go", paths: ["svc/**"], dir: "../.." }],
+    }),
+  ).toThrow();
+});
