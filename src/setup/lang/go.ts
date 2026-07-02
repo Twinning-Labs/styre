@@ -1,18 +1,20 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { findManifests } from "../manifests.ts";
 import type { ComponentDraft, LangDef } from "./types.ts";
 
 export const goDef: LangDef = {
   kind: "go",
   detect(repoDir: string): ComponentDraft[] {
-    if (!existsSync(join(repoDir, "go.mod"))) return [];
-    return [
-      {
-        name: "go",
+    const out: ComponentDraft[] = [];
+    for (const rel of findManifests(repoDir, "go.mod")) {
+      const dir = rel.slice(0, -"go.mod".length).replace(/\/$/, "");
+      out.push({
+        name: dir === "" ? "go" : dir.replace(/\//g, "-"),
         kind: "go",
-        paths: ["**"],
+        ...(dir === "" ? {} : { dir }),
+        paths: [dir === "" ? "**" : `${dir}/**`],
         commands: { build: "go build ./...", test: "go test ./..." },
-      },
-    ];
+      });
+    }
+    return out;
   },
 };

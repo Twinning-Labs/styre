@@ -58,7 +58,6 @@ export function detectComponents(repoDir: string): {
 
 const TARGETED_LANG_MANIFESTS: Array<[string, string[]]> = [
   ["python", ["pyproject.toml", "setup.py", "requirements.txt"]],
-  ["go", ["go.mod"]],
   ["jvm-maven", ["pom.xml"]],
   ["jvm-gradle", ["build.gradle", "build.gradle.kts"]],
   ["ruby", ["Gemfile"]],
