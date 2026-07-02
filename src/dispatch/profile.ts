@@ -64,8 +64,24 @@ export const CommandValueSchema = z.union([
 ]);
 export type CommandValue = z.infer<typeof CommandValueSchema>;
 
+/** A repo-relative dir string is safe iff non-empty, not absolute, and has no `..`/`.`/empty
+ *  segment (after trim). Deliberately a tiny inline predicate — a subset of setup/manifests.ts's
+ *  `isSafePath` — rather than importing from setup/, which would reverse the dispatch→setup
+ *  layering. This is the RUN-path parse-boundary backstop: `profile.json` is hand-editable and
+ *  its `dir` field drives verify command cwd (WO-9 Task 2), so a malicious/malformed `dir` (e.g.
+ *  `../..`) must be rejected at `parseProfile`, not just at detection time. */
+const isSafeDir = (d: string): boolean => {
+  const t = d.trim();
+  if (t === "" || t.startsWith("/")) return false; // reject empty / absolute
+  return !t.split("/").some((seg) => {
+    const s = seg.trim();
+    return s === ".." || s === "." || s === "";
+  });
+};
+
 /** A single detected stack component. schemaVersion 3 adds per-component `extensions[]` for
- *  file-identity routing and the optional detect-only `prepare` field (stored, never run by styre). */
+ *  file-identity routing and the optional detect-only `prepare` field (stored, never run by
+ *  styre), plus the optional `dir` field (module root, relative to repo root — WO-9). */
 export const ComponentSchema = z.object({
   name: z.string().min(1),
   kind: z.string().min(1),
@@ -76,7 +92,7 @@ export const ComponentSchema = z.object({
   /** Detect-only install command (never run by styre; env-provisioning workstream WO-12). */
   prepare: z.string().optional(),
   /** Module root directory, relative to repo root; absent means root (WO-9 non-root modules). */
-  dir: z.string().optional(),
+  dir: z.string().refine(isSafeDir, "unsafe dir (absolute or traversal)").optional(),
 });
 export type Component = z.infer<typeof ComponentSchema>;
 
