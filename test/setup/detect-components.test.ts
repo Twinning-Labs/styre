@@ -126,12 +126,12 @@ test("go: root go.mod → one go component with build/test", () => {
   expect(go?.commands.test).toBe("go test ./...");
 });
 
-test("go: nested-only go.mod (no root) → no go component (single-module first)", () => {
-  expect(
-    detectComponents(fixture({ "backend/go.mod": "module x\n" })).components.find(
-      (c) => c.kind === "go",
-    ),
-  ).toBeUndefined();
+test("go: nested-only go.mod (no root) → dir-scoped go component (non-root detection)", () => {
+  const go = detectComponents(fixture({ "backend/go.mod": "module x\n" })).components.find(
+    (c) => c.kind === "go",
+  );
+  expect(go?.dir).toBe("backend");
+  expect(go?.paths).toEqual(["backend/**"]);
 });
 
 test("jvm: root pom.xml → jvm-maven (bare mvn when no wrapper)", () => {
@@ -171,11 +171,9 @@ test("jvm: no jvm manifest → no jvm component", () => {
   expect(comps.find((c) => c.kind === "jvm-maven" || c.kind === "jvm-gradle")).toBeUndefined();
 });
 
-test("loud note: subdir-only go.mod warns; root go.mod does not", () => {
+test("loud note: subdir-only go.mod does NOT warn (Go warning retired — every go.mod is detected)", () => {
   const nested = unrootedManifestWarnings(fixture({ "backend/go.mod": "module x\n" }));
-  expect(nested.some((w) => /go\.mod/.test(w) && /backend/.test(w) && /deferred/i.test(w))).toBe(
-    true,
-  );
+  expect(nested.some((w) => /go\.mod/.test(w))).toBe(false);
   expect(unrootedManifestWarnings(fixture({ "go.mod": "module x\n" }))).toEqual([]);
 });
 
