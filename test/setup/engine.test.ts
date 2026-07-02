@@ -92,3 +92,19 @@ test("CONFORMANCE: every registry def over an adversarial polyglot fixture emits
     }
   }
 });
+
+test("runRegistry throws on an unsafe dir", () => {
+  const evil: LangDef = {
+    kind: "go",
+    detect: () => [{ name: "x", kind: "go", paths: ["**"], commands: {}, dir: "../evil" }],
+  };
+  expect(() => runRegistry("/tmp", [evil])).toThrow(/unsafe dir/);
+});
+
+test("runRegistry passes a safe dir through", () => {
+  const ok: LangDef = {
+    kind: "go",
+    detect: () => [{ name: "svc", kind: "go", paths: ["svc/**"], commands: {}, dir: "svc" }],
+  };
+  expect(runRegistry("/tmp", [ok])[0].dir).toBe("svc");
+});

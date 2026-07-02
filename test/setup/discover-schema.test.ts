@@ -185,6 +185,32 @@ test("DiscoverSchema strips prepare from agent proposal (agent-unauthorable, gua
   expect((parsed.components[0] as Record<string, unknown>).prepare).toBeUndefined();
 });
 
+test("mergeComponents preserves scanned dir when the agent REFINES the component (rebuild path)", () => {
+  const scan: Component[] = [
+    { name: "svc", kind: "go", paths: ["svc/**"], commands: {}, extensions: [".go"], dir: "svc" },
+  ];
+  // agent proposes the same component by name → rebuild path → dir dropped WITHOUT the carry:
+  const merged = mergeComponents(scan, [
+    { name: "svc", kind: "go", paths: ["svc/**"], commands: {} } as unknown as Component,
+  ]);
+  expect(merged[0].dir).toBe("svc"); // GENUINELY RED without the carry; green with it
+});
+
+test("mergeComponents preserves scanned dir when the agent omits the component (bonus, green pre-change)", () => {
+  const scan: Component[] = [
+    { name: "svc", kind: "go", paths: ["svc/**"], commands: {}, extensions: [".go"], dir: "svc" },
+  ];
+  expect(mergeComponents(scan, [])[0].dir).toBe("svc"); // early-return branch — already safe
+});
+
+test("an agent proposal cannot introduce dir (not in DiscoverSchema)", () => {
+  const parsed = DiscoverSchema.parse({
+    components: [{ name: "svc", kind: "go", paths: ["svc/**"], commands: {}, dir: "../evil" }],
+    repoCommands: {},
+  });
+  expect((parsed.components[0] as Record<string, unknown>).dir).toBeUndefined();
+});
+
 test("probeCommandExists is false for a missing binary", () => {
   expect(probeCommandExists(process.cwd(), "definitely-not-a-real-binary-xyz --help")).toBe(false);
   expect(probeCommandExists(process.cwd(), "git status")).toBe(true);

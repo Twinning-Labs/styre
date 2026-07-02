@@ -43,6 +43,8 @@ export function mergeComponents(scan: Component[], proposed: Component[]): Compo
       extensions: s.extensions,
       // prepare is scan-authoritative (agent-unauthorable — not in DiscoverSchema); carry it verbatim.
       ...(s.prepare !== undefined ? { prepare: s.prepare } : {}),
+      // dir is scan-authoritative (agent-unauthorable — not in DiscoverSchema); carry it verbatim.
+      ...(s.dir !== undefined ? { dir: s.dir } : {}),
     };
   });
 }
