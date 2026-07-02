@@ -28,7 +28,24 @@ export function runRegistry(repoDir: string, registry: LangDef[]): Component[] {
       out.push({ ...c, paths, extensions: [...(EXTENSIONS_BY_KIND[c.kind] ?? [])] });
     }
   }
-  return out;
+  return uniquifyNames(out);
+}
+
+/** Guarantee unique component names: a name shared by ≥2 components is qualified `<kind>-<name>`
+ *  (then `-<n>`). Non-colliding names are left untouched (behavior-preserving for single-stack repos). */
+export function uniquifyNames(components: Component[]): Component[] {
+  const counts = new Map<string, number>();
+  for (const c of components) counts.set(c.name, (counts.get(c.name) ?? 0) + 1);
+  const used = new Set<string>();
+  for (const c of components) if ((counts.get(c.name) ?? 0) === 1) used.add(c.name);
+  return components.map((c) => {
+    if ((counts.get(c.name) ?? 0) === 1) return c;
+    let name = `${c.kind}-${c.name}`;
+    let i = 2;
+    while (used.has(name)) name = `${c.kind}-${c.name}-${i++}`;
+    used.add(name);
+    return { ...c, name };
+  });
 }
 
 /** Deterministic component skeleton: anchors the agent refine + the command ladder. */
