@@ -148,12 +148,12 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 - [ ] 🔵 `go.work` reactor — additive, same reconcile gate
 - [ ] 🔵 Degrade-to-over-verify (`["**"]` workspace root) on low-confidence member parse
 
-### WO-9 · Non-root detection & naming — *design: `docs/brainstorms/2026-07-01-wo9-non-root-detection-design.md` (v2, reviewed)*
-- [x] 🟡 Rust/Node emit non-root dir components (folder-glob — B2 interim; WO-9 retrofits `dir` for correct command cwd)
-- [ ] ⬜ **Python/Go non-root — via file-identity, per-manifest (root + nested), each dir-scoped + a `Component.dir?` field driving per-component command cwd** (closes the root+nested vacuous pass; operator-signed-off). *WO-9 scope.*
+### WO-9 · Non-root detection & naming — ✅ COMPLETE (Python/Go non-root + `uniquifyNames` shipped; JVM non-root → WO-8) — *plan `docs/plans/2026-07-01-wo9-non-root-detection.md`*
+- [x] 🟡 Rust/Node emit non-root dir components (folder-glob — B2 interim; WO-9 retrofitted `dir` for correct command cwd, commit `fd48235`)
+- [x] ✅ **Python/Go non-root — file-identity, per-manifest (root + nested), each dir-scoped + a `Component.dir?` field driving per-component command cwd at all 3 verify run sites** (closes the root+nested vacuous pass; the nested module gets its own gate in its own cwd). Commits `1490821` (dir field+backstop+carry) · `0cef08f` (cwd + parse-boundary refine) · `d24d46c` (Go) · `74d56ca` (Python + requirements-only warning) · `ea02dd2` (findManifests skip-testdata + sort). *WO-9 SHIPPED.*
 - [ ] 🔵 **JVM non-root → moved to WO-8** (not self-contained: `<parent>`/`<relativePath>` + root wrapper = reactor/parent resolution). JVM subdir-only stays **warning-only** until then.
-- [ ] 🔵 **`uniquifyNames`** pass (sound, specced in M-C2a, **unshipped**) — RETAIN; **lands *with* non-root** (real consumer once dir-named components exist). *WO-9 scope.*
-- [ ] ❌ **`scopeColocatedRoots`** (folder carve) — **REJECTED**, do not build (silent under-verify; freeze §5)
+- [x] ✅ **`uniquifyNames`** pass (m-c2a Task 1, verbatim) — kind-qualifies name collisions; runs inside `runRegistry`. Commit `d59f463`. *WO-9 SHIPPED.*
+- [ ] ❌ **`scopeColocatedRoots`** (folder carve) — **REJECTED**, do not build (silent under-verify; freeze §5) — confirmed NOT shipped.
 
 ### WO-10 · Cross-stack contract gates (freeze §9.6) — **explicit-artifact-only**
 - [ ] ⬜ Detect explicit contract artifacts (`.proto` / OpenAPI / Pact / GraphQL)
@@ -192,7 +192,7 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 
 - **Fully landed & aligned (✅):** WO-1 (M-A security), WO-2 (M-C1 registry/engine/invariants), the 6 detectors + SKIP + warning in WO-3, the conventions rung + confirm ladder in WO-4, Rust reactor in WO-8, the per-verify recompute in WO-7, the existing PR-body gap surfacing + MERGE gate in WO-11, **WO-13's stack-grounded prompt decomposition (commits `5dc7960`, `38b9603`)**, **WO-4's AGENTS.md command source (commit `de4c80d`)**, and **WO-5's file-identity routing + run-all safety (commits `0b941c0`/`0b1e9ea`/`6384811`; TDD + per-task + overall Opus reviews)**.
 - **Interim (🟡 — landed, mechanism to be replaced):** folder-glob routing (WO-5/WO-6), the Node co-located carve, the Node per-member walk.
-- **In-feature, not started (⬜):** scoped CI-reading + precedence wiring (WO-4; AGENTS.md half done); Python/Go/JVM non-root via identity (WO-9); explicit-artifact contract gates (WO-10 items 1–2). *(WO-3 Ruby/PHP/`prepare` now ✅ SHIPPED.)*
+- **In-feature, not started (⬜):** scoped CI-reading + precedence wiring (WO-4; AGENTS.md half done); explicit-artifact contract gates (WO-10 items 1–2). *(WO-3 Ruby/PHP/`prepare` ✅ SHIPPED; WO-9 Python/Go non-root + `uniquifyNames` ✅ SHIPPED — JVM non-root → WO-8. **The polyglot-setup DONE line is now closed.**)*
 - **In-feature, partially landed (🟡):** **the cost refinement** (WO-6: inert-skip + `sweep-cost` measurement **landed**, commits `d29f138`/`7759451`; the T1 over-budget **bound** + the *named hard-gate* global-file set + content-hash dedup deferred to a calibrated fast-follow; the safety mechanism itself landed in WO-5).
 - **Named follow-on milestone (🔵 first-class, separate):** **Milestone M-D — cross-stack design/implement coordination** (implement-time cross-stack context, coupled-cluster one-context, dependency-graph blast-radius, implicit-contract design-gate). Modifies the closed S1–S10 catalog; needs its own spec + `control-loop.md` revision + review; depends on WO-13.
 - **Out-of-feature (🔵 — reframe / run-loop / commercial):** persist+watch the graph (WO-7); JVM/Go reactors (WO-8); rung-2/rung-3 classification (WO-5); the pre-PR interactive hold (WO-11); the OSS env-bubble belongs to the run-loop (WO-12).
