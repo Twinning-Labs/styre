@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
-import { existsSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { branchNameFor } from "../agent/branch.ts";
 import type { AgentRunner } from "../agent/runner.ts";
@@ -54,7 +55,7 @@ import {
   implementVars,
   reviewVars,
 } from "./prompt-vars.ts";
-import { planProvision, sourceCheckCommand } from "./provision.ts";
+import { planProvision, resolvePythonInterpreter, sourceCheckCommand } from "./provision.ts";
 import { ReviewOutputSchema, computeBlocksShip, validateReviewFindings } from "./review-schema.ts";
 import type { DispatchDeps } from "./run-dispatch.ts";
 import { runAgentDispatch } from "./run-dispatch.ts";
@@ -372,42 +373,96 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           `provision: ${a.component} '${a.command}' exited ${run.exitCode}${run.timedOut ? " (timed out)" : ""}: ${run.stderr.slice(0, 500)}`,
         );
       }
-      // The worktree-source assertion (Task 5 / review F-1): a successful `pip install -e .`
-      // does not prove `import <pkg>` resolves to the worktree — a pre-installed/conda copy can
-      // shadow it. Only applies to the python editable-install shape with a known import name.
+      // The worktree-source assertion (Task 5 / review F-1, hardened by the Opus re-review's
+      // Fix A/B/D/E): a successful `pip install -e .` does not prove `import <pkg>` resolves to
+      // the worktree — a pre-installed/conda copy can shadow it. Only applies to the python
+      // editable-install shape. An unresolvable import name is NOT a silent skip (Fix B) — it
+      // escalates.
       const component = deps.profile.components.find((c) => c.name === a.component);
-      const importName = component?.kind === "python" ? pythonImportName(a.cwd) : undefined;
-      const check = sourceCheckCommand(
-        component?.kind ?? "",
-        component?.prepare,
-        a.cwd,
-        importName,
-      );
-      if (check) {
-        writeFileSync(join(a.cwd, check.scriptName), check.script);
-        let probe = await runCommand(check.command, {
-          cwd: a.cwd,
-          timeoutMs: PROVISION_TIMEOUT_MS,
-        });
-        if (probe.exitCode !== 0) {
-          // Remediate once: a stale/non-editable prior install can shadow the worktree copy on
-          // sys.path; force-reinstalling editable (no-deps, deps are already provisioned) fixes
-          // the common case without re-running the full prepare command.
-          await runCommand("pip install -e . --force-reinstall --no-deps", {
-            cwd: a.cwd,
-            timeoutMs: PROVISION_TIMEOUT_MS,
-          });
-          probe = await runCommand(check.command, { cwd: a.cwd, timeoutMs: PROVISION_TIMEOUT_MS });
-        }
-        if (probe.exitCode !== 0) {
+      const isEditablePythonInstall =
+        component?.kind === "python" && component.prepare === "pip install -e .";
+      if (isEditablePythonInstall && component) {
+        // Fix D: resolve once (python3, then python); neither present is a distinct
+        // provisioning-infra failure, not a silent pass.
+        let interp: string;
+        try {
+          interp = resolvePythonInterpreter();
+        } catch (err) {
           insertSignal(ctx.db, {
             ticketId: ctx.ticket.id,
             workUnitId: null,
             signalType: "provision",
             result: "fail",
-            detail: { component: a.component, check: "source-under-test" },
+            detail: {
+              component: a.component,
+              check: "source-under-test",
+              reason: "no-python-interpreter",
+            },
           });
-          throw new Error(`provision: worktree source not under test for ${a.component}`);
+          throw err;
+        }
+        // Fix A: the probe script lives in a fresh tempdir OUTSIDE the worktree — never inside
+        // `a.cwd` — so CPython never auto-prepends the worktree to sys.path for the probe.
+        const scriptDir = mkdtempSync(join(tmpdir(), "styre-provcheck-"));
+        try {
+          const importName = pythonImportName(a.cwd);
+          let check: ReturnType<typeof sourceCheckCommand>;
+          try {
+            check = sourceCheckCommand({
+              component: a.component,
+              kind: component.kind,
+              prepare: component.prepare,
+              cwd: a.cwd,
+              importName,
+              scriptDir,
+              interp,
+            });
+          } catch (err) {
+            // Fix B: unresolvable/invalid (Fix E) import name escalates — never a silent skip.
+            insertSignal(ctx.db, {
+              ticketId: ctx.ticket.id,
+              workUnitId: null,
+              signalType: "provision",
+              result: "fail",
+              detail: {
+                component: a.component,
+                check: "source-under-test",
+                reason: "unresolvable-import-name",
+              },
+            });
+            throw err;
+          }
+          if (!check) continue; // unreachable given isEditablePythonInstall, but keeps TS honest
+          writeFileSync(check.scriptPath, check.script);
+          let probe = await runCommand(check.command, {
+            cwd: a.cwd,
+            timeoutMs: PROVISION_TIMEOUT_MS,
+          });
+          if (probe.exitCode !== 0) {
+            // Remediate once: a stale/non-editable prior install can shadow the worktree copy on
+            // sys.path; force-reinstalling editable (no-deps, deps are already provisioned) fixes
+            // the common case without re-running the full prepare command.
+            await runCommand(`${interp} -m pip install -e . --force-reinstall --no-deps`, {
+              cwd: a.cwd,
+              timeoutMs: PROVISION_TIMEOUT_MS,
+            });
+            probe = await runCommand(check.command, {
+              cwd: a.cwd,
+              timeoutMs: PROVISION_TIMEOUT_MS,
+            });
+          }
+          if (probe.exitCode !== 0) {
+            insertSignal(ctx.db, {
+              ticketId: ctx.ticket.id,
+              workUnitId: null,
+              signalType: "provision",
+              result: "fail",
+              detail: { component: a.component, check: "source-under-test" },
+            });
+            throw new Error(`provision: worktree source not under test for ${a.component}`);
+          }
+        } finally {
+          rmSync(scriptDir, { recursive: true, force: true });
         }
       }
     }

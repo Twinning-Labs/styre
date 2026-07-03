@@ -160,4 +160,43 @@ describe("pythonImportName", () => {
     const root = fixture({ "a/__init__.py": "", "b/__init__.py": "" });
     expect(pythonImportName(root)).toBeUndefined();
   });
+
+  // ─── Opus re-review Fix C: Poetry + src-layout ─────────────────────────────
+
+  test("pyproject.toml [tool.poetry] name -> normalized (- to _)", () => {
+    const root = fixture({
+      "pyproject.toml": '[tool.poetry]\nname = "my-poetry-pkg"\nversion = "0.1.0"\n',
+    });
+    expect(pythonImportName(root)).toBe("my_poetry_pkg");
+  });
+
+  test("[project] name takes precedence over [tool.poetry] name when both present", () => {
+    const root = fixture({
+      "pyproject.toml": '[project]\nname = "proj-name"\n\n[tool.poetry]\nname = "poetry-name"\n',
+    });
+    expect(pythonImportName(root)).toBe("proj_name");
+  });
+
+  test("src-layout: sole src/<pkg>/__init__.py -> that pkg's name", () => {
+    const root = fixture({ "src/pkg/__init__.py": "" });
+    expect(pythonImportName(root)).toBe("pkg");
+  });
+
+  test("src-layout: pyproject present with no name, no top-level __init__.py -> falls back to src/<pkg>", () => {
+    const root = fixture({
+      "pyproject.toml": "[tool.pytest.ini_options]\n",
+      "src/pkg/__init__.py": "",
+    });
+    expect(pythonImportName(root)).toBe("pkg");
+  });
+
+  test("src-layout: more than one src/<pkg>/__init__.py dir -> undefined (ambiguous)", () => {
+    const root = fixture({ "src/a/__init__.py": "", "src/b/__init__.py": "" });
+    expect(pythonImportName(root)).toBeUndefined();
+  });
+
+  test("a top-level __init__.py dir takes precedence over src-layout when both present", () => {
+    const root = fixture({ "pkg/__init__.py": "", "src/other/__init__.py": "" });
+    expect(pythonImportName(root)).toBe("pkg");
+  });
 });

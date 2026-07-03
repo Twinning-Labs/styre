@@ -34,20 +34,25 @@ export function pythonPrepare(repoDir: string): string | undefined {
 }
 
 /** The importable module name for a python component, used by `provision`'s post-install
- *  worktree-source check (Task 5). Preference: `pyproject.toml` `[project]` `name` (PEP 621,
- *  `-` normalized to `_` as pip/setuptools do at install time), else the sole top-level
- *  directory containing `__init__.py`; else `undefined` (the check is then skipped — no false
- *  escalation on a shape we can't name). */
+ *  worktree-source check (Task 5). Preference order: `pyproject.toml` `[project]` `name` (PEP
+ *  621), else `pyproject.toml` `[tool.poetry]` `name` (Poetry projects commonly have no
+ *  `[project]` table at all) — both `-` normalized to `_` as pip/setuptools do at install time —
+ *  else the sole top-level directory containing `__init__.py` (flat layout), else the sole
+ *  `src/<pkg>/__init__.py` directory (src layout); else `undefined` (the check is then treated
+ *  as underivable by the caller — never silently skipped, see provision.ts Fix B). */
 export function pythonImportName(repoDir: string): string | undefined {
   const pp = join(repoDir, "pyproject.toml");
   if (existsSync(pp)) {
     try {
       const content = readFileSync(pp, "utf8");
       const project = content.match(/\[project\]([\s\S]*?)(?=\n\[|$)/);
-      const name = project?.[1].match(/name\s*=\s*["']([^"']+)["']/);
-      if (name) return name[1].replace(/-/g, "_");
+      const projectName = project?.[1].match(/name\s*=\s*["']([^"']+)["']/);
+      if (projectName) return projectName[1].replace(/-/g, "_");
+      const poetry = content.match(/\[tool\.poetry\]([\s\S]*?)(?=\n\[|$)/);
+      const poetryName = poetry?.[1].match(/name\s*=\s*["']([^"']+)["']/);
+      if (poetryName) return poetryName[1].replace(/-/g, "_");
     } catch {
-      // unreadable/unparsable pyproject — fall through to the directory scan
+      // unreadable/unparsable pyproject — fall through to the directory scans
     }
   }
   try {
@@ -56,7 +61,18 @@ export function pythonImportName(repoDir: string): string | undefined {
       .filter((e) => existsSync(join(repoDir, e.name, "__init__.py")));
     if (candidates.length === 1) return candidates[0].name;
   } catch {
-    // unreadable repoDir — no name to offer
+    // unreadable repoDir — fall through to the src-layout scan
+  }
+  const srcDir = join(repoDir, "src");
+  if (existsSync(srcDir)) {
+    try {
+      const candidates = readdirSync(srcDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .filter((e) => existsSync(join(srcDir, e.name, "__init__.py")));
+      if (candidates.length === 1) return candidates[0].name;
+    } catch {
+      // unreadable src/ dir — no name to offer
+    }
   }
   return undefined;
 }
