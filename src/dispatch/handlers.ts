@@ -53,6 +53,7 @@ import {
   implementVars,
   reviewVars,
 } from "./prompt-vars.ts";
+import { planProvision } from "./provision.ts";
 import { ReviewOutputSchema, computeBlocksShip, validateReviewFindings } from "./review-schema.ts";
 import type { DispatchDeps } from "./run-dispatch.ts";
 import { runAgentDispatch } from "./run-dispatch.ts";
@@ -79,6 +80,7 @@ export interface RegistryDeps {
 const DESIGN_TIMEOUT_MS = 60 * 60 * 1000;
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const VERIFY_TIMEOUT_MS = 10 * 60 * 1000;
+const PROVISION_TIMEOUT_MS = 15 * 60 * 1000;
 
 /** Resolve the repo + ticket worktree + branch for a DAEMON-run step (verify). Unlike
  *  `depsFor` this carries no agent capability — verify only reads the committed worktree. */
@@ -349,6 +351,29 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     );
     setUnitStatus(ctx.db, unit.id, "verifying");
     return result;
+  });
+
+  registry.register("provision", async (ctx: HandlerContext) => {
+    const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
+    ensureWorktree(repoPath, branch, worktreePath);
+    const actions = planProvision(deps.profile.components, worktreePath);
+    for (const a of actions) {
+      const run = await runCommand(a.command, { cwd: a.cwd, timeoutMs: PROVISION_TIMEOUT_MS });
+      insertSignal(ctx.db, {
+        ticketId: ctx.ticket.id,
+        workUnitId: null,
+        signalType: "provision",
+        result: run.exitCode === 0 ? "pass" : run.timedOut ? "error" : "fail",
+        detail: { component: a.component, command: a.command, exitCode: run.exitCode },
+      });
+      if (run.exitCode !== 0) {
+        throw new Error(
+          `provision: ${a.component} '${a.command}' exited ${run.exitCode}${run.timedOut ? " (timed out)" : ""}: ${run.stderr.slice(0, 500)}`,
+        );
+      }
+      // Task 5 inserts the worktree-source assertion for editable-install components here.
+    }
+    return { provisioned: actions.length };
   });
 
   registry.register("verify:check", async (ctx: HandlerContext) => {
