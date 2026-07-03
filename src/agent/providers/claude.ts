@@ -1,7 +1,8 @@
 import { agentEnv } from "../agent-env.ts";
 import type { AgentRunInput, AgentRunResult, AgentRunner, FailureCause } from "../runner.ts";
 
-// agentEnv (the cred scrub) is shared with the verify sink (run-command.ts); see ../agent-env.ts.
+// agentEnv keeps ANTHROPIC_API_KEY for the agent CLI; the verify sink (run-command.ts) uses the
+// stricter verifyEnv (also strips ANTHROPIC_API_KEY). See ../agent-env.ts.
 export { agentEnv } from "../agent-env.ts";
 
 /** The Claude `claude -p` argv (pure). Flag names are CLI-version-specific — verified against a

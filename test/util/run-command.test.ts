@@ -31,6 +31,22 @@ test("runs the command in the given cwd", async () => {
   expect(r.stdout.trim()).toBe(cwd);
 });
 
+test("verify commands cannot read ANTHROPIC_API_KEY", async () => {
+  const prev = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "secret-should-not-leak";
+  try {
+    const res = await runCommand("printf '%s' \"$ANTHROPIC_API_KEY\"", {
+      cwd: process.cwd(),
+      timeoutMs: 5000,
+    });
+    expect(res.stdout).toBe("");
+  } finally {
+    // biome-ignore lint/performance/noDelete: process.env must be unset via delete; assigning undefined leaves the string "undefined"
+    if (prev === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = prev;
+  }
+});
+
 // Capability isolation (move-4): verify runs agent-authored code, so the daemon's creds must NOT
 // be visible to it. runCommand scrubs LINEAR_API_KEY / GITHUB_TOKEN from the spawned env.
 test("scrubs the daemon-held creds from the spawned command's env", async () => {

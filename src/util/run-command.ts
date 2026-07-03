@@ -1,4 +1,4 @@
-import { agentEnv } from "../agent/agent-env.ts";
+import { verifyEnv } from "../agent/agent-env.ts";
 
 export interface CommandResult {
   exitCode: number | null;
@@ -12,8 +12,9 @@ export interface CommandResult {
  *
  *  Capability isolation (move-4): the command is **agent-authored worktree code** (the implement
  *  agent wrote the source/tests this build/test runs), so it is spawned with the daemon's creds
- *  scrubbed (`agentEnv` — no LINEAR_API_KEY / GITHUB_TOKEN). Verify needs neither; running it under
- *  the daemon's full env would expose the daemon's tokens to code an agent produced.
+ *  scrubbed (`verifyEnv` — no LINEAR_API_KEY / GITHUB_TOKEN / ANTHROPIC_API_KEY). Verify needs
+ *  none of these; running it under the daemon's full env would expose the daemon's tokens to code
+ *  an agent produced.
  *
  *  On timeout we resolve PROMPTLY (race the exit against the timer) and best-effort
  *  SIGKILL the process — we do NOT await `proc.exited` or drain the pipes first. A shell
@@ -28,7 +29,7 @@ export async function runCommand(
 ): Promise<CommandResult> {
   const proc = Bun.spawn(["sh", "-c", command], {
     cwd: opts.cwd,
-    env: agentEnv(process.env),
+    env: verifyEnv(process.env),
     stdout: "pipe",
     stderr: "pipe",
   });

@@ -30,7 +30,10 @@ export function mergeComponents(scan: Component[], proposed: Component[]): Compo
     // `*`/`**` — e.g. `**`, `*`, `**/*.ts`, `*/**` — which matches broadly across the tree and would
     // run the component's commands on every diff + widen the implement Bash scope). Keep only globs
     // anchored to a literal first path segment. The scan's workspace anchors are always preserved.
-    const agentPaths = p.paths.filter((g) => !/^\*/.test(g.trim()));
+    const agentPaths = p.paths.filter((g) => {
+      const t = g.trim();
+      return !/^\*/.test(t) && !t.split("/").includes(".."); // no unanchored glob, no traversal segment
+    });
     return {
       name: s.name,
       kind: p.kind || s.kind,
