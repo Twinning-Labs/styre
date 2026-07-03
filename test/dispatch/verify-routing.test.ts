@@ -72,6 +72,7 @@ test("docs-only diff with no owned files passes for non-behavioral unit", async 
     worktreeRoot,
   });
   await advanceOneStep(db, ticketId, registry); // implement:dispatch (writes docs/note.md)
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test → pure-docs path
   const sig = listByUnit(db, unit.id).find((s) => s.signal_type === "test");
   db.close();
@@ -117,6 +118,7 @@ test("a stack with a real command runs and passes", async () => {
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch (writes feature.ts, base_sha captured)
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test → real command, passes
   // Advance one more tick to allow the resolver to mark the unit verified
   await advanceOneStep(db, ticketId, registry);
@@ -174,6 +176,7 @@ test("behavioral unit in a test-unavailable stack degrades to reviewer-only", as
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test → all-unavailable degrade
   const sigs = listByUnit(db, unit.id);
   const testSig = sigs.find((s) => s.signal_type === "test");
@@ -223,6 +226,7 @@ test("a declared check absent on an impacted component errors (loud)", async () 
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check lint → absent → error
   const sig = listByUnit(db, unit.id).find((s) => s.signal_type === "lint");
   db.close();
@@ -285,6 +289,7 @@ test("mixed tested + untested behavioral unit: tested stack gates, untested stac
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test
   const sigs = listByUnit(db, unit.id);
   const testSig = sigs.find((s) => s.signal_type === "test");
@@ -341,6 +346,7 @@ test("renderPrBody includes untested-merge-risk component name when degrade occu
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test → degrade
 
   // Verify the untested-merge-risk signal was created
@@ -392,6 +398,7 @@ test("zero components in profile → no-components-detected error, not vacuous p
     worktreeRoot,
   });
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test → no-components-detected
   const sig = listByUnit(db, unit.id).find((s) => s.signal_type === "test");
   db.close();
@@ -434,6 +441,7 @@ test("behavioral unit with docs-only diff → behavioral-no-code fail", async ()
     worktreeRoot,
   });
   await advanceOneStep(db, ticketId, registry); // implement:dispatch (writes README.md)
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test → behavioral-no-code
   const sig = listByUnit(db, unit.id).find((s) => s.signal_type === "test");
   db.close();
@@ -486,6 +494,7 @@ test("advisory sweep records ran-all-unowned for failing untouched stack, unit s
     worktreeRoot,
   });
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test
   const sigs = listByUnit(db, unit.id);
   const testSig = sigs.find((s) => s.signal_type === "test");
@@ -542,6 +551,7 @@ test("advisory sweep with passing untouched stack emits no signal and unit passe
     worktreeRoot,
   });
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test
   const sigs = listByUnit(db, unit.id);
   const testSig = sigs.find((s) => s.signal_type === "test");
@@ -593,6 +603,7 @@ test("all changed files unowned non-inert → no hard gate runs, advisory sweep,
     worktreeRoot,
   });
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test
   const sigs = listByUnit(db, unit.id);
   const testSig = sigs.find((s) => s.signal_type === "test");
@@ -648,6 +659,7 @@ test("advisory sweep silently skips absent command on untouched stack (no error)
     worktreeRoot,
   });
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test
   const sigs = listByUnit(db, unit.id);
   const testSig = sigs.find((s) => s.signal_type === "test");
@@ -698,6 +710,7 @@ test("inert-only diff (LICENSE) non-behavioral → passes via inert-only path, n
     worktreeRoot,
   });
   await advanceOneStep(db, ticketId, registry); // implement:dispatch (writes LICENSE)
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test → pure-inert path
   const sigs = listByUnit(db, unit.id);
   const testSig = sigs.find((s) => s.signal_type === "test");
@@ -746,6 +759,7 @@ test("inert-only diff (LICENSE) behavioral → behavioral-no-code fail", async (
     worktreeRoot,
   });
   await advanceOneStep(db, ticketId, registry); // implement:dispatch (writes LICENSE)
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test → behavioral-no-code
   const sig = listByUnit(db, unit.id).find((s) => s.signal_type === "test");
   db.close();
@@ -793,6 +807,7 @@ test("non-inert unowned file (cfg.yaml) still triggers advisory sweep", async ()
     worktreeRoot,
   });
   await advanceOneStep(db, ticketId, registry); // implement:dispatch (writes other/cfg.yaml)
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test → sweep runs
   const sigs = listByUnit(db, unit.id);
   const testSig = sigs.find((s) => s.signal_type === "test");
@@ -847,6 +862,7 @@ test("renderPrBody renders ran-all-unowned under its own section, separate from 
     worktreeRoot,
   });
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test → advisory sweep emits ran-all-unowned
 
   const body = renderPrBody(db, { id: ticketId, ident: "ENG-1", title: null });
@@ -906,6 +922,7 @@ test("sweep-cost signal fires with stacksSwept count when untouched stack has th
     worktreeRoot,
   });
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test
   const sigs = listByUnit(db, unit.id);
   const costSig = sigs.find((s) => s.signal_type === "sweep-cost");
@@ -967,6 +984,7 @@ test("sweep-cost positive-trace: fires with stacksSwept:0 when untouched stacks 
     worktreeRoot,
   });
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test
   const sigs = listByUnit(db, unit.id);
   const costSig = sigs.find((s) => s.signal_type === "sweep-cost");
@@ -1021,6 +1039,7 @@ test("no sweep-cost signal when all changed files are owned or inert", async () 
     worktreeRoot,
   });
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test
   const sigs = listByUnit(db, unit.id);
   const costSig = sigs.find((s) => s.signal_type === "sweep-cost");

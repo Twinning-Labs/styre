@@ -110,6 +110,9 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
           return step(`implement:wu${u.seq}:dispatch`, "dispatch", "implement:dispatch", u.id);
         }
         // verifying
+        if (!done(db, ticketId, "provision")) {
+          return step("provision", "provision", "provision", null);
+        }
         const check = nextUnrunCheck(db, u);
         if (check !== null) {
           return step(`verify:wu${u.seq}:${check}`, "verify", "verify:check", u.id);
@@ -124,6 +127,9 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
           signalType: "integration",
         });
         if (branchSha === null || !integrationPassedShas.includes(branchSha)) {
+          if (!done(db, ticketId, "provision")) {
+            return step("provision", "provision", "provision", null);
+          }
           return step("verify:integration", "verify", "verify:integration", null);
         }
         if (ticket.needs_docs === 1 && !done(db, ticketId, "docs:revise")) {
