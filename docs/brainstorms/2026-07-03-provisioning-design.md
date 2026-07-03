@@ -1,8 +1,8 @@
 # Provisioning: making `styre run` ready its own verify environment
 
-**Status:** Design (brainstorm output). Reviewed → implementation plan is a separate cycle.
+**Status:** Design (brainstorm output), revised after two independent Opus reviews (adversarial + architecture). Implementation plan is a separate cycle.
 **Date:** 2026-07-03
-**Scope of this doc:** the design + seams of provisioning as a styre capability, and the decision to build only the general provisioner covering the Python and Node stacks now.
+**Scope of this doc:** the design + seams of provisioning as a styre capability, building only the general provisioner for the Python and Node stacks now.
 
 ---
 
@@ -15,106 +15,105 @@ Run against real repos (surfaced by styre-bench on SWE-bench Python + Multi-SWE-
 3. **correctly refuses to open a PR for unverified code** (the "ground truth over self-report" / "loop-not-halt" invariants working), and so
 4. **blocks and delivers nothing**.
 
-This is a **real styre deployment failure**, not a benchmark artifact. In both real deployment modes — commercial CI/cloud (`styre run` is *the* CI/cloud/fleet primitive) and OSS on a fresh checkout — styre will meet environments that need provisioning. If it can't provision, it produces correct code and fails to deliver it.
+This is a **real styre deployment failure**, not a benchmark artifact: in both real deployment modes — commercial CI/cloud (`styre run` is *the* CI/cloud/fleet primitive) and OSS on a fresh checkout — styre meets environments that need provisioning. If it can't provision, it produces correct code and fails to deliver it.
 
-The cure is not to prop styre up from the bench harness (that treats the symptom and tests a styre that doesn't exist in the wild). The cure is to give styre the **provisioning capability as one of its own parts**, so `styre run` genuinely goes: setup → **provision** → design → implement → verify → PR, under its own control.
+The cure is to give styre the **provisioning capability as one of its own parts**, so `styre run` readies its verify environment under its own control. **Provisioning is NOT a new top-level stage** (DS-2: no ad-hoc stages) — it is a sub-step inside `implement`, run once **before the first `verify:check`**.
 
 ## 2. Goal & non-goals
 
-**Goal:** `styre run` readies its own verify environment before the first verify, for the common case, using a **general** capability that serves real developers and the bench alike.
+**Goal:** before its first verify, `styre run` makes its **detected** verify command runnable against the **worktree source**, for the common case, via a general capability that serves real developers and the bench alike.
 
-**Non-goals (this cycle):**
-- Not building stacks beyond **Python and Node** (the bench's corpora). Go/Rust/JVM/Ruby/PHP follow the same template later, incrementally.
-- Not building a formal swappable "provider contract" (see §7 — YAGNI).
-- Not building the commercial managed-substrate.
-- Not fixing styre's separate "can't-verify → silently block, deliver nothing" behavior (see §12) — that is its own defect, tracked separately.
+**Non-goals (this cycle):** stacks beyond **Python and Node**; a formal swappable provider contract (§7); the commercial managed-substrate; the separate "can't-verify → deliver nothing" behavior (§12).
 
-## 3. Decisions (frozen in the brainstorm)
+## 3. Decisions (frozen; revised per review)
 
-1. **The capability lives in styre core** — every downloader gets it. It is NOT bench-specific, and there is **no "image-aware" provider**. The eval images are ordinary Python/Node environments a *general* provisioner handles. styre core must **never** know about any benchmark (detect environments; never hardcode names like SWE-bench's `testbed`).
-2. **`styre setup` detects and records the bootstrap plan; `styre run` executes it**, deterministically, right before the first verify.
-3. **C1 — the bootstrap plan and the verify command are a matched pair** from one environment analysis (see §5).
-4. **Runner-owned and deterministic — not the agent via Bash.** The agent hitting "npm ci requires approval" was *correct*; capability isolation stays intact. The runner provisions.
-5. **No formal provider seam now** (see §7). Provisioning is plain styre logic; the commercial plane wraps the whole run and optimizes via infrastructure, both transparent to styre. A trivial config override is the only future seam, deferred.
-6. **Open-core boundary:** provisioning *logic* = OSS (commodity; in styre core). Managed *infrastructure* (cloud sandboxes, caching, hermetic reproducibility, fleet isolation) = commercial plane, which wraps the run rather than re-implementing provisioning.
-7. **styre change + re-pin accepted** — curing the disease outweighs keeping `a2406a4` frozen. The bench re-pins to the styre commit that includes this.
+1. **The capability lives in styre core** — every downloader gets it. NOT bench-specific; there is **no "image-aware" provider** (eval images are ordinary Python/Node environments). styre core must **never** know about any benchmark (detect environments; never hardcode names).
+2. **`styre setup` detects and records the bootstrap into the EXISTING `prepare` field** (schema v3, reserved for this workstream — WO-12); **`styre run` executes it** deterministically, as a `provision` step before the first verify. **No parallel field is added** (review P0-1).
+3. **Provisioning never overrides the detected verify command** (review F1/F2/P1-2). It makes that command runnable and ensures the **worktree source** is what gets tested. "Reuse" means *skip a redundant install when the env is already ready*, never *swap the command* or *test an installed copy*.
+4. **Runner-owned and deterministic — not the agent via Bash.** Preserves move-4 capability isolation. **Caveat stated honestly (review F6):** this runs arbitrary lockfile/`setup.py` code (postinstall scripts, build backends) **without** the operator command-approval gate that `verify`/`build` commands pass through (`src/cli/setup.ts:141`). It is a *checkpoint relocation*, contained by the sandbox, not an isolation *gain*. See §6.
+5. **Provisioning is a PROBED effect, not an exactly-once journaled step** (review P0-2). Its idempotency is the run-time readiness probe (§5), re-evaluated against the actual (possibly fresh-on-resume) worktree every time. See §9.
+6. **No formal provider seam now** (§7). Provisioning is plain styre logic; the commercial plane wraps the whole run and optimizes via infrastructure. The future seam is a deferred config override — **deferred, not unnecessary** (review F7).
+7. **Open-core boundary:** provisioning *logic* = OSS (commodity, in core). Managed *infrastructure* = commercial plane, wrapping the run. The `prepare`-field evolution stays **additive/optional** so it does not bump `schemaVersion` or force re-setup (review P2).
+8. **styre change + re-pin accepted** — curing the disease outweighs keeping `a2406a4` frozen.
 
-## 4. Architecture — where it lives and how it flows
+## 4. Architecture — where it lives and what changes
 
-Provisioning rides on styre's **existing per-language detectors** (`src/setup/lang/{python,node,go,rust,jvm,ruby,php}.ts`), which already emit each component's `{build,test,check}` commands. It is NOT new machinery — it is an added responsibility on those detectors.
+Provisioning rides on styre's existing per-language detectors (`src/setup/lang/*.ts`), which already emit `{build,test,check}` commands and (for node/php/ruby) a `prepare` string. This is a real, named surface — **not** merely "a detector responsibility" (review F4):
 
-**Uniform per-ecosystem strategy.** Each language detector answers three questions (the shared layer only knows this *shape*; the specifics stay private to each detector — this is the guard against per-stack special-casing leaking into the core):
+**Files that change:**
+- `src/dispatch/profile.ts` — evolve the existing optional `prepare` field to carry the bootstrap (kept additive/optional). No second field.
+- `src/setup/lang/python.ts` — build the bootstrap (0% today: emits no `prepare`).
+- `src/setup/lang/node.ts` — replace the current hardcoded, non-deterministic `prepare: "npm install"` with lockfile-aware `npm ci`/`yarn`/`pnpm`.
+- `src/setup/detect-components.ts` — the safety backstop must cover the (now run-executed) command; a network-install string needs the same `isCommandSafe` gate the other commands get.
+- `src/daemon/resolver.ts` — a new `provision` `StepDescriptor` in the (currently closed) union, sequenced before the first `verify:check` in the implement branch.
+- `src/dispatch/handlers.ts` — register the `provision` step in `buildDispatchRegistry` + its handler (probe-then-install). **Not** folded into `verify:check` (which is documented read-only, `handlers.ts:83` — burying a mutating install there erodes that boundary and re-runs on every check).
+- `docs/architecture/control-loop.md` + `minimal-loop.md` — a step-catalog entry for `provision` (it is a step, not a stage).
 
-| | Question | Python example | Node example |
-|---|---|---|---|
-| 1 | Is a usable environment already present? | a venv/conda env with the project installed | `node_modules/` present |
-| 2 | If not, how to make it ready? | `pip install -e .` / `poetry install` | `npm ci`/`yarn`/`pnpm` (by lockfile) |
-| 3 | What test command runs *in that environment*? | `pytest …` (in the env) | the package's test script |
+**Flow:** `styre setup` runs each detector → records `prepare` per component. `styre run`, at the new `provision` step (before first verify), **probes** each impacted component's env (§5) and installs only what's missing, deterministically, runner-owned.
 
-**Flow:**
-- **`styre setup`** runs each detector, which now also produces a **bootstrap plan** per component: `{ reuseEnv?: <how to use an existing env>, bootstrap?: <install command>, verifyCommand: <matched command> }`. Recorded in the profile.
-- **`styre run`**, before the first verify, executes the recorded bootstrap plan **deterministically in the worktree** (runner-owned), leaving the environment ready for the detected verify command.
+**Why detect at setup but execute at run:** setup is the "understand the repo" phase, so *detecting how to install* fits there; the environment is ephemeral per-run, so *installing* happens at run time. Note (review F3): what setup records is only the **static, knowable** part (the install command); the readiness decision is **purely run-time** (§5) and never a second copy of the verify command — verify keeps reading `commands.test`, avoiding two writers of the same fact (single-SoT).
 
-**Why detect at setup but execute at run:** setup is already the "understand the repo" phase, so *detecting* how to ready the env fits there; but the environment is ephemeral per-run (a fresh worktree; the run container may differ from where setup ran), so the actual *provisioning* must happen at run time when the workspace exists. This mirrors setup's existing split of "detect commands" from "run commands." (Risk: setup's environment may not match run's, so a recorded plan could be stale — mitigated because the plan is a small, environment-agnostic instruction like "npm ci" / "reuse a venv if present," re-evaluated against the actual run workspace by the reuse-check in §5.)
+## 5. What "make it runnable + test the worktree source" means
 
-## 5. C1 — the matched (bootstrap, verify-command) pair
+styre's verify runs the component's `commands.test` in the worktree (`src/dispatch/handlers.ts:453`, cwd `worktreePath/dir`). Provisioning's job at run time, per impacted component:
 
-styre's verify runs the **component's `commands.test`** (`src/dispatch/handlers.ts:454`, `commandFor(c, "test")`). So the environment and the command it runs in are **one decision**: you can't pick the right test command without knowing the environment you'll have, and you can't ready the environment without knowing the command that must run in it.
+1. **Probe readiness against the actual worktree:** is the detected command runnable *and* does it exercise the worktree source? (Node: `node_modules/` present and the test script resolves. Python: the test runner present **and** the worktree is what's imported — i.e. editable/source, not a separately-installed copy.)
+2. **If ready → skip** (the reuse case; also how a plane pre-warm is consumed).
+3. **If not ready → install** what the *detected command* needs, ensuring the worktree source is under test:
+   - **Node:** lockfile install (`npm ci`/`yarn --frozen-lockfile`/`pnpm i --frozen-lockfile`). Tests resolve from local `node_modules` + source — no wrong-artifact risk.
+   - **Python:** make the detected command runnable. If it is a source-building harness (`tox`/`nox`), install that harness (`pip install tox`) and let it build from source — **do not** substitute a bare runner. If it is bare `pytest`, ensure the worktree is `pip install -e .` (editable) so `import <pkg>` resolves to the worktree, not an installed copy.
 
-**Rule — prefer a usable pre-existing environment over rebuilding from a config file.** When a ready env exists (a venv/conda with the project installed; a warm `node_modules`), the bootstrap is "use it" and the verify command is *that environment's native runner* (`pytest`), **overriding** a config-file command like `tox` that would rebuild from scratch. When no env exists, the bootstrap installs from the lockfile and the detected command stands.
+**The load-bearing correctness rule (review F1/F2):** the reuse probe must distinguish *"this HEAD's source is under test"* from *"some installed copy is under test."* "importable + runner present" is **not** sufficient (a non-editable install passes it while importing the wrong bytes). Where the probe cannot prove the worktree source is under test, it must **fall through to install (editable)**, never assume ready. When in doubt, install.
 
-This is not a bench accommodation: a developer with a working venv wants styre to use it, not re-run `tox`. It is also the mechanism by which the commercial plane's **pre-warming** works for free (§7): a pre-provisioned sandbox reads as "ready env" → styre reuses it → skips bootstrap.
+**Honest limitation:** for Python-scientific repos whose real command is a heavy harness (`tox -e …-alldeps`), the correct path is a full rebuild — **slow and itself failure-prone**. We accept correct-but-slow over fast-but-wrong. The pre-built conda env cannot be safely shortcut without losing the harness's fidelity (env vars, markers, test selection) or testing an installed copy. This is a real constraint, honestly measured, not a solved problem.
 
-The astropy failure was exactly this mismatch: styre picked `tox` (from `tox.ini`), which the pre-built conda env doesn't have. Under C1, styre detects the ready env and verifies with `pytest` in it.
+## 6. Capability isolation — stated honestly
 
-## 6. Capability isolation
+Provisioning is a **runner step**; the agent never installs deps (that is why it correctly hit "npm ci requires approval"). This keeps move-4 isolation for the *agent*. But it is not a security *gain* overall (review F6): the install commands run arbitrary network-fetched code (postinstall scripts, build backends, C-extension compiles) **outside** the operator sign-off gate that `verify`/`build`/`check` commands pass (`src/cli/setup.ts:141`). Two honest options, to decide in the plan:
+- (a) route the bootstrap command through the **same operator sign-off** the other commands get (headless/`--trust-agent-commands` then implies trusting it, as today for verify), or
+- (b) state explicitly that provisioning runs unapproved install code and relies on the **sandbox** (container / commercial substrate) for containment.
+Either way the doc must not call checkpoint-removal an isolation win.
 
-Provisioning is a **runner step**, not an agent capability. The agent never installs deps via Bash (that is why it correctly hit "npm ci requires approval"; the fix is the runner provisions, not loosening the agent). This preserves move-4 capability isolation and makes provisioning **deterministic and reproducible** — same input, same environment, every run — which a general benchmark requires.
+## 7. The seam — minimal, and deferred (not dismissed)
 
-## 7. The seam — deliberately minimal (YAGNI)
+No formal provider contract now. The commercial needs are met without a slot: **where** it runs = wherever the plane launches `styre run`; **faster** = a plane-mounted cache the probe (§5) consumes transparently; **pre-installed** = the plane provisions editable-to-HEAD and the §5 probe reads "ready" and skips.
 
-There is **no formal "provider contract"** in this design. Provisioning is plain styre logic. Every commercial need is met without a slot:
-
-- **Where it runs:** wherever the commercial plane launches `styre run` (its managed machine) — the plane already wraps the whole run; provisioning is part of it. No slot.
-- **Faster (caching):** the plane mounts a warm dependency cache into the sandbox; styre's `npm ci` hits it. Transparent. No slot.
-- **Pre-installed env:** the plane pre-provisions the sandbox; styre's §5 reuse-before-rebuild detects "ready" and skips bootstrap. Already handled. No slot.
-
-The **only** future seam — required by the "never fork the core" invariant so customers *extend* rather than fork — is a **one-line config override**: a `provision` hook / "assume-ready" flag in the profile/config that, when set, replaces styre's default provisioning. Cheap, additive, and **deferred** until a real customer environment needs it. Not built now.
+But "no seam needed" was too strong (review F7): an **assume-ready flag is a *skip* switch**; it does not express *"run these bootstrap steps, these env vars, in this order"* — a bespoke monorepo bootstrap, a docker-compose service dep, an air-gapped `PIP_INDEX_URL` mirror. That is a **replace-provisioning** hook, a different and real future need. This design **defers** it (its one-field shape is left to the cycle that needs it) but does not claim it unnecessary. The pre-warm "for free" story holds **only** if the plane pre-installs editable-to-HEAD (else it inherits the §5 wrong-artifact trap) — stated so the plane contract is honest.
 
 ## 8. Scope this cycle
 
-- Build the **uniform strategy shape** on the detector interface + implement it for **Python and Node** (the two bench corpora; both immediately useful to real developers).
-- Python: reuse an existing venv/conda env; else `pip install -e .` (or poetry). Verify via the env's `pytest`.
-- Node: reuse `node_modules`; else lockfile install (`npm ci`/`yarn`/`pnpm`). Verify via the package's test script.
-- Add the run-time **provision step** before the first verify.
-- The other five stacks follow the same template later.
+Build the bootstrap+probe for **Python and Node** only:
+- **Node:** probe `node_modules` + script resolvability; else lockfile install. Verify via the detected script.
+- **Python:** probe runner + worktree-under-test; else install the detected harness (`tox`) or `pip install -e .` for bare `pytest`. Verify via the detected command.
+- Add the `provision` resolver step + handler + step-catalog entry.
+- Go/Rust/JVM/Ruby/PHP follow the same template later (Ruby/PHP already emit a `prepare` string to build on).
 
-## 9. Error handling & graceful degradation
+## 9. Crash-resume & idempotency (review P0-2)
 
-The provisioner must **never crash setup or run**. When a detector cannot determine a bootstrap (exotic setups — docker-compose test envs, custom Makefiles, multi-service, system `apt` deps), it records **no bootstrap**, and run falls back to **today's behavior**: assume the env is ready and run the detected command as-is. That instance may then fail verify — which is **honestly measured**, not masked. This is the same graceful-degradation styre already applies to unavailable commands (warnings, not crashes). The provisioner covers the common ~80%; the tail is config-override (§7) or later work.
+`styre run` can park (session-limit / out-of-credits, exit 75) and resume; resume **wipes and recreates** the worktree (`src/cli/park.ts`), so any installed deps are gone. Therefore provisioning **must not** be an exactly-once journaled `succeeded` step (which `recover.ts` would skip on replay, leaving verify to run in an empty tree). It is a **probed effect**: on every run/resume the `provision` handler re-runs the §5 readiness probe against the *current* worktree and installs if not ready. The probe is the CL-3 external-state check that makes the effect idempotent. **Cost:** every resume re-installs unless a plane-mounted cache satisfies the probe — acknowledged.
 
-Bootstrap execution failures (e.g. `npm ci` fails on a broken lockfile) are surfaced as a provisioning failure on the run — a real, reportable outcome, distinct from a verify failure.
+The provisioning *outcome* (probed-ready / installed / install-failed) is persisted by the runner as a step/signal (single-writer SoT, B2) — a distinct, reportable result, separate from a verify failure.
 
 ## 10. The bench's role
 
-The bench **authors no provider**. It re-pins `styreCommit` to the styre commit containing this capability and runs — styre provisions the eval images itself (reuse the conda env; `npm ci`/`yarn` for MSB), verifies with a matched command, and (when the fix is right) opens a PR. This tests styre **end-to-end and honestly** — no diff-capture workaround, no harness propping styre up. It measures the loop (job #2) *and* styre's real provisioning + delivery (job #1).
+The bench **authors no provider**. It re-pins `styreCommit` and runs — styre provisions the eval images itself (node: `npm ci`; python: install `tox`, or editable + pytest), verifies with the detected command against the worktree source, and (on a correct fix) opens a PR. No diff-capture workaround. This measures the loop (job #2) *and* styre's real provisioning + delivery (job #1) honestly. Note: provisioning must ready **every impacted/integration component** (`handlers.ts:555,630`), so a polyglot repo does N installs.
 
 ## 11. Testing strategy
 
-- **Unit (per detector):** given a repo fixture, the Python/Node detector produces the correct `{reuseEnv?, bootstrap?, verifyCommand}` — including: ready-env present → reuse + native command (the tox→pytest override); no env → lockfile install + detected command; unknown → no bootstrap (degradation).
-- **Unit (run step):** given a recorded plan, the provision step issues the right deterministic commands in the worktree, before verify; a bootstrap failure is surfaced distinctly.
-- **Live (gated):** an actual `styre run` against a bare Node repo and a venv/conda Python repo that provisions → verifies → (on a real fix) opens a PR.
-- **Bench (integration):** the re-pinned bench takes at least one SWE-bench and one MSB instance from "blocked (env)" to a verified, PR-opened run.
+- **Unit (per detector):** ready-env present → skip (probe true); no env → correct install command (node: `npm ci` not `npm install`; python: `tox` install or editable); unknown stack → no `prepare` (degradation).
+- **Unit (probe):** the readiness probe returns **false** for a non-editable/installed-copy Python env (the F1/F2 regression guard — this is the test that proves we don't verify the wrong bytes) and true only when the worktree source is under test.
+- **Unit (provision step):** issues the right deterministic commands before verify; a bootstrap failure is a distinct outcome; re-running against a fresh worktree re-installs (resume idempotency).
+- **Live (gated):** `styre run` on a bare Node repo and a venv/conda Python repo → provisions → verifies → (on a real fix) opens a PR.
+- **Bench (integration):** the re-pinned bench takes ≥1 SWE-bench and ≥1 MSB instance from "blocked (env)" to verified + PR-opened.
 
-## 12. Separate / deferred (named, not silently dropped)
+## 12. Separate / deferred (named, not dropped)
 
-- **styre's "can't-verify → silently block, deliver nothing"** is its own defect. Even with perfect provisioning, some repo's verify will be un-runnable; styre should then deliver-with-caveat (an "unverified — needs review" PR) or escalate work-ready, not vanish. Separate fix.
-- **Commercial managed substrate** — deferred; §7 shows it needs no seam here.
-- **Config override seam** — deferred to first real need (§7).
-- **Go/Rust/JVM/Ruby/PHP strategies** — later, via the §4 template.
+- **styre's "can't-verify → silently block, deliver nothing"** is its own defect. Even with perfect provisioning, the exotic tail (§9 fallback) stays un-provisionable; styre should then deliver-with-caveat or escalate work-ready. **Provisioning alone does not close the reported failure for that tail** — the two fixes deliver full value only together (review minor). Separate fix.
+- **Commercial managed substrate**, **the replace-provisioning override seam**, **Go/Rust/JVM/Ruby/PHP** — all deferred.
 
 ## 13. Open risks
 
-- **Setup/run environment drift** — a plan recorded at setup may not fit the run workspace. Mitigated by keeping plans environment-agnostic + re-checking "ready env?" at run time (§4, §5). Worth watching in the live gate.
-- **Command-override aggressiveness** — "prefer the ready-env runner over the config-file command" could, in a pathological repo, override a legitimately-necessary command. Mitigation: only override when a *usable* env is actually detected; otherwise the detected command stands.
-- **Reuse-detection false positives** — mistaking a partial/stale env for "ready" → verify fails confusingly. Mitigation: the reuse check should be conservative (require the project importable / the test runner present), else fall through to install.
+- **Reuse-probe false positives** (the F1/F2 hazard) — mistaking an installed copy / partial env for "ready" → verifying the wrong bytes. **Highest risk.** Mitigation: the probe must assert worktree-source-under-test, and fall through to install when it cannot prove it. This predicate must be specified as an actual boolean over run-workspace state in the plan, per language — if it can't be, that language degrades to "install every run."
+- **Heavy-harness cost/flakiness** (§5) — `tox` rebuilds are slow and can fail; accepted as honest signal, watched at the live gate.
+- **Approval-gate removal** (§6) — resolve (a) vs (b) in the plan; do not ship silent unapproved installs without a conscious choice.
+- **Setup/run drift** — a `prepare` recorded at setup that doesn't fit the run workspace; mitigated because the run-time probe (§5/§9) re-decides readiness and only the static install command is carried.
