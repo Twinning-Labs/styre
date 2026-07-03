@@ -12,7 +12,14 @@ Deterministic scan results (treat the flags as ground truth — do not contradic
 
 For EACH section, write a `detail` string: concrete, specific prose grounded in the actual files (e.g. "Postgres via Prisma; migrations in prisma/migrations; soft-delete columns on users"). Never read secret values — you may note that a `.env.example` exists, but do not open `.env` files.
 
-For any section the scan marked `unknown`, investigate the repo and, if you can determine it, set `presence` to `present` or `absent` (for topology set `type`, for release set `mechanism`). If you still cannot tell, omit the proposal (leave it out) and say so in `detail`. Do NOT set presence/type/mechanism for sections the scan already resolved — only enrich their `detail`.
+For any section the scan marked `unknown`, investigate the repo and, if you can determine it, propose a value. For `presence` (data/caching/observability/configSecrets/documentation) use `present` or `absent`. For `topology` set `type`; for release/packaging set `mechanism`. Each of `type` and `mechanism` must be exactly one of the allowed values listed below — never invent a value outside the list. If none of the allowed values fit, use `unknown` and explain what you found in `detail`. Do NOT set presence/type/mechanism for sections the scan already resolved — only enrich their `detail`.
+
+Allowed `topology.type` (choose exactly one, else `unknown`):
+`web-service`, `web-n-tier`, `desktop`, `mobile-ios`, `mobile-android`, `browser-extension`, `cli`, `library`, `hybrid`, `unknown`.
+
+Allowed `releasePackaging.mechanism` (choose exactly one, else `unknown`):
+`semantic-release`, `app-store`, `installer`, `signed-binary`, `pypi`, `conda`, `npm`, `cargo`, `gem`, `composer`, `maven`, `go-module`, `none`, `unknown`.
+When more than one could apply, prefer the release-automation tool if one is configured (e.g. `semantic-release`); otherwise name the target package registry (e.g. `pypi`, `npm`, `cargo`).
 
 Emit exactly one fenced block:
 
