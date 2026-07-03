@@ -5,6 +5,8 @@ import { join } from "node:path";
 import {
   ComponentSchema,
   ProfileSchema,
+  ReleaseMechanismEnum,
+  TopologyTypeEnum,
   loadProfile,
   parseProfile,
 } from "../../src/dispatch/profile.ts";
@@ -200,4 +202,43 @@ test("parseProfile rejects a hand-edited profile with a traversal dir on a compo
       components: [{ name: "svc", kind: "go", paths: ["svc/**"], dir: "../.." }],
     }),
   ).toThrow();
+});
+
+describe("enum vocabulary covers polyglot ecosystems", () => {
+  test("ReleaseMechanismEnum accepts the polyglot mechanisms and keeps the originals", () => {
+    for (const m of [
+      "pypi",
+      "conda",
+      "npm",
+      "cargo",
+      "gem",
+      "composer",
+      "maven",
+      "go-module",
+      "semantic-release",
+      "app-store",
+      "installer",
+      "signed-binary",
+      "none",
+      "unknown",
+    ] as const) {
+      expect(ReleaseMechanismEnum.parse(m)).toBe(m);
+    }
+  });
+  test("TopologyTypeEnum accepts browser-extension and keeps the originals", () => {
+    for (const t of [
+      "browser-extension",
+      "web-service",
+      "web-n-tier",
+      "desktop",
+      "mobile-ios",
+      "mobile-android",
+      "cli",
+      "library",
+      "hybrid",
+      "unknown",
+    ] as const) {
+      expect(TopologyTypeEnum.parse(t)).toBe(t);
+    }
+  });
 });

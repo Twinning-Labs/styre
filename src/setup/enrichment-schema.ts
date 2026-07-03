@@ -12,11 +12,11 @@ const dataSection = z.object({
   detail: z.string().default(""),
 });
 const topologySection = z.object({
-  type: TopologyTypeEnum.optional(),
+  type: TopologyTypeEnum.optional().catch(undefined),
   detail: z.string().default(""),
 });
 const releaseSection = z.object({
-  mechanism: ReleaseMechanismEnum.optional(),
+  mechanism: ReleaseMechanismEnum.optional().catch(undefined),
   detail: z.string().default(""),
 });
 
