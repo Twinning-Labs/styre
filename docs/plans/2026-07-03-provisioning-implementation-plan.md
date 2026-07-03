@@ -2,89 +2,64 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `styre run` provisions its own verify environment — a runner-owned `provision` step that, before the first verify, installs each component's deps (recorded at `styre setup` in the `prepare` field) so the **detected** verify command runs against the **worktree source**.
+**Goal:** `styre run` provisions its own verify environment — a runner-owned `provision` step that, before the first verify, installs each component's deps (recorded at `styre setup` in `prepare`) so the **detected** verify command runs against the **worktree source**, and **proves** the worktree source is what's under test.
 
-**Architecture:** `styre setup`'s per-language detectors record a lockfile/harness-matched install command in the existing `Component.prepare` field. A new `provision` resolver step (before the first `verify:check`) runs each component's `prepare` deterministically via `runCommand`, skipping when a cheap per-kind readiness probe says the env is already ready. It is a **probed effect** (re-runs after park/resume because the worktree is wiped), never overriding the verify command.
+**Architecture:** setup's per-language detectors record a lockfile/harness-matched install command in the existing `Component.prepare`. A `provision` resolver step (before the first `verify:check` AND before `verify:integration`) runs each component's `prepare` deterministically via `runCommand`, then — for editable-install stacks (Python `pytest`) — **asserts the imported source resolves to the worktree** (escalating if not, never shipping wrong bytes). It re-runs on resume (worktree wiped) and when a loopback touches a dependency manifest.
 
 **Tech stack:** TypeScript, Zod, Bun (`bun test`), SQLite step-journal.
 
-**Design doc:** `docs/brainstorms/2026-07-03-provisioning-design.md` (read it — this plan implements it).
+**Design doc:** `docs/brainstorms/2026-07-03-provisioning-design.md`. **This plan was revised after two Opus plan-reviews; the findings (F-1…F-7) are folded in and cited per task.**
 
 ## Global Constraints
 
 - Branch `feat/polyglot-setup`; commit per task; never `main`.
-- **Never override the detected verify command** (`commands.test`). `provision` only makes it runnable + ensures the worktree source is under test. (Design §5; review F1/F2.)
-- `prepare` stays an **optional** field; **no `schemaVersion` bump** (additive). The change is a *semantic* reinterpretation (stored → executed) — update the two doc-comments that assert "never run" (Task 3).
-- All install commands must pass the existing `isCommandSafe` gate in `runRegistry` (`src/setup/detect-components.ts:14-32`) — no shell metacharacters. Keep install commands metachar-free single strings.
-- `provision` runs via `runCommand(command, { cwd, timeoutMs })` with `verifyEnv` (creds scrubbed) — identical capability treatment to `verify:check`.
-- A component with **no** `prepare` is **skipped** (graceful degradation, design §9) — never a hard failure at run-start. Do **not** add `prepare` to `assertResolved`/`MUST_HAVE` in `src/cli/run.ts`.
-- `provision` is a **step, not a stage** (DS-2). It lives inside `implement`, before the first verify.
-- Security posture (design §6, decided here): `provision` executes the setup-recorded, `isCommandSafe`-validated `prepare` — the operator already sees it at setup (`src/cli/setup.ts:150`), and it runs under the same trust model + sandbox containment as verify commands. **No new run-time approval gate**; the doc-comment updates (Task 3) state plainly that it executes install code contained by the sandbox.
-- Test runner: `bun test`. Also run `bun run typecheck` and `bun run lint`; both must stay green.
+- **Never override the detected verify command** (`commands.test`). (Design §5; review F1/F2.)
+- **The worktree source MUST be provably under test.** For editable-install stacks, provision runs a post-install assertion that `import <pkg>` resolves under the worktree; on failure it force-reinstalls editable, and if still failing, **fails provision → escalate** (never verifies an installed/stale copy). This is the load-bearing correctness guard the design's §11/§13 mandated. (Review F-1.)
+- `prepare` stays **optional**; **no `schemaVersion` bump** (additive). It's a *semantic* reinterpretation (stored→executed) — update the two doc-comments (Task 3).
+- Install/assert commands must pass `isCommandSafe` (`src/setup/command-safety.ts:8`) — no shell metacharacters (`;&|` `` ` `` `$()<>` newlines). Keep each a single metachar-free command; **do not chain with `;`/`&&`** (the handler runs multiple commands as separate steps).
+- All commands run via `runCommand(cmd, {cwd, timeoutMs})` with `verifyEnv` (creds scrubbed).
+- A component with no `prepare` is **skipped** (graceful degradation) — never a hard fail at run-start; do not add `prepare` to `assertResolved`.
+- `provision` is a **step, not a stage** (DS-2), inside `implement`, before the first verify.
+- Security posture (design §6): provision executes the setup-recorded, `isCommandSafe`-validated `prepare` (operator sees it at `setup.ts:150`), under the same trust model + sandbox as verify. **No new run-time gate.**
+- Provision gets an **independent** timeout (`PROVISION_TIMEOUT_MS`, 15 min), NOT the shared `deps.timeoutMs` (review F-5).
+- Runner: `bun test`; also `bun run typecheck` + `bun run lint` stay green.
 
 ## File map
 
-- `src/setup/lang/node.ts` — emit lockfile-aware `prepare` (Task 1).
-- `src/setup/lang/python.ts` — emit test-command-matched `prepare` (Task 2).
-- `src/dispatch/profile.ts`, `src/setup/command-safety.ts` — flip the "never run" doc-comments (Task 3).
-- `src/dispatch/provision.ts` (**new**) — the pure readiness probe + provision-plan builder (Task 4).
-- `src/dispatch/handlers.ts` — register the `provision` handler (Task 4).
-- `src/daemon/resolver.ts` — insert the `provision` step before first verify (Task 5).
-- `src/cli/park.ts` (resume path) — reset `provision` to pending on resume (Task 6).
-- `docs/architecture/control-loop.md`, `docs/architecture/minimal-loop.md` — step-catalog + loopback entry (Task 7).
+- `src/setup/lang/node.ts`, `python.ts` — emit `prepare` (Tasks 1, 2).
+- `src/dispatch/profile.ts`, `src/setup/command-safety.ts` — flip "never run" comments (Task 3).
+- `src/dispatch/provision.ts` (**new**) — pure plan/probe + the source-check command builder (Tasks 4, 5).
+- `src/dispatch/handlers.ts` — the `provision` handler (Tasks 4, 5).
+- `src/daemon/resolver.ts` — insert provision before first-verify AND integration (Task 6).
+- `src/cli/park.ts` — reset provision on resume (Task 7).
+- `src/daemon/failure-policy.ts` — provision-failure routing (Task 8).
+- `src/daemon/advance.ts` / implement handler — re-provision on manifest-touch (Task 9).
+- `docs/architecture/control-loop.md`, `minimal-loop.md` — step-catalog + loopback (Task 10).
 
 ---
 
 ### Task 1: Node detector emits a lockfile-aware `prepare`
 
-**Files:**
-- Modify: `src/setup/lang/node.ts` (the `prepare: "npm install"` at ~line 39; add a `nodePrepare(dir)` helper)
-- Test: `test/setup/lang/node.test.ts`
+**Files:** Modify `src/setup/lang/node.ts`; Test `test/setup/lang/node.test.ts`.
+**Interfaces:** `export function nodePrepare(compDir: string): string`.
 
-**Interfaces:**
-- Produces: `export function nodePrepare(compDir: string): string` — the install command for a Node component rooted at absolute path `compDir`.
-
-- [ ] **Step 1: Write the failing test**
-
-Add to `test/setup/lang/node.test.ts` (match the file's existing `fixture(files)` helper that mkdtemps a repo + returns root):
+- [ ] **Step 1: failing test** — add to `test/setup/lang/node.test.ts` (file's `fixture(files)` helper):
 
 ```ts
 import { nodeDef, nodePrepare } from "../../../src/setup/lang/node.ts";
-
 describe("nodePrepare (lockfile-aware)", () => {
-  test("yarn.lock -> frozen yarn install", () => {
-    const root = fixture({ "yarn.lock": "", "package.json": '{"scripts":{"test":"jest"}}' });
-    expect(nodePrepare(root)).toBe("yarn install --frozen-lockfile");
-  });
-  test("pnpm-lock.yaml -> frozen pnpm install", () => {
-    const root = fixture({ "pnpm-lock.yaml": "", "package.json": "{}" });
-    expect(nodePrepare(root)).toBe("pnpm install --frozen-lockfile");
-  });
-  test("package-lock.json -> npm ci", () => {
-    const root = fixture({ "package-lock.json": "{}", "package.json": "{}" });
-    expect(nodePrepare(root)).toBe("npm ci");
-  });
-  test("no lockfile -> npm install (last resort)", () => {
-    const root = fixture({ "package.json": "{}" });
-    expect(nodePrepare(root)).toBe("npm install");
-  });
-  test("detect() sets the lockfile-aware prepare on the component", () => {
-    const root = fixture({ "package.json": '{"scripts":{"test":"jest"}}', "package-lock.json": "{}" });
-    expect(nodeDef.detect(root)[0]?.prepare).toBe("npm ci");
-  });
+  test("yarn.lock -> frozen", () => { const r = fixture({ "yarn.lock": "", "package.json": "{}" }); expect(nodePrepare(r)).toBe("yarn install --frozen-lockfile"); });
+  test("pnpm-lock.yaml -> frozen", () => { const r = fixture({ "pnpm-lock.yaml": "", "package.json": "{}" }); expect(nodePrepare(r)).toBe("pnpm install --frozen-lockfile"); });
+  test("package-lock.json -> npm ci", () => { const r = fixture({ "package-lock.json": "{}", "package.json": "{}" }); expect(nodePrepare(r)).toBe("npm ci"); });
+  test("no lockfile -> npm install", () => { const r = fixture({ "package.json": "{}" }); expect(nodePrepare(r)).toBe("npm install"); });
+  test("detect() sets it", () => { const r = fixture({ "package.json": '{"scripts":{"test":"jest"}}', "package-lock.json": "{}" }); expect(nodeDef.detect(r)[0]?.prepare).toBe("npm ci"); });
 });
 ```
 
-- [ ] **Step 2: Run — expect FAIL** (`bun test test/setup/lang/node.test.ts` → `nodePrepare` undefined / component still `"npm install"`).
-
-- [ ] **Step 3: Implement**
-
-In `src/setup/lang/node.ts`, add (near the top, after imports):
+- [ ] **Step 2: run → FAIL.**
+- [ ] **Step 3: implement** — add to `node.ts` (imports `join`/`existsSync` present):
 
 ```ts
-/** The install command for a Node component rooted at `compDir` — lockfile-aware so the
- *  provision step is deterministic (frozen installs). Falls back to `npm install` only when
- *  no lockfile is present. Runner-executed by the provision step (dispatch/provision.ts). */
 export function nodePrepare(compDir: string): string {
   if (existsSync(join(compDir, "yarn.lock"))) return "yarn install --frozen-lockfile";
   if (existsSync(join(compDir, "pnpm-lock.yaml"))) return "pnpm install --frozen-lockfile";
@@ -92,252 +67,85 @@ export function nodePrepare(compDir: string): string {
   return "npm install";
 }
 ```
+Replace `prepare: "npm install",` in the `components.push({...})` with `prepare: nodePrepare(isRoot ? repoDir : join(repoDir, dir)),`.
 
-Then replace the `prepare: "npm install",` line in the `components.push({...})` with:
-
-```ts
-        prepare: nodePrepare(isRoot ? repoDir : join(repoDir, dir)),
-```
-
-(`join`/`existsSync` are already imported in this file.)
-
-- [ ] **Step 4: Run — expect PASS.**
-- [ ] **Step 5: `bun test` (full) + `bun run typecheck` + `bun run lint` — all green.** (No existing test should assert `prepare === "npm install"`; if one does, update it to the lockfile-aware value.)
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/setup/lang/node.ts test/setup/lang/node.test.ts
-git commit -m "feat(setup): node prepare is lockfile-aware (npm ci/yarn/pnpm), for the provision step"
-```
+- [ ] **Step 4: run → PASS.** (Note review F6: the two existing `node.test.ts` prepare assertions have no lockfile → still `"npm install"` → unaffected.)
+- [ ] **Step 5: `bun test` + typecheck + lint green.**
+- [ ] **Step 6: commit** `feat(setup): node prepare is lockfile-aware (npm ci/yarn/pnpm)`
 
 ---
 
 ### Task 2: Python detector emits a test-command-matched `prepare`
 
-**Files:**
-- Modify: `src/setup/lang/python.ts`
-- Test: `test/setup/lang/python.test.ts`
+**Files:** Modify `src/setup/lang/python.ts`; Test `test/setup/lang/python.test.ts`.
+**Interfaces:** `export function pythonPrepare(repoDir: string): string | undefined`.
 
-**Interfaces:**
-- Produces: `export function pythonPrepare(repoDir: string): string | undefined` — the install command matched to `pythonTestCommand(repoDir)`, or `undefined` when no safe install can be determined (→ component skipped by provision).
-
-**Rationale (design §5):** the prepare must make the *detected* command runnable AND put the worktree source under test. For a source-building harness (`tox`/`nox`) that means installing the harness (it builds from source). For bare `pytest`, an **editable** install (`pip install -e .`) so `import <pkg>` resolves to the worktree, never a separately-installed copy (review F1/F2). Unknown → `undefined` (skip; honestly measured).
-
-- [ ] **Step 1: Write the failing test**
-
-Add to `test/setup/lang/python.test.ts` (existing `fixture` helper):
+- [ ] **Step 1: failing test** — add (file's `fixture`):
 
 ```ts
 import { pythonDef, pythonPrepare } from "../../../src/setup/lang/python.ts";
-
-describe("pythonPrepare (matched to the detected test command)", () => {
-  test("tox.ini -> pip install tox (tox builds from source)", () => {
-    const root = fixture({ "tox.ini": "", "setup.py": "" });
-    expect(pythonPrepare(root)).toBe("pip install tox");
-  });
-  test("noxfile.py -> pip install nox", () => {
-    const root = fixture({ "noxfile.py": "" });
-    expect(pythonPrepare(root)).toBe("pip install nox");
-  });
-  test("pytest project with pyproject -> editable install (worktree under test)", () => {
-    const root = fixture({ "pyproject.toml": "[tool.pytest.ini_options]\n" });
-    expect(pythonPrepare(root)).toBe("pip install -e .");
-  });
-  test("no package + requirements.txt -> requirements install", () => {
-    const root = fixture({ "requirements.txt": "requests\n" });
-    expect(pythonPrepare(root)).toBe("pip install -r requirements.txt");
-  });
-  test("nothing installable -> undefined (component skipped by provision)", () => {
-    const root = fixture({ "main.py": "print(1)" });
-    expect(pythonPrepare(root)).toBeUndefined();
-  });
-  test("detect() sets prepare on the component", () => {
-    const root = fixture({ "tox.ini": "", "setup.py": "" });
-    expect(pythonDef.detect(root)[0]?.prepare).toBe("pip install tox");
-  });
+describe("pythonPrepare", () => {
+  test("tox -> pip install tox", () => { expect(pythonPrepare(fixture({ "tox.ini": "", "setup.py": "" }))).toBe("pip install tox"); });
+  test("nox -> pip install nox", () => { expect(pythonPrepare(fixture({ "noxfile.py": "" }))).toBe("pip install nox"); });
+  test("pytest+pyproject -> editable", () => { expect(pythonPrepare(fixture({ "pyproject.toml": "[tool.pytest.ini_options]\n" }))).toBe("pip install -e ."); });
+  test("requirements only -> requirements", () => { expect(pythonPrepare(fixture({ "requirements.txt": "requests\n" }))).toBe("pip install -r requirements.txt"); });
+  test("nothing installable -> undefined", () => { expect(pythonPrepare(fixture({ "main.py": "print(1)" }))).toBeUndefined(); });
 });
 ```
 
-- [ ] **Step 2: Run — expect FAIL.**
-
-- [ ] **Step 3: Implement**
-
-In `src/setup/lang/python.ts`, add after `pythonTestCommand`:
+- [ ] **Step 2: run → FAIL.**
+- [ ] **Step 3: implement** — add after `pythonTestCommand` (imports present):
 
 ```ts
-/** Install command matched to the detected test command, for the runner-executed provision
- *  step. tox/nox build from source, so we install the harness itself; bare pytest needs the
- *  worktree editable-installed so it imports the worktree source (NOT a separately-installed
- *  copy). `undefined` when nothing installable is detected — provision skips that component. */
 export function pythonPrepare(repoDir: string): string | undefined {
   const test = pythonTestCommand(repoDir);
   if (test === "tox") return "pip install tox";
   if (test === "nox") return "pip install nox";
-  // pytest / python -m pytest: editable install so the worktree source is under test.
-  if (
-    existsSync(join(repoDir, "pyproject.toml")) ||
-    existsSync(join(repoDir, "setup.py")) ||
-    existsSync(join(repoDir, "setup.cfg"))
-  ) {
-    return "pip install -e .";
-  }
+  if (existsSync(join(repoDir, "pyproject.toml")) || existsSync(join(repoDir, "setup.py")) || existsSync(join(repoDir, "setup.cfg"))) return "pip install -e .";
   if (existsSync(join(repoDir, "requirements.txt"))) return "pip install -r requirements.txt";
   return undefined;
 }
 ```
+Set `prepare` on **both** `out.push({...})` sites (NOT `components.push` — review F2): root `prepare: pythonPrepare(repoDir)`, nested `prepare: pythonPrepare(join(repoDir, dir))`.
 
-Then in `pythonDef.detect`, set `prepare` on **both** the root and nested `components.push({...})` (nested uses `join(repoDir, dir)` for its component dir, mirroring how the test command is computed per-dir):
-
-```ts
-        prepare: pythonPrepare(repoDir),   // root component
-```
-```ts
-        prepare: pythonPrepare(join(repoDir, dir)),   // nested component
-```
-
-(Confirm `existsSync`/`join`/`readFileSync` imports exist; add `existsSync`/`join` if the nested branch needs them.)
-
-- [ ] **Step 4: Run — expect PASS.**
-- [ ] **Step 5: `bun test` + typecheck + lint — green.**
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/setup/lang/python.ts test/setup/lang/python.test.ts
-git commit -m "feat(setup): python prepare matched to test command (tox/nox harness, else editable install)"
-```
+- [ ] **Step 4: run → PASS.**
+- [ ] **Step 5: FIX the existing exact-match test** (review F2) — `test/setup/lang/python.test.ts:67-72` uses `.toEqual([{...}])`; add `prepare: "pip install -e ."` to its expected object (its fixture has `pyproject.toml`). Then `bun test` + typecheck + lint green.
+- [ ] **Step 6: commit** `feat(setup): python prepare matched to test command (tox/nox/editable/requirements)`
 
 ---
 
-### Task 3: Flip the `prepare` "never run" contract in the doc-comments
+### Task 3: Flip the `prepare` "never run" doc-comments
 
-**Files:**
-- Modify: `src/dispatch/profile.ts` (the `prepare` field comment ~line 100 and the parse-boundary comment ~76-81)
-- Modify: `src/setup/command-safety.ts` (the "HYGIENE, NOT A SANDBOX" / F1 framing comment)
-- Test: none (comment-only; correctness is that the codebase's stated contract matches the new behavior).
+**Files:** `src/dispatch/profile.ts` (lines **93** and **101-102** — the two "never run" assertions; review F7), `src/setup/command-safety.ts:8`.
 
-This is a load-bearing honesty change (review P0-1, F6): `prepare` becomes runner-executed. The comments that assert it is "never run by styre" are now false and must be corrected so a future reader (and the commercial plane) has the right contract.
-
-- [ ] **Step 1: Edit `src/dispatch/profile.ts`** — change the `prepare` field comment to:
-
-```ts
-  /** Install command for this component, EXECUTED by the runner-owned `provision` step
-   *  (src/dispatch/provision.ts) before the first verify — makes the detected verify command
-   *  runnable against the worktree source. Optional; absent → provision skips this component.
-   *  Validated by isCommandSafe at setup (detect-components.ts). (Was WO-12 detect-only.) */
-  prepare: z.string().optional(),
-```
-
-Update any nearby parse-boundary comment (the block ~lines 76-81 asserting `prepare` is never executed) to note it is now executed by the provision step under the same command-safety + sandbox treatment as verify commands.
-
-- [ ] **Step 2: Edit `src/setup/command-safety.ts`** — update the doc-comment so it no longer claims `prepare` is stored-only; state that `prepare` (like verify/build/check commands) is executed via `runCommand`/`sh -c` and that `isCommandSafe` is hygiene (no metachars), containment being the sandbox — for provision and verify alike.
-
-- [ ] **Step 3: `bun run typecheck` + `bun run lint` — green** (comment-only; no behavior).
-- [ ] **Step 4: Commit**
-
-```bash
-git add src/dispatch/profile.ts src/setup/command-safety.ts
-git commit -m "docs(profile): prepare is now runner-executed by the provision step (flip WO-12 'never run')"
-```
+- [ ] **Step 1** — profile.ts:101-102 field comment → "Install command EXECUTED by the runner-owned `provision` step before the first verify; makes the detected verify command runnable against the worktree source. Optional; absent → skipped. isCommandSafe-validated at setup." Update the schema doc-comment at line 93 similarly (drop "stored, never run").
+- [ ] **Step 2** — command-safety.ts doc-comment: state `prepare` is now executed (like verify/build/check) via `runCommand`/`sh -c`; `isCommandSafe` is hygiene, containment is the sandbox.
+- [ ] **Step 3: typecheck + lint green** (comment-only).
+- [ ] **Step 4: commit** `docs(profile): prepare is runner-executed by provision (flip WO-12 'never run')`
 
 ---
 
-### Task 4: The provision plan/probe (pure) + the `provision` handler
+### Task 4: Provision plan/probe (pure) + the `provision` handler
 
-**Files:**
-- Create: `src/dispatch/provision.ts` (pure: readiness probe + per-component plan)
-- Create: `test/dispatch/provision.test.ts`
-- Modify: `src/dispatch/handlers.ts` (register the `"provision"` handler)
-
+**Files:** Create `src/dispatch/provision.ts` + `test/dispatch/provision.test.ts`; modify `src/dispatch/handlers.ts`.
 **Interfaces:**
-- Produces:
-  - `export interface ProvisionAction { component: string; command: string; cwd: string }`
-  - `export function isComponentReady(kind: string, compAbsDir: string): boolean` — cheap probe: does the env already satisfy the detected command? Node/sveltekit → `node_modules/` present. Everything else → `false` (always run prepare; the honest "install every run" for Python, per §5).
-  - `export function planProvision(components: Component[], worktreePath: string): ProvisionAction[]` — for each component with a `prepare` that isn't already-ready, an action with `cwd = join(worktreePath, dir ?? "")`.
-- Consumes (handler): `HandlerContext` (`{db, ticket, step, workUnitId, config}`), `RegistryDeps` (`{runner, agentConfig, profile, worktreeRoot, timeoutMs, resumeContext}`), `worktreeFor`, `ensureWorktree`, `runCommand`, `insertSignal` — all already in `handlers.ts` scope.
+- `interface ProvisionAction { component: string; command: string; cwd: string }`
+- `function isComponentReady(kind: string, compAbsDir: string): boolean` — Node/sveltekit: a **completed** `node_modules` (marker `node_modules/.package-lock.json`, written by npm/yarn on success — review F6). Else `false`.
+- `function planProvision(components: Component[], worktreePath: string): ProvisionAction[]`.
 
-- [ ] **Step 1: Write the failing test** (`test/dispatch/provision.test.ts`) — pure functions only, using a tmp dir:
-
-```ts
-import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { Component } from "../../src/dispatch/profile.ts";
-import { isComponentReady, planProvision } from "../../src/dispatch/provision.ts";
-
-function comp(over: Partial<Component>): Component {
-  return { name: "c", kind: "node", paths: ["**"], commands: {}, extensions: [], ...over } as Component;
-}
-
-describe("isComponentReady", () => {
-  test("node with node_modules present -> ready (skip)", () => {
-    const d = mkdtempSync(join(tmpdir(), "prov-"));
-    mkdirSync(join(d, "node_modules"));
-    expect(isComponentReady("node", d)).toBe(true);
-  });
-  test("node without node_modules -> not ready", () => {
-    const d = mkdtempSync(join(tmpdir(), "prov-"));
-    expect(isComponentReady("node", d)).toBe(false);
-  });
-  test("python -> never probed-ready (always install; honest install-every-run)", () => {
-    const d = mkdtempSync(join(tmpdir(), "prov-"));
-    expect(isComponentReady("python", d)).toBe(false);
-  });
-});
-
-describe("planProvision", () => {
-  test("emits an action per component with a prepare that isn't ready", () => {
-    const wt = mkdtempSync(join(tmpdir(), "wt-"));
-    const actions = planProvision(
-      [comp({ name: "py", kind: "python", prepare: "pip install -e ." }),
-       comp({ name: "fe", kind: "node", prepare: "npm ci", dir: "web" })],
-      wt,
-    );
-    expect(actions).toEqual([
-      { component: "py", command: "pip install -e .", cwd: wt },
-      { component: "fe", command: "npm ci", cwd: join(wt, "web") },
-    ]);
-  });
-  test("skips components with no prepare", () => {
-    const wt = mkdtempSync(join(tmpdir(), "wt-"));
-    expect(planProvision([comp({ name: "x", kind: "go" })], wt)).toEqual([]);
-  });
-  test("skips a node component whose node_modules already exists (ready)", () => {
-    const wt = mkdtempSync(join(tmpdir(), "wt-"));
-    mkdirSync(join(wt, "web", "node_modules"), { recursive: true });
-    expect(
-      planProvision([comp({ name: "fe", kind: "node", prepare: "npm ci", dir: "web" })], wt),
-    ).toEqual([]);
-  });
-});
-```
-
-- [ ] **Step 2: Run — expect FAIL** (module absent).
-
-- [ ] **Step 3: Implement `src/dispatch/provision.ts`**
+- [ ] **Step 1: failing test** (`test/dispatch/provision.test.ts`) — pure fns over tmp dirs: node with `node_modules/.package-lock.json` → ready; node with only a partial `node_modules/` dir → NOT ready (F6); python → not ready; `planProvision` emits one action per prepare-bearing, not-ready component with `cwd = join(worktree, dir ?? "")`; skips no-prepare and ready components. (Shape mirrors the earlier draft; assert exact `ProvisionAction[]`.)
+- [ ] **Step 2: run → FAIL.**
+- [ ] **Step 3: implement `src/dispatch/provision.ts`:**
 
 ```ts
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Component } from "./profile.ts";
-
-export interface ProvisionAction {
-  component: string;
-  command: string;
-  cwd: string;
-}
-
-/** Cheap readiness probe: is the detected verify command already runnable without provisioning?
- *  Node/sveltekit: node_modules present (also how a plane pre-warm is consumed). Every other
- *  kind returns false — we always run its prepare (the honest "install every run" for Python,
- *  since "worktree source under test" is not observable by a cheap check; design §5, review F2). */
+export interface ProvisionAction { component: string; command: string; cwd: string; }
 export function isComponentReady(kind: string, compAbsDir: string): boolean {
-  if (kind === "node" || kind === "sveltekit") return existsSync(join(compAbsDir, "node_modules"));
-  return false;
+  if (kind === "node" || kind === "sveltekit") return existsSync(join(compAbsDir, "node_modules", ".package-lock.json"));
+  return false; // python + unknown: always install; correctness assured by the post-install source check (Task 5)
 }
-
-/** One action per component that has a `prepare` and isn't already ready. cwd is the component's
- *  dir under the worktree (root component → worktree root). Never touches commands.test. */
 export function planProvision(components: Component[], worktreePath: string): ProvisionAction[] {
   const out: ProvisionAction[] = [];
   for (const c of components) {
@@ -350,218 +158,152 @@ export function planProvision(components: Component[], worktreePath: string): Pr
 }
 ```
 
-- [ ] **Step 4: Run — expect PASS.**
-
-- [ ] **Step 5: Register the handler in `src/dispatch/handlers.ts`** — inside `buildDispatchRegistry`, register `"provision"` (mirror `verify:check`'s worktree + runCommand + insertSignal shape):
+- [ ] **Step 4: run → PASS.**
+- [ ] **Step 5: register the handler in `handlers.ts`** (mirror `verify:check`; independent timeout; DROP `branchHeadSha` — review F1). Add `const PROVISION_TIMEOUT_MS = 15 * 60 * 1000;`:
 
 ```ts
-  registry.register("provision", async (ctx: HandlerContext) => {
-    const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
-    ensureWorktree(repoPath, branch, worktreePath);
-    const actions = planProvision(deps.profile.components, worktreePath);
-    for (const a of actions) {
-      const run = await runCommand(a.command, {
-        cwd: a.cwd,
-        timeoutMs: deps.timeoutMs ?? PROVISION_TIMEOUT_MS,
-      });
-      insertSignal(ctx.db, {
-        ticketId: ctx.ticket.id,
-        workUnitId: null,
-        signalType: "provision",
-        result: run.exitCode === 0 ? "pass" : run.timedOut ? "error" : "fail",
-        branchHeadSha: null,
-        detail: { component: a.component, command: a.command, exitCode: run.exitCode },
-      });
-      if (run.exitCode !== 0) {
-        throw new Error(
-          `provision: ${a.component} '${a.command}' exited ${run.exitCode}${run.timedOut ? " (timed out)" : ""}: ${run.stderr.slice(0, 500)}`,
-        );
-      }
-    }
-    return { provisioned: actions.length };
-  });
+registry.register("provision", async (ctx: HandlerContext) => {
+  const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
+  ensureWorktree(repoPath, branch, worktreePath);
+  const actions = planProvision(deps.profile.components, worktreePath);
+  for (const a of actions) {
+    const run = await runCommand(a.command, { cwd: a.cwd, timeoutMs: PROVISION_TIMEOUT_MS });
+    insertSignal(ctx.db, { ticketId: ctx.ticket.id, workUnitId: null, signalType: "provision",
+      result: run.exitCode === 0 ? "pass" : run.timedOut ? "error" : "fail",
+      detail: { component: a.component, command: a.command, exitCode: run.exitCode } });
+    if (run.exitCode !== 0) throw new Error(`provision: ${a.component} '${a.command}' exited ${run.exitCode}${run.timedOut ? " (timed out)" : ""}: ${run.stderr.slice(0, 500)}`);
+    // Task 5 inserts the worktree-source assertion for editable-install components here.
+  }
+  return { provisioned: actions.length };
+});
 ```
+Import `planProvision` (+ the Task-5 helpers). Note: no `branchHeadSha` key; `workUnitId: null` and `detail` (unknown) are accepted by `insertSignal` (`ground-truth-signal.ts:49`).
 
-Add near the other timeout consts: `const PROVISION_TIMEOUT_MS = 15 * 60 * 1000;` (installs can be slow; design §5). Add `import { planProvision } from "./provision.ts";` and confirm `insertSignal`'s `branchHeadSha` accepts null (it does elsewhere; if not, pass the latest sha via the same helper `verify:check` uses).
-
-- [ ] **Step 6: `bun test` + typecheck + lint — green.**
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add src/dispatch/provision.ts test/dispatch/provision.test.ts src/dispatch/handlers.ts
-git commit -m "feat(run): provision handler — install each component's prepare before verify (probe-then-install)"
-```
+- [ ] **Step 6: `bun test` + typecheck + lint green.**
+- [ ] **Step 7: commit** `feat(run): provision handler installs each component's prepare before verify`
 
 ---
 
-### Task 5: Resolver inserts `provision` before the first verify
+### Task 5 (CRITICAL — review F-1): prove the worktree source is under test
 
-**Files:**
-- Modify: `src/daemon/resolver.ts` (implement branch, ~106-135)
-- Test: `test/daemon/resolver.test.ts`
+**Files:** `src/dispatch/provision.ts` (+ its test), `src/setup/lang/python.ts` (import-name), `src/dispatch/handlers.ts` (wire the assertion).
+
+**Why:** `pip install -e .` exiting 0 does NOT prove `import <pkg>` resolves to the worktree — a pre-installed/conda copy can shadow it (design's exact F1/F2 disease). Provision must assert it, remediate, and escalate rather than verify wrong bytes.
 
 **Interfaces:**
-- Consumes: existing `done(db, ticketId, stepKey)` and `step(stepKey, stepType, handlerKey, workUnitId)` helpers.
-- Produces: when the first `verify:check` would fire and `provision` has not succeeded, the resolver returns `step("provision", "provision", "provision", null)` first.
+- `python.ts`: `export function pythonImportName(repoDir: string): string | undefined` — from `pyproject [project].name` (normalize `-`→`_`), else the sole top-level dir containing `__init__.py`; else `undefined`.
+- `provision.ts`: `export function sourceCheckCommand(kind: string, cwd: string, importName: string | undefined): string | null` — for `python` with an editable `prepare` and a known `importName`, returns a metachar-free `python -c '...'` that imports the package and asserts its `__file__` resolves under `cwd`; else `null`.
 
-- [ ] **Step 1: Write the failing test** (extend `test/daemon/resolver.test.ts`, matching its `makeTestDb`/`succeed`/`nextStepKey` pattern):
+- [ ] **Step 1: failing tests** — `sourceCheckCommand` returns a `python -c` string containing the importName + the cwd for a python editable case, `null` for node/unknown/no-name; `pythonImportName` reads `[project]\nname = "astropy"` → `astropy`, and finds a top-level `pkg/__init__.py` → `pkg`. **Regression guard (the §11 test):** an integration-style test that seeds a tmp "worktree" whose editable install is shadowed by a copy earlier on `sys.path`, runs the `sourceCheckCommand`, and asserts it **exits non-zero** (proves we detect wrong-bytes). Mark it live-gated if it needs a real `python` on PATH.
+- [ ] **Step 2: run → FAIL.**
+- [ ] **Step 3: implement** — `pythonImportName` in `python.ts` (reuse `readFileSync`/`findManifests`); `sourceCheckCommand` in `provision.ts`. The command (single line, no forbidden metachars — note `python -c` uses a string arg; keep it free of `;&|$()` by using a module-file check via `importlib.util.find_spec` and `str.__contains__`, e.g. a `python -c "import importlib.util,pathlib as p,sys; s=importlib.util.find_spec('NAME'); sys.exit(0 if s and s.origin and str(p.Path('CWD').resolve()) in str(p.Path(s.origin).resolve()) else 1)"` — verify it passes `isCommandSafe`; if `()`/`$`/`;` are unavoidable, write the check to a temp `.py` file in the worktree at provision time and run `python that_file.py NAME CWD`, which is metachar-free).
+- [ ] **Step 4: wire into the handler** (Task 4 Step 5 marker). After a component's `prepare` succeeds, if `sourceCheckCommand(c.kind, cwd, pythonImportName(cwd))` is non-null: run it; if it exits non-zero, run a remediation `pip install -e . --force-reinstall --no-deps` (cwd) and re-run the check; if STILL non-zero, `throw` a `"provision: worktree source not under test for <c>"` error (→ escalate, Task 8). Record a `signal(type="provision", result="fail")` on the escalate path.
+- [ ] **Step 5: run → PASS; `bun test` + typecheck + lint green.**
+- [ ] **Step 6: commit** `feat(run): provision asserts the worktree source is under test (never verify a shadowed copy)`
+
+---
+
+### Task 6: Resolver runs provision before the first verify AND before integration
+
+**Files:** `src/daemon/resolver.ts`; Test `test/daemon/resolver.test.ts`.
+
+- [ ] **Step 1: failing tests** (async; `await succeed(...)` — review F3; use `insertWorkUnit({..., status: "verifying"})` — review F4):
 
 ```ts
-test("provision runs once before the first verify, then verify proceeds", () => {
-  const { db, ticketId } = makeTestDb();
-  setTicketStage(db, ticketId, "implement");
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", verifyCheckTypes: ["test"] });
-  // unit dispatched -> now verifying
-  succeed(db, ticketId, "implement:wu1:dispatch");
-  setWorkUnitStatus(db, ticketId, 1, "verifying"); // use the file's existing status helper
-
-  // first thing before verify is provision
-  expect(nextStepKey(db, ticketId)).toEqual({
-    kind: "step",
-    stepKey: "provision",
-    stepType: "provision",
-    handlerKey: "provision",
-    workUnitId: null,
-  });
-
-  // after provision succeeds, verify proceeds
-  succeed(db, ticketId, "provision");
+test("provision runs once before the first unit verify", async () => {
+  const { db, ticketId } = makeTestDb(); setTicketStage(db, ticketId, "implement");
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", verifyCheckTypes: ["test"], status: "verifying" });
+  expect(nextStepKey(db, ticketId)).toEqual({ kind: "step", stepKey: "provision", stepType: "provision", handlerKey: "provision", workUnitId: null });
+  await succeed(db, ticketId, "provision");
   expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "verify:wu1:test" });
   db.close();
 });
-```
-
-(Use whatever helper the file already has to mark a unit `verifying`; if none, mirror the existing dispatch→verify test's setup.)
-
-- [ ] **Step 2: Run — expect FAIL** (resolver returns `verify:wu1:test` directly).
-
-- [ ] **Step 3: Implement** — in the implement branch, gate the first verify:
-
-```ts
-        const check = nextUnrunCheck(db, u);
-        if (check !== null) {
-          if (!done(db, ticketId, "provision")) {
-            return step("provision", "provision", "provision", null);
-          }
-          return step(`verify:wu${u.seq}:${check}`, "verify", "verify:check", u.id);
-        }
-```
-
-(Insert only the two `if (!done(...)) return step(...)` lines before the existing verify return. The `verify:integration` path (§119-128) needs no change: `done("provision")` is already true by the time all units verify.)
-
-- [ ] **Step 4: Run — expect PASS.**
-- [ ] **Step 5: `bun test` + typecheck + lint — green.**
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/daemon/resolver.ts test/daemon/resolver.test.ts
-git commit -m "feat(run): resolver runs provision once before the first verify"
-```
-
----
-
-### Task 6: Re-provision after park/resume (the probed-effect requirement)
-
-**Files:**
-- Modify: `src/cli/park.ts` (resume path, after the stale-worktree wipe ~line 189-201)
-- Test: `test/cli/park.test.ts` (or the resume test file — match where resume is tested)
-
-**Why (review P0-2):** resume wipes the worktree and mints a fresh `worktreeRoot`, so installed deps are gone; but the journaled `provision` step is `succeeded`, so the resolver's `done("provision")` would skip it → the post-resume verify runs in an un-provisioned tree. Fix: on resume, **reset the `provision` step to pending** so it re-runs against the fresh worktree. (`recover()` won't do this — it only resets `running` steps.)
-
-- [ ] **Step 1: Write the failing test** — resume a parked ticket whose `provision` step is `succeeded`; assert that after the resume-prep, the `provision` step is back to `pending` (so it will re-run). Use `makeTestDb` + the step-journal + park's resume-prep function. If resume logic isn't unit-testable in isolation, extract the reset into a small pure-ish helper `resetProvisionForResume(db, ticketId)` and test that directly:
-
-```ts
-test("resume resets a succeeded provision step to pending (deps are gone on the fresh worktree)", () => {
-  const { db, ticketId } = makeTestDb();
-  succeed(db, ticketId, "provision");
-  expect(getByKey(db, ticketId, "provision")?.status).toBe("succeeded");
-  resetProvisionForResume(db, ticketId);
-  expect(getByKey(db, ticketId, "provision")?.status).toBe("pending");
+test("provision also gates verify:integration when units have no per-unit checks", async () => {
+  const { db, ticketId } = makeTestDb(); setTicketStage(db, ticketId, "implement");
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "data", verifyCheckTypes: [], status: "verifying" });
+  // all units verified with no checks -> integration; provision must gate it
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "provision" });
   db.close();
 });
 ```
 
-- [ ] **Step 2: Run — expect FAIL.**
-
-- [ ] **Step 3: Implement** — add the helper (next to the resume logic in `src/cli/park.ts`, reusing the step-journal repo functions `getByKey` and `steps.resetToPending`):
-
-```ts
-/** On resume the worktree is wiped + re-created fresh, so any installed deps are gone. The
- *  journaled provision step is `succeeded`, which would make the resolver skip it — reset it so
- *  it re-runs (probe-then-install) against the fresh worktree. Provision is a PROBED EFFECT
- *  (design §9): its idempotency is the handler's readiness probe, not exactly-once journaling. */
-export function resetProvisionForResume(db: Database, ticketId: number): void {
-  const s = getByKey(db, ticketId, "provision");
-  if (s && s.status === "succeeded") steps.resetToPending(db, s.id);
-}
-```
-
-Call `resetProvisionForResume(db, ticketId)` in the resume path immediately after the stale-worktree cleanup block. (Confirm the exact imports: `getByKey` from the workflow-step repo the resolver's `done()` uses; `steps.resetToPending` as in `src/daemon/recover.ts`.)
-
-- [ ] **Step 4: Run — expect PASS.**
-- [ ] **Step 5: `bun test` + typecheck + lint — green.**
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/cli/park.ts test/cli/park.test.ts
-git commit -m "fix(run): re-provision on resume — reset the provision step (fresh worktree loses deps)"
-```
+- [ ] **Step 2: run → FAIL.**
+- [ ] **Step 3: implement** — gate BOTH sites with `if (!done(db, ticketId, "provision")) return step("provision", "provision", "provision", null);`: (a) inside the implement branch before returning `verify:wu…`, and (b) in the `allUnitsVerified` branch before returning `verify:integration` (review F-3).
+- [ ] **Step 4: run → PASS; full suite + typecheck + lint green.**
+- [ ] **Step 5: commit** `feat(run): resolver runs provision before first unit-verify and before integration`
 
 ---
 
-### Task 7: Step-catalog + loopback documentation
+### Task 7: Re-provision on park/resume
 
-**Files:**
-- Modify: `docs/architecture/control-loop.md` (step catalog §4; Loopback Atlas §8)
-- Modify: `docs/architecture/minimal-loop.md` (the `next_step_key` state machine)
+**Files:** `src/cli/park.ts` (resume path, after the stale-worktree cleanup ~189-201, before `recover()`); Test `test/cli/park.test.ts`.
 
-**Interfaces:** documentation only — encodes the invariants a future step-author must hold.
+- [ ] **Step 1: failing test** — define a local `async succeed` (or call `runStep` directly — `succeed` is NOT shared, review F5); assert `resetProvisionForResume(db, ticketId)` turns a succeeded provision step `pending` **and** zeroes `attempt` (review F-7). Import `getByKey` from `db/repos/workflow-step.ts`.
+- [ ] **Step 2: run → FAIL.**
+- [ ] **Step 3: implement** — add to `park.ts`, call it in `resumeRun` after the cleanup block:
 
-- [ ] **Step 1: Add a step-catalog entry** for `provision` in `control-loop.md` §4, at the Implement→Verify boundary (a new **S2c**), matching the S3 template:
-
+```ts
+export function resetProvisionForResume(db: Database, ticketId: number): void {
+  const s = getByKey(db, ticketId, "provision");
+  if (s && s.status === "succeeded") { steps.resetToPending(db, s.id); steps.resetAttempt(db, s.id); }
+}
 ```
-**S2c · `provision`** — runner-executed (no LLM): before the first verify of the ticket, make
-each component's detected verify command runnable against the worktree source.
-- **Guard:** ticket in `implement`, a unit is `verifying`, and `provision` has not yet succeeded
-  (reset on park/resume — a probed effect, not exactly-once).
-- **Input:** `profile.components[].prepare` (recorded at setup); the worktree.
-- **Output:** `signal(type="provision")` per component; installed deps in the worktree.
-- **Commands/Capability:** runs `prepare` via `runCommand`+`verifyEnv` (creds scrubbed);
-  `isCommandSafe`-validated at setup; NEVER runs or overrides `commands.test`.
-- **Failure → route:** a non-zero `prepare` exit fails the step → [Loopback Atlas code, §8]:
-  an environment/provisioning failure (distinct from a code-verify fail) → escalate, not a
-  code loopback (it will not self-heal via re-implementation).
-```
+(Add a `resetAttempt(db, id)` repo helper in `workflow-step.ts` setting `attempt = 0` if none exists.)
 
-- [ ] **Step 2: Add the loopback routing** in §8 for a provision failure (environment error → escalation path, per the design's "honest failure" — do NOT route it back to implement as if the code were wrong).
+- [ ] **Step 4: run → PASS. Add a wiring assertion** (review F-7 testing gap): a test that `resumeRun` on a parked ticket leaves `provision` pending (covers `--resume`; note `--accept-head` reaches the same call site).
+- [ ] **Step 5: full suite + typecheck + lint green.**
+- [ ] **Step 6: commit** `fix(run): re-provision on resume (fresh worktree loses deps; reset step + attempt)`
 
-- [ ] **Step 3: Update `minimal-loop.md`** — note the `provision` step fires once before the first `verify:check` and re-runs on resume.
+---
 
-- [ ] **Step 4: Commit**
+### Task 8: Provision-failure routing (escalate, don't loopback)
 
-```bash
-git add docs/architecture/control-loop.md docs/architecture/minimal-loop.md
-git commit -m "docs(control-loop): step catalog + loopback routing for the provision step"
-```
+**Files:** `src/daemon/failure-policy.ts`; Test `test/daemon/failure-policy.test.ts`.
+
+**Why (review F-4):** a provision throw currently falls through to the generic `retry` tail → escalates only at `attempt>=max` (3×, ~45 min of identical failing installs). A broken lockfile won't self-heal on identical retry, and the "never loopback to implement" property is unenforced/untested.
+
+- [ ] **Step 1: failing test** — a `step_type: "provision"` failure returns `{ decision: "escalated" }` (or retry once then escalate), and NEVER sets a work-unit to pending (never loopback).
+- [ ] **Step 2: run → FAIL.**
+- [ ] **Step 3: implement** — add near the top of `applyFailurePolicy`, before the verify branches: `if (step.step_type === "provision") { ...escalate to human_resume after 1 attempt... return { decision: "escalated" }; }` (mirror the existing `human_resume` escalation insert used at `failure-policy.ts:62`).
+- [ ] **Step 4: run → PASS; full suite green.**
+- [ ] **Step 5: commit** `feat(run): provision failure escalates (env error won't self-heal via re-implement)`
+
+---
+
+### Task 9: Re-provision when a loopback edits a dependency manifest
+
+**Files:** the implement post-commit path (`src/daemon/advance.ts` or the implement handler where the unit's diff is known); Test alongside.
+
+**Why (review F-2):** if a later `implement` adds a dependency (edits a manifest), the once-gated provision is skipped → verify fails "module not found" → loopback → the agent can't install → escalation loop.
+
+- [ ] **Step 1: failing test** — a pure helper `diffTouchesManifest(changedPaths: string[]): boolean` returns true for `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements*.txt`; false otherwise.
+- [ ] **Step 2/3: implement** the helper in `src/dispatch/provision.ts`; after an implement dispatch whose committed diff touches a manifest, `resetProvisionForResume`-style reset the `provision` step to pending (reuse the Task-7 helper or a shared `resetProvision(db, ticketId)`), so the resolver's `!done("provision")` gate re-fires before the next verify.
+- [ ] **Step 4: run → PASS; full suite green.**
+- [ ] **Step 5: commit** `fix(run): re-provision when a loopback edits a dependency manifest`
+
+---
+
+### Task 10: Step-catalog + loopback documentation
+
+**Files:** `docs/architecture/control-loop.md` (§4 step catalog as **S2c**; §8 Loopback Atlas), `minimal-loop.md`.
+
+- [ ] Add the `S2c · provision` catalog entry (runner-executed; guard = implement + a unit verifying/all-verified + `!done("provision")`, reset on resume/manifest-touch; input `prepare`; output `signal(type="provision")` + installed deps + proven worktree-under-test; commands = `prepare` + editable-source assertion via `runCommand`/`verifyEnv`, never `commands.test`; failure → **escalate** (env error, not a code loopback)). Add the §8 routing. Update `minimal-loop.md`. Commit `docs(control-loop): provision step catalog + loopback`.
 
 ---
 
 ## Self-Review
 
-**1. Spec coverage (design doc → tasks):** §4 files all covered (node T1, python T2, profile/command-safety comments T3, provision.ts+handlers T4, resolver T5, park T6, docs T7). §5 correctness (never override command; editable install; worktree-under-test) → T2 + T4 (`isComponentReady` returns false for python = always install; pytest→editable). §6 security posture → T3 comments + global constraint (decided: no new gate; sandbox containment). §7 seam → nothing built (correct; deferred). §9 crash-resume/probed-effect → T6. §9 graceful degradation (no prepare → skip) → T4 `planProvision`. §10 all components → T4 iterates `profile.components`.
+**Spec coverage:** design §4 files all covered; §5 correctness → Tasks 2+4+**5**; §6 posture → Task 3 + constraints; §9 resume → Task 7; §9 degradation → Task 4; §10 all components → Task 4. **Review findings:** F-1→Task 5; F-2→Task 9; F-3→Task 6(b); F-4→Task 8; F-5→Task 4 (independent timeout); F-6→Task 4 (completeness marker); F-7→Task 7 (attempt reset + wiring test); mechanical F1-F5→folded (branchHeadSha dropped, python.test fix, async/await, `insertWorkUnit(status)`, local `succeed`); F7 line refs→Task 3.
 
-**2. Placeholder scan:** the one soft spot — the exact status helper to mark a unit `verifying` (T5) and the exact step-journal import names (`getByKey`, `steps.resetToPending`) in T6 — are flagged inline to reconcile against the file's existing helpers, not invented. No TBDs.
+**Placeholder scan:** the one soft spot — whether the `python -c` source check passes `isCommandSafe` (`()`/`$` may be forbidden) — is flagged in Task 5 Step 3 with a concrete fallback (write a temp `.py` and run it metachar-free). No TBDs.
 
-**3. Type consistency:** `ProvisionAction`/`planProvision`/`isComponentReady` signatures identical across T4 def, its test, and the handler call. `step("provision","provision","provision",null)` matches the resolver test's expected `StepDescriptor` and the handler's registered key. `prepare` is read (never written) at run; `commands.test` is never mutated (C1 invariant holds by construction — no task touches it).
+**Type consistency:** `ProvisionAction`/`planProvision`/`isComponentReady`/`sourceCheckCommand`/`pythonImportName` signatures consistent across defs, tests, and handler. `commands.test` is never written (C1 holds by construction). `step("provision","provision","provision",null)` matches the resolver test + the registered handler key.
 
-## Deferred (named, not dropped — from the design)
+## Honest limitation (surface to the operator)
+Task 5's correctness guard means a SWE-bench-style repo whose pre-installed copy cannot be displaced (conda-managed files pip can't remove) will **escalate** rather than verify-green. That is the *correct* outcome (honesty over a false pass), but it means such instances won't resolve until a stronger remediation (env rebuild) exists — deferred. The bench will record them as provisioning-escalations, not false resolves.
 
-- **Go/Rust/JVM/Ruby/PHP** prepare/probe (same template as T1/T2).
-- **Monorepo** lockfile-at-root handling for nested Node components (T1 checks the component dir only).
-- **The replace-provisioning config-override seam** (design §7) — until a real customer env needs it.
-- **styre's "can't-verify → deliver nothing"** behavior (design §12) — separate fix; provisioning alone doesn't close the exotic tail.
+## Deferred (named)
+Go/Rust/JVM/Ruby/PHP; monorepo lockfile-at-root; the replace-provisioning config-override seam; styre's "can't-verify → deliver nothing" behavior; stronger conda-displacement remediation.
 
-## Post-merge handoff (cross-repo)
-
-After this lands on `feat/polyglot-setup`, re-pin styre-bench (`styreCommit` → new tip) and re-run `SMOKE=2` to confirm a SWE-bench + an MSB instance go from "blocked (env)" to verified + PR-opened.
+## Post-merge handoff
+Re-pin styre-bench (`styreCommit` → new tip) and re-run `SMOKE=2`; confirm a Node (MSB) instance goes blocked(env)→verified→PR, and observe the Python (SWE-bench) instance either verify-green or **escalate honestly** (not false-resolve).
