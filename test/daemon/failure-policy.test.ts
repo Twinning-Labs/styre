@@ -266,6 +266,36 @@ test("bounce-back resets the implement dispatch step so re-coding actually runs"
   expect(dispatchAfter?.status).toBe("pending");
 });
 
+test("a provision failure escalates immediately and never loops back (even under attempt budget)", () => {
+  const { db, ticketId } = makeTestDb();
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verifying",
+  });
+  const step = failedStep(db, ticketId, {
+    stepKey: "provision",
+    stepType: "provision",
+    attempts: 1,
+  });
+  const result = applyFailurePolicy(db, ticketId, step);
+  const ticket = getTicket(db, ticketId);
+  const pending = listPending(db, ticketId);
+  const escalations = listEvents(db, ticketId).filter((e) => e.kind === "escalated");
+  const loopbacks = listEvents(db, ticketId).filter((e) => e.kind === "loopback");
+  const afterUnit = getUnit(db, unit.id);
+  db.close();
+  expect(result.decision).toBe("escalated");
+  if (!ticket) throw new Error("ticket missing");
+  expect(ticket.status).toBe("waiting");
+  expect(pending.some((s) => s.signal_type === "human_resume")).toBe(true);
+  expect(escalations.length).toBe(1);
+  expect(loopbacks.length).toBe(0);
+  expect(afterUnit?.status).toBe("verifying"); // never bounced to pending
+});
+
 test("whole-project failure spawns a reconcile unit and re-opens integration", () => {
   const { db, ticketId } = makeTestDb();
   insertWorkUnit(db, {

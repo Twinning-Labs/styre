@@ -72,6 +72,27 @@ export function applyFailurePolicy(
     return { decision: "escalated" };
   }
 
+  // Provision (env/install) failure → escalate immediately. An identical retry won't fix a
+  // broken lockfile/env, and re-implementing can't reach it either (capability isolation) —
+  // never loop this back to implement.
+  if (step.step_type === "provision") {
+    db.transaction(() => {
+      setTicketStatus(db, ticketId, "waiting");
+      insertSignal(db, {
+        ticketId,
+        signalType: "human_resume",
+        reason: "provision failed for ticket",
+      });
+      appendEvent(db, {
+        ticketId,
+        kind: "escalated",
+        reason: `step '${step.step_key}' failed`,
+        signature: failureSignature(step),
+      });
+    })();
+    return { decision: "escalated" };
+  }
+
   if (step.step_type === "verify" && step.work_unit_id !== null) {
     const workUnitId = step.work_unit_id;
     const signature = failureSignature(step);
