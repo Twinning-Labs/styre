@@ -53,7 +53,21 @@ describe("EnrichmentSchema fails SOFT on an out-of-enum type/mechanism (crash-ki
     }
   });
 
-  test("a genuinely malformed section (bad type for detail) still FAILS (fail-soft is scoped to type/mechanism only)", () => {
+  test("out-of-enum PRESENCE coerces to undefined too (crash class closed for all enum fields, not just type/mechanism)", () => {
+    // Whole-branch-review gap: presence had no `.catch`, so a wild presence ("likely") would
+    // fail-parse → malformed → 3-retry crash, exactly like the original mechanism bug.
+    const parsed = EnrichmentSchema.safeParse({
+      ...full,
+      caching: { presence: "likely", detail: "seems cached" },
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.caching.presence).toBeUndefined(); // coerced, not admitted
+      expect(parsed.data.caching.detail).toBe("seems cached"); // prose survives
+    }
+  });
+
+  test("a genuinely malformed section (bad type for detail) still FAILS — fail-soft coerces enum VALUES only, never structural corruption", () => {
     const parsed = EnrichmentSchema.safeParse({ ...full, caching: { detail: 123 } });
     expect(parsed.success).toBe(false);
   });
