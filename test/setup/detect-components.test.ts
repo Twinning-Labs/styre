@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { detectComponents } from "../../src/setup/detect-components.ts";
+import { detectComponents, unrootedManifestWarnings } from "../../src/setup/detect-components.ts";
 
 function fixture(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "styre-dc-"));
@@ -64,6 +64,128 @@ test("unreadable root Cargo.toml is treated as not-a-workspace (no throw)", () =
   } finally {
     chmodSync(join(root, "Cargo.toml"), 0o644);
   }
+});
+
+test("manifests inside dependency/build dirs are skipped (no phantom components)", () => {
+  const root = fixture({
+    ".tox/py311/lib/package.json": JSON.stringify({ scripts: { test: "x" } }),
+    "vendor/github.com/foo/Cargo.toml": '[package]\nname="dep"\n',
+    ".gradle/tmp/package.json": JSON.stringify({ scripts: { build: "x" } }),
+  });
+  const { components } = detectComponents(root);
+  expect(components).toHaveLength(0);
+});
+
+test("python: pyproject.toml → one python component, default runner", () => {
+  const root = fixture({ "pyproject.toml": "[project]\nname='x'\n" });
+  const py = detectComponents(root).components.find((c) => c.kind === "python");
+  expect(py?.paths).toEqual(["**"]);
+  expect(py?.commands.test).toBe("python -m pytest");
+});
+
+test("python: runner detection precedence tox > nox > pytest-config > default", () => {
+  expect(
+    detectComponents(fixture({ "setup.py": "", "tox.ini": "[tox]\n" })).components.find(
+      (c) => c.kind === "python",
+    )?.commands.test,
+  ).toBe("tox");
+  expect(
+    detectComponents(fixture({ "setup.py": "", "noxfile.py": "" })).components.find(
+      (c) => c.kind === "python",
+    )?.commands.test,
+  ).toBe("nox");
+  expect(
+    detectComponents(fixture({ "setup.py": "", "pytest.ini": "[pytest]\n" })).components.find(
+      (c) => c.kind === "python",
+    )?.commands.test,
+  ).toBe("pytest");
+  expect(
+    detectComponents(fixture({ "pyproject.toml": "[tool.pytest.ini_options]\n" })).components.find(
+      (c) => c.kind === "python",
+    )?.commands.test,
+  ).toBe("pytest");
+  expect(
+    detectComponents(fixture({ "requirements.txt": "pytest\n" })).components.find(
+      (c) => c.kind === "python",
+    )?.commands.test,
+  ).toBe("python -m pytest");
+});
+
+test("python: no python manifest → no python component", () => {
+  expect(
+    detectComponents(fixture({ "README.md": "x" })).components.find((c) => c.kind === "python"),
+  ).toBeUndefined();
+});
+
+test("go: root go.mod → one go component with build/test", () => {
+  const go = detectComponents(fixture({ "go.mod": "module x\n\ngo 1.22\n" })).components.find(
+    (c) => c.kind === "go",
+  );
+  expect(go?.paths).toEqual(["**"]);
+  expect(go?.commands.build).toBe("go build ./...");
+  expect(go?.commands.test).toBe("go test ./...");
+});
+
+test("go: nested-only go.mod (no root) → no go component (single-module first)", () => {
+  expect(
+    detectComponents(fixture({ "backend/go.mod": "module x\n" })).components.find(
+      (c) => c.kind === "go",
+    ),
+  ).toBeUndefined();
+});
+
+test("jvm: root pom.xml → jvm-maven (bare mvn when no wrapper)", () => {
+  const m = detectComponents(fixture({ "pom.xml": "<project/>" })).components.find(
+    (c) => c.kind === "jvm-maven",
+  );
+  expect(m?.paths).toEqual(["**"]);
+  expect(m?.commands.build).toBe("mvn -q -DskipTests compile");
+  expect(m?.commands.test).toBe("mvn -q test");
+});
+
+test("jvm: pom.xml + mvnw → prefers the maven wrapper", () => {
+  const m = detectComponents(
+    fixture({ "pom.xml": "<project/>", mvnw: "#!/bin/sh\n" }),
+  ).components.find((c) => c.kind === "jvm-maven");
+  expect(m?.commands.build).toBe("./mvnw -q -DskipTests compile");
+  expect(m?.commands.test).toBe("./mvnw -q test");
+});
+
+test("jvm: build.gradle(.kts) → jvm-gradle; gradlew preferred when present", () => {
+  for (const f of ["build.gradle", "build.gradle.kts"]) {
+    const g = detectComponents(fixture({ [f]: "" })).components.find(
+      (c) => c.kind === "jvm-gradle",
+    );
+    expect(g?.commands.build).toBe("gradle build -x test");
+    expect(g?.commands.test).toBe("gradle test");
+  }
+  const gw = detectComponents(
+    fixture({ "build.gradle": "", gradlew: "#!/bin/sh\n" }),
+  ).components.find((c) => c.kind === "jvm-gradle");
+  expect(gw?.commands.test).toBe("./gradlew test");
+  expect(gw?.commands.build).toBe("./gradlew build -x test");
+});
+
+test("jvm: no jvm manifest → no jvm component", () => {
+  const comps = detectComponents(fixture({ "README.md": "x" })).components;
+  expect(comps.find((c) => c.kind === "jvm-maven" || c.kind === "jvm-gradle")).toBeUndefined();
+});
+
+test("loud note: subdir-only go.mod warns; root go.mod does not", () => {
+  const nested = unrootedManifestWarnings(fixture({ "backend/go.mod": "module x\n" }));
+  expect(nested.some((w) => /go\.mod/.test(w) && /backend/.test(w) && /deferred/i.test(w))).toBe(
+    true,
+  );
+  expect(unrootedManifestWarnings(fixture({ "go.mod": "module x\n" }))).toEqual([]);
+});
+
+test("loud note: subdir-only pyproject warns; non-targeted nested files do not", () => {
+  expect(
+    unrootedManifestWarnings(fixture({ "src/pyproject.toml": "[project]\n" })).some((w) =>
+      /pyproject\.toml/.test(w),
+    ),
+  ).toBe(true);
+  expect(unrootedManifestWarnings(fixture({ "README.md": "x" }))).toEqual([]);
 });
 
 test("cargo workspace collapses members into ONE rust component", () => {
