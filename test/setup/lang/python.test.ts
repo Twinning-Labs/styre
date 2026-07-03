@@ -1,9 +1,9 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unrootedManifestWarnings } from "../../../src/setup/detect-components.ts";
-import { pythonDef } from "../../../src/setup/lang/python.ts";
+import { pythonDef, pythonImportName, pythonPrepare } from "../../../src/setup/lang/python.ts";
 
 function fixture(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "styre-python-"));
@@ -67,7 +67,13 @@ test("python: no python manifest → no components", () => {
 test("python: single root pyproject → one root component (unchanged)", () => {
   const root = fixture({ "pyproject.toml": "[project]\n" });
   expect(pythonDef.detect(root)).toEqual([
-    { name: "python", kind: "python", paths: ["**"], commands: { test: "python -m pytest" } },
+    {
+      name: "python",
+      kind: "python",
+      paths: ["**"],
+      commands: { test: "python -m pytest" },
+      prepare: "pip install -e .",
+    },
   ]);
 });
 
@@ -98,4 +104,99 @@ test("python: subdir requirements.txt with no pyproject/setup.py → NOT a modul
   expect(
     unrootedManifestWarnings(root).some((w) => w.includes("svc") && w.includes("requirements.txt")),
   ).toBe(true);
+});
+
+// ─── Task 2: pythonPrepare (test-command-matched) ────────────────────────────
+
+describe("pythonPrepare", () => {
+  test("tox -> pip install tox", () => {
+    expect(pythonPrepare(fixture({ "tox.ini": "", "setup.py": "" }))).toBe("pip install tox");
+  });
+  test("nox -> pip install nox", () => {
+    expect(pythonPrepare(fixture({ "noxfile.py": "" }))).toBe("pip install nox");
+  });
+  test("pytest+pyproject -> editable", () => {
+    expect(pythonPrepare(fixture({ "pyproject.toml": "[tool.pytest.ini_options]\n" }))).toBe(
+      "pip install -e .",
+    );
+  });
+  test("requirements only -> requirements", () => {
+    expect(pythonPrepare(fixture({ "requirements.txt": "requests\n" }))).toBe(
+      "pip install -r requirements.txt",
+    );
+  });
+  test("nothing installable -> undefined", () => {
+    expect(pythonPrepare(fixture({ "main.py": "print(1)" }))).toBeUndefined();
+  });
+});
+
+// ─── Task 5: pythonImportName ────────────────────────────────────────────────
+
+describe("pythonImportName", () => {
+  test("pyproject.toml [project] name -> normalized (- to _)", () => {
+    const root = fixture({ "pyproject.toml": '[project]\nname = "my-pkg"\n' });
+    expect(pythonImportName(root)).toBe("my_pkg");
+  });
+
+  test("sole top-level dir with __init__.py -> that dir's name", () => {
+    const root = fixture({ "pkg/__init__.py": "" });
+    expect(pythonImportName(root)).toBe("pkg");
+  });
+
+  test("neither a named pyproject nor a sole __init__.py dir -> undefined", () => {
+    const root = fixture({ "README.md": "x" });
+    expect(pythonImportName(root)).toBeUndefined();
+  });
+
+  test("pyproject.toml present but no [project] name -> falls back to the __init__.py dir", () => {
+    const root = fixture({
+      "pyproject.toml": "[tool.pytest.ini_options]\n",
+      "pkg/__init__.py": "",
+    });
+    expect(pythonImportName(root)).toBe("pkg");
+  });
+
+  test("more than one top-level __init__.py dir -> undefined (ambiguous)", () => {
+    const root = fixture({ "a/__init__.py": "", "b/__init__.py": "" });
+    expect(pythonImportName(root)).toBeUndefined();
+  });
+
+  // ─── Opus re-review Fix C: Poetry + src-layout ─────────────────────────────
+
+  test("pyproject.toml [tool.poetry] name -> normalized (- to _)", () => {
+    const root = fixture({
+      "pyproject.toml": '[tool.poetry]\nname = "my-poetry-pkg"\nversion = "0.1.0"\n',
+    });
+    expect(pythonImportName(root)).toBe("my_poetry_pkg");
+  });
+
+  test("[project] name takes precedence over [tool.poetry] name when both present", () => {
+    const root = fixture({
+      "pyproject.toml": '[project]\nname = "proj-name"\n\n[tool.poetry]\nname = "poetry-name"\n',
+    });
+    expect(pythonImportName(root)).toBe("proj_name");
+  });
+
+  test("src-layout: sole src/<pkg>/__init__.py -> that pkg's name", () => {
+    const root = fixture({ "src/pkg/__init__.py": "" });
+    expect(pythonImportName(root)).toBe("pkg");
+  });
+
+  test("src-layout: pyproject present with no name, no top-level __init__.py -> falls back to src/<pkg>", () => {
+    const root = fixture({
+      "pyproject.toml": "[tool.pytest.ini_options]\n",
+      "src/pkg/__init__.py": "",
+    });
+    expect(pythonImportName(root)).toBe("pkg");
+  });
+
+  test("src-layout: more than one src/<pkg>/__init__.py dir -> undefined (ambiguous)", () => {
+    const root = fixture({ "src/a/__init__.py": "", "src/b/__init__.py": "" });
+    expect(pythonImportName(root)).toBeUndefined();
+  });
+
+  test("a top-level __init__.py dir takes precedence over src-layout when both present", () => {
+    const root = fixture({ "pkg/__init__.py": "", "src/other/__init__.py": "" });
+    expect(pythonImportName(root)).toBe("pkg");
+  });
 });

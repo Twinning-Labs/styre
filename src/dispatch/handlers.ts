@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { branchNameFor } from "../agent/branch.ts";
 import type { AgentRunner } from "../agent/runner.ts";
@@ -25,6 +26,7 @@ import {
   setBaseSha,
   setStatus as setUnitStatus,
 } from "../db/repos/work-unit.ts";
+import { pythonImportName } from "../setup/lang/python.ts";
 import { runCommand } from "../util/run-command.ts";
 import { ComplexityGradeSchema } from "./complexity-schema.ts";
 import {
@@ -53,6 +55,13 @@ import {
   implementVars,
   reviewVars,
 } from "./prompt-vars.ts";
+import {
+  isEditablePythonPrepare,
+  planProvision,
+  resetProvisionIfManifestTouched,
+  resolvePythonInterpreter,
+  sourceCheckCommand,
+} from "./provision.ts";
 import { ReviewOutputSchema, computeBlocksShip, validateReviewFindings } from "./review-schema.ts";
 import type { DispatchDeps } from "./run-dispatch.ts";
 import { runAgentDispatch } from "./run-dispatch.ts";
@@ -79,6 +88,7 @@ export interface RegistryDeps {
 const DESIGN_TIMEOUT_MS = 60 * 60 * 1000;
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const VERIFY_TIMEOUT_MS = 10 * 60 * 1000;
+const PROVISION_TIMEOUT_MS = 15 * 60 * 1000;
 
 /** Resolve the repo + ticket worktree + branch for a DAEMON-run step (verify). Unlike
  *  `depsFor` this carries no agent capability — verify only reads the committed worktree. */
@@ -348,7 +358,134 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       },
     );
     setUnitStatus(ctx.db, unit.id, "verifying");
+    // Review F-2: if this dispatch's committed diff touched a dependency manifest, a once-gated
+    // `provision` (already `done`) would otherwise be silently stale — re-arm it so the resolver
+    // re-installs before the next verify (never a hard fail here; the agent has no install
+    // capability itself, so surfacing this at implement time is the only safe point).
+    resetProvisionIfManifestTouched(
+      ctx.db,
+      ctx.ticket.id,
+      changedFilesAt(result.sha, implWorktreePath),
+    );
     return result;
+  });
+
+  registry.register("provision", async (ctx: HandlerContext) => {
+    const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
+    ensureWorktree(repoPath, branch, worktreePath);
+    const actions = planProvision(deps.profile.components, worktreePath);
+    for (const a of actions) {
+      const run = await runCommand(a.command, { cwd: a.cwd, timeoutMs: PROVISION_TIMEOUT_MS });
+      insertSignal(ctx.db, {
+        ticketId: ctx.ticket.id,
+        workUnitId: null,
+        signalType: "provision",
+        result: run.exitCode === 0 ? "pass" : run.timedOut ? "error" : "fail",
+        detail: { component: a.component, command: a.command, exitCode: run.exitCode },
+      });
+      if (run.exitCode !== 0) {
+        throw new Error(
+          `provision: ${a.component} '${a.command}' exited ${run.exitCode}${run.timedOut ? " (timed out)" : ""}: ${run.stderr.slice(0, 500)}`,
+        );
+      }
+      // The worktree-source assertion (Task 5 / review F-1, hardened by the Opus re-review's
+      // Fix A/B/D/E, and the whole-branch review's Finding 2): a successful pip-editable install
+      // does not prove `import <pkg>` resolves to the worktree — a pre-installed/conda copy can
+      // shadow it. Applies to any pip-editable-install shape (`isEditablePythonPrepare` — not
+      // just the exact `pip install -e .` string; a config-overridden `pip install -e .[dev]` /
+      // `--editable` / `python -m pip install -e .` is guarded too). An unresolvable import name
+      // is NOT a silent skip (Fix B) — it escalates.
+      const component = deps.profile.components.find((c) => c.name === a.component);
+      const isEditablePythonInstall =
+        component?.kind === "python" &&
+        component.prepare !== undefined &&
+        isEditablePythonPrepare(component.prepare);
+      if (isEditablePythonInstall && component) {
+        // Fix D: resolve once (python3, then python); neither present is a distinct
+        // provisioning-infra failure, not a silent pass.
+        let interp: string;
+        try {
+          interp = resolvePythonInterpreter();
+        } catch (err) {
+          insertSignal(ctx.db, {
+            ticketId: ctx.ticket.id,
+            workUnitId: null,
+            signalType: "provision",
+            result: "fail",
+            detail: {
+              component: a.component,
+              check: "source-under-test",
+              reason: "no-python-interpreter",
+            },
+          });
+          throw err;
+        }
+        // Fix A: the probe script lives in a fresh tempdir OUTSIDE the worktree — never inside
+        // `a.cwd` — so CPython never auto-prepends the worktree to sys.path for the probe.
+        const scriptDir = mkdtempSync(join(tmpdir(), "styre-provcheck-"));
+        try {
+          const importName = pythonImportName(a.cwd);
+          let check: ReturnType<typeof sourceCheckCommand>;
+          try {
+            check = sourceCheckCommand({
+              component: a.component,
+              kind: component.kind,
+              prepare: component.prepare,
+              cwd: a.cwd,
+              importName,
+              scriptDir,
+              interp,
+            });
+          } catch (err) {
+            // Fix B: unresolvable/invalid (Fix E) import name escalates — never a silent skip.
+            insertSignal(ctx.db, {
+              ticketId: ctx.ticket.id,
+              workUnitId: null,
+              signalType: "provision",
+              result: "fail",
+              detail: {
+                component: a.component,
+                check: "source-under-test",
+                reason: "unresolvable-import-name",
+              },
+            });
+            throw err;
+          }
+          if (!check) continue; // unreachable given isEditablePythonInstall, but keeps TS honest
+          writeFileSync(check.scriptPath, check.script);
+          let probe = await runCommand(check.command, {
+            cwd: a.cwd,
+            timeoutMs: PROVISION_TIMEOUT_MS,
+          });
+          if (probe.exitCode !== 0) {
+            // Remediate once: a stale/non-editable prior install can shadow the worktree copy on
+            // sys.path; force-reinstalling editable (no-deps, deps are already provisioned) fixes
+            // the common case without re-running the full prepare command.
+            await runCommand(`${interp} -m pip install -e . --force-reinstall --no-deps`, {
+              cwd: a.cwd,
+              timeoutMs: PROVISION_TIMEOUT_MS,
+            });
+            probe = await runCommand(check.command, {
+              cwd: a.cwd,
+              timeoutMs: PROVISION_TIMEOUT_MS,
+            });
+          }
+          if (probe.exitCode !== 0) {
+            insertSignal(ctx.db, {
+              ticketId: ctx.ticket.id,
+              workUnitId: null,
+              signalType: "provision",
+              result: "fail",
+              detail: { component: a.component, check: "source-under-test" },
+            });
+            throw new Error(`provision: worktree source not under test for ${a.component}`);
+          }
+        } finally {
+          rmSync(scriptDir, { recursive: true, force: true });
+        }
+      }
+    }
+    return { provisioned: actions.length };
   });
 
   registry.register("verify:check", async (ctx: HandlerContext) => {

@@ -4,6 +4,13 @@ import type { Component } from "../../dispatch/profile.ts";
 import { findManifests } from "../manifests.ts";
 import type { ComponentDraft, LangDef } from "./types.ts";
 
+export function nodePrepare(compDir: string): string {
+  if (existsSync(join(compDir, "yarn.lock"))) return "yarn install --frozen-lockfile";
+  if (existsSync(join(compDir, "pnpm-lock.yaml"))) return "pnpm install --frozen-lockfile";
+  if (existsSync(join(compDir, "package-lock.json"))) return "npm ci";
+  return "npm install";
+}
+
 export const nodeDef: LangDef = {
   kind: "node",
   detect(repoDir: string): ComponentDraft[] {
@@ -36,7 +43,7 @@ export const nodeDef: LangDef = {
         // Co-located frontend: root package.json owns src/static, NOT a sibling rust src-tauri.
         paths: isRoot ? ["src/**", "static/**", "package.json"] : [`${dir}/**`],
         commands,
-        prepare: "npm install",
+        prepare: nodePrepare(isRoot ? repoDir : join(repoDir, dir)),
       });
     }
     return components;

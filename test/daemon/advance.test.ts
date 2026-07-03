@@ -57,10 +57,14 @@ test("advance + mark-verified transitions collapse, then the next real step runs
     result: "pass",
     branchHeadSha: "sha-abc",
   });
-  // resolver: unit verifying, all checks satisfied at current commit → mark-verified (collapses), then
-  // allUnitsVerified → verify:integration step runs.
+  // resolver: unit verifying, gate (a) requires provision before the checks are consulted →
+  // provision runs first (and its "done" gate also covers verify:integration below); then
+  // mark-verified collapses, then allUnitsVerified → verify:integration step runs.
   const registry = new StepRegistry();
+  registry.register("provision", () => ({ ok: true }));
   registry.register("verify:integration", () => ({ ok: true }));
+  const provisionOutcome = await advanceOneStep(db, ticketId, registry);
+  expect(provisionOutcome).toEqual({ kind: "stepped", stepKey: "provision" });
   const outcome = await advanceOneStep(db, ticketId, registry);
   const afterUnit = getUnit(db, unit.id);
   db.close();

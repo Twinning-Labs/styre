@@ -89,8 +89,9 @@ const isSafeDir = (d: string): boolean => {
 };
 
 /** A single detected stack component. schemaVersion 3 adds per-component `extensions[]` for
- *  file-identity routing and the optional detect-only `prepare` field (stored, never run by
- *  styre), plus the optional `dir` field (module root, relative to repo root — WO-9). */
+ *  file-identity routing and the optional `prepare` install command (EXECUTED by the
+ *  runner-owned provision step before the first verify), plus the optional `dir` field
+ *  (module root, relative to repo root — WO-9). */
 export const ComponentSchema = z.object({
   name: z.string().min(1),
   kind: z.string().min(1),
@@ -98,7 +99,10 @@ export const ComponentSchema = z.object({
   commands: z.record(z.string(), CommandValueSchema).default({}),
   testFilePattern: z.string().optional(),
   extensions: z.array(z.string()).default([]),
-  /** Detect-only install command (never run by styre; env-provisioning workstream WO-12). */
+  /** Install command EXECUTED by the runner-owned `provision` step (src/dispatch/provision.ts)
+   *  before the first verify — makes the detected verify command runnable against the worktree
+   *  source. Optional; absent → provision skips this component. `isCommandSafe`-validated at
+   *  setup (detect-components.ts). (Was WO-12 detect-only "never run".) */
   prepare: z.string().optional(),
   /** Module root directory, relative to repo root; absent means root (WO-9 non-root modules). */
   dir: z.string().refine(isSafeDir, "unsafe dir (absolute or traversal)").optional(),

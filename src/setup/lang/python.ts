@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { findManifests } from "../manifests.ts";
 import type { ComponentDraft, LangDef } from "./types.ts";
@@ -19,6 +19,64 @@ export function pythonTestCommand(repoDir: string): string {
   return "python -m pytest";
 }
 
+export function pythonPrepare(repoDir: string): string | undefined {
+  const test = pythonTestCommand(repoDir);
+  if (test === "tox") return "pip install tox";
+  if (test === "nox") return "pip install nox";
+  if (
+    existsSync(join(repoDir, "pyproject.toml")) ||
+    existsSync(join(repoDir, "setup.py")) ||
+    existsSync(join(repoDir, "setup.cfg"))
+  )
+    return "pip install -e .";
+  if (existsSync(join(repoDir, "requirements.txt"))) return "pip install -r requirements.txt";
+  return undefined;
+}
+
+/** The importable module name for a python component, used by `provision`'s post-install
+ *  worktree-source check (Task 5). Preference order: `pyproject.toml` `[project]` `name` (PEP
+ *  621), else `pyproject.toml` `[tool.poetry]` `name` (Poetry projects commonly have no
+ *  `[project]` table at all) — both `-` normalized to `_` as pip/setuptools do at install time —
+ *  else the sole top-level directory containing `__init__.py` (flat layout), else the sole
+ *  `src/<pkg>/__init__.py` directory (src layout); else `undefined` (the check is then treated
+ *  as underivable by the caller — never silently skipped, see provision.ts Fix B). */
+export function pythonImportName(repoDir: string): string | undefined {
+  const pp = join(repoDir, "pyproject.toml");
+  if (existsSync(pp)) {
+    try {
+      const content = readFileSync(pp, "utf8");
+      const project = content.match(/\[project\]([\s\S]*?)(?=\n\[|$)/);
+      const projectName = project?.[1].match(/name\s*=\s*["']([^"']+)["']/);
+      if (projectName) return projectName[1].replace(/-/g, "_");
+      const poetry = content.match(/\[tool\.poetry\]([\s\S]*?)(?=\n\[|$)/);
+      const poetryName = poetry?.[1].match(/name\s*=\s*["']([^"']+)["']/);
+      if (poetryName) return poetryName[1].replace(/-/g, "_");
+    } catch {
+      // unreadable/unparsable pyproject — fall through to the directory scans
+    }
+  }
+  try {
+    const candidates = readdirSync(repoDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .filter((e) => existsSync(join(repoDir, e.name, "__init__.py")));
+    if (candidates.length === 1) return candidates[0].name;
+  } catch {
+    // unreadable repoDir — fall through to the src-layout scan
+  }
+  const srcDir = join(repoDir, "src");
+  if (existsSync(srcDir)) {
+    try {
+      const candidates = readdirSync(srcDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .filter((e) => existsSync(join(srcDir, e.name, "__init__.py")));
+      if (candidates.length === 1) return candidates[0].name;
+    } catch {
+      // unreadable src/ dir — no name to offer
+    }
+  }
+  return undefined;
+}
+
 const PY_ROOT_MANIFESTS = ["pyproject.toml", "setup.py", "requirements.txt"];
 const PY_MODULE_ANCHORS = ["pyproject.toml", "setup.py"]; // nested-module anchors (NOT requirements.txt)
 
@@ -33,6 +91,7 @@ export const pythonDef: LangDef = {
         kind: "python",
         paths: ["**"],
         commands: { test: pythonTestCommand(repoDir) },
+        prepare: pythonPrepare(repoDir),
       });
     }
     // Nested modules: a subdir with pyproject.toml or setup.py (dedup by dir).
@@ -50,6 +109,7 @@ export const pythonDef: LangDef = {
         dir,
         paths: [`${dir}/**`],
         commands: { test: pythonTestCommand(join(repoDir, dir)) },
+        prepare: pythonPrepare(join(repoDir, dir)),
       });
     }
     return out;

@@ -108,6 +108,7 @@ test("a passing check records a pass signal (with command) and the step succeeds
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test
   const sigs = listByUnit(db, unit.id);
   const step = getByKey(db, ticketId, "verify:wu1:test");
@@ -157,6 +158,7 @@ test("a failing check records a fail signal and fails the step (→ failure-poli
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test
   const sigs = listByUnit(db, unit.id);
   const step = getByKey(db, ticketId, "verify:wu1:test");
@@ -206,6 +208,7 @@ test("an absent check (component has no command for the declared check-type) rec
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test → absent error
   const sigs = listByUnit(db, unit.id);
   db.close();
@@ -239,6 +242,7 @@ test("verify:integration passes when build and test pass, recording an integrati
   const registry = registryFor(repo, { build: "true", test: "true" });
   seedAllVerified(db, ticketId, projectId, repo);
 
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   const outcome = await advanceOneStep(db, ticketId, registry);
   const step = getByKey(db, ticketId, "verify:integration");
   const sigs = db
@@ -258,6 +262,7 @@ test("verify:integration fails the step when a command fails", async () => {
   const registry = registryFor(repo, { build: "true", test: "false" });
   seedAllVerified(db, ticketId, projectId, repo);
 
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   const outcome = await advanceOneStep(db, ticketId, registry);
   const sigs = db
     .query(
@@ -307,6 +312,7 @@ test("a timed-out check records an error signal (not fail)", async () => {
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test → sleeps 5s but timeouts at 200ms
   const sigs = listByUnit(db, unit.id);
   db.close();
@@ -352,6 +358,7 @@ test("verify:check stamps the verified commit on the signal", async () => {
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch → real commit sha recorded
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test
   const sigs = listByUnit(db, unit.id);
   const sig = sigs.find((s) => s.signal_type === "test");
@@ -401,6 +408,7 @@ test("behavioral unit: green test command but no test in the diff fails with beh
 
   // implement (writes feature.ts, commits) then verify:check test (true passes, but no test file).
   await advanceOneStep(db, ticketId, registry); // implement
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test → A1 fail
   const sig = listByUnit(db, unit.id).find((s) => s.signal_type === "test");
   db.close();
@@ -446,6 +454,7 @@ test("behavioral unit: a test file in the diff passes the test check", async () 
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-a1ok-")),
   });
   await advanceOneStep(db, ticketId, registry); // implement
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // verify:check test → pass (test file present)
   const sig = listByUnit(db, unit.id).find((s) => s.signal_type === "test");
   db.close();
@@ -491,6 +500,7 @@ test("scope_diff records an advisory fail for out-of-scope files but does NOT fa
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-sd-")),
   });
   await advanceOneStep(db, ticketId, registry); // implement
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test (passes) + scope_diff advisory
   const sigs = listByUnit(db, unit.id);
   const scope = sigs.find((s) => s.signal_type === "scope_diff");
@@ -550,6 +560,7 @@ test("hard-gate: verify:check runs a non-root component's command in its module 
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test
   const sigs = listByUnit(db, unit.id);
   db.close();
@@ -602,6 +613,7 @@ test("hard-gate: a root component (no dir) still runs at the worktree root (no r
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test
   const sigs = listByUnit(db, unit.id);
   db.close();
@@ -657,6 +669,7 @@ test("advisory sweep: the swept untouched component's command runs in its module
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test (sweep only)
   const sigs = db
     .query(
@@ -712,6 +725,7 @@ test("verify:integration runs a component job in its module dir and a repoComman
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-intdir-")),
   });
 
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   const outcome = await advanceOneStep(db, ticketId, registry); // verify:integration
   const sigs = db
     .query(

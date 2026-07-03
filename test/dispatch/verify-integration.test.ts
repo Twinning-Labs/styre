@@ -80,6 +80,7 @@ test("verify:integration runs all components' build+test + repoCommands and reco
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-int-wt-")),
   });
 
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   const outcome = await advanceOneStep(db, ticketId, registry);
   const step = getByKey(db, ticketId, "verify:integration");
   const sigs = db
@@ -144,6 +145,7 @@ test("verify:integration fails when one component's test command fails", async (
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-int-fail-")),
   });
 
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   const outcome = await advanceOneStep(db, ticketId, registry);
   const sigs = db
     .query(

@@ -278,6 +278,32 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   no arbitrary Bash.
 - **Failure → route:** I1/I2 in §8.
 
+**S2c · `provision`** — ready the verify environment (runner-executed, no LLM)
+- **Guard:** `stage='implement'`; a work-unit is `verifying` (about to run its first unrun check) **or**
+  all units are verified and integration hasn't passed at the current SHA; `!done('provision')`. Fires
+  **once** per gate — before the first `verify:wuN:<check>` of the ticket **and** before
+  `verify:integration` — never re-runs while its step row stands `succeeded`.
+- **Input:** each profile `Component`'s `prepare` (the setup-recorded, `isCommandSafe`-validated
+  install command, §3 flip — stored→executed); worktree at current HEAD.
+- **Output:** each not-yet-ready component installed; a `ground_truth_signal(signal_type='provision')`
+  row per component (`pass`/`fail`/`error`). For Python editable-install components, an additional
+  worktree-source assertion — `import <pkg>` resolves under the worktree, not a shadowing
+  pre-installed/conda copy — remediated once (`pip install -e . --force-reinstall --no-deps`) before
+  failing. All actions clean → `done('provision')`, unblocking the gated verify step.
+- **Commands/Capability:** **only** each component's `prepare` (never `commands.test`) run via
+  `runCommand` under `verifyEnv` (creds scrubbed), on an **independent** `PROVISION_TIMEOUT_MS` (15
+  min — not the shared dispatch timeout, review F-5); plus, for editable Python, a generated
+  source-check script run the same way. Never arbitrary shell. A component with no `prepare` is
+  skipped (graceful degradation, never a hard fail at run-start).
+- **Idempotency / re-arm:** a component already ready (e.g. Node's completed
+  `node_modules/.package-lock.json` marker) is skipped on re-entry. The step itself is reset to
+  `pending` (attempt zeroed, not counted as a retry) by `styre run --resume` (the worktree was wiped)
+  and when an `implement:wuN:dispatch`'s committed diff touches a dependency manifest (review F-2) —
+  so a once-gated `provision` never goes silently stale.
+- **Failure → route:** **escalate immediately** — an environment error (broken lockfile/env, or a
+  worktree source that can't be proven under test), never a code defect, so it is never routed back to
+  implement (re-implementing can't reach it under capability isolation). See §8, row E1.
+
 ### Verify (ground truth; runner-executed, no LLM)
 
 **S3 · `verify:wuN:<check>`** — per-work-unit ground truth (one step per check-type)
@@ -560,6 +586,8 @@ exit 75 on a session interruption, resumable with `styre run --resume` — are i
 | I4 | S3 | tests red | → S2b with failing tests | unit | K_distinct → escalate |
 | I5 | S3 | behavioral unit, no test in the diff | → S2b to add the test | unit | K_distinct → escalate |
 | I6 | S3 | toolchain/infra error | retry (transient) | — | K_retry → escalate(infra) |
+| **Provision** ||||||
+| E1 | S2c `provision` | `prepare` install fails, or (Python editable) the worktree-source assertion fails after remediation | escalate immediately (env error, **not** a code loopback — never routed to S2b) | — | immediate, no retry |
 | **Integration** ||||||
 | N1 | S4 | cross-unit integration red | → ticket-scoped reconcile implement | ticket | K_distinct → escalate |
 | **Docs** ||||||
@@ -603,7 +631,8 @@ There is no automatic "diff expanded → loopback."
 ### 8.4 Loopback targets, by meaning
 **→ implement** (unit or ticket scope — the code is wrong; most failures). **→ design / re-design**
 (plan scope — the plan is wrong; caught early at DV1, or late at V3). **→ escalate** (a resumable
-park — budget exhausted, or an inherently human case: R3/R4, V-def, V6, P3, H1, X1/X2; in OSS the run
+park — budget exhausted, or an inherently human case: R3/R4, V-def, V6, P3, H1, X1/X2; **or an
+environment error, E1** — provision, always immediate, never bounded by attempt-count; in OSS the run
 exits with the trace, in the commercial Control Plane it surfaces in the needs-you inbox).
 
 ### 8.5 Deleted by design (why most current failure reasons need no row)

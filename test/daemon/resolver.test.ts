@@ -85,7 +85,7 @@ test("implement: a pending unit asks for its dispatch step", () => {
   });
 });
 
-test("implement: a verifying unit with an unrun check asks for the verify step", () => {
+test("implement: a verifying unit with an unrun check asks for the verify step", async () => {
   const { db, ticketId } = makeTestDb();
   setTicketStage(db, ticketId, "implement");
   const u = insertWorkUnit(db, {
@@ -95,6 +95,7 @@ test("implement: a verifying unit with an unrun check asks for the verify step",
     verifyCheckTypes: ["test"],
     status: "verifying",
   });
+  await succeed(db, ticketId, "provision");
   const d = nextStepKey(db, ticketId);
   db.close();
   expect(d).toEqual({
@@ -106,7 +107,7 @@ test("implement: a verifying unit with an unrun check asks for the verify step",
   });
 });
 
-test("implement: a verifying unit whose checks all have signals asks to mark-verified", () => {
+test("implement: a verifying unit whose checks all have signals asks to mark-verified", async () => {
   const { db, ticketId } = makeTestDb();
   setTicketStage(db, ticketId, "implement");
   const u = insertWorkUnit(db, {
@@ -132,6 +133,7 @@ test("implement: a verifying unit whose checks all have signals asks to mark-ver
     result: "pass",
     branchHeadSha: "sha-abc",
   });
+  await succeed(db, ticketId, "provision");
   const d = nextStepKey(db, ticketId);
   db.close();
   expect(d).toEqual({ kind: "mark-verified", workUnitId: u.id });
@@ -148,6 +150,7 @@ test("implement: all units verified + no docs → verify:integration then advanc
     status: "verified",
   });
   expect(u.status).toBe("verified");
+  await succeed(db, ticketId, "provision");
   const beforeIntegration = nextStepKey(db, ticketId);
   expect(beforeIntegration.kind === "step" && beforeIntegration.handlerKey).toBe(
     "verify:integration",
@@ -239,6 +242,43 @@ test("released: runs released:project then reports done", async () => {
   const d = nextStepKey(db, ticketId);
   db.close();
   expect(d).toEqual({ kind: "done" });
+});
+
+test("provision runs once before the first unit verify", async () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verifying",
+  });
+  expect(nextStepKey(db, ticketId)).toEqual({
+    kind: "step",
+    stepKey: "provision",
+    stepType: "provision",
+    handlerKey: "provision",
+    workUnitId: null,
+  });
+  await succeed(db, ticketId, "provision");
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "verify:wu1:test" });
+  db.close();
+});
+
+test("provision also gates verify:integration when units have no per-unit checks", async () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "data",
+    verifyCheckTypes: [],
+    status: "verifying",
+  });
+  // all units verified with no checks -> integration; provision must gate it
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "provision" });
+  db.close();
 });
 
 test("nextActionableUnit: dep-gating — wu2 gated until wu1 verified", () => {

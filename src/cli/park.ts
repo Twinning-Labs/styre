@@ -29,6 +29,7 @@ import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
 import { listByStatus } from "../db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
+import { resetProvision } from "../dispatch/provision.ts";
 import { branchHeadSha, removeWorktree } from "../dispatch/worktree.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
@@ -101,6 +102,19 @@ export function dumpPark(
   );
   return dir;
 }
+
+/** On resume, a fresh `worktreeRoot` is minted and the parked worktree is wiped (see the
+ *  stale-worktree cleanup above) — so any deps a succeeded `provision` step installed are gone.
+ *  But the journaled step is still 'succeeded', so the resolver's `done("provision")` gate would
+ *  skip re-running it, and post-resume verify would run against an un-provisioned tree. Reset the
+ *  step to 'pending' (and zero its `attempt`, since a wiped worktree isn't a retry of the prior
+ *  attempt) so the resolver's `!done("provision")` gate re-fires before the next verify.
+ *
+ *  This is the same reset the Task-9 manifest-touch hook needs (a loopback editing a dependency
+ *  manifest also invalidates a succeeded provision) — the logic lives in `dispatch/provision.ts`
+ *  as `resetProvision` and is re-exported here under its resume-specific name so callers/tests of
+ *  this module are unaffected. */
+export const resetProvisionForResume = resetProvision;
 
 /** The single ticket id in a per-run SoT. */
 function onlyTicketId(db: Database): number {
@@ -199,6 +213,10 @@ export async function resumeRun(
     // Belt-and-suspenders: prune dangling worktree refs in git's internal tracking.
     Bun.spawnSync(["git", "worktree", "prune"], { cwd: project.target_repo });
   }
+
+  // The worktree above is gone (wiped/rebuilt fresh below) — any deps a succeeded `provision`
+  // step installed are gone with it. Re-arm provision so it re-runs before the next verify.
+  resetProvisionForResume(db, ticketId);
 
   setTicketStatus(db, ticketId, "active");
   let resumeContext: { stepKey: string; transcript: string } | undefined;

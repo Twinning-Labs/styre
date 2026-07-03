@@ -39,10 +39,12 @@ next_step_key(t):
       if branch_behind_origin(t):                    return f'{u}:rebase'
       if u.status == 'pending':                      return f'{u}:dispatch'
       if u.status == 'verifying':
+        if not done('provision'):                     return 'provision'          # S2c, once per ticket
         c = next_unrun_check(u)        # a check-type in u.verify_check_types with no pass/fail signal
         if c:                                        return f'verify:{u}:{c}'
         # all checks ran clean → the verify step marks u 'verified' on its success commit
     if all_units_verified(t):
+      if not done('provision'):                       return 'provision'          # gates integration too
       if not done('verify:integration'):             return 'verify:integration'
       if t.needs_docs and not done('docs:revise'):   return 'docs:revise'
       advance('implement' -> 'review'); recurse
@@ -69,6 +71,15 @@ step (replay; control-loop §6.2). A `failed` step is handled by `apply_failure_
 **resets state so the resolver re-picks correctly** (§2 below) — the resolver itself stays a pure
 forward function.
 
+**`provision` (S2c, control-loop §4) fires once per ticket**, not once per unit: it gates the first
+`verify:{u}:{c}` the ticket reaches *and* `verify:integration`, but a single `succeeded` row satisfies
+both guards above — installs aren't repeated per work-unit. It is **reset to `pending`** (never
+re-executed as a retry of the same attempt) in exactly two places outside the failure path: `styre run
+--resume` (the worktree was wiped, so installed deps are gone) and when an `implement:{u}:dispatch`'s
+committed diff touches a dependency manifest (`package.json`, a lockfile, `pyproject.toml`, …) — so a
+loopback that adds a dependency doesn't verify against a stale environment. Both resets zero `attempt`
+too (a fresh install is not a retry of a prior failed one).
+
 ## 2. Loopback effects — what a route *resets* (so §1 re-picks it)
 
 The atlas (control-loop §8) says *where* a failure routes; the loop must set the state that makes
@@ -81,6 +92,7 @@ The atlas (control-loop §8) says *where* a failure routes; the loop must set th
 | → design / pivot (D2/D3, DV1, V3) | clear `work_units`; reset the design steps; `stage='design'` | `loopback{loop='plan'}` |
 | retry (I1, I6, V4, P2, C1) | the step → `status='pending'`, `attempt+=1` (no state rewind) | — (retry, not loopback) |
 | escalate (any exhaustion, R3/R4, V-def, X1/X2) | `t.status='waiting'`; raise a `human_resume` signal | `escalated{reason}` |
+| escalate, provision (E1) | same as above, but **immediate on first failure** — no attempt-count exhaustion, and never a unit/ticket/plan reset (an env error can't be fixed by re-implementing) | `escalated{reason}` |
 
 Only **distinct** loopbacks (signature changed) bump the per-loop counter (§3); a retry of the same
 signature trips the consecutive-identical cap faster (control-loop §8.2).
@@ -165,6 +177,7 @@ whole spine:
 ```
 design:dispatch(Opus,plan) → design:extract(Haiku,work_units)            # fast-track: skip design:review
  → implement:wu1:rebase(runner) → implement:wu1:dispatch(Sonnet,code+tests; runner commits)
+ → provision(runner,installs each component's prepare; once per ticket, gates verify)
  → verify:wu1:build,test(runner,ground-truth) → verify:integration(runner)
  → review(Opus,findings via interface → 0 blocking) → merge:push → merge:pr-ensure(cheap-AI body)
  → merge:await-checks(poll) → merge:await-human(operator merges) → released:project(→ Done)
