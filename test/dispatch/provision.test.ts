@@ -3,7 +3,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Component } from "../../src/dispatch/profile.ts";
-import { isComponentReady, planProvision } from "../../src/dispatch/provision.ts";
+import {
+  isComponentReady,
+  planProvision,
+  sourceCheckCommand,
+} from "../../src/dispatch/provision.ts";
+import { isCommandSafe } from "../../src/setup/command-safety.ts";
+import { runCommand } from "../../src/util/run-command.ts";
 
 const roots: string[] = [];
 afterAll(() => {
@@ -106,4 +112,76 @@ describe("planProvision", () => {
 
     expect(planProvision([ready, noPrepare], worktree)).toEqual([]);
   });
+});
+
+// ─── Task 5: sourceCheckCommand (worktree-source-under-test) ────────────────────
+
+describe("sourceCheckCommand", () => {
+  test("python editable + known import name -> a check whose command carries the name and cwd", () => {
+    const check = sourceCheckCommand("python", "pip install -e .", "/tmp/worktree", "pkg");
+    expect(check).not.toBeNull();
+    expect(check?.command).toContain("pkg");
+    expect(check?.command).toContain("/tmp/worktree");
+    expect(check?.command).toContain(check?.scriptName ?? "");
+    expect(check?.script).toContain("find_spec");
+  });
+
+  test("node kind -> null (no python source-shadowing risk)", () => {
+    expect(sourceCheckCommand("node", "npm ci", "/tmp/worktree", "pkg")).toBeNull();
+  });
+
+  test("python but prepare is not editable-install -> null", () => {
+    expect(
+      sourceCheckCommand("python", "pip install -r requirements.txt", "/tmp/worktree", "pkg"),
+    ).toBeNull();
+  });
+
+  test("python editable but no known import name -> null", () => {
+    expect(sourceCheckCommand("python", "pip install -e .", "/tmp/worktree", undefined)).toBeNull();
+  });
+
+  test("the generated command is isCommandSafe (no shell metacharacters)", () => {
+    const check = sourceCheckCommand(
+      "python",
+      "pip install -e .",
+      "/tmp/some worktree",
+      "pkg-name",
+    );
+    expect(check).not.toBeNull();
+    expect(isCommandSafe(check?.command ?? "")).toBe(true);
+  });
+});
+
+// ─── Task 5 §11 regression: detect a worktree-shadowing install ─────────────────
+
+describe("sourceCheckCommand regression: shadowed copy is detected", () => {
+  // Live-gated (needs a real `python` on PATH). The pure-shape assertions above run
+  // unconditionally; this proves the generated check actually catches the F-1 disease end to end.
+  (process.env.RUN_LIVE === "1" ? test : test.skip)(
+    "a module resolving OUTSIDE the worktree cwd makes the check exit non-zero",
+    async () => {
+      const worktree = tmpDir("styre-prov-shadow-worktree-");
+      const shadowRoot = tmpDir("styre-prov-shadow-outside-");
+      // The "shadowing" package: importable, but its origin is NOT under the worktree — e.g. a
+      // pre-installed/conda copy sitting earlier on sys.path than the (never-actually-run-here)
+      // editable install would be.
+      mkdirSync(join(shadowRoot, "shadow_pkg"), { recursive: true });
+      writeFileSync(join(shadowRoot, "shadow_pkg", "__init__.py"), "");
+
+      const check = sourceCheckCommand("python", "pip install -e .", worktree, "shadow_pkg");
+      expect(check).not.toBeNull();
+      if (!check) return;
+      writeFileSync(join(worktree, check.scriptName), check.script);
+
+      const prevPythonPath = process.env.PYTHONPATH;
+      process.env.PYTHONPATH = shadowRoot;
+      try {
+        const result = await runCommand(check.command, { cwd: worktree, timeoutMs: 10_000 });
+        expect(result.exitCode).not.toBe(0);
+      } finally {
+        if (prevPythonPath === undefined) Reflect.deleteProperty(process.env, "PYTHONPATH");
+        else process.env.PYTHONPATH = prevPythonPath;
+      }
+    },
+  );
 });

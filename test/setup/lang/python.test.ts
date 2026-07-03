@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unrootedManifestWarnings } from "../../../src/setup/detect-components.ts";
-import { pythonDef, pythonPrepare } from "../../../src/setup/lang/python.ts";
+import { pythonDef, pythonImportName, pythonPrepare } from "../../../src/setup/lang/python.ts";
 
 function fixture(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "styre-python-"));
@@ -127,5 +127,37 @@ describe("pythonPrepare", () => {
   });
   test("nothing installable -> undefined", () => {
     expect(pythonPrepare(fixture({ "main.py": "print(1)" }))).toBeUndefined();
+  });
+});
+
+// ─── Task 5: pythonImportName ────────────────────────────────────────────────
+
+describe("pythonImportName", () => {
+  test("pyproject.toml [project] name -> normalized (- to _)", () => {
+    const root = fixture({ "pyproject.toml": '[project]\nname = "my-pkg"\n' });
+    expect(pythonImportName(root)).toBe("my_pkg");
+  });
+
+  test("sole top-level dir with __init__.py -> that dir's name", () => {
+    const root = fixture({ "pkg/__init__.py": "" });
+    expect(pythonImportName(root)).toBe("pkg");
+  });
+
+  test("neither a named pyproject nor a sole __init__.py dir -> undefined", () => {
+    const root = fixture({ "README.md": "x" });
+    expect(pythonImportName(root)).toBeUndefined();
+  });
+
+  test("pyproject.toml present but no [project] name -> falls back to the __init__.py dir", () => {
+    const root = fixture({
+      "pyproject.toml": "[tool.pytest.ini_options]\n",
+      "pkg/__init__.py": "",
+    });
+    expect(pythonImportName(root)).toBe("pkg");
+  });
+
+  test("more than one top-level __init__.py dir -> undefined (ambiguous)", () => {
+    const root = fixture({ "a/__init__.py": "", "b/__init__.py": "" });
+    expect(pythonImportName(root)).toBeUndefined();
   });
 });

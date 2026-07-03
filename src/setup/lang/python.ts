@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { findManifests } from "../manifests.ts";
 import type { ComponentDraft, LangDef } from "./types.ts";
@@ -30,6 +30,34 @@ export function pythonPrepare(repoDir: string): string | undefined {
   )
     return "pip install -e .";
   if (existsSync(join(repoDir, "requirements.txt"))) return "pip install -r requirements.txt";
+  return undefined;
+}
+
+/** The importable module name for a python component, used by `provision`'s post-install
+ *  worktree-source check (Task 5). Preference: `pyproject.toml` `[project]` `name` (PEP 621,
+ *  `-` normalized to `_` as pip/setuptools do at install time), else the sole top-level
+ *  directory containing `__init__.py`; else `undefined` (the check is then skipped — no false
+ *  escalation on a shape we can't name). */
+export function pythonImportName(repoDir: string): string | undefined {
+  const pp = join(repoDir, "pyproject.toml");
+  if (existsSync(pp)) {
+    try {
+      const content = readFileSync(pp, "utf8");
+      const project = content.match(/\[project\]([\s\S]*?)(?=\n\[|$)/);
+      const name = project?.[1].match(/name\s*=\s*["']([^"']+)["']/);
+      if (name) return name[1].replace(/-/g, "_");
+    } catch {
+      // unreadable/unparsable pyproject — fall through to the directory scan
+    }
+  }
+  try {
+    const candidates = readdirSync(repoDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .filter((e) => existsSync(join(repoDir, e.name, "__init__.py")));
+    if (candidates.length === 1) return candidates[0].name;
+  } catch {
+    // unreadable repoDir — no name to offer
+  }
   return undefined;
 }
 
