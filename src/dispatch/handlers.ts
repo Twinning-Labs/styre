@@ -56,6 +56,7 @@ import {
   reviewVars,
 } from "./prompt-vars.ts";
 import {
+  isEditablePythonPrepare,
   planProvision,
   resetProvisionIfManifestTouched,
   resolvePythonInterpreter,
@@ -388,13 +389,17 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         );
       }
       // The worktree-source assertion (Task 5 / review F-1, hardened by the Opus re-review's
-      // Fix A/B/D/E): a successful `pip install -e .` does not prove `import <pkg>` resolves to
-      // the worktree — a pre-installed/conda copy can shadow it. Only applies to the python
-      // editable-install shape. An unresolvable import name is NOT a silent skip (Fix B) — it
-      // escalates.
+      // Fix A/B/D/E, and the whole-branch review's Finding 2): a successful pip-editable install
+      // does not prove `import <pkg>` resolves to the worktree — a pre-installed/conda copy can
+      // shadow it. Applies to any pip-editable-install shape (`isEditablePythonPrepare` — not
+      // just the exact `pip install -e .` string; a config-overridden `pip install -e .[dev]` /
+      // `--editable` / `python -m pip install -e .` is guarded too). An unresolvable import name
+      // is NOT a silent skip (Fix B) — it escalates.
       const component = deps.profile.components.find((c) => c.name === a.component);
       const isEditablePythonInstall =
-        component?.kind === "python" && component.prepare === "pip install -e .";
+        component?.kind === "python" &&
+        component.prepare !== undefined &&
+        isEditablePythonPrepare(component.prepare);
       if (isEditablePythonInstall && component) {
         // Fix D: resolve once (python3, then python); neither present is a distinct
         // provisioning-infra failure, not a silent pass.

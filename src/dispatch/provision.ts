@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { getByKey, resetAttempt, resetToPending } from "../db/repos/workflow-step.ts";
 import type { Component } from "./profile.ts";
@@ -11,15 +11,42 @@ export interface ProvisionAction {
   cwd: string;
 }
 
-/** Is this component's dependency install already complete? Node/sveltekit: a **completed**
- *  `node_modules` (marker `node_modules/.package-lock.json`, written by npm/yarn on success —
- *  review F6; a bare/partial `node_modules/` dir is NOT sufficient). Python + unknown kinds:
- *  always re-install; correctness is assured by the post-install source check (Task 5). */
+/** Per-package-manager completeness marker written under `node_modules/` on a successful
+ *  install — npm/yarn/pnpm each write a different one, so all three are checked (whole-branch
+ *  review Finding 3: yarn/pnpm previously had NO readiness cache at all, so `isComponentReady`
+ *  fell through `false` and re-installed on every provision run for those managers). */
+const NODE_INSTALL_MARKERS = [".package-lock.json", ".yarn-state.yml", ".modules.yaml"];
+
+/** Manifest/lockfile basenames whose mtime, if newer than the install marker, proves the
+ *  install is stale (a dependency was added/changed after the last install completed). */
+const NODE_MANIFEST_FILES = ["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"];
+
+/** Is this component's dependency install already complete? Node/sveltekit: **content-aware**
+ *  per-manager (whole-branch review Finding 1): ready iff a manager's completeness marker exists
+ *  under `node_modules/` AND its mtime is >= the newest mtime among the manifest/lockfiles
+ *  present in `compAbsDir`. A manifest edited (loopback dependency change) after the last install
+ *  makes the marker stale → not ready → `planProvision` reinstalls, closing the silent no-op
+ *  where a later manifest touch reset `provision` to pending but the marker (never invalidated)
+ *  still read "ready" and the reinstall was skipped. No marker at all → not ready. Python +
+ *  unknown kinds: always re-install; correctness is assured by the post-install source check
+ *  (Task 5). */
 export function isComponentReady(kind: string, compAbsDir: string): boolean {
-  if (kind === "node" || kind === "sveltekit") {
-    return existsSync(join(compAbsDir, "node_modules", ".package-lock.json"));
-  }
-  return false;
+  if (kind !== "node" && kind !== "sveltekit") return false;
+
+  const nodeModulesDir = join(compAbsDir, "node_modules");
+  const markerMtimes = NODE_INSTALL_MARKERS.map((m) => join(nodeModulesDir, m))
+    .filter((p) => existsSync(p))
+    .map((p) => statSync(p).mtimeMs);
+  if (markerMtimes.length === 0) return false;
+  const freshestMarkerMtime = Math.max(...markerMtimes);
+
+  const manifestMtimes = NODE_MANIFEST_FILES.map((f) => join(compAbsDir, f))
+    .filter((p) => existsSync(p))
+    .map((p) => statSync(p).mtimeMs);
+  if (manifestMtimes.length === 0) return true; // no manifest present to compare against
+  const newestManifestMtime = Math.max(...manifestMtimes);
+
+  return freshestMarkerMtime >= newestManifestMtime;
 }
 
 /** Plan the `provision` step's install actions: one per prepare-bearing, not-yet-ready
@@ -73,6 +100,21 @@ except ValueError:
 sys.exit(0)
 `;
 
+/** Matches any pip-editable-install invocation shape, not just the canonical `pip install -e .`
+ *  (whole-branch review Finding 2 / F-1 reopen): `pip install -e .[dev]`, `pip install --editable
+ *  .`, `python -m pip install -e .`, etc. — any config-overridden `prepare` that still installs
+ *  editable via pip must still trip the worktree-source-under-test guard, or a shadowed copy can
+ *  verify silently. Matched against the raw `prepare` string; `kind === "python"` is checked
+ *  separately by callers. Residual, accepted gap: a non-pip editable install supplied via the
+ *  config-override seam (e.g. `poetry install`) does not match this pattern and is NOT guarded —
+ *  narrower than "every editable install", but broader than the single exact-string match this
+ *  replaces. See docs/brainstorms/2026-07-03-provisioning-design.md. */
+const EDITABLE_PIP_RE = /(^|\s)(python -m\s+)?pip\s+install\s+(.*\s)?(-e|--editable)(\s|$)/;
+
+export function isEditablePythonPrepare(prepare: string): boolean {
+  return EDITABLE_PIP_RE.test(prepare);
+}
+
 /** A worktree-source check to run after a component's `prepare` succeeds: write `script` to
  *  `scriptPath` (inside a tempdir OUTSIDE the worktree — Fix A), then run `command` (metachar-free
  *  — passes `isCommandSafe`; no inline `python -c "…find_spec(…)…"`, whose parens/quotes/`$` are
@@ -109,13 +151,15 @@ export interface SourceCheckInput {
 /** Decide whether — and how — to check that the worktree source is actually under test.
  *
  *  Returns `null` ONLY for shapes that carry no shadowing risk at all: `kind !== "python"`, or a
- *  `prepare` that isn't exactly the editable-install shape (`pip install -e .`). Every other
+ *  `prepare` that doesn't match the pip-editable-install PATTERN (`isEditablePythonPrepare` —
+ *  whole-branch review Finding 2: not just the exact string `pip install -e .`, but also e.g.
+ *  `pip install -e .[dev]`, `pip install --editable .`, `python -m pip install -e .`). Every other
  *  python-editable-install component MUST be checked — an undefined or invalid (Fix E) importName
  *  is NOT a silent skip (Fix B): it THROWS, so the caller escalates instead of quietly trusting an
  *  unverified install. */
 export function sourceCheckCommand(input: SourceCheckInput): SourceCheck | null {
   const { component, kind, prepare, cwd, importName, scriptDir, interp } = input;
-  if (kind !== "python" || prepare !== "pip install -e .") return null;
+  if (kind !== "python" || prepare === undefined || !isEditablePythonPrepare(prepare)) return null;
   if (importName === undefined || !isValidImportName(importName)) {
     throw new Error(
       `provision: cannot verify worktree source (unresolvable import name) for ${component}`,

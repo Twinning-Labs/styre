@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getByKey } from "../../src/db/repos/workflow-step.ts";
@@ -7,6 +7,7 @@ import type { Component } from "../../src/dispatch/profile.ts";
 import {
   diffTouchesManifest,
   isComponentReady,
+  isEditablePythonPrepare,
   isValidImportName,
   planProvision,
   resetProvision,
@@ -60,6 +61,73 @@ describe("isComponentReady", () => {
   test("python: always not ready", () => {
     const dir = tmpDir("styre-prov-py-");
     expect(isComponentReady("python", dir)).toBe(false);
+  });
+});
+
+// ─── Content-aware, per-manager readiness (whole-branch review Finding 1 / Finding 3) ────────
+// The composition test the review flagged as missing: create a fake node component, prove it's
+// ready, then prove a manifest edit (a loopback dependency change) makes it stale — and that
+// `planProvision` actually emits a reinstall action, not just that `isComponentReady` flips.
+
+function touch(path: string, mtimeMs: number): void {
+  const t = mtimeMs / 1000;
+  utimesSync(path, t, t);
+}
+
+describe("isComponentReady + planProvision: content-aware per-manager readiness", () => {
+  test("npm: ready when marker postdates the manifest; manifest edit after install -> stale, planProvision reinstalls", () => {
+    const worktree = tmpDir("styre-prov-composed-npm-");
+    const compDir = join(worktree, "web");
+    mkdirSync(join(compDir, "node_modules"), { recursive: true });
+    const manifestPath = join(compDir, "package.json");
+    writeFileSync(manifestPath, "{}");
+    const markerPath = join(compDir, "node_modules", ".package-lock.json");
+    writeFileSync(markerPath, "{}");
+
+    const base = Date.now();
+    touch(manifestPath, base); // manifest written first
+    touch(markerPath, base + 10_000); // then the install marker -> fresh
+
+    expect(isComponentReady("node", compDir)).toBe(true);
+
+    const component = makeComponent({ name: "web", kind: "node", dir: "web", prepare: "npm ci" });
+    expect(planProvision([component], worktree)).toEqual([]);
+
+    // A later loopback edits package.json (adds a dep) — the manifest is now newer than the
+    // marker recorded at the last install. Force the ordering explicitly (mtime resolution can
+    // otherwise be too coarse/fast in CI to trust real wall-clock deltas).
+    writeFileSync(manifestPath, '{"dependencies":{"left-pad":"1.0.0"}}');
+    touch(manifestPath, base + 20_000);
+
+    expect(isComponentReady("node", compDir)).toBe(false);
+    expect(planProvision([component], worktree)).toEqual([
+      { component: "web", command: "npm ci", cwd: compDir },
+    ]);
+  });
+
+  test("yarn: .yarn-state.yml marker -> ready when fresh, stale when the manifest is edited after install", () => {
+    const worktree = tmpDir("styre-prov-composed-yarn-");
+    const compDir = join(worktree, "app");
+    mkdirSync(join(compDir, "node_modules"), { recursive: true });
+    const manifestPath = join(compDir, "package.json");
+    writeFileSync(manifestPath, "{}");
+    const markerPath = join(compDir, "node_modules", ".yarn-state.yml");
+    writeFileSync(markerPath, "");
+
+    const base = Date.now();
+    touch(manifestPath, base);
+    touch(markerPath, base + 10_000);
+    expect(isComponentReady("node", compDir)).toBe(true);
+
+    touch(manifestPath, base + 20_000); // manifest edited after the install completed
+    expect(isComponentReady("node", compDir)).toBe(false);
+  });
+
+  test("pnpm: .modules.yaml marker is recognized (previously no readiness cache at all)", () => {
+    const dir = tmpDir("styre-prov-pnpm-");
+    mkdirSync(join(dir, "node_modules"), { recursive: true });
+    writeFileSync(join(dir, "node_modules", ".modules.yaml"), "");
+    expect(isComponentReady("node", dir)).toBe(true);
   });
 });
 
@@ -156,6 +224,26 @@ describe("resolvePythonInterpreter", () => {
   });
 });
 
+// ─── isEditablePythonPrepare (whole-branch review Finding 2 / F-1 reopen) ────────────────────
+
+describe("isEditablePythonPrepare", () => {
+  test("recognizes non-canonical pip-editable spellings", () => {
+    expect(isEditablePythonPrepare("pip install -e .[dev]")).toBe(true);
+    expect(isEditablePythonPrepare("python -m pip install -e .")).toBe(true);
+    expect(isEditablePythonPrepare("pip install --editable .")).toBe(true);
+    expect(isEditablePythonPrepare("pip install -e .")).toBe(true); // still matches canonical
+  });
+
+  test("does not match non-editable pip installs", () => {
+    expect(isEditablePythonPrepare("pip install tox")).toBe(false);
+    expect(isEditablePythonPrepare("pip install -r requirements.txt")).toBe(false);
+  });
+
+  test("residual accepted gap: a non-pip editable install (poetry) does not match", () => {
+    expect(isEditablePythonPrepare("poetry install")).toBe(false);
+  });
+});
+
 // ─── sourceCheckCommand (Task 5 / Opus re-review Fix A/B/E) ─────────────────────
 
 describe("sourceCheckCommand", () => {
@@ -203,6 +291,25 @@ describe("sourceCheckCommand", () => {
         interp: "python3",
       }),
     ).toBeNull();
+  });
+
+  test("non-canonical editable spellings still produce a check (Finding 2)", () => {
+    for (const prepare of [
+      "pip install -e .[dev]",
+      "python -m pip install -e .",
+      "pip install --editable .",
+    ]) {
+      const check = sourceCheckCommand({
+        component: "api",
+        kind: "python",
+        prepare,
+        cwd: "/tmp/worktree",
+        importName: "pkg",
+        scriptDir: "/tmp/scriptdir",
+        interp: "python3",
+      });
+      expect(check).not.toBeNull();
+    }
   });
 
   test("the generated command is isCommandSafe (no shell metacharacters)", () => {
