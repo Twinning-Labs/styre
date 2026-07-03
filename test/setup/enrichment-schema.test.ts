@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { RuntimeContextSchema } from "../../src/dispatch/profile.ts";
+import { extractSidecar } from "../../src/dispatch/sidecar.ts";
 import { EnrichmentSchema } from "../../src/setup/enrichment-schema.ts";
+import { mergeScanAndEnrichment } from "../../src/setup/merge.ts";
 
 const full = {
   topology: { detail: "" },
@@ -53,5 +56,68 @@ describe("EnrichmentSchema fails SOFT on an out-of-enum type/mechanism (crash-ki
   test("a genuinely malformed section (bad type for detail) still FAILS (fail-soft is scoped to type/mechanism only)", () => {
     const parsed = EnrichmentSchema.safeParse({ ...full, caching: { detail: 123 } });
     expect(parsed.success).toBe(false);
+  });
+});
+
+// Crux-review hardening (#1): pin the "fail-soft is SCOPED to enum fields" boundary so a future
+// leniency edit (e.g. making sections .optional()/.partial()) can't silently turn a truncated
+// agent response into a SUCCESSFUL parse — that would erode the transport-failure→retry contract
+// (a missing/garbled section must stay `malformed` → re-dispatch, never become a written profile).
+describe("EnrichmentSchema: structural corruption STILL fails (fail-soft never reaches whole sections)", () => {
+  test("a whole missing required section (releasePackaging) fails the parse", () => {
+    const { releasePackaging: _omit, ...missing } = full;
+    expect(EnrichmentSchema.safeParse(missing).success).toBe(false);
+  });
+
+  test("a whole missing required section (topology) fails the parse", () => {
+    const { topology: _omit, ...missing } = full;
+    expect(EnrichmentSchema.safeParse(missing).success).toBe(false);
+  });
+
+  test("a non-object / empty-object input fails the parse", () => {
+    expect(EnrichmentSchema.safeParse("not an object").success).toBe(false);
+    expect(EnrichmentSchema.safeParse(null).success).toBe(false);
+    expect(EnrichmentSchema.safeParse({}).success).toBe(false);
+  });
+});
+
+// Crux-review hardening (#2): the actual crash path, end-to-end. Before the fail-soft fix, an
+// out-of-enum mechanism made `extractSidecar` return {reason:"malformed"}, which drove the 3-retry
+// crash. This proves the trigger is dead through the REAL extractSidecar → merge path, not just at
+// the schema boundary — and that a confident scan value still wins (scan stays ground truth).
+describe("crash-is-dead E2E: an out-of-enum agent sidecar completes setup (extractSidecar → merge)", () => {
+  const sidecar = (json: string) => `Here you go.\n\`\`\`styre-setup-enrich\n${json}\n\`\`\`\n`;
+
+  test("mechanism 'homebrew-tap' → extractSidecar ok (not malformed) → merge yields unknown, detail preserved, neighbor intact", () => {
+    const stdout = sidecar(
+      JSON.stringify({
+        ...full,
+        releasePackaging: { mechanism: "homebrew-tap", detail: "distributed via a homebrew tap" },
+        topology: { type: "web-service", detail: "api server" },
+      }),
+    );
+    const parsed = extractSidecar(stdout, EnrichmentSchema, { fence: "styre-setup-enrich" });
+    expect(parsed.ok).toBe(true); // the crash trigger: this was `malformed` before the fix
+    if (!parsed.ok) return;
+
+    const scan = RuntimeContextSchema.parse({ releasePackaging: { mechanism: "unknown" } });
+    const merged = mergeScanAndEnrichment(scan, parsed.value);
+    expect(merged.releasePackaging.mechanism).toBe("unknown"); // coerced → setup completes
+    expect(merged.releasePackaging.detail).toContain("homebrew"); // agent prose survives
+    expect(merged.topology.type).toBe("web-service"); // valid neighbor intact
+  });
+
+  test("a confident scan mechanism still wins over a coerced-to-undefined agent proposal (scan = ground truth)", () => {
+    const stdout = sidecar(
+      JSON.stringify({ ...full, releasePackaging: { mechanism: "homebrew-tap", detail: "x" } }),
+    );
+    const parsed = extractSidecar(stdout, EnrichmentSchema, { fence: "styre-setup-enrich" });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const scan = RuntimeContextSchema.parse({
+      releasePackaging: { mechanism: "semantic-release" },
+    });
+    const merged = mergeScanAndEnrichment(scan, parsed.value);
+    expect(merged.releasePackaging.mechanism).toBe("semantic-release"); // scan wins over coercion
   });
 });
