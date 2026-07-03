@@ -26,7 +26,7 @@ import { getLatestForTicket, getLatestWorktreePath } from "../db/repos/dispatch.
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { getProject } from "../db/repos/project.ts";
 import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
-import { listByStatus } from "../db/repos/workflow-step.ts";
+import { getByKey, listByStatus, resetAttempt, resetToPending } from "../db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { branchHeadSha, removeWorktree } from "../dispatch/worktree.ts";
@@ -100,6 +100,20 @@ export function dumpPark(
     }),
   );
   return dir;
+}
+
+/** On resume, a fresh `worktreeRoot` is minted and the parked worktree is wiped (see the
+ *  stale-worktree cleanup above) — so any deps a succeeded `provision` step installed are gone.
+ *  But the journaled step is still 'succeeded', so the resolver's `done("provision")` gate would
+ *  skip re-running it, and post-resume verify would run against an un-provisioned tree. Reset the
+ *  step to 'pending' (and zero its `attempt`, since a wiped worktree isn't a retry of the prior
+ *  attempt) so the resolver's `!done("provision")` gate re-fires before the next verify. */
+export function resetProvisionForResume(db: Database, ticketId: number): void {
+  const s = getByKey(db, ticketId, "provision");
+  if (s && s.status === "succeeded") {
+    resetToPending(db, s.id);
+    resetAttempt(db, s.id);
+  }
 }
 
 /** The single ticket id in a per-run SoT. */
@@ -199,6 +213,10 @@ export async function resumeRun(
     // Belt-and-suspenders: prune dangling worktree refs in git's internal tracking.
     Bun.spawnSync(["git", "worktree", "prune"], { cwd: project.target_repo });
   }
+
+  // The worktree above is gone (wiped/rebuilt fresh below) — any deps a succeeded `provision`
+  // step installed are gone with it. Re-arm provision so it re-runs before the next verify.
+  resetProvisionForResume(db, ticketId);
 
   setTicketStatus(db, ticketId, "active");
   let resumeContext: { stepKey: string; transcript: string } | undefined;

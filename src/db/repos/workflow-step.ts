@@ -142,6 +142,15 @@ export function decrementAttempt(db: Database, id: number): void {
   });
 }
 
+/** Zero out `attempt`. Used on resume to make a re-provisioned step attempt-neutral — a fresh
+ *  worktree (deps wiped) is not a retry of the prior provision attempt, it's a first try again. */
+export function resetAttempt(db: Database, id: number): void {
+  db.query("UPDATE workflow_step SET attempt = 0, updated_at = $now WHERE id = $id").run({
+    $now: nowUtc(),
+    $id: id,
+  });
+}
+
 export function listStepsForUnit(
   db: Database,
   ticketId: number,
