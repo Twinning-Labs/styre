@@ -1,5 +1,7 @@
+import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import { getByKey, resetAttempt, resetToPending } from "../db/repos/workflow-step.ts";
 import type { Component } from "./profile.ts";
 
 /** One `prepare` install command to run, resolved against the worktree. */
@@ -136,4 +138,62 @@ export function resolvePythonInterpreter(): string {
     if (Bun.which(candidate)) return candidate;
   }
   throw new Error("provision: no python3 or python interpreter found on PATH");
+}
+
+// ─── Task 9: re-provision when a loopback edits a dependency manifest ──────────
+
+/** Basenames that identify a dependency manifest/lockfile across the supported ecosystems.
+ *  `requirements*.txt` (e.g. `requirements-dev.txt`) is matched separately via regex — pip's
+ *  convention allows an arbitrary suffix. */
+const MANIFEST_BASENAMES = new Set([
+  "package.json",
+  "package-lock.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "pyproject.toml",
+  "setup.py",
+  "setup.cfg",
+  "poetry.lock",
+  "Pipfile",
+  "Pipfile.lock",
+]);
+
+const REQUIREMENTS_RE = /^requirements.*\.txt$/;
+
+/** True iff any changed path's basename is a dependency manifest/lockfile — i.e. an `implement`
+ *  dispatch's committed diff could have added/changed a dependency, which the once-gated
+ *  `provision` step (already `done`) would otherwise miss (review F-2). Path-independent: matches
+ *  on basename only, so a nested `apps/api/pyproject.toml` counts. */
+export function diffTouchesManifest(changedPaths: string[]): boolean {
+  return changedPaths.some((p) => {
+    const base = basename(p);
+    return MANIFEST_BASENAMES.has(base) || REQUIREMENTS_RE.test(base);
+  });
+}
+
+/** Reset a succeeded `provision` step back to `pending` (and zero its `attempt` — a fresh install
+ *  is not a retry of a prior attempt) so the resolver's `!done("provision")` gate re-fires before
+ *  the next verify. A no-op if provision hasn't run yet or isn't currently `succeeded` (e.g.
+ *  already pending/running/failed). Shared by the resume path (`src/cli/park.ts`) and the
+ *  manifest-touch hook below. */
+export function resetProvision(db: Database, ticketId: number): void {
+  const s = getByKey(db, ticketId, "provision");
+  if (s && s.status === "succeeded") {
+    resetToPending(db, s.id);
+    resetAttempt(db, s.id);
+  }
+}
+
+/** The `implement:dispatch` post-commit hook (review F-2): if the dispatch's committed diff
+ *  touched a dependency manifest, re-arm `provision` so it re-installs before the next verify.
+ *  Only resets when provision is currently `succeeded` — a not-yet-run/already-pending provision
+ *  needs no reset. */
+export function resetProvisionIfManifestTouched(
+  db: Database,
+  ticketId: number,
+  changedFiles: string[],
+): void {
+  if (diffTouchesManifest(changedFiles)) {
+    resetProvision(db, ticketId);
+  }
 }

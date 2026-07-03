@@ -26,9 +26,10 @@ import { getLatestForTicket, getLatestWorktreePath } from "../db/repos/dispatch.
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { getProject } from "../db/repos/project.ts";
 import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
-import { getByKey, listByStatus, resetAttempt, resetToPending } from "../db/repos/workflow-step.ts";
+import { listByStatus } from "../db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
+import { resetProvision } from "../dispatch/provision.ts";
 import { branchHeadSha, removeWorktree } from "../dispatch/worktree.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
@@ -107,14 +108,13 @@ export function dumpPark(
  *  But the journaled step is still 'succeeded', so the resolver's `done("provision")` gate would
  *  skip re-running it, and post-resume verify would run against an un-provisioned tree. Reset the
  *  step to 'pending' (and zero its `attempt`, since a wiped worktree isn't a retry of the prior
- *  attempt) so the resolver's `!done("provision")` gate re-fires before the next verify. */
-export function resetProvisionForResume(db: Database, ticketId: number): void {
-  const s = getByKey(db, ticketId, "provision");
-  if (s && s.status === "succeeded") {
-    resetToPending(db, s.id);
-    resetAttempt(db, s.id);
-  }
-}
+ *  attempt) so the resolver's `!done("provision")` gate re-fires before the next verify.
+ *
+ *  This is the same reset the Task-9 manifest-touch hook needs (a loopback editing a dependency
+ *  manifest also invalidates a succeeded provision) — the logic lives in `dispatch/provision.ts`
+ *  as `resetProvision` and is re-exported here under its resume-specific name so callers/tests of
+ *  this module are unaffected. */
+export const resetProvisionForResume = resetProvision;
 
 /** The single ticket id in a per-run SoT. */
 function onlyTicketId(db: Database): number {

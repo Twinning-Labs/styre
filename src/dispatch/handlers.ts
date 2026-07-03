@@ -55,7 +55,12 @@ import {
   implementVars,
   reviewVars,
 } from "./prompt-vars.ts";
-import { planProvision, resolvePythonInterpreter, sourceCheckCommand } from "./provision.ts";
+import {
+  planProvision,
+  resetProvisionIfManifestTouched,
+  resolvePythonInterpreter,
+  sourceCheckCommand,
+} from "./provision.ts";
 import { ReviewOutputSchema, computeBlocksShip, validateReviewFindings } from "./review-schema.ts";
 import type { DispatchDeps } from "./run-dispatch.ts";
 import { runAgentDispatch } from "./run-dispatch.ts";
@@ -352,6 +357,15 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       },
     );
     setUnitStatus(ctx.db, unit.id, "verifying");
+    // Review F-2: if this dispatch's committed diff touched a dependency manifest, a once-gated
+    // `provision` (already `done`) would otherwise be silently stale — re-arm it so the resolver
+    // re-installs before the next verify (never a hard fail here; the agent has no install
+    // capability itself, so surfacing this at implement time is the only safe point).
+    resetProvisionIfManifestTouched(
+      ctx.db,
+      ctx.ticket.id,
+      changedFilesAt(result.sha, implWorktreePath),
+    );
     return result;
   });
 

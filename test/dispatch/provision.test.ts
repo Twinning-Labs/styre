@@ -2,16 +2,22 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getByKey } from "../../src/db/repos/workflow-step.ts";
 import type { Component } from "../../src/dispatch/profile.ts";
 import {
+  diffTouchesManifest,
   isComponentReady,
   isValidImportName,
   planProvision,
+  resetProvision,
+  resetProvisionIfManifestTouched,
   resolvePythonInterpreter,
   sourceCheckCommand,
 } from "../../src/dispatch/provision.ts";
+import { runStep } from "../../src/engine/step-journal.ts";
 import { isCommandSafe } from "../../src/setup/command-safety.ts";
 import { runCommand } from "../../src/util/run-command.ts";
+import { makeTestDb } from "../helpers/db.ts";
 
 const roots: string[] = [];
 afterAll(() => {
@@ -380,4 +386,107 @@ describe("sourceCheckCommand regression: shadowed copy is detected", () => {
       }
     },
   );
+});
+
+// ─── Task 9: diffTouchesManifest + the manifest-touch re-provision hook ────────
+
+describe("diffTouchesManifest", () => {
+  test("true for a nested package.json", () => {
+    expect(diffTouchesManifest(["foo/package.json"])).toBe(true);
+  });
+  test("true for a root pyproject.toml", () => {
+    expect(diffTouchesManifest(["pyproject.toml"])).toBe(true);
+  });
+  test("true for a requirements-dev.txt (requirements*.txt)", () => {
+    expect(diffTouchesManifest(["requirements-dev.txt"])).toBe(true);
+  });
+  test("true for other manifest/lockfile basenames", () => {
+    for (const p of [
+      "package-lock.json",
+      "yarn.lock",
+      "pnpm-lock.yaml",
+      "setup.py",
+      "setup.cfg",
+      "requirements.txt",
+      "poetry.lock",
+      "Pipfile",
+      "Pipfile.lock",
+    ]) {
+      expect(diffTouchesManifest([p])).toBe(true);
+    }
+  });
+  test("false for ordinary source/doc files", () => {
+    expect(diffTouchesManifest(["src/main.py", "README.md"])).toBe(false);
+  });
+  test("false for an empty changed-files list", () => {
+    expect(diffTouchesManifest([])).toBe(false);
+  });
+  test("true when only one of several changed files is a manifest", () => {
+    expect(diffTouchesManifest(["src/main.py", "README.md", "package.json"])).toBe(true);
+  });
+});
+
+describe("resetProvisionIfManifestTouched", () => {
+  async function succeedProvision(db: Parameters<typeof runStep>[0], ticketId: number) {
+    await runStep(db, {
+      ticketId,
+      stepKey: "provision",
+      stepType: "provision",
+      effectful: true,
+      execute: () => ({ ok: true }),
+    });
+  }
+
+  test("a manifest-touching diff resets a succeeded provision step to pending (attempt 0)", async () => {
+    const { db, ticketId } = makeTestDb();
+    await succeedProvision(db, ticketId);
+    expect(getByKey(db, ticketId, "provision")?.status).toBe("succeeded");
+
+    resetProvisionIfManifestTouched(db, ticketId, ["src/main.py", "requirements.txt"]);
+
+    const after = getByKey(db, ticketId, "provision");
+    db.close();
+    expect(after?.status).toBe("pending");
+    expect(after?.attempt).toBe(0);
+  });
+
+  test("a non-manifest diff leaves a succeeded provision step untouched", async () => {
+    const { db, ticketId } = makeTestDb();
+    await succeedProvision(db, ticketId);
+
+    resetProvisionIfManifestTouched(db, ticketId, ["src/main.py", "README.md"]);
+
+    const after = getByKey(db, ticketId, "provision");
+    db.close();
+    expect(after?.status).toBe("succeeded");
+  });
+
+  test("no-op when there is no provision step yet, even with a manifest-touching diff", () => {
+    const { db, ticketId } = makeTestDb();
+    resetProvisionIfManifestTouched(db, ticketId, ["package.json"]);
+    const after = getByKey(db, ticketId, "provision");
+    db.close();
+    expect(after).toBeNull();
+  });
+});
+
+describe("resetProvision (shared by park's resume path and the manifest-touch hook)", () => {
+  test("only resets a currently-succeeded provision step", async () => {
+    const { db, ticketId } = makeTestDb();
+    const run = runStep(db, {
+      ticketId,
+      stepKey: "provision",
+      stepType: "provision",
+      execute: () => {
+        throw new Error("boom");
+      },
+    });
+    await expect(run).rejects.toThrow("boom");
+
+    resetProvision(db, ticketId);
+
+    const after = getByKey(db, ticketId, "provision");
+    db.close();
+    expect(after?.status).toBe("failed");
+  });
 });
