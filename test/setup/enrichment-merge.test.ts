@@ -83,3 +83,26 @@ test("migrationTool: scan wins, agent fills only when scan absent", () => {
   );
   expect(b.data.migrationTool).toBe("alembic");
 });
+
+test("agent's pypi proposal fills an unknown release scan section (new vocabulary)", () => {
+  const m = mergeScanAndEnrichment(
+    scan({ releasePackaging: { mechanism: "unknown" } }),
+    enr({
+      ...fullEnrichment,
+      releasePackaging: { mechanism: "pypi", detail: "PyPI via pyproject.toml" },
+    }),
+  );
+  expect(m.releasePackaging.mechanism).toBe("pypi");
+  expect(m.releasePackaging.detail).toBe("PyPI via pyproject.toml");
+});
+
+test("agent's browser-extension proposal fills an unknown topology scan section (new vocabulary)", () => {
+  const m = mergeScanAndEnrichment(
+    scan({ topology: { type: "unknown" } }),
+    enr({
+      ...fullEnrichment,
+      topology: { type: "browser-extension", detail: "Chrome/Firefox extension" },
+    }),
+  );
+  expect(m.topology.type).toBe("browser-extension");
+});
