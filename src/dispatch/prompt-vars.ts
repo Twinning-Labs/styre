@@ -8,7 +8,27 @@ import implementTemplate from "../../prompts/implement.md" with { type: "text" }
 import reviewTemplate from "../../prompts/review.md" with { type: "text" };
 import type { WorkUnitRow } from "../db/repos/work-unit.ts";
 import { commandFor, impactedComponents } from "./components.ts";
-import type { Profile } from "./profile.ts";
+import type { Component, Profile } from "./profile.ts";
+
+/** One line per detected component for the `{{detected_stacks}}` prompt slot: name, kind, paths,
+ *  and the test command when known. Empty string when there are no components (renders blank). */
+export function stackSummary(components: Component[]): string {
+  return components
+    .map((c) => {
+      const test = commandFor(c, "test");
+      const paths = c.paths.join(", ");
+      return `- ${c.name} (kind: ${c.kind}) — paths: ${paths}${test ? `; test: ${test}` : ""}`;
+    })
+    .join("\n");
+}
+
+/** The `{{detected_stacks}}` prompt value: the component summary, or an explicit no-detect note so
+ *  the prompt's stack guidance still reads sensibly on repos `styre setup` could not classify. */
+function detectedStacksVar(profile: Profile): string {
+  return profile.components.length > 0
+    ? stackSummary(profile.components)
+    : "(no stacks auto-detected — infer the stack(s) and their build/test commands from the repo and its CI)";
+}
 
 function runtimeVars(profile: Profile): Record<string, string> {
   const rc = profile.runtimeContext;
@@ -46,6 +66,7 @@ export function extractVars(
     ident: ticket.ident,
     title: ticket.title ?? "",
     slug: profile.slug,
+    detected_stacks: detectedStacksVar(profile),
     ...profile.promptVars,
     ...runtimeVars(profile),
   };
@@ -61,6 +82,7 @@ export function designVars(
     description: ticket.description ?? "",
     slug: profile.slug,
     stack: "",
+    detected_stacks: detectedStacksVar(profile),
     ...profile.promptVars,
     ...runtimeVars(profile),
   };

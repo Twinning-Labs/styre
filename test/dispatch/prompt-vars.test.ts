@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { WorkUnitRow } from "../../src/db/repos/work-unit.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
+import type { Component } from "../../src/dispatch/profile.ts";
 import {
   DESIGN_REVIEW_TEMPLATE,
   DESIGN_TEMPLATE,
@@ -12,6 +13,7 @@ import {
   extractVars,
   implementVars,
   reviewVars,
+  stackSummary,
 } from "../../src/dispatch/prompt-vars.ts";
 import { placeholders, renderPrompt } from "../../src/dispatch/render-prompt.ts";
 
@@ -133,4 +135,46 @@ test("implementVars sources test_command from the unit's impacted components", (
   } as unknown as WorkUnitRow;
   const vars = implementVars({ ident: "ENG-1", title: "t" }, unit, profile);
   expect(vars.test_command).toBe("cargo test");
+});
+
+const COMPS: Component[] = [
+  { name: "go", kind: "go", paths: ["**"], commands: { test: "go test ./..." } },
+  {
+    name: "frontend",
+    kind: "sveltekit",
+    paths: ["src/**", "static/**", "package.json"],
+    commands: { test: "npm run test" },
+  },
+];
+
+test("stackSummary is empty for no components; lists kind/name/paths/test otherwise", () => {
+  expect(stackSummary([])).toBe("");
+  const s = stackSummary(COMPS);
+  expect(s).toContain("go");
+  expect(s).toContain("sveltekit");
+  expect(s).toContain("go test ./...");
+  expect(s).toContain("src/**");
+  // pin the rendered line shape (a format regression guard, not just substrings)
+  expect(s.split("\n")[0]).toBe("- go (kind: go) — paths: **; test: go test ./...");
+  // the `; test: …` segment is omitted when the component has no (or an unavailable) test command
+  expect(stackSummary([{ name: "x", kind: "go", paths: ["**"], commands: {} }])).toBe(
+    "- x (kind: go) — paths: **",
+  );
+});
+
+test("designVars + extractVars carry detected_stacks from the profile components", () => {
+  const profile = parseProfile({ slug: "d", targetRepo: "/t", components: COMPS });
+  const dv = designVars({ ident: "ENG-1", title: "T", description: "b" }, profile);
+  const ev = extractVars({ ident: "ENG-1", title: "T" }, profile);
+  expect(dv.detected_stacks).toBe(stackSummary(COMPS));
+  expect(ev.detected_stacks).toBe(stackSummary(COMPS));
+  expect(dv.detected_stacks).toContain("sveltekit");
+  expect(dv.stack).toBe(""); // {{stack}} (free-text note) unchanged; no promptVars.stack in this fixture
+});
+
+test("detected_stacks falls back to a no-detect note when the profile has no components", () => {
+  const profile = parseProfile({ slug: "d", targetRepo: "/t" });
+  const v = extractVars({ ident: "E", title: "T" }, profile).detected_stacks;
+  expect(v).toContain("no stacks auto-detected");
+  expect(stackSummary([])).toBe(""); // the pure helper still returns "" — the fallback is var-level
 });
