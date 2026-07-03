@@ -1,9 +1,9 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unrootedManifestWarnings } from "../../../src/setup/detect-components.ts";
-import { pythonDef } from "../../../src/setup/lang/python.ts";
+import { pythonDef, pythonPrepare } from "../../../src/setup/lang/python.ts";
 
 function fixture(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "styre-python-"));
@@ -67,7 +67,13 @@ test("python: no python manifest → no components", () => {
 test("python: single root pyproject → one root component (unchanged)", () => {
   const root = fixture({ "pyproject.toml": "[project]\n" });
   expect(pythonDef.detect(root)).toEqual([
-    { name: "python", kind: "python", paths: ["**"], commands: { test: "python -m pytest" } },
+    {
+      name: "python",
+      kind: "python",
+      paths: ["**"],
+      commands: { test: "python -m pytest" },
+      prepare: "pip install -e .",
+    },
   ]);
 });
 
@@ -98,4 +104,28 @@ test("python: subdir requirements.txt with no pyproject/setup.py → NOT a modul
   expect(
     unrootedManifestWarnings(root).some((w) => w.includes("svc") && w.includes("requirements.txt")),
   ).toBe(true);
+});
+
+// ─── Task 2: pythonPrepare (test-command-matched) ────────────────────────────
+
+describe("pythonPrepare", () => {
+  test("tox -> pip install tox", () => {
+    expect(pythonPrepare(fixture({ "tox.ini": "", "setup.py": "" }))).toBe("pip install tox");
+  });
+  test("nox -> pip install nox", () => {
+    expect(pythonPrepare(fixture({ "noxfile.py": "" }))).toBe("pip install nox");
+  });
+  test("pytest+pyproject -> editable", () => {
+    expect(pythonPrepare(fixture({ "pyproject.toml": "[tool.pytest.ini_options]\n" }))).toBe(
+      "pip install -e .",
+    );
+  });
+  test("requirements only -> requirements", () => {
+    expect(pythonPrepare(fixture({ "requirements.txt": "requests\n" }))).toBe(
+      "pip install -r requirements.txt",
+    );
+  });
+  test("nothing installable -> undefined", () => {
+    expect(pythonPrepare(fixture({ "main.py": "print(1)" }))).toBeUndefined();
+  });
 });

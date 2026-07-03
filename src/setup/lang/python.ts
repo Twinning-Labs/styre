@@ -19,6 +19,20 @@ export function pythonTestCommand(repoDir: string): string {
   return "python -m pytest";
 }
 
+export function pythonPrepare(repoDir: string): string | undefined {
+  const test = pythonTestCommand(repoDir);
+  if (test === "tox") return "pip install tox";
+  if (test === "nox") return "pip install nox";
+  if (
+    existsSync(join(repoDir, "pyproject.toml")) ||
+    existsSync(join(repoDir, "setup.py")) ||
+    existsSync(join(repoDir, "setup.cfg"))
+  )
+    return "pip install -e .";
+  if (existsSync(join(repoDir, "requirements.txt"))) return "pip install -r requirements.txt";
+  return undefined;
+}
+
 const PY_ROOT_MANIFESTS = ["pyproject.toml", "setup.py", "requirements.txt"];
 const PY_MODULE_ANCHORS = ["pyproject.toml", "setup.py"]; // nested-module anchors (NOT requirements.txt)
 
@@ -33,6 +47,7 @@ export const pythonDef: LangDef = {
         kind: "python",
         paths: ["**"],
         commands: { test: pythonTestCommand(repoDir) },
+        prepare: pythonPrepare(repoDir),
       });
     }
     // Nested modules: a subdir with pyproject.toml or setup.py (dedup by dir).
@@ -50,6 +65,7 @@ export const pythonDef: LangDef = {
         dir,
         paths: [`${dir}/**`],
         commands: { test: pythonTestCommand(join(repoDir, dir)) },
+        prepare: pythonPrepare(join(repoDir, dir)),
       });
     }
     return out;
