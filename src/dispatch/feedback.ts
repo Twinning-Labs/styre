@@ -10,7 +10,13 @@ export function implementFeedback(db: Database, workUnitId: number): string {
     return "";
   }
   const failures = listByUnit(db, workUnitId).filter(
-    (s) => s.branch_head_sha === sha && s.result !== "pass" && s.signal_type !== "scope_diff",
+    (s) =>
+      s.branch_head_sha === sha &&
+      s.result !== "pass" &&
+      s.signal_type !== "scope_diff" &&
+      // advisory run-all-on-unowned sweeps surface UNTOUCHED stacks' pre-existing red — never feed
+      // them to the re-coding agent (it can't and shouldn't iterate on stacks this unit didn't touch).
+      s.signal_type !== "ran-all-unowned",
   );
   if (failures.length === 0) {
     return "";

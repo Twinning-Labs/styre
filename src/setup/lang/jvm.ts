@@ -1,11 +1,10 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { Component } from "../../dispatch/profile.ts";
-import type { LangDef } from "./types.ts";
+import type { ComponentDraft, LangDef } from "./types.ts";
 
 export const jvmMavenDef: LangDef = {
   kind: "jvm-maven",
-  detect(repoDir: string): Component[] {
+  detect(repoDir: string): ComponentDraft[] {
     if (!existsSync(join(repoDir, "pom.xml"))) return [];
     const mvn = existsSync(join(repoDir, "mvnw")) ? "./mvnw" : "mvn";
     return [
@@ -21,7 +20,7 @@ export const jvmMavenDef: LangDef = {
 
 export const jvmGradleDef: LangDef = {
   kind: "jvm-gradle",
-  detect(repoDir: string): Component[] {
+  detect(repoDir: string): ComponentDraft[] {
     if (
       !existsSync(join(repoDir, "build.gradle")) &&
       !existsSync(join(repoDir, "build.gradle.kts"))

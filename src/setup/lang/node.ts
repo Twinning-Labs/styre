@@ -2,12 +2,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Component } from "../../dispatch/profile.ts";
 import { findManifests } from "../manifests.ts";
-import type { LangDef } from "./types.ts";
+import type { ComponentDraft, LangDef } from "./types.ts";
 
 export const nodeDef: LangDef = {
   kind: "node",
-  detect(repoDir: string): Component[] {
-    const components: Component[] = [];
+  detect(repoDir: string): ComponentDraft[] {
+    const components: ComponentDraft[] = [];
     // --- Node/JS: one component per package.json (skip workspace-member packages already covered).
     for (const rel of findManifests(repoDir, "package.json")) {
       const dir = rel.replace(/package\.json$/, "").replace(/\/$/, "");

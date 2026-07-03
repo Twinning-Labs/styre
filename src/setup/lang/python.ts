@@ -1,7 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Component } from "../../dispatch/profile.ts";
-import type { LangDef } from "./types.ts";
+import type { ComponentDraft, LangDef } from "./types.ts";
 
 /** §5.3 runner detection: tox > nox > pytest-config > default. Root-level config only. */
 export function pythonTestCommand(repoDir: string): string {
@@ -21,7 +20,7 @@ export function pythonTestCommand(repoDir: string): string {
 
 export const pythonDef: LangDef = {
   kind: "python",
-  detect(repoDir: string): Component[] {
+  detect(repoDir: string): ComponentDraft[] {
     const hasPython = ["pyproject.toml", "setup.py", "requirements.txt"].some((m) =>
       existsSync(join(repoDir, m)),
     );
