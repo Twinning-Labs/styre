@@ -1,8 +1,8 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { nodeDef } from "../../../src/setup/lang/node.ts";
+import { nodeDef, nodePrepare } from "../../../src/setup/lang/node.ts";
 
 function fixture(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "styre-node-"));
@@ -154,4 +154,32 @@ test("node: prepare is set even when scripts is empty", () => {
   });
   const [c] = nodeDef.detect(root);
   expect(c.prepare).toBe("npm install");
+});
+
+// ─── Task 1: nodePrepare (lockfile-aware) ────────────────────────────────────
+
+describe("nodePrepare (lockfile-aware)", () => {
+  test("yarn.lock -> frozen", () => {
+    const r = fixture({ "yarn.lock": "", "package.json": "{}" });
+    expect(nodePrepare(r)).toBe("yarn install --frozen-lockfile");
+  });
+  test("pnpm-lock.yaml -> frozen", () => {
+    const r = fixture({ "pnpm-lock.yaml": "", "package.json": "{}" });
+    expect(nodePrepare(r)).toBe("pnpm install --frozen-lockfile");
+  });
+  test("package-lock.json -> npm ci", () => {
+    const r = fixture({ "package-lock.json": "{}", "package.json": "{}" });
+    expect(nodePrepare(r)).toBe("npm ci");
+  });
+  test("no lockfile -> npm install", () => {
+    const r = fixture({ "package.json": "{}" });
+    expect(nodePrepare(r)).toBe("npm install");
+  });
+  test("detect() sets it", () => {
+    const r = fixture({
+      "package.json": '{"scripts":{"test":"jest"}}',
+      "package-lock.json": "{}",
+    });
+    expect(nodeDef.detect(r)[0]?.prepare).toBe("npm ci");
+  });
 });
