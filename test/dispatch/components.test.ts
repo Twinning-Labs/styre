@@ -171,3 +171,84 @@ test("matchesComponent: path still scopes the component (ext matches but path do
   // .py file inside the path glob
   expect(matchesComponent(python, "api/routes.py")).toBe(true);
 });
+
+// ─── WO-3 Task 1: Ruby file-identity routing ─────────────────────────────────
+
+test("EXTENSIONS_BY_KIND has ruby entry with .rb/.rake/.gemspec", () => {
+  expect(EXTENSIONS_BY_KIND.ruby).toContain(".rb");
+  expect(EXTENSIONS_BY_KIND.ruby).toContain(".rake");
+  expect(EXTENSIONS_BY_KIND.ruby).toContain(".gemspec");
+});
+
+test("ruby component routes .rb/.rake/.gemspec files; does not match .py", () => {
+  const ruby: Component = {
+    name: "ruby",
+    kind: "ruby",
+    paths: ["**"],
+    commands: { test: "bundle exec rspec" },
+    extensions: [".rb", ".rake", ".gemspec"],
+  };
+  expect(matchesComponent(ruby, "src/a.rb")).toBe(true);
+  expect(matchesComponent(ruby, "x.rake")).toBe(true);
+  expect(matchesComponent(ruby, "y.gemspec")).toBe(true);
+  // must not match a Python file
+  expect(matchesComponent(ruby, "a.py")).toBe(false);
+});
+
+// ─── WO-3 Task 2: PHP file-identity routing ──────────────────────────────────
+
+test("EXTENSIONS_BY_KIND has php entry with .php", () => {
+  expect(EXTENSIONS_BY_KIND.php).toContain(".php");
+});
+
+test("php component routes .php files (incl. test file); does not match .rb", () => {
+  const php: Component = {
+    name: "php",
+    kind: "php",
+    paths: ["**"],
+    commands: { test: "./vendor/bin/phpunit" },
+    extensions: [".php"],
+  };
+  // regular source file
+  expect(matchesComponent(php, "src/a.php")).toBe(true);
+  // .php extension routes it; testFilePattern is asserted in php.test.ts, not consulted by matchesComponent
+  expect(matchesComponent(php, "src/CalculatorTest.php")).toBe(true);
+  // must not match a Ruby file
+  expect(matchesComponent(php, "a.rb")).toBe(false);
+});
+
+// ─── WO-3 Task 3: inertness contract — prepare never leaks into implement allowlist ───
+
+/**
+ * Regression guard: `prepare` is a detect-only stored field; it must NEVER appear
+ * in the implement Bash allowlist emitted by realRunnerCommands / scopedRunnersForFiles.
+ * This test passes before AND after the Node prepare addition because realRunnerCommands
+ * only iterates c.commands — not c.prepare. It is a durable contract, not a red→green step.
+ */
+test("inertness contract: prepare field is absent from realRunnerCommands allowlist", () => {
+  const node: Component = {
+    name: "app",
+    kind: "node",
+    paths: ["src/**"],
+    commands: { test: "npm run test" },
+    extensions: [".ts", ".js"],
+    prepare: "npm install",
+  };
+  const cmds = realRunnerCommands([node]);
+  expect(cmds).toContain("npm run test");
+  expect(cmds).not.toContain("npm install");
+});
+
+test("inertness contract: prepare absent from scopedRunnersForFiles allowlist", () => {
+  const node: Component = {
+    name: "app",
+    kind: "node",
+    paths: ["src/**"],
+    commands: { test: "npm run test" },
+    extensions: [".ts", ".js"],
+    prepare: "npm install",
+  };
+  const cmds = scopedRunnersForFiles([node], ["src/index.ts"]);
+  expect(cmds).toContain("npm run test");
+  expect(cmds).not.toContain("npm install");
+});

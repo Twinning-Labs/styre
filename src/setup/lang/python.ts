@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { findManifests } from "../manifests.ts";
 import type { ComponentDraft, LangDef } from "./types.ts";
 
 /** §5.3 runner detection: tox > nox > pytest-config > default. Root-level config only. */
@@ -18,20 +19,39 @@ export function pythonTestCommand(repoDir: string): string {
   return "python -m pytest";
 }
 
+const PY_ROOT_MANIFESTS = ["pyproject.toml", "setup.py", "requirements.txt"];
+const PY_MODULE_ANCHORS = ["pyproject.toml", "setup.py"]; // nested-module anchors (NOT requirements.txt)
+
 export const pythonDef: LangDef = {
   kind: "python",
   detect(repoDir: string): ComponentDraft[] {
-    const hasPython = ["pyproject.toml", "setup.py", "requirements.txt"].some((m) =>
-      existsSync(join(repoDir, m)),
-    );
-    if (!hasPython) return [];
-    return [
-      {
+    const out: ComponentDraft[] = [];
+    // Root component: existing 3-name trigger (incl requirements.txt), unchanged.
+    if (PY_ROOT_MANIFESTS.some((m) => existsSync(join(repoDir, m)))) {
+      out.push({
         name: "python",
         kind: "python",
         paths: ["**"],
         commands: { test: pythonTestCommand(repoDir) },
-      },
-    ];
+      });
+    }
+    // Nested modules: a subdir with pyproject.toml or setup.py (dedup by dir).
+    const dirs = new Set<string>();
+    for (const m of PY_MODULE_ANCHORS) {
+      for (const rel of findManifests(repoDir, m)) {
+        const dir = rel.slice(0, -m.length).replace(/\/$/, "");
+        if (dir !== "") dirs.add(dir);
+      }
+    }
+    for (const dir of [...dirs].sort()) {
+      out.push({
+        name: dir.replace(/\//g, "-"),
+        kind: "python",
+        dir,
+        paths: [`${dir}/**`],
+        commands: { test: pythonTestCommand(join(repoDir, dir)) },
+      });
+    }
+    return out;
   },
 };

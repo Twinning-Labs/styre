@@ -451,7 +451,11 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     if (realImpacted.length > 0) {
       const toRun = realImpacted
         .filter((c) => commandFor(c, checkType) !== undefined)
-        .map((c) => ({ component: c.name, command: commandFor(c, checkType) as string }));
+        .map((c) => ({
+          component: c.name,
+          command: commandFor(c, checkType) as string,
+          dir: c.dir,
+        }));
       const unavailable = realImpacted.filter((c) => isUnavailable(c, checkType));
       const absent = realImpacted.filter(
         (c) => commandFor(c, checkType) === undefined && !isUnavailable(c, checkType),
@@ -498,10 +502,10 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
 
       // (a) run each realImpacted component's real command; aggregate.
       const ran: Array<{ component: string; exitCode: number | null; timedOut: boolean }> = [];
-      for (const { component, command } of toRun) {
+      for (const { component, command, dir } of toRun) {
         lastCommand = command;
         const run = await runCommand(command, {
-          cwd: worktreePath,
+          cwd: join(worktreePath, dir ?? ""),
           timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
         });
         ran.push({ component, exitCode: run.exitCode, timedOut: run.timedOut });
@@ -557,7 +561,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         if (cmd === undefined) continue; // absent on untouched stack → skip, no error
         stacksSwept++;
         const sweepRun = await runCommand(cmd, {
-          cwd: worktreePath,
+          cwd: join(worktreePath, c.dir ?? ""),
           timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
         });
         if (sweepRun.exitCode !== 0) {
@@ -627,15 +631,15 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
     ensureWorktree(repoPath, branch, worktreePath);
 
-    const jobs: Array<{ label: string; command: string }> = [];
+    const jobs: Array<{ label: string; command: string; dir?: string }> = [];
     for (const c of deps.profile.components) {
       for (const key of ["build", "test"] as const) {
         const cmd = commandFor(c, key);
-        if (cmd) jobs.push({ label: `${c.name}:${key}`, command: cmd });
+        if (cmd) jobs.push({ label: `${c.name}:${key}`, command: cmd, dir: c.dir });
       }
     }
     for (const [name, cmd] of Object.entries(deps.profile.repoCommands)) {
-      jobs.push({ label: `repo:${name}`, command: cmd });
+      jobs.push({ label: `repo:${name}`, command: cmd }); // repo-wide → no dir → worktree root
     }
     if (jobs.length === 0) {
       insertSignal(ctx.db, {
@@ -650,10 +654,10 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     const ran: Array<{ label: string; exitCode: number | null; timedOut: boolean }> = [];
     let result: "pass" | "fail" | "error" = "pass";
     let lastCommand = "";
-    for (const { label, command } of jobs) {
+    for (const { label, command, dir } of jobs) {
       lastCommand = command;
       const run = await runCommand(command, {
-        cwd: worktreePath,
+        cwd: join(worktreePath, dir ?? ""),
         timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
       });
       ran.push({ label, exitCode: run.exitCode, timedOut: run.timedOut });

@@ -126,12 +126,12 @@ test("go: root go.mod → one go component with build/test", () => {
   expect(go?.commands.test).toBe("go test ./...");
 });
 
-test("go: nested-only go.mod (no root) → no go component (single-module first)", () => {
-  expect(
-    detectComponents(fixture({ "backend/go.mod": "module x\n" })).components.find(
-      (c) => c.kind === "go",
-    ),
-  ).toBeUndefined();
+test("go: nested-only go.mod (no root) → dir-scoped go component (non-root detection)", () => {
+  const go = detectComponents(fixture({ "backend/go.mod": "module x\n" })).components.find(
+    (c) => c.kind === "go",
+  );
+  expect(go?.dir).toBe("backend");
+  expect(go?.paths).toEqual(["backend/**"]);
 });
 
 test("jvm: root pom.xml → jvm-maven (bare mvn when no wrapper)", () => {
@@ -171,21 +171,24 @@ test("jvm: no jvm manifest → no jvm component", () => {
   expect(comps.find((c) => c.kind === "jvm-maven" || c.kind === "jvm-gradle")).toBeUndefined();
 });
 
-test("loud note: subdir-only go.mod warns; root go.mod does not", () => {
+test("loud note: subdir-only go.mod does NOT warn (Go warning retired — every go.mod is detected)", () => {
   const nested = unrootedManifestWarnings(fixture({ "backend/go.mod": "module x\n" }));
-  expect(nested.some((w) => /go\.mod/.test(w) && /backend/.test(w) && /deferred/i.test(w))).toBe(
-    true,
-  );
+  expect(nested.some((w) => /go\.mod/.test(w))).toBe(false);
   expect(unrootedManifestWarnings(fixture({ "go.mod": "module x\n" }))).toEqual([]);
 });
 
-test("loud note: subdir-only pyproject warns; non-targeted nested files do not", () => {
+test("loud note: subdir-only pyproject does NOT warn (Python non-root detected); non-targeted nested files do not warn either", () => {
   expect(
     unrootedManifestWarnings(fixture({ "src/pyproject.toml": "[project]\n" })).some((w) =>
       /pyproject\.toml/.test(w),
     ),
-  ).toBe(true);
+  ).toBe(false);
   expect(unrootedManifestWarnings(fixture({ "README.md": "x" }))).toEqual([]);
+});
+
+test("loud note: subdir requirements.txt with no pyproject/setup.py sibling warns (undetectable Python module)", () => {
+  const warnings = unrootedManifestWarnings(fixture({ "svc/requirements.txt": "flask\n" }));
+  expect(warnings.some((w) => w.includes("svc") && w.includes("requirements.txt"))).toBe(true);
 });
 
 test("cargo workspace collapses members into ONE rust component", () => {

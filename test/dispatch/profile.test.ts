@@ -2,7 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProfileSchema, loadProfile, parseProfile } from "../../src/dispatch/profile.ts";
+import {
+  ComponentSchema,
+  ProfileSchema,
+  ReleaseMechanismEnum,
+  TopologyTypeEnum,
+  loadProfile,
+  parseProfile,
+} from "../../src/dispatch/profile.ts";
 
 test("parses a v3 components profile", () => {
   const p = parseProfile({
@@ -84,6 +91,25 @@ test("loadProfile reads + validates a JSON file", () => {
   expect(p.slug).toBe("demo");
 });
 
+// ─── WO-3 Task 1: prepare round-trip (genuinely red until ComponentSchema adds the field) ──
+
+test("prepare field on a component round-trips through parseProfile", () => {
+  const p = parseProfile({
+    slug: "s",
+    targetRepo: "/r",
+    components: [
+      {
+        name: "ruby",
+        kind: "ruby",
+        paths: ["**"],
+        commands: { test: "bundle exec rspec" },
+        prepare: "bundle install",
+      },
+    ],
+  });
+  expect(p.components[0].prepare).toBe("bundle install");
+});
+
 test("testFilePattern on a component is optional and parses when present", () => {
   const p1 = parseProfile({ slug: "s", targetRepo: "/r" });
   expect(p1.components).toHaveLength(0);
@@ -133,5 +159,86 @@ describe("runtimeContext", () => {
         runtimeContext: { data: { presence: "maybe" } },
       }),
     ).toThrow();
+  });
+});
+
+test("ComponentSchema round-trips an optional dir", () => {
+  const c = ComponentSchema.parse({ name: "svc", kind: "go", paths: ["svc/**"], dir: "svc" });
+  expect(c.dir).toBe("svc");
+});
+
+test("a component without dir parses (dir undefined)", () => {
+  const c = ComponentSchema.parse({ name: "go", kind: "go", paths: ["**"] });
+  expect(c.dir).toBeUndefined();
+});
+
+test("ComponentSchema rejects a traversal dir (parse-boundary safety, WO-9 Task 2)", () => {
+  expect(() =>
+    ComponentSchema.parse({ name: "svc", kind: "go", paths: ["svc/**"], dir: "../.." }),
+  ).toThrow();
+});
+
+test("ComponentSchema rejects an absolute dir", () => {
+  expect(() =>
+    ComponentSchema.parse({ name: "svc", kind: "go", paths: ["svc/**"], dir: "/etc" }),
+  ).toThrow();
+});
+
+test("ComponentSchema accepts a safe nested dir", () => {
+  const c = ComponentSchema.parse({
+    name: "svc",
+    kind: "go",
+    paths: ["svc/**"],
+    dir: "services/api",
+  });
+  expect(c.dir).toBe("services/api");
+});
+
+test("parseProfile rejects a hand-edited profile with a traversal dir on a component", () => {
+  expect(() =>
+    parseProfile({
+      slug: "demo",
+      targetRepo: "/tmp/repo",
+      components: [{ name: "svc", kind: "go", paths: ["svc/**"], dir: "../.." }],
+    }),
+  ).toThrow();
+});
+
+describe("enum vocabulary covers polyglot ecosystems", () => {
+  test("ReleaseMechanismEnum accepts the polyglot mechanisms and keeps the originals", () => {
+    for (const m of [
+      "pypi",
+      "conda",
+      "npm",
+      "cargo",
+      "gem",
+      "composer",
+      "maven",
+      "go-module",
+      "semantic-release",
+      "app-store",
+      "installer",
+      "signed-binary",
+      "none",
+      "unknown",
+    ] as const) {
+      expect(ReleaseMechanismEnum.parse(m)).toBe(m);
+    }
+  });
+  test("TopologyTypeEnum accepts browser-extension and keeps the originals", () => {
+    for (const t of [
+      "browser-extension",
+      "web-service",
+      "web-n-tier",
+      "desktop",
+      "mobile-ios",
+      "mobile-android",
+      "cli",
+      "library",
+      "hybrid",
+      "unknown",
+    ] as const) {
+      expect(TopologyTypeEnum.parse(t)).toBe(t);
+    }
   });
 });

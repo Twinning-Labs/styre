@@ -32,9 +32,11 @@ export const nodeDef: LangDef = {
       components.push({
         name: isRoot ? "frontend" : dir.replace(/\//g, "-"),
         kind: isRoot && fe ? "sveltekit" : "node",
+        ...(isRoot ? {} : { dir }),
         // Co-located frontend: root package.json owns src/static, NOT a sibling rust src-tauri.
         paths: isRoot ? ["src/**", "static/**", "package.json"] : [`${dir}/**`],
         commands,
+        prepare: "npm install",
       });
     }
     return components;

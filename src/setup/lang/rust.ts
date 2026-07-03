@@ -71,6 +71,7 @@ export const rustDef: LangDef = {
       components.push({
         name: dir === "" ? "rust" : dir.replace(/\//g, "-"),
         kind: "rust",
+        ...(dir === "" ? {} : { dir }),
         paths: [dir === "" ? "**" : `${dir}/**`],
         commands: { build: "cargo build", test: "cargo test" },
       });

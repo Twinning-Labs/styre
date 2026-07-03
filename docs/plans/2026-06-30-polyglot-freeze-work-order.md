@@ -96,7 +96,7 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 - [x] ✅ Invariant 2 — path backstop + `safeMember` member sanitization
 - [x] ✅ Behavior-preserving migration of the 5 stacks + invariant/conformance tests
 
-### WO-3 · Deterministic detection / first-class set
+### WO-3 · Deterministic detection / first-class set — ✅ COMPLETE (Ruby/PHP/`prepare` shipped; plan `docs/plans/2026-06-30-wo3-ruby-php-prepare.md`)
 - [x] ✅ Rust detector (+ workspace collapse) — *detection done; glob emission is interim (WO-5/6)*
 - [x] ✅ Node **detection** (scripts-aware) — *glob emission (root carve / per-member) is 🟡 interim (WO-5/6)*
 - [x] ✅ Python detector (+ runner ladder tox → nox → `pytest.ini` → `pyproject` → `python -m pytest`) — *no `manage.py` rung; that was never built*
@@ -105,9 +105,9 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 - [x] ✅ JVM-Gradle detector (wrapper-aware)
 - [x] ✅ Extended manifest-walk `SKIP` set
 - [x] ✅ Subdir-only-manifest loud warning (`unrootedManifestWarnings`)
-- [ ] ⬜ **Ruby `LangDef`** (Gemfile; rspec/rake ladder) **+ its `EXTENSIONS_BY_KIND` entry** (`.rb/.rake/.gemspec`) — *M-C3, first-class set. Without the map entry, `.rb` files route path-only (the interleaving fix won't apply).*
-- [ ] ⬜ **PHP `LangDef`** (composer.json; Pest-before-phpunit ladder) **+ its `EXTENSIONS_BY_KIND` entry** (`.php`) — *M-C3, first-class set.*
-- [ ] ⬜ **Detect-only `prepare` command class** (install/bootstrap, stored not run) — *M-C3*
+- [x] ✅ **Ruby `LangDef`** (Gemfile; signal-gated rspec→rake→`{unavailable}` ladder) **+ `EXTENSIONS_BY_KIND["ruby"]=[".rb",".rake",".gemspec"]`** + anchored `testFilePattern` `(^|/)(spec|test)/.*_(test|spec)\.rb$` — *WO-3 SHIPPED (commits `60b5b13`/`be08341`); verify inert until WO-12.*
+- [x] ✅ **PHP `LangDef`** (composer.json; Pest-before-phpunit ladder) **+ `EXTENSIONS_BY_KIND["php"]=[".php"]`** + anchored `testFilePattern` `(^|/)tests?/.*Test\.php$` — *WO-3 SHIPPED (commits `8ecbdcc`/`c32992d`); verify inert until WO-12.*
+- [x] ✅ **Detect-only `prepare` command class** (install/bootstrap, **stored never run**) — separate `Component.prepare?` field (inert/agent-unauthorable/Invariant-1-backstopped/shown-at-sign-off); populated Ruby/PHP/Node (`bundle`/`composer`/`npm install`); python/go/jvm/rust deferred. *WO-3 SHIPPED (commits `60b5b13`/`6215b82`).*
 
 ### WO-4 · Command discovery sources (freeze §9.5)
 - [x] ✅ Conventions / ecosystem-default rung (hardcoded commands per LangDef)
@@ -148,11 +148,12 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 - [ ] 🔵 `go.work` reactor — additive, same reconcile gate
 - [ ] 🔵 Degrade-to-over-verify (`["**"]` workspace root) on low-confidence member parse
 
-### WO-9 · Non-root detection & naming
-- [x] 🟡 Rust/Node emit non-root dir components (folder-glob — B2 interim)
-- [ ] ⬜ Python/Go/JVM non-root — *via the WO-5 file-identity model (currently warning-only)*
-- [ ] 🔵 **`uniquifyNames`** pass (sound, specced in M-C2a, **unshipped**) — RETAIN; **additive, lands *with* non-root** (no consumer until dir-named components exist)
-- [ ] ❌ **`scopeColocatedRoots`** (folder carve) — **REJECTED**, do not build (silent under-verify; freeze §5)
+### WO-9 · Non-root detection & naming — ✅ COMPLETE (Python/Go non-root + `uniquifyNames` shipped; JVM non-root → WO-8) — *plan `docs/plans/2026-07-01-wo9-non-root-detection.md`*
+- [x] 🟡 Rust/Node emit non-root dir components (folder-glob — B2 interim; WO-9 retrofitted `dir` for correct command cwd, commit `fd48235`)
+- [x] ✅ **Python/Go non-root — file-identity, per-manifest (root + nested), each dir-scoped + a `Component.dir?` field driving per-component command cwd at all 3 verify run sites** (closes the root+nested vacuous pass; the nested module gets its own gate in its own cwd). Commits `1490821` (dir field+backstop+carry) · `0cef08f` (cwd + parse-boundary refine) · `d24d46c` (Go) · `74d56ca` (Python + requirements-only warning) · `ea02dd2` (findManifests skip-testdata + sort). *WO-9 SHIPPED.*
+- [ ] 🔵 **JVM non-root → moved to WO-8** (not self-contained: `<parent>`/`<relativePath>` + root wrapper = reactor/parent resolution). JVM subdir-only stays **warning-only** until then.
+- [x] ✅ **`uniquifyNames`** pass (m-c2a Task 1, verbatim) — kind-qualifies name collisions; runs inside `runRegistry`. Commit `d59f463`. *WO-9 SHIPPED.*
+- [ ] ❌ **`scopeColocatedRoots`** (folder carve) — **REJECTED**, do not build (silent under-verify; freeze §5) — confirmed NOT shipped.
 
 ### WO-10 · Cross-stack contract gates (freeze §9.6) — **explicit-artifact-only**
 - [ ] ⬜ Detect explicit contract artifacts (`.proto` / OpenAPI / Pact / GraphQL)
@@ -191,13 +192,13 @@ Grouped by the frozen design (executed work §4, decisions §6–7, research §8
 
 - **Fully landed & aligned (✅):** WO-1 (M-A security), WO-2 (M-C1 registry/engine/invariants), the 6 detectors + SKIP + warning in WO-3, the conventions rung + confirm ladder in WO-4, Rust reactor in WO-8, the per-verify recompute in WO-7, the existing PR-body gap surfacing + MERGE gate in WO-11, **WO-13's stack-grounded prompt decomposition (commits `5dc7960`, `38b9603`)**, **WO-4's AGENTS.md command source (commit `de4c80d`)**, and **WO-5's file-identity routing + run-all safety (commits `0b941c0`/`0b1e9ea`/`6384811`; TDD + per-task + overall Opus reviews)**.
 - **Interim (🟡 — landed, mechanism to be replaced):** folder-glob routing (WO-5/WO-6), the Node co-located carve, the Node per-member walk.
-- **In-feature, not started (⬜):** Ruby/PHP/`prepare` (WO-3); scoped CI-reading + precedence wiring (WO-4; AGENTS.md half done); Python/Go/JVM non-root via identity (WO-9); explicit-artifact contract gates (WO-10 items 1–2).
+- **In-feature, not started (⬜):** scoped CI-reading + precedence wiring (WO-4; AGENTS.md half done); explicit-artifact contract gates (WO-10 items 1–2). *(WO-3 Ruby/PHP/`prepare` ✅ SHIPPED; WO-9 Python/Go non-root + `uniquifyNames` ✅ SHIPPED — JVM non-root → WO-8. **The polyglot-setup DONE line is now closed.**)*
 - **In-feature, partially landed (🟡):** **the cost refinement** (WO-6: inert-skip + `sweep-cost` measurement **landed**, commits `d29f138`/`7759451`; the T1 over-budget **bound** + the *named hard-gate* global-file set + content-hash dedup deferred to a calibrated fast-follow; the safety mechanism itself landed in WO-5).
 - **Named follow-on milestone (🔵 first-class, separate):** **Milestone M-D — cross-stack design/implement coordination** (implement-time cross-stack context, coupled-cluster one-context, dependency-graph blast-radius, implicit-contract design-gate). Modifies the closed S1–S10 catalog; needs its own spec + `control-loop.md` revision + review; depends on WO-13.
 - **Out-of-feature (🔵 — reframe / run-loop / commercial):** persist+watch the graph (WO-7); JVM/Go reactors (WO-8); rung-2/rung-3 classification (WO-5); the pre-PR interactive hold (WO-11); the OSS env-bubble belongs to the run-loop (WO-12).
 - **Rejected (❌):** `scopeColocatedRoots` (WO-9); commercial env-provisioning (WO-12).
 
-**The DONE line.** Polyglot setup is *complete* at **WO-1…WO-6** (security, registry, detectors, command discovery incl. AGENTS.md + scoped CI, file-identity rung-1 + the two re-expressions, gates/triggers + run-more-when-unsure) **plus WO-9's non-root via identity and WO-13's stack-grounded decomposition**. Everything from WO-7's persistence on — including **Milestone M-D** (cross-stack implement coordination) — is additive, follow-on, run-loop, control-loop, or commercial.
+**The DONE line.** Polyglot setup is *complete* at **WO-1…WO-6** (security, registry, detectors, command discovery incl. AGENTS.md + scoped CI, file-identity rung-1 + the two re-expressions, gates/triggers + run-more-when-unsure) **plus WO-9's Python/Go non-root via identity and WO-13's stack-grounded decomposition**. **JVM non-root folds into WO-8** (reactor/parent resolution) — the DONE line does **not** block on it. Everything from WO-7's persistence on — including **Milestone M-D** (cross-stack implement coordination) — is additive, follow-on, run-loop, control-loop, or commercial.
 
 **The cardinal sin is now killed (WO-5, landed).** File-identity routing + the run-all advisory sweep mean an unowned file in a mixed diff can no longer ride through silently. **The single most load-bearing *remaining* item is WO-6's cost *bound*:** the run-all sweep is now **measured** (the `sweep-cost` signal, commit `7759451`) but not yet **bounded** — the over-budget branch + the *named hard-gate* global-file set remain (deferred calibrated fast-follow, freeze §13 #1). (The passing/empty-sweep positive-trace nuance is now **closed**: `sweep-cost` fires even at `stacksSwept:0`.)
 

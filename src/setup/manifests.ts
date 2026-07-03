@@ -17,6 +17,7 @@ export const SKIP = new Set([
   ".gradle",
   ".mvn",
   "Pods",
+  "testdata",
 ]);
 
 /** Bounded-depth walk collecting manifest paths (relative to repoDir). */
@@ -33,7 +34,7 @@ export function findManifests(repoDir: string, name: string, maxDepth = 3): stri
     }
   };
   walk(repoDir, "", 0);
-  return found;
+  return found.sort();
 }
 
 /** Invariant 2 helper — a repo-derived workspace member string is safe iff non-empty, not absolute,

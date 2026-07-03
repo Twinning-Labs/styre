@@ -19,12 +19,33 @@ export function runRegistry(repoDir: string, registry: LangDef[]): Component[] {
         if (typeof v === "string" && !isCommandSafe(v))
           throw new Error(`engine: unsafe command for ${c.name}.${k}: ${v}`);
       }
+      if (c.prepare !== undefined && !isCommandSafe(c.prepare))
+        throw new Error(`engine: unsafe prepare command for ${c.name}: ${c.prepare}`);
+      if (c.dir !== undefined && !isSafePath(c.dir))
+        throw new Error(`engine: unsafe dir for ${c.name}: ${c.dir}`);
       const paths = c.paths.filter(isSafePath);
       if (paths.length === 0) continue;
       out.push({ ...c, paths, extensions: [...(EXTENSIONS_BY_KIND[c.kind] ?? [])] });
     }
   }
-  return out;
+  return uniquifyNames(out);
+}
+
+/** Guarantee unique component names: a name shared by ≥2 components is qualified `<kind>-<name>`
+ *  (then `-<n>`). Non-colliding names are left untouched (behavior-preserving for single-stack repos). */
+export function uniquifyNames(components: Component[]): Component[] {
+  const counts = new Map<string, number>();
+  for (const c of components) counts.set(c.name, (counts.get(c.name) ?? 0) + 1);
+  const used = new Set<string>();
+  for (const c of components) if ((counts.get(c.name) ?? 0) === 1) used.add(c.name);
+  return components.map((c) => {
+    if ((counts.get(c.name) ?? 0) === 1) return c;
+    let name = `${c.kind}-${c.name}`;
+    let i = 2;
+    while (used.has(name)) name = `${c.kind}-${c.name}-${i++}`;
+    used.add(name);
+    return { ...c, name };
+  });
 }
 
 /** Deterministic component skeleton: anchors the agent refine + the command ladder. */
@@ -36,10 +57,10 @@ export function detectComponents(repoDir: string): {
 }
 
 const TARGETED_LANG_MANIFESTS: Array<[string, string[]]> = [
-  ["python", ["pyproject.toml", "setup.py", "requirements.txt"]],
-  ["go", ["go.mod"]],
   ["jvm-maven", ["pom.xml"]],
   ["jvm-gradle", ["build.gradle", "build.gradle.kts"]],
+  ["ruby", ["Gemfile"]],
+  ["php", ["composer.json"]],
 ];
 
 /** §5.4 loud note: warn when a targeted-language manifest exists only in subdirs (no root match),
@@ -58,6 +79,19 @@ export function unrootedManifestWarnings(repoDir: string): string[] {
         break;
       }
     }
+  }
+  // Python: a subdir requirements.txt with NO sibling pyproject.toml/setup.py is not a detectable
+  // module — surface it (loud) rather than emitting nothing (would be a silent under-detection).
+  for (const rel of findManifests(repoDir, "requirements.txt")) {
+    const dir = rel.slice(0, -"requirements.txt".length).replace(/\/$/, "");
+    if (dir === "") continue; // root → root component handles it
+    const hasAnchor =
+      existsSync(join(repoDir, dir, "pyproject.toml")) ||
+      existsSync(join(repoDir, dir, "setup.py"));
+    if (!hasAnchor)
+      out.push(
+        `⚠ requirements.txt under ${dir}/ has no pyproject.toml/setup.py — not a detectable Python module; no component emitted.`,
+      );
   }
   return out;
 }

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { unrootedManifestWarnings } from "../../../src/setup/detect-components.ts";
 import { pythonDef } from "../../../src/setup/lang/python.ts";
 
 function fixture(files: Record<string, string>): string {
@@ -63,7 +64,38 @@ test("python: no python manifest → no components", () => {
   expect(pythonDef.detect(root)).toHaveLength(0);
 });
 
-test("python: nested-only pyproject.toml → no component (root-only detection)", () => {
-  const root = fixture({ "src/pyproject.toml": "[project]\n" });
-  expect(pythonDef.detect(root)).toHaveLength(0);
+test("python: single root pyproject → one root component (unchanged)", () => {
+  const root = fixture({ "pyproject.toml": "[project]\n" });
+  expect(pythonDef.detect(root)).toEqual([
+    { name: "python", kind: "python", paths: ["**"], commands: { test: "python -m pytest" } },
+  ]);
+});
+
+test("python: subdir-only pyproject/setup.py → per-subdir dir-scoped components", () => {
+  const root = fixture({ "services/a/pyproject.toml": "[project]\n", "services/b/setup.py": "" });
+  const cs = pythonDef.detect(root).sort((x, y) => x.name.localeCompare(y.name));
+  expect(cs.map((c) => [c.name, c.dir, c.paths[0]])).toEqual([
+    ["services-a", "services/a", "services/a/**"],
+    ["services-b", "services/b", "services/b/**"],
+  ]);
+});
+
+test("python: root + nested → root ['**'] AND nested dir-scoped", () => {
+  const root = fixture({ "pyproject.toml": "[project]\n", "libs/x/pyproject.toml": "[project]\n" });
+  const cs = pythonDef.detect(root);
+  expect(cs.find((c) => c.dir === undefined)?.paths).toEqual(["**"]);
+  expect(cs.find((c) => c.dir === "libs/x")?.paths).toEqual(["libs/x/**"]);
+});
+
+test("python: a module with BOTH pyproject and setup.py → ONE component", () => {
+  const root = fixture({ "svc/pyproject.toml": "[project]\n", "svc/setup.py": "" });
+  expect(pythonDef.detect(root).filter((c) => c.dir === "svc")).toHaveLength(1);
+});
+
+test("python: subdir requirements.txt with no pyproject/setup.py → NOT a module, but warns", () => {
+  const root = fixture({ "svc/requirements.txt": "flask\n" });
+  expect(pythonDef.detect(root)).toEqual([]); // no module emitted
+  expect(
+    unrootedManifestWarnings(root).some((w) => w.includes("svc") && w.includes("requirements.txt")),
+  ).toBe(true);
 });

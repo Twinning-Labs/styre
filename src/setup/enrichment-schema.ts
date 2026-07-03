@@ -5,18 +5,27 @@ import { PresenceEnum, ReleaseMechanismEnum, TopologyTypeEnum } from "../dispatc
 // agent that emits a section but omits its detail still parses. An omitted whole section makes
 // the parse fail → extractSidecar reports "malformed" → enrichRuntimeContext retries. The
 // optional presence/type/mechanism are PROPOSALS, honored by the merge only where scan==unknown.
-const triSection = z.object({ presence: PresenceEnum.optional(), detail: z.string().default("") });
+// FAIL-SOFT (uniform across ALL enum-valued proposal fields — presence, type, mechanism):
+// `.catch(undefined)` coerces an out-of-enum agent value to `undefined` (→ the merge's
+// `?? "unknown"`), so a wild proposal degrades gracefully to `unknown` instead of failing the
+// whole-section parse and crashing setup after 3 retries. This never admits the raw string into
+// the profile (the vocab stays controlled), and it is scoped to the enum VALUE only — a
+// wrong-typed `detail` or a whole missing section is structural corruption and STILL fails→retry.
+const triSection = z.object({
+  presence: PresenceEnum.optional().catch(undefined),
+  detail: z.string().default(""),
+});
 const dataSection = z.object({
-  presence: PresenceEnum.optional(),
+  presence: PresenceEnum.optional().catch(undefined),
   migrationTool: z.string().optional(),
   detail: z.string().default(""),
 });
 const topologySection = z.object({
-  type: TopologyTypeEnum.optional(),
+  type: TopologyTypeEnum.optional().catch(undefined),
   detail: z.string().default(""),
 });
 const releaseSection = z.object({
-  mechanism: ReleaseMechanismEnum.optional(),
+  mechanism: ReleaseMechanismEnum.optional().catch(undefined),
   detail: z.string().default(""),
 });
 
