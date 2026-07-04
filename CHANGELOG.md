@@ -1,6 +1,17 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.3.0] - 2026-07-04
+
+### Features
+- Setup→verify security hardening (F1–F4 + A1) (#43)
+- Polyglot detectors + registry engine (M-B / M-C1) (#44)
+- Design stack-awareness (WO-13) + AGENTS.md command source (WO-4) (#45)
+- File-identity routing (WO-5, schemaVersion 3) + sweep cost (WO-6) (#46)
+- Ruby/PHP (WO-3) + non-root manifests (WO-9) + enrichment fail-soft (#47)
+- Provision step — styre readies its own verify env (C1) (#48)
+
+
 ## [0.2.0] - 2026-06-27
 
 ### Documentation
