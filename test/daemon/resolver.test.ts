@@ -96,6 +96,7 @@ test("implement: a verifying unit with an unrun check asks for the verify step",
     status: "verifying",
   });
   await succeed(db, ticketId, "provision");
+  await succeed(db, ticketId, "completeness:wu1");
   const d = nextStepKey(db, ticketId);
   db.close();
   expect(d).toEqual({
@@ -103,6 +104,28 @@ test("implement: a verifying unit with an unrun check asks for the verify step",
     stepKey: "verify:wu1:test",
     stepType: "verify",
     handlerKey: "verify:check",
+    workUnitId: u.id,
+  });
+});
+
+test("implement: a verifying unit routes to completeness after provision, before verify", async () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  const u = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verifying",
+  });
+  await succeed(db, ticketId, "provision");
+  const d = nextStepKey(db, ticketId);
+  db.close();
+  expect(d).toEqual({
+    kind: "step",
+    stepKey: "completeness:wu1",
+    stepType: "completeness",
+    handlerKey: "completeness",
     workUnitId: u.id,
   });
 });
@@ -134,6 +157,7 @@ test("implement: a verifying unit whose checks all have signals asks to mark-ver
     branchHeadSha: "sha-abc",
   });
   await succeed(db, ticketId, "provision");
+  await succeed(db, ticketId, "completeness:wu1");
   const d = nextStepKey(db, ticketId);
   db.close();
   expect(d).toEqual({ kind: "mark-verified", workUnitId: u.id });
@@ -262,6 +286,7 @@ test("provision runs once before the first unit verify", async () => {
     workUnitId: null,
   });
   await succeed(db, ticketId, "provision");
+  await succeed(db, ticketId, "completeness:wu1");
   expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "verify:wu1:test" });
   db.close();
 });

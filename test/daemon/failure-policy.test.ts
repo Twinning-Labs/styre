@@ -296,6 +296,102 @@ test("a provision failure escalates immediately and never loops back (even under
   expect(afterUnit?.status).toBe("verifying"); // never bounced to pending
 });
 
+test("completeness under-delivery loops the unit back to implement", () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verifying",
+  });
+  const step = failedStep(db, ticketId, {
+    stepKey: "completeness:wu1",
+    stepType: "completeness",
+    workUnitId: unit.id,
+    attempts: 1,
+  });
+  // A genuine under-delivery signal must exist so the branch takes the loopback path, not the
+  // F1 infra-crash retry guard (latestCompletenessResult !== "fail" -> retry). Without this the
+  // handler crashing before recording anything (a wiped worktree, etc.) looks identical to a
+  // clean-run non-failure, and correctly defaults to retry, not loopback.
+  insertSignal(db, { ticketId, workUnitId: unit.id, signalType: "completeness", result: "fail" });
+  const result = applyFailurePolicy(db, ticketId, step);
+  const afterUnit = getUnit(db, unit.id);
+  const loopbacks = listEvents(db, ticketId).filter((e) => e.kind === "loopback");
+  db.close();
+  expect(result.decision).toBe("loopback");
+  expect(afterUnit?.status).toBe("pending");
+  expect(loopbacks.length).toBe(1);
+  expect(loopbacks[0]?.loop).toBe("implement");
+});
+
+test("completeness under-delivery escalates at the attempt ceiling", () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verifying",
+  });
+  const step = failedStep(db, ticketId, {
+    stepKey: "completeness:wu1",
+    stepType: "completeness",
+    workUnitId: unit.id,
+    attempts: 3,
+  });
+  const result = applyFailurePolicy(db, ticketId, step, { maxAttempts: 3 });
+  db.close();
+  expect(result.decision).toBe("escalated");
+});
+
+// The design's most-insisted-on property (§4): a re-coded-but-still-under-delivering unit must
+// escalate at the SECOND identical failure (isRepeatedFailure), not burn all 3 attempts.
+test("completeness escalates at the second identical under-delivery, not the third", () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verifying",
+  });
+  // A genuine under-delivery signal must exist so the branch takes the loopback path (F1 guard).
+  // (insertSignal here is the ground-truth-signal repo import already at the top of the file.)
+  const recordFail = () =>
+    insertSignal(db, { ticketId, workUnitId: unit.id, signalType: "completeness", result: "fail" });
+
+  recordFail();
+  const first = failedStep(db, ticketId, {
+    stepKey: "completeness:wu1",
+    stepType: "completeness",
+    workUnitId: unit.id,
+    attempts: 1,
+  });
+  expect(applyFailurePolicy(db, ticketId, first).decision).toBe("loopback");
+
+  // Second identical failure: same step_key + same "boom" message ⇒ same failureSignature as the
+  // loopback just recorded, at attempt 2 (< maxAttempts, so NOT the ceiling guard). The loopback
+  // above reset the step to pending (not deleted, per resetToPending) — re-fetch and re-fail the
+  // SAME row rather than inserting a new one, or the ticket_id+step_key UNIQUE constraint fires
+  // (mirrors the "same verify failure twice in a row escalates" test's pattern).
+  recordFail();
+  const resetStep = getStepByKey(db, ticketId, "completeness:wu1");
+  if (!resetStep) throw new Error("step missing after loopback reset");
+  markRunning(db, resetStep.id, { pid: 1 });
+  markFailed(db, resetStep.id, new Error("boom"));
+  const second = getStep(db, resetStep.id);
+  if (!second) throw new Error("step missing after second markFailed");
+  expect(second.attempt).toBe(2);
+  const res = applyFailurePolicy(db, ticketId, second);
+  db.close();
+  expect(res.decision).toBe("escalated");
+});
+
 test("whole-project failure spawns a reconcile unit and re-opens integration", () => {
   const { db, ticketId } = makeTestDb();
   insertWorkUnit(db, {

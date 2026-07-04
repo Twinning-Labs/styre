@@ -115,6 +115,11 @@ export function validateExtraction(units: ExtractedWorkUnit[]): string[] {
   }
 
   for (const u of units) {
+    if (u.files_to_touch.length === 0) {
+      errors.push(
+        `unit seq ${u.seq} declares no files_to_touch (every planned unit must name ≥1 file)`,
+      );
+    }
     if (u.behavioral) {
       if (u.test_plan === null || u.test_plan.trim() === "") {
         errors.push(`unit seq ${u.seq} is behavioral but has no test_plan`);

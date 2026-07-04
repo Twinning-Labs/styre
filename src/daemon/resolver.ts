@@ -113,6 +113,9 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
         if (!done(db, ticketId, "provision")) {
           return step("provision", "provision", "provision", null);
         }
+        if (!done(db, ticketId, `completeness:wu${u.seq}`)) {
+          return step(`completeness:wu${u.seq}`, "completeness", "completeness", u.id);
+        }
         const check = nextUnrunCheck(db, u);
         if (check !== null) {
           return step(`verify:wu${u.seq}:${check}`, "verify", "verify:check", u.id);

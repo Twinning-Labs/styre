@@ -192,10 +192,14 @@ message (incl. `dispatch_id`) and records the SHA — so agents need no git tool
 > code↔test iteration).
 
 **Per-step postcondition (`[CL-POSTCOND]`).** Every dispatch step has a concrete runner-checked
-postcondition — *did this step actually produce its output?* (design → plan committed; implement →
-non-empty diff; review → completed with a findings ledger). A clean dispatch that fails its
-postcondition is that step's failure, routed per §8 — **no step can silently no-op.** (This
-decomposes the legacy `agent-contract-missing` into per-step checks.)
+postcondition — *did this step actually produce its output?* (design → plan committed; review →
+completed with a findings ledger). A clean dispatch that fails its postcondition is that step's
+failure, routed per §8 — **no step can silently no-op.** (This decomposes the legacy
+`agent-contract-missing` into per-step checks.) **Implement is the exception:** its dispatch has no
+non-empty-diff postcondition (the plan gate at `design:extract` already guarantees every unit
+declares ≥1 file, so a vacuous unit never reaches implement); an empty *actual* diff is instead
+caught downstream as under-delivery by `completeness:wuN` (S2d, §8 row CM1), not thrown as a
+dispatch-level failure.
 
 **Pre-dispatch profile-completeness gate (`[CL-PROFILE]`).** Before *any* dispatch, the runner
 verifies the project-profile resolves every input the rendered prompt needs (no unresolved
@@ -270,13 +274,17 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   plan committed; rebase current.
 - **Input:** the `work_unit` spec; the plan doc; implement prompt + profile; worktree at branch HEAD.
 - **Output:** code **+ the unit's tests** edited in the worktree → **runner commits** → SHA recorded,
-  `dispatch` row, `wuN.status='verifying'`. **Postcondition: branch HEAD advanced; diff non-empty.**
-  No schema-extraction step — implement's output is code, judged by ground-truth verify, not a payload.
+  `dispatch` row, `wuN.status='verifying'`. **Postcondition: branch HEAD advanced** (the commit
+  happened) — there is no dispatch-level non-empty-diff check; that guarantee now comes from the plan
+  gate (every unit declares ≥1 file at `design:extract`) plus `completeness:wuN` (S2d) gating
+  under-delivery downstream. No schema-extraction step — implement's output is code, judged by
+  ground-truth verify, not a payload.
 - **Tools:** `Read`, `Grep`, `Glob`; `Write`/`Edit` **full worktree** (`files_to_touch` is advisory,
   A3 — reviewer-judged, not tool-enforced); `Bash` = **profile's kind-appropriate build/test/lint
   runners only** (the within-step code↔test self-check loop). ❌ no git tools, no outward tools,
   no arbitrary Bash.
-- **Failure → route:** I1/I2 in §8.
+- **Failure → route:** I1 in §8 (empty-diff is no longer routed here — the plan gate rejects
+  no-file units and `completeness:wuN`/CM1 gates under-delivery; I2 is superseded by CM1).
 
 **S2c · `provision`** — ready the verify environment (runner-executed, no LLM)
 - **Guard:** `stage='implement'`; a work-unit is `verifying` (about to run its first unrun check) **or**
@@ -304,6 +312,43 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   worktree source that can't be proven under test), never a code defect, so it is never routed back to
   implement (re-implementing can't reach it under capability isolation). See §8, row E1.
 
+**S2d · `completeness:wuN`** — deterministic plan-vs-diff reconciliation (runner-executed, no LLM)
+- **Guard:** a work-unit is `verifying`; `done('provision')`; `!done('completeness:wuN')`. Fires
+  **once** per unit, gated between S2c `provision` and the unit's first `verify:wuN:<check>` — after
+  the provision gate, before the unit's next-unrun-check lookup.
+- **Input:** `wuN.files_to_touch` (the declared scope); two diffs, both via `changedFilesBetween`,
+  because under- and over-delivery need opposite bases — the unit's **own** diff (base = `wuN`'s own
+  `base_sha`, head = its latest dispatch SHA — identical to what `verify:check` used before this step
+  absorbed the calculation) and the **cumulative** ticket diff (base = the **lowest-seq unit's**
+  `base_sha`, the ticket fork point — never the processed unit's own base, which for a later unit would
+  exclude an earlier sibling's already-landed work); worktree at the unit's latest SHA.
+- **Output:** a **`completeness`** ground-truth signal (`result ∈ pass|fail`, `detail_json =
+  {disposition, under, declared}`); an advisory **`scope_diff`** signal (own-diff-based over-delivery —
+  the same signal `verify:check` used to produce, now emitted here instead).
+  `under = declared − cumulativeTouched` (did *anyone* touch the declared file — a sibling's coverage
+  counts, so a redundant/over-decomposed unit is not flagged); `over = ownTouched − declared` (did
+  *this* unit touch something undeclared — always its own diff, never cumulative, or every prior unit's
+  files would be misattributed as this unit's over-reach).
+- **Dispositions:** `under ≠ ∅` → `under-delivered` — **hard gate**, loopback (§8); `under = ∅` and
+  `ownTouched = ∅` → `covered-by-sibling` — no-op success, advance (fixes the false-block where a
+  redundant unit's declared work was already done by a sibling); `under = ∅` and `ownTouched ≠ ∅` →
+  `completed-by-self` — advance. `over` is always advisory; it never fails this step.
+- **Precondition (plan gate):** `design:extract` (S1b) requires every planned unit to declare ≥1
+  `files_to_touch`, so a vacuous unit fails plan validation and re-dispatches `design:extract` instead
+  of ever reaching implement — `completeness` is never asked to loop back a unit with nothing to touch.
+  The runner-created `reconcile` unit (ticket-scoped, declares no files by design, §8 N1) is exempt and
+  is governed by `verify:integration`, not this step.
+- **Commands/Capability:** none — pure git-diff + set arithmetic against already-committed state; no
+  install, no build/test runner, no LLM. **Recomputable, no exactly-once effect** (like `provision`/S3):
+  safe to re-run on replay.
+- **Scope (a known, deliberate limit):** file-granular and plan-anchored — verifies *self-consistency*
+  (implement matches the declared plan), not *validity* (the plan matches the ticket) or
+  content-completeness (a stub or partial edit within a touched file). The semantic
+  **AC-completeness** layer — a dropped acceptance criterion, or a file declared by multiple units
+  where the real work landed on none of them — is a **deferred follow-up**, folded into S5 review as a
+  new finding category, not a parallel journaled step.
+- **Failure → route:** under-delivery in §8 (**Completeness**, row CM1).
+
 ### Verify (ground truth; runner-executed, no LLM)
 
 **S3 · `verify:wuN:<check>`** — per-work-unit ground truth (one step per check-type)
@@ -318,8 +363,8 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 - **Behavioral gate (A1), deterministic:** when `wuN.behavioral=1`, the test check requires *the
   dispatch diff touched a test file* (path-classified via the profile) **and** tests green — both
   deterministic. Whether the test is *good* is the reviewer's job (S5), never the runner's.
-- **`scope_diff` is advisory (A3):** produces a signal that becomes an input to review; it never
-  fails S3.
+- **`scope_diff` moved to `completeness` (S2d, A3):** the advisory over-delivery signal is produced
+  there now, not here — it becomes an input to review; it never fails S2d or S3.
 - **Value (vs the agent's inner loop):** the agent's loop is self-report on its working tree with a
   command it chose; S3 is the **independent** re-run on the **committed SHA** with the **canonical**
   profile command, producing a **structured durable signal** the control loop trusts. It catches
@@ -581,13 +626,15 @@ exit 75 on a session interruption, resumable with `styre run --resume` — are i
 | R4 | rebase (post-review) | main outpaces keep-current (thrash) | stop; hand merge to the human | — | — |
 | **Implement + unit verify** ||||||
 | I1 | S2b | claude death / timeout | retry fresh dispatch (backoff) | unit | K_retry → escalate |
-| I2 | S2b postcondition | noop — empty diff | re-dispatch with feedback | unit | K_distinct → escalate |
+| I2 | ~~S2b postcondition~~ | ~~noop — empty diff~~ — **superseded by CM1**: S2b no longer has a non-empty-diff postcondition (§ CL-POSTCOND); an empty dispatch diff for a real unit now surfaces as `under ≠ ∅` at `completeness:wuN` and routes via CM1 below | — | — | — |
 | I3 | S3 | build red | → S2b with build error | unit | K_distinct → escalate |
 | I4 | S3 | tests red | → S2b with failing tests | unit | K_distinct → escalate |
 | I5 | S3 | behavioral unit, no test in the diff | → S2b to add the test | unit | K_distinct → escalate |
 | I6 | S3 | toolchain/infra error | retry (transient) | — | K_retry → escalate(infra) |
 | **Provision** ||||||
 | E1 | S2c `provision` | `prepare` install fails, or (Python editable) the worktree-source assertion fails after remediation | escalate immediately (env error, **not** a code loopback — never routed to S2b) | — | immediate, no retry |
+| **Completeness** ||||||
+| CM1 | S2d `completeness` | `under-delivered` — a declared file untouched by anyone (cumulative diff) ³ | → S2b, targeted (missing-files feedback) | unit | K_distinct (per-step `maxAttempts`) → escalate |
 | **Integration** ||||||
 | N1 | S4 | cross-unit integration red | → ticket-scoped reconcile implement | ticket | K_distinct → escalate |
 | **Docs** ||||||
@@ -628,8 +675,19 @@ reconciled-code catch-up → re-verify integration + checks **and re-review (S5)
 (→ files *no* finding, nothing loops back) or **unjustified** (→ a `scope` finding, then exactly V1).
 There is no automatic "diff expanded → loopback."
 
+³ **CM1's plan-gate precondition:** the under-delivered loopback assumes no vacuous unit ever reaches
+implement — S1b's `design:extract` completeness check requires every planned unit to declare ≥1
+`files_to_touch` (D2 if it doesn't), so a unit with nothing to do never produces an incoherent
+"touch these files" loopback with no files named. `completeness` and `verify:wuN:<check>` carry
+**independent** per-step `attempt` counters (not a shared per-unit budget) — an alternating
+completeness/verify failure can therefore cost up to `maxAttempts × 2` implement re-dispatches before
+either exhausts. The semantic **AC-completeness** layer (a dropped acceptance criterion; a file
+declared by multiple units where none did the real work) is explicitly **out of scope for CM1** — it
+is a deferred follow-up folded into S5 review, not this row.
+
 ### 8.4 Loopback targets, by meaning
-**→ implement** (unit or ticket scope — the code is wrong; most failures). **→ design / re-design**
+**→ implement** (unit or ticket scope — the code is wrong; most failures — including CM1's
+under-delivery, where the code is *missing* rather than wrong). **→ design / re-design**
 (plan scope — the plan is wrong; caught early at DV1, or late at V3). **→ escalate** (a resumable
 park — budget exhausted, or an inherently human case: R3/R4, V-def, V6, P3, H1, X1/X2; **or an
 environment error, E1** — provision, always immediate, never bounded by attempt-count; in OSS the run

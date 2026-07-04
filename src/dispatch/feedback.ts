@@ -27,6 +27,10 @@ export function implementFeedback(db: Database, workUnitId: number): string {
     if (detail.reason === "behavioral-no-test") {
       return "- Your previous attempt changed behavior but added no test. Add a test that exercises the new behavior, then make it pass.";
     }
+    if (s.signal_type === "completeness" && Array.isArray(detail.under)) {
+      const under = detail.under as string[];
+      return `- Your previous attempt did not modify these declared files, which the plan required you to change: ${under.join(", ")}. Implement the change to them.`;
+    }
     const why =
       typeof detail.stderr === "string" && detail.stderr !== ""
         ? `: ${detail.stderr.slice(0, 500)}`

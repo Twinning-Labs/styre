@@ -109,14 +109,16 @@ test("a passing check records a pass signal (with command) and the step succeeds
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
   await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
+  await advanceOneStep(db, ticketId, registry); // completeness:wu1 (declared=∅ → no throw)
   const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test
   const sigs = listByUnit(db, unit.id);
   const step = getByKey(db, ticketId, "verify:wu1:test");
   db.close();
   expect(outcome.kind).toBe("stepped");
-  expect(sigs[0]?.signal_type).toBe("test");
-  expect(sigs[0]?.result).toBe("pass");
-  expect(sigs[0]?.command).toBe("true");
+  const testSig = sigs.find((s) => s.signal_type === "test");
+  expect(testSig?.signal_type).toBe("test");
+  expect(testSig?.result).toBe("pass");
+  expect(testSig?.command).toBe("true");
   expect(step?.status).toBe("succeeded");
 });
 
@@ -159,13 +161,15 @@ test("a failing check records a fail signal and fails the step (→ failure-poli
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
   await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
+  await advanceOneStep(db, ticketId, registry); // completeness:wu1 (declared=∅ → no throw)
   const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test
   const sigs = listByUnit(db, unit.id);
   const step = getByKey(db, ticketId, "verify:wu1:test");
   const after = getUnit(db, unit.id);
   db.close();
   expect(["retry", "loopback", "escalated"]).toContain(outcome.kind);
-  expect(sigs[0]?.result).toBe("fail");
+  const testSig = sigs.find((s) => s.signal_type === "test");
+  expect(testSig?.result).toBe("fail");
   expect(step?.status).toBe("pending"); // failure-policy reset
   expect(after?.status).toBe("pending"); // generic verify loopback reset the unit
 });
@@ -209,6 +213,7 @@ test("an absent check (component has no command for the declared check-type) rec
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
   await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
+  await advanceOneStep(db, ticketId, registry); // completeness:wu1 (declared=∅ → no throw)
   const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test → absent error
   const sigs = listByUnit(db, unit.id);
   db.close();
@@ -313,11 +318,13 @@ test("a timed-out check records an error signal (not fail)", async () => {
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
   await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
+  await advanceOneStep(db, ticketId, registry); // completeness:wu1 (declared=∅ → no throw)
   await advanceOneStep(db, ticketId, registry); // verify:check test → sleeps 5s but timeouts at 200ms
   const sigs = listByUnit(db, unit.id);
   db.close();
   // timedOut || exitCode === null maps to "error", not "fail"
-  expect(sigs[0]?.result).toBe("error");
+  const testSig = sigs.find((s) => s.signal_type === "test");
+  expect(testSig?.result).toBe("error");
 });
 
 test("verify:check stamps the verified commit on the signal", async () => {
@@ -359,6 +366,7 @@ test("verify:check stamps the verified commit on the signal", async () => {
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch → real commit sha recorded
   await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
+  await advanceOneStep(db, ticketId, registry); // completeness:wu1 (declared=∅ → no throw)
   await advanceOneStep(db, ticketId, registry); // verify:check test
   const sigs = listByUnit(db, unit.id);
   const sig = sigs.find((s) => s.signal_type === "test");
@@ -409,6 +417,7 @@ test("behavioral unit: green test command but no test in the diff fails with beh
   // implement (writes feature.ts, commits) then verify:check test (true passes, but no test file).
   await advanceOneStep(db, ticketId, registry); // implement
   await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
+  await advanceOneStep(db, ticketId, registry); // completeness:wu1 (declared=∅ → no throw)
   await advanceOneStep(db, ticketId, registry); // verify:check test → A1 fail
   const sig = listByUnit(db, unit.id).find((s) => s.signal_type === "test");
   db.close();
@@ -455,6 +464,7 @@ test("behavioral unit: a test file in the diff passes the test check", async () 
   });
   await advanceOneStep(db, ticketId, registry); // implement
   await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
+  await advanceOneStep(db, ticketId, registry); // completeness:wu1 (declared=∅ → no throw)
   await advanceOneStep(db, ticketId, registry); // verify:check test → pass (test file present)
   const sig = listByUnit(db, unit.id).find((s) => s.signal_type === "test");
   db.close();
@@ -501,7 +511,8 @@ test("scope_diff records an advisory fail for out-of-scope files but does NOT fa
   });
   await advanceOneStep(db, ticketId, registry); // implement
   await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
-  const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test (passes) + scope_diff advisory
+  await advanceOneStep(db, ticketId, registry); // completeness:wu1 (allowed.ts declared+touched → completed-by-self; also stamps scope_diff over-delivery for sneaky.ts)
+  const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test (passes); scope_diff already stamped by completeness, not re-emitted
   const sigs = listByUnit(db, unit.id);
   const scope = sigs.find((s) => s.signal_type === "scope_diff");
   const testSig = sigs.find((s) => s.signal_type === "test");

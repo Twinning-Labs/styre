@@ -35,6 +35,14 @@ function latestVerifyResult(db: Database, step: WorkflowStepRow): string | null 
   return rows.length === 0 ? null : (rows[rows.length - 1]?.result ?? null);
 }
 
+/** The most recent `completeness` result for this unit's step. "fail" = a genuine under-delivery
+ *  (the handler recorded it before throwing); null = the handler crashed before any signal
+ *  (infra/git fault — e.g. a wiped worktree, design §3.1 caveat 2). Mirrors latestVerifyResult. */
+function latestCompletenessResult(db: Database, workUnitId: number): string | null {
+  const rows = listByUnit(db, workUnitId).filter((s) => s.signal_type === "completeness");
+  return rows.length === 0 ? null : (rows[rows.length - 1]?.result ?? null);
+}
+
 /** True when the same failure signature was the immediately-previous loopback for this ticket
  *  (no progress between attempts → escalate). */
 function isRepeatedFailure(db: Database, ticketId: number, signature: string): boolean {
@@ -156,6 +164,47 @@ export function applyFailurePolicy(
         loop: "integration",
         routeTo: step.step_key,
         signature: failureSignature(step),
+      });
+    })();
+    return { decision: "loopback" };
+  }
+
+  // Under-delivery (deterministic completeness) → bounce the unit back to coding to touch its
+  // missing declared files. Same shape as the verify loopback; escalates on no-progress or when
+  // this step's own attempt budget is exhausted (the top-of-function maxAttempts guard). NOTE:
+  // completeness and verify carry independent per-step attempt counters (~maxAttempts each).
+  if (step.step_type === "completeness" && step.work_unit_id !== null) {
+    const workUnitId = step.work_unit_id;
+    // Infra/git crash (no "fail" signal recorded) → retry the check, don't re-code the agent for
+    // an environment fault. Mirrors the verify branch's latestVerifyResult === "error" retry.
+    if (latestCompletenessResult(db, workUnitId) !== "fail") {
+      resetToPending(db, step.id);
+      return { decision: "retry" };
+    }
+    const signature = failureSignature(step);
+    if (isRepeatedFailure(db, ticketId, signature)) {
+      db.transaction(() => {
+        setTicketStatus(db, ticketId, "waiting");
+        insertSignal(db, {
+          ticketId,
+          signalType: "human_resume",
+          reason: `no progress: '${step.step_key}' under-delivered identically twice`,
+        });
+        appendEvent(db, { ticketId, kind: "escalated", reason: "no progress", signature });
+      })();
+      return { decision: "escalated" };
+    }
+    db.transaction(() => {
+      setUnitStatus(db, workUnitId, "pending");
+      for (const s of listStepsForUnit(db, ticketId, workUnitId)) {
+        resetToPending(db, s.id);
+      }
+      appendEvent(db, {
+        ticketId,
+        kind: "loopback",
+        loop: "implement",
+        routeTo: step.step_key,
+        signature,
       });
     })();
     return { decision: "loopback" };
