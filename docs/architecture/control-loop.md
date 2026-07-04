@@ -192,10 +192,14 @@ message (incl. `dispatch_id`) and records the SHA — so agents need no git tool
 > code↔test iteration).
 
 **Per-step postcondition (`[CL-POSTCOND]`).** Every dispatch step has a concrete runner-checked
-postcondition — *did this step actually produce its output?* (design → plan committed; implement →
-non-empty diff; review → completed with a findings ledger). A clean dispatch that fails its
-postcondition is that step's failure, routed per §8 — **no step can silently no-op.** (This
-decomposes the legacy `agent-contract-missing` into per-step checks.)
+postcondition — *did this step actually produce its output?* (design → plan committed; review →
+completed with a findings ledger). A clean dispatch that fails its postcondition is that step's
+failure, routed per §8 — **no step can silently no-op.** (This decomposes the legacy
+`agent-contract-missing` into per-step checks.) **Implement is the exception:** its dispatch has no
+non-empty-diff postcondition (the plan gate at `design:extract` already guarantees every unit
+declares ≥1 file, so a vacuous unit never reaches implement); an empty *actual* diff is instead
+caught downstream as under-delivery by `completeness:wuN` (S2d, §8 row CM1), not thrown as a
+dispatch-level failure.
 
 **Pre-dispatch profile-completeness gate (`[CL-PROFILE]`).** Before *any* dispatch, the runner
 verifies the project-profile resolves every input the rendered prompt needs (no unresolved
@@ -270,8 +274,11 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   plan committed; rebase current.
 - **Input:** the `work_unit` spec; the plan doc; implement prompt + profile; worktree at branch HEAD.
 - **Output:** code **+ the unit's tests** edited in the worktree → **runner commits** → SHA recorded,
-  `dispatch` row, `wuN.status='verifying'`. **Postcondition: branch HEAD advanced; diff non-empty.**
-  No schema-extraction step — implement's output is code, judged by ground-truth verify, not a payload.
+  `dispatch` row, `wuN.status='verifying'`. **Postcondition: branch HEAD advanced** (the commit
+  happened) — there is no dispatch-level non-empty-diff check; that guarantee now comes from the plan
+  gate (every unit declares ≥1 file at `design:extract`) plus `completeness:wuN` (S2d) gating
+  under-delivery downstream. No schema-extraction step — implement's output is code, judged by
+  ground-truth verify, not a payload.
 - **Tools:** `Read`, `Grep`, `Glob`; `Write`/`Edit` **full worktree** (`files_to_touch` is advisory,
   A3 — reviewer-judged, not tool-enforced); `Bash` = **profile's kind-appropriate build/test/lint
   runners only** (the within-step code↔test self-check loop). ❌ no git tools, no outward tools,
@@ -618,7 +625,7 @@ exit 75 on a session interruption, resumable with `styre run --resume` — are i
 | R4 | rebase (post-review) | main outpaces keep-current (thrash) | stop; hand merge to the human | — | — |
 | **Implement + unit verify** ||||||
 | I1 | S2b | claude death / timeout | retry fresh dispatch (backoff) | unit | K_retry → escalate |
-| I2 | S2b postcondition | noop — empty diff | re-dispatch with feedback | unit | K_distinct → escalate |
+| I2 | ~~S2b postcondition~~ | ~~noop — empty diff~~ — **superseded by CM1**: S2b no longer has a non-empty-diff postcondition (§ CL-POSTCOND); an empty dispatch diff for a real unit now surfaces as `under ≠ ∅` at `completeness:wuN` and routes via CM1 below | — | — | — |
 | I3 | S3 | build red | → S2b with build error | unit | K_distinct → escalate |
 | I4 | S3 | tests red | → S2b with failing tests | unit | K_distinct → escalate |
 | I5 | S3 | behavioral unit, no test in the diff | → S2b to add the test | unit | K_distinct → escalate |

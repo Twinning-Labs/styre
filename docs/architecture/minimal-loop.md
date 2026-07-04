@@ -200,6 +200,7 @@ whole spine:
 design:dispatch(Opus,plan) → design:extract(Haiku,work_units)            # fast-track: skip design:review
  → implement:wu1:rebase(runner) → implement:wu1:dispatch(Sonnet,code+tests; runner commits)
  → provision(runner,installs each component's prepare; once per ticket, gates verify)
+ → completeness:wu1(runner,plan-vs-diff reconciliation; once per unit)
  → verify:wu1:build,test(runner,ground-truth) → verify:integration(runner)
  → review(Opus,findings via interface → 0 blocking) → merge:push → merge:pr-ensure(cheap-AI body)
  → merge:await-checks(poll) → merge:await-human(operator merges) → released:project(→ Done)
