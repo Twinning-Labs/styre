@@ -74,6 +74,23 @@ test("validateExtraction accepts a valid backward dependency", () => {
   ).toEqual([]);
 });
 
+test("validateExtraction rejects a unit with no files_to_touch", () => {
+  const errors = validateExtraction([
+    {
+      seq: 1,
+      kind: "backend",
+      title: "t",
+      description: "d",
+      behavioral: false,
+      test_plan: null,
+      files_to_touch: [], // vacuous
+      verify_check_types: [],
+      depends_on: [],
+    },
+  ]);
+  expect(errors.some((e) => e.includes("no files_to_touch"))).toBe(true);
+});
+
 // ─── cdotImpact schema + profile-consistency gate ────────────────────────────
 
 const baseUnits = [
