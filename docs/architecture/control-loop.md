@@ -283,7 +283,8 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   A3 — reviewer-judged, not tool-enforced); `Bash` = **profile's kind-appropriate build/test/lint
   runners only** (the within-step code↔test self-check loop). ❌ no git tools, no outward tools,
   no arbitrary Bash.
-- **Failure → route:** I1/I2 in §8.
+- **Failure → route:** I1 in §8 (empty-diff is no longer routed here — the plan gate rejects
+  no-file units and `completeness:wuN`/CM1 gates under-delivery; I2 is superseded by CM1).
 
 **S2c · `provision`** — ready the verify environment (runner-executed, no LLM)
 - **Guard:** `stage='implement'`; a work-unit is `verifying` (about to run its first unrun check) **or**
