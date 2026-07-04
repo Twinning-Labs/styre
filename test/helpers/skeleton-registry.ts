@@ -42,6 +42,7 @@ export function skeletonRegistry(): StepRegistry {
     return { code: "ok" };
   });
   r.register("provision", () => ({ ok: true }));
+  r.register("completeness", () => ({ ok: true }));
   r.register("verify:check", (ctx: HandlerContext) => {
     const check = ctx.step.step_key.split(":").pop() ?? "test";
     // Stamp the PASS signal at the unit's current commit SHA (content-keyed)
