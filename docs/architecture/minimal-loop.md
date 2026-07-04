@@ -40,6 +40,7 @@ next_step_key(t):
       if u.status == 'pending':                      return f'{u}:dispatch'
       if u.status == 'verifying':
         if not done('provision'):                     return 'provision'          # S2c, once per ticket
+        if not done(f'completeness:{u}'):             return f'completeness:{u}'  # S2d, once per unit
         c = next_unrun_check(u)        # a check-type in u.verify_check_types with no pass/fail signal
         if c:                                        return f'verify:{u}:{c}'
         # all checks ran clean → the verify step marks u 'verified' on its success commit
@@ -80,6 +81,17 @@ committed diff touches a dependency manifest (`package.json`, a lockfile, `pypro
 loopback that adds a dependency doesn't verify against a stale environment. Both resets zero `attempt`
 too (a fresh install is not a retry of a prior failed one).
 
+**`completeness:wuN` (S2d, control-loop §4) fires once per unit**, gated after `provision` and before
+the unit's first `verify:{u}:{c}` — a deterministic, runner-computed reconciliation of the unit's
+declared `files_to_touch` against its diff, no LLM. `under = declared − cumulativeTouched` (the
+lowest-seq unit's `base_sha` as the cumulative base, so a sibling's coverage counts — the fix for a
+redundant/over-decomposed unit that would otherwise false-block on an empty diff): non-empty →
+`under-delivered`, a **hard gate** that loops back to `implement:{u}:dispatch` with the missing files
+named. Empty `under` with an empty own-diff → `covered-by-sibling` (no-op advance); empty `under` with
+a non-empty own-diff → `completed-by-self` (advance). Over-delivery (`ownTouched − declared`) is always
+advisory — emitted as `scope_diff`, an input to review, never a gate. This step is **recomputable**
+(like `provision`): no exactly-once effect, safe to re-run on replay.
+
 ## 2. Loopback effects — what a route *resets* (so §1 re-picks it)
 
 The atlas (control-loop §8) says *where* a failure routes; the loop must set the state that makes
@@ -88,6 +100,7 @@ The atlas (control-loop §8) says *where* a failure routes; the loop must set th
 | Route | Runner resets | `event_log` |
 |---|---|---|
 | → implement, unit-scope (I3/I4/I5, V1) | the named unit(s) → `status='pending'`; `stage='implement'` | `loopback{loop, route_to, signature}` |
+| → implement, under-delivered (CM1) | the unit → `status='pending'`; all its steps reset to `pending` (so previously-passed checks re-run against the new commit) | `loopback{loop='implement', route_to, signature}` |
 | → implement, ticket-scope (N1, P1) | spawn a ticket-scoped reconcile unit (kind=`reconcile`); `stage='implement'` | `loopback` |
 | → design / pivot (D2/D3, DV1, V3) | clear `work_units`; reset the design steps; `stage='design'` | `loopback{loop='plan'}` |
 | retry (I1, I6, V4, P2, C1) | the step → `status='pending'`, `attempt+=1` (no state rewind) | — (retry, not loopback) |
@@ -96,6 +109,15 @@ The atlas (control-loop §8) says *where* a failure routes; the loop must set th
 
 Only **distinct** loopbacks (signature changed) bump the per-loop counter (§3); a retry of the same
 signature trips the consecutive-identical cap faster (control-loop §8.2).
+
+**CM1's loopback assumes no vacuous unit ever reaches implement:** `design:extract` (S1b) requires
+every planned unit to declare ≥1 `files_to_touch`, so `completeness` never has to bounce a unit that
+has nothing to touch back to implement with an empty instruction. `completeness` and
+`verify:{u}:{c}` carry **independent** per-step `attempt` counters, not a shared per-unit budget — a
+unit alternating between the two failure modes escalates at up to `maxAttempts × 2` implement
+re-dispatches, still bounded, just not by a single cap. The semantic **AC-completeness** layer — a
+dropped acceptance criterion, or a file declared by multiple units where the real work landed on none
+of them — is **out of scope for CM1**; it is a deferred follow-up folded into S5 review.
 
 ## 3. Dispatch shell-out — keeping the leaves (§9.1)
 
