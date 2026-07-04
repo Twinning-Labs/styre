@@ -351,11 +351,9 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         vars: implementVars(ctx.ticket, unit, deps.profile, implementFeedback(ctx.db, unit.id)),
         loopback: isUnitLoopback(ctx, unit.seq),
         runnerCommands,
-        postcondition: ({ changed }) => {
-          if (!changed) {
-            throw new Error("implement:dispatch postcondition: empty diff");
-          }
-        },
+        // Empty-diff is no longer a dispatch-level failure: the plan gate guarantees non-empty
+        // declared files, and the completeness step (under-delivery) is what gates on it now.
+        postcondition: () => {},
       },
     );
     setUnitStatus(ctx.db, unit.id, "verifying");
@@ -803,25 +801,6 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       branchHeadSha: latestSha,
       detail,
     });
-
-    // scope_diff (A3) — advisory; now over the cumulative diff. Recorded once per (unit, sha).
-    if (latestSha !== undefined) {
-      const declared = parseFilesToTouch(unit);
-      const already = listByUnit(ctx.db, ctx.workUnitId).some(
-        (s) => s.signal_type === "scope_diff" && s.branch_head_sha === latestSha,
-      );
-      if (declared.length > 0 && !already) {
-        const outOfScope = changed.filter((p) => !declared.includes(p));
-        insertSignal(ctx.db, {
-          ticketId: ctx.ticket.id,
-          workUnitId: ctx.workUnitId,
-          signalType: "scope_diff",
-          result: outOfScope.length === 0 ? "pass" : "fail",
-          branchHeadSha: latestSha,
-          detail: { changed, out_of_scope: outOfScope },
-        });
-      }
-    }
 
     if (result !== "pass") throw new Error(`verify:check ${checkType}: ${result}`);
     return { check: checkType, result };

@@ -74,12 +74,17 @@ test("implement:dispatch runs the agent, commits, sets the unit verifying", asyn
   expect(dispatches[0]?.model).toBe("claude-sonnet-4-6");
 });
 
-test("implement:dispatch with an empty diff fails the step (postcondition → failure-policy)", async () => {
+test("implement:dispatch with an empty diff succeeds the step (empty-diff gating moved to completeness)", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
   db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", verifyCheckTypes: ["test"] });
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+  });
   const runner = new FakeAgentRunner(() => ({
     completed: true,
     exitCode: 0,
@@ -91,10 +96,15 @@ test("implement:dispatch with an empty diff fails the step (postcondition → fa
     tokensOut: null,
   }));
   const outcome = await advanceOneStep(db, ticketId, registryFor(repo, runner));
+  const afterUnit = getUnit(db, unit.id);
   const step = getByKey(db, ticketId, "implement:wu1:dispatch");
   db.close();
-  expect(["retry", "loopback", "escalated"]).toContain(outcome.kind);
-  expect(step?.status).toBe("pending");
+  // implement:dispatch no longer has a postcondition on the diff — an empty diff dispatch now
+  // succeeds; the plan gate guarantees non-empty declared files, and it is the completeness
+  // step's under-delivery disposition (Task 7) that gates on an empty/insufficient diff.
+  expect(outcome.kind).toBe("stepped");
+  expect(step?.status).toBe("succeeded");
+  expect(afterUnit?.status).toBe("verifying");
 });
 
 test("implement:dispatch escalates to the deep tier after a bounce-back", async () => {
