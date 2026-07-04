@@ -89,6 +89,24 @@ test("advisory scope_diff failure is excluded from re-coding feedback; real gati
   expect(fb).toContain("build");
 });
 
+test("completeness under-delivery yields a missing-files instruction naming the declared files", () => {
+  const { db, ticketId } = makeTestDb();
+  const u = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend" });
+  seedAttempt(db, ticketId, u.id, "sha1");
+  insertSignal(db, {
+    ticketId,
+    workUnitId: u.id,
+    signalType: "completeness",
+    result: "fail",
+    branchHeadSha: "sha1",
+    detail: { disposition: "under-delivered", under: ["src/x.ts"], declared: ["src/x.ts"] },
+  });
+  const fb = implementFeedback(db, u.id);
+  db.close();
+  expect(fb).toContain("src/x.ts");
+  expect(fb).not.toContain("completeness check");
+});
+
 test("advisory ran-all-unowned (untouched-stack red) is excluded from re-coding feedback", () => {
   const { db, ticketId } = makeTestDb();
   const u = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend" });
