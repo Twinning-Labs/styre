@@ -28,6 +28,7 @@ import {
 } from "../db/repos/work-unit.ts";
 import { pythonImportName } from "../setup/lang/python.ts";
 import { runCommand } from "../util/run-command.ts";
+import { classifyDisposition, reconcileScope } from "./completeness.ts";
 import { ComplexityGradeSchema } from "./complexity-schema.ts";
 import {
   commandFor,
@@ -486,6 +487,68 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       }
     }
     return { provisioned: actions.length };
+  });
+
+  registry.register("completeness", async (ctx: HandlerContext) => {
+    if (ctx.workUnitId === null) throw new Error("completeness: missing workUnitId");
+    const unit = getUnit(ctx.db, ctx.workUnitId);
+    if (!unit) throw new Error(`completeness: work_unit ${ctx.workUnitId} not found`);
+    const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
+    ensureWorktree(repoPath, branch, worktreePath);
+
+    const latestSha = getLatestByWorkUnit(ctx.db, ctx.workUnitId)?.branch_head_sha ?? undefined;
+    const declared = parseFilesToTouch(unit);
+
+    // The unit's OWN diff (per-unit base) — for over-delivery + "did this unit change anything".
+    // Unlike verify:check, base==head means "this unit committed NOTHING": ownTouched is [] (NOT
+    // changedFilesAt, which would wrongly attribute a sibling's commit at that sha as this unit's).
+    const ownTouched =
+      unit.base_sha && latestSha && unit.base_sha !== latestSha
+        ? changedFilesBetween(unit.base_sha, latestSha, worktreePath)
+        : [];
+
+    // The CUMULATIVE ticket diff — base = the lowest-seq unit's base_sha (the ticket fork point),
+    // so a redundant unit whose declared files a sibling already touched is not flagged (darkreader).
+    const minSeqUnit = listUnits(ctx.db, ctx.ticket.id)[0];
+    const cumulativeBase = minSeqUnit?.base_sha ?? null;
+    const cumulativeTouched =
+      cumulativeBase && latestSha && cumulativeBase !== latestSha
+        ? changedFilesBetween(cumulativeBase, latestSha, worktreePath)
+        : ownTouched;
+
+    const { under, over } = reconcileScope(declared, cumulativeTouched, ownTouched);
+    const disposition = classifyDisposition(under, ownTouched);
+
+    // Over-delivery — advisory scope_diff, OWN-diff based, once per (unit, sha).
+    if (latestSha !== undefined && declared.length > 0) {
+      const already = listByUnit(ctx.db, ctx.workUnitId).some(
+        (s) => s.signal_type === "scope_diff" && s.branch_head_sha === latestSha,
+      );
+      if (!already) {
+        insertSignal(ctx.db, {
+          ticketId: ctx.ticket.id,
+          workUnitId: ctx.workUnitId,
+          signalType: "scope_diff",
+          result: over.length === 0 ? "pass" : "fail",
+          branchHeadSha: latestSha,
+          detail: { changed: ownTouched, out_of_scope: over },
+        });
+      }
+    }
+
+    insertSignal(ctx.db, {
+      ticketId: ctx.ticket.id,
+      workUnitId: ctx.workUnitId,
+      signalType: "completeness",
+      result: disposition === "under-delivered" ? "fail" : "pass",
+      branchHeadSha: latestSha,
+      detail: { disposition, under, declared },
+    });
+
+    if (disposition === "under-delivered") {
+      throw new Error(`completeness:wu${unit.seq}: under-delivered [${under.join(", ")}]`);
+    }
+    return { disposition, under: under.length, over: over.length };
   });
 
   registry.register("verify:check", async (ctx: HandlerContext) => {
