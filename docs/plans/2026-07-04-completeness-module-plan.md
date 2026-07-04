@@ -326,25 +326,36 @@ git commit -m "feat(completeness): completeness handler (two-diff reconcile + ad
 
 - [ ] **Step 1: Write the failing test**
 
+Add this to `test/daemon/resolver.test.ts`. It mirrors the existing test "implement: a verifying unit with an unrun check asks for the verify step" (currently at `:88`); `makeTestDb`, `nextStepKey`, `setTicketStage`, `insertWorkUnit`, and the top-of-file `succeed(db, ticketId, stepKey)` helper are all already imported/defined there.
+
 ```ts
-// add to test/daemon/resolver.test.ts — a unit in "verifying" with provision done but no
-// completeness step yet must resolve to the completeness step BEFORE any verify check.
-test("verifying unit routes to completeness after provision, before verify", () => {
-  // Build a ticket in stage implement with one unit status=verifying, provision succeeded,
-  // completeness:wu1 not yet done. (Use the same fixtures as the existing provision-gate test.)
-  // Expect nextStepKey → step with stepKey "completeness:wu1", stepType "completeness".
-  const d = /* existing helper that seeds ticket+unit(verifying)+provision succeeded */;
-  const s = nextStepKey(d.db, d.ticketId);
-  expect(s).toMatchObject({ kind: "step", stepKey: "completeness:wu1", stepType: "completeness" });
+test("implement: a verifying unit routes to completeness after provision, before verify", async () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  const u = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verifying",
+  });
+  await succeed(db, ticketId, "provision");
+  const d = nextStepKey(db, ticketId);
+  db.close();
+  expect(d).toEqual({
+    kind: "step",
+    stepKey: "completeness:wu1",
+    stepType: "completeness",
+    handlerKey: "completeness",
+    workUnitId: u.id,
+  });
 });
 ```
 
-> Model this on the existing test that asserts the provision gate fires (search `test/daemon/resolver.test.ts` for `"provision"`), reusing its seed helper and adding a succeeded `provision` step.
-
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `bun test test/daemon/resolver.test.ts -t "completeness"`
-Expected: FAIL — currently routes to `verify:wu1:...`.
+Run: `bun test test/daemon/resolver.test.ts -t "routes to completeness"`
+Expected: FAIL — currently routes to `verify:wu1:test`.
 
 - [ ] **Step 3: Insert the gate**
 
@@ -361,10 +372,16 @@ In `src/daemon/resolver.ts`, in the `// verifying` block, between the provision 
         const check = nextUnrunCheck(db, u);
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [ ] **Step 4: Run to verify it passes; fix the collateral resolver tests**
 
 Run: `bun test test/daemon/resolver.test.ts`
-Expected: PASS. Fix any sibling resolver test that now expects `verify:` immediately after provision — insert the completeness step in its expected sequence (do not weaken assertions).
+Four existing tests seed a `verifying` unit + `succeed(db, ticketId, "provision")` and then expect the verify step / mark-verified / integration: "a verifying unit with an unrun check…" (`:88`), "…all checks have signals asks to mark-verified" (`:110`), "all units verified + no docs…" (`:142`), and "provision runs once before the first unit verify" (`:247`). Each now stops one step earlier at completeness. Fix each by inserting, right after its `await succeed(db, ticketId, "provision");` line:
+
+```ts
+  await succeed(db, ticketId, "completeness:wu1");
+```
+
+(`succeed` marks the step `succeeded`, which is what the resolver's `done()` gate checks — the `stepType: "dispatch"` it journals is irrelevant to the gate.) Do not weaken any assertion. Expected end state: PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -385,30 +402,61 @@ git commit -m "feat(completeness): resolver gates completeness:wuN between provi
 
 - [ ] **Step 1: Write the failing test**
 
+Add to `test/daemon/failure-policy.test.ts`. The file already defines the `failedStep(db, ticketId, { stepKey, stepType, workUnitId, attempts })` helper (it `insertPending`s a step, calls `markRunning` `attempts` times to bump the attempt counter, then `markFailed`s it) and imports `makeTestDb`, `setTicketStage`, `insertWorkUnit`, `getById as getUnit`, `listByTicket as listEvents`, `getById as getStep`. Mirror the existing "a verify step on a unit loops back" test:
+
 ```ts
-// add to test/daemon/failure-policy.test.ts
 test("completeness under-delivery loops the unit back to implement", () => {
-  // seed a failed completeness step (step_type "completeness", work_unit_id set, attempt 1)
-  const d = /* helper seeding ticket + unit + failed completeness step */;
-  const res = applyFailurePolicy(d.db, d.ticketId, d.completenessStep);
-  expect(res.decision).toBe("loopback");
-  // unit is back to pending; a loopback event was recorded
-  expect(getUnit(d.db, d.unitId)?.status).toBe("pending");
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verifying",
+  });
+  const step = failedStep(db, ticketId, {
+    stepKey: "completeness:wu1",
+    stepType: "completeness",
+    workUnitId: unit.id,
+    attempts: 1,
+  });
+  const result = applyFailurePolicy(db, ticketId, step);
+  const afterUnit = getUnit(db, unit.id);
+  const loopbacks = listEvents(db, ticketId).filter((e) => e.kind === "loopback");
+  db.close();
+  expect(result.decision).toBe("loopback");
+  expect(afterUnit?.status).toBe("pending");
+  expect(loopbacks.length).toBe(1);
+  expect(loopbacks[0]?.loop).toBe("implement");
 });
 
-test("completeness exhausts to escalate at maxAttempts", () => {
-  const d = /* same, but completeness step attempt = 3 */;
-  const res = applyFailurePolicy(d.db, d.ticketId, d.completenessStepAt3);
-  expect(res.decision).toBe("escalated");
+test("completeness under-delivery escalates at the attempt ceiling", () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verifying",
+  });
+  const step = failedStep(db, ticketId, {
+    stepKey: "completeness:wu1",
+    stepType: "completeness",
+    workUnitId: unit.id,
+    attempts: 3,
+  });
+  const result = applyFailurePolicy(db, ticketId, step, { maxAttempts: 3 });
+  db.close();
+  expect(result.decision).toBe("escalated");
 });
 ```
-
-> Model the seed on the existing `provision`/`verify` failure-policy tests in the same file.
 
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `bun test test/daemon/failure-policy.test.ts -t "completeness"`
-Expected: FAIL — a `completeness` step currently falls through to the default `retry`.
+Expected: the loopback test FAILS (a `completeness` step currently falls through to the default `retry`, so `decision` is `"retry"` and no loopback event is written); the ceiling test passes via the top-of-function `maxAttempts` guard even without the branch.
 
 - [ ] **Step 3: Add the branch**
 
@@ -515,48 +563,124 @@ The load-bearing scenarios. Use the existing dispatch/daemon e2e harness (see `t
 **Files:**
 - Create/extend: `test/dispatch/completeness-e2e.test.ts`
 
-- [ ] **Step 1: Write the scenarios (each an independent test)**
+- [ ] **Step 1: Write the harness + the two load-bearing scenarios**
+
+Create `test/dispatch/completeness-e2e.test.ts`. The top matches `verify-routing.test.ts` (which is the canonical driver-loop harness — copy its `gitRepo`/`rig`/`buildDispatchRegistry`/`advanceOneStep` usage verbatim). `writers` lets a single `FakeAgentRunner` write different files on each successive `implement` dispatch (call 1 = wu1, call 2 = wu2, …).
 
 ```ts
-// test/dispatch/completeness-e2e.test.ts — sketch; wire to the existing harness helpers.
-// A1 darkreader: wu1 touches parse.ts (the fix); wu2 declares parse.ts, produces empty diff.
-//   completeness:wu2 ⇒ ownTouched=[], under=∅ (parse.ts in cumulative) ⇒ covered-by-sibling ⇒
-//   handler returns (no throw); resolver advances wu2 to verify. ASSERT no under-delivered signal,
-//   no loopback event.
-//
-// A2 skipped: single unit declares src/x.ts, produces empty diff (nobody touched x.ts).
-//   completeness ⇒ under=[x.ts] ⇒ throws; applyFailurePolicy ⇒ loopback; after 3 attempts ⇒ escalate.
-//
-// A3 single-unit missed file: unit declares [a.ts,b.ts], touches only a.ts.
-//   completeness ⇒ under=[b.ts] ⇒ under-delivered ⇒ loopback BEFORE any verify runs.
-//
-// Over-delivery own-base regression: 3-unit ticket; wu3 declares ui.ts and touches ui.ts; wu1/wu2
-//   touched other files. completeness:wu3 ⇒ over MUST be [] (own diff = {ui.ts}), NOT the prior
-//   units' files. ASSERT scope_diff signal for wu3 has out_of_scope=[].
-//
-// Min-seq base regression: 2-unit ticket where using wu2's OWN base for the cumulative set would
-//   exclude wu1's change to the declared file. ASSERT wu2 is covered-by-sibling (uses min-seq base),
-//   not under-delivered.
-//
-// Reconcile exemption: an appended reconcile unit (declared=∅) is not under-delivered.
-//
-// A6 plan gate: an extraction with a unit files_to_touch=[] ⇒ validateExtraction returns an error
-//   ⇒ (assert the extract handler re-dispatches design:extract rather than inserting units — see
-//   Step 2).
+import { expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
+import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
+import { advanceOneStep } from "../../src/daemon/advance.ts";
+import { listByUnit } from "../../src/db/repos/ground-truth-signal.ts";
+import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
+import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
+import { parseProfile } from "../../src/dispatch/profile.ts";
+import { makeTestDb } from "../helpers/db.ts";
+
+function gitRepo(): string {
+  const root = mkdtempSync(join(tmpdir(), "styre-ce-"));
+  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
+  run(["init", "-b", "main"]);
+  run(["config", "user.email", "t@s.dev"]);
+  run(["config", "user.name", "T"]);
+  writeFileSync(join(root, "README.md"), "x");
+  run(["add", "-A"]);
+  run(["commit", "-m", "init"]);
+  return root;
+}
+
+// A FakeAgentRunner whose Nth implement dispatch runs writers[N-1](cwd). A no-op writer ⇒ empty diff.
+function sequencedRunner(writers: Array<(cwd: string) => void>): FakeAgentRunner {
+  let call = 0;
+  return new FakeAgentRunner((input) => {
+    writers[call]?.(input.cwd);
+    call++;
+    return {
+      completed: true, exitCode: 0, stdout: "{}", stderr: "",
+      timedOut: false, costUsd: null, tokensIn: null, tokensOut: null,
+    };
+  });
+}
+
+async function driveUntilCompleteness(db: any, ticketId: number, registry: any, unitId: number) {
+  for (let i = 0; i < 14; i++) {
+    if (listByUnit(db, unitId).some((s) => s.signal_type === "completeness")) return;
+    await advanceOneStep(db, ticketId, registry);
+  }
+}
+
+const disposition = (db: any, unitId: number): string | undefined =>
+  JSON.parse(
+    listByUnit(db, unitId).find((s) => s.signal_type === "completeness")?.detail_json ?? "{}",
+  ).disposition;
+
+test("A1 darkreader: a redundant unit whose declared file a sibling touched is covered-by-sibling (no block)", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+  // wu1 declares+touches parse.ts (the real fix); wu2 declares parse.ts but produces an empty diff.
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", behavioral: 0, verifyCheckTypes: ["test"], filesToTouch: ["parse.ts"] });
+  const wu2 = insertWorkUnit(db, { ticketId, seq: 2, kind: "backend", behavioral: 0, verifyCheckTypes: ["test"], filesToTouch: ["parse.ts"], dependsOn: [1] });
+  const runner = sequencedRunner([
+    (cwd) => writeFileSync(join(cwd, "parse.ts"), "export const x = 1;\n"), // wu1
+    () => {}, // wu2 → empty diff
+  ]);
+  const profile = parseProfile({ slug: "demo", targetRepo: repo, components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }] });
+  const registry = buildDispatchRegistry({ runner, agentConfig: DEFAULT_AGENT_CONFIG, profile, worktreeRoot: mkdtempSync(join(tmpdir(), "styre-cewt-")) });
+
+  await driveUntilCompleteness(db, ticketId, registry, wu2.id);
+  const events = listEvents(db, ticketId);
+  db.close();
+  expect(disposition(db, wu2.id)).toBe("covered-by-sibling");
+  expect(events.filter((e) => e.kind === "loopback").length).toBe(0);
+});
+
+test("A2 under-delivered: a unit that touches a file it did NOT declare loops back to implement", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+  const wu1 = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", behavioral: 0, verifyCheckTypes: ["test"], filesToTouch: ["src/x.ts"] });
+  const runner = sequencedRunner([(cwd) => { // touches y.ts, never the declared x.ts
+    Bun.spawnSync(["mkdir", "-p", join(cwd, "src")]);
+    writeFileSync(join(cwd, "src", "y.ts"), "export const y = 1;\n");
+  }]);
+  const profile = parseProfile({ slug: "demo", targetRepo: repo, components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }] });
+  const registry = buildDispatchRegistry({ runner, agentConfig: DEFAULT_AGENT_CONFIG, profile, worktreeRoot: mkdtempSync(join(tmpdir(), "styre-cewt-")) });
+
+  await driveUntilCompleteness(db, ticketId, registry, wu1.id);
+  const sig = listByUnit(db, wu1.id).find((s) => s.signal_type === "completeness");
+  db.close();
+  expect(sig?.result).toBe("fail");
+  expect(JSON.parse(sig?.detail_json ?? "{}").disposition).toBe("under-delivered");
+  expect(JSON.parse(sig?.detail_json ?? "{}").under).toEqual(["src/x.ts"]);
+});
 ```
 
-Implement each as a real test using the harness (seed profile with a matching component + a real git worktree so `changedFilesBetween` returns real files, exactly as `provision.test.ts` / `verify-routing.test.ts` do).
+- [ ] **Step 2: Add the base-ref regression tests (they guard the two load-bearing invariants)**
 
-- [ ] **Step 2: Confirm the plan-gate re-dispatch wiring**
+Add to the same file, using the same `sequencedRunner`/`driveUntilCompleteness` helpers:
 
-Read the `design:extract` handler in `src/dispatch/handlers.ts` and confirm a non-empty `validateExtraction(...)` result causes a re-dispatch (transport failure / no unit insertion), consistent with §3a. If it currently swallows errors, add a test + fix so a vacuous-unit extraction re-dispatches `design:extract` rather than persisting the bad plan.
+- **Over-delivery own-base:** a 3-unit ticket where wu1/wu2 touch `a.ts`/`b.ts` and wu3 declares+touches only `c.ts`. Assert wu3's `scope_diff` signal has `out_of_scope: []` (over is computed from wu3's OWN diff `{c.ts}`, not the cumulative `{a,b,c}`). Guard: temporarily switching the handler's `over` computation to `cumulativeTouched` makes this fail.
+- **Min-seq base:** the A1 darkreader test above IS this regression — wu2 is `covered-by-sibling` only because the cumulative diff uses the *min-seq* base (which includes wu1's `parse.ts`). Add an explicit assertion comment that reverting the handler to `unit.base_sha` (wu2's own base) would flip wu2 to `under-delivered`.
+- **Reconcile exemption:** seed a ticket, let one unit verify, then insert a reconcile-shaped unit (`kind: "reconcile"`, `filesToTouch` omitted ⇒ null/declared=∅) and assert its completeness disposition is `covered-by-sibling`/`completed-by-self`, never `under-delivered`.
 
-- [ ] **Step 3: Run to verify all pass**
+- [ ] **Step 3: Add the plan-gate (A6) test + confirm the re-dispatch wiring**
+
+Read the `design:extract` handler in `src/dispatch/handlers.ts` and confirm a non-empty `validateExtraction(...)` result causes a re-dispatch (transport failure — no units inserted), consistent with control-loop §3a. Add a test asserting that an extraction whose units include one with `files_to_touch: []` does NOT persist work units (it re-dispatches). If the handler currently swallows the error, add the wiring + test so a vacuous-unit extraction re-dispatches `design:extract` rather than persisting the bad plan.
+
+- [ ] **Step 4: Run to verify all pass**
 
 Run: `bun test test/dispatch/completeness-e2e.test.ts`
 Expected: PASS for every scenario.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add test/dispatch/completeness-e2e.test.ts src/
