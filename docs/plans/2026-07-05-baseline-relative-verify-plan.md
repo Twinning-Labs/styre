@@ -60,6 +60,9 @@ Corrected for lazy baseline + `couldn't-judge`. Interfaces confirmed against the
 - **Per-test itemized differential (method-level TIA):** the only thing that could *recover a verdict* from a red-baseline-*touched* gate instead of couldn't-judge. Frozen design's deferred rung-3. Do not build before its prerequisites.
 - **Flakiness handling (repeat-run/quarantine):** for both green→red (loopback) and red-base-confirmation (D5).
 - **Advisory infra-signature cause-labels** (divergence #8).
+- **Fix-pinning test gate (strengthen A1) [follow-on, brainstorm §13.2]:** for a behavioral unit, require the agent's *new* test to **fail on base and pass on the change** — reusing this plan's base-state check. Turns verify from "no regression" into "the change is pinned by a test that demonstrably exercises it" (the bar both upstream PRs used). Necessary-not-sufficient (reviewer judges test quality; escape needed for untestable changes). Separate decision — needs its own control-loop note + review.
+- **Build-gate reconsideration [open, brainstorm §13.1]:** styre gates on whatever `build` script exists, conflating typecheck / bundler / release-packager. A build gate is defensible only as a *check-only* compile (`tsc --noEmit`/`cargo check`), never packaging — part of the darkreader block was self-inflicted (gating on a packaging build). `inconclusive` band-aids it; the root fix is detector-side (don't gate on packaging). Out of this milestone.
+- **Regression strategy [open, the T1 fulcrum, brainstorm §13.3]:** the build catches only *type-level* cross-breakage; behavioral regressions need running the covering tests. Principled cheap answer = coverage-guided selection / import-graph TIA (deferred). This plan's component-granular differential **under-catches cross-component regressions** — an honest, named limit, not a solved problem.
 
 ## Open risks
 

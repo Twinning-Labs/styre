@@ -214,6 +214,55 @@ All claims below were **reproduced in the actual bench Docker images** (not infe
 
 ---
 
-## 13. Changelog
+## 13. The gate model, reconsidered — progress vs regression (follow-on beyond CL-BASELINE)
+
+Analysing the two upstream fixes (astropy #12907, darkreader #7241) exposed that both were verified the
+same way — **a targeted test that fails on the old code and passes on the new, with the existing suite
+staying green** — and that *neither* determination used the build. That reframes verification as **two
+orthogonal jobs styre currently blurs**, and opens three questions this doc records as follow-ons (each a
+separate decision; none folded into CL-BASELINE):
+
+- **Progress** — did the change do the thing? → a test that *exercises the change* (fail-on-base →
+  pass-on-change).
+- **Regression** — did it break what worked? → run the tests that *cover the affected code*.
+
+**(1) The build gate is mis-categorised.** A build carries a real signal tests don't fully give — a
+whole-tree *static* check (types/imports/wiring) over code tests never execute. But styre conflates a
+**typecheck** (`tsc --noEmit`/`cargo check` — correctness), a **bundler** (partly), and a
+**release-packager** (rollup→zip→sign — *not correctness*). darkreader's `npm run build` is the third,
+and the project's own PR CI never runs it. **Part of the darkreader block was self-inflicted: gating on a
+packaging build.** `inconclusive` band-aids it; the deeper fix is *don't gate on packaging builds* — a
+build gate is defensible only as a check-only compile, never as packaging. styre's detector cannot yet
+tell them apart.
+
+**(2) styre lacks a test-pinning gate.** A1 ("behavioral change *touched a test file* + tests green") is a
+weak proxy — darkreader's junk placeholder tests passed it. The strengthening: for a behavioral unit,
+require the agent's **new test to fail on base and pass on the change** (reusing the CL-BASELINE
+base-state check) — exactly what both upstream PRs did. **Honest limits (not sycophancy):** it proves the
+test *exercises* the change, **not** that it tests the *right* behaviour (test-gaming stays the reviewer's
+job, S5); it needs an escape for genuinely-untestable changes (refactor/perf/concurrency/visual), and that
+escape is only as trustworthy as the behavioral classification behind it. It is a step up from A1, not
+equivalence with a human maintainer who writes a *good* test.
+
+**(3) Regressions without running all tests — no free lunch.** The build/typecheck catches only
+*type-level* cross-breakage (a retyped/removed symbol used elsewhere); it does **not** catch *behavioral*
+regressions (code that still type-checks but returns the wrong value). There is **no cheap whole-tree
+behavioral check** — behaviour requires execution. The principled cheap answer is **coverage-guided
+selection** (run tests whose covered lines changed — Ekstazi-style) or **static import-graph TIA** — both
+the frozen design's deferred rung. Absent them: **run-all** (safe, expensive — where the astropy
+provisioning/pre-warm work pays off: make run-all *affordable*, don't avoid it) or **run-changed-component
+only** (cheap, misses cross-component → this is our component-granular differential, which therefore
+**under-catches cross-component regressions** — stated plainly). "Do without build" holds for regressions:
+running the covering tests compiles what they execute; only *untested-code* type errors are lost, which a
+cheap `tsc --noEmit` covers far better than a packaging build.
+
+**Implied target model** (each a follow-on decision, none in this milestone): **(progress)** a fix-pinning
+test gate (strengthen A1 via the base-state check) + **(regression)** coverage/impact-guided test running
++ an **optional typecheck** as a whole-tree net for untested code — with **packaging builds not gated at
+all**. Q3's cost fulcrum (the frozen design's T1) is the unsolved core: without coverage/TIA, regression
+coverage is either expensive or incomplete, and the build never bought us out of it.
+
+## 14. Changelog
 - *2026-07-05 (v1)* — initial diagnosis + philosophy, from the 2026-07-04 bench pass and a container-reproduction investigation. Principle 4.2 tightened after operator objection: naïve "red→red = neutral" is unsafe (masking).
 - *2026-07-05 (v2)* — revised after an independent five-lens code-grounded review (fact-check / coherence / feasibility / scope / adversarial). **Diagnosis and scope affirmed; mechanism downgraded for candor.** Changes: (a) the differential is **component-granular** today — per-test itemized outcomes and fine isolation do **not** exist and are the frozen design's deferred method-level TIA; v1's "styre already has routing to know which targets" was false at that granularity (feasibility + adversarial MUST-FIX). (b) Attribution's load-bearing distinction is the **2-way change-attributable-vs-not**; "failure-locus-vs-diff" removed as non-structural; environment-vs-pre-existing conceded structurally inseparable; cause-labels demoted to advisory signature-matching (coherence + adversarial MUST-FIX). (c) **Flakiness** added as a first-class risk that breaks the one agent-looping verdict (adversarial, previously unaddressed). (d) The "four consequences of one principle" claim **deflated** — astropy's win is provisioning env-reuse, darkreader's is baseline-validation + deliver-with-caveat; the diagnosis unifies *why* they are right, it does not make them free (adversarial + scope). (e) darkreader "verified" corrected to "fix delivered, itself untested (junk placeholder tests), build not judgeable"; the CI-reading corroboration removed as pilot-gated. (f) §7.2/§7.6 asserted outcomes softened to conditional-pending-review; §9.5 control-loop blast radius enlarged; §7.5 baseline cost named a new category; taxonomy flagged half-grounded. (g) Fact-check wording fixes (integration detail carries timeout flags + exit codes, not "only exit codes"; astropy error→retry→escalate).
+- *2026-07-05 (v3)* — added §13 "the gate model, reconsidered" after analysing the two upstream fixes (astropy #12907, darkreader #7241): both verified via a targeted fail→pass test, neither via the build. Records three follow-on questions beyond CL-BASELINE — the build gate is mis-categorised (packaging ≠ correctness; part of darkreader was self-inflicted), styre lacks a real test-pinning gate (strengthen A1 via the base-state check, with honest test-gaming/false-negative limits), and regression-without-run-all has no free lunch (build catches only type-level breakage; coverage/TIA is the deferred principled answer; component-granular under-catches cross-component). None folded into the current milestone.
