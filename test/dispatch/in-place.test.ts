@@ -2,7 +2,12 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertInPlaceIdentity, assertInPlaceSafe } from "../../src/dispatch/in-place.ts";
+import {
+  assertInPlaceIdentity,
+  assertInPlaceMarker,
+  assertInPlaceSafe,
+  discoverRepoRoot,
+} from "../../src/dispatch/in-place.ts";
 import type { Profile } from "../../src/dispatch/profile.ts";
 import type { runCommand } from "../../src/util/run-command.ts";
 
@@ -34,8 +39,11 @@ function tmpRepoOnBranch(): string {
   return dir;
 }
 
-test("safe: detached HEAD + clean tracked tree passes", () => {
-  expect(() => assertInPlaceSafe(tmpRepo())).not.toThrow();
+test("safe: marker present + clean tracked tree passes (detached HEAD alone no longer suffices)", () => {
+  const repo = tmpRepo();
+  expect(() => assertInPlaceSafe(repo)).toThrow(/marker/);
+  writeFileSync(join(repo, ".styre-disposable"), "");
+  expect(() => assertInPlaceSafe(repo)).not.toThrow();
 });
 
 test("refuse: on a named branch with no marker", () => {
@@ -50,15 +58,58 @@ test("allow: named branch but .styre-disposable marker present", () => {
 
 test("refuse: uncommitted tracked change", () => {
   const repo = tmpRepo();
+  writeFileSync(join(repo, ".styre-disposable"), ""); // marker present so this proves the tracked-dirty guard, not the marker guard
   writeFileSync(join(repo, "tracked.txt"), "x");
   Bun.spawnSync(["git", "add", "tracked.txt"], { cwd: repo });
-  expect(() => assertInPlaceSafe(repo)).toThrow(/refused/);
+  expect(() => assertInPlaceSafe(repo)).toThrow(/tracked/);
 });
 
 test("allow: untracked files present (editable-env residue must not false-refuse)", () => {
   const repo = tmpRepo();
+  writeFileSync(join(repo, ".styre-disposable"), ""); // marker present so this proves the untracked-residue guard, not the marker guard
   writeFileSync(join(repo, "build.egg-info"), "residue");
   expect(() => assertInPlaceSafe(repo)).not.toThrow();
+});
+
+test("discoverRepoRoot returns the git toplevel of cwd", () => {
+  const repo = tmpRepo();
+  expect(discoverRepoRoot(repo)).toBe(
+    Bun.spawnSync(["git", "rev-parse", "--show-toplevel"], { cwd: repo }).stdout.toString().trim(),
+  );
+});
+
+test("discoverRepoRoot throws (fail-closed) when cwd is not a git repo", () => {
+  const dir = mkdtempSync(join(tmpdir(), "nonrepo-"));
+  roots.push(dir);
+  expect(() => discoverRepoRoot(dir)).toThrow(/no git repo/);
+});
+
+test("assertInPlaceMarker passes with a regular-file marker, throws without", () => {
+  const repo = tmpRepo();
+  expect(() => assertInPlaceMarker(repo)).toThrow(/marker/);
+  writeFileSync(join(repo, ".styre-disposable"), "");
+  expect(() => assertInPlaceMarker(repo)).not.toThrow();
+});
+
+test("assertInPlaceMarker rejects a non-regular-file marker (F5)", () => {
+  const repo = tmpRepo();
+  Bun.spawnSync(["mkdir", join(repo, ".styre-disposable")]);
+  expect(() => assertInPlaceMarker(repo)).toThrow(/regular file/);
+});
+
+test("assertInPlaceSafe: marker required even on a NAMED branch (detached-HEAD dropped)", () => {
+  const repo = tmpRepoOnBranch(); // on a named branch, no marker
+  expect(() => assertInPlaceSafe(repo)).toThrow(/marker/);
+  writeFileSync(join(repo, ".styre-disposable"), "");
+  expect(() => assertInPlaceSafe(repo)).not.toThrow(); // marker present + clean → ok, branch state irrelevant
+});
+
+test("assertInPlaceSafe: tracked-dirty still refused", () => {
+  const repo = tmpRepo();
+  writeFileSync(join(repo, ".styre-disposable"), "");
+  writeFileSync(join(repo, "f.txt"), "x");
+  Bun.spawnSync(["git", "add", "f.txt"], { cwd: repo });
+  expect(() => assertInPlaceSafe(repo)).toThrow(/tracked/);
 });
 
 test("identity: skips (no throw) when profile has no python components", async () => {

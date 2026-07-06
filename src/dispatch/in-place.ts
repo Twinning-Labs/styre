@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pythonImportName } from "../setup/lang/python.ts";
@@ -18,22 +18,37 @@ const defaultGit: GitRun = (args, cwd) => {
   return r.stdout.toString().trim();
 };
 
-/** Refuse in-place unless (detached HEAD OR .styre-disposable marker) AND no un-committed tracked
- *  work. Untracked files (e.g. an editable env's `.so`/`.egg-info` residue) must NOT trip this —
- *  `--untracked-files=no` excludes them from the dirty check by design. */
-export function assertInPlaceSafe(repoPath: string, git: GitRun = defaultGit): void {
-  const detached = git(["rev-parse", "--abbrev-ref", "HEAD"], repoPath) === "HEAD";
-  const marker = existsSync(join(repoPath, ".styre-disposable"));
-  if (!detached && !marker) {
+export function discoverRepoRoot(cwd: string = process.cwd(), git: GitRun = defaultGit): string {
+  try {
+    return git(["rev-parse", "--show-toplevel"], cwd);
+  } catch {
     throw new Error(
-      `--in-place refused: ${repoPath} is on a named branch and has no .styre-disposable marker; refusing to mutate a checkout that may be owned (use a detached HEAD or write .styre-disposable).`,
+      `--in-place: no git repo at the working directory ${cwd}; launch with WORKDIR / docker -w set to the checkout.`,
     );
   }
+}
+
+/** Repo-scoped disposability signal: a REGULAR file <repoPath>/.styre-disposable. Defense-in-depth
+ *  against misuse, NOT proof (a mount/hook/commit could forge it — see the design doc). */
+export function assertInPlaceMarker(repoPath: string): void {
+  const m = join(repoPath, ".styre-disposable");
+  if (!existsSync(m) || !statSync(m).isFile()) {
+    throw new Error(
+      `--in-place refused: no .styre-disposable marker (regular file) at ${repoPath}; refusing to mutate a checkout that may be owned.`,
+    );
+  }
+}
+
+/** Refuse in-place unless a .styre-disposable marker (regular file) is present AND there is no
+ *  un-committed tracked work. Untracked files (e.g. an editable env's `.so`/`.egg-info` residue)
+ *  must NOT trip this — `--untracked-files=no` excludes them from the dirty check by design. */
+export function assertInPlaceSafe(repoPath: string, git: GitRun = defaultGit): void {
+  assertInPlaceMarker(repoPath);
   if (git(["status", "--porcelain", "--untracked-files=no"], repoPath) !== "") {
     throw new Error(`--in-place refused: ${repoPath} has uncommitted tracked changes.`);
   }
   console.error(
-    `IN-PLACE: styre will mutate ${repoPath} on a branch (HEAD ${git(["rev-parse", "--short", "HEAD"], repoPath)}).`,
+    `IN-PLACE: mutating ${repoPath} on a branch (HEAD ${git(["rev-parse", "--short", "HEAD"], repoPath)}).`,
   );
 }
 
