@@ -28,6 +28,7 @@ import { getProject } from "../db/repos/project.ts";
 import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
 import { listByStatus } from "../db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
+import { assertInPlaceIdentity } from "../dispatch/in-place.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { resetProvision } from "../dispatch/provision.ts";
 import { branchHeadSha, removeWorktree } from "../dispatch/worktree.ts";
@@ -179,7 +180,8 @@ export async function resumeRun(
   // Same-container in-place derivation: no schema/dump change — the persisted worktree_path on
   // the latest dispatch IS the signal. In-place there is no separate worktree to wipe/re-mint,
   // and the deps installed by `provision` persist in the repo root across the park.
-  const inPlace = getLatestWorktreePath(db, ticketId) === project.target_repo;
+  const staleWorktreePath = getLatestWorktreePath(db, ticketId);
+  const inPlace = staleWorktreePath === project.target_repo;
   const branch = branchNameFor(ticket);
   const parkedStep = listByStatus(db, "running").find((s) => s.ticket_id === ticketId) ?? null;
 
@@ -204,6 +206,17 @@ export async function resumeRun(
     return;
   }
 
+  // Defense-in-depth (whole-branch review I-2): `assertInPlaceSafe` is NOT reusable on resume
+  // (HEAD legitimately sits on the styre branch mid-run in the supported same-container path), so
+  // resume drives `ensureWorktree`'s `checkout -B` with no safety gate at all. A reused park dir
+  // whose `target_repo` path happens to collide with a foreign checkout would let resume hijack
+  // it. The IDENTITY probe IS reusable here: in a foreign checkout the active env's `<pkg>` won't
+  // resolve under the repo root, so it fails fast BEFORE the stale-worktree cleanup / dispatch
+  // below ever mutates the repo.
+  if (inPlace) {
+    await assertInPlaceIdentity(project.target_repo, profile);
+  }
+
   // --- Stale-worktree cleanup (Fix B) ---
   // The parked run left its worktree checked out. git will refuse `worktree add -B <branch>`
   // if the branch is already checked out in another worktree. Remove it best-effort.
@@ -211,7 +224,6 @@ export async function resumeRun(
   // nothing stale to remove (and `removeWorktree` already no-ops on worktreePath===repoPath;
   // skipping here also avoids the harmless-but-pointless `git worktree prune`).
   if (!inPlace) {
-    const staleWorktreePath = getLatestWorktreePath(db, ticketId);
     if (staleWorktreePath) {
       try {
         removeWorktree(project.target_repo, staleWorktreePath);

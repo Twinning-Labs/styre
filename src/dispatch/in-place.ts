@@ -37,8 +37,12 @@ export function assertInPlaceSafe(repoPath: string, git: GitRun = defaultGit): v
   );
 }
 
-/** Assert the active env's <pkg> for each python component resolves UNDER repoPath — else fail
- *  fast, so in-place never degrades into provision's editable-remediation recompile. */
+/** Assert the active env's <pkg> for EACH python component resolves UNDER that component's own
+ *  dir — else fail fast, so in-place never degrades into provision's editable-remediation
+ *  recompile. Mirrors how `provision` derives per-component identity (`join(worktreePath, c.dir)`,
+ *  see `src/dispatch/handlers.ts`): a multi-python profile with a component in a subdir must be
+ *  checked on ITS OWN dir, not just the repo root — checking only the root left subdir components
+ *  unchecked (whole-branch review I-1). */
 export async function assertInPlaceIdentity(
   repoPath: string,
   profile: Profile,
@@ -52,23 +56,25 @@ export async function assertInPlaceIdentity(
   } catch {
     return; // no python → nothing to assert here
   }
-  const importName = pythonImportName(repoPath);
-  if (importName === undefined || !isValidImportName(importName)) return; // can't derive → skip (reuse just won't fire)
-  const scriptDir = mkdtempSync(join(tmpdir(), "styre-inplace-"));
-  try {
-    const scriptPath = join(scriptDir, SOURCE_CHECK_SCRIPT_NAME);
-    writeFileSync(scriptPath, SOURCE_CHECK_SCRIPT);
-    const res = await run(`${interp} "${scriptPath}" "${importName}" "${repoPath}"`, {
-      cwd: repoPath,
-      timeoutMs: 60_000,
-    });
-    if (res.exitCode !== 0) {
-      throw new Error(
-        `--in-place: the active environment's '${importName}' is not installed against the repo root ${repoPath} ` +
-          `(source-check exit ${res.exitCode}). In-place requires the editable env to target the repo root.`,
-      );
+  for (const component of pythonComponents) {
+    const componentDir = join(repoPath, component.dir ?? "");
+    const importName = pythonImportName(componentDir);
+    if (importName === undefined || !isValidImportName(importName)) continue; // can't derive → skip THAT component (reuse just won't fire for it)
+    const scriptDir = mkdtempSync(join(tmpdir(), "styre-inplace-"));
+    try {
+      const scriptPath = join(scriptDir, SOURCE_CHECK_SCRIPT_NAME);
+      writeFileSync(scriptPath, SOURCE_CHECK_SCRIPT);
+      const res = await run(`${interp} "${scriptPath}" "${importName}" "${componentDir}"`, {
+        cwd: componentDir,
+        timeoutMs: 60_000,
+      });
+      if (res.exitCode !== 0) {
+        throw new Error(
+          `--in-place: the active environment's '${importName}' (component '${component.name}') is not installed against ${componentDir} (source-check exit ${res.exitCode}). In-place requires the editable env to target the repo root.`,
+        );
+      }
+    } finally {
+      rmSync(scriptDir, { recursive: true, force: true });
     }
-  } finally {
-    rmSync(scriptDir, { recursive: true, force: true });
   }
 }

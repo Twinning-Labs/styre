@@ -165,3 +165,96 @@ test("resumeRun derives in-place from the persisted worktree path: skips wipe/re
     rmSync(repoPath, { recursive: true, force: true });
   }
 });
+
+test("resumeRun re-checks in-place identity before mutating: throws when the active env's <pkg> doesn't resolve under target_repo (I-2)", async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), "styre-park-inplace-identity-state-"));
+  const prevXdgStateHome = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = stateRoot;
+  const slug = "inplace-identity-test";
+  const ident = "ENG-10";
+  const branch = `feat/${ident}`;
+  const { root: repoPath } = gitRepo(branch);
+
+  // A python component whose derivable import name is NOT installed anywhere the active
+  // interpreter can see (`find_spec` returns None) — the identity probe can't resolve it under
+  // repoPath, exactly like a foreign-checkout collision (a reused park dir whose target_repo path
+  // happens to collide with a checkout the editable env doesn't actually target).
+  writeFileSync(
+    join(repoPath, "pyproject.toml"),
+    '[project]\nname = "definitely_not_a_real_package_xyz123"\n',
+  );
+
+  try {
+    const dir = parkDir(slug, ident);
+    mkdirSync(dir, { recursive: true });
+    const dbPath = join(dir, "run.db");
+    migrate(dbPath);
+    const seedDb = openDb(dbPath);
+    const projectId = insertProject(seedDb, { slug, targetRepo: repoPath });
+    const ticketId = insertTicket(seedDb, { projectId, ident });
+    setTicketStage(seedDb, ticketId, "implement");
+
+    // The prior IN-PLACE park: latest dispatch's worktree_path === project.target_repo, so
+    // `resumeRun` derives `inPlace = true` and must re-run the identity probe before anything else.
+    const seq = nextDispatchSeq(seedDb, ticketId);
+    const d = insertDispatch(seedDb, {
+      ticketId,
+      dispatchId: `${ident}-d0001`,
+      seq,
+      worktreePath: repoPath,
+    });
+    completeDispatch(seedDb, d.id, { outcome: "parked", branchHeadSha: null });
+
+    seedDb.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    seedDb.close();
+
+    const profile = parseProfile({
+      slug,
+      targetRepo: repoPath,
+      defaultBranch: "main",
+      checksSystem: "none",
+      components: [{ name: "app", kind: "python", paths: ["**"], commands: {} }],
+    });
+
+    const headBefore = Bun.spawnSync(["git", "rev-parse", "--abbrev-ref", "HEAD"], {
+      cwd: repoPath,
+    })
+      .stdout.toString()
+      .trim();
+    expect(headBefore).toBe("main");
+
+    await expect(
+      resumeRun({ resume: ident }, profile, DEFAULT_RUNTIME_CONFIG, {
+        ports: {
+          issueTracker: fakeIssueTracker({
+            ticket: {
+              ident,
+              title: "In-place resume identity re-check",
+              description: "body",
+              typeLabel: "Feature",
+              linearIssueUuid: "uuid-inplace-identity",
+              url: null,
+            },
+          }),
+          forge: fakeForge(),
+          checks: fakeChecks("passing"),
+        },
+      }),
+    ).rejects.toThrow(/in-place/);
+
+    // Proof of "before mutating": the repo's own checkout never moved off `main` — the identity
+    // probe fired (and threw) before `ensureWorktree`'s `checkout -B` could hijack it.
+    const headAfter = Bun.spawnSync(["git", "rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoPath })
+      .stdout.toString()
+      .trim();
+    expect(headAfter).toBe("main");
+  } finally {
+    if (prevXdgStateHome === undefined) {
+      process.env.XDG_STATE_HOME = undefined;
+    } else {
+      process.env.XDG_STATE_HOME = prevXdgStateHome;
+    }
+    rmSync(stateRoot, { recursive: true, force: true });
+    rmSync(repoPath, { recursive: true, force: true });
+  }
+});

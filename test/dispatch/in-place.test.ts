@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertInPlaceIdentity, assertInPlaceSafe } from "../../src/dispatch/in-place.ts";
@@ -117,4 +117,57 @@ test("identity: skips (no throw) when import name is underivable (no pyproject/s
     throw new Error("run should not be invoked when importName is underivable");
   };
   await expect(assertInPlaceIdentity(dir, profile, shouldNotBeCalled)).resolves.toBeUndefined();
+});
+
+// Multi-python profile, one component per subdir — each must be checked on ITS OWN dir (mirrors
+// `provision`'s per-component `join(worktreePath, c.dir)`), not just the repo root.
+function tmpMultiPyRepo(): { repo: string; okDir: string; badDir: string } {
+  const repo = mkdtempSync(join(tmpdir(), "styre-inplace-multipy-"));
+  roots.push(repo);
+  const okDir = join(repo, "ok-comp");
+  const badDir = join(repo, "bad-comp");
+  mkdirSync(okDir, { recursive: true });
+  mkdirSync(badDir, { recursive: true });
+  writeFileSync(join(okDir, "pyproject.toml"), '[project]\nname = "ok_pkg"\n');
+  writeFileSync(join(badDir, "pyproject.toml"), '[project]\nname = "bad_pkg"\n');
+  return { repo, okDir, badDir };
+}
+
+test("identity: checks EACH python component on its own dir — throws naming the failing component", async () => {
+  const { repo, okDir, badDir } = tmpMultiPyRepo();
+  const profile = {
+    targetRepo: repo,
+    components: [
+      { name: "good", kind: "python", paths: ["**"], commands: {}, dir: "ok-comp" },
+      { name: "bad", kind: "python", paths: ["**"], commands: {}, dir: "bad-comp" },
+    ],
+  } as unknown as Profile;
+  const run: typeof runCommand = async (_cmd, opts) => {
+    // The 'good' component's source-check (cwd === okDir) passes; the 'bad' component
+    // (cwd === badDir) fails — proving BOTH components are actually checked, per-dir.
+    const exitCode = opts.cwd === okDir ? 0 : opts.cwd === badDir ? 2 : 99;
+    return { exitCode, stdout: "", stderr: "", timedOut: false };
+  };
+  await expect(assertInPlaceIdentity(repo, profile, run)).rejects.toThrow(/bad/);
+});
+
+test("identity: a component with an underivable name is skipped (no throw) while others are still checked", async () => {
+  const { repo, okDir } = tmpMultiPyRepo();
+  const noDerivDir = join(repo, "no-deriv-comp");
+  mkdirSync(noDerivDir, { recursive: true }); // no pyproject.toml / src layout → underivable
+  const profile = {
+    targetRepo: repo,
+    components: [
+      { name: "good", kind: "python", paths: ["**"], commands: {}, dir: "ok-comp" },
+      { name: "noderiv", kind: "python", paths: ["**"], commands: {}, dir: "no-deriv-comp" },
+    ],
+  } as unknown as Profile;
+  const run: typeof runCommand = async (_cmd, opts) => {
+    if (opts.cwd === noDerivDir) {
+      throw new Error("run should not be invoked for the underivable component");
+    }
+    expect(opts.cwd).toBe(okDir);
+    return { exitCode: 0, stdout: "", stderr: "", timedOut: false };
+  };
+  await expect(assertInPlaceIdentity(repo, profile, run)).resolves.toBeUndefined();
 });
