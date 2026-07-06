@@ -70,6 +70,10 @@ export async function reuseAwareTestCommand(
     return detectedCommand;
   }
   const importName = pythonImportName(absCwd);
-  if (await pythonEnvReady(absCwd, importName, interp, run)) return `${interp} -m pytest`;
+  try {
+    if (await pythonEnvReady(absCwd, importName, interp, run)) return `${interp} -m pytest`;
+  } catch {
+    return detectedCommand;
+  }
   return detectedCommand;
 }

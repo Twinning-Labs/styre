@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Component } from "../../src/dispatch/profile.ts";
 import { resolvePythonInterpreter } from "../../src/dispatch/provision.ts";
+import type { CmdRunner } from "../../src/dispatch/reuse.ts";
 import { pythonEnvReady, reuseAwareTestCommand } from "../../src/dispatch/reuse.ts";
 import { runCommand } from "../../src/util/run-command.ts";
 
@@ -67,6 +68,32 @@ test("reuseAwareTestCommand: ready python test → pytest with the resolved inte
       fake({ "styre-provision-check": 0, "--collect-only": 0 }),
     );
     expect(cmd).toBe(`${resolvePythonInterpreter()} -m pytest`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reuseAwareTestCommand: pythonEnvReady throwing (e.g. unwritable tmpdir) falls back to detectedCommand", async () => {
+  // Contract: "any probe that fails or can't be proven returns `detectedCommand` unchanged". The
+  // interpreter resolution is already try/catch-guarded; this proves the pythonEnvReady() call
+  // itself is ALSO guarded — a rejecting `run` makes pythonEnvReady's internal `await run(...)`
+  // throw (e.g. simulating mkdtempSync/writeFileSync failure on an unwritable tmpdir), and that
+  // throw must be swallowed by reuseAwareTestCommand, not escape and fail the whole verify step.
+  const root = mkdtempSync(join(tmpdir(), "styre-reuse-throw-"));
+  try {
+    writeFileSync(join(root, "pyproject.toml"), '[project]\nname = "pkg"\n');
+    const c: Component = {
+      name: "python",
+      kind: "python",
+      paths: ["**"],
+      commands: { test: "tox" },
+      extensions: [],
+    };
+    const rejecting: CmdRunner = async () => {
+      throw new Error("boom");
+    };
+    const cmd = await reuseAwareTestCommand(c, "test", "tox", root, rejecting);
+    expect(cmd).toBe("tox");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
