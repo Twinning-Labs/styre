@@ -135,11 +135,11 @@ test("worktreeFor: default (worktree) resolves under worktreeRoot", () => {
   expect(wt.worktreePath).toBe("/tmp/x/ENG-1");
 });
 ```
-*(If a `seedCtx` helper doesn't exist, build the ctx inline the way `verify-handlers.test.ts` seeds its DB — real DB, real project/ticket rows.)*
+*(No `seedCtx` helper exists. Build it from the real conventions: `makeTestDb()` (`test/helpers/db.ts`) returns `{ db, ticketId, projectId }`; set the repo path with `db.query("UPDATE project SET target_repo = ? WHERE id = ?").run("/some/repo", projectId)` (as `verify-handlers.test.ts:77`); construct the `HandlerContext` inline via the `ctxFor(db, ticketId)` pattern in `test/dispatch/park-routing.test.ts:29` / `run-dispatch.test.ts:28`. The `{ inPlace, worktreeRoot } as any` cast covers the rest of `RegistryDeps` the resolution doesn't read.)*
 
 - [ ] **Step 2: Run → FAIL** (`inPlace` not a field; worktreeFor ignores it).
 - [ ] **Step 3: Implement:**
-  - `handlers.ts` RegistryDeps (after `worktreeRoot: string;` at :85): add `inPlace: boolean;`
+  - `handlers.ts` RegistryDeps (after `worktreeRoot: string;` at :85): add **`inPlace?: boolean;`** — **optional** (there are 68 `buildDispatchRegistry({...})` construction sites, 66 of them in tests; a *required* field would break `tsc` across 23 test files. The resolver ternary below treats `undefined` as falsy, so optional is behaviorally identical and needs zero test edits).
   - `worktreeFor` (:105-108) and `depsFor` (:129-130): change `worktreePath: join(deps.worktreeRoot, ctx.ticket.ident),` to
     `worktreePath: deps.inPlace ? project.target_repo : join(deps.worktreeRoot, ctx.ticket.ident),`
     (in both functions; `project` is already in scope in both).
@@ -151,7 +151,7 @@ test("worktreeFor: default (worktree) resolves under worktreeRoot", () => {
     },
     ```
   - `run.ts` `buildDispatchRegistry({...})` (:91-96): add `inPlace: (args["in-place"] as boolean | undefined) ?? false,`
-- [ ] **Step 4: Run → PASS.** `bun test`, typecheck, lint green. *(Fix any other `buildDispatchRegistry` call sites the compiler flags for the new required field — the daemon and park; park is handled in Task 4, the daemon passes `inPlace: false`.)*
+- [ ] **Step 4: Run → PASS.** `bun test`, typecheck, lint green. *(Because `inPlace` is optional, no existing `buildDispatchRegistry` call site needs editing. Production build sites are exactly `run.ts:91` (set here) and `park.ts:242` (set in Task 4); there is NO daemon build site — `daemon/loop.ts:25` receives the registry as a parameter.)*
 - [ ] **Step 5: Commit** `feat(run): --in-place flag threads inPlace so dispatch works in the repo root`
 
 ---
@@ -256,7 +256,7 @@ export async function assertInPlaceIdentity(
   }
 }
 ```
-  Then wire into `src/cli/run.ts` — after `assertResolved(profile);` (:58) and before the resume/run branch:
+  Then wire into `src/cli/run.ts` — **inside the `try` block** (which opens at :66), before the resume/run branch, so a refusal is caught by `analytics.cliError(...)` (:138) and `analytics.shutdown()` in `finally` rather than escaping the run's telemetry:
 ```ts
 if (args["in-place"] && !(args.resume && args.resume.length > 0)) {
   const { assertInPlaceSafe, assertInPlaceIdentity } = await import("../dispatch/in-place.ts");
@@ -264,6 +264,7 @@ if (args["in-place"] && !(args.resume && args.resume.length > 0)) {
   await assertInPlaceIdentity(profile.targetRepo, profile);
 }
 ```
+  (`profile.targetRepo` == the eventual `project.target_repo` by construction — `run-ticket.ts:96` does `insertProject({ targetRepo: profile.targetRepo })` — so the preflight checks the same path dispatch will mutate.)
 
 - [ ] **Step 4: Run → PASS.** `bun test test/dispatch/in-place.test.ts`, typecheck, lint green.
 - [ ] **Step 5: Commit** `feat(run): in-place preflight — safety gate (detached/marker + tracked-dirty) + identity assertion`
@@ -293,7 +294,7 @@ const inPlace = getLatestWorktreePath(db, ticketId) === project.target_repo;
 
 - **Spec coverage:** flag+seam (Task 2, spec §1/§4.1) ✓; in-place git primitives incl. the `.git`-short-circuit fix + checkout-B guard + removeWorktree no-op (Task 1, spec §4.2/§4.3) ✓; safety gate detached-HEAD-or-marker + tracked-dirty + banner (Task 3, spec §2) ✓; identity fail-fast (Task 3, spec §3) ✓; same-container resume derived from DB, skip mint/wipe/provision-reset (Task 4, spec §5) ✓. Daemon-out-of-scope, isolation-delegated, result-extraction, C-source residual = design notes, no task (spec §7/§9) ✓.
 - **Placeholder scan:** the two soft spots are named, not hand-waved — the test-seeding helper (`seedCtx`/park seeding) must match `verify-handlers.test.ts`'s real-DB pattern (no mock convention), and exporting `worktreeFor` for Task 2's unit test. No fictional harness; live-python path uses DI, not a container test.
-- **Type consistency:** `RegistryDeps.inPlace: boolean` (Task 2) is consumed by `worktreeFor`/`depsFor` (Task 2) and set by `run.ts` (Task 2) + `park.ts` (Task 4) + the daemon (`false`); `assertInPlaceSafe`/`assertInPlaceIdentity` (Task 3) signatures are used verbatim in `run.ts`. `ensureWorktree`/`removeWorktree` signatures are unchanged (Task 1) so all existing callers keep compiling.
+- **Type consistency:** `RegistryDeps.inPlace?: boolean` (Task 2, **optional** — 68 construction sites, so a required field would break 23 test files' typecheck) is consumed by `worktreeFor`/`depsFor` via a `undefined`-tolerant ternary and set only at the two production build sites, `run.ts` (Task 2) + `park.ts` (Task 4); there is no daemon build site. `assertInPlaceSafe`/`assertInPlaceIdentity` (Task 3) signatures are used verbatim in `run.ts`. `ensureWorktree`/`removeWorktree` signatures are unchanged (Task 1) so all existing callers keep compiling.
 
 ## Execution Handoff
 
