@@ -1,6 +1,8 @@
 # Provision re-point — make styre's worktree the source-under-test in a ready env (completes the conda reuse)
 
-**Status:** Design (brainstorm output). Completes the shipped **python env reuse** feature (PR #51) — the piece that makes reuse actually *fire* on astropy. Pending independent review, then plan.
+> **⚠️ SUPERSEDED (2026-07-06).** After independent review (see below), this approach was **shelved** in favour of **in-place execution**: in a caller-declared *disposable* checkout (single-use container/CI), styre works on a branch in the repo root instead of a separate worktree, so a pre-built editable env (which points at the repo root) *is* the source-under-test — reuse fires natively with **no re-point, no offline recompile, no build-isolation problem**. The reviews below are why: this re-point recompiles a C-extension package offline at provision (build-isolation failure, cold from-scratch compile, stale `.so`, location-not-import probe). Kept as a record; **do not build.** The in-place rule is the path forward.
+
+**Status:** ~~Design (brainstorm output)~~ **SUPERSEDED — do not implement.** Reviewed; the review findings (offline build isolation, cold C-extension compile, failure mis-routing) motivated the in-place-execution decision that replaces it.
 **Date:** 2026-07-06
 **Scope:** at **provision**, when a ready pre-built env (deps present) has the package installed but pointing at a location *other than* styre's worktree, **re-point the editable install at the worktree** (`pip install -e . --force-reinstall --no-deps`) — reusing the heavy deps while making the worktree the source-under-test. Then the shipped verify-time reuse probe passes and pytest tests the agent's actual code, fast. **Does NOT** change the verify-side reuse code (already shipped), nor build pre-warm / env-selection (still deferred).
 **Builds on:**
