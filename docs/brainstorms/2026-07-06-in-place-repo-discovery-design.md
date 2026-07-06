@@ -1,6 +1,6 @@
 # Path-free disposable wiring — repo-root discovery + repo-scoped marker for `--in-place`
 
-**Status:** Design v2 (brainstorm output) — corrected after independent review found the v1 marker-at-`/` unsafe. Part of the in-place execution work (**PR #52**); this is the discovery/gate increment, not a separate PR.
+**Status:** Design v3 (brainstorm output) — v2 corrected the v1 marker-at-`/` hole; v3 folds in the v2 re-review (resume disposability gap + honest "declaration not proof" framing). Part of the in-place execution work (**PR #52**); this is the discovery/gate increment, not a separate PR.
 **Date:** 2026-07-06
 **Scope:** make `styre run --in-place` (and `styre setup`) **path-free at the CLI** in a disposable container by **discovering** the repo root (cwd/`WORKDIR`), while keeping the disposability signal **repo-scoped** (a marker *inside* the repo). **Does NOT** change the in-place mechanics (the `worktreePath===repoPath` seam, resume derivation) already in #52; changes only repo-root resolution + the safety gate + `setup`.
 **Builds on / modifies:** #52's `assertInPlaceSafe` (`src/dispatch/in-place.ts`), `run.ts` preflight, `park.ts` resume, `setup.ts`.
@@ -62,7 +62,9 @@ Placement is trivial for whoever built the disposable checkout — they know whe
 
 > `profile.targetRepo = repoRoot` inside the `--in-place` preflight block (`run.ts:72-78`), after discovery, before ports/registry/runTicket.
 
-**Resume (review + feasibility MUST):** the preflight block is skipped on resume (`!args.resume`), and `resumeRun` rebuilds forge ports from the *un-overridden* profile (`park.ts:263`) — while `styre run`'s terminal state is *PR-ready*, so the forge **does** run. Fix: in `resumeRun`, `if (inPlace) profile.targetRepo = project.target_repo;` (the value is already read at `park.ts:184`) before ports are built. So both paths route the discovered root consistently.
+**Resume path-routing (review + feasibility MUST):** the preflight block is skipped on resume (`!args.resume`), and `resumeRun` rebuilds forge ports from the *un-overridden* profile (`park.ts:263`) — while `styre run`'s terminal state is *PR-ready*, so the forge **does** run. Fix: in `resumeRun`, `if (inPlace) profile.targetRepo = project.target_repo;` (the value is already read at `park.ts:184`) before ports are built. So both paths route the discovered root consistently.
+
+**Resume disposability re-check (v3, adversarial F1 — MUST):** the fresh-run gate (`assertInPlaceSafe`) is deliberately skipped on resume, and the identity assertion (§7) returns early for a **non-python** repo (`in-place.ts:51-52`) — so a non-python in-place repo currently resumes with **no disposability check at all**, then `checkout -B`s + commits against `project.target_repo`. That is a clobber path. Fix: on an in-place resume, re-check **marker presence** (`<repoRoot>/.styre-disposable`) — a cheap, **language-agnostic**, repo-scoped check that is still valid mid-run (the marker is a file, unaffected by the branch/commits the run made). Do **not** re-run the tracked-dirty half on resume (the run's own in-progress commits legitimately dirty the tree mid-run); **presence** is the resume gate. This makes §8's "no marker → refuse" true on the resume path too.
 
 ---
 
@@ -80,23 +82,28 @@ Placement is trivial for whoever built the disposable checkout — they know whe
 
 #52's `assertInPlaceIdentity` is **kept load-bearing** (not demoted — v1's "mismatch impossible by construction" was wrong, review F4): a **symlinked `WORKDIR`** makes `git rev-parse --show-toplevel` return the realpath while `pip install -e` may have recorded the symlink path — a real divergence the assertion catches. Discovery *narrows* the mismatch (the told-path case is gone); it does not eliminate it. Keep the per-component check exactly as #52 ships it.
 
+**But it is python-only** (`in-place.ts:51-52` returns early with no python components), so it is **not** a general safety backstop — the language-agnostic disposability guard is the marker (§4 fresh-run, §5 resume re-check), not this.
+
 ---
 
 ## 8. Invariants / safety
 
-- **The gate now guards the mutated object.** The disposability signal (repo-scoped marker) + tracked-dirty are both properties of `repoRoot` itself — not the container — so a disposable *container* holding a non-disposable *repo* (bind mount) is refused, not clobbered.
-- **Fail-closed everywhere:** no repo at cwd → error; no marker → refuse; tracked-dirty → refuse; setup no-arg without marker → refuse.
-- **Capability isolation** unchanged; the discovered `repoRoot` is the writable surface, bounded by a checkout the marker (inside it) declares throwaway.
+- **The gate now guards the mutated object.** The disposability signal (repo-scoped marker) + tracked-dirty are both properties of `repoRoot` itself — not the container — so the common misuse (a bind-mounted real repo whose mount hides any image-baked marker) is refused, not clobbered.
+- **Fail-closed on the checks styre can make:** no repo at cwd → error; no marker → refuse (fresh run AND resume, §5); tracked-dirty → refuse; setup no-arg without marker → refuse.
+- **Honest limit — the marker is a *declaration*, not *proof* (adversarial F2).** Presence of `<repo>/.styre-disposable` is a file, and anything that can write the repo dir (a committed file, a devcontainer hook, a CI step, a `docker cp`, a seeded named volume) can plant it — which is exactly the party styre is about to grant repo-write. So the marker + the explicit `--in-place` flag + tracked-dirty are strong **defense-in-depth against *misuse*** (a mistaken `--in-place` on a real checkout won't have all three), but **not a cryptographic guarantee** against a container deliberately/accidentally set up to carry the marker on real bytes. Ultimate disposability remains the **caller's container contract** — the same honest stance #52 §7 takes for isolation. (A stronger, non-forgeable signal — verifying `repoRoot` sits on the container's own ephemeral overlay, not a host mount — was considered and **deferred**; operator chose the simple marker for now. See §9.)
+- **Capability isolation** unchanged; the discovered `repoRoot` is the writable surface, bounded by a checkout the marker (inside it) *declares* throwaway.
 
 ---
 
 ## 9. Risks / open questions
 
 1. **`WORKDIR` ≠ code dir / not set.** Discovery needs cwd inside the repo — true for purpose-built images via `WORKDIR` + `docker run/exec`; false for an odd `WORKDIR` or an sshd launch ($HOME). v2 **fails closed** (hard error) rather than guessing; the caller sets `WORKDIR`/`-w`. The plan should test the error path.
-2. **Marker committed into a real repo.** If a developer commits `<repo>/.styre-disposable` into their real checkout, a mounted copy would carry it → gate passes. This is a deliberate, odd act (committing a disposability marker to a real repo) — far less likely than v1's base-image-carries-`/`-marker, but worth a one-line doc note ("`.styre-disposable` should be `.gitignore`d / image-created, never committed").
-3. **Symlinked WORKDIR** (§7) — handled by keeping the identity assertion; plan should include a symlink test.
-4. **Multiple repos in one container** — cwd discovery yields the one repo cwd sits in; document in-place = one repo per container.
-5. **Sequencing vs #52** — this lives on the #52 branch; it modifies `assertInPlaceSafe` from #52 directly (same PR).
+2. **★ The marker is forgeable by any repo-dir writer (adversarial F2/F3).** Presence is a plain file, so besides a *committed* `.styre-disposable`, a devcontainer hook / CI step / `docker cp` — or an **empty named volume mounted over the image path, which copies the image's contents (marker included) into the volume on first use** — can carry it onto real bytes (the mount-overlay defense holds for *bind* mounts specifically, not all mount types). Accepted for now (operator: keep the simple marker) as **misuse defense, not proof** (§8). Doc guidance: `.styre-disposable` should be `.gitignore`d and image-created, never committed. **Deferred stronger option:** verify `repoRoot` is on the container's own ephemeral overlay (not a host mount) via `/proc/self/mountinfo` — non-forgeable, but Linux-specific and may false-refuse volume-mounted CI; revisit if the misuse bar proves insufficient.
+3. **★ Override-or-throw ordering (plan invariant, feasibility F4).** The gate's safety depends on discovery **overriding** `profile.targetRepo` before the gate runs and **hard-erroring** on discovery failure — if the `try/catch` around `discoverRepoRoot()` swallows a failure and falls through, the gate silently validates the profile's *stale* `targetRepo` (a different repo than cwd). Likewise the `setup` marker gate must sit **inside `runSetup` before the enrichment agent** (`setup.ts:98,102`), not merely in the citty wrapper. The plan must encode both as ordering invariants with explicit error-path tests.
+4. **Symlinked WORKDIR** (§7) — handled by keeping the identity assertion; plan should include a symlink test.
+5. **Multiple repos in one container** — cwd discovery yields the one repo cwd sits in; document in-place = one repo per container.
+6. **Nit (F5):** `lstat` the marker to require a regular file (`existsSync` follows a symlinked/dir `.styre-disposable`); and log a discovered-vs-profile `targetRepo` mismatch (the override silently wins — an operator who pointed `--profile` at the wrong project gets only the §4 banner).
+7. **Sequencing vs #52** — this lives on the #52 branch; it modifies `assertInPlaceSafe` from #52 directly (same PR).
 
 ---
 
@@ -110,3 +117,4 @@ Placement is trivial for whoever built the disposable checkout — they know whe
 
 ## 11. Changelog
 - *v1 → v2 (2026-07-06, post 3-lens review):* **reverted the marker to the repo root** (`<repoRoot>/.styre-disposable`) — v1's container-`/` marker can't vouch for a bind-mounted/volume/committed repo (review F1/F2/F3: "container disposable ≠ repo disposable"). **Dropped the marker-carried-path fallback** (F2/F3 — presence-gate-vs-contents-path disagreement, cross-repo trap); discovery is now **cwd-only, fail-closed**. **`setup` no-arg now requires the same repo-scoped marker** before running its write-capable enrichment agent (F5). **Kept the identity assertion load-bearing** and corrected §7's false "impossible by construction" (F4 — symlinked WORKDIR). **Re-apply the discovered override on resume** (feasibility — the forge runs on the PR-ready path and reads the un-overridden profile). Discovery (cwd/WORKDIR) retained — it, not the marker location, is what makes the CLI path-free.
+- *v2 → v3 (2026-07-06, post v2 re-review — confirmed v2 closes v1's central hole):* **resume now re-checks marker presence** (adversarial F1 — a non-python in-place repo previously resumed with *zero* disposability check; the python-only identity assertion is not a general backstop). **Honest framing** (F2): the marker is **defense-in-depth against misuse, not proof** — forgeable by any repo-dir writer (committed file / devcontainer hook / CI step / **named-volume population**); "fail-closed everywhere" / "by construction" over-claims corrected to match #52 §7's "caller's container contract" stance. **Named-volume caveat** added (F3 — an empty named volume copies image contents, marker included). **Override-or-throw + setup-gate-before-enrichment** promoted to plan ordering invariants with error-path tests (F4). **Nit** (F5): `lstat` the marker as a regular file; log discovered-vs-profile mismatch. **Deferred:** the non-forgeable overlay-vs-mount check (operator: keep the simple marker for now).
