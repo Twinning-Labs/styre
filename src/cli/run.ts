@@ -69,6 +69,14 @@ export const runCommand = defineCommand({
     const analytics = createAnalytics(runtimeConfig);
     const startedAt = Date.now();
     try {
+      if (args["in-place"] && !(args.resume && args.resume.length > 0)) {
+        const { assertInPlaceSafe, assertInPlaceIdentity } = await import(
+          "../dispatch/in-place.ts"
+        );
+        assertInPlaceSafe(profile.targetRepo);
+        await assertInPlaceIdentity(profile.targetRepo, profile);
+      }
+
       if (args.resume && args.resume.length > 0) {
         const { resumeRun } = await import("./park.ts");
         await resumeRun(
