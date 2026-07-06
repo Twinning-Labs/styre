@@ -123,3 +123,48 @@ test("changedFilesBetween returns the cumulative diff across commits", () => {
 
   expect(changedFilesBetween(base, head, repo).sort()).toEqual(["a.ts", "b.ts"]);
 });
+
+// In-place mode (worktreePath === repoPath): the checkout is disposable (single-use container),
+// so styre works on a branch in the repo root instead of a separate git worktree.
+function tmpRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "styre-wt-test-"));
+  roots.push(dir);
+  const run = (args: string[]) => Bun.spawnSync(["git", ...args], { cwd: dir });
+  run(["init", "-q"]);
+  run(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-qm", "base"]);
+  run(["checkout", "-q", "--detach"]); // simulate a disposable container checkout
+  return dir;
+}
+const head = (dir: string) =>
+  Bun.spawnSync(["git", "rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir })
+    .stdout.toString()
+    .trim();
+
+test("ensureWorktree in-place: checks out the branch in the repo root", () => {
+  const repo = tmpRepo();
+  ensureWorktree(repo, "styre/eng-1", repo); // worktreePath === repoPath
+  expect(head(repo)).toBe("styre/eng-1");
+});
+test("ensureWorktree in-place is idempotent (no reset error on repeat)", () => {
+  const repo = tmpRepo();
+  ensureWorktree(repo, "styre/eng-1", repo);
+  ensureWorktree(repo, "styre/eng-1", repo); // ~6x/unit in reality
+  expect(head(repo)).toBe("styre/eng-1");
+});
+test("removeWorktree in-place is a no-op (never removes the repo root)", () => {
+  const repo = tmpRepo();
+  ensureWorktree(repo, "styre/eng-1", repo);
+  removeWorktree(repo, repo); // must not throw, must not delete the repo
+  expect(head(repo)).toBe("styre/eng-1");
+});
+test("worktree mode still creates a separate worktree (regression)", () => {
+  const repo = tmpRepo();
+  const wt = join(mkdtempSync(join(tmpdir(), "styre-wt-out-")), "eng-1");
+  roots.push(wt);
+  ensureWorktree(repo, "styre/eng-1", wt);
+  expect(
+    Bun.spawnSync(["git", "rev-parse", "--abbrev-ref", "HEAD"], { cwd: wt })
+      .stdout.toString()
+      .trim(),
+  ).toBe("styre/eng-1");
+});
