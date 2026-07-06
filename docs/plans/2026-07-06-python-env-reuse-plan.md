@@ -1,143 +1,128 @@
-# Python env reuse (the conda switch) — Implementation Plan
+# Python env reuse (the conda switch) — Implementation Plan (v2, post-review)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** When a ready Python environment already tests the worktree (e.g. an editable conda env), run `python -m pytest` in it instead of the detected harness (`tox`) — fixing astropy's env-rebuild timeout and the bare-`tox`-matrix problem at once.
+**Goal:** When a ready Python environment already tests the worktree AND can collect the suite, run `<interp> -m pytest` in it instead of the detected harness (`tox`) — fixing astropy's env-rebuild timeout and the bare-`tox`-matrix at once.
 
-**Architecture:** A runtime **readiness probe** reusing styre's existing source-under-test check: for a python `test` gate, if `import <pkg>` resolves under the worktree **and** `pytest` is importable in the active interpreter, the effective command becomes `<interp> -m pytest`; otherwise the detected command runs unchanged. The probe + resolver live in a new `src/dispatch/reuse.ts`; `verify:check` and `verify:integration` route python test commands through it. **No change** to the no-ready-env path (that's the deferred pre-warm plan).
+**Architecture:** A runtime **readiness probe** reusing styre's source-under-test check plus a **collection** check: for a python `test` gate, if `import <pkg>` resolves under the worktree **and** `pytest --collect-only` exits 0 (the env can actually collect *this* suite — plugins/deps present), the effective command becomes `<interp> -m pytest`; else the detected command runs unchanged. Probe + resolver live in a new `src/dispatch/reuse.ts` with an **injected runner** (the repo has no mock convention — DI is the test seam). `verify:check` and `verify:integration` route python `test` commands through it.
 
-**Tech Stack:** TypeScript, Bun (`bun test`), embedded SQLite. Runner: `bun test`; `bun run typecheck` + `bun run lint` stay green.
+**Tech Stack:** TypeScript, Bun (`bun test`), embedded SQLite.
 
-**Scope — deliberately minimal (operator: "one problem at a time").** This ships *only* the reuse switch. Deferred to separate work: **pre-warm** (`tox -e <env> --notest` + env-selection, for the no-ready-env case), the **whole-suite-runtime-vs-budget** question (measure first — a reused suite still runs under `VERIFY_TIMEOUT_MS`), **test-selection/TIA**, and **CI-reading**.
+**Scope — minimal (operator: "one problem at a time").** Ships *only* the reuse switch. **Deferred:** pre-warm + tox env-selection (no-ready-env case); the whole-suite-runtime-vs-budget question (measure via the bench first); test-selection/TIA; CI-reading.
 
 ## Global Constraints
 
 - Branch `feat/verify-gates` (continues PR #51); commit per task; **never `main`**; PR-only.
-- **Reuse only when *proven*.** The probe (`import <pkg>` resolves under the worktree) IS the wrong-bytes guard — the exact refinement of the conda denial. If the probe can't run or fails → fall through to the detected command (no regression).
-- Commands stay metachar-free; the probe reuses `SOURCE_CHECK_SCRIPT` (a temp `.py` run by argv, never inline `python -c`), written to a tempdir **outside** the worktree (existing Fix A).
+- **Reuse only when *proven*.** Two guards, both must pass: (a) `import <pkg>` resolves under the worktree (the wrong-bytes guard — effectively requires an editable install), (b) `pytest --collect-only` exits 0 (the missing-plugin guard — an env that imports pytest but lacks the suite's plugins fails here). If the probe can't run or either guard fails → run the detected command (no regression).
+- **Testing seam = dependency injection.** The repo has **no** `runCommand` mock/`spyOn` convention (its live tests run real commands under `RUN_LIVE=1`, e.g. `provision.test.ts:412`). So `pythonEnvReady`/`reuseAwareTestCommand` take an **injected `run` param defaulting to `runCommand`** — unit tests pass a fake; a `RUN_LIVE` test exercises real python.
+- **Honest limit (design §5.1):** reuse runs the *standard runner*, not the harness's exact config (`changedir`/`setenv`). This is **not** a claim of bit-identical reproduction; the verdict-parity gate is the **bench's held-out oracle** (validation below), not a unit assertion.
 - Runner: `bun test`; `bun run typecheck` + `bun run lint` green after each task.
-- **Out of scope / deferred:** pre-warm + tox env-selection; skipping the (harmless, fast) `pip install tox` at provision; the whole-suite-budget question; TIA; CI-reading; ruby/php readiness probes.
+- **Out of scope / deferred:** pre-warm + env-selection; skipping the (fast, harmless) `pip install tox` at provision; the whole-suite budget; TIA; CI-reading; ruby/php probes.
 
 ## File Structure
 
-- `src/dispatch/reuse.ts` — **new** — `pythonEnvReady()` (probe) + `reuseAwareTestCommand()` (resolver). One clear responsibility: "which test command should actually run for this component."
-- `src/dispatch/handlers.ts` — `verify:check` `toRun` construction (~651-656) and `verify:integration` `jobs` construction (~814-820) route python `test` commands through `reuseAwareTestCommand`. **Modify.**
-- Tests: `test/dispatch/reuse.test.ts`, `test/dispatch/handlers.test.ts`, `test/live/astropy-reuse.test.ts` (live-gated).
+- `src/dispatch/provision.ts` — **add `export`** to the module-private `SOURCE_CHECK_SCRIPT` (line 82) so `reuse.ts` can import it. **Modify (one word).**
+- `src/dispatch/reuse.ts` — **new** — `pythonEnvReady()` (probe) + `reuseAwareTestCommand()` (resolver), both with an injected runner.
+- `src/dispatch/handlers.ts` — `verify:check` `toRun` (~650-656) and `verify:integration` `jobs` (~814-819) route python `test` commands through the resolver. **Modify.**
+- Tests: `test/dispatch/reuse.test.ts` (unit, DI + a `RUN_LIVE` real-python fixture), `test/dispatch/verify-handlers.test.ts` + `test/dispatch/verify-integration.test.ts` (wiring).
 
-**Reused existing machinery (no change):** `SOURCE_CHECK_SCRIPT`, `SOURCE_CHECK_SCRIPT_NAME`, `isValidImportName`, `resolvePythonInterpreter` (`src/dispatch/provision.ts`); `pythonImportName` (`src/setup/lang/python.ts`); `commandFor` (`src/dispatch/components.ts`); `runCommand` (`src/util/run-command.ts`).
+**Reused existing exports (confirmed):** `SOURCE_CHECK_SCRIPT_NAME`, `isValidImportName`, `resolvePythonInterpreter` (`provision.ts:72,133,180`); `pythonImportName` (`python.ts:43`); `commandFor` (`components.ts:59`); `runCommand` (`util/run-command.ts`). **`SOURCE_CHECK_SCRIPT` is currently NOT exported (provision.ts:82) — Task 1 fixes that.**
 
 ---
 
-### Task 1: The reuse probe + resolver (`src/dispatch/reuse.ts`)
+### Task 1: Export the probe script + the reuse probe/resolver (`reuse.ts`)
 
-**Files:** Create `src/dispatch/reuse.ts` + `test/dispatch/reuse.test.ts`.
+**Files:** Modify `src/dispatch/provision.ts` (add `export`); Create `src/dispatch/reuse.ts` + `test/dispatch/reuse.test.ts`.
 **Interfaces:**
-- `export async function pythonEnvReady(absCwd: string, importName: string | undefined, interp: string): Promise<boolean>` — true iff `import <importName>` resolves to a file under `absCwd` AND `import pytest` succeeds, both run with `interp`.
-- `export async function reuseAwareTestCommand(c: Component, checkType: string, detectedCommand: string, absCwd: string): Promise<string>` — returns `<interp> -m pytest` for a ready python `test` gate; else `detectedCommand`.
+- `export type CmdRunner = (cmd: string, opts: { cwd: string; timeoutMs: number }) => Promise<{ exitCode: number | null; stdout: string; stderr: string; timedOut: boolean }>`
+- `export async function pythonEnvReady(absCwd: string, importName: string | undefined, interp: string, run?: CmdRunner): Promise<boolean>`
+- `export async function reuseAwareTestCommand(c: Component, checkType: string, detectedCommand: string, absCwd: string, run?: CmdRunner): Promise<string>`
 
-- [ ] **Step 1: Failing test** — `test/dispatch/reuse.test.ts`. Stub `runCommand` (via a module mock or dependency-injected variant — mirror how existing dispatch tests stub it) so the source-check exits 0 and `import pytest` exits 0 → `pythonEnvReady` true; source-check exits 1 → false; pytest missing (exit 1) → false; `importName` undefined → false. For `reuseAwareTestCommand`: a python component with `checkType==="test"` and a ready env → `"python3 -m pytest"`; a non-python component → `detectedCommand`; `checkType==="lint"` → `detectedCommand`.
+- [ ] **Step 1: Export the script** — in `src/dispatch/provision.ts:82`, change `const SOURCE_CHECK_SCRIPT = \`...` to `export const SOURCE_CHECK_SCRIPT = \`...`. Run `bun run typecheck` — still green.
+- [ ] **Step 2: Failing test** (`test/dispatch/reuse.test.ts`) — inject a fake runner; assert the *decision logic* without real python:
 
 ```ts
-test("pythonEnvReady true only when worktree imports AND pytest present", async () => {
-  // stub: sourceCheck→0, `import pytest`→0
-  expect(await pythonEnvReady("/wt", "astropy", "python3")).toBe(true);
+import { pythonEnvReady, reuseAwareTestCommand } from "../../src/dispatch/reuse.ts";
+import { resolvePythonInterpreter } from "../../src/dispatch/provision.ts";
+const fake = (results: Record<string, number>) =>
+  async (cmd: string) => ({ exitCode: Object.entries(results).find(([k]) => cmd.includes(k))?.[1] ?? 0, stdout: "", stderr: "", timedOut: false });
+
+test("pythonEnvReady true only when source-check AND collect-only both exit 0", async () => {
+  expect(await pythonEnvReady("/wt", "astropy", "python3", fake({ "styre-provision-check": 0, "--collect-only": 0 }))).toBe(true);
+  expect(await pythonEnvReady("/wt", "astropy", "python3", fake({ "styre-provision-check": 1, "--collect-only": 0 }))).toBe(false); // wrong bytes
+  expect(await pythonEnvReady("/wt", "astropy", "python3", fake({ "styre-provision-check": 0, "--collect-only": 1 }))).toBe(false); // missing plugin
+  expect(await pythonEnvReady("/wt", undefined, "python3", fake({}))).toBe(false); // no import name
 });
-test("reuseAwareTestCommand swaps to pytest for a ready python test gate", async () => {
+test("reuseAwareTestCommand: ready python test → pytest with the resolved interp", async () => {
   const c = { name: "python", kind: "python", paths: ["**"], commands: { test: "tox" } } as any;
-  expect(await reuseAwareTestCommand(c, "test", "tox", "/wt")).toBe("python3 -m pytest");
+  const cmd = await reuseAwareTestCommand(c, "test", "tox", "/wt", fake({ "styre-provision-check": 0, "--collect-only": 0 }));
+  expect(cmd).toBe(`${resolvePythonInterpreter()} -m pytest`);
 });
-test("reuseAwareTestCommand leaves non-python / non-test unchanged", async () => {
-  const c = { name: "frontend", kind: "node", paths: ["**"], commands: { test: "npm run test" } } as any;
-  expect(await reuseAwareTestCommand(c, "test", "npm run test", "/wt")).toBe("npm run test");
+test("reuseAwareTestCommand: non-python / non-test unchanged (no python needed)", async () => {
+  const node = { name: "fe", kind: "node", paths: ["**"], commands: { test: "npm run test" } } as any;
+  expect(await reuseAwareTestCommand(node, "test", "npm run test", "/wt", fake({}))).toBe("npm run test");
+  const py = { name: "py", kind: "python", paths: ["**"], commands: { lint: "ruff" } } as any;
+  expect(await reuseAwareTestCommand(py, "lint", "ruff", "/wt", fake({}))).toBe("ruff");
 });
 ```
 
-- [ ] **Step 2: Run → FAIL.**
-- [ ] **Step 3: Implement `src/dispatch/reuse.ts`:**
+- [ ] **Step 3: Run → FAIL.**
+- [ ] **Step 4: Implement `src/dispatch/reuse.ts`:**
 
 ```ts
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { commandFor } from "./components.ts";
 import type { Component } from "./profile.ts";
-import {
-  SOURCE_CHECK_SCRIPT,
-  SOURCE_CHECK_SCRIPT_NAME,
-  isValidImportName,
-  resolvePythonInterpreter,
-} from "./provision.ts";
+import { SOURCE_CHECK_SCRIPT, SOURCE_CHECK_SCRIPT_NAME, isValidImportName, resolvePythonInterpreter } from "./provision.ts";
 import { pythonImportName } from "../setup/lang/python.ts";
 import { runCommand } from "../util/run-command.ts";
 
-const PROBE_TIMEOUT_MS = 60 * 1000; // a probe, not a build — bounded tight
+export type CmdRunner = typeof runCommand;
+const SOURCE_CHECK_TIMEOUT_MS = 60 * 1000;
+const COLLECT_TIMEOUT_MS = 3 * 60 * 1000; // collection imports test modules; bounded well under a full run
 
 export async function pythonEnvReady(
-  absCwd: string,
-  importName: string | undefined,
-  interp: string,
+  absCwd: string, importName: string | undefined, interp: string, run: CmdRunner = runCommand,
 ): Promise<boolean> {
   if (importName === undefined || !isValidImportName(importName)) return false;
   const scriptDir = mkdtempSync(join(tmpdir(), "styre-reuse-")); // OUTSIDE the worktree (Fix A)
   try {
     const scriptPath = join(scriptDir, SOURCE_CHECK_SCRIPT_NAME);
     writeFileSync(scriptPath, SOURCE_CHECK_SCRIPT);
-    const src = await runCommand(`${interp} "${scriptPath}" "${importName}" "${absCwd}"`, {
-      cwd: absCwd,
-      timeoutMs: PROBE_TIMEOUT_MS,
-    });
+    const src = await run(`${interp} "${scriptPath}" "${importName}" "${absCwd}"`, { cwd: absCwd, timeoutMs: SOURCE_CHECK_TIMEOUT_MS });
     if (src.exitCode !== 0) return false;
-    const runner = await runCommand(`${interp} -c "import pytest"`, {
-      cwd: absCwd,
-      timeoutMs: PROBE_TIMEOUT_MS,
-    });
-    return runner.exitCode === 0;
+    const collect = await run(`${interp} -m pytest --collect-only -q`, { cwd: absCwd, timeoutMs: COLLECT_TIMEOUT_MS });
+    return collect.exitCode === 0;
   } finally {
     rmSync(scriptDir, { recursive: true, force: true });
   }
 }
 
 export async function reuseAwareTestCommand(
-  c: Component,
-  checkType: string,
-  detectedCommand: string,
-  absCwd: string,
+  c: Component, checkType: string, detectedCommand: string, absCwd: string, run: CmdRunner = runCommand,
 ): Promise<string> {
   if (checkType !== "test" || c.kind !== "python") return detectedCommand;
   let interp: string;
-  try {
-    interp = resolvePythonInterpreter();
-  } catch {
-    return detectedCommand; // no interpreter → can't probe → run what was detected
-  }
+  try { interp = resolvePythonInterpreter(); } catch { return detectedCommand; }
   const importName = pythonImportName(absCwd);
-  if (await pythonEnvReady(absCwd, importName, interp)) return `${interp} -m pytest`;
+  if (await pythonEnvReady(absCwd, importName, interp, run)) return `${interp} -m pytest`;
   return detectedCommand;
 }
 ```
-*(Confirm `commandFor` import is used — if the resolver takes `detectedCommand` as a param it may not need `commandFor`; drop the unused import to keep lint green.)*
 
-- [ ] **Step 4: Run → PASS.** `bun test` + typecheck + lint green.
-- [ ] **Step 5: Commit** `feat(run): python env readiness probe + reuse-aware test command`
+- [ ] **Step 5: Run → PASS.** Add a **`RUN_LIVE`-gated real-python test** (mirror `provision.test.ts:412`'s `const live = process.env.RUN_LIVE === "1" ? test : test.skip;`): in a temp dir write a minimal editable package (`setup.py` + `pkg/__init__.py` + `tests/test_x.py`), `pip install -e .` into the ambient env, then assert `pythonEnvReady(tmp, "pkg", resolvePythonInterpreter())` is **true** (real source-check + real collect-only), and returns **false** when the package is not installed. `bun test` (skips live) + typecheck + lint green.
+- [ ] **Step 6: Commit** `feat(run): python env readiness probe (source-under-test + collect-only) + reuse-aware command`
 
 ---
 
 ### Task 2: `verify:check` routes python test commands through the resolver
 
-**Files:** Modify `src/dispatch/handlers.ts` (the `toRun` construction ~651-656); Test `test/dispatch/handlers.test.ts`.
+**Files:** Modify `src/dispatch/handlers.ts` (the `toRun` construction ~650-656); Test `test/dispatch/verify-handlers.test.ts`.
 
-**Interfaces:** Consumes `reuseAwareTestCommand` (Task 1).
-
-- [ ] **Step 1: Failing test** — a python component whose detected `test` is `tox`, with a stubbed ready env → `verify:check test` runs `python3 -m pytest` (assert on the recorded `command`/`ran` detail), not `tox`. And with a NOT-ready env → runs `tox` (unchanged).
+- [ ] **Step 1: Failing test** (real-command style, `RUN_LIVE`-gated, OR assert via the recorded `command`): a python component with detected `test: "tox"` where a ready env is present → `verify:check test` runs `<interp> -m pytest` (assert the `ran`/`lastCommand` detail), not `tox`; with no ready env → runs `tox`. *(If a `RUN_LIVE` real-env fixture is impractical here, assert the wiring by spying that `reuseAwareTestCommand`'s result is what reaches `runCommand` — but prefer extending the reuse unit test over a handler mock, since the handler has no runCommand seam.)*
 - [ ] **Step 2: Run → FAIL.**
-- [ ] **Step 3: Implement** — replace the sync `toRun` map:
-
-```ts
-const toRun = realImpacted
-  .filter((c) => commandFor(c, checkType) !== undefined)
-  .map((c) => ({ component: c.name, command: commandFor(c, checkType) as string, dir: c.dir }));
-```
-with an async resolution:
+- [ ] **Step 3: Implement** — replace the sync `toRun` map (handlers.ts:650-656):
 
 ```ts
 const toRun = await Promise.all(
@@ -145,17 +130,12 @@ const toRun = await Promise.all(
     .filter((c) => commandFor(c, checkType) !== undefined)
     .map(async (c) => ({
       component: c.name,
-      command: await reuseAwareTestCommand(
-        c,
-        checkType,
-        commandFor(c, checkType) as string,
-        join(worktreePath, c.dir ?? ""),
-      ),
+      command: await reuseAwareTestCommand(c, checkType, commandFor(c, checkType) as string, join(worktreePath, c.dir ?? "")),
       dir: c.dir,
     })),
 );
 ```
-Add `import { reuseAwareTestCommand } from "./reuse.ts";`. (The surrounding handler is already `async`.)
+Add `import { reuseAwareTestCommand } from "./reuse.ts";`. (Handler is already `async`; `worktreePath` is in scope at :553.)
 
 - [ ] **Step 4: Run → PASS.** `bun test` + typecheck + lint green.
 - [ ] **Step 5: Commit** `feat(verify): reuse a ready python env (pytest) instead of the detected harness`
@@ -164,31 +144,20 @@ Add `import { reuseAwareTestCommand } from "./reuse.ts";`. (The surrounding hand
 
 ### Task 3: `verify:integration` routes python test commands through the resolver
 
-**Files:** Modify `src/dispatch/handlers.ts` (verify:integration `jobs` construction ~814-820); Test `test/dispatch/handlers.test.ts`.
+**Files:** Modify `src/dispatch/handlers.ts` (verify:integration `jobs` construction ~814-819); Test `test/dispatch/verify-integration.test.ts`.
 
-- [ ] **Step 1: Failing test** — at `verify:integration`, a python component with `test: "tox"` and a stubbed ready env runs `python3 -m pytest` (not `tox`) for its test job; `build` jobs and non-python components unchanged.
+- [ ] **Step 1: Failing test** — at `verify:integration`, a python component with `test: "tox"` + a ready env runs `<interp> -m pytest` for its test job; `build` jobs and non-python components unchanged. **Note:** the separate `repoCommands` loop (handlers.ts:820-822) is intentionally left on the detected command — repo-wide commands aren't per-component/per-stack, so reuse doesn't apply.
 - [ ] **Step 2: Run → FAIL.**
-- [ ] **Step 3: Implement** — the current loop:
-
-```ts
-for (const c of deps.profile.components) {
-  for (const key of ["build", "test"] as const) {
-    const cmd = commandFor(c, key);
-    if (cmd) jobs.push({ label: `${c.name}:${key}`, command: cmd, dir: c.dir });
-  }
-}
-```
-becomes:
+- [ ] **Step 3: Implement** — the component loop:
 
 ```ts
 for (const c of deps.profile.components) {
   for (const key of ["build", "test"] as const) {
     const cmd = commandFor(c, key);
     if (!cmd) continue;
-    const command =
-      key === "test"
-        ? await reuseAwareTestCommand(c, key, cmd, join(worktreePath, c.dir ?? ""))
-        : cmd;
+    const command = key === "test"
+      ? await reuseAwareTestCommand(c, key, cmd, join(worktreePath, c.dir ?? ""))
+      : cmd;
     jobs.push({ label: `${c.name}:${key}`, command, dir: c.dir });
   }
 }
@@ -199,32 +168,25 @@ for (const c of deps.profile.components) {
 
 ---
 
-### Task 4: Live validation against the astropy image (the "check how conda does" gate)
+### Task 4: Validation — the bench is the verdict-parity gate
 
-**Files:** Create `test/live/astropy-reuse.test.ts` (live-gated — skipped unless `STYRE_LIVE_ASTROPY=1` and Docker + the image are present, mirroring any existing live-gated test convention).
+The reuse logic is unit-tested (Task 1 DI) and probe-tested against a real editable fixture (Task 1 `RUN_LIVE`). The **verdict-parity** proof (does reuse give the same result as the harness on a known-good change?) is **not** a host unit test — `bun test` runs on the host, astropy's env is in the container, and only the bench's held-out oracle can confirm the verdict. So:
 
-**Why:** the operator's stated goal — "check how styre does after it switches over to using conda." The reuse logic is unit-tested with stubs (Tasks 1–3); this is the real proof.
+- [ ] **Step 1: Post-merge bench handoff** — after merge, re-pin `styre-bench` (`styreCommit` → this tip) and run `SMOKE=2`. **Record:** does the astropy (`astropy__astropy-12907`) instance go from **blocked (tox timeout) → the reuse path (pytest in the conda env) → verified + PR-opened**, and does the held-out oracle score the gold fix **resolved** (the parity check)? Capture the reused-run wall-clock to inform the deferred whole-suite-budget question (design §5.2).
+- [ ] **Step 2:** document the result in the PR (or a follow-up note) — this is the "how does styre do after switching to conda" answer the operator asked for. If the reused run exceeds `VERIFY_TIMEOUT_MS`, that's the signal to pick up the deferred budget/test-selection lever — not a defect in this change.
 
-- [ ] **Step 1: Write the live test** — in the `swebench/sweb.eval.arm64.astropy_1776_astropy-12907` container (repo at `/testbed`, active conda `testbed` env): (a) assert `pythonEnvReady("/testbed", "astropy", "python")` is **true** (the editable env is detected); (b) assert `reuseAwareTestCommand(<python component, test, "tox">, "test", "tox", "/testbed")` returns `python -m pytest`; (c) run that command with a short timeout and assert it **starts collecting/running tests** (does not hang in an env build) — i.e. it gets past the tox-rebuild wall. Capture the elapsed time to inform the *deferred* budget question.
-- [ ] **Step 2: Run gated** (`STYRE_LIVE_ASTROPY=1 bun test test/live/astropy-reuse.test.ts`) and record: does reuse detect the env, swap to pytest, and start running tests within budget?
-- [ ] **Step 3:** ensure the default (ungated) `bun test` skips it cleanly; `bun test` + typecheck + lint green.
-- [ ] **Step 4: Commit** `test(live): astropy conda-env reuse runs pytest (gated on STYRE_LIVE_ASTROPY)`
+*(No `bun test` in this task — the prior plan's fictional `test/e2e/`/`test/live/` container harness does not exist and is not invented here.)*
 
 ---
 
 ## Self-Review
 
-- **Spec coverage (design §1.2):** readiness probe reusing the source-under-test check + `import pytest` (Task 1) ✓; reuse runs `<interp> -m pytest` when proven, else the detected command (Tasks 1–3) ✓; both verify sites routed (Tasks 2–3) ✓; live astropy proof (Task 4) ✓. Pre-warm, env-selection, the budget question, TIA, CI-reading all explicitly deferred ✓.
-- **Placeholder scan:** the only soft spot is how existing dispatch tests stub `runCommand` (Task 1 Step 1) — the implementer must match the repo's real stubbing convention (module mock vs injected dep); flagged, not hand-waved. No TBDs.
-- **Type consistency:** `pythonEnvReady(absCwd, importName, interp)` and `reuseAwareTestCommand(c, checkType, detectedCommand, absCwd)` (Task 1) are consumed with the same signatures in Tasks 2–3. `resolvePythonInterpreter`/`pythonImportName`/`SOURCE_CHECK_SCRIPT*`/`isValidImportName` are imported from their real modules (confirmed to exist).
+- **Spec coverage (design §1):** source-under-test + **collect-only** probe (Task 1, review F2 fix) ✓; reuse runs `<interp> -m pytest` only when proven, else detected (Tasks 1–3) ✓; both verify sites routed, `repoCommands` intentionally not (Tasks 2–3) ✓; bench = verdict-parity gate (Task 4, review F1 fix) ✓. Pre-warm/env-selection/budget/TIA/CI-reading deferred ✓.
+- **Placeholder scan:** the export fix (Task 1 Step 1) and the DI seam (no-mock-convention) are now explicit, not "mirror an existing stub." The `RUN_LIVE` gate copies the real `provision.test.ts:412` pattern. Task 2's handler test honestly notes the no-runCommand-seam and prefers the reuse-unit test. No fictional `test/e2e`/`test/live`.
+- **Type consistency:** `CmdRunner`/`pythonEnvReady`/`reuseAwareTestCommand` signatures (Task 1) are consumed unchanged in Tasks 2–3; assertions use `resolvePythonInterpreter()` (not a literal `python3`) per review; `SOURCE_CHECK_SCRIPT` is exported in Task 1 Step 1 before it's imported.
 
 ## Deferred / named follow-ons
+Pre-warm + tox env-selection (no-ready-env case); the whole-suite-runtime-vs-budget question (measure via Task 4 first); test-selection/TIA; skipping the wasted `pip install tox` at provision; ruby/php readiness probes; CI-reading.
 
-- **Pre-warm + tox env-selection** (the no-ready-env case) — separate plan; astropy doesn't need it (it has a ready env).
-- **Whole-suite runtime vs `VERIFY_TIMEOUT_MS`** — operator decision: measure via Task 4 first; only address (longer budget / test-selection) if a reused run actually exceeds budget.
-- **Skipping the wasted `pip install tox` at provision** when reuse applies — a harmless-fast optimization; not worth the cross-step coupling yet.
-- **Ruby/PHP readiness probes**, native typecheckers, CI-reading.
-
-## Execution Handoff
-
-Plan saved to `docs/plans/2026-07-06-python-env-reuse-plan.md`. Two execution options: (1) subagent-driven (fresh subagent per task, review between) — recommended; (2) inline with checkpoints.
+## Changelog
+- *v1 → v2 (2026-07-06, post 3-lens review):* exported `SOURCE_CHECK_SCRIPT` (was module-private → wouldn't compile); switched tests to **dependency injection** (repo has no mock convention — its live tests are `RUN_LIVE`-gated real commands); **strengthened the probe with `pytest --collect-only`** (import-pytest under-proved readiness → a missing plugin would turn a correct change into a fast wrong fail — review F2); **reframed validation** — the fictional container/`test/live` harness is dropped; the verdict-parity proof is the bench's held-out oracle via `SMOKE=2` (review F1); asserted the resolved interpreter, not a literal; noted `repoCommands` is intentionally not routed. Added the verdict-parity honest limit to the design (§5.1).

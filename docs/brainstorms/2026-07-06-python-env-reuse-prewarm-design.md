@@ -29,11 +29,11 @@ The unifying rule (generalizes styre's existing node `node_modules` readiness ch
 
 ### 1.1 The readiness probe (environment-agnostic — not conda-specific)
 
-Run, against the active Python on PATH, styre's **existing** source-under-test check plus a runner check:
-- **(a) worktree-under-test:** `import <pkg>` resolves to a file *under the worktree* (`SOURCE_CHECK_SCRIPT` — `find_spec(name).origin` is under `cwd`). This is the exact "is this env good, and does it test the right bytes" test styre already ships.
-- **(b) runner present:** `python -c "import pytest"` succeeds.
+Run, against the active Python on PATH, styre's **existing** source-under-test check plus a **collection** check:
+- **(a) worktree-under-test (right bytes):** `import <pkg>` resolves to a file *under the worktree* (`SOURCE_CHECK_SCRIPT` — `find_spec(name).origin` under `cwd`; `del sys.path[0]` so a merely-present or non-editable/`site-packages` copy fails). This effectively requires an **editable install pointing at the worktree** — the exact "is this env good, and does it test the right bytes" test styre already ships.
+- **(b) env can run *this* suite (complete):** `pytest --collect-only -q` exits 0. This is stronger than "`import pytest`" (which an under-provisioned env passes): collection loads `conftest.py`, `addopts`, and every declared plugin (`pytest-astropy`, `pytest-mpl`, doctest plugins…). If the env is missing a plugin the suite needs, collection **errors** → the env is **not** ready → fall through. This is the guard against reuse turning a slow-but-correct pass into a fast *wrong* fail (review F2).
 
-If **both pass** → the env is ready (conda `testbed`, a venv, whatever's active) → **reuse**. If either fails → **provision + pre-warm**. styre never enumerates conda envs or knows about conda — it validates whatever is active. Deterministic, ground-truth, reuses existing machinery.
+If **both pass** → the env is ready (conda `testbed`, a venv, whatever's active) → **reuse**. If either fails → **provision** (and, later, pre-warm). styre never enumerates conda envs or knows about conda — it validates whatever is active. Deterministic, ground-truth, reuses existing machinery.
 
 ### 1.2 The reuse path (primary — the astropy fix)
 
@@ -78,11 +78,12 @@ Same "reuse-what's-built" pattern already exists / applies across stacks (see th
 
 ## 5. Open questions / risks
 
-1. **★ Reuse still runs the *whole* suite.** `python -m pytest` runs all tests — for a very large suite (astropy is thousands of tests) the *run* could itself approach/exceed the 10-min verify budget, even with no rebuild. Reuse fixes the *dominant* blocker (env-build timeout) and gets styre to actually running tests, but the full-suite run is the next lever — which points at **test-selection/TIA (deferred)** or a longer budget for a proven-env run. Honest limit: reuse makes astropy *runnable*, not guaranteed *fast enough*.
-2. **Env-selection heuristic (pre-warm path).** Picking `py<host>-test` from a factor-expanded `envlist` is a real parser; a wrong pick runs the wrong env. Only matters when there's no ready env (astropy itself has one, so reuse skips this).
-3. **tox source-under-test on the pre-warm path** (`isolated_build`/`changedir`): the verify run must reinstall the sdist to test the change; confirm/force per-run reinstall.
-4. **Probe assumes an active env on PATH.** In the reuse case the SWE-bench image activates `testbed`; a deployment where the right env isn't active would fail the probe → provision (correct, just slower).
-5. **Deferred:** test-selection/TIA; env-selection for nox; ruby/php readiness probes; native typecheckers.
+1. **★ Verdict parity — reuse runs the *standard runner*, not the harness's exact config (review F1).** `python -m pytest` from the repo root does **not** reproduce tox's `changedir`/`setenv`/`passenv`/`isolated_build`. We accept this deliberately, for three reasons, and do **not** claim bit-identical harness reproduction: (a) the probe requires an *editable* env, so the imported bytes are the worktree either way (tox's `changedir`-to-avoid-source-import is inert when installed==source); (b) a project's *base* test env (e.g. `py39-test`, no factors) typically has no `setenv` — the factor envs that do (`cov`/`image`/`clocale`) aren't the base verification; (c) **the ultimate parity gate is the bench's held-out oracle** — if a reuse'd run yields a PR the oracle scores correctly on a known-good fix, parity holds for that case. The honest limit: for a repo whose harness config *does* change the verdict, reuse could drift; the collection probe (§1.1b) catches the *missing-plugin* class, not the *different-config-same-plugins* class. Surfaced, not hidden.
+2. **★ Reuse still runs the *whole* suite.** `python -m pytest` runs all tests — for a very large suite (astropy is thousands of tests) the *run* could itself approach/exceed the 10-min verify budget, even with no rebuild. Reuse fixes the *dominant* blocker (env-build timeout) and gets styre to actually running tests, but the full-suite run is the next lever — which points at **test-selection/TIA (deferred)** or a longer budget for a proven-env run. Honest limit: reuse makes astropy *runnable*, not guaranteed *fast enough*.
+3. **Env-selection heuristic (pre-warm path).** Picking `py<host>-test` from a factor-expanded `envlist` is a real parser; a wrong pick runs the wrong env. Only matters when there's no ready env (astropy itself has one, so reuse skips this).
+4. **tox source-under-test on the pre-warm path** (`isolated_build`/`changedir`): the verify run must reinstall the sdist to test the change; confirm/force per-run reinstall.
+5. **Probe assumes an active env on PATH.** In the reuse case the SWE-bench image activates `testbed`; a deployment where the right env isn't active would fail the probe → provision (correct, just slower).
+6. **Deferred:** test-selection/TIA; env-selection for nox; ruby/php readiness probes; native typecheckers.
 
 ---
 
