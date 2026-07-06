@@ -70,9 +70,10 @@ export const runCommand = defineCommand({
     const startedAt = Date.now();
     try {
       if (args["in-place"] && !(args.resume && args.resume.length > 0)) {
-        const { assertInPlaceSafe, assertInPlaceIdentity } = await import(
+        const { discoverRepoRoot, assertInPlaceSafe, assertInPlaceIdentity } = await import(
           "../dispatch/in-place.ts"
         );
+        profile.targetRepo = discoverRepoRoot(); // cwd git-toplevel; THROWS (fail-closed) if not a repo — never falls through to the stale profile path
         assertInPlaceSafe(profile.targetRepo);
         await assertInPlaceIdentity(profile.targetRepo, profile);
       }
