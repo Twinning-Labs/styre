@@ -58,6 +58,7 @@ test("resumeRun derives in-place from the persisted worktree path: skips wipe/re
   const ident = "ENG-9";
   const branch = `feat/${ident}`;
   const { root: repoPath, sha } = gitRepo(branch);
+  writeFileSync(join(repoPath, ".styre-disposable"), ""); // Task 3: resume now re-checks the marker
 
   try {
     const dir = parkDir(slug, ident);
@@ -174,6 +175,9 @@ test("resumeRun re-checks in-place identity before mutating: throws when the act
   const ident = "ENG-10";
   const branch = `feat/${ident}`;
   const { root: repoPath } = gitRepo(branch);
+  writeFileSync(join(repoPath, ".styre-disposable"), ""); // marker present: isolate this test to
+  // the identity probe only (Task 3 added a marker re-check that runs first — without the marker
+  // this would throw on that instead, never reaching the identity assertion below).
 
   // A python component whose derivable import name is NOT installed anywhere the active
   // interpreter can see (`find_spec` returns None) — the identity probe can't resolve it under
@@ -240,7 +244,7 @@ test("resumeRun re-checks in-place identity before mutating: throws when the act
           checks: fakeChecks("passing"),
         },
       }),
-    ).rejects.toThrow(/in-place/);
+    ).rejects.toThrow(/is not installed against/); // the identity error specifically, not the marker one
 
     // Proof of "before mutating": the repo's own checkout never moved off `main` — the identity
     // probe fired (and threw) before `ensureWorktree`'s `checkout -B` could hijack it.
@@ -248,6 +252,193 @@ test("resumeRun re-checks in-place identity before mutating: throws when the act
       .stdout.toString()
       .trim();
     expect(headAfter).toBe("main");
+  } finally {
+    if (prevXdgStateHome === undefined) {
+      process.env.XDG_STATE_HOME = undefined;
+    } else {
+      process.env.XDG_STATE_HOME = prevXdgStateHome;
+    }
+    rmSync(stateRoot, { recursive: true, force: true });
+    rmSync(repoPath, { recursive: true, force: true });
+  }
+});
+
+test("resumeRun refuses in-place resume when the disposability marker is absent: throws before any repo mutation (Task 3)", async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), "styre-park-inplace-marker-state-"));
+  const prevXdgStateHome = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = stateRoot;
+  const slug = "inplace-marker-test";
+  const ident = "ENG-11";
+  const branch = `feat/${ident}`;
+  // NOTE: no .styre-disposable marker is written at repoPath — this is the exact gap Task 3
+  // closes: resume previously skipped `assertInPlaceMarker` entirely (only the python-only
+  // identity probe ran), so a non-python in-place repo would resume with no disposability check.
+  const { root: repoPath } = gitRepo(branch);
+
+  try {
+    const dir = parkDir(slug, ident);
+    mkdirSync(dir, { recursive: true });
+    const dbPath = join(dir, "run.db");
+    migrate(dbPath);
+    const seedDb = openDb(dbPath);
+    const projectId = insertProject(seedDb, { slug, targetRepo: repoPath });
+    const ticketId = insertTicket(seedDb, { projectId, ident });
+    setTicketStage(seedDb, ticketId, "implement");
+
+    // The prior IN-PLACE park: latest dispatch's worktree_path === project.target_repo, so
+    // `resumeRun` derives `inPlace = true` and must re-check the marker before anything else.
+    const seq = nextDispatchSeq(seedDb, ticketId);
+    const d = insertDispatch(seedDb, {
+      ticketId,
+      dispatchId: `${ident}-d0001`,
+      seq,
+      worktreePath: repoPath,
+    });
+    completeDispatch(seedDb, d.id, { outcome: "parked", branchHeadSha: null });
+
+    seedDb.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    seedDb.close();
+
+    // A deliberately stale override on the profile — proves the marker re-check happens
+    // regardless of what the profile currently carries (it reads `project.target_repo`, not
+    // `profile.targetRepo`, for the marker path itself).
+    const profile = parseProfile({
+      slug,
+      targetRepo: "/nonexistent/stale-profile-target-repo",
+      defaultBranch: "main",
+      checksSystem: "none",
+    });
+
+    const headBefore = Bun.spawnSync(["git", "rev-parse", "--abbrev-ref", "HEAD"], {
+      cwd: repoPath,
+    })
+      .stdout.toString()
+      .trim();
+    expect(headBefore).toBe("main");
+
+    await expect(
+      resumeRun({ resume: ident }, profile, DEFAULT_RUNTIME_CONFIG, {
+        ports: {
+          issueTracker: fakeIssueTracker({
+            ticket: {
+              ident,
+              title: "In-place resume marker re-check",
+              description: "body",
+              typeLabel: "Feature",
+              linearIssueUuid: "uuid-inplace-marker",
+              url: null,
+            },
+          }),
+          forge: fakeForge(),
+          checks: fakeChecks("passing"),
+        },
+      }),
+    ).rejects.toThrow(/disposable/);
+
+    // Proof of "before mutating": the repo's own checkout never moved off `main` — the marker
+    // re-check fired (and threw) before `ensureWorktree`'s `checkout -B` could touch it.
+    const headAfter = Bun.spawnSync(["git", "rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoPath })
+      .stdout.toString()
+      .trim();
+    expect(headAfter).toBe("main");
+
+    // No separate worktree was ever registered.
+    const wtListRes = Bun.spawnSync(["git", "worktree", "list"], { cwd: repoPath });
+    const worktreeLines = wtListRes.stdout
+      .toString()
+      .trim()
+      .split("\n")
+      .filter((l) => l !== "");
+    expect(worktreeLines.length).toBe(1);
+  } finally {
+    if (prevXdgStateHome === undefined) {
+      process.env.XDG_STATE_HOME = undefined;
+    } else {
+      process.env.XDG_STATE_HOME = prevXdgStateHome;
+    }
+    rmSync(stateRoot, { recursive: true, force: true });
+    rmSync(repoPath, { recursive: true, force: true });
+  }
+});
+
+test("resumeRun with the marker present re-applies profile.targetRepo (the discovered override) before the ports build (Task 3)", async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), "styre-park-inplace-override-state-"));
+  const prevXdgStateHome = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = stateRoot;
+  const slug = "inplace-override-test";
+  const ident = "ENG-12";
+  const branch = `feat/${ident}`;
+  const { root: repoPath, sha } = gitRepo(branch);
+  writeFileSync(join(repoPath, ".styre-disposable"), "");
+
+  try {
+    const dir = parkDir(slug, ident);
+    mkdirSync(dir, { recursive: true });
+    const dbPath = join(dir, "run.db");
+    migrate(dbPath);
+    const seedDb = openDb(dbPath);
+    const projectId = insertProject(seedDb, { slug, targetRepo: repoPath });
+    const ticketId = insertTicket(seedDb, { projectId, ident });
+    setTicketStage(seedDb, ticketId, "implement");
+
+    // provision already succeeded on a prior attempt — mirrors the S4 test's deterministic path
+    // to a terminal (escalated/blocked) outcome with no agent dispatch ever needed.
+    await succeed(seedDb, ticketId, "provision");
+    insertWorkUnit(seedDb, {
+      ticketId,
+      seq: 1,
+      kind: "backend",
+      status: "verifying",
+      behavioral: 0,
+      filesToTouch: [],
+      verifyCheckTypes: ["build"],
+    });
+
+    const seq = nextDispatchSeq(seedDb, ticketId);
+    const d = insertDispatch(seedDb, {
+      ticketId,
+      dispatchId: `${ident}-d0001`,
+      seq,
+      worktreePath: repoPath,
+    });
+    completeDispatch(seedDb, d.id, { outcome: "parked", branchHeadSha: sha });
+
+    seedDb.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    seedDb.close();
+
+    // The profile's targetRepo is deliberately stale here (e.g. a profile.json loaded from disk
+    // before the in-place discovery ran) — `resumeRun` must re-apply `project.target_repo` onto
+    // `profile.targetRepo` so ports built from `profile` (`makeProjectorPorts` et al.) target the
+    // right repo, exactly like the fresh-run `--in-place` preflight in `run.ts` does.
+    const profile = parseProfile({
+      slug,
+      targetRepo: "/nonexistent/stale-profile-target-repo",
+      defaultBranch: "main",
+      checksSystem: "none",
+    });
+    expect(profile.targetRepo).not.toBe(repoPath);
+
+    await expect(
+      resumeRun({ resume: ident }, profile, DEFAULT_RUNTIME_CONFIG, {
+        ports: {
+          issueTracker: fakeIssueTracker({
+            ticket: {
+              ident,
+              title: "In-place resume override re-apply",
+              description: "body",
+              typeLabel: "Feature",
+              linearIssueUuid: "uuid-inplace-override",
+              url: null,
+            },
+          }),
+          forge: fakeForge(),
+          checks: fakeChecks("passing"),
+        },
+      }),
+    ).rejects.toThrow(/blocked/);
+
+    // The override reached: `profile.targetRepo` now matches the discovered `project.target_repo`.
+    expect(profile.targetRepo).toBe(repoPath);
   } finally {
     if (prevXdgStateHome === undefined) {
       process.env.XDG_STATE_HOME = undefined;
