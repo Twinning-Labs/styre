@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
@@ -14,6 +14,7 @@ import {
 import { getByKey } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
+import { resolvePythonInterpreter } from "../../src/dispatch/provision.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 function gitRepo(): string {
@@ -747,3 +748,156 @@ test("verify:integration runs a component job in its module dir and a repoComman
   expect(outcome.kind).toBe("stepped");
   expect(sigs[0]?.result).toBe("pass");
 });
+
+// --- Task 2: verify:check test-command resolution routes through reuseAwareTestCommand ---
+
+test("verify:check test command for a python component with no ready env falls back to the configured harness unchanged", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo(); // no pyproject.toml / editable install anywhere → never provably "ready"
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    behavioral: 0,
+    verifyCheckTypes: ["test"],
+  });
+  const runner = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "feature.py"), "x = 1\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: "{}",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      // kind: "python" + checkType "test" is exactly what reuseAwareTestCommand self-gates on;
+      // "tox" here is the "detected harness" that must survive unchanged when reuse isn't proven.
+      components: [{ name: "py", kind: "python", paths: ["**"], commands: { test: "tox" } }],
+    }),
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfy-pynoready-")),
+  });
+
+  await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
+  await advanceOneStep(db, ticketId, registry); // completeness:wu1
+  const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test → runs "tox"
+  const sigs = listByUnit(db, unit.id);
+  db.close();
+  expect(["retry", "loopback", "escalated"]).toContain(outcome.kind); // "tox" isn't a real binary here
+  const testSig = sigs.find((s) => s.signal_type === "test");
+  expect(testSig?.command).toBe("tox");
+});
+
+// RUN_LIVE-gated: exercises the real reuse resolver end to end through the handler — a real
+// editable pip install (via the existing `provision` step) makes the python env provably ready,
+// so verify:check must run pytest directly instead of the configured "false" harness (which would
+// fail the step if it ran unchanged — the strongest possible proof the wiring is live, not mocked).
+const live = process.env.RUN_LIVE === "1" ? test : test.skip;
+
+live(
+  "verify:check: a ready python env resolves the test command to pytest, not the configured harness",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "styre-vfy-pyready-"));
+    const interp = resolvePythonInterpreter();
+    const pytestCheck = Bun.spawnSync([interp, "-m", "pytest", "--version"]);
+    const installedPytest = pytestCheck.exitCode !== 0;
+    try {
+      const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
+      run(["init", "-b", "main"]);
+      run(["config", "user.email", "t@s.dev"]);
+      run(["config", "user.name", "T"]);
+      mkdirSync(join(root, "pkg"), { recursive: true });
+      writeFileSync(join(root, "pkg", "__init__.py"), "");
+      mkdirSync(join(root, "tests"), { recursive: true });
+      writeFileSync(join(root, "tests", "test_x.py"), "def test_x():\n    assert True\n");
+      writeFileSync(
+        join(root, "setup.py"),
+        "from setuptools import setup\nsetup(name='pkg', version='0.0.1', packages=['pkg'])\n",
+      );
+      run(["add", "-A"]);
+      run(["commit", "-m", "init"]);
+
+      const { db, ticketId, projectId } = makeTestDb();
+      db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(root, projectId);
+      db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+      const unit = insertWorkUnit(db, {
+        ticketId,
+        seq: 1,
+        kind: "backend",
+        behavioral: 0,
+        verifyCheckTypes: ["test"],
+      });
+      const runner = new FakeAgentRunner((input) => {
+        writeFileSync(join(input.cwd, "pkg", "extra.py"), "X = 1\n");
+        return {
+          completed: true,
+          exitCode: 0,
+          stdout: "{}",
+          stderr: "",
+          timedOut: false,
+          costUsd: null,
+          tokensIn: null,
+          tokensOut: null,
+        };
+      });
+      const registry = buildDispatchRegistry({
+        runner,
+        agentConfig: DEFAULT_AGENT_CONFIG,
+        profile: parseProfile({
+          slug: "demo",
+          targetRepo: root,
+          components: [
+            {
+              name: "pkg",
+              kind: "python",
+              paths: ["**"],
+              // "false" would fail the step if it ran unchanged — proves reuse actually replaced it.
+              commands: { test: "false" },
+              prepare: `${interp} -m pip install --break-system-packages --user pytest && ${interp} -m pip install --break-system-packages --user -e .`,
+            },
+          ],
+        }),
+        worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfywt-pyready-")),
+      });
+
+      await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
+      await advanceOneStep(db, ticketId, registry); // provision → real editable install (env → ready)
+      await advanceOneStep(db, ticketId, registry); // completeness:wu1
+      const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test → pytest
+      const sigs = listByUnit(db, unit.id);
+      db.close();
+      expect(outcome.kind).toBe("stepped");
+      const testSig = sigs.find((s) => s.signal_type === "test");
+      expect(testSig?.result).toBe("pass");
+      expect(testSig?.command).toBe(`${interp} -m pytest`);
+    } finally {
+      await Bun.spawn([interp, "-m", "pip", "uninstall", "-y", "--break-system-packages", "pkg"])
+        .exited;
+      if (installedPytest) {
+        await Bun.spawn([
+          interp,
+          "-m",
+          "pip",
+          "uninstall",
+          "-y",
+          "--break-system-packages",
+          "pytest",
+        ]).exited;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  120_000,
+);

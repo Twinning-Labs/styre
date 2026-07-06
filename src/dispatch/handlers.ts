@@ -63,6 +63,7 @@ import {
   resolvePythonInterpreter,
   sourceCheckCommand,
 } from "./provision.ts";
+import { reuseAwareTestCommand } from "./reuse.ts";
 import { ReviewOutputSchema, computeBlocksShip, validateReviewFindings } from "./review-schema.ts";
 import type { DispatchDeps } from "./run-dispatch.ts";
 import { runAgentDispatch } from "./run-dispatch.ts";
@@ -647,13 +648,20 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     let detail: Record<string, unknown> = {};
 
     if (realImpacted.length > 0) {
-      const toRun = realImpacted
-        .filter((c) => commandFor(c, checkType) !== undefined)
-        .map((c) => ({
-          component: c.name,
-          command: commandFor(c, checkType) as string,
-          dir: c.dir,
-        }));
+      const toRun = await Promise.all(
+        realImpacted
+          .filter((c) => commandFor(c, checkType) !== undefined)
+          .map(async (c) => ({
+            component: c.name,
+            command: await reuseAwareTestCommand(
+              c,
+              checkType,
+              commandFor(c, checkType) as string,
+              join(worktreePath, c.dir ?? ""),
+            ),
+            dir: c.dir,
+          })),
+      );
       const unavailable = realImpacted.filter((c) => isUnavailable(c, checkType));
       const absent = realImpacted.filter(
         (c) => commandFor(c, checkType) === undefined && !isUnavailable(c, checkType),
