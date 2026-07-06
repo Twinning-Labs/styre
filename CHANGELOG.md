@@ -1,6 +1,14 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.4.0] - 2026-07-06
+
+### Features
+- Deterministic completeness step (fixes the empty-diff false-block) (#49)
+- Verify reuses a ready env instead of rebuilding (#51)
+- In-place execution for disposable checkouts (branch in the repo root, not a worktree) (#52)
+
+
 ## [0.3.0] - 2026-07-04
 
 ### Features
