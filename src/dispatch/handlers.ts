@@ -822,7 +822,12 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     for (const c of deps.profile.components) {
       for (const key of ["build", "test"] as const) {
         const cmd = commandFor(c, key);
-        if (cmd) jobs.push({ label: `${c.name}:${key}`, command: cmd, dir: c.dir });
+        if (!cmd) continue;
+        const command =
+          key === "test"
+            ? await reuseAwareTestCommand(c, key, cmd, join(worktreePath, c.dir ?? ""))
+            : cmd;
+        jobs.push({ label: `${c.name}:${key}`, command, dir: c.dir });
       }
     }
     for (const [name, cmd] of Object.entries(deps.profile.repoCommands)) {
