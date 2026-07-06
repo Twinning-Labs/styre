@@ -11,8 +11,17 @@ function git(args: string[], cwd: string): string {
 }
 
 /** Create a worktree on `branch` (reset to current HEAD) if absent; reuse if present.
- *  The worktree is the agent's only writable surface (capability isolation, move 4). */
+ *  The worktree is the agent's only writable surface (capability isolation, move 4).
+ *
+ *  In-place mode (`worktreePath === repoPath`, i.e. the checkout is disposable — a single-use
+ *  container): no separate worktree. Create/switch the branch directly in the repo root instead. */
 export function ensureWorktree(repoPath: string, branch: string, worktreePath: string): void {
+  if (worktreePath === repoPath) {
+    // Called ~6x/unit; `checkout -B` resets the ref to HEAD each time, so skip when already on it.
+    if (git(["rev-parse", "--abbrev-ref", "HEAD"], repoPath) === branch) return;
+    git(["checkout", "-B", branch], repoPath);
+    return;
+  }
   if (existsSync(join(worktreePath, ".git"))) {
     return;
   }
@@ -38,6 +47,7 @@ export function commitWorktree(
 }
 
 export function removeWorktree(repoPath: string, worktreePath: string): void {
+  if (worktreePath === repoPath) return; // in-place: never remove the repo root
   git(["worktree", "remove", "--force", worktreePath], repoPath);
 }
 

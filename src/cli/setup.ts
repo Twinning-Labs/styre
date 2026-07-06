@@ -78,7 +78,11 @@ export function deriveSetupInput(profile: Profile): SetupInput {
 }
 
 /** Probe a repo, enrich its runtime context via the agent, and write the profile JSON. Testable
- *  core (the citty command is a thin wrapper that supplies the real runner + cred precondition). */
+ *  core (the citty command is a thin wrapper that supplies the real runner + cred precondition).
+ *  Assumes `args.repo` is an explicit, operator-named path — it does NOT itself gate on the
+ *  disposability marker. Any future caller that passes a discovered / no-arg repo MUST call
+ *  `assertInPlaceMarker(repo)` first, as the citty wrapper below does. Do not let this wrapper-only
+ *  gate silently erode. */
 export async function runSetup(args: {
   repo: string;
   out?: string;
@@ -182,7 +186,12 @@ function credNote(profile: Profile): string | null {
 export const setupCommand = defineCommand({
   meta: { name: "setup", description: "Probe a repo and write a Styre profile JSON." },
   args: {
-    repo: { type: "positional", required: true, description: "Path to the target repo" },
+    repo: {
+      type: "positional",
+      required: false,
+      description:
+        "Path to the target repo (omit to discover the cwd repo — requires a .styre-disposable marker)",
+    },
     out: {
       type: "string",
       description: "Output path (default: $XDG_CONFIG_HOME/styre/<slug>/profile.json)",
@@ -201,12 +210,21 @@ export const setupCommand = defineCommand({
     },
   },
   async run({ args }) {
+    // No positional `repo`: discover the cwd repo and gate it on the disposability marker BEFORE
+    // any write-capable enrichment agent call (runSetup's enrichRuntimeContext/discoverComponents).
+    // An explicit `setup <repo>` requires no marker — the operator named the target.
+    let repo = args.repo;
+    if (!repo) {
+      const { discoverRepoRoot, assertInPlaceMarker } = await import("../dispatch/in-place.ts");
+      repo = discoverRepoRoot(); // no-arg → discover cwd's repo (throws fail-closed if not a git repo)
+      assertInPlaceMarker(repo); // gate BEFORE runSetup's write-capable enrichment agent
+    }
     if (!process.env.ANTHROPIC_API_KEY) {
       throw new Error("setup: ANTHROPIC_API_KEY is required (runtime-context prose enrichment)");
     }
     const runner = selectAgentRunner(DEFAULT_AGENT_CONFIG, { claude: () => claudeAgentRunner() });
     const { outPath, profile, needsInput } = await runSetup({
-      repo: args.repo,
+      repo,
       out: args.out,
       checks: args.checks,
       slug: args.slug,

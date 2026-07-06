@@ -52,6 +52,11 @@ export const runCommand = defineCommand({
       description: "Resume even though the branch HEAD moved (drops carryover)",
     },
     inspect: { type: "boolean", description: "Print resume diagnostics and exit without running" },
+    "in-place": {
+      type: "boolean",
+      description:
+        "Work on a branch in the repo root instead of a worktree (disposable single-use checkout only)",
+    },
   },
   async run({ args }) {
     const profile = loadProfile(args.profile);
@@ -64,6 +69,22 @@ export const runCommand = defineCommand({
     const analytics = createAnalytics(runtimeConfig);
     const startedAt = Date.now();
     try {
+      if (args["in-place"] && !(args.resume && args.resume.length > 0)) {
+        const { discoverRepoRoot, assertInPlaceSafe, assertInPlaceIdentity } = await import(
+          "../dispatch/in-place.ts"
+        );
+        // cwd git-toplevel; THROWS (fail-closed) if not a repo — never falls through to the stale profile path
+        const discovered = discoverRepoRoot();
+        if (discovered !== profile.targetRepo) {
+          console.error(
+            `IN-PLACE: discovered repo root ${discovered} differs from the profile's targetRepo ${profile.targetRepo}; using the discovered root (components/commands still come from the profile).`,
+          );
+        }
+        profile.targetRepo = discovered;
+        assertInPlaceSafe(profile.targetRepo);
+        await assertInPlaceIdentity(profile.targetRepo, profile);
+      }
+
       if (args.resume && args.resume.length > 0) {
         const { resumeRun } = await import("./park.ts");
         await resumeRun(
@@ -93,6 +114,7 @@ export const runCommand = defineCommand({
         agentConfig: DEFAULT_AGENT_CONFIG,
         profile,
         worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-")),
+        inPlace: (args["in-place"] as boolean | undefined) ?? false,
       });
 
       analytics.runStarted({
