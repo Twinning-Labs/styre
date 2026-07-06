@@ -83,6 +83,7 @@ export interface RegistryDeps {
   agentConfig: AgentConfig;
   profile: Profile;
   worktreeRoot: string;
+  inPlace?: boolean;
   timeoutMs?: number;
   resumeContext?: { stepKey: string; transcript: string };
 }
@@ -94,7 +95,7 @@ const PROVISION_TIMEOUT_MS = 15 * 60 * 1000;
 
 /** Resolve the repo + ticket worktree + branch for a DAEMON-run step (verify). Unlike
  *  `depsFor` this carries no agent capability — verify only reads the committed worktree. */
-function worktreeFor(
+export function worktreeFor(
   ctx: HandlerContext,
   deps: RegistryDeps,
 ): { repoPath: string; worktreePath: string; branch: string } {
@@ -104,7 +105,7 @@ function worktreeFor(
   }
   return {
     repoPath: project.target_repo,
-    worktreePath: join(deps.worktreeRoot, ctx.ticket.ident),
+    worktreePath: deps.inPlace ? project.target_repo : join(deps.worktreeRoot, ctx.ticket.ident),
     branch: branchNameFor(ctx.ticket),
   };
 }
@@ -127,7 +128,7 @@ function depsFor(ctx: HandlerContext, deps: RegistryDeps, timeoutMs: number): Di
     agentConfig: deps.agentConfig,
     profile: deps.profile,
     repoPath: project.target_repo,
-    worktreePath: join(deps.worktreeRoot, ctx.ticket.ident),
+    worktreePath: deps.inPlace ? project.target_repo : join(deps.worktreeRoot, ctx.ticket.ident),
     branch: branchNameFor(ctx.ticket),
     timeoutMs,
     resumeContext: deps.resumeContext,
