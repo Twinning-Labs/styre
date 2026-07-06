@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -94,6 +94,14 @@ test("assertInPlaceMarker passes with a regular-file marker, throws without", ()
 test("assertInPlaceMarker rejects a non-regular-file marker (F5)", () => {
   const repo = tmpRepo();
   Bun.spawnSync(["mkdir", join(repo, ".styre-disposable")]);
+  expect(() => assertInPlaceMarker(repo)).toThrow(/regular file/);
+});
+
+test("assertInPlaceMarker rejects a symlinked marker even when it points at a real regular file (F5)", () => {
+  const repo = tmpRepo();
+  const realFile = join(repo, "real-file.txt");
+  writeFileSync(realFile, "");
+  symlinkSync(realFile, join(repo, ".styre-disposable"));
   expect(() => assertInPlaceMarker(repo)).toThrow(/regular file/);
 });
 

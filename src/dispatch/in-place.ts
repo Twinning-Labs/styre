@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pythonImportName } from "../setup/lang/python.ts";
@@ -32,7 +32,7 @@ export function discoverRepoRoot(cwd: string = process.cwd(), git: GitRun = defa
  *  against misuse, NOT proof (a mount/hook/commit could forge it — see the design doc). */
 export function assertInPlaceMarker(repoPath: string): void {
   const m = join(repoPath, ".styre-disposable");
-  if (!existsSync(m) || !statSync(m).isFile()) {
+  if (!existsSync(m) || !lstatSync(m).isFile()) {
     throw new Error(
       `--in-place refused: no .styre-disposable marker (regular file) at ${repoPath}; refusing to mutate a checkout that may be owned.`,
     );
