@@ -73,7 +73,14 @@ export const runCommand = defineCommand({
         const { discoverRepoRoot, assertInPlaceSafe, assertInPlaceIdentity } = await import(
           "../dispatch/in-place.ts"
         );
-        profile.targetRepo = discoverRepoRoot(); // cwd git-toplevel; THROWS (fail-closed) if not a repo — never falls through to the stale profile path
+        // cwd git-toplevel; THROWS (fail-closed) if not a repo — never falls through to the stale profile path
+        const discovered = discoverRepoRoot();
+        if (discovered !== profile.targetRepo) {
+          console.error(
+            `IN-PLACE: discovered repo root ${discovered} differs from the profile's targetRepo ${profile.targetRepo}; using the discovered root (components/commands still come from the profile).`,
+          );
+        }
+        profile.targetRepo = discovered;
         assertInPlaceSafe(profile.targetRepo);
         await assertInPlaceIdentity(profile.targetRepo, profile);
       }

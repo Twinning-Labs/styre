@@ -87,6 +87,37 @@ test("run --in-place: overrides profile.targetRepo with the cwd-discovered repo 
   }
 });
 
+test("run --in-place: warns on stderr when the discovered repo root differs from the profile's targetRepo", async () => {
+  const cwdRepo = makeRepo(true); // has the marker — this is what discovery SHOULD return
+  const staleProfileRepo = makeRepo(true); // also has the marker, so the gate passes either way —
+  // isolates the assertion to the warning itself, not a side effect of the gate rejecting the stale
+  // value. Note both dirs are real git-toplevels, so `git rev-parse --show-toplevel` on cwdRepo
+  // (not a raw mkdtemp path — macOS /private/var realpath caution) will never equal staleProfileRepo.
+  const profilePath = writeProfile(staleProfileRepo);
+
+  const errors: string[] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+
+  const prevCwd = process.cwd();
+  process.chdir(cwdRepo);
+  try {
+    await expect(invokeRun(profilePath)).rejects.toThrow(/--ticket is required/);
+
+    const discoveredRoot = Bun.spawnSync(["git", "rev-parse", "--show-toplevel"], { cwd: cwdRepo })
+      .stdout.toString()
+      .trim();
+    const warning = errors.find((e) => e.startsWith("IN-PLACE: discovered repo root"));
+    expect(warning).toBeDefined();
+    expect(warning).toContain(discoveredRoot);
+    expect(warning).toContain(staleProfileRepo);
+    expect(warning).toContain("differs from the profile's targetRepo");
+  } finally {
+    process.chdir(prevCwd);
+    console.error = origError;
+  }
+});
+
 test("run --in-place: fails closed when cwd is not a git repo — never falls through to the stale profile.targetRepo", async () => {
   const nonRepoDir = mkdtempSync(join(tmpdir(), "styre-run-inplace-disc-nonrepo-"));
   roots.push(nonRepoDir);

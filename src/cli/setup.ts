@@ -78,7 +78,11 @@ export function deriveSetupInput(profile: Profile): SetupInput {
 }
 
 /** Probe a repo, enrich its runtime context via the agent, and write the profile JSON. Testable
- *  core (the citty command is a thin wrapper that supplies the real runner + cred precondition). */
+ *  core (the citty command is a thin wrapper that supplies the real runner + cred precondition).
+ *  Assumes `args.repo` is an explicit, operator-named path — it does NOT itself gate on the
+ *  disposability marker. Any future caller that passes a discovered / no-arg repo MUST call
+ *  `assertInPlaceMarker(repo)` first, as the citty wrapper below does. Do not let this wrapper-only
+ *  gate silently erode. */
 export async function runSetup(args: {
   repo: string;
   out?: string;
