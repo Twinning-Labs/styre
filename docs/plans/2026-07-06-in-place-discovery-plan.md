@@ -69,10 +69,14 @@ test("assertInPlaceSafe: tracked-dirty still refused", () => {
   expect(() => assertInPlaceSafe(repo)).toThrow(/tracked/);
 });
 ```
-**Also update the existing detached-HEAD tests:** the #52 test "detached HEAD + clean passes" must change — detached-HEAD alone (no marker) now **throws**. Rewrite those cases to the marker-only semantics; do not leave them asserting the old behavior.
+**Update the existing tests broken by dropping detached-HEAD — THREE cases (feasibility), and preserve their coverage:**
+- `in-place.test.ts:37-39` `"safe: detached HEAD + clean tracked tree passes"` — rewrite to marker semantics (detached alone no longer passes; a marker is now required).
+- `in-place.test.ts:58-62` `"untracked residue must not false-refuse"` — **add a `.styre-disposable` marker** to its repo, else it throws on the missing marker *before* reaching the `--untracked-files=no` check. This is the ONLY coverage for the editable-env-residue guard — keep it, don't delete it.
+- `in-place.test.ts:51-56` `"refuse: uncommitted tracked change"` — **add a marker** too, else it now throws for the *marker* reason, not the tracked-dirty reason it's written to prove (a false pass). Assert the message names the tracked-dirty cause.
+- The `tmpRepo()` helper's `checkout --detach` (`:24`) is now semantically inert for the gate; leave it (harmless) or note it.
 
 - [ ] **Step 2: Run → FAIL** (`discoverRepoRoot`/`assertInPlaceMarker` don't exist; `assertInPlaceSafe` still accepts detached).
-- [ ] **Step 3: Implement** in `src/dispatch/in-place.ts` (add `import { statSync } from "node:fs";`):
+- [ ] **Step 3: Implement** in `src/dispatch/in-place.ts` (**merge `statSync` into the existing `node:fs` import** at line 1 — `{ existsSync, mkdtempSync, rmSync, statSync, writeFileSync }` — NOT a second import line, or biome `organizeImports` fails the lint gate):
 
 ```ts
 export function discoverRepoRoot(cwd: string = process.cwd(), git: GitRun = defaultGit): string {
@@ -115,7 +119,7 @@ Update `assertInPlaceSafe`'s docstring to drop the detached-HEAD mention.
 **Files:** Modify `src/cli/run.ts`; Test `test/dispatch/in-place.test.ts` (override-propagation unit) or a `RUN_LIVE` run test.
 **Interfaces — Consumes:** `discoverRepoRoot` (Task 1).
 
-- [ ] **Step 1: Failing test** — assert that with `--in-place`, `profile.targetRepo` is overridden to the discovered root before it reaches `insertProject`/ports. Prefer a focused test: extract nothing new — call the preflight logic path via a `RUN_LIVE`-gated run of `styre run --in-place` in a temp git repo (marker present), then assert the DB's `project.target_repo` equals the repo root (not the profile's original `targetRepo`). If a full run is too heavy, assert the wiring by unit-testing that `discoverRepoRoot()`'s result is what's assigned (read-through), and rely on Task 1's discovery unit + this task's code review.
+- [ ] **Step 1: Failing test** — assert that with `--in-place`, `profile.targetRepo` is overridden to the discovered root before it reaches `insertProject`/ports. Prefer a focused test: extract nothing new — call the preflight logic path via a `RUN_LIVE`-gated run of `styre run --in-place` in a temp git repo (marker present), then assert the DB's `project.target_repo` equals the repo root (not the profile's original `targetRepo`). **macOS symlink caution:** `git rev-parse --show-toplevel` returns the realpath (`/private/var/…`) while `mkdtempSync` hands back a `/var/…` symlink — compare against another `git rev-parse --show-toplevel` (as Task 1's test does), not the raw `mkdtemp` path. If a full run is too heavy, assert the wiring by unit-testing that `discoverRepoRoot()`'s result is what's assigned (read-through), and rely on Task 1's discovery unit + this task's code review.
 - [ ] **Step 2: Run → FAIL.**
 - [ ] **Step 3: Implement** — in `src/cli/run.ts`, the `--in-place` preflight block becomes:
 
@@ -150,6 +154,7 @@ if (inPlace) {
   assertInPlaceMarker(project.target_repo);                       // F1: language-agnostic disposability re-check before checkout -B (assertInPlaceSafe is NOT re-run — HEAD sits on the styre branch mid-run; tracked-dirty is noisy)
 }
 ```
+There's already an `if (inPlace) { … assertInPlaceIdentity … }` block on the resume path (`park.ts:216-218`, the #52 fix). **Fold these into one `if (inPlace)` block** — the override + marker re-check + the existing identity re-check — placed after the `inPlace` derivation (`:184`) and before the ports build (`:263`), so the whole in-place resume guard is in one place. (`assertInPlaceMarker`/`assertInPlaceIdentity` can share the one dynamic `import`.)
 
 - [ ] **Step 4: Run → PASS.** Full `bun test`, typecheck, lint green.
 - [ ] **Step 5: Commit** `feat(run): in-place resume re-checks the disposability marker + re-applies the override`
@@ -175,7 +180,7 @@ if (inPlace) {
     }
     // ... runSetup({ repo, out: args.out, ... })   // pass the resolved `repo`
     ```
-  (The gate sits in the wrapper, ahead of `runSetup`'s enrichment at `setup.ts:98,102`. `runSetup(explicitPath)` keeps its named-target contract — no marker required when the operator passes a path.)
+  (The gate sits in the wrapper (`setup.ts:203-217`), ahead of `runSetup`'s write-capable agent calls — `enrichRuntimeContext` (`:103`) and `discoverComponents` (`:124`); `probeProfile` (`:98`) is the deterministic scan. `runSetup(explicitPath)` keeps its named-target contract — no marker required when the operator passes a path; the only direct `runSetup` callers are tests, all of which pass an explicit `repo`, so none reach the no-arg gate.)
 
 - [ ] **Step 4: Run → PASS.** `bun test`, typecheck, lint green.
 - [ ] **Step 5: Commit** `feat(setup): optional repo arg — discover cwd root, gated by the disposability marker`
