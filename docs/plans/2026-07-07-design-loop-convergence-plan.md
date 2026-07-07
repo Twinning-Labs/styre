@@ -178,22 +178,30 @@ test("design:dispatch fails the postcondition when no plan for this ticket exist
 Run: `bun test test/dispatch/handlers.test.ts`
 Expected: the "passes when the agent writes this ticket's plan" test may already pass (old code accepts a fresh commit); the failure that matters appears in Step 4's regression once the postcondition changes. Run now to confirm the two new tests execute (green/consistent baseline).
 
-- [ ] **Step 3: Implement — replace the postcondition body**
+- [ ] **Step 3: Implement — three edits**
 
-In `src/dispatch/handlers.ts`, add the import near the other `./` imports:
+(a) `src/dispatch/handlers.ts` — add the import near the other `./` imports:
 ```ts
 import { hasTicketPlan } from "./plan-frontmatter.ts";
 ```
-Replace the `design:dispatch` postcondition (currently lines ~195-203):
+
+(b) **Fix the now-unused `node:fs` import (else `tsc --noEmit` fails — `noUnusedLocals`, tsconfig.json:16).** `hasTicketPlan` absorbs `existsSync`/`readdirSync`, which `handlers.ts` used *only* in this postcondition. Change line 2 from:
 ```ts
-      postcondition: () => {
-        const plansDir = join(depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS).worktreePath, "docs", "plans");
-        if (!hasTicketPlan(plansDir, ctx.ticket.ident)) {
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+```
+to (drop `existsSync`, `readdirSync` — the other three are still used at :426/:456/:485):
+```ts
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+```
+
+(c) Replace the `design:dispatch` postcondition (currently ~195-203). Use the `{ worktreePath }` arg (available per `run-dispatch.ts:33,125`); `ctx` is in the closure scope, so `ctx.ticket.ident` resolves:
+```ts
+      postcondition: ({ worktreePath }) => {
+        if (!hasTicketPlan(join(worktreePath, "docs", "plans"), ctx.ticket.ident)) {
           throw new Error("design:dispatch postcondition: no plan for this ticket under docs/plans/");
         }
       },
 ```
-> The postcondition previously used the `{ worktreePath, changed }` arg; drop `changed` (it is the wrong question — see spec §2.1) and derive `worktreePath` the same way the dispatch does. If `worktreePath` is more cleanly available on the postcondition arg object, prefer that: `postcondition: ({ worktreePath }) => { if (!hasTicketPlan(join(worktreePath, "docs", "plans"), ctx.ticket.ident)) throw ... }` — confirm the arg shape at `run-dispatch.ts:33` and use the simpler form.
 
 - [ ] **Step 4: Run to verify**
 
@@ -288,7 +296,23 @@ export function designFeedback(db: Database, ticketId: number): string {
   );
 }
 ```
-Also create `test/helpers/dispatch-fixtures.ts` with `insertDesignReviewDispatch(db, ticketId): string` (see Step 1 note).
+Also create the fixture helper (buildable per the review — the JOIN `latestDispatchForStep` needs is `dispatch d JOIN workflow_step w ON d.step_id = w.id WHERE w.step_key = 'design:review'`, review-finding.ts:112-114):
+```ts
+// test/helpers/dispatch-fixtures.ts
+import type { Database } from "bun:sqlite";
+import { insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
+import { insertPending } from "../../src/db/repos/workflow-step.ts";
+
+/** A `design:review` workflow_step + a dispatch row owned by it, so
+ *  `latestDispatchForStep(db, ticketId, "design:review")` resolves. Returns the dispatch_id. */
+export function insertDesignReviewDispatch(db: Database, ticketId: number): string {
+  const step = insertPending(db, { ticketId, stepKey: "design:review", stepType: "dispatch" });
+  const dispatchId = `${ticketId}-review-1`;
+  insertDispatch(db, { ticketId, dispatchId, seq: nextSeq(db, ticketId), stepId: step.id });
+  return dispatchId;
+}
+```
+> Confirm `insertPending` (workflow-step.ts:62 — returns the step row with `.id`) and `insertDispatch` (dispatch.ts:72 — its param names) against source; the review verified this shape resolves the JOIN and that `makeTestDb()` seeds the project+ticket FKs (ticket `ENG-1`).
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -310,35 +334,26 @@ git commit -m "feat(design-loop): designFeedback reads the latest plan-review's 
 - Modify: `src/dispatch/prompt-vars.ts:75-89` (`designVars` — add param + key)
 - Modify: `prompts/design.md` (add the `{{review_feedback}}` slot)
 - Modify: `src/dispatch/handlers.ts:194` (pass `designFeedback(...)`)
-- Test: `test/dispatch/prompt-vars.test.ts` (create or extend)
+- Modify (APPEND): `test/dispatch/prompt-vars.test.ts` — it **already exists** (~160 lines, its own `profile`/`ticket` fixtures at lines 20/26). Append the two new tests; do NOT recreate the file (a standalone copy re-declares `profile`/`ticket`/imports → "Cannot redeclare").
 
 **Interfaces:**
 - Consumes: `designFeedback` (Task 3), `renderPrompt` (`render-prompt.ts`), `DESIGN_TEMPLATE`.
 
 - [ ] **Step 1: Write the failing test**
 
+**Append** these two tests to the existing `test/dispatch/prompt-vars.test.ts` — `expect`/`test`, `DESIGN_TEMPLATE`, `designVars`, `placeholders`, `renderPrompt`, and the `profile`/`ticket` consts are **already imported/defined** at the top of that file (lines 7-26). Do not re-import or re-declare them.
 ```ts
-// test/dispatch/prompt-vars.test.ts
-import { expect, test } from "bun:test";
-import { DESIGN_TEMPLATE, designVars } from "../../src/dispatch/prompt-vars.ts";
-import { placeholders, renderPrompt } from "../../src/dispatch/render-prompt.ts";
-import { parseProfile } from "../../src/dispatch/profile.ts";
-
-const profile = parseProfile({ slug: "demo", targetRepo: "/x", components: [] });
-const ticket = { ident: "ENG-1", title: "t", description: "d" };
-
 test("design template has a review_feedback slot", () => {
   expect(placeholders(DESIGN_TEMPLATE)).toContain("review_feedback");
 });
 
 test("designVars fills review_feedback (empty default renders cleanly)", () => {
-  const r1 = renderPrompt(DESIGN_TEMPLATE, designVars(ticket, profile));
-  expect(r1.ok).toBe(true); // no `missing` — default "" fills the slot
-
-  const r2 = renderPrompt(DESIGN_TEMPLATE, designVars(ticket, profile, "PRIOR REVIEW: fix the regex"));
-  expect(r2.ok && r2.prompt.includes("PRIOR REVIEW: fix the regex")).toBe(true);
+  expect(renderPrompt(DESIGN_TEMPLATE, designVars(ticket, profile)).ok).toBe(true); // "" fills the slot
+  const r = renderPrompt(DESIGN_TEMPLATE, designVars(ticket, profile, "PRIOR REVIEW: fix the regex"));
+  expect(r.ok && r.prompt.includes("PRIOR REVIEW: fix the regex")).toBe(true);
 });
 ```
+> Note: the file's existing test at :34 (`designVars resolves every placeholder`) and `design-vars.test.ts:18` already iterate *every* `DESIGN_TEMPLATE` placeholder — so once step-3(a) adds `{{review_feedback}}`, those pre-existing tests **fail** until step-3(b) adds the `review_feedback` var. Both edits are in this task, so they go green together.
 
 - [ ] **Step 2: Run to verify it fails**
 
