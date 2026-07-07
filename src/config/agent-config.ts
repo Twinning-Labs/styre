@@ -33,3 +33,13 @@ export function parseAgentConfig(raw: unknown): AgentConfig {
 export function modelForTier(config: AgentConfig, tier: Tier): string {
   return config.models[tier];
 }
+
+/** Provider → the env var it needs to authenticate its CLI (DEC-CX-6). Used by the setup gate. */
+const PROVIDER_REQUIRED_ENV: Record<string, string> = {
+  claude: "ANTHROPIC_API_KEY",
+  codex: "OPENAI_API_KEY",
+};
+
+export function requiredEnvFor(provider: string): string | undefined {
+  return PROVIDER_REQUIRED_ENV[provider];
+}
