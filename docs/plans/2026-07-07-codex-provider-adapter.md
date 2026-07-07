@@ -170,12 +170,9 @@ test("agentEnv keeps OPENAI_API_KEY (codex CLI needs it)", () => {
 });
 ```
 
-Create `test/config/agent-config.test.ts`:
+**Append** to the EXISTING `test/config/agent-config.test.ts` (it already has 4 tests — do NOT recreate it, or they are silently deleted). Add `requiredEnvFor` to its existing `agent-config.ts` import, then append:
 
 ```ts
-import { expect, test } from "bun:test";
-import { requiredEnvFor } from "../../src/config/agent-config.ts";
-
 test("requiredEnvFor maps providers to their auth env var", () => {
   expect(requiredEnvFor("claude")).toBe("ANTHROPIC_API_KEY");
   expect(requiredEnvFor("codex")).toBe("OPENAI_API_KEY");
@@ -721,7 +718,11 @@ Replace the `claudeAgentRunner`/`selectAgentRunner` imports (lines 13-14) with `
 
 - [ ] **Step 3: Rewire `src/cli/setup.ts` (add `--config`, provider-aware gate)**
 
-Replace imports (lines 5-6) with `import { resolveAgentRunner } from "../agent/resolve.ts";` and add `import { DEFAULT_AGENT_CONFIG, requiredEnvFor } from "../config/agent-config.ts";` and `import { RuntimeConfigSchema } from "../config/runtime-config.ts";` (plus `readFileSync` from `node:fs` if not already imported).
+Fix the imports by **editing existing lines** (do NOT add duplicate import statements — `setup.ts` already imports `DEFAULT_AGENT_CONFIG` at `:7` and `DEFAULT_RUNTIME_CONFIG` at `:9`; duplicate bindings fail `tsc`, and unmerged same-module imports fail `biome check`):
+- `:2` — add `readFileSync`: `import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";`
+- `:5-6` — replace the `claudeAgentRunner` + `selectAgentRunner` imports with a single `import { resolveAgentRunner } from "../agent/resolve.ts";`
+- `:7` — merge in `requiredEnvFor`: `import { DEFAULT_AGENT_CONFIG, requiredEnvFor } from "../config/agent-config.ts";`
+- `:9` — merge in `RuntimeConfigSchema`: `import { DEFAULT_RUNTIME_CONFIG, RuntimeConfigSchema } from "../config/runtime-config.ts";`
 
 Add a `config` arg to the command `args` block (next to `force`):
 
@@ -841,3 +842,22 @@ Confirm: `completed: true`, a non-empty `stdout` (the final message), and `usage
   DEC-CX-8c §3a doc correction → Task 6. DEC-CX-9 gitignore → already committed on this branch.
 - DEC-CX-8a (neutral capability descriptor) and DEC-CX-8b/8d (Codex `--output-schema`, full config
   precedence merge) are explicitly deferred follow-ups — no task, by design.
+
+## Independent review (2026-07-07)
+
+A fresh, code-grounded reviewer verified every task against the source. Verdict: architecture
+sound, all file:line anchors match, type contracts hold, sequencing compiles at each step, and the
+setup gate still trips `/ANTHROPIC_API_KEY/` on the default path. Two literal-execution traps were
+found and patched into this plan:
+
+- **Task 2 (was HIGH):** `test/config/agent-config.test.ts` already exists with 4 tests — the step
+  now says **append**, not create, so those tests aren't silently deleted.
+- **Task 5 (was MEDIUM):** `setup.ts` already imports `DEFAULT_AGENT_CONFIG` (`:7`) and
+  `DEFAULT_RUNTIME_CONFIG` (`:9`) — the step now **merges** `requiredEnvFor`/`RuntimeConfigSchema`
+  into those lines instead of adding duplicate imports (which would fail `tsc` + `biome`).
+
+Accepted as-is (no change): the codex clean-exit-but-empty branch reporting `exitCode: null` (routes
+on `cause`, adapter-localized); and all `codex exec` flags / JSONL fields being smoke-verified only
+(confined to `codex.ts`, `parseCodexUsage` is best-effort so a wrong field yields `null`, never a
+false test pass). Note: the PR head branch is `feat/codex-provider-brainstorm`; the local worktree
+branch is `worktree-feat+codex-provider-brainstorm` — commit/PR steps target the checked-out branch.
