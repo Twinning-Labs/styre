@@ -86,10 +86,17 @@ Expected: FAIL — `src/config/slug.ts` does not exist.
 ```ts
 import { basename } from "node:path";
 
-/** Run git in `cwd`, returning trimmed stdout, or null on any failure (probe-graceful). */
+/** Run git in `cwd`, returning trimmed stdout, or null on ANY failure (probe-graceful). The
+ *  try/catch matters: `Bun.spawnSync` THROWS (not `{success:false}`) when `cwd` does not exist, so
+ *  an unguarded call would propagate — this honors the "null on any failure" contract and keeps
+ *  `slugForCwd`/`deriveSlug` robust when the resolved repo dir is missing/fabricated. */
 export function tryGit(args: string[], cwd: string): string | null {
-  const res = Bun.spawnSync(["git", ...args], { cwd });
-  return res.success ? res.stdout.toString().trim() : null;
+  try {
+    const res = Bun.spawnSync(["git", ...args], { cwd });
+    return res.success ? res.stdout.toString().trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Parse a GitHub remote URL into { owner, repo }, or null. Pure/SDK-free so slug derivation
@@ -138,12 +145,14 @@ import { parseGitHubRemote } from "../../config/slug.ts";
 export { parseGitHubRemote }; // re-exported so existing importers (probe, tests) are unchanged
 ```
 
-`src/setup/probe.ts` — remove the local `tryGit` (lines ~8-12) and `deriveSlug` (lines ~14-19) definitions and the `import { parseGitHubRemote } from "../integrations/adapters/github.ts";` line; add:
+Also trim the now-stale prose that described the moved function: the header line "The pure `parseGitHubRemote` helper below is …" (~line 12) and the doc-comment block that sat above the old definition (~lines 41-46). Leave the internal call site (`const parsed = parseGitHubRemote(remoteUrl);`, ~line 73) intact.
+
+`src/setup/probe.ts` — remove the local `tryGit` (lines ~8-12) and `deriveSlug` (lines ~14-19) definitions and the `import { parseGitHubRemote } from "../integrations/adapters/github.ts";` line; add `import { deriveSlug, tryGit } from "../config/slug.ts";`. **Also drop `basename` from the node:path import** — it was used only inside the now-removed `deriveSlug`, and `tsconfig.json` has `"noUnusedLocals": true`, so leaving it fails `bun run typecheck` (TS6133). Line 1 becomes:
 
 ```ts
-import { deriveSlug, tryGit } from "../config/slug.ts";
+import { resolve } from "node:path";
 ```
-(`detectDefaultBranch` keeps using the imported `tryGit`.)
+(`detectDefaultBranch` keeps using the imported `tryGit`; `probeProfile` keeps using `resolve`.)
 
 `src/dispatch/in-place.ts` — remove the local `type GitRun`, `defaultGit`, and `discoverRepoRoot` (lines ~14-29); add near the top:
 
@@ -253,7 +262,9 @@ test("loadProfileByConvention: ENOENT → run-setup error; present → loads", (
 test("slugForCwd returns null off-repo and the slug in a repo (injected git)", () => {
   expect(slugForCwd("/nope", () => { throw new Error("not a repo"); })).toBeNull();
   const fakeGit = (args: string[]) => (args[0] === "rev-parse" ? "/repo/acme-widget" : "");
-  expect(slugForCwd("/anything", fakeGit)).toBe("acme-widget"); // no origin → basename of toplevel
+  // injected git returns the (fabricated, nonexistent) toplevel; deriveSlug's REAL `git config`
+  // then runs in that missing dir → hardened tryGit catches the spawn ENOENT → null → basename fallback
+  expect(slugForCwd("/anything", fakeGit)).toBe("acme-widget");
 });
 ```
 
@@ -373,11 +384,16 @@ async function invokeRun(profilePath: string): Promise<void> {
   } finally {
     if (prevTelemetry === undefined) process.env.STYRE_TELEMETRY = undefined;
     else process.env.STYRE_TELEMETRY = prevTelemetry;
-    if (prevXdg === undefined) process.env.XDG_CONFIG_HOME = undefined;
+    // Restore XDG with delete, NOT `= undefined`: the string "undefined" has length>0, so
+    // configDir() would compute "undefined/styre" and leak it to later tests in the same process.
+    if (prevXdg === undefined)
+      // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
+      delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = prevXdg;
   }
 }
 ```
+(This `delete` + `biome-ignore` is the same pattern `test/cli/setup-inplace-discovery.test.ts:98-99` already uses for its XDG restore.)
 
 Create `test/cli/run-convention.test.ts`:
 
@@ -406,7 +422,10 @@ async function invoke(args: Record<string, unknown>, cwd: string, xdg: string): 
     return await runCommand.run?.({ rawArgs: [], cmd: runCommand, args: { _: [], ...args } as never });
   } finally {
     process.env.STYRE_TELEMETRY = prev.t;
-    process.env.XDG_CONFIG_HOME = prev.x;
+    if (prev.x === undefined)
+      // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
+      delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prev.x;
     process.chdir(prev.c);
   }
 }
@@ -492,6 +511,7 @@ Feed the setup credential gate + `resolveAgentRunner` from the discovered runtim
 
 **Files:**
 - Modify: `src/cli/setup.ts`
+- Modify: `test/cli/setup-inplace-discovery.test.ts` (sandbox `XDG_CONFIG_HOME` in `invokeSetup` — H3 from review; MANDATORY, not conditional)
 
 **Interfaces:**
 - Consumes: `discoverRuntimeConfig` (Task 2), `deriveSlug` (Task 1 leaf), `requiredEnvFor`/`DEFAULT_AGENT_CONFIG`/`resolveAgentRunner` (existing).
@@ -517,15 +537,46 @@ The credential gate (`requiredEnvFor(agentConfig.provider)` …) and `resolveAge
 
 (`createAnalytics(DEFAULT_RUNTIME_CONFIG)` at ~line 259 is left as-is — setup's analytics knob is out of scope for this task.)
 
-- [ ] **Step 2: Run the full suite + gates**
+- [ ] **Step 2: Sandbox `XDG_CONFIG_HOME` in the setup wrapper test (H3 — MANDATORY)**
+
+`test/cli/setup-inplace-discovery.test.ts` tests 2 & 3 drive the `setup` wrapper without `--config` and assert `.rejects.toThrow(/ANTHROPIC_API_KEY/)`. After Step 1, setup resolves the provider from the host `~/.config/styre/config.json` — and this feature's own motivating scenario (a global config selecting Codex) makes the gate throw `OPENAI_API_KEY is required for provider 'codex'`, so `/ANTHROPIC_API_KEY/` fails. Make every invocation hermetic by sandboxing XDG inside the shared `invokeSetup` helper (it already sandboxes `ANTHROPIC_API_KEY`; `mkdtempSync`/`tmpdir`/`join` are already imported in this file):
+
+```ts
+async function invokeSetup(repo?: string): Promise<void> {
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  const prevXdg = process.env.XDG_CONFIG_HOME;
+  // biome-ignore lint/performance/noDelete: env var must be truly unset, not the string "undefined"
+  delete process.env.ANTHROPIC_API_KEY;
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "styre-setup-xdg-empty-")); // no host config
+  try {
+    await setupCommand.run?.({
+      rawArgs: [],
+      cmd: setupCommand,
+      args: { _: [], repo } as unknown as Parameters<NonNullable<typeof setupCommand.run>>[0]["args"],
+    });
+  } finally {
+    if (prevKey === undefined)
+      // biome-ignore lint/performance/noDelete: restoring an unset env var requires delete
+      delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = prevKey;
+    if (prevXdg === undefined)
+      // biome-ignore lint/performance/noDelete: restoring an unset env var requires delete
+      delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prevXdg;
+  }
+}
+```
+(Test 1 sets its own XDG for its "nothing written under configDir" assertion; the helper's nested save/restore leaves that intact — test 1 throws `/disposable/` before any config read or write, so nothing lands in either dir.)
+
+- [ ] **Step 3: Run the full suite + gates**
 
 Run: `bun test && bun run typecheck && bun run lint`
-Expected: PASS — `setup.test.ts` (drives `runSetup` directly, unaffected) and `setup-inplace-discovery.test.ts` green. If `setup-inplace-discovery.test.ts` drives the `setup` wrapper without `--config`, sandbox its `XDG_CONFIG_HOME` the same way as Task 3 (verify during the run; add the guard if a host config file makes it non-hermetic).
+Expected: PASS — `setup.test.ts` (drives `runSetup` directly, unaffected) and `setup-inplace-discovery.test.ts` green under the XDG sandbox.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add src/cli/setup.ts
+git add src/cli/setup.ts test/cli/setup-inplace-discovery.test.ts
 git commit -m "feat(setup): resolve agent/provider config by convention (effective slug)"
 ```
 
@@ -591,3 +642,28 @@ git commit -m "docs: document run/config by convention (XDG discovery)"
 - DEC-CV-1 layout → Tasks 2/3/4 (paths via `configDir()`/`configHome`). DEC-CV-2 profile-by-convention (run only) → Task 3. DEC-CV-3 shallow merge + agent all-or-nothing → Task 2 (`discoverRuntimeConfig` + tests). DEC-CV-4 hermetic explicit flags → Task 2 (explicit-path branch) + Tasks 3/4 wiring. DEC-CV-5 shared slug + `--slug` reconciliation → Task 1 (`deriveSlug` leaf) + Task 3 (`run --slug`) + Task 4 (effective slug for config + profile). DEC-CV-6 `config/` leaf → Task 1.
 - H1 (test goes non-hermetic) → Task 3 Step 1 (XDG sandbox) + Task 4 Step 2 (verify/guard setup test). H2/M1 (`setup --slug`) → Tasks 3+4. M2 (eager heavy import) → Task 1 leaf. M3 (partial agent) → Task 2 test. L2 (ENOENT vs malformed) → Task 2 `loadProfileByConvention`.
 - No schema change; explicit-flag callers byte-preserved (hermetic branches).
+
+## Independent review (2026-07-07)
+
+A fresh, code-grounded reviewer verified every task against the source. Verdict: architecture sound,
+wiring almost entirely correct; not executable as-first-written due to small gate-level defects, all
+now folded in:
+
+- **Critical (typecheck):** removing `deriveSlug` from `probe.ts` orphaned `basename`
+  (`noUnusedLocals` → TS6133). Task 1 now drops `basename` from the `node:path` import.
+- **Critical (test):** the `discover.test.ts` `slugForCwd` injected-git case failed because
+  `Bun.spawnSync` THROWS (not `{success:false}`) on a fabricated nonexistent cwd, propagating through
+  the unguarded `tryGit`. Fixed at the source: `tryGit` now wraps `Bun.spawnSync` in try/catch
+  (honoring its "null on any failure" contract), which also hardens the real `slugForCwd`.
+- **High (existing tests non-hermetic):** `setup-inplace-discovery.test.ts` tests 2 & 3 reach the
+  credential gate without `--config` and would read host `~/.config` — breaking exactly under this
+  feature's Codex-global scenario. Task 4 now MANDATORILY sandboxes `XDG_CONFIG_HOME` in `invokeSetup`.
+- **Medium (env leak):** restoring `XDG_CONFIG_HOME = undefined` sets the string `"undefined"`, which
+  `configDir()` turns into `"undefined/styre"`. Both new test helpers now restore via guarded
+  `delete` + `biome-ignore lint/performance/noDelete` (the repo's existing pattern).
+- **Low (stale comment):** Task 1 now trims the `github.ts` prose describing the moved
+  `parseGitHubRemote`.
+
+Cleared non-findings: no import cycle (`discover.ts → dispatch/profile.ts`, which imports only
+`node:fs` + `zod`), DEC-CV-6's "no new heavy startup deps" holds, explicit-flag hermetic branches are
+byte-preserving, and every DEC-CV-1..6 maps to a task.
