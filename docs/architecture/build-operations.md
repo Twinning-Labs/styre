@@ -148,6 +148,11 @@ so the plane can set per-ticket budgets/strictness without touching the binary. 
 > K_DISTINCT/block-threshold* mapping still holds for whatever sets RuntimeConfig — just not via a
 > ticket block in OSS.
 
+> **`[IMPLEMENTED 2026-07-07]`** The workspace-config loader is wired: `styre run`/`setup` discover
+> `~/.config/styre/config.json` (global) + `~/.config/styre/<slug>/config.json` (per-project),
+> shallow-merged under an explicit `--config`. Profile auto-discovery by slug is likewise live for
+> `styre run`. See `docs/brainstorms/2026-07-07-config-profile-by-convention-design.md`.
+
 ## 5. The open-core seam — stable contracts the plane plugs into `[BUILD THESE STABLE]`
 
 > **This is the OSS↔commercial integration boundary.** The commercial Control Plane integrates with the
