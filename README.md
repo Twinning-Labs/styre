@@ -103,6 +103,34 @@ styre migrate
 
 ---
 
+### Running by convention
+
+`styre setup` writes the project profile to `~/.config/styre/<slug>/profile.json`. After that,
+`styre run` needs no path flags — from inside the repo:
+
+    cd my-repo && styre run ENG-123
+
+It derives the `<slug>` from the repo's `origin` remote (or dir name), loads that profile, and
+resolves the runtime config by merging:
+
+- `~/.config/styre/config.json` — global (applies to every project)
+- `~/.config/styre/<slug>/config.json` — per-project override
+
+Per-project wins per setting; the `agent` block (provider + models) must be written complete.
+Example — use Codex everywhere by writing the full block once in the global file:
+
+    { "agent": { "provider": "codex", "command": "codex",
+                 "models": { "deep": "…", "standard": "…", "cheap": "…" } } }
+
+Each explicit flag overrides discovery **for its own artifact only**: `--profile <path>` pins the
+profile, `--config <path>` pins the runtime config (ignoring host `~/.config`). They are
+independent — passing only `--profile` still discovers the runtime config from host `~/.config`, so
+a CI/fleet caller that wants full hermeticity must pass **both** `--profile` and `--config`. A custom
+`styre setup --slug <name>` stores under that slug — pass `--slug <name>` (or `--profile`) to
+`styre run` for such a project.
+
+---
+
 ## Install
 
 Styre ships as a single self-contained binary via Homebrew (macOS & Linux):

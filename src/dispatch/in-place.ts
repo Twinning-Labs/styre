@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type GitRun, defaultGit, discoverRepoRoot } from "../config/slug.ts";
 import { pythonImportName } from "../setup/lang/python.ts";
 import { runCommand } from "../util/run-command.ts";
 import type { Profile } from "./profile.ts";
@@ -11,22 +12,7 @@ import {
   resolvePythonInterpreter,
 } from "./provision.ts";
 
-type GitRun = (args: string[], cwd: string) => string;
-const defaultGit: GitRun = (args, cwd) => {
-  const r = Bun.spawnSync(["git", ...args], { cwd });
-  if (!r.success) throw new Error(`git ${args.join(" ")} failed: ${r.stderr.toString().trim()}`);
-  return r.stdout.toString().trim();
-};
-
-export function discoverRepoRoot(cwd: string = process.cwd(), git: GitRun = defaultGit): string {
-  try {
-    return git(["rev-parse", "--show-toplevel"], cwd);
-  } catch {
-    throw new Error(
-      `--in-place: no git repo at the working directory ${cwd}; launch with WORKDIR / docker -w set to the checkout.`,
-    );
-  }
-}
+export { discoverRepoRoot }; // re-export: run.ts/setup.ts lazy-import it from here
 
 /** Repo-scoped disposability signal: a REGULAR file <repoPath>/.styre-disposable. Defense-in-depth
  *  against misuse, NOT proof (a mount/hook/commit could forge it — see the design doc). */

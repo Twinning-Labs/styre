@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { defineCommand } from "citty";
 import { resolveAgentRunner } from "../agent/resolve.ts";
 import { DEFAULT_AGENT_CONFIG, requiredEnvFor } from "../config/agent-config.ts";
+import { discoverRuntimeConfig } from "../config/discover.ts";
 import { configDir } from "../config/paths.ts";
-import { DEFAULT_RUNTIME_CONFIG, RuntimeConfigSchema } from "../config/runtime-config.ts";
+import { DEFAULT_RUNTIME_CONFIG } from "../config/runtime-config.ts";
+import { deriveSlug } from "../config/slug.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
 import { unrootedManifestWarnings } from "../setup/detect-components.ts";
@@ -222,11 +224,9 @@ export const setupCommand = defineCommand({
       repo = discoverRepoRoot(); // no-arg → discover cwd's repo (throws fail-closed if not a git repo)
       assertInPlaceMarker(repo); // gate BEFORE runSetup's write-capable enrichment agent
     }
-    const agentConfig =
-      args.config && args.config.length > 0
-        ? (RuntimeConfigSchema.parse(JSON.parse(readFileSync(args.config, "utf8"))).agent ??
-          DEFAULT_AGENT_CONFIG)
-        : DEFAULT_AGENT_CONFIG;
+    const effSlug = args.slug && args.slug.length > 0 ? args.slug : deriveSlug(resolve(repo));
+    const runtimeConfig = discoverRuntimeConfig({ explicitPath: args.config, slug: effSlug });
+    const agentConfig = runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG;
     const requiredKey = requiredEnvFor(agentConfig.provider);
     if (requiredKey && !process.env[requiredKey]) {
       throw new Error(
@@ -238,7 +238,7 @@ export const setupCommand = defineCommand({
       repo,
       out: args.out,
       checks: args.checks,
-      slug: args.slug,
+      slug: effSlug,
       force: args.force,
       reprobe: args.reprobe,
       trustAgentCommands: args["trust-agent-commands"] === true,

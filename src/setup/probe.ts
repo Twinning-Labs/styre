@@ -1,22 +1,9 @@
-import { basename, resolve } from "node:path";
+import { resolve } from "node:path";
+import { deriveSlug, tryGit } from "../config/slug.ts";
 import { type Profile, parseProfile } from "../dispatch/profile.ts";
-import { parseGitHubRemote } from "../integrations/adapters/github.ts";
 import { detectComponents } from "./detect-components.ts";
 import { detectRuntimeContext } from "./detect-runtime.ts";
 import { detectChecksSystem } from "./detect.ts";
-
-/** Run git in `cwd`, returning trimmed stdout, or null on any failure (probe-graceful). */
-function tryGit(args: string[], cwd: string): string | null {
-  const res = Bun.spawnSync(["git", ...args], { cwd });
-  return res.success ? res.stdout.toString().trim() : null;
-}
-
-/** Slug from the origin remote's repo name, else the dir basename. */
-function deriveSlug(repoDir: string): string {
-  const url = tryGit(["config", "--get", "remote.origin.url"], repoDir);
-  const parsed = url ? parseGitHubRemote(url) : null;
-  return parsed?.repo ?? basename(repoDir);
-}
 
 /** Default branch from origin/HEAD, else the current branch, else "main". */
 function detectDefaultBranch(repoDir: string): string {

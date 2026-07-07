@@ -56,8 +56,10 @@ function makeRepo(withMarker: boolean): string {
  *  reach the real (live) agent call. */
 async function invokeSetup(repo?: string): Promise<void> {
   const prevKey = process.env.ANTHROPIC_API_KEY;
+  const prevXdg = process.env.XDG_CONFIG_HOME;
   // biome-ignore lint/performance/noDelete: env var must be truly unset, not the string "undefined"
   delete process.env.ANTHROPIC_API_KEY;
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "styre-setup-xdg-empty-")); // no host config
   try {
     await setupCommand.run?.({
       rawArgs: [],
@@ -68,12 +70,14 @@ async function invokeSetup(repo?: string): Promise<void> {
       } as unknown as Parameters<NonNullable<typeof setupCommand.run>>[0]["args"],
     });
   } finally {
-    if (prevKey === undefined) {
+    if (prevKey === undefined)
       // biome-ignore lint/performance/noDelete: restoring an unset env var requires delete
       delete process.env.ANTHROPIC_API_KEY;
-    } else {
-      process.env.ANTHROPIC_API_KEY = prevKey;
-    }
+    else process.env.ANTHROPIC_API_KEY = prevKey;
+    if (prevXdg === undefined)
+      // biome-ignore lint/performance/noDelete: restoring an unset env var requires delete
+      delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prevXdg;
   }
 }
 
