@@ -1,6 +1,19 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.5.0] - 2026-07-07
+
+### Features
+
+- **Codex is now a supported agent provider.** You can configure `styre` to run tickets through OpenAI's `codex` CLI instead of Claude by adding an `agent` block to `config.json`; Claude remains the default when nothing is configured.
+- **`styre run` and `styre setup` now work without path flags.** Set up your profile and workspace config once under `~/.config/styre` (globally or per-project), then run `styre run ENG-123` from inside any project directory and it discovers the right config and profile automatically. Explicit `--profile`/`--config` flags still work exactly as before for hermetic overrides.
+- **Release notes are now written in plain language.** GitHub releases and `CHANGELOG.md` entries describe what changed for users rather than listing raw commit subjects.
+
+### Bug Fixes
+
+- **Design review feedback no longer gets lost on redesign loops.** When a plan review sends a ticket back for redesign, per-unit findings (like decomposition or feasibility issues on a specific work unit) now carry through to the redesign instead of being silently discarded, so the redesign actually addresses what the reviewer flagged.
+- **Design review loops converge instead of looping forever on already-correct plans.** A ticket sent back from review for redesign now checks its own updated plan (not an unrelated fresh commit) and gets the reviewer's actual feedback passed along, so a nearly-right plan can pass review on the next pass instead of bouncing indefinitely.
+
 ## [0.4.0] - 2026-07-06
 
 ### Features
