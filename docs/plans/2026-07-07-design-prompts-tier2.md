@@ -138,13 +138,28 @@ git commit -m "feat(prompts): design.md — inspect-before-planning + requiremen
 **Interfaces:**
 - Consumes: `DESIGN_REVIEW_TEMPLATE`, `designReviewVars` from `src/dispatch/prompt-vars.ts` (both already exported).
 
-- [ ] **Step 1: Write the failing presence test (append to the same file)**
+- [ ] **Step 1: Write the failing presence test (extend the same file)**
 
-Append to `test/dispatch/design-prompts-tier2.test.ts`:
+First, extend the existing `prompt-vars.ts` import at the top of `test/dispatch/design-prompts-tier2.test.ts` to add the two design-review symbols (keep it one import, alphabetized for biome's `organizeImports`). Replace:
 
 ```typescript
-import { DESIGN_REVIEW_TEMPLATE, designReviewVars } from "../../src/dispatch/prompt-vars.ts";
+import { DESIGN_TEMPLATE, designVars } from "../../src/dispatch/prompt-vars.ts";
+```
 
+with:
+
+```typescript
+import {
+  DESIGN_REVIEW_TEMPLATE,
+  DESIGN_TEMPLATE,
+  designReviewVars,
+  designVars,
+} from "../../src/dispatch/prompt-vars.ts";
+```
+
+Then append these tests to the end of the file:
+
+```typescript
 test("design-review.md has calibrated critical severity (C)", () => {
   expect(DESIGN_REVIEW_TEMPLATE).toContain("impossible-to-execute step");
 });
