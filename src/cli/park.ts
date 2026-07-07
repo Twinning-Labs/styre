@@ -10,8 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { branchNameFor } from "../agent/branch.ts";
-import { claudeAgentRunner } from "../agent/providers/claude.ts";
-import { selectAgentRunner } from "../agent/registry.ts";
+import { resolveAgentRunner } from "../agent/resolve.ts";
 import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { stateDir } from "../config/paths.ts";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
@@ -269,8 +268,8 @@ export async function resumeRun(
   const registry: StepRegistry = deps?.buildRegistry
     ? deps.buildRegistry(resumeContext)
     : buildDispatchRegistry({
-        runner: selectAgentRunner(DEFAULT_AGENT_CONFIG, { claude: () => claudeAgentRunner() }),
-        agentConfig: DEFAULT_AGENT_CONFIG,
+        runner: resolveAgentRunner(runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG),
+        agentConfig: runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG,
         profile,
         inPlace,
         // worktreeRoot is unused in-place (any value is inert) — avoid minting a tmpdir for it.

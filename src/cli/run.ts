@@ -2,8 +2,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defineCommand } from "citty";
-import { claudeAgentRunner } from "../agent/providers/claude.ts";
-import { selectAgentRunner } from "../agent/registry.ts";
+import { resolveAgentRunner } from "../agent/resolve.ts";
 import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { DEFAULT_RUNTIME_CONFIG, RuntimeConfigSchema } from "../config/runtime-config.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
@@ -108,10 +107,11 @@ export const runCommand = defineCommand({
       recover(db, realRecoverDeps());
 
       const ports = makeProjectorPorts(runtimeConfig, profile);
-      const runner = selectAgentRunner(DEFAULT_AGENT_CONFIG, { claude: () => claudeAgentRunner() });
+      const agentConfig = runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG;
+      const runner = resolveAgentRunner(agentConfig);
       const registry = buildDispatchRegistry({
         runner,
-        agentConfig: DEFAULT_AGENT_CONFIG,
+        agentConfig,
         profile,
         worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-")),
         inPlace: (args["in-place"] as boolean | undefined) ?? false,
