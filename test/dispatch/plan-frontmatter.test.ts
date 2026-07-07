@@ -1,9 +1,9 @@
 // test/dispatch/plan-frontmatter.test.ts
 import { expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { planFrontmatterLinear, hasTicketPlan } from "../../src/dispatch/plan-frontmatter.ts";
+import { hasTicketPlan, planFrontmatterLinear } from "../../src/dispatch/plan-frontmatter.ts";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "styre-pf-"));

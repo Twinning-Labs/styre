@@ -15,11 +15,5 @@ export function designFeedback(db: Database, ticketId: number): string {
   const lines = blocking.map(
     (f) => `- [${f.category ?? "?"}] ${f.location ?? "plan-wide"}: ${f.rationale ?? ""}`,
   );
-  return (
-    "## Prior plan-review feedback (address before finalizing)\n\n" +
-    "A prior plan review raised the following. For EACH, either revise the plan to address it, or " +
-    'state explicitly in the plan why it does not apply or is an accepted trade-off — a bare "no ' +
-    'changes needed" is not a disposition:\n' +
-    lines.join("\n")
-  );
+  return `## Prior plan-review feedback (address before finalizing)\n\nA prior plan review raised the following. For EACH, either revise the plan to address it, or state explicitly in the plan why it does not apply or is an accepted trade-off — a bare "no changes needed" is not a disposition:\n${lines.join("\n")}`;
 }

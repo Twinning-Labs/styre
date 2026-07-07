@@ -196,7 +196,9 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       vars: designVars(ctx.ticket, deps.profile, designFeedback(ctx.db, ctx.ticket.id)),
       postcondition: ({ worktreePath }) => {
         if (!hasTicketPlan(join(worktreePath, "docs", "plans"), ctx.ticket.ident)) {
-          throw new Error("design:dispatch postcondition: no plan for this ticket under docs/plans/");
+          throw new Error(
+            "design:dispatch postcondition: no plan for this ticket under docs/plans/",
+          );
         }
       },
     }),

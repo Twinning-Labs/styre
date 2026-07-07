@@ -162,11 +162,23 @@ test("design:dispatch passes when the agent writes this ticket's plan", async ()
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
   db.query("UPDATE ticket SET stage = 'design' WHERE id = ?").run(ticketId);
-  const ident = db.query<{ ident: string }, [number]>("SELECT ident FROM ticket WHERE id = ?").get(ticketId)!.ident;
+  const ident = "ENG-1"; // makeTestDb seeds the ticket with ident ENG-1
   const runner = new FakeAgentRunner((input) => {
     mkdirSync(join(input.cwd, "docs", "plans"), { recursive: true });
-    writeFileSync(join(input.cwd, "docs", "plans", `${ident}.md`), `---\nlinear: ${ident}\n---\n# Plan\n`);
-    return { completed: true, exitCode: 0, stdout: "{}", stderr: "", timedOut: false, costUsd: null, tokensIn: null, tokensOut: null };
+    writeFileSync(
+      join(input.cwd, "docs", "plans", `${ident}.md`),
+      `---\nlinear: ${ident}\n---\n# Plan\n`,
+    );
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: "{}",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
   });
   await advanceOneStep(db, ticketId, registryFor(repo, runner));
   const d = listByTicket(db, ticketId);
@@ -179,8 +191,19 @@ test("design:dispatch fails the postcondition when no plan for this ticket exist
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
   db.query("UPDATE ticket SET stage = 'design' WHERE id = ?").run(ticketId);
-  const runner = new FakeAgentRunner(() => // writes NO plan
-    ({ completed: true, exitCode: 0, stdout: "{}", stderr: "", timedOut: false, costUsd: null, tokensIn: null, tokensOut: null }));
+  const runner = new FakeAgentRunner(() =>
+    // writes NO plan
+    ({
+      completed: true,
+      exitCode: 0,
+      stdout: "{}",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    }),
+  );
   await advanceOneStep(db, ticketId, registryFor(repo, runner));
   const d = listByTicket(db, ticketId);
   db.close();

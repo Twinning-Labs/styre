@@ -186,6 +186,9 @@ test("design template has a review_feedback slot", () => {
 
 test("designVars fills review_feedback (empty default renders cleanly)", () => {
   expect(renderPrompt(DESIGN_TEMPLATE, designVars(ticket, profile)).ok).toBe(true); // "" fills the slot
-  const r = renderPrompt(DESIGN_TEMPLATE, designVars(ticket, profile, "PRIOR REVIEW: fix the regex"));
+  const r = renderPrompt(
+    DESIGN_TEMPLATE,
+    designVars(ticket, profile, "PRIOR REVIEW: fix the regex"),
+  );
   expect(r.ok && r.prompt.includes("PRIOR REVIEW: fix the regex")).toBe(true);
 });
