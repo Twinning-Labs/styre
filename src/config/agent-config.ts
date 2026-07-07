@@ -26,6 +26,14 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   },
 };
 
+/** Built-in Codex preset (DEC-CX-7). Model ids are OPERATOR-SET config, not core truth — these are
+ *  drop-in defaults to confirm/override in workspace config.json. */
+export const CODEX_PRESET: AgentConfig = {
+  provider: "codex",
+  command: "codex",
+  models: { deep: "gpt-5.4", standard: "gpt-5.4-codex", cheap: "gpt-5.4-codex-mini" },
+};
+
 export function parseAgentConfig(raw: unknown): AgentConfig {
   return AgentConfigSchema.parse(raw);
 }
