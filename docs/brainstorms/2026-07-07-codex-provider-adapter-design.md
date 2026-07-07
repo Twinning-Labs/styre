@@ -64,6 +64,14 @@ without them. Claude remains the bundled binary default; Codex is an opt-in pres
   - allowlist contains any of `Write`, `Edit`, `Bash`/`Bash(…)` → `--sandbox workspace-write`
     (write surface = the worktree `cwd`).
 
+  **Network parity (from independent review).** Codex's `workspace-write` sandbox disables network
+  by **default**, but `design:dispatch`'s allowlist carries `WebSearch`/`WebFetch`
+  (`tool-allowlists.ts:10`) — a design agent is meant to browse. So the translation adds a second
+  axis: when the allowlist contains `WebSearch` or `WebFetch`, the adapter also passes
+  `-c sandbox_workspace_write.network_access=true` to restore network; otherwise network stays off
+  (implement/docs get no web, matching Claude, where those allowlists omit the web tools). This
+  keeps capability parity for the one dispatch that needs the web, instead of silently losing it.
+
   **Accepted fidelity loss (explicit, operator-signed-off 2026-07-07):** Claude scopes Bash to
   specific runners (`Bash(pytest:*)`) and *drops Bash entirely* when a unit resolves no runners
   (`tool-allowlists.ts:37`). Codex `workspace-write` cannot express per-command scoping — an
@@ -83,20 +91,30 @@ without them. Claude remains the bundled binary default; Codex is an opt-in pres
   usage event) is parsed for token accounting, and `AgentRunResult.stdout` is set to the contents of
   the `--output-last-message` file (the final assistant message, verbatim) — so the accounting
   stream and the message text never intermix. The Claude adapter is **retrofitted** to extract the
-  envelope's `result` field into `stdout`
-  (keeping the usage parse), fixing the latent fenced-block escaping bug the fake-runner hid. Both
-  providers now honor one contract, and every `extractSidecar` consumer
-  (extract/review/complexity/discover/enrich) becomes provider-independent by construction.
+  envelope's `result` field into `stdout` (the usage parse keeps reading the **raw** envelope, not
+  the unwrapped text), fixing the latent fenced-block escaping bug the fake-runner hid. Retrofit
+  caution: if `result` is absent/non-string (e.g. an error envelope), fall back to the raw stdout —
+  never emit the literal string `"undefined"`. Both providers now honor one contract, and every
+  `extractSidecar` consumer (extract/review/complexity/discover/enrich) becomes provider-independent
+  by construction.
 
-- **DEC-CX-5 — Wire config-driven selection end-to-end (chosen: full config selection).** The four
-  call sites stop hardcoding `DEFAULT_AGENT_CONFIG` + a single-entry map. Introduce one shared
-  helper `resolveAgentRunner(agentConfig)` that (a) builds the **full built-in adapter map**
+- **DEC-CX-5 — Wire config-driven selection through the config file that exists today (chosen: full
+  config selection, scoped to the current loader).** The four call sites stop hardcoding
+  `DEFAULT_AGENT_CONFIG` + a single-entry map. Introduce one shared helper
+  `resolveAgentRunner(agentConfig)` that (a) builds the **full built-in adapter map**
   `{ claude: () => claudeAgentRunner(cfg.command), codex: () => codexAgentRunner(cfg.command) }`
-  and (b) calls `selectAgentRunner(agentConfig, map)`. `agentConfig` is loaded from workspace
-  `config.json` under the existing precedence (ticket > workspace > profile > binary default);
-  absent → `DEFAULT_AGENT_CONFIG` (Claude preset) as today. An unregistered `provider` remains the
-  clear setup error `selectAgentRunner` already throws (a GOAL-INSTALL touchpoint). Result: "no
-  claude present, codex configured" is a valid, tested configuration.
+  and (b) calls `selectAgentRunner(agentConfig, map)`. **Scope correction (from independent
+  review):** the ticket > workspace > profile > default *precedence merge* does **not** exist yet —
+  `runtime-config.ts:3-7` explicitly defers that loader to the startup-entrypoint milestone, and
+  `agentConfig` is currently a field of neither `RuntimeConfigSchema` nor the profile (it lives only
+  as `DEFAULT_AGENT_CONFIG`). So DEC-CX-5 wires selection through the **single-file loader that
+  exists today**: add an optional `agent: AgentConfigSchema` field to the runtime `config.json`
+  (parsed by the same `--config` path `run.ts:64-67` already uses); present → use it, absent →
+  `DEFAULT_AGENT_CONFIG` (Claude preset). This makes "no claude present, codex configured" a valid,
+  tested configuration **now**, without inventing the precedence engine. Folding `agentConfig` into
+  the full ticket>workspace>profile precedence merge is deferred to that milestone as a named
+  follow-up (DEC-CX-8d), not silently assumed here. An unregistered `provider` remains the clear
+  setup error `selectAgentRunner` already throws (a GOAL-INSTALL touchpoint).
 
 - **DEC-CX-6 — Provider-parametric capability gates.** The setup credential gate stops naming
   Anthropic: it requires the *configured provider's* key (`ANTHROPIC_API_KEY` for `claude`,
@@ -113,14 +131,19 @@ without them. Claude remains the bundled binary default; Codex is an opt-in pres
   model ids are **operator-set config, not core constants** (DEC-AG-3) — the binary ships the Claude
   preset as `DEFAULT_AGENT_CONFIG` and documents the Codex preset as a drop-in. Codex reports token
   usage (`turn.completed.usage`: `input_tokens`/`output_tokens`/`cached_input_tokens`→`cacheRead`)
-  but **no USD cost** → `costUsd: null`; the interface already tolerates null (`runner.ts:22`).
+  but **no USD cost** → `costUsd: null`; the interface already tolerates null (`runner.ts:20`), the
+  per-dispatch `cost_usd` is nullable (`events.ts:45`), and the summary `sum()` coerces null→0
+  (`emitter.ts:82`) — so a null Codex cost breaks no telemetry.
 
 - **DEC-CX-8 — Named follow-ups (not silent deferrals).** (a) The neutral capability descriptor of
   DEC-CX-3. (b) Codex's native `--output-schema` could enforce the zod schema on the final message
   for sidecar steps (a reliability win over the fenced-block convention) — deferred; the fenced
   sidecar keeps working for both providers. (c) The doc/impl mismatch at `control-loop.md:147`
   ("Anthropic-SDK forced-schema tool calls") should be corrected to describe fenced-sidecar parsing;
-  Codex's `--output-schema` is the closest realization of the doc's original intent.
+  Codex's `--output-schema` is the closest realization of the doc's original intent. (d) Fold
+  `agentConfig` into the full ticket > workspace > profile > default precedence merge once the
+  startup-entrypoint milestone builds that loader (`runtime-config.ts:3-7`); DEC-CX-5 ships
+  single-file loading until then.
 
 - **DEC-CX-9 — Repo hygiene: ignore local agent/worktree artifacts.** `.gitignore` gains
   `.claude/worktrees/` (transient in-repo worktrees), `.codex/` (Codex's local session/config dir,
@@ -154,8 +177,8 @@ scripts/smoke-agent.ts      # CHANGED — same; add a codex smoke path
 ```
 handler → runAgentDispatch → renderPrompt → ensureWorktree
         → runner.run({ prompt, model, allowedTools, cwd, timeoutMs })     ← resolveAgentRunner picked codex
-            codex adapter: buildCodexArgs (allowedTools→--sandbox) → spawn `codex exec -`
-                         → drain JSONL(stderr) for usage + read --output-last-message → stdout=final text
+            codex adapter: buildCodexArgs (allowedTools→--sandbox[+network]) → spawn `codex exec -`
+                         → parse JSONL(stdout) for usage + read --output-last-message file → stdout field = final text
         → commitWorktree → completeDispatch → postcondition
         → (sidecar steps) extractSidecar(result.stdout, schema)           ← now provider-independent
 ```
@@ -245,3 +268,21 @@ in the adapter). Prompts and `AGENTS.md` injection are already vendor-neutral; C
 Steps 1–3 are worth doing on their own merits (they pay down the "designed-but-unwired" debt and fix
 a latent bug); step 4 is the provider itself. Per repo workflow: a `feat/` branch, PR into `main`,
 operator merges — no auto-merge.
+
+## 9. Independent review (2026-07-07)
+
+A fresh, code-grounded adversarial review verified every `file:line` claim and attacked each
+decision. Outcome: the three headline claims (unwired provider selection, the latent sidecar/envelope
+bug, the two Claude-key-shaped capability touchpoints) and DEC-CX-4/6/7 all **confirmed against the
+code**. Two corrections were folded back in:
+
+- **DEC-CX-5 rescoped (was HIGH):** the ticket>workspace>profile precedence loader does not exist
+  (`runtime-config.ts:3-7` defers it; `agentConfig` is not yet a config field). Now ships single-file
+  loading via the existing `--config` path; full precedence → DEC-CX-8d.
+- **DEC-CX-3 network parity (was MEDIUM):** Codex `workspace-write` disables network by default,
+  which would silently strip web access from `design:dispatch`; the adapter now restores it via
+  `-c sandbox_workspace_write.network_access=true` when the allowlist carries `WebSearch`/`WebFetch`.
+
+Plus low-severity fixes: data-flow diagram stream label (JSONL is on stdout, not stderr), a retrofit
+fallback for an absent `envelope.result`, and telemetry-null-cost confirmation. No un-inventoried
+Claude assumptions were found in `src/`.
