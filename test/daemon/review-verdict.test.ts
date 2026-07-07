@@ -113,6 +113,42 @@ test("blocking plan-defect, config redesign → loopback to design (units cleare
   expect(designStep?.status).toBe("pending");
 });
 
+test("code-review plan-defect redesign carries the triggering findings into the design feedback (ENG-272)", () => {
+  const { db, ticketId } = makeTestDb();
+  const { unit, did } = seedReviewRound(db, ticketId);
+  // seed the design steps the redesign route resets
+  for (const k of ["design:dispatch", "design:extract"]) {
+    const s = insertPending(db, { ticketId, stepKey: k, stepType: "dispatch" });
+    db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
+  }
+  insertFinding(db, {
+    ticketId,
+    reviewKind: "code",
+    dispatchId: did,
+    severity: "major",
+    category: "plan-defect",
+    deferralCandidate: 0,
+    blocksShip: 1,
+    workUnitId: unit.id, // per-unit finding: its unit is deleted by the redesign
+    location: "src/a.ts:12",
+    rationale: "CODE-REVIEW-PLAN-DEFECT",
+  });
+  const r = applyReviewVerdict(
+    db,
+    ticketId,
+    { ...DEFAULT_RUNTIME_CONFIG, onPlanDefect: "redesign" },
+    { stepKey: "review" },
+  );
+  const ticket = getTicket(db, ticketId);
+  const feedback = designFeedback(db, ticketId);
+  db.close();
+  expect(r.decision).toBe("loopback");
+  expect(ticket?.stage).toBe("design");
+  // The code-review finding is rendered into the redesign feedback (was empty before ENG-272).
+  expect(feedback).toContain("CODE-REVIEW-PLAN-DEFECT");
+  expect(feedback).toContain("src/a.ts:12");
+});
+
 test("plan-review redesign preserves a per-unit blocking finding for the redesign feedback", () => {
   const { db, ticketId } = makeTestDb();
   const unit = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", filesToTouch: ["a.ts"] });

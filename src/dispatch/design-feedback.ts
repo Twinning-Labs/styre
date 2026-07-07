@@ -1,18 +1,29 @@
 import type { Database } from "bun:sqlite";
-import { latestDispatchForStep, listByDispatch } from "../db/repos/review-finding.ts";
+import { listByTicket as listEvents } from "../db/repos/event-log.ts";
 
-/** Corrective feedback for a design re-dispatch after a plan-review loopback: the blocking findings
- *  from the ticket's most recent `design:review`, verbatim, with a disposition demand. Empty string
- *  when there is no prior review or it raised nothing blocking — so a first design dispatch renders
- *  a blank `{{review_feedback}}` slot. Mirrors `implementFeedback` (feedback.ts). */
+/** The per-finding shape snapshotted into a design loopback event's payload by `redesignLoopback`. */
+interface FindingSnapshot {
+  category: string | null;
+  location: string | null;
+  rationale: string | null;
+}
+
+/** Corrective feedback for a design re-dispatch after a redesign loopback: the blocking findings
+ *  that forced the most recent redesign, verbatim, with a disposition demand. The verdict
+ *  (`redesignLoopback`) snapshots those findings into the loopback event's `payload_json`, so this
+ *  covers BOTH the `design:review`→redesign and the code-review→plan-defect→redesign paths — the
+ *  latter's findings live on the `review` (code) dispatch and were never rendered before (ENG-272).
+ *  Empty string when there is no prior redesign — so a first design dispatch renders a blank
+ *  `{{review_feedback}}` slot. Mirrors `implementFeedback` (feedback.ts). */
 export function designFeedback(db: Database, ticketId: number): string {
-  const dispatchId = latestDispatchForStep(db, ticketId, "design:review");
-  if (dispatchId === null) return "";
-  const blocking = listByDispatch(db, ticketId, dispatchId).filter(
-    (f) => f.status === "open" && f.blocks_ship === 1,
+  const loopbacks = listEvents(db, ticketId).filter(
+    (e) => e.kind === "loopback" && e.loop === "design" && e.payload_json !== null,
   );
-  if (blocking.length === 0) return "";
-  const lines = blocking.map(
+  const latest = loopbacks[loopbacks.length - 1];
+  if (!latest?.payload_json) return "";
+  const findings = (JSON.parse(latest.payload_json) as { findings?: FindingSnapshot[] }).findings;
+  if (!findings || findings.length === 0) return "";
+  const lines = findings.map(
     (f) => `- [${f.category ?? "?"}] ${f.location ?? "plan-wide"}: ${f.rationale ?? ""}`,
   );
   return `## Prior plan-review feedback (address before finalizing)\n\nA prior plan review raised the following. For EACH, either revise the plan to address it, or state explicitly in the plan why it does not apply or is an accepted trade-off — a bare "no changes needed" is not a disposition:\n${lines.join("\n")}`;
