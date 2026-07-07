@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
@@ -155,4 +155,34 @@ test("implement:dispatch escalates to the deep tier after a bounce-back", async 
   db.close();
   expect(dispatches.length).toBe(1);
   expect(dispatches[0]?.model).toBe("claude-opus-4-8"); // deep tier (escalated), not the standard sonnet
+});
+
+test("design:dispatch passes when the agent writes this ticket's plan", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'design' WHERE id = ?").run(ticketId);
+  const ident = db.query<{ ident: string }, [number]>("SELECT ident FROM ticket WHERE id = ?").get(ticketId)!.ident;
+  const runner = new FakeAgentRunner((input) => {
+    mkdirSync(join(input.cwd, "docs", "plans"), { recursive: true });
+    writeFileSync(join(input.cwd, "docs", "plans", `${ident}.md`), `---\nlinear: ${ident}\n---\n# Plan\n`);
+    return { completed: true, exitCode: 0, stdout: "{}", stderr: "", timedOut: false, costUsd: null, tokensIn: null, tokensOut: null };
+  });
+  await advanceOneStep(db, ticketId, registryFor(repo, runner));
+  const d = listByTicket(db, ticketId);
+  db.close();
+  expect(d.at(-1)?.outcome).toBe("clean-success");
+});
+
+test("design:dispatch fails the postcondition when no plan for this ticket exists", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'design' WHERE id = ?").run(ticketId);
+  const runner = new FakeAgentRunner(() => // writes NO plan
+    ({ completed: true, exitCode: 0, stdout: "{}", stderr: "", timedOut: false, costUsd: null, tokensIn: null, tokensOut: null }));
+  await advanceOneStep(db, ticketId, registryFor(repo, runner));
+  const d = listByTicket(db, ticketId);
+  db.close();
+  expect(d.at(-1)?.outcome).toBe("postcondition-failed");
 });
