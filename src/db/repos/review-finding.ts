@@ -123,10 +123,3 @@ export type ReviewFindingStatus = "open" | "fixed" | "deferred" | "wont-fix";
 export function setStatus(db: Database, id: number, status: ReviewFindingStatus): void {
   db.query("UPDATE review_finding SET status = $s WHERE id = $id").run({ $s: status, $id: id });
 }
-
-/** Sever a finding from its work unit (work_unit_id → NULL). Used before a redesign deletes the
- *  ticket's work units, so a per-unit finding is not cascade-deleted with the unit it referenced —
- *  it survives as a plan-level finding the redesign feedback can still carry. */
-export function detachFromWorkUnit(db: Database, id: number): void {
-  db.query("UPDATE review_finding SET work_unit_id = NULL WHERE id = $id").run({ $id: id });
-}
