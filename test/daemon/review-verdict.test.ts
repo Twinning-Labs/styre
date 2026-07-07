@@ -9,7 +9,9 @@ import { getTicket } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit, listByTicket as listUnits } from "../../src/db/repos/work-unit.ts";
 import { getByKey } from "../../src/db/repos/workflow-step.ts";
 import { insertPending } from "../../src/db/repos/workflow-step.ts";
+import { designFeedback } from "../../src/dispatch/design-feedback.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { insertDesignReviewDispatch } from "../helpers/dispatch-fixtures.ts";
 
 function seedReviewRound(db: ReturnType<typeof makeTestDb>["db"], ticketId: number) {
   db.query("UPDATE ticket SET stage = 'review' WHERE id = ?").run(ticketId);
@@ -109,6 +111,45 @@ test("blocking plan-defect, config redesign → loopback to design (units cleare
   expect(ticket?.stage).toBe("design");
   expect(units.length).toBe(0);
   expect(designStep?.status).toBe("pending");
+});
+
+test("plan-review redesign preserves a per-unit blocking finding for the redesign feedback", () => {
+  const { db, ticketId } = makeTestDb();
+  const unit = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", filesToTouch: ["a.ts"] });
+  const did = insertDesignReviewDispatch(db, ticketId); // design:review step + dispatch
+
+  insertFinding(db, {
+    ticketId,
+    dispatchId: did,
+    reviewKind: "plan",
+    severity: "major",
+    category: "decomposition",
+    location: "plan.md:10",
+    rationale: "PER-UNIT-DECOMP-ISSUE",
+    blocksShip: 1,
+    workUnitId: unit.id,
+  });
+  insertFinding(db, {
+    ticketId,
+    dispatchId: did,
+    reviewKind: "plan",
+    severity: "major",
+    category: "completeness",
+    location: "plan.md:2",
+    rationale: "PLAN-WIDE-ISSUE",
+    blocksShip: 1,
+    workUnitId: null,
+  });
+
+  const r = applyReviewVerdict(db, ticketId, DEFAULT_RUNTIME_CONFIG, { stepKey: "design:review" });
+  const units = listUnits(db, ticketId);
+  const feedback = designFeedback(db, ticketId);
+  db.close();
+
+  expect(r.decision).toBe("loopback");
+  expect(units.length).toBe(0); // redesign still clears the decomposition
+  expect(feedback).toContain("PER-UNIT-DECOMP-ISSUE"); // survives the cascade now
+  expect(feedback).toContain("PLAN-WIDE-ISSUE"); // still there
 });
 
 test("non-blocking major + deferral_candidate → escalated", () => {

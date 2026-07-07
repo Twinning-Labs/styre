@@ -3,6 +3,7 @@ import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
 import {
   type ReviewFindingRow,
+  detachFromWorkUnit,
   latestDispatchForStep,
   listByDispatch,
 } from "../db/repos/review-finding.ts";
@@ -88,8 +89,21 @@ function codeLoopback(
   })();
 }
 
-function redesignLoopback(db: Database, ticketId: number, signature: string): void {
+function redesignLoopback(
+  db: Database,
+  ticketId: number,
+  signature: string,
+  blocking: ReviewFindingRow[],
+): void {
   db.transaction(() => {
+    // Preserve the findings that forced this redesign: detach any per-unit finding from its unit
+    // BEFORE deleteByTicket, so the ON DELETE CASCADE does not take it. designFeedback then reads
+    // the full blocking set (plan-wide + formerly-per-unit) for the re-dispatch.
+    for (const f of blocking) {
+      if (f.work_unit_id !== null) {
+        detachFromWorkUnit(db, f.id);
+      }
+    }
     deleteByTicket(db, ticketId);
     for (const key of ["design:dispatch", "design:extract", "design:review", "review"]) {
       const step = getByKey(db, ticketId, key);
@@ -137,7 +151,7 @@ export function applyReviewVerdict(
       escalate(db, ticketId, "no progress: identical plan-review findings", signature);
       return { decision: "escalated" };
     }
-    redesignLoopback(db, ticketId, signature);
+    redesignLoopback(db, ticketId, signature, blocking);
     return { decision: "loopback" };
   }
 
@@ -155,7 +169,10 @@ export function applyReviewVerdict(
     const isPlanDefect = blocking.some((f) => f.category === "plan-defect");
     if (isPlanDefect) {
       if (config.onPlanDefect === "redesign") {
-        redesignLoopback(db, ticketId, signature);
+        // Code-review-triggered redesign carries no plan feedback today (designFeedback reads only
+        // design:review findings). Nothing to preserve here — pass []. See the known-gap note in
+        // docs/plans/2026-07-07-design-redesign-feedback-cascade-fix.md.
+        redesignLoopback(db, ticketId, signature, []);
         return { decision: "loopback" };
       }
       escalate(

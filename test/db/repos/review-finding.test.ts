@@ -1,14 +1,40 @@
 import { expect, test } from "bun:test";
 import { insertDispatch } from "../../../src/db/repos/dispatch.ts";
 import {
+  detachFromWorkUnit,
+  getById,
   insertFinding,
   latestDispatchForStep,
   listByDispatch,
   listOpenByTicket,
   setStatus,
 } from "../../../src/db/repos/review-finding.ts";
+import { deleteByTicket, insertWorkUnit } from "../../../src/db/repos/work-unit.ts";
 import { insertPending } from "../../../src/db/repos/workflow-step.ts";
 import { makeTestDb } from "../../helpers/db.ts";
+
+test("detachFromWorkUnit nulls work_unit_id so the finding survives its unit's deletion", () => {
+  const { db, ticketId } = makeTestDb();
+  const unit = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", filesToTouch: ["a.ts"] });
+  const f = insertFinding(db, {
+    ticketId,
+    reviewKind: "plan",
+    severity: "major",
+    category: "decomposition",
+    location: "plan.md:10",
+    rationale: "unit boundary is wrong",
+    blocksShip: 1,
+    workUnitId: unit.id,
+  });
+
+  detachFromWorkUnit(db, f.id);
+  expect(getById(db, f.id)?.work_unit_id).toBeNull();
+
+  // With work_unit_id NULL, deleting the unit no longer cascades the finding away.
+  deleteByTicket(db, ticketId);
+  expect(getById(db, f.id)).not.toBeNull();
+  db.close();
+});
 
 test("insertFinding persists fields and round-trips by dispatch", () => {
   const { db, ticketId } = makeTestDb();
