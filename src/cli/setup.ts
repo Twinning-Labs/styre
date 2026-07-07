@@ -1,12 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { defineCommand } from "citty";
-import { claudeAgentRunner } from "../agent/providers/claude.ts";
-import { selectAgentRunner } from "../agent/registry.ts";
-import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
+import { resolveAgentRunner } from "../agent/resolve.ts";
+import { DEFAULT_AGENT_CONFIG, requiredEnvFor } from "../config/agent-config.ts";
 import { configDir } from "../config/paths.ts";
-import { DEFAULT_RUNTIME_CONFIG } from "../config/runtime-config.ts";
+import { DEFAULT_RUNTIME_CONFIG, RuntimeConfigSchema } from "../config/runtime-config.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
 import { unrootedManifestWarnings } from "../setup/detect-components.ts";
@@ -203,6 +202,10 @@ export const setupCommand = defineCommand({
       type: "boolean",
       description: "Re-probe from scratch, discarding operator-resolved runtime context",
     },
+    config: {
+      type: "string",
+      description: "Path to a runtime config.json (selects the agent provider)",
+    },
     "trust-agent-commands": {
       type: "boolean",
       description:
@@ -219,10 +222,18 @@ export const setupCommand = defineCommand({
       repo = discoverRepoRoot(); // no-arg → discover cwd's repo (throws fail-closed if not a git repo)
       assertInPlaceMarker(repo); // gate BEFORE runSetup's write-capable enrichment agent
     }
-    if (!process.env.ANTHROPIC_API_KEY) {
-      throw new Error("setup: ANTHROPIC_API_KEY is required (runtime-context prose enrichment)");
+    const agentConfig =
+      args.config && args.config.length > 0
+        ? (RuntimeConfigSchema.parse(JSON.parse(readFileSync(args.config, "utf8"))).agent ??
+          DEFAULT_AGENT_CONFIG)
+        : DEFAULT_AGENT_CONFIG;
+    const requiredKey = requiredEnvFor(agentConfig.provider);
+    if (requiredKey && !process.env[requiredKey]) {
+      throw new Error(
+        `setup: ${requiredKey} is required for provider '${agentConfig.provider}' (runtime-context prose enrichment)`,
+      );
     }
-    const runner = selectAgentRunner(DEFAULT_AGENT_CONFIG, { claude: () => claudeAgentRunner() });
+    const runner = resolveAgentRunner(agentConfig);
     const { outPath, profile, needsInput } = await runSetup({
       repo,
       out: args.out,
@@ -231,7 +242,7 @@ export const setupCommand = defineCommand({
       force: args.force,
       reprobe: args.reprobe,
       trustAgentCommands: args["trust-agent-commands"] === true,
-      deps: { runner, agentConfig: DEFAULT_AGENT_CONFIG },
+      deps: { runner, agentConfig },
     });
     console.log(`setup: wrote ${outPath}`);
     if (needsInput.length > 0) {

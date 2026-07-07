@@ -44,6 +44,18 @@ export function parseClaudeJson(stdout: string): {
   }
 }
 
+/** DEC-CX-4: the stdout contract is "the final assistant message as plain text". `claude -p
+ *  --output-format json` returns an envelope whose `result` field carries that text; unwrap it.
+ *  Falls back to the raw string when `result` is absent/non-string (never emits "undefined"). */
+export function assistantText(rawStdout: string): string {
+  try {
+    const obj = JSON.parse(rawStdout) as Record<string, unknown>;
+    return typeof obj.result === "string" ? obj.result : rawStdout;
+  } catch {
+    return rawStdout;
+  }
+}
+
 /** Map a Claude `claude -p` death to a provider-neutral cause (ENG-164). The ONLY place that
  *  knows Claude's marker strings. A session-limit death is a clean non-zero exit carrying the
  *  marker on stderr/stdout, so both streams are searched. */
@@ -115,14 +127,22 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
           new Response(proc.stderr).text(),
         ]);
         const usage = parseClaudeJson(stdout);
+        const finalText = assistantText(stdout); // usage stays parsed from the RAW envelope above
         if (exitCode === 0) {
-          return { completed: true, exitCode, stdout, stderr, timedOut: false, ...usage };
+          return {
+            completed: true,
+            exitCode,
+            stdout: finalText,
+            stderr,
+            timedOut: false,
+            ...usage,
+          };
         }
         const { cause, resetAt } = classifyFailure(stderr, stdout);
         return {
           completed: false,
           exitCode,
-          stdout,
+          stdout: finalText,
           stderr,
           timedOut: false,
           ...usage,

@@ -14,6 +14,9 @@ export interface AgentRunInput {
 export interface AgentRunResult {
   completed: boolean;
   exitCode: number | null;
+  /** DEC-CX-4 CONTRACT: the agent's final assistant message as plain, unescaped text (real
+   *  newlines) — NOT a provider envelope. Token/cost accounting lives only in the fields below.
+   *  Sidecar/structured-output extraction (dispatch/sidecar.ts) reads this. */
   stdout: string;
   stderr: string;
   timedOut: boolean;

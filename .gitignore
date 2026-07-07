@@ -153,3 +153,8 @@ dist/
 
 # subagent-driven-development scratch (ledger, briefs, reports, review packages)
 .superpowers/
+
+# Local agent / worktree artifacts (never committed)
+.claude/worktrees/
+.codex/
+AGENTS.md

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AgentConfigSchema } from "./agent-config.ts";
 
 /** Daemon runtime config: operator policy knobs, threaded as one object through the loop.
  *  This is NOT the probed project Profile (product shape). The *values* live outside the target
@@ -16,6 +17,8 @@ export const RuntimeConfigSchema = z.object({
   forge: z.string().default("github"),
   // OSS adoption analytics (PostHog). On by default; honors DO_NOT_TRACK / STYRE_TELEMETRY too.
   telemetry: z.boolean().default(true),
+  // DEC-CX-5: the agent provider + per-tier models. Absent → the binary Claude preset.
+  agent: AgentConfigSchema.optional(),
 });
 
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
