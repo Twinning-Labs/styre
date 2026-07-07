@@ -133,6 +133,18 @@ test("code-review plan-defect redesign carries the triggering findings into the 
     location: "src/a.ts:12",
     rationale: "CODE-REVIEW-PLAN-DEFECT",
   });
+  // a non-blocking finding in the same round must NOT be snapshotted into the feedback
+  insertFinding(db, {
+    ticketId,
+    reviewKind: "code",
+    dispatchId: did,
+    severity: "nit",
+    category: "maintainability",
+    deferralCandidate: 0,
+    blocksShip: 0,
+    location: "src/b.ts:3",
+    rationale: "NON-BLOCKING-NIT",
+  });
   const r = applyReviewVerdict(
     db,
     ticketId,
@@ -147,6 +159,7 @@ test("code-review plan-defect redesign carries the triggering findings into the 
   // The code-review finding is rendered into the redesign feedback (was empty before ENG-272).
   expect(feedback).toContain("CODE-REVIEW-PLAN-DEFECT");
   expect(feedback).toContain("src/a.ts:12");
+  expect(feedback).not.toContain("NON-BLOCKING-NIT"); // non-blocking excluded from the snapshot
 });
 
 test("plan-review redesign preserves a per-unit blocking finding for the redesign feedback", () => {
