@@ -51,8 +51,8 @@ CREATE TABLE schema_meta (
     note        TEXT
 );
 INSERT INTO schema_meta (version, applied_at, note)
-VALUES (3, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-        'v3: event_log.actor enum daemon→runner (OSS single-writer terminology)');
+VALUES (4, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+        'v4: acceptance_criterion + ac_check (change-scoped verify — AC identity + authored-check registry)');
 
 -- ============================================================================
 -- §A  PROJECT + TICKET   (replaces issue-state.json + stage:* / pipeline:* labels)
@@ -385,6 +385,51 @@ CREATE TABLE review_finding (
     CHECK (blocks_ship IS NULL OR severity <> 'critical' OR blocks_ship = 1)
 );
 CREATE INDEX idx_finding_open ON review_finding (ticket_id, status, blocks_ship);
+
+-- ============================================================================
+-- §F2  ACCEPTANCE CRITERIA + AUTHORED-CHECK REGISTRY  (change-scoped verify)
+-- ----------------------------------------------------------------------------
+-- The AC's observable behavior becomes a ground-truth check (design
+-- docs/brainstorms/2026-07-07-change-scoped-verify-ac-checks-design.md). ACs are
+-- unmodeled elsewhere (they lived only in ticket.description). Per-check VERDICT
+-- rows are NOT here — they reuse ground_truth_signal (open-vocab signal_type).
+-- ============================================================================
+
+-- acceptance_criterion — one concern per row, derived deterministically from the
+-- ticket description (parseAcChecklist): a GFM task-list item, else the whole
+-- description as a single AC. `source` records which. (M1 writes id/seq/text/source;
+-- disposition columns for assessed-satisfied / not-expressible are added at M6.)
+CREATE TABLE acceptance_criterion (
+    id          INTEGER PRIMARY KEY,
+    ticket_id   INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
+    seq         INTEGER NOT NULL,                    -- 1-based order within the ticket
+    text        TEXT    NOT NULL,                    -- the AC's observable-behavior text
+    source      TEXT    NOT NULL CHECK (source IN ('checklist','whole-description')),
+    created_at  TEXT    NOT NULL,
+    updated_at  TEXT    NOT NULL,
+    UNIQUE (ticket_id, seq)
+);
+CREATE INDEX idx_ac_ticket ON acceptance_criterion (ticket_id, seq);
+
+-- ac_check — the authored-check REGISTRY: one row per native test the plan-blind
+-- checks:dispatch step (M2) writes for an AC. `selector` is the in-suite selection
+-- (e.g. a pytest node-id / -k expression) run within the suite's setup context.
+-- `red_first_result` is the COARSE RED-first outcome on clean HEAD (M2 fills);
+-- `red_class` is the graded taxonomy assertion/absence/environmental (M3 fills).
+-- Both are NULL until their milestone populates them. Per-run verdicts at each sha
+-- go to ground_truth_signal, not here.
+CREATE TABLE ac_check (
+    id               INTEGER PRIMARY KEY,
+    ticket_id        INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
+    ac_id            INTEGER NOT NULL REFERENCES acceptance_criterion(id) ON DELETE CASCADE,
+    selector         TEXT    NOT NULL,               -- in-suite selection (node-id / -k / …)
+    test_path        TEXT,                           -- authored test file, repo-relative
+    red_first_result TEXT CHECK (red_first_result IS NULL OR red_first_result IN ('red','green','error')),  -- M2 coarse
+    red_class        TEXT CHECK (red_class IS NULL OR red_class IN ('assertion','absence','environmental')), -- M3 graded
+    created_at       TEXT    NOT NULL,
+    updated_at       TEXT    NOT NULL
+);
+CREATE INDEX idx_ac_check_ticket ON ac_check (ticket_id, ac_id);
 
 -- ============================================================================
 -- §G  LINEAR / GITHUB PROJECTION   (move 2 / §9.4 #4 — one-way, idempotent)
