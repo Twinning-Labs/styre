@@ -93,11 +93,13 @@ export async function callAnthropic(system: string, user: string): Promise<strin
       "anthropic-version": "2023-06-01",
       "content-type": "application/json",
     },
-    // No temperature/top_p/top_k and no thinking field: Sonnet 5 rejects sampling
-    // params (400) and defaults to adaptive thinking; extractText ignores thinking blocks.
+    // No temperature/top_p/top_k: Sonnet 5 rejects sampling params (400). thinking
+    // disabled so the whole max_tokens budget goes to the notes (adaptive thinking would
+    // otherwise share it and could truncate them); "disabled" is accepted on Sonnet 5.
     body: JSON.stringify({
       model,
       max_tokens: 2048,
+      thinking: { type: "disabled" },
       system,
       messages: [{ role: "user", content: user }],
     }),
@@ -105,7 +107,12 @@ export async function callAnthropic(system: string, user: string): Promise<strin
   if (!res.ok) {
     throw new Error(`Anthropic API ${res.status}: ${(await res.text()).slice(0, 500)}`);
   }
-  return extractText(await res.json());
+  const json = await res.json();
+  if ((json as { stop_reason?: string }).stop_reason === "max_tokens") {
+    // Truncated output — don't ship half a note; fail so the workflow falls back.
+    throw new Error("Anthropic response truncated at max_tokens");
+  }
+  return extractText(json);
 }
 
 function git(args: string[]): string {

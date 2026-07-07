@@ -219,7 +219,16 @@ jobs:
           SHA0: ${{ needs.compute.outputs.sha0 }}
           RELEASE_NOTES: ${{ inputs.release_notes }}
         run: |
-          if [ -n "$RELEASE_NOTES" ]; then
+          # HEAL: if this version's release commit is already on main, reuse the notes
+          # already committed to CHANGELOG.md instead of regenerating them (which would
+          # diverge from the committed section and re-spend the LLM). Falls through to
+          # normal generation when there's nothing committed yet.
+          if git log origin/main -1 --format=%s | grep -qxF "chore(release): $V" \
+             && git show "origin/main:CHANGELOG.md" > /tmp/committed_changelog.md 2>/dev/null \
+             && bun run scripts/changelog-section.ts "$V" /tmp/committed_changelog.md > RELEASE_NOTES.md 2>/dev/null \
+             && [ -s RELEASE_NOTES.md ]; then
+            echo "::notice::reusing committed release notes for $V (heal)"
+          elif [ -n "$RELEASE_NOTES" ]; then
             printf '%s\n' "$RELEASE_NOTES" > RELEASE_NOTES.md
           else
             SINCE="$(git describe --tags --abbrev=0 "$SHA0")"

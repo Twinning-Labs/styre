@@ -34,3 +34,18 @@ test("is idempotent: a second call for the same version replaces, not duplicates
   expect(twice).toContain("### Bug Fixes\n- Fixed X");
   expect(twice).not.toContain("Codex provider"); // old body for this version replaced
 });
+
+test("strips a leading '## [..]' heading from notes (git-cliff fallback) — no double heading", () => {
+  // git cliff --unreleased --strip all still emits a per-release heading.
+  const cliffNotes = "## [0.5.0] - 2026-07-07\n\n### Features\n- New thing\n";
+  const out = prependChangelog(HEADER, "0.5.0", "2026-07-07", cliffNotes);
+  expect(out.match(/## \[0\.5\.0\]/g)?.length).toBe(1); // exactly one heading, not two
+  expect(out).toContain("### Features\n- New thing");
+});
+
+test("replace-path keeps a blank line before the following section", () => {
+  const existing = `${HEADER}## [0.5.0] - 2026-07-07\n\n- old\n\n## [0.4.0] - 2026-07-06\n\n- older\n`;
+  const out = prependChangelog(existing, "0.5.0", "2026-07-07", "### Bug Fixes\n- Fixed X\n");
+  // the replaced section's last line is separated from the next heading by a blank line
+  expect(out).toContain("- Fixed X\n\n## [0.4.0]");
+});

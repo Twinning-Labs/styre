@@ -1,6 +1,5 @@
 // scripts/prepend-changelog.ts
-const DEFAULT_HEADER =
-  "# Changelog\n\nAll notable changes to this project are documented here.\n";
+const DEFAULT_HEADER = "# Changelog\n\nAll notable changes to this project are documented here.\n";
 
 /** Splice a new `## [version] - date` section onto a changelog, directly under the header
  *  and above all prior version sections. Idempotent: an existing section for the same
@@ -12,7 +11,11 @@ export function prependChangelog(
   notes: string,
 ): string {
   const v = version.replace(/^v/, "");
-  const section = `## [${v}] - ${date}\n\n${notes.trim()}\n`;
+  // Strip a leading "## [..]" heading if the notes already carry one (the git-cliff
+  // fallback path emits one). We own the version heading here, so passing one through
+  // would double the heading in CHANGELOG.md.
+  const body = notes.replace(/^\s*##\s*\[[^\]]*\][^\n]*\n+/, "").trim();
+  const section = `## [${v}] - ${date}\n\n${body}\n`;
 
   const base = existing.trim() === "" ? DEFAULT_HEADER : existing;
 
@@ -24,7 +27,11 @@ export function prependChangelog(
     const start = m.index;
     const nextIdx = base.indexOf("\n## [", start + 1);
     const end = nextIdx === -1 ? base.length : nextIdx + 1;
-    return `${base.slice(0, start)}${section}${base.slice(end)}`;
+    const tail = base.slice(end);
+    // Match the insert-path spacing: a blank line before the following section.
+    return tail === ""
+      ? `${base.slice(0, start)}${section}`
+      : `${base.slice(0, start)}${section}\n${tail}`;
   }
 
   // Otherwise split at the first version section and insert above it.
