@@ -24,7 +24,10 @@ async function invoke(args: Record<string, unknown>, cwd: string, xdg: string): 
       args: { _: [], ...args } as never,
     });
   } finally {
-    process.env.STYRE_TELEMETRY = prev.t;
+    if (prev.t === undefined)
+      // biome-ignore lint/performance/noDelete: restoring an unset env var requires delete
+      delete process.env.STYRE_TELEMETRY;
+    else process.env.STYRE_TELEMETRY = prev.t;
     if (prev.x === undefined)
       // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
       delete process.env.XDG_CONFIG_HOME;

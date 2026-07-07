@@ -171,7 +171,7 @@ export const runCommand = defineCommand({
         const dir = parkDir(profile.slug, ident);
         console.error(
           `Parked: ${out.park.cause}${out.park.resetAt ? ` (resets ${out.park.resetAt})` : ""}.\n` +
-            `Resume with: styre run --resume ${ident} --profile ${args.profile}\n` +
+            `Resume with: styre run --resume ${ident} ${args.profile ? `--profile ${args.profile}` : `--slug ${slug}`}\n` +
             `Dump: ${dir}`,
         );
       }
