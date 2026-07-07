@@ -2,11 +2,14 @@ import { expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import {
+  assistantText,
   buildClaudeArgs,
   claudeAgentRunner,
   parseClaudeJson,
 } from "../../../src/agent/providers/claude.ts";
+import { extractSidecar } from "../../../src/dispatch/sidecar.ts";
 
 const cwd = realpathSync(mkdtempSync(join(tmpdir(), "styre-claude-")));
 
@@ -103,4 +106,25 @@ test("run classifies spawn failure as transient (non-existent command)", async (
   // ENG-164: spawn failure goes through the catch branch → transportFailure → cause: "transient"
   expect(r.cause).toBe("transient");
   expect(r.resetAt).toBeNull();
+});
+
+test("assistantText unwraps the envelope result field, falling back to raw", () => {
+  const raw = JSON.stringify({ result: "hello\nworld", usage: { input_tokens: 1 } });
+  expect(assistantText(raw)).toBe("hello\nworld");
+  // no result field → raw passthrough (never the string "undefined")
+  const noResult = JSON.stringify({ usage: { input_tokens: 1 } });
+  expect(assistantText(noResult)).toBe(noResult);
+  expect(assistantText("not json")).toBe("not json");
+});
+
+test("a claude success carrying a sidecar block yields extractable stdout (regression)", async () => {
+  const sidecar = `\`\`\`styre-sidecar\n${JSON.stringify({ n: 5 })}\n\`\`\``;
+  // real claude wraps assistant text (incl. the fenced block) inside the json envelope's `result`
+  const envelope = JSON.stringify({ result: `done\n${sidecar}`, usage: { input_tokens: 1 } });
+  const cli = fakeCli("claude-sidecar", `cat <<'EOF'\n${envelope}\nEOF`);
+  const r = await claudeAgentRunner(cli).run({ ...runInput });
+  expect(r.completed).toBe(true);
+  const parsed = extractSidecar(r.stdout, z.object({ n: z.number() }));
+  expect(parsed.ok).toBe(true);
+  if (parsed.ok) expect(parsed.value.n).toBe(5);
 });
