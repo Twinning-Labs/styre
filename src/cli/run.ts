@@ -1,10 +1,10 @@
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defineCommand } from "citty";
 import { resolveAgentRunner } from "../agent/resolve.ts";
 import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
-import { DEFAULT_RUNTIME_CONFIG, RuntimeConfigSchema } from "../config/runtime-config.ts";
+import { discoverRuntimeConfig, loadProfileByConvention, slugForCwd } from "../config/discover.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
 import { realRecoverDeps, recover } from "../daemon/recover.ts";
 import { runTicket } from "../daemon/run-ticket.ts";
@@ -42,7 +42,16 @@ export const runCommand = defineCommand({
   meta: { name: "run", description: "Ingest one ticket and drive it to PR-ready, then exit." },
   args: {
     ticket: { type: "positional", required: false, description: "Ticket ref (e.g. ENG-123)" },
-    profile: { type: "string", required: true, description: "Path to the project-profile JSON" },
+    profile: {
+      type: "string",
+      description:
+        "Path to the project-profile JSON (default: ~/.config/styre/<slug>/profile.json for the cwd repo)",
+    },
+    slug: {
+      type: "string",
+      description:
+        "Project slug to locate the profile + per-project config (default: derived from the cwd repo)",
+    },
     config: { type: "string", description: "Path to a runtime config.json (optional)" },
     db: { type: "string", description: "DB path (default: a fresh per-run temp DB)" },
     resume: { type: "string", description: "Resume a parked run by ticket ident" },
@@ -58,12 +67,23 @@ export const runCommand = defineCommand({
     },
   },
   async run({ args }) {
-    const profile = loadProfile(args.profile);
+    let profile: Profile;
+    let slug: string;
+    if (args.profile && args.profile.length > 0) {
+      profile = loadProfile(args.profile);
+      slug = args.slug && args.slug.length > 0 ? args.slug : profile.slug;
+    } else {
+      const derived = args.slug && args.slug.length > 0 ? args.slug : slugForCwd();
+      if (!derived) {
+        throw new Error(
+          "styre run: no --profile given and the current directory is not a git repo — cd into the target repo, or pass --profile / --slug.",
+        );
+      }
+      slug = derived;
+      profile = loadProfileByConvention(slug);
+    }
     assertResolved(profile);
-    const runtimeConfig =
-      args.config && args.config.length > 0
-        ? RuntimeConfigSchema.parse(JSON.parse(readFileSync(args.config, "utf8")))
-        : DEFAULT_RUNTIME_CONFIG;
+    const runtimeConfig = discoverRuntimeConfig({ explicitPath: args.config, slug });
 
     const analytics = createAnalytics(runtimeConfig);
     const startedAt = Date.now();

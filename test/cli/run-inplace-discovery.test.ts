@@ -50,7 +50,9 @@ function writeProfile(targetRepo: string): string {
 // required` throw, which sits immediately AFTER the `--in-place` preflight block in run.ts.
 async function invokeRun(profilePath: string): Promise<void> {
   const prevTelemetry = process.env.STYRE_TELEMETRY;
+  const prevXdg = process.env.XDG_CONFIG_HOME;
   process.env.STYRE_TELEMETRY = "0"; // NOOP analytics — no network/file I/O from createAnalytics
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "styre-xdg-empty-")); // no convention files
   try {
     await runCommand.run?.({
       rawArgs: [],
@@ -64,6 +66,12 @@ async function invokeRun(profilePath: string): Promise<void> {
   } finally {
     if (prevTelemetry === undefined) process.env.STYRE_TELEMETRY = undefined;
     else process.env.STYRE_TELEMETRY = prevTelemetry;
+    // Restore XDG with delete, NOT `= undefined`: the string "undefined" has length>0, so
+    // configDir() would compute "undefined/styre" and leak it to later tests in the same process.
+    if (prevXdg === undefined)
+      // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
+      delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prevXdg;
   }
 }
 
