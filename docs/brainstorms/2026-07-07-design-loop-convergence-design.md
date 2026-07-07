@@ -1,19 +1,19 @@
 # Design-loop convergence — the review-loopback dead-end
 
-**Status:** Design (brainstorm output) — approaches settled with the operator (postcondition = *this ticket's* plan exists; carry the review's findings into the re-dispatch; on a genuinely-unresolved finding **honest-block** via the existing escalate path — not forward-with-caveat, not an adjudicator; ground-truth-check synthesis named as deferred). Revised (v2) after an independent two-lens review (code-grounded feasibility + adversarial) that killed the v1 exit rule. Pending written-spec review + independent review of v2. Isolated on branch `feat/change-scoped-verify-brainstorm` (off `main`).
+**Status:** Design (brainstorm output), **v3 — settled.** Two independent review rounds (code-grounded feasibility + adversarial). **Shipped scope = §3.1 + §3.2** (the dead-end fix + feedback carry). **The exit stays styre's *existing* `escalate`-on-repeat** — no new exit mechanism, no oscillation change (both held after review). The sound resolution (ground truth adjudicates a plan dispute) is named and **deferred** (§6). Isolated on branch `feat/change-scoped-verify-brainstorm` (off `main`).
 **Date:** 2026-07-07
-**Scope:** one **rare, intermittent** control-loop defect surfaced by the bench (darkreader-7241, SMOKE=2 re-run, styre @ `d7c5a1a`): a `design → review → design` loopback can **dead-end**, blocking a ticket *before implement* even when its plan is nearly right. This is a routing/convergence bug in the *design* loop, upstream of and **separate from** the verify-gate work. The change-scoped-verify design (Option B: build→typecheck, T-min test-pinning, pre-warm) is unaffected and stands.
-**Not the common darkreader failure.** Historically darkreader reached the **build** stage and failed there (the pre-existing-base-build problem the approved Option B addresses). The design-loop dead-end only fires when the design agent happens to write a plan carrying an *internal tradeoff* the review catches — so it is intermittent (plan-dependent) and rare (unobserved in months of harness use). This doc treats it with care *because* it is rare and surprising, not because it is common.
+**Scope:** one **rare, intermittent** control-loop defect surfaced by the bench (darkreader-7241, SMOKE=2 re-run, styre @ `d7c5a1a`): a `design → review → design` loopback can **dead-end**, blocking a ticket *before implement* even when its plan is nearly right. A routing/convergence bug in the *design* loop, upstream of and **separate from** the verify-gate work. The change-scoped-verify design (Option B: build→typecheck, T-min test-pinning, pre-warm) is unaffected.
+**Not the common darkreader failure.** Historically darkreader reached the **build** stage and failed there (the pre-existing-base-build problem the approved Option B addresses). The design-loop dead-end only fires when the design agent happens to write a plan carrying an *internal tradeoff* the review catches — intermittent (plan-dependent), rare (unobserved in months of harness use). This doc treats it with care *because* it is rare and surprising, and it ships the **minimum** that fixes it.
 **Builds on:**
-- `docs/architecture/control-loop.md` — the per-ticket event loop, CL-POSTCOND (dispatch postconditions), the Loopback Atlas (§8), review-origin loopbacks.
-- `docs/brainstorms/2026-07-05-verification-as-differential-inference-design.md` — the **deliver-with-caveat / attributed-verdict** philosophy, and its named soundness gap: *the OSS headless path has no human before the PR.* That gap is exactly why the v1 "forward-with-caveat" exit was unsound (§4).
-- `CLAUDE.md` invariants: **ground truth over self-report** (the load-bearing one here); **loop-not-halt**; structured agent output through a validated interface.
+- `docs/architecture/control-loop.md` — the per-ticket event loop, CL-POSTCOND, the Loopback Atlas (§8), review-origin loopbacks.
+- `docs/brainstorms/2026-07-05-verification-as-differential-inference-design.md` — the attributed-verdict philosophy and its named gap (the OSS headless path has no human before the PR). The deferred "concern → verify check" north star (§6) is that philosophy applied to a plan dispute.
+- `CLAUDE.md` invariants: **ground truth over self-report**, **loop-not-halt**, structured agent output through a validated interface.
 
 ---
 
 ## 1. What happened (the darkreader trace)
 
-On the SMOKE=2 re-run, darkreader-7241 (`ENG-270`) ended `blocked / loop-exhausted` at **`design:dispatch`**, never reaching implement — with a *nearly* correct plan on disk. The dispatch ledger:
+darkreader-7241 (`ENG-270`) ended `blocked / loop-exhausted` at **`design:dispatch`**, never reaching implement — with a *nearly* correct plan on disk:
 
 ```
 design seq1 clean · design seq2 clean
@@ -24,9 +24,9 @@ escalated: step 'design:dispatch' failed
 design seq5 postcondition-failed   → blocked
 ```
 
-The design agent **correctly diagnosed the bug** (an un-anchored delimiter regex in `indexSitesFixesConfig` mis-parsing Base64 `==` padding). A **consistency review then raised a genuinely valid objection**: the plan's proposed `/^…$/gm` regex uses `m`-flag zero-width anchors that would *not* preserve the byte-identical offsets the plan itself promised. That is a real *internal tradeoff* in the plan (anchor-the-delimiter vs keep-offsets). Loopback to design. On the revision the agent concluded *"No changes needed — the plan is correct and already committed"* and **wrote nothing**. The no-op revision tripped the postcondition, escalated, retried once, blocked.
+The agent **correctly diagnosed the bug** (an un-anchored delimiter regex mis-parsing Base64 `==` padding). A **consistency review raised a genuinely valid objection**: the proposed `/^…$/gm` regex uses `m`-flag zero-width anchors that wouldn't preserve the byte-identical offsets the plan itself promised — a real *internal tradeoff* (anchor-the-delimiter vs keep-offsets). Loopback to design. On the revision the agent wrote **nothing** ("no changes needed — the plan is correct"). The no-op revision tripped the postcondition, escalated, retried, blocked.
 
-Two independent code causes, plus one behavioural dynamic, produce this.
+Two code causes plus one behavioural dynamic.
 
 ---
 
@@ -42,99 +42,96 @@ postcondition: ({ worktreePath, changed }) => {
   if (!hasPlan) throw new Error("design:dispatch postcondition: no plan committed under docs/plans/");
 },
 ```
-The `changed &&` requires **this dispatch** to have committed. A justified no-op revision (a valid plan already on disk) has `changed === false` → throw → `postcondition-failed`.
+The `changed &&` requires **this dispatch** to have committed. A justified no-op revision (a valid plan already on disk) has `changed === false` → throw.
 
-Note the redundancy is *not* what v1 claimed. A **transport-empty** dispatch is caught upstream (`run-dispatch.ts:61` CL-PROFILE, `:108-111` transport-failure — both before `spec.postcondition` at `:125`). But a dispatch that **ran, produced output, and committed nothing** (`commitWorktree` → `changed === false`) is *exactly the no-op-revision case* and does reach the postcondition. `changed` is not redundant "because empties are upstream"; it is the *wrong question*. The right question is **"does a plan for *this ticket* exist?"** — which independently rejects a planless dispatch and (unlike `changed`) also rejects the *opposite* failure the adversarial review found:
-
-> Dropping `changed &&` to "any `*.md` under `docs/plans/`" **fails open**: `readdir…endsWith(".md")` is not ticket-scoped, `redesignLoopback` never deletes the plan file, and most repos already carry committed plans. A design dispatch that writes nothing would then pass on a *stale or other-ticket* plan.
-
-So the postcondition must key on **ticket identity**, not commit-freshness and not mere existence.
+`changed` is the *wrong question*, not a redundant one. A transport-empty dispatch is caught upstream (`run-dispatch.ts:61` CL-PROFILE, `:108-111` transport-failure, before the postcondition call at `:125`). But a dispatch that **ran, produced output, and committed nothing** (`commitWorktree` → `changed === false`) is exactly the no-op-revision case and reaches the postcondition. The right question is **"does a plan for *this ticket* exist?"**
 
 ### 2.2 The re-dispatched design agent never sees the objection — `[cause of the dismissal]`
-`design:dispatch` renders `designVars(ctx.ticket, deps.profile)` (`prompt-vars.ts:75`) — ticket + profile only. The review's findings are persisted (`insertFinding`, `handlers.ts:309-321`) and **survive** the redesign loopback (`review-verdict.ts:91-109` deletes work-units, not `review_finding` rows) but are **never threaded into the design prompt**. So round-2 design runs on the *same inputs as round-1*, blind to the specific objection.
+`design:dispatch` renders `designVars(ctx.ticket, deps.profile)` (`prompt-vars.ts:75`) — ticket + profile only. **`prompts/design.md` has no review-feedback placeholder** (grep `feedback|review|finding` → nothing). Findings are persisted (`insertFinding`, `handlers.ts:309-321`) and survive the redesign loopback (`review-verdict.ts:91-109` deletes work-units, not `review_finding` rows) but are never threaded into the prompt. So round-2 design runs on the *same inputs as round-1*, blind to the objection. (`prompts/implement.md:10` already has a `{{feedback}}` slot — the design prompt lacks the equivalent.)
 
 ### 2.3 Why a fresh, independent agent still refuses — *posture, not ego* `[the behavioural dynamic]`
-Design and review are **independent fresh invocations** — round-2 design is not defending "its own" work, so this is *not* self-grading. The real dynamic is **posture**, and it is explicit in the prompts:
+Design and review are **independent fresh invocations** — round-2 design is not defending "its own" work; this is *not* self-grading. The dynamic is **posture**, explicit in the prompts:
 - `prompts/design.md` — a **builder**: *"write a brainstorm + implementation plan… reason about how this ticket interacts…"*
-- `prompts/design-review.md` — a **cold critic**: *"you did **not** write this plan; judge it cold… do NOT read it as what the designer intended… file a finding for each real problem."*
+- `prompts/design-review.md:5` — a **cold critic**: *"you did **not** write this plan; judge it cold… file a finding for each real problem."*
 
-Same model, opposite posture → the reviewer perceives the offset subtlety the builder didn't. The consequence for §2.2's fix: re-dispatching to the *builder* posture, even with the feedback attached, may **still** under-engage a subtle objection (a builder re-reads its plan and finds it self-consistent). Carrying the feedback (§3.2) raises the odds of convergence; it does not guarantee it — which is why the exit rule (§3.3) must be a sound *residual*, not a hope.
+Same model, opposite posture → the reviewer perceives the offset subtlety the builder didn't. Consequence for §3.2: re-dispatching to the *builder* posture, even with the feedback attached, may **still** under-engage a subtle objection. Carrying the feedback raises the odds of convergence; it does not guarantee it.
 
 ---
 
-## 3. Design
+## 3. Design (shipped: §3.1 + §3.2; exit: unchanged existing behaviour)
 
-Three changes: the first unblocks, the second gives real engagement a chance, the third bounds the loop into an honest terminal.
-
-### 3.1 Postcondition = *this ticket's* plan exists `[unblocks, ticket-scoped]`
-Replace commit-freshness with ticket-identity. The design prompt mandates `linear: {{ident}}` **frontmatter** in the plan (agent-chosen *filenames* are not reliable). So:
+### 3.1 Postcondition = *this ticket's* plan exists `[SHIP — unblocks]`
+Replace commit-freshness with ticket-identity. The design prompt mandates `linear: {{ident}}` **frontmatter** (agent-chosen *filenames* aren't reliable):
 ```ts
 const hasPlan = existsSync(plansDir) && readdirSync(plansDir)
   .filter((f) => f.endsWith(".md"))
   .some((f) => planFrontmatterLinear(join(plansDir, f)) === ctx.ticket.ident);
 ```
-A no-op revision over *this ticket's* valid plan passes and routes forward; a planless dispatch still fails; a stale/other-ticket plan no longer counts (closes the fail-open hole). Transport/empty failures remain caught upstream. Sibling postconditions (implement's diff gate) are untouched — "a durable plan artifact for this ticket exists" is the right invariant only for design.
+A no-op revision over *this ticket's* valid plan passes; a planless dispatch still fails; a stale/other-ticket plan no longer counts. Transport/empty failures remain caught upstream. Sibling postconditions (implement's diff gate) untouched.
 
-### 3.2 Carry the review's exact findings into the re-dispatch — with a *disposition* demand `[real engagement]`
-When `design:dispatch` is entered as a review-origin loopback (detect via the event log, exactly as `isUnitLoopback`, `handlers.ts:114-119`), inject the last round's *blocking* findings (verbatim `category`/`location`/`rationale`) into `designVars` as a `review_feedback` block. **Direct precedent, no new machinery:** `implement:dispatch` already does this — `implementVars(…, implementFeedback(ctx.db, unit.id))` with a `feedback=""` param (`prompt-vars.ts:95`). The design template renders the block as: *"a prior review raised these. For **each**, either revise the plan to address it, **or** state explicitly why it does not apply / is an accepted trade-off. A bare 'no changes needed' is not a disposition."* The disposition demand pushes the builder to *engage* each point (countering §2.3's posture gap) and surfaces genuine tradeoffs as explicit decisions rather than silent horn-picking. First (non-loopback) dispatches render an empty block — unchanged behaviour.
+**Honest limits (adversarial review):** frontmatter is a *string tag*, not a plan check — a correctly-tagged plan with a gutted body, or one written for a different problem, still passes; and a **stale same-ticket** plan passes too, because `redesignLoopback` never deletes the `.md`. None of these silently ship: a bad/stale plan that passes the postcondition goes to `design:review`, which re-flags it — so the *review*, not the postcondition, is the quality gate. The postcondition's only job is "a plan artifact for this ticket exists," and that is all §3.1 claims. `planFrontmatterLinear` is a **net-new** tiny reader (no YAML/frontmatter dep in the repo; treat a missing `linear:` as "not this ticket's plan").
 
-### 3.3 Bounded exit = honest-block, via the existing escalate path `[convergence + honest terminal]`
-The exit machinery already exists and already *intends* this: `review-verdict.ts:133-139` — on a `design:review` loopback whose blocking findings reproduce the previous loopback's signature (`isRepeatedReviewLoopback`), it calls `escalate("no progress")` (sets `waiting`, emits `human_resume`, logs `escalated`). Two fixes make it *reachable* and *sound*:
+### 3.2 Carry the review's findings into the re-dispatch — with a *disposition* demand `[SHIP — real engagement]`
+When `design:dispatch` is entered as a review-origin loopback (detect via the event log — the design analog of `isUnitLoopback` `handlers.ts:113-120`, matching `loop === "design"` loopback events), inject the last round's *blocking* findings (verbatim `category`/`location`/`rationale`) into `designVars` as a `{{review_feedback}}` block. **Direct precedent:** `implement:dispatch` already does this — `implementVars(…, implementFeedback(ctx.db, unit.id))`, `feedback=""` param at `prompt-vars.ts:95`, `implementFeedback` at `feedback.ts:7`. (One wrinkle: `implementFeedback` keys on `branch_head_sha`; the design analog reads the *previous* `design:review` dispatch's findings — the re-dispatch mints a new dispatch — feasible, findings persist and are queryable.) The template renders it as: *"a prior review raised these. For **each**, revise the plan to address it, **or** state explicitly why it does not apply / is an accepted trade-off — a bare 'no changes needed' is not a disposition."*
 
-1. **Reachable:** today darkreader never reaches this — it dies at the §2.1 postcondition on the first no-op revision. §3.1 fixes that: the revision passes → `design:review` runs again → *this* logic decides.
-2. **Oscillation-robust:** `isRepeatedReviewLoopback` compares only the *immediately previous* loopback (`prev = prior[last]`), so an A/B/A/B pattern (same defect flagged at alternating lines, or relocated) never trips "repeated" and loops until budget exhausts — a *more expensive* block. Fix: match the signature against **any** prior review-loopback for the ticket (or cap the count of design-review loopbacks). Convergence must not rest on immediate-predecessor equality.
+**Honest limit (adversarial review):** the demand is not a guarantee. A builder can emit a plausible "accepted trade-off" that reads as engagement but isn't; and if it writes that rationale *into the plan*, the cold reviewer may downgrade the finding below `blocks_ship` → the loop goes clean and the plan forwards on the strength of a rationalization. §3.2 raises the odds of *genuine* convergence; it does not make the review infallible. That residual is the §6 problem, not something §3.2 closes.
 
-**The terminal is honest-block, deliberately not forward-with-caveat.** v1 routed the surviving finding *forward* to implement with a PR caveat. The adversarial review killed this, correctly:
-- it **ships a plan with a reviewer-confirmed flaw** — darkreader's regex was genuinely wrong; forwarding it implements a regex that corrupts offsets, and if no test exercises that invariant, verify goes green and a **latent bug merges**. That is **self-report beating ground truth** (the agent's "I judged it doesn't apply" winning by exhaustion) — a core-invariant violation.
-- in the **headless** target there is no human before the PR *and* nobody reads PR bodies (the bench scores on tests), so a caveat carries **zero signal** — forward-with-caveat reduces to "ship the flaw, hope a test catches it."
+### 3.3 Exit = styre's *existing* `escalate`-on-repeat `[HOLD — no new mechanism]`
+The exit already exists and already *is* honest-block: `review-verdict.ts:131-142` — on a `design:review` loopback whose blocking findings reproduce the previous loopback's signature (`isRepeatedReviewLoopback`, `:33-39`), it calls `escalate("no progress")` (`:41-47`: `waiting` + `human_resume` + `escalated`). **Code-confirmed clean terminal:** `driveToTerminal` catches the `human_resume` signal in the same tick (`run-ticket.ts:66-67`) and returns `blocked` — so one-shot `styre run` **ends blocked, no hang.** §3.1 makes this reachable (today darkreader dies at the postcondition before the second review runs); nothing else changes.
 
-So on a genuinely-unresolved finding (agent engaged once via §3.2, same objection survives, oscillation-robust check fires) styre **escalates / honest-blocks**: the ticket ends "unresolved plan-review finding" — a *truthful* terminal (no fix shipped) rather than a false green. In OSS `styre run` this is the run's blocked terminal (the bench scores it unresolved — honest); the commercial plane surfaces the same escalation through its needs-you inbox. This is the *existing* escalate path made reachable + robust — **no new plumbing** (and in particular, no PR-caveat surfacing, which would have crossed the `signal.ts` ⇄ `ground-truth-signal.ts` seam v1 wrongly called "reuse").
+**Two v2 exit ideas were HELD after review:**
+- **The oscillation "match any prior signature" change is NOT shipped.** It would kill legitimate multi-round convergence (fix finding A → review raises B → fixing B reintroduces A → "any prior A" blocks a loop that round-4 would have converged), and it *still* misses a defect relocated to a new line (a new signature). A loopback-**count cap** is the safer variant if one is ever wanted; the current immediate-predecessor check ships unchanged, with loop-budget exhaustion as the backstop for a true oscillation.
+- **v2's "forward-with-caveat" is NOT the exit** (it was killed in review): it ships a reviewer-confirmed flaw, and in the headless target nobody reads the PR body, so the caveat carries zero signal.
+
+**The honest accounting (this is the crux).** A plan-quality disagreement between the builder and the reviewer has **no ground truth at the design stage** — both are agent verdicts. The two available exits each have a failure class:
+- **Block** (what ships) never ships a reviewer-flagged flaw, but it is wrong for a reviewer **false positive** (§4 row 1), and it forgoes the **downstream self-healing** — `implement` writes real code that can fix a prose-level slip, `verify` runs real tests — that is *why darkreader historically reached build.*
+- **Forward** never wrongly blocks, but ships a **latent bug** wherever `verify` doesn't cover the concern.
+
+Neither is *sound*; the choice is a **bias**, not a proof. This doc keeps styre's existing **block** terminal because (a) it needs no new machinery, (b) it's a confirmed clean terminal, and (c) for a *rare, surprising* failure the conservative bias — never ship a flagged flaw — is defensible. It explicitly does **not** claim this is "ground truth over self-report": the block fires on the **reviewer agent's** verdict, a pragmatic bound. The *sound* resolution — synthesize a `verify` check from the surviving finding so **ground truth** adjudicates — is the deferred north star (§6).
 
 ---
 
-## 4. Why honest-block is the right residual (the refusal-reasons argument)
+## 4. Why the exit can't be "solved" here (the refusal-reasons argument)
 
-"Refuses feedback N times" is not one phenomenon; it is several that demand *opposite* responses, and styre cannot tell them apart from the refusal alone:
+"Refuses feedback N times" is several failures that demand *opposite* responses, indistinguishable from the refusal alone:
 
 | The agent is… | e.g. | correct response |
 |---|---|---|
-| **right** — review is a false positive | reviewer misread the code | forward (blocking would be the bug) |
-| **right** — concern is out of scope | valid-but-tangential | forward |
-| **wrong, can't act** — doesn't grasp a subtle point | darkreader's `m`-flag/offset subtlety | needs a *different modality* (an example, a **test**) — not the same words again |
-| **wrong** — talking past each other | ambiguous/location-less feedback | needs sharper feedback |
-| **neither** — a genuine internal tradeoff | anchor-regex vs keep-offsets | make the tradeoff **explicit and decided** |
+| **right** — review is a false positive | reviewer misread the code | forward |
+| **right** — out of scope | valid-but-tangential | forward |
+| **wrong, can't act** — a subtle point | darkreader's `m`-flag/offset | needs a *test*, not the same words |
+| **wrong** — talking past each other | ambiguous feedback | needs sharper feedback |
+| **neither** — a genuine tradeoff | anchor-regex vs keep-offsets | make the tradeoff explicit + decided |
 
-A fixed counter gets ~half of these wrong (forward the false-positive, block the real bug). The only thing that *can* adjudicate right-vs-wrong is **ground truth** — turn "offsets must stay byte-identical" into a check implement must pass. That is the sound answer, and it is the deferred north star (§6). It is **not built here** because it is the hard, general "concern → executable check" capability, and it belongs with the change-scoped-verify work.
-
-Absent ground-truth adjudication, the residual choices are (a) trust the agent's word (forward — self-report wins, §3.3), (b) build an independent arbiter (a whole grading subsystem of its own — rejected as over-built for a rare case), or (c) **honest-block** — refuse to ship what styre could not establish. For a rare, worrying edge case, (c) is the disciplined choice: it never ships a latent bug, it needs no new subsystem, and — because §3.1/§3.2 mean a block only happens *after* a real engagement fails — it is honest, not the old spurious dead-end.
+A fixed rule gets ~half wrong (forward the false-positive, block the real bug). The only thing that adjudicates right-vs-wrong is **ground truth** — turn "offsets must stay byte-identical" into a check `implement` must pass. That is the deferred north star (§6); it is the hard, general "concern → executable check" capability and belongs with the change-scoped-verify work. Until it exists, styre cannot referee this dispute — so it holds its conservative bound (block) and ships the two fixes that *are* sound (§3.1, §3.2).
 
 ---
 
 ## 5. What this deliberately does NOT do
-- **Not** adjudicating whether the agent's rebuttal is correct (no arbiter, no grading). styre guarantees the objection was *shown* once and *not shipped* if unresolved.
+- **Not** adjudicating the agent's rebuttal (no arbiter, no grading — rejected as an over-built subsystem for a rare case).
 - **Not** building the "concern → check" synthesis (§6, deferred).
-- **Not** touching verify gates, plan/review quality bars (`computeBlocksShip` unchanged), or `implement`-side review routing.
-- **Not** loosening what design must *produce* — a real, ticket-scoped plan is still required; only "must re-commit every turn" is removed.
+- **Not** changing the exit machinery, verify gates, plan/review quality bars (`computeBlocksShip` unchanged), or `implement`-side review routing.
+- **Not** loosening what design must *produce* — a real, ticket-scoped plan is still required.
 
-## 6. Open questions / risks / deferred
-1. **Deferred north star:** synthesize a ground-truth verify check from a surviving plausibility finding, so ground truth (not the agent, not a counter) adjudicates. The principled fix for the whole §4 problem; the hard, general capability; belongs with change-scoped-verify.
-2. **`review_feedback` wiring (§3.2):** `designVars` must learn the loopback origin (event log carries the `loop`/`signature`) and read the ticket's last blocking findings — both available; mirrors `implementFeedback`.
-3. **Frontmatter parse (§3.1):** needs a tiny `linear:`-frontmatter reader over `docs/plans/*.md`. Confirm plans reliably carry it (the prompt mandates it; older/hand-written plans may not — treat a missing `linear:` as "not this ticket's plan").
-4. **Signature granularity:** `category:location` is coarse; "same finding, relocated to a new line" reads as a new signature. §3.3's "match any prior signature / cap count" bounds it; a semantic finding-identity is out of scope.
-5. **Escalate-in-headless:** confirm `escalate()` (`waiting` + `human_resume`) is a clean *terminal* for one-shot `styre run` (run ends, ticket blocked), not a hang — the differential doc's "no human before the PR" gap means it must terminate, not wait.
+## 6. Open questions / deferred
+1. **★ Deferred north star:** synthesize a ground-truth `verify` check from a surviving plan-review finding, so ground truth (not the agent, not a counter, not a bias) adjudicates. The principled fix for the whole §4 problem; the hard, general capability; belongs with change-scoped-verify.
+2. **`{{review_feedback}}` wiring (§3.2):** `designVars` learns the loopback origin (event log carries `loop`/`signature`) and reads the ticket's last blocking findings — mirrors `implementFeedback`.
+3. **Frontmatter reader (§3.1):** net-new; confirm plans reliably carry `linear:` (the prompt mandates it; hand-written/legacy plans may not).
+4. **Whether to add a loopback-count cap** (§3.3) later, if loop-budget exhaustion on a true oscillation proves too expensive in practice. Not shipped now.
 
-## 7. Invariants held
-- **Ground truth over self-report:** the postcondition requires a real ticket plan; the exit refuses to *ship* on the agent's self-grade (honest-block), rather than letting "I judged it doesn't apply" win by exhaustion.
-- **Loop-not-halt:** the common path now *converges* (the agent usually addresses feedback it can see); halt is reserved for the genuine, rare, unresolved disagreement — and it is a truthful terminal, not the old spurious postcondition dead-end.
-- **Structured output:** review findings already flow through `ReviewOutputSchema`; §3.2 reuses those rows, §3.3 reuses `findingsSignature`/`isRepeatedReviewLoopback`.
+## 7. Invariants
+- **Ground truth over self-report — honestly scoped:** §3.1 requires a real ticket plan; the shipped exit does **not** claim to be ground truth (it is the reviewer agent's verdict — a bias, named as such). The invariant is *served* only by the deferred §6 check-synthesis; this doc does not pretend otherwise.
+- **Loop-not-halt:** the common path now *converges* (the agent usually addresses feedback it can see, §3.2); halt is the existing terminal for the rare genuine standoff — and no longer the spurious postcondition dead-end (§3.1).
+- **Structured output:** review findings already flow through `ReviewOutputSchema`; §3.2 reuses those rows, the exit reuses `findingsSignature`/`isRepeatedReviewLoopback`.
 
 ## 8. Evidence appendix (file:line)
-- Postcondition: `src/dispatch/handlers.ts:195-203`; upstream failure guards `src/dispatch/run-dispatch.ts:61,108-111` (before `:125` postcondition call); `commitWorktree`→`changed` at `run-dispatch.ts:114`.
-- Feedback plumbing + precedent: `designVars` `prompt-vars.ts:75` (no feedback param); `implementVars(…, implementFeedback(...))` + `feedback=""` `prompt-vars.ts:95`; loopback-origin detection `handlers.ts:114-119` (`isUnitLoopback`); findings survive redesign `review-verdict.ts:91-109`; findings persisted `handlers.ts:309-321`.
-- Exit machinery: `src/daemon/review-verdict.ts:23-39` (`findingsSignature`, `isRepeatedReviewLoopback`), `:133-139` (design:review verdict → `escalate`/`redesignLoopback`); `escalate` `:40-46`.
-- Posture: `prompts/design.md` (builder), `prompts/design-review.md:5` ("judge it cold").
+- Postcondition: `handlers.ts:195-203`; upstream guards `run-dispatch.ts:61,108-111` (before `:125`); `commitWorktree`→`changed` `run-dispatch.ts:114`.
+- Feedback + precedent: `designVars` `prompt-vars.ts:75` (no feedback); `prompts/design.md` (no review slot) vs `prompts/implement.md:10` (`{{feedback}}`); `implementVars(…, feedback="")` `prompt-vars.ts:91-96`, called `handlers.ts:353`; `implementFeedback` `feedback.ts:7`; loopback detection `handlers.ts:113-120` (`isUnitLoopback` matches a `verify:wu{seq}:` route — design analog matches `loop==="design"`); findings survive redesign `review-verdict.ts:91-109`; persisted `handlers.ts:309-321`.
+- Exit: `review-verdict.ts:23-39` (`findingsSignature`, `isRepeatedReviewLoopback`), `:131-142` (design:review verdict), `:41-47` (`escalate`); headless terminal `run-ticket.ts:66-67` (catches `human_resume` → `blocked`).
+- Posture: `prompts/design.md` (builder); `prompts/design-review.md:5` ("judge it cold").
 - Bench evidence: `~/bench-rerun2/styre-bench-run-darkreader__darkreader-7241-1783401799740-238e3cea/` (`run.ndjson` ledger; `transcript.jsonl` seq4/seq5 "no changes needed").
 
 ## 9. Changelog
-- *2026-07-07 (v2)* — after independent two-lens review. **Exit rule replaced:** v1's forward-with-caveat was unsound (ships a reviewer-confirmed flaw; self-report beats ground truth; caveat is unread in the headless target) → now **honest-block via the existing `escalate` path**, made reachable (§3.1) + oscillation-robust (§3.3). **§3.1 hardened:** postcondition keys on the ticket's `linear:` frontmatter (v1's "any `.md`" failed open on stale/other-ticket plans — the review's most important find). **§2.1 rationale corrected** (`changed` is the wrong question, not "redundant because empties are upstream"; real throw sites `run-dispatch.ts:61,108-111`). **§2.3 added** (posture, not ego — design=builder vs review=critic, from the prompts). **§3.2 strengthened** with the disposition demand + the `implementFeedback` precedent. **§4 added** (the refusal-reasons argument for why honest-block, with ground-truth-check as the deferred north star). Reframed as a rare, intermittent edge case (darkreader's common blocker is the build stage — approved Option B).
-- *2026-07-07 (v1)* — initial design after the SMOKE=2 darkreader re-run isolated the `design→review→design` dead-end (postcondition requires a fresh commit; re-dispatch carries no feedback; forward-with-caveat exit).
+- *2026-07-07 (v3, settled)* — after a second independent two-lens review. **Exit softened to *no new mechanism*:** keep styre's existing `escalate`-on-repeat (code-confirmed a clean headless terminal, `run-ticket.ts:66-67`); the v2 oscillation "match-any-prior" change **held** (kills legitimate 2-step convergence; a count-cap is the safer future option); **dropped the "ground truth over self-report" claim** for the block — it is the reviewer agent's verdict, a named *bias*, with the sound fix (concern→check) deferred (§6). Added honest limits to §3.1 (frontmatter is a tag; stale/gutted plans are caught by re-review, not the postcondition) and §3.2 (disposition demand can be rationalized → false-clean). Shipped scope narrowed to **§3.1 + §3.2**. Fixed line-refs (`escalate` `:41-47`; verdict block `:131-142`; `isUnitLoopback` matches a route prefix). §6.5 resolved (escalate terminates, does not hang).
+- *2026-07-07 (v2)* — replaced v1 forward-with-caveat (unsound: ships a reviewer-confirmed flaw; caveat unread in headless) with honest-block; hardened §3.1 to the `linear:` frontmatter; added the posture analysis (§2.3) and the refusal-reasons argument (§4).
+- *2026-07-07 (v1)* — initial design after the SMOKE=2 darkreader re-run isolated the dead-end (postcondition requires a fresh commit; re-dispatch carries no feedback).
