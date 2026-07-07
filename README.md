@@ -122,9 +122,12 @@ Example — use Codex everywhere by writing the full block once in the global fi
     { "agent": { "provider": "codex", "command": "codex",
                  "models": { "deep": "…", "standard": "…", "cheap": "…" } } }
 
-Explicit `--profile` / `--config` override discovery and are hermetic (host config is ignored),
-for CI/fleet callers. A custom `styre setup --slug <name>` stores under that slug — pass
-`--slug <name>` (or `--profile`) to `styre run` for such a project.
+Each explicit flag overrides discovery **for its own artifact only**: `--profile <path>` pins the
+profile, `--config <path>` pins the runtime config (ignoring host `~/.config`). They are
+independent — passing only `--profile` still discovers the runtime config from host `~/.config`, so
+a CI/fleet caller that wants full hermeticity must pass **both** `--profile` and `--config`. A custom
+`styre setup --slug <name>` stores under that slug — pass `--slug <name>` (or `--profile`) to
+`styre run` for such a project.
 
 ---
 
