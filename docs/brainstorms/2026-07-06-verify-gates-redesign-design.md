@@ -21,6 +21,16 @@ The two gates fix **two different darkreader problems** and are independently va
 
 ---
 
+## 0b. External evidence — competitor scan (2026-07-07)
+
+A wide scan of open-source SWE agents and CI test-impact tools (sources in the 2026-07-07 changelog entry) corroborates this design's direction:
+- **The winning agent pattern is a reproduction test (fail→pass) + a base-passing regression subset — never the whole hidden suite** (Agentless, Moatless, SpecRover). That is exactly T-min's shape (the agent's test must go *red* on the base) sitting on the "over-verify, never under-verify" floor.
+- **"Don't gate on packaging builds" matches the field:** a build failure is a hard block *"by convention, not construction"* — agents lean on prompt discipline; almost none gate structurally on a packaging build. Option B's typecheck-not-packaging is the principled version.
+- **Baseline-diffing is real but lives in the CI platform** (GitLab new-vs-fixed, Datadog/Trunk flaky quarantine) and needs flakiness handling (re-run N, quarantine) to be sound — reinforcing the deferral of the heavyweight CL-BASELINE differential until method-level TIA + flakiness are solved (§9.1/§9.3 of the differential doc).
+- **Ground truth over self-report** is the field's north star (Devin/Codex push the verdict to real CI) *because* a model that writes and grades its own test is contaminated — the honest ceiling on T-min (it raises the floor, not the ceiling).
+
+---
+
 ## 1. The two deep-dives (what the code actually does)
 
 ### 1.1 Detector / build gate
@@ -116,4 +126,5 @@ Not deep-dived this session (operator: "pre-warming should be simpler"). Sketch 
 ---
 
 ## 7. Changelog
+- *2026-07-07 (v2)* — added §0b external-evidence note from a wide open-source competitor scan (SWE-agent, OpenHands, Aider, Agentless, Moatless, SpecRover; jest `--findRelatedTests`, pytest-testmon, Ekstazi, Google TAP/Meta predictive selection; GitLab/Datadog/Trunk baseline+flaky handling). Corroborates typecheck-not-packaging, T-min's repro+base-passing shape, and the deferral of the heavyweight CL-BASELINE differential (baseline-diffing is real but CI-layer and needs flakiness handling). No design change — evidence only. (Scan run during the 2026-07-07 design-loop-convergence brainstorm; the operator chose to *align* today's SWE-bench re-run findings with this existing design rather than supersede it.)
 - *2026-07-06 (v1)* — Option B design after two code-grounded deep-dives (detector gate, test gate). Operator approved detector = A+B (typecheck-not-packaging; opaque build advisory; cargo check; gradle compile-only) and test = T-min (junk-catcher: test-only-on-base must go red, over a legible base). Pre-warm sketched for a separate lighter spec. CL-BASELINE (Option A) and the full fix-pinning gate (T-full) deferred.

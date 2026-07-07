@@ -75,6 +75,7 @@ export function extractVars(
 export function designVars(
   ticket: { ident: string; title: string | null; description: string | null },
   profile: Profile,
+  reviewFeedback = "",
 ): Record<string, string> {
   return {
     ident: ticket.ident,
@@ -83,6 +84,7 @@ export function designVars(
     slug: profile.slug,
     stack: "",
     detected_stacks: detectedStacksVar(profile),
+    review_feedback: reviewFeedback,
     ...profile.promptVars,
     ...runtimeVars(profile),
   };

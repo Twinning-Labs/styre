@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { branchNameFor } from "../agent/branch.ts";
@@ -39,8 +39,10 @@ import {
   realRunnerCommands,
   scopedRunnersForFiles,
 } from "./components.ts";
+import { designFeedback } from "./design-feedback.ts";
 import { ExtractOutputSchema, validateCdotImpact, validateExtraction } from "./extract-schema.ts";
 import { implementFeedback } from "./feedback.ts";
+import { hasTicketPlan } from "./plan-frontmatter.ts";
 import type { Profile } from "./profile.ts";
 import {
   DESIGN_COMPLEXITY_GRADE_TEMPLATE,
@@ -191,13 +193,12 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     runAgentDispatch(ctx, depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS), {
       handlerKey: "design:dispatch",
       template: DESIGN_TEMPLATE,
-      vars: designVars(ctx.ticket, deps.profile),
-      postcondition: ({ worktreePath, changed }) => {
-        const plansDir = join(worktreePath, "docs", "plans");
-        const hasPlan =
-          changed && existsSync(plansDir) && readdirSync(plansDir).some((f) => f.endsWith(".md"));
-        if (!hasPlan) {
-          throw new Error("design:dispatch postcondition: no plan committed under docs/plans/");
+      vars: designVars(ctx.ticket, deps.profile, designFeedback(ctx.db, ctx.ticket.id)),
+      postcondition: ({ worktreePath }) => {
+        if (!hasTicketPlan(join(worktreePath, "docs", "plans"), ctx.ticket.ident)) {
+          throw new Error(
+            "design:dispatch postcondition: no plan for this ticket under docs/plans/",
+          );
         }
       },
     }),

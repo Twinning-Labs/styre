@@ -179,3 +179,16 @@ test("detected_stacks falls back to a no-detect note when the profile has no com
   expect(v).toContain("no stacks auto-detected");
   expect(stackSummary([])).toBe(""); // the pure helper still returns "" — the fallback is var-level
 });
+
+test("design template has a review_feedback slot", () => {
+  expect(placeholders(DESIGN_TEMPLATE)).toContain("review_feedback");
+});
+
+test("designVars fills review_feedback (empty default renders cleanly)", () => {
+  expect(renderPrompt(DESIGN_TEMPLATE, designVars(ticket, profile)).ok).toBe(true); // "" fills the slot
+  const r = renderPrompt(
+    DESIGN_TEMPLATE,
+    designVars(ticket, profile, "PRIOR REVIEW: fix the regex"),
+  );
+  expect(r.ok && r.prompt.includes("PRIOR REVIEW: fix the regex")).toBe(true);
+});
