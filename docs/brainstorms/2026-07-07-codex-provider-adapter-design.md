@@ -43,18 +43,20 @@ without them. Claude remains the bundled binary default; Codex is an opt-in pres
   `buildCodexArgs`, a JSONL usage/final-message parser, and a `classifyCodexFailure` that is the
   *only* place that knows Codex's error markers. The core imports it only through the adapter map.
 
-- **DEC-CX-2 — `codex exec`, non-interactive, sandbox-enforced.** The adapter spawns
-  `codex exec` with:
-  - the prompt on **stdin** (`codex exec -` — reuses the existing stdin path; no argv-length limit,
-    no shell-quoting surface);
-  - `--model <id>` (tier→model from config, DEC-AG-3);
-  - `--cd <cwd>` (explicit working dir, not just the spawn cwd);
-  - `--sandbox <mode>` translated from the tool allowlist (DEC-CX-3);
-  - `--ask-for-approval never` (a headless dispatch must NEVER block on an approval prompt);
-  - `--json` (JSONL event stream) **and** `--output-last-message <tmpfile>` (the final assistant
-    message, written verbatim — the source for `stdout`, DEC-CX-4);
-  - `--skip-git-repo-check` (defensive; the worktree is a repo, but in-place / edge setups may not
-    look like one to Codex).
+- **DEC-CX-2 — `codex exec`, non-interactive, sandbox-enforced.** Argv shape is ground-truth from a
+  real `codex` self-review (2026-07-07): **`--ask-for-approval` and `--search` are GLOBAL flags that
+  MUST precede the `exec` subcommand** — the installed CLI rejects `codex exec --ask-for-approval …`.
+  So the adapter emits:
+  - **global (before `exec`):** `--ask-for-approval never` (a headless dispatch must NEVER block on
+    approval); `--search` **only** when the allowlist carries WebSearch/WebFetch (enables the native
+    web-search tool — `network_access` alone does not);
+  - **subcommand + flags:** `exec`, then `--json` (JSONL usage stream) + `-o <tmpfile>`
+    (`--output-last-message`, the final message — source for `stdout`, DEC-CX-4); `--model <id>`
+    (tier→model, DEC-AG-3); `--cd <cwd>`; `--sandbox <mode>` (DEC-CX-3); `--skip-git-repo-check`;
+    **`--ephemeral`** (no Codex session persistence — Styre's SQLite journal + transcript dump are the
+    durable record; avoids `.codex` churn); **`--ignore-user-config` + `--ignore-rules`** (Styre owns
+    the run contract — local Codex config/execpolicy must not alter runner behavior; target-repo
+    `AGENTS.md` handling stays a separate deliberate choice); trailing `-` (prompt on stdin).
   `danger-full-access` and the deprecated `--full-auto` are never used.
 
 - **DEC-CX-3 — Translate `allowedTools` → sandbox in the adapter; the core interface is unchanged
@@ -64,13 +66,15 @@ without them. Claude remains the bundled binary default; Codex is an opt-in pres
   - allowlist contains any of `Write`, `Edit`, `Bash`/`Bash(…)` → `--sandbox workspace-write`
     (write surface = the worktree `cwd`).
 
-  **Network parity (from independent review).** Codex's `workspace-write` sandbox disables network
-  by **default**, but `design:dispatch`'s allowlist carries `WebSearch`/`WebFetch`
-  (`tool-allowlists.ts:10`) — a design agent is meant to browse. So the translation adds a second
-  axis: when the allowlist contains `WebSearch` or `WebFetch`, the adapter also passes
-  `-c sandbox_workspace_write.network_access=true` to restore network; otherwise network stays off
-  (implement/docs get no web, matching Claude, where those allowlists omit the web tools). This
-  keeps capability parity for the one dispatch that needs the web, instead of silently losing it.
+  **Network parity (from independent review + Codex self-review).** Codex's `workspace-write` sandbox
+  disables network by **default**, but `design:dispatch`'s allowlist carries `WebSearch`/`WebFetch`
+  (`tool-allowlists.ts:10`) — a design agent is meant to browse. Restoring web takes **two** flags,
+  not one: the global `--search` enables the native web-search tool, **and**
+  `-c sandbox_workspace_write.network_access=true` restores raw network (the config override alone
+  does not turn on the search tool). Both are emitted only when the allowlist contains
+  `WebSearch`/`WebFetch`; otherwise network + search stay off (implement/docs get no web, matching
+  Claude, whose allowlists omit the web tools). This keeps capability parity for the one dispatch
+  that needs the web, instead of silently losing it.
 
   **Accepted fidelity loss (explicit, operator-signed-off 2026-07-07):** Claude scopes Bash to
   specific runners (`Bash(pytest:*)`) and *drops Bash entirely* when a unit resolves no runners
@@ -286,3 +290,13 @@ code**. Two corrections were folded back in:
 Plus low-severity fixes: data-flow diagram stream label (JSONL is on stdout, not stderr), a retrofit
 fallback for an absent `envelope.result`, and telemetry-null-cost confirmation. No un-inventoried
 Claude assumptions were found in `src/`.
+
+**Codex self-review (2026-07-07).** The real `codex` CLI reviewed both docs and caught one **blocking
+command-primitive bug**: `--ask-for-approval` (and `--search`) are **global** flags — `codex exec
+--ask-for-approval never …` is rejected; the working form is `codex --ask-for-approval never exec …`.
+Folded into DEC-CX-2 (argv is now global-flags-before-`exec`). Also adopted as improvements:
+`--search` is required (not just `network_access`) to enable the web-search tool (DEC-CX-3);
+`--ephemeral` + `--ignore-user-config` + `--ignore-rules` so Styre owns the run contract; temp-**dir**
+cleanup (not just the message file); preserve the real `exitCode` on a clean-exit-but-empty dispatch;
+and a tightened quota regex so "insufficient permissions" is not misclassified as out-of-credits. All
+are localized to `codex.ts` and reflected in the plan's Task 3 tests.

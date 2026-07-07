@@ -286,7 +286,7 @@ test("sandboxForTools maps read-only vs write and web access", () => {
   });
 });
 
-test("buildCodexArgs assembles exec, sandbox, model, cd, non-interactive flags", () => {
+test("buildCodexArgs puts global flags before exec, adds --search + ownership flags", () => {
   const args = buildCodexArgs({
     model: "gpt-x",
     allowedTools: ["Read", "Write", "WebFetch"],
@@ -294,21 +294,30 @@ test("buildCodexArgs assembles exec, sandbox, model, cd, non-interactive flags",
     outputPath: "/tmp/out.txt",
   });
   const s = args.join(" ");
-  expect(args[0]).toBe("exec");
+  // GLOBAL flags must precede the subcommand (installed CLI rejects `codex exec --ask-for-approval`)
+  expect(args[0]).toBe("--ask-for-approval");
+  expect(args[1]).toBe("never");
+  expect(args.indexOf("exec")).toBeGreaterThan(args.indexOf("never"));
+  expect(args.indexOf("--search")).toBeLessThan(args.indexOf("exec")); // --search is global too
   expect(s).toContain("--model gpt-x");
   expect(s).toContain("--cd /wt");
   expect(s).toContain("--sandbox workspace-write");
-  expect(s).toContain("--ask-for-approval never");
   expect(s).toContain("--skip-git-repo-check");
-  expect(s).toContain("--output-last-message /tmp/out.txt");
+  expect(s).toContain("--ephemeral");
+  expect(s).toContain("--ignore-user-config");
+  expect(s).toContain("--ignore-rules");
+  expect(s).toContain("-o /tmp/out.txt");
   expect(s).toContain("-c sandbox_workspace_write.network_access=true");
   expect(args[args.length - 1]).toBe("-"); // prompt on stdin
 });
 
-test("buildCodexArgs omits the network override for a read-only dispatch", () => {
+test("buildCodexArgs omits --search + network override for a read-only dispatch", () => {
   const args = buildCodexArgs({ model: "m", allowedTools: ["Read"], cwd: "/wt", outputPath: "/o" });
-  expect(args.join(" ")).toContain("--sandbox read-only");
-  expect(args.join(" ")).not.toContain("network_access");
+  const s = args.join(" ");
+  expect(s).toContain("--sandbox read-only");
+  expect(s).not.toContain("--search");
+  expect(s).not.toContain("network_access");
+  expect(args.indexOf("exec")).toBeGreaterThan(args.indexOf("--ask-for-approval"));
 });
 
 test("parseCodexUsage reads turn.completed usage from the JSONL stream", () => {
@@ -330,7 +339,7 @@ test("run reads the final message from --output-last-message and parses usage", 
     "codex-ok",
     [
       "out=",
-      'while [ $# -gt 0 ]; do if [ "$1" = "--output-last-message" ]; then out="$2"; fi; shift; done',
+      'while [ $# -gt 0 ]; do if [ "$1" = "-o" ]; then out="$2"; fi; shift; done',
       "printf '%s' 'done\n```styre-sidecar\n{\"n\":5}\n```' > \"$out\"",
       `echo '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":3,"cached_input_tokens":7}}'`,
     ].join("\n"),
@@ -371,6 +380,10 @@ test("quota/billing → out-of-credits", () => {
   expect(classifyCodexFailure("insufficient_quota / billing", "").cause).toBe("out-of-credits");
 });
 
+test("insufficient permissions is NOT credits (transient)", () => {
+  expect(classifyCodexFailure("Error: insufficient permissions", "").cause).toBe("transient");
+});
+
 test("anything else → transient", () => {
   expect(classifyCodexFailure("connection reset", "").cause).toBe("transient");
   expect(classifyCodexFailure("", "").resetAt).toBeNull();
@@ -406,8 +419,13 @@ export function sandboxForTools(allowedTools: string[]): {
   return { mode: hasWrite ? "workspace-write" : "read-only", network };
 }
 
-/** The `codex exec` argv (pure). Flag names are CLI-version-specific — confirmed by the manual
- *  smoke; the core never depends on these. */
+/** The `codex` argv (pure). Ground truth from a real `codex` self-review (2026-07-07): `--ask-for-
+ *  approval` and `--search` are GLOBAL flags and MUST precede the `exec` subcommand — the installed
+ *  CLI rejects `codex exec --ask-for-approval never …`. Styre owns the run contract, so we also
+ *  pass `--ephemeral` (no session persistence — Styre's journal is the durable record, avoids
+ *  `.codex` churn) and `--ignore-user-config`/`--ignore-rules` (local Codex config/execpolicy must
+ *  not alter runner behavior; target-repo AGENTS.md handling is a separate deliberate choice).
+ *  Flag names are CLI-version-specific — pinned by the manual smoke; the core never depends on them. */
 export function buildCodexArgs(input: {
   model: string;
   allowedTools: string[];
@@ -415,7 +433,12 @@ export function buildCodexArgs(input: {
   outputPath: string;
 }): string[] {
   const { mode, network } = sandboxForTools(input.allowedTools);
-  const args = [
+  return [
+    // GLOBAL flags (before the subcommand)
+    "--ask-for-approval",
+    "never",
+    ...(network ? ["--search"] : []), // native web-search tool (network_access alone doesn't enable it)
+    // subcommand + its flags
     "exec",
     "--json",
     "--model",
@@ -424,17 +447,17 @@ export function buildCodexArgs(input: {
     input.cwd,
     "--sandbox",
     mode,
-    "--ask-for-approval",
-    "never",
     "--skip-git-repo-check",
-    "--output-last-message",
+    "--ephemeral",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "-o",
     input.outputPath,
+    ...(mode === "workspace-write" && network
+      ? ["-c", "sandbox_workspace_write.network_access=true"]
+      : []),
+    "-", // read the prompt from stdin
   ];
-  if (mode === "workspace-write" && network) {
-    args.push("-c", "sandbox_workspace_write.network_access=true");
-  }
-  args.push("-"); // read the prompt from stdin
-  return args;
 }
 
 /** Best-effort parse of the `--json` JSONL stream's `turn.completed` usage (forensic only). Codex
@@ -482,7 +505,8 @@ export function classifyCodexFailure(
     const m = text.match(/resets?\s+([^\n]+)/i);
     return { cause: "session-limit", resetAt: m ? m[1].trim() : null };
   }
-  if (/quota|insufficient|billing|out of credit|exceeded your current/i.test(text)) {
+  // Tightened (bare "insufficient" would misclassify "insufficient permissions" as credits).
+  if (/insufficient_quota|insufficient balance|billing|quota|out of credit|exceeded your current quota/i.test(text)) {
     return { cause: "out-of-credits", resetAt: null };
   }
   return { cause: "transient", resetAt: null };
@@ -508,7 +532,8 @@ export function codexAgentRunner(command = "codex"): AgentRunner {
         cause: "transient",
         resetAt: null,
       });
-      const outputPath = join(mkdtempSync(join(tmpdir(), "styre-codex-msg-")), "final.txt");
+      const msgDir = mkdtempSync(join(tmpdir(), "styre-codex-msg-"));
+      const outputPath = join(msgDir, "final.txt");
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         const codexArgs = buildCodexArgs({
@@ -552,8 +577,9 @@ export function codexAgentRunner(command = "codex"): AgentRunner {
           return { completed: true, exitCode, stdout: finalMessage, stderr, timedOut: false, ...usage };
         }
         if (exitCode === 0) {
-          // clean exit but no final message = a broken dispatch → transport failure, never an empty verdict
-          return { ...transportFailure("codex produced no final message", false), stderr, ...usage };
+          // clean exit but no final message = a broken dispatch → transport failure, never an empty
+          // verdict. Preserve the real exitCode (0) for forensics; routing uses cause/completed.
+          return { ...transportFailure("codex produced no final message", false), exitCode, stderr, ...usage };
         }
         const { cause, resetAt } = classifyCodexFailure(stderr, rawStdout);
         return { completed: false, exitCode, stdout: finalMessage, stderr, timedOut: false, ...usage, cause, resetAt };
@@ -561,7 +587,7 @@ export function codexAgentRunner(command = "codex"): AgentRunner {
         return transportFailure(String(err), false);
       } finally {
         clearTimeout(timer);
-        rmSync(outputPath, { force: true });
+        rmSync(msgDir, { recursive: true, force: true }); // clean the temp dir, not just the file
       }
     },
   };
