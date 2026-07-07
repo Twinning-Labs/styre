@@ -39,6 +39,7 @@ import {
   realRunnerCommands,
   scopedRunnersForFiles,
 } from "./components.ts";
+import { designFeedback } from "./design-feedback.ts";
 import { ExtractOutputSchema, validateCdotImpact, validateExtraction } from "./extract-schema.ts";
 import { implementFeedback } from "./feedback.ts";
 import { hasTicketPlan } from "./plan-frontmatter.ts";
@@ -192,7 +193,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     runAgentDispatch(ctx, depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS), {
       handlerKey: "design:dispatch",
       template: DESIGN_TEMPLATE,
-      vars: designVars(ctx.ticket, deps.profile),
+      vars: designVars(ctx.ticket, deps.profile, designFeedback(ctx.db, ctx.ticket.id)),
       postcondition: ({ worktreePath }) => {
         if (!hasTicketPlan(join(worktreePath, "docs", "plans"), ctx.ticket.ident)) {
           throw new Error("design:dispatch postcondition: no plan for this ticket under docs/plans/");
