@@ -38,6 +38,16 @@ function isRepeatedReviewLoopback(db: Database, ticketId: number, signature: str
   return prev?.signature === signature;
 }
 
+/** Ticket-level verify steps re-arm on any HEAD-moving loopback: their recorded success is content-
+ *  keyed to the OLD head, so leaving them 'succeeded' replays a stale gate pass at the new HEAD →
+ *  resolver re-emit → MAX_TRANSITIONS. Reset is a no-op when a step doesn't exist (getByKey null). */
+function resetTicketVerifySteps(db: Database, ticketId: number): void {
+  for (const key of ["verify:integration", "verify:checks-gate"]) {
+    const s = getByKey(db, ticketId, key);
+    if (s) resetToPending(db, s.id);
+  }
+}
+
 function escalate(db: Database, ticketId: number, reason: string, signature: string): void {
   db.transaction(() => {
     setTicketStatus(db, ticketId, "waiting");
@@ -77,6 +87,7 @@ function codeLoopback(
     if (reviewStep) {
       resetToPending(db, reviewStep.id);
     }
+    resetTicketVerifySteps(db, ticketId);
     setTicketStage(db, ticketId, "implement");
     appendEvent(db, {
       ticketId,
@@ -112,6 +123,7 @@ function redesignLoopback(
         resetToPending(db, step.id);
       }
     }
+    resetTicketVerifySteps(db, ticketId);
     setTicketStage(db, ticketId, "design");
     appendEvent(db, {
       ticketId,

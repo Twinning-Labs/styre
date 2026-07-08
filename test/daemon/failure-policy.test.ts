@@ -319,6 +319,40 @@ test("a failed verify:checks-gate step escalates cleanly (never an integration-r
   expect(reconcile).toBeUndefined();
 });
 
+test("whole-project failure also resets the sibling verify:checks-gate (M4 §8d, reconcile unit moves HEAD)", () => {
+  const { db, ticketId } = makeTestDb();
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verified",
+  });
+  const intStep = insertPending(db, {
+    ticketId,
+    stepKey: "verify:integration",
+    stepType: "verify",
+  });
+  markRunning(db, intStep.id, {});
+  markFailed(db, intStep.id, new Error("integration red"));
+  // The AC-check gate had already passed before this infra crash — it must re-run once the
+  // reconcile unit moves HEAD, or its stale success replays at the new HEAD (MAX_TRANSITIONS).
+  const gateStep = insertPending(db, {
+    ticketId,
+    stepKey: "verify:checks-gate",
+    stepType: "verify",
+  });
+  markRunning(db, gateStep.id, {});
+  markSucceeded(db, gateStep.id, { gated: 1, stillRed: 0 });
+  const s = getStep(db, intStep.id);
+  if (!s) throw new Error("no step");
+  const r = applyFailurePolicy(db, ticketId, s);
+  const gateAfter = getStepByKey(db, ticketId, "verify:checks-gate");
+  db.close();
+  expect(r.decision).toBe("loopback");
+  expect(gateAfter?.status).toBe("pending");
+});
+
 test("completeness under-delivery loops the unit back to implement", () => {
   const { db, ticketId } = makeTestDb();
   setTicketStage(db, ticketId, "implement");

@@ -8,7 +8,7 @@ import {
   listByTicket as listUnits,
   setStatus as setUnitStatus,
 } from "../db/repos/work-unit.ts";
-import { listStepsForUnit, resetToPending } from "../db/repos/workflow-step.ts";
+import { getByKey, listStepsForUnit, resetToPending } from "../db/repos/workflow-step.ts";
 import type { WorkflowStepRow } from "../db/repos/workflow-step.ts";
 
 export type FailureDecision = "retry" | "loopback" | "escalated";
@@ -171,7 +171,10 @@ export function applyFailurePolicy(
   }
 
   // Whole-project (integration) failure → ticket-scoped reconcile: add a fix unit that runs
-  // after all others, then re-open the integration check.
+  // after all others, then re-open the integration check. M4 §8c: this branch now fires only on
+  // an infra crash (the handler threw before/without recording a verdict — a genuine test fail
+  // SUCCEEDS + advises instead). M4 §8d: the reconcile unit moves HEAD, so the sibling
+  // verify:checks-gate (a passed gate is content-keyed to the OLD head) must also re-run.
   if (step.step_type === "verify" && step.work_unit_id === null) {
     db.transaction(() => {
       const units = listUnits(db, ticketId);
@@ -185,6 +188,8 @@ export function applyFailurePolicy(
         dependsOn: units.map((u) => u.seq),
       });
       resetToPending(db, step.id);
+      const gate = getByKey(db, ticketId, "verify:checks-gate");
+      if (gate) resetToPending(db, gate.id);
       appendEvent(db, {
         ticketId,
         kind: "loopback",
