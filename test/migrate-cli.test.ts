@@ -15,5 +15,5 @@ test("`styre migrate --db <path>` exits 0 and reports v4", async () => {
   const out = await new Response(proc.stdout).text();
   const code = await proc.exited;
   expect(code).toBe(0);
-  expect(out).toContain("schema v5");
+  expect(out).toContain("schema v6");
 });

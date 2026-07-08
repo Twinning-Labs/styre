@@ -51,8 +51,8 @@ CREATE TABLE schema_meta (
     note        TEXT
 );
 INSERT INTO schema_meta (version, applied_at, note)
-VALUES (5, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-        'v5: ac_check.disposition (M3 green-on-HEAD per-check) + M3 owns red_class/disposition storage, M6 projects');
+VALUES (6, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+        'v6: ac_check.superseded_at + AUTOINCREMENT id — M4 re-author SUPERSEDES (never deletes); control state is read from the table, not the append-only signal log');
 
 -- ============================================================================
 -- §A  PROJECT + TICKET   (replaces issue-state.json + stage:* / pipeline:* labels)
@@ -418,9 +418,12 @@ CREATE INDEX idx_ac_ticket ON acceptance_criterion (ticket_id, seq);
 -- `red_class` is the graded taxonomy assertion/absence/environmental (M3 fills, write-once);
 -- `disposition` is the green-on-HEAD per-check outcome satisfied/not-expressible (M3 fills).
 -- Both are NULL until M3 populates them; M6 projects the AC-level rollup. Per-run verdicts at
--- each sha go to ground_truth_signal, not here.
+-- each sha go to ground_truth_signal, not here. A re-author SUPERSEDES the flagged active
+-- generation (`superseded_at`) and inserts fresh active rows — never deletes; control state is
+-- read from this table (active = `superseded_at IS NULL`), never from the append-only signal
+-- log by (now-stable) id.
 CREATE TABLE ac_check (
-    id               INTEGER PRIMARY KEY,
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,  -- stable id: never reused (M4 supersede)
     ticket_id        INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
     ac_id            INTEGER NOT NULL REFERENCES acceptance_criterion(id) ON DELETE CASCADE,
     selector         TEXT    NOT NULL,               -- in-suite selection (node-id / -k / …)
@@ -428,10 +431,12 @@ CREATE TABLE ac_check (
     red_first_result TEXT CHECK (red_first_result IS NULL OR red_first_result IN ('red','green','error')),  -- M2 coarse
     red_class        TEXT CHECK (red_class IS NULL OR red_class IN ('assertion','absence','environmental')), -- M3 graded
     disposition      TEXT CHECK (disposition IS NULL OR disposition IN ('satisfied','not-expressible')),      -- M3 green-on-HEAD per-check
+    superseded_at    TEXT,                           -- M4 re-author supersede: NULL = active; set = replaced generation (never deleted)
     created_at       TEXT    NOT NULL,
     updated_at       TEXT    NOT NULL
 );
 CREATE INDEX idx_ac_check_ticket ON ac_check (ticket_id, ac_id);
+CREATE INDEX idx_ac_check_active ON ac_check (ticket_id, ac_id) WHERE superseded_at IS NULL;
 
 -- ============================================================================
 -- §G  LINEAR / GITHUB PROJECTION   (move 2 / §9.4 #4 — one-way, idempotent)
