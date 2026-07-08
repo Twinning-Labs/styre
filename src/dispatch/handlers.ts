@@ -13,6 +13,7 @@ import {
   deleteActiveByAc,
   deleteByTicket,
   insertAcCheck,
+  listActiveByTicket as listAcChecks,
   listUnresolvedByTicket,
 } from "../db/repos/ac-check.ts";
 import { listByTicket as listAcs } from "../db/repos/acceptance-criterion.ts";
@@ -679,7 +680,13 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       {
         handlerKey: "implement:dispatch",
         template: IMPLEMENT_TEMPLATE,
-        vars: implementVars(ctx.ticket, unit, deps.profile, implementFeedback(ctx.db, unit.id)),
+        vars: implementVars(
+          ctx.ticket,
+          unit,
+          deps.profile,
+          implementFeedback(ctx.db, unit.id),
+          listAcChecks(ctx.db, ctx.ticket.id),
+        ),
         loopback: isUnitLoopback(ctx, unit.seq),
         runnerCommands,
         // Empty-diff is no longer a dispatch-level failure: the plan gate guarantees non-empty

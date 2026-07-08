@@ -72,6 +72,18 @@ test("implementVars carries the feedback var (empty by default)", () => {
   expect(implementVars(ticket, unit, profile, "fix the build").feedback).toBe("fix the build");
 });
 
+test("implementVars renders the authored check paths + a do-not-edit instruction", () => {
+  const vars = implementVars(ticket, unit, profile, "", [
+    { test_path: "api/tests/styre_checks/ENG-1_ac7_test.py" },
+  ]);
+  expect(vars.authored_checks).toContain("ENG-1_ac7_test.py");
+  expect(vars.authored_checks.toLowerCase()).toContain("do not edit");
+});
+
+test("implementVars with no authored checks renders an empty slot", () => {
+  expect(implementVars(ticket, unit, profile, "", []).authored_checks).toBe("");
+});
+
 test("review template renders with reviewVars (no missing placeholders)", () => {
   const profile = parseProfile({ slug: "demo", targetRepo: "/tmp/x" });
   const r = renderPrompt(REVIEW_TEMPLATE, reviewVars({ ident: "ENG-1", title: "T" }, profile));
