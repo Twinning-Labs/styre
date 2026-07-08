@@ -165,6 +165,7 @@ export function checksVars(
   ticket: { ident: string; title: string | null },
   profile: Profile,
   acs: { id: number; text: string }[],
+  feedback = "",
 ): Record<string, string> {
   return {
     ident: ticket.ident,
@@ -172,6 +173,7 @@ export function checksVars(
     slug: profile.slug,
     detected_stacks: detectedStacksVar(profile),
     acceptance_criteria: acs.map((a) => `- ac_id=${a.id}: ${a.text}`).join("\n"),
+    checks_feedback: feedback,
     ...profile.promptVars,
   };
 }

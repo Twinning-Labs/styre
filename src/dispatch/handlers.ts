@@ -5,10 +5,12 @@ import { join } from "node:path";
 import { branchNameFor } from "../agent/branch.ts";
 import type { AgentRunner } from "../agent/runner.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
+import { latestChecksReauthorAcs } from "../daemon/checks-verdict.ts";
 import { StepRegistry } from "../daemon/step-registry.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
 import {
   classifyAcCheck,
+  deleteByAc,
   deleteByTicket,
   insertAcCheck,
   listUnresolvedByTicket,
@@ -45,6 +47,7 @@ import {
   frameworkFor,
   signalResultForCoarse,
 } from "./check-selector.ts";
+import { checksFeedback } from "./checks-feedback.ts";
 import { runCheckForRed } from "./checks-run.ts";
 import { ChecksOutputSchema } from "./checks-schema.ts";
 import { classifyPrior } from "./classify-prior.ts";
@@ -358,8 +361,14 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   registry.register("checks:dispatch", async (ctx: HandlerContext) => {
     // deriveAndPersistAcs runs HERE, not in the resolver (resolver is pure, §2). Idempotent (§6).
     deriveAndPersistAcs(ctx.db, ctx.ticket.id);
-    const acs = listAcs(ctx.db, ctx.ticket.id);
-    if (acs.length === 0) return { authored: 0, acs: 0 }; // no ACs → nothing to author (decision 6)
+    const allAcs = listAcs(ctx.db, ctx.ticket.id);
+    if (allAcs.length === 0) return { authored: 0, acs: 0 }; // no ACs → nothing to author (decision 6)
+    // Scoped re-author (§2b): a loop==="checks" event re-authors ONLY its flagged ACs; a fresh/
+    // crash-resume dispatch re-authors the whole ticket. `scoped` drives the agent's AC list, the
+    // coverage postcondition, and the delete strategy — all three must agree.
+    const flaggedAcs = latestChecksReauthorAcs(ctx.db, ctx.ticket.id);
+    const scoped = flaggedAcs !== null;
+    const acs = scoped ? allAcs.filter((a) => flaggedAcs.includes(a.id)) : allAcs;
     const acIds = new Set(acs.map((a) => a.id));
 
     // Dispatch the plan-blind author (no Bash; commits via CL-COMMIT → sha).
@@ -369,7 +378,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       {
         handlerKey: "checks:dispatch",
         template: CHECKS_TEMPLATE,
-        vars: checksVars(ctx.ticket, deps.profile, acs),
+        vars: checksVars(ctx.ticket, deps.profile, acs, checksFeedback(ctx.db, ctx.ticket.id)),
         // Identity + coverage are verified below against the committed diff, not on the raw diff here.
         postcondition: () => {},
       },
@@ -469,7 +478,11 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     // Persist (§9): delete-then-insert in ONE transaction (resume-dedup, decision 1) + the signal row
     // via the vocab map (never write 'red' into ground_truth_signal).
     ctx.db.transaction(() => {
-      deleteByTicket(ctx.db, ctx.ticket.id);
+      if (scoped) {
+        for (const acId of acIds) deleteByAc(ctx.db, acId); // leave every non-flagged AC's rows frozen
+      } else {
+        deleteByTicket(ctx.db, ctx.ticket.id);
+      }
       for (const r of records) {
         const row = insertAcCheck(ctx.db, {
           ticketId: ctx.ticket.id,
