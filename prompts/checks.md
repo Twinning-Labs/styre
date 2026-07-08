@@ -6,6 +6,8 @@ pass once it is. You are given the criteria and the project's detected stacks an
 NOT given the implementation plan. Read the repository (Read/Grep/Glob) enough to write a *valid,
 runnable* failing test; do not guess blindly.
 
+{{checks_feedback}}
+
 Rules — follow them exactly:
 - **One new file per criterion.** Create a brand-new test file. Do NOT edit, extend, or add to any
   existing test file — the runner will reject a check whose file is not newly added.

@@ -8,6 +8,7 @@ import { ParkSignal } from "../engine/park-signal.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { awaitSignal } from "../engine/signals.ts";
 import { runStep } from "../engine/step-journal.ts";
+import { applyChecksVerdict } from "./checks-verdict.ts";
 import { applyFailurePolicy } from "./failure-policy.ts";
 import { enqueueStageProjection } from "./projector.ts";
 import { nextStepKey } from "./resolver.ts";
@@ -16,7 +17,7 @@ import type { StepRegistry } from "./step-registry.ts";
 
 const MAX_TRANSITIONS = 100;
 
-const VERDICT_BEARING_STEPS = new Set(["review", "design:review"]);
+const VERDICT_BEARING_STEPS = new Set(["review", "design:review", "checks:classify"]);
 
 export type AdvanceOutcome =
   | { kind: "stepped"; stepKey: string }
@@ -104,12 +105,11 @@ export async function advanceOneStep(
           }),
         onSucceed: VERDICT_BEARING_STEPS.has(d.stepKey)
           ? () => {
-              verdictBox.value = applyReviewVerdict(
-                db,
-                ticketId,
-                opts?.config ?? DEFAULT_RUNTIME_CONFIG,
-                { stepKey: d.stepKey },
-              );
+              const cfg = opts?.config ?? DEFAULT_RUNTIME_CONFIG;
+              verdictBox.value =
+                d.stepKey === "checks:classify"
+                  ? applyChecksVerdict(db, ticketId, { stepKey: d.stepKey })
+                  : applyReviewVerdict(db, ticketId, cfg, { stepKey: d.stepKey });
             }
           : undefined,
       });

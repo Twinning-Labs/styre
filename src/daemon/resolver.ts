@@ -108,6 +108,9 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
       if (!done(db, ticketId, "checks:dispatch")) {
         return step("checks:dispatch", "dispatch", "checks:dispatch", null);
       }
+      if (!done(db, ticketId, "checks:classify")) {
+        return step("checks:classify", "dispatch", "checks:classify", null);
+      }
       return { kind: "advance", from: "design", to: "implement" };
     }
 

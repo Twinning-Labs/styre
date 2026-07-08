@@ -1,3 +1,4 @@
+import checksClassifyTemplate from "../../prompts/checks-classify.md" with { type: "text" };
 import checksTemplate from "../../prompts/checks.md" with { type: "text" };
 import complexityGradeTemplate from "../../prompts/design-complexity-grade.md" with {
   type: "text",
@@ -53,6 +54,7 @@ function runtimeVars(profile: Profile): Record<string, string> {
 }
 
 export const CHECKS_TEMPLATE = checksTemplate;
+export const CHECKS_CLASSIFY_TEMPLATE = checksClassifyTemplate;
 export const DESIGN_TEMPLATE = designTemplate;
 export const DESIGN_REVIEW_TEMPLATE = designReviewTemplate;
 export const DESIGN_COMPLEXITY_GRADE_TEMPLATE = complexityGradeTemplate;
@@ -163,6 +165,7 @@ export function checksVars(
   ticket: { ident: string; title: string | null },
   profile: Profile,
   acs: { id: number; text: string }[],
+  feedback = "",
 ): Record<string, string> {
   return {
     ident: ticket.ident,
@@ -170,6 +173,43 @@ export function checksVars(
     slug: profile.slug,
     detected_stacks: detectedStacksVar(profile),
     acceptance_criteria: acs.map((a) => `- ac_id=${a.id}: ${a.text}`).join("\n"),
+    checks_feedback: feedback,
+    ...profile.promptVars,
+  };
+}
+
+/** One check the adjudicator must classify: its AC text, the authored test, the coarse RED-first
+ *  bucket, and the recorded trace it judges from (never re-run). */
+export interface AdjudicateItem {
+  acCheckId: number;
+  acText: string;
+  testPath: string | null;
+  testName: string;
+  coarse: string;
+  rawOutput: string;
+}
+
+/** Prompt vars for the `checks:classify` adjudicator (§5). Renders each check as a labeled block with
+ *  its recorded trace; the agent echoes `ac_check_id` back in its sidecar. Read-only, plan-blind. */
+export function adjudicateVars(
+  ticket: { ident: string; title: string | null },
+  profile: Profile,
+  items: AdjudicateItem[],
+): Record<string, string> {
+  const blocks = items
+    .map(
+      (it) =>
+        `### ac_check_id=${it.acCheckId} (coarse: ${it.coarse})\n` +
+        `Acceptance criterion: ${it.acText}\n` +
+        `Test: ${it.testPath ?? "(no path)"} :: ${it.testName}\n` +
+        `Recorded RED-first output:\n\`\`\`\n${it.rawOutput || "(empty)"}\n\`\`\``,
+    )
+    .join("\n\n");
+  return {
+    ident: ticket.ident,
+    title: ticket.title ? ` — ${ticket.title}` : "",
+    slug: profile.slug,
+    checks_to_classify: blocks,
     ...profile.promptVars,
   };
 }

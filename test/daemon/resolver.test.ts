@@ -59,6 +59,8 @@ test("design fast-track: units + track=fast → provision, then checks:dispatch,
   await succeed(db, ticketId, "provision");
   expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "checks:dispatch" });
   await succeed(db, ticketId, "checks:dispatch");
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "checks:classify" });
+  await succeed(db, ticketId, "checks:classify");
   expect(nextStepKey(db, ticketId)).toEqual({ kind: "advance", from: "design", to: "implement" });
   db.close();
 });
@@ -73,6 +75,8 @@ test("design full-track: after design:review, still routes through provision →
   await succeed(db, ticketId, "provision");
   expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "checks:dispatch" });
   await succeed(db, ticketId, "checks:dispatch");
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "checks:classify" });
+  await succeed(db, ticketId, "checks:classify");
   expect(nextStepKey(db, ticketId)).toEqual({ kind: "advance", from: "design", to: "implement" });
   db.close();
 });

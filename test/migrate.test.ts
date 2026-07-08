@@ -32,7 +32,7 @@ describe("migrate", () => {
   test("bootstraps a fresh DB at schema v4", () => {
     const result = migrate(tmpDbPath());
     expect(result.created).toBe(true);
-    expect(result.version).toBe(4);
+    expect(result.version).toBe(5);
   });
 
   test("creates the core SoT tables", () => {
@@ -54,6 +54,6 @@ describe("migrate", () => {
     migrate(path);
     const second = migrate(path);
     expect(second.created).toBe(false);
-    expect(second.version).toBe(4);
+    expect(second.version).toBe(5);
   });
 });

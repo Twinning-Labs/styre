@@ -5,11 +5,12 @@ import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
-import { listByTicket as listAcChecks } from "../../src/db/repos/ac-check.ts";
+import { classifyAcCheck, listByTicket as listAcChecks } from "../../src/db/repos/ac-check.ts";
+import { appendEvent } from "../../src/db/repos/event-log.ts";
 import { listByTicket as listSignals } from "../../src/db/repos/ground-truth-signal.ts";
 import { setTicketTrack } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
-import { getByKey } from "../../src/db/repos/workflow-step.ts";
+import { getByKey, resetToPending } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
@@ -158,4 +159,136 @@ test("checks:dispatch rejects a MODIFIED file (identity: added-only) → postcon
   expect(["retry", "escalated"]).toContain(outcome.kind);
   expect(step?.status).toBe("pending");
   expect(checks.length).toBe(0);
+});
+
+test("checks:dispatch on a checks re-author loopback re-authors ONLY the flagged AC — the other AC's row is untouched", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET description = ? WHERE id = ?").run(
+    "- [ ] first thing\n- [ ] second thing\n",
+    ticketId,
+  );
+  await markDesignDone(db, ticketId);
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
+  setTicketTrack(db, ticketId, "fast");
+
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-chwt-scoped-"));
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+  });
+  const runCheckCommand = async () => ({
+    exitCode: 1,
+    stdout: "1 failed",
+    stderr: "",
+    timedOut: false,
+  });
+
+  // Round 1: fresh dispatch — no checks-loopback event yet → whole-ticket author, both ACs covered.
+  const runner1 = new FakeAgentRunner((input) => {
+    const dir = join(input.cwd, "checks");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "ac1.py"), "def test_ac1():\n    assert False\n");
+    writeFileSync(join(dir, "ac2.py"), "def test_ac2():\n    assert False\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout:
+        '```styre-sidecar\n{"checksAuthored":[' +
+        '{"ac_id":1,"test_file":"checks/ac1.py","test_name":"test_ac1"},' +
+        '{"ac_id":2,"test_file":"checks/ac2.py","test_name":"test_ac2"}' +
+        "]}\n```",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const registry1 = buildDispatchRegistry({
+    runner: runner1,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile,
+    worktreeRoot,
+    runCheckCommand,
+  });
+  await advanceOneStep(db, ticketId, registry1); // provision
+  await advanceOneStep(db, ticketId, registry1); // checks:dispatch (whole-ticket)
+
+  const checksBefore = listAcChecks(db, ticketId);
+  expect(checksBefore.length).toBe(2);
+  const ac1CheckBefore = checksBefore.find((c) => c.ac_id === 1);
+  const ac2CheckBefore = checksBefore.find((c) => c.ac_id === 2);
+  expect(ac1CheckBefore).toBeDefined();
+  expect(ac2CheckBefore).toBeDefined();
+
+  // AC-2's check is already classified (M3) — this row must survive a scoped re-author untouched.
+  classifyAcCheck(db, {
+    acCheckId: (ac2CheckBefore as (typeof checksBefore)[number]).id,
+    redClass: "assertion",
+  });
+
+  // A checks re-author loopback flags ONLY AC-1.
+  appendEvent(db, {
+    ticketId,
+    kind: "loopback",
+    loop: "checks",
+    routeTo: "checks:classify",
+    signature: "checks:1",
+    payload: { acIds: [1], findings: [{ acId: 1, reason: "prior check was vacuous" }] },
+  });
+  const dispatchStep = getByKey(db, ticketId, "checks:dispatch");
+  if (!dispatchStep) throw new Error("checks:dispatch step missing before scoped round");
+  resetToPending(db, dispatchStep.id);
+
+  // Round 2: the scoped re-author — the agent sees/authors only AC-1's replacement check.
+  const runner2 = new FakeAgentRunner((input) => {
+    const dir = join(input.cwd, "checks");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "ac1_v2.py"), "def test_ac1_v2():\n    assert False\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout:
+        '```styre-sidecar\n{"checksAuthored":[' +
+        '{"ac_id":1,"test_file":"checks/ac1_v2.py","test_name":"test_ac1_v2"}' +
+        "]}\n```",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const registry2 = buildDispatchRegistry({
+    runner: runner2,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile,
+    worktreeRoot,
+    runCheckCommand,
+  });
+  const outcome = await advanceOneStep(db, ticketId, registry2); // checks:dispatch (scoped)
+  const checksAfter = listAcChecks(db, ticketId);
+  const stepAfter = getByKey(db, ticketId, "checks:dispatch");
+  db.close();
+
+  expect(outcome.kind).toBe("stepped");
+  expect(stepAfter?.status).toBe("succeeded");
+  expect(checksAfter.length).toBe(2);
+
+  const ac1CheckAfter = checksAfter.find((c) => c.ac_id === 1);
+  const ac2CheckAfter = checksAfter.find((c) => c.ac_id === 2);
+  expect(ac1CheckAfter).toBeDefined();
+  expect(ac2CheckAfter).toBeDefined();
+
+  // AC-1's row was replaced (new id, new test path) — the flagged AC IS re-authored.
+  expect(ac1CheckAfter?.id).not.toBe(ac1CheckBefore?.id);
+  expect(ac1CheckAfter?.test_path).toBe("checks/ac1_v2.py");
+
+  // AC-2's row (id, selector, classification) is FROZEN — untouched by the scoped re-author.
+  expect(ac2CheckAfter?.id).toBe(ac2CheckBefore?.id);
+  expect(ac2CheckAfter?.test_path).toBe(ac2CheckBefore?.test_path);
+  expect(ac2CheckAfter?.red_class).toBe("assertion");
 });
