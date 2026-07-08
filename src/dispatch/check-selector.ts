@@ -1,3 +1,5 @@
+import { basename, dirname } from "node:path";
+
 /** A concrete test framework the selector constructor + coarse run-output reader understand.
  *  Derived from a profile component's `kind` and its `test` command string. */
 export type CheckFramework =
@@ -65,5 +67,71 @@ export function frameworkFor(component: {
       return "phpunit";
     default:
       return null;
+  }
+}
+
+export interface CheckSelector {
+  runArgs: string;
+  precision: SelectorPrecision;
+}
+
+/** Escape regex metacharacters so a plain test NAME can be anchored inside `^…$` (jest -t / go -run
+ *  / minitest -n all take a regex). */
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** The class name for a JVM/PHP test = the file's basename without extension (styre authors one
+ *  public test class per file, named after the file). */
+function classFromFile(testFile: string): string {
+  return basename(testFile).replace(/\.[^.]+$/, "");
+}
+
+/** Construct the framework-native selection args that run ONLY the one authored check (§5.2). The
+ *  returned `runArgs` are appended to the framework binary by M2b; `precision` records the scoping
+ *  tier (precise > anchored > package > file). For file-addressable frameworks the styre-authored
+ *  file is itself the scope (M2b's added-file identity guarantees it holds only this check); Go/Rust
+ *  have no file-level run, so they scope to the package/crate + an anchored/exact name. */
+export function buildCheckSelector(
+  fw: CheckFramework,
+  p: { testFile: string; testName: string },
+): CheckSelector {
+  const { testFile, testName } = p;
+  switch (fw) {
+    case "pytest":
+      return { runArgs: `${testFile}::${testName}`, precision: "precise" };
+    case "jest":
+      return { runArgs: `${testFile} -t '^${escapeRegex(testName)}$'`, precision: "anchored" };
+    case "vitest":
+      return { runArgs: `run ${testFile} -t '^${escapeRegex(testName)}$'`, precision: "anchored" };
+    case "go":
+      return {
+        runArgs: `-run '^${escapeRegex(testName)}$' ./${dirname(testFile)}`,
+        precision: "package",
+      };
+    case "cargo":
+      // One-file-one-crate integration test (§5.2 Rust mandate): `--test <stem>` selects the crate,
+      // `<name> -- --exact` the single test function.
+      return {
+        runArgs: `--test ${classFromFile(testFile)} ${testName} -- --exact`,
+        precision: "package",
+      };
+    case "junit-maven":
+      return {
+        runArgs: `-Dtest=${classFromFile(testFile)}#${testName} test`,
+        precision: "precise",
+      };
+    case "junit-gradle":
+      return {
+        runArgs: `test --tests '${classFromFile(testFile)}.${testName}'`,
+        precision: "precise",
+      };
+    case "rspec":
+      // rspec -e is a substring match; the styre-authored file is the real scope (safe by identity).
+      return { runArgs: `${testFile} -e '${testName}'`, precision: "file" };
+    case "minitest":
+      return { runArgs: `${testFile} -n '/^${escapeRegex(testName)}$/'`, precision: "file" };
+    case "phpunit":
+      return { runArgs: `--filter '/::${escapeRegex(testName)}$/' ${testFile}`, precision: "file" };
   }
 }
