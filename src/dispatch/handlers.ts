@@ -10,7 +10,7 @@ import { StepRegistry } from "../daemon/step-registry.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
 import {
   classifyAcCheck,
-  deleteByAc,
+  deleteActiveByAc,
   deleteByTicket,
   insertAcCheck,
   listUnresolvedByTicket,
@@ -479,9 +479,12 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     // via the vocab map (never write 'red' into ground_truth_signal).
     ctx.db.transaction(() => {
       if (scoped) {
-        for (const acId of acIds) deleteByAc(ctx.db, acId); // leave every non-flagged AC's rows frozen
+        // Resume-dedup ONLY: clear this dispatch's own not-yet-classified actives (a crash-resume would
+        // otherwise double-insert). The flagged generation was already SUPERSEDED by the verdict
+        // (checks-verdict.ts, exactly-once) — never deleted here, so history + the escalate counter stand.
+        for (const acId of acIds) deleteActiveByAc(ctx.db, acId);
       } else {
-        deleteByTicket(ctx.db, ctx.ticket.id);
+        deleteByTicket(ctx.db, ctx.ticket.id); // fresh / crash-resume whole-ticket author (unchanged)
       }
       for (const r of records) {
         const row = insertAcCheck(ctx.db, {
