@@ -7,6 +7,7 @@ const TIERS: Record<string, Tier> = {
   "design:review": "deep",
   review: "deep",
   "implement:dispatch": "standard",
+  "checks:dispatch": "standard",
   "design:extract": "cheap",
   "design:size": "cheap",
   "docs:revise": "cheap",

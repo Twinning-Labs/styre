@@ -142,23 +142,19 @@ test("full-track clean plan (no findings) advances ticket from design to impleme
   }));
   const registry = registryFor(repo, runner);
 
-  // Drive advanceOneStep until the design:review step fires (clean verdict → "stepped").
-  // Then call once more to trigger the inline advance design→implement (the resolver now sees
-  // design:dispatch done, units present, track=full, design:review done → emits advance).
+  // Drive advanceOneStep until the ticket leaves design: design:review (clean verdict) is now
+  // followed by the hoisted provision (no `prepare` on this kind:"app" profile → no-op) and
+  // checks:dispatch (null ticket description → 0 ACs → no-op, decision 6) before the resolver's
+  // inline advance design→implement fires. This runner returns a clean-plan sidecar unconditionally
+  // (no throw-on-unexpected-call gate), so a subsequent implement:wu1:dispatch attempt succeeds too.
   for (let i = 0; i < 10; i++) {
     const t = getTicket(db, ticketId);
     if (!t || t.stage !== "design") break;
-    const outcome = await advanceOneStep(db, ticketId, registry);
-    if (outcome.kind === "stepped" && "stepKey" in outcome && outcome.stepKey === "design:review") {
-      // design:review done clean → fire the inline advance design→implement.
-      // The implement stage then dispatches implement:wu1:dispatch which has no real worktree;
-      // we catch that throw since the binding fact (stage=implement) is already set inline.
-      try {
-        await advanceOneStep(db, ticketId, registry);
-      } catch {
-        // Expected: advance fires (sets stage=implement), then implement:dispatch may throw.
-      }
-      break;
+    try {
+      await advanceOneStep(db, ticketId, registry);
+    } catch {
+      // Defensive: not expected to throw with this runner, but the binding fact under test is
+      // stage=implement, not any particular intermediate step's outcome.
     }
   }
 

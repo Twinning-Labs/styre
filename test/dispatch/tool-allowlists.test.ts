@@ -72,6 +72,12 @@ test("no allowlist ever contains an outward tool", () => {
   }
 });
 
+test("checks:dispatch is authoring-only — Read/Grep/Glob/Write/Edit and NO Bash", () => {
+  const tools = allowlistFor("checks:dispatch");
+  expect(tools).toEqual(["Read", "Grep", "Glob", "Write", "Edit"]);
+  expect(tools).not.toContain("Bash");
+});
+
 test("an unknown handlerKey throws", () => {
   expect(() => allowlistFor("verify:integration")).toThrow();
 });

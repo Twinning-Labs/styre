@@ -50,14 +50,31 @@ test("design: units present + track unset → routes to design:size", async () =
   });
 });
 
-test("design fast-track: with units + track=fast, advances to implement", async () => {
+test("design fast-track: units + track=fast → provision, then checks:dispatch, then advance", async () => {
   const { db, ticketId } = makeTestDb();
   await succeed(db, ticketId, "design:dispatch");
   setTicketTrack(db, ticketId, "fast");
   insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", verifyCheckTypes: ["test"] });
-  const d = nextStepKey(db, ticketId);
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "provision" });
+  await succeed(db, ticketId, "provision");
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "checks:dispatch" });
+  await succeed(db, ticketId, "checks:dispatch");
+  expect(nextStepKey(db, ticketId)).toEqual({ kind: "advance", from: "design", to: "implement" });
   db.close();
-  expect(d).toEqual({ kind: "advance", from: "design", to: "implement" });
+});
+
+test("design full-track: after design:review, still routes through provision → checks:dispatch → advance", async () => {
+  const { db, ticketId } = makeTestDb();
+  await succeed(db, ticketId, "design:dispatch");
+  setTicketTrack(db, ticketId, "full");
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", verifyCheckTypes: ["test"] });
+  await succeed(db, ticketId, "design:review");
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "provision" });
+  await succeed(db, ticketId, "provision");
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "checks:dispatch" });
+  await succeed(db, ticketId, "checks:dispatch");
+  expect(nextStepKey(db, ticketId)).toEqual({ kind: "advance", from: "design", to: "implement" });
+  db.close();
 });
 
 test("design full-track: with units + track=full, asks for design:review before advancing", async () => {

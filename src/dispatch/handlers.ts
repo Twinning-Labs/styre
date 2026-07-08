@@ -7,6 +7,8 @@ import type { AgentRunner } from "../agent/runner.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
 import { StepRegistry } from "../daemon/step-registry.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
+import { deleteByTicket, insertAcCheck } from "../db/repos/ac-check.ts";
+import { listByTicket as listAcs } from "../db/repos/acceptance-criterion.ts";
 import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";
 import { listByTicket as listEvents } from "../db/repos/event-log.ts";
 import {
@@ -28,6 +30,16 @@ import {
 } from "../db/repos/work-unit.ts";
 import { pythonImportName } from "../setup/lang/python.ts";
 import { runCommand } from "../util/run-command.ts";
+import {
+  type CheckFramework,
+  type CoarseResult,
+  binaryFor,
+  buildCheckSelector,
+  frameworkFor,
+  signalResultForCoarse,
+} from "./check-selector.ts";
+import { runCheckForRed } from "./checks-run.ts";
+import { ChecksOutputSchema } from "./checks-schema.ts";
 import { classifyDisposition, reconcileScope } from "./completeness.ts";
 import { ComplexityGradeSchema } from "./complexity-schema.ts";
 import {
@@ -39,18 +51,21 @@ import {
   realRunnerCommands,
   scopedRunnersForFiles,
 } from "./components.ts";
+import { deriveAndPersistAcs } from "./derive-acs.ts";
 import { designFeedback } from "./design-feedback.ts";
 import { ExtractOutputSchema, validateCdotImpact, validateExtraction } from "./extract-schema.ts";
 import { implementFeedback } from "./feedback.ts";
 import { hasTicketPlan } from "./plan-frontmatter.ts";
 import type { Profile } from "./profile.ts";
 import {
+  CHECKS_TEMPLATE,
   DESIGN_COMPLEXITY_GRADE_TEMPLATE,
   DESIGN_REVIEW_TEMPLATE,
   DESIGN_TEMPLATE,
   EXTRACT_TEMPLATE,
   IMPLEMENT_TEMPLATE,
   REVIEW_TEMPLATE,
+  checksVars,
   complexityGradeVars,
   designReviewVars,
   designVars,
@@ -73,10 +88,12 @@ import { extractSidecar } from "./sidecar.ts";
 import { isTestFile } from "./test-file.ts";
 import { combineTrack, sizeTrack } from "./track-sizing.ts";
 import {
+  addedFilesAt,
   branchHeadSha,
   changedFilesAt,
   changedFilesBetween,
   ensureWorktree,
+  fileContentAt,
   removeWorktree,
 } from "./worktree.ts";
 
@@ -88,6 +105,9 @@ export interface RegistryDeps {
   inPlace?: boolean;
   timeoutMs?: number;
   resumeContext?: { stepKey: string; transcript: string };
+  /** RED-first check executor override (tests inject a scripted runner; production uses runCommand).
+   *  Only `checks:dispatch` reads it (M2b decision 4). */
+  runCheckCommand?: import("./reuse.ts").CmdRunner;
 }
 
 const DESIGN_TIMEOUT_MS = 60 * 60 * 1000;
@@ -322,6 +342,148 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       });
     }
     return { findings: parsed.value.findings.length, blocking };
+  });
+
+  registry.register("checks:dispatch", async (ctx: HandlerContext) => {
+    // deriveAndPersistAcs runs HERE, not in the resolver (resolver is pure, §2). Idempotent (§6).
+    deriveAndPersistAcs(ctx.db, ctx.ticket.id);
+    const acs = listAcs(ctx.db, ctx.ticket.id);
+    if (acs.length === 0) return { authored: 0, acs: 0 }; // no ACs → nothing to author (decision 6)
+    const acIds = new Set(acs.map((a) => a.id));
+
+    // Dispatch the plan-blind author (no Bash; commits via CL-COMMIT → sha).
+    const { sha, output } = await runAgentDispatch(
+      ctx,
+      depsFor(ctx, deps, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+      {
+        handlerKey: "checks:dispatch",
+        template: CHECKS_TEMPLATE,
+        vars: checksVars(ctx.ticket, deps.profile, acs),
+        // Identity + coverage are verified below against the committed diff, not on the raw diff here.
+        postcondition: () => {},
+      },
+    );
+
+    // Structured output through the validated interface (§4): absent/malformed = transport failure.
+    const parsed = extractSidecar(output, ChecksOutputSchema);
+    if (!parsed.ok) {
+      throw new Error(`checks:dispatch sidecar ${parsed.reason}: ${parsed.detail}`);
+    }
+
+    const { worktreePath } = worktreeFor(ctx, deps);
+    const added = new Set(addedFilesAt(sha, worktreePath));
+    const components = deps.profile.components;
+    const run = deps.runCheckCommand;
+
+    // Per authored check: identity (§5.1) → framework → RED-first execution (§5.3) → coarse (§5.4).
+    const records: Array<{
+      acId: number;
+      selector: string;
+      testPath: string;
+      coarse: CoarseResult;
+      rawOutput: string;
+      exitCode: number | null;
+      framework: CheckFramework | null;
+      command: string | null;
+    }> = [];
+    const covered = new Set<number>();
+
+    for (const c of parsed.value.checksAuthored) {
+      if (!acIds.has(c.ac_id)) continue; // unknown AC id → reject (decision 5)
+      if (!added.has(c.test_file)) continue; // not git-status A → reject (§5.1 added-only)
+      const content = fileContentAt(sha, c.test_file, worktreePath);
+      if (content === null || !content.includes(c.test_name)) continue; // name absent → reject
+
+      const comp = impactedComponents(components, [c.test_file])[0]; // decision 2
+      const fw = comp ? frameworkFor(comp) : null;
+
+      let coarse: CoarseResult;
+      let selector = c.test_file; // NOT-NULL fallback when no framework (decision 2)
+      let rawOutput = "";
+      let exitCode: number | null = null;
+      let command: string | null = null;
+
+      if (!comp || !fw) {
+        coarse = "error"; // can't attempt — no framework (§5.2)
+      } else {
+        let interp: string | undefined;
+        if (fw === "pytest") {
+          try {
+            interp = resolvePythonInterpreter();
+          } catch {
+            interp = undefined;
+          }
+        }
+        if (fw === "pytest" && interp === undefined) {
+          coarse = "error"; // no interpreter → can't attempt
+        } else {
+          const sel = buildCheckSelector(fw, { testFile: c.test_file, testName: c.test_name });
+          selector = sel.runArgs;
+          const res = await runCheckForRed({
+            framework: fw,
+            binary: binaryFor(fw, { interp }),
+            runArgs: sel.runArgs,
+            cwd: join(worktreePath, comp.dir ?? ""),
+            timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
+            run,
+          });
+          rawOutput = res.rawOutput;
+          exitCode = res.exitCode;
+          command = res.command;
+          if (res.coarse === "selected-none") continue; // selects 0 → identity reject (§5.1)
+          coarse = res.coarse;
+        }
+      }
+      records.push({
+        acId: c.ac_id,
+        selector,
+        testPath: c.test_file,
+        coarse,
+        rawOutput,
+        exitCode,
+        framework: fw,
+        command,
+      });
+      covered.add(c.ac_id);
+    }
+
+    // Postcondition (§8): ≥1 identity-verified check per AC, else fail (bounded retry / escalate).
+    const uncovered = acs.filter((a) => !covered.has(a.id));
+    if (uncovered.length > 0) {
+      throw new Error(
+        `checks:dispatch postcondition: no valid check for AC seq ${uncovered.map((a) => a.seq).join(", ")}`,
+      );
+    }
+
+    // Persist (§9): delete-then-insert in ONE transaction (resume-dedup, decision 1) + the signal row
+    // via the vocab map (never write 'red' into ground_truth_signal).
+    ctx.db.transaction(() => {
+      deleteByTicket(ctx.db, ctx.ticket.id);
+      for (const r of records) {
+        const row = insertAcCheck(ctx.db, {
+          ticketId: ctx.ticket.id,
+          acId: r.acId,
+          selector: r.selector,
+          testPath: r.testPath,
+          redFirstResult: r.coarse,
+        });
+        insertSignal(ctx.db, {
+          ticketId: ctx.ticket.id,
+          signalType: "ac-check-red-first",
+          result: signalResultForCoarse(r.coarse),
+          branchHeadSha: sha,
+          detail: {
+            rawOutput: r.rawOutput,
+            exitCode: r.exitCode,
+            framework: r.framework,
+            command: r.command,
+            acCheckId: row.id,
+          },
+        });
+      }
+    })();
+
+    return { authored: records.length, acs: acs.length };
   });
 
   registry.register("implement:dispatch", async (ctx: HandlerContext) => {

@@ -100,6 +100,14 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
       if (ticket.track === "full" && !done(db, ticketId, "design:review")) {
         return step("design:review", "dispatch", "design:review", null);
       }
+      // Hoist: provision runs ONCE at design-HEAD (reused by implement — whose provision gates stay,
+      // finding it done and skipping; resetProvisionIfManifestTouched still re-arms it, §2).
+      if (!done(db, ticketId, "provision")) {
+        return step("provision", "provision", "provision", null);
+      }
+      if (!done(db, ticketId, "checks:dispatch")) {
+        return step("checks:dispatch", "dispatch", "checks:dispatch", null);
+      }
       return { kind: "advance", from: "design", to: "implement" };
     }
 

@@ -1,3 +1,4 @@
+import checksTemplate from "../../prompts/checks.md" with { type: "text" };
 import complexityGradeTemplate from "../../prompts/design-complexity-grade.md" with {
   type: "text",
 };
@@ -51,6 +52,7 @@ function runtimeVars(profile: Profile): Record<string, string> {
   };
 }
 
+export const CHECKS_TEMPLATE = checksTemplate;
 export const DESIGN_TEMPLATE = designTemplate;
 export const DESIGN_REVIEW_TEMPLATE = designReviewTemplate;
 export const DESIGN_COMPLEXITY_GRADE_TEMPLATE = complexityGradeTemplate;
@@ -150,6 +152,24 @@ export function designReviewVars(
     ident: ticket.ident,
     title: ticket.title ?? "",
     slug: profile.slug,
+    ...profile.promptVars,
+  };
+}
+
+/** Prompt vars for the plan-blind `checks:dispatch` author (M2 design §3): the ticket's acceptance
+ *  criteria (each by its DB `id`, which the agent echoes as `ac_id`) + the detected stacks/test-commands.
+ *  Deliberately NOT the implementation plan — the step is plan-blind. */
+export function checksVars(
+  ticket: { ident: string; title: string | null },
+  profile: Profile,
+  acs: { id: number; text: string }[],
+): Record<string, string> {
+  return {
+    ident: ticket.ident,
+    title: ticket.title ?? "",
+    slug: profile.slug,
+    detected_stacks: detectedStacksVar(profile),
+    acceptance_criteria: acs.map((a) => `- ac_id=${a.id}: ${a.text}`).join("\n"),
     ...profile.promptVars,
   };
 }
