@@ -43,3 +43,40 @@ test("listByTicket and listByAc return inserted rows", () => {
   expect(byTicket.map((r) => r.selector).sort()).toEqual(["s1", "s2"]);
   expect(byAc.length).toBe(2);
 });
+
+test("insertAcCheck records a coarse red_first_result when given one", () => {
+  const { db, ticketId } = makeTestDb();
+  const acId = seedAc(db, ticketId);
+  const row = acChecks.insertAcCheck(db, {
+    ticketId,
+    acId,
+    selector: "tests/t.py::test_ok",
+    testPath: "tests/t.py",
+    redFirstResult: "red",
+  });
+  db.close();
+  expect(row.red_first_result).toBe("red");
+  expect(row.red_class).toBeNull(); // M3 fills this
+});
+
+test("insertAcCheck rejects an out-of-vocab red_first_result (the CHECK constraint)", () => {
+  const { db, ticketId } = makeTestDb();
+  const acId = seedAc(db, ticketId);
+  expect(() =>
+    // @ts-expect-error — deliberately violating the "red"|"green"|"error" union at runtime
+    acChecks.insertAcCheck(db, { ticketId, acId, selector: "s", redFirstResult: "pass" }),
+  ).toThrow();
+  db.close();
+});
+
+test("deleteByTicket removes this ticket's rows and returns the count (resume-dedup)", () => {
+  const { db, ticketId } = makeTestDb();
+  const acId = seedAc(db, ticketId);
+  acChecks.insertAcCheck(db, { ticketId, acId, selector: "s1", redFirstResult: "green" });
+  acChecks.insertAcCheck(db, { ticketId, acId, selector: "s2", redFirstResult: "red" });
+  const deleted = acChecks.deleteByTicket(db, ticketId);
+  const remaining = acChecks.listByTicket(db, ticketId);
+  db.close();
+  expect(deleted).toBe(2);
+  expect(remaining).toEqual([]);
+});
