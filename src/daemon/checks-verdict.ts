@@ -15,10 +15,10 @@ interface VacuousFinding {
   reason: string;
 }
 
-/** The vacuous findings of the CURRENT round: classification signals of class `vacuous` whose
- *  acCheckId is a LIVE ac_check row (§3/§7 by-live-id — a re-author deletes the prior round's rows,
- *  so its stale vacuous signals point to dead ids and drop out). Distinct by AC. */
-function currentVacuousFindings(db: Database, ticketId: number): VacuousFinding[] {
+/** The re-author findings of the CURRENT round: classification signals of class `vacuous` OR `weak`
+ *  whose acCheckId is a LIVE ac_check row (§3/§7 by-live-id — a re-author deletes the prior round's
+ *  rows, so its stale findings point to dead ids and drop out). Distinct by AC. */
+function currentReauthorFindings(db: Database, ticketId: number): VacuousFinding[] {
   const liveIds = new Set(listAcChecks(db, ticketId).map((r) => r.id));
   const byAc = new Map<number, string>();
   for (const s of listSignals(db, ticketId)) {
@@ -29,14 +29,19 @@ function currentVacuousFindings(db: Database, ticketId: number): VacuousFinding[
       class?: string;
       reason?: string;
     };
-    if (d.class !== "vacuous" || d.acCheckId === undefined || !liveIds.has(d.acCheckId)) continue;
+    if (
+      (d.class !== "vacuous" && d.class !== "weak") ||
+      d.acCheckId === undefined ||
+      !liveIds.has(d.acCheckId)
+    )
+      continue;
     if (d.acId !== undefined) byAc.set(d.acId, d.reason ?? "");
   }
   return [...byAc.entries()].map(([acId, reason]) => ({ acId, reason }));
 }
 
-/** Signature keyed on (ac_ids, "vacuous") (§7): scoping makes a stuck AC produce a repeated,
- *  AC-keyed finding across re-authors even though the check text differs. */
+/** Signature keyed on ac_ids ALONE (reason-agnostic): a stuck AC repeats its signature whether
+ *  stuck-vacuous, stuck-weak, or oscillating → escalate trips (§5). */
 function vacuousSignature(findings: VacuousFinding[]): string {
   return `checks:${findings
     .map((f) => f.acId)
@@ -98,15 +103,16 @@ function checksLoopback(
   })();
 }
 
-/** M3 verdict (§2/§7): a `vacuous` green-on-HEAD check triggers an AC-scoped re-author loopback;
- *  a repeated (ac_ids,"vacuous") signature escalates. Ground-truth over self-report — reads the
- *  persisted classification signals, never an agent verdict. Mirrors `applyReviewVerdict`. */
+/** M3/M4 verdict (§2/§5/§7): a `vacuous` or `weak` green-on-HEAD check triggers an AC-scoped
+ *  re-author loopback; a repeated ac_ids signature (reason-agnostic — see `vacuousSignature`)
+ *  escalates. Ground-truth over self-report — reads the persisted classification signals, never
+ *  an agent verdict. Mirrors `applyReviewVerdict`. */
 export function applyChecksVerdict(
   db: Database,
   ticketId: number,
   _opts: { stepKey: string },
 ): ChecksVerdictResult {
-  const findings = currentVacuousFindings(db, ticketId);
+  const findings = currentReauthorFindings(db, ticketId);
   if (findings.length === 0) return { decision: "clean" };
   const signature = vacuousSignature(findings);
   if (isRepeatedChecksLoopback(db, ticketId, signature)) {

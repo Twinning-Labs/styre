@@ -20,6 +20,18 @@ function seedVacuous(db: ReturnType<typeof makeTestDb>["db"], ticketId: number, 
   return { acId, acCheckId: row.id };
 }
 
+function seedWeak(db: ReturnType<typeof makeTestDb>["db"], ticketId: number, seq: number) {
+  const acId = insertAc(db, { ticketId, seq, text: `ac ${seq}`, source: "checklist" }).id;
+  const row = insertAcCheck(db, { ticketId, acId, selector: `s${seq}`, redFirstResult: "green" });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-classification",
+    result: "fail",
+    detail: { acCheckId: row.id, acId, class: "weak", reason: "shallow assertion" },
+  });
+  return { acId, acCheckId: row.id };
+}
+
 test("no vacuous checks → clean", () => {
   const { db, ticketId } = makeTestDb();
   const acId = insertAc(db, { ticketId, seq: 1, text: "ac", source: "checklist" }).id;
@@ -57,6 +69,40 @@ test("repeated identical (ac_ids,vacuous) signature → escalate", () => {
     routeTo: "checks:classify",
     signature: `checks:${acId}`,
   });
+  const res = applyChecksVerdict(db, ticketId, { stepKey: "checks:classify" });
+  expect(res.decision).toBe("escalated");
+  expect(getTicket(db, ticketId)?.status).toBe("waiting");
+  db.close();
+});
+
+test("a weak-only AC triggers the re-author loopback", () => {
+  const { db, ticketId } = makeTestDb();
+  insertPending(db, { ticketId, stepKey: "checks:dispatch", stepType: "dispatch" });
+  insertPending(db, { ticketId, stepKey: "checks:classify", stepType: "dispatch" });
+  db.query("UPDATE workflow_step SET status = 'succeeded'").run();
+  seedWeak(db, ticketId, 1);
+
+  const res = applyChecksVerdict(db, ticketId, { stepKey: "checks:classify" });
+  expect(res.decision).toBe("loopback");
+  expect(listAcChecks(db, ticketId).length).toBe(0); // flagged AC's checks deleted
+  db.close();
+});
+
+test("an AC oscillating vacuous->weak still escalates (reason-agnostic signature)", () => {
+  const { db, ticketId } = makeTestDb();
+  // Current round: the same AC is now flagged 'weak' instead of 'vacuous'.
+  const { acId } = seedWeak(db, ticketId, 1);
+  // Prior checks-loopback was recorded while this AC was 'vacuous'. The signature format is
+  // reason-agnostic (ac_ids only), so it's identical to what the current 'weak' round computes.
+  appendEvent(db, {
+    ticketId,
+    kind: "loopback",
+    loop: "checks",
+    routeTo: "checks:classify",
+    signature: `checks:${acId}`,
+  });
+
+  // Same AC-id set -> same signature 'checks:<acId>' even though the reason differs -> escalate.
   const res = applyChecksVerdict(db, ticketId, { stepKey: "checks:classify" });
   expect(res.decision).toBe("escalated");
   expect(getTicket(db, ticketId)?.status).toBe("waiting");
