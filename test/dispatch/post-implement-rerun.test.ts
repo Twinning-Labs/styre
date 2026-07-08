@@ -185,3 +185,37 @@ test("a row with red_class=NULL AND disposition=NULL throws (loud NULL/NULL asse
   await expect(promise).rejects.toThrow(/neither red_class nor disposition/);
   db.close();
 });
+
+test("a gated (assertion) check with test_path=NULL fails CLOSED — never silently advances", async () => {
+  const { db, ticketId } = makeTestDb();
+  const ac = insertAc(db, { ticketId, seq: 1, text: "ac", source: "checklist" });
+  const check = insertAcCheck(db, {
+    ticketId,
+    acId: ac.id,
+    selector: "'tests/test_x.py::test_x'",
+    testPath: null, // e.g. a corrupted/lost row — there is nothing to re-run
+    redFirstResult: "red",
+  });
+  classifyAcCheck(db, { acCheckId: check.id, redClass: "assertion" });
+
+  const result = await rerunAcChecks({
+    db,
+    ticketId,
+    components: [PY_COMPONENT],
+    worktreePath: "/repo",
+    headSha: "deadbeef",
+    timeoutMs: 1000,
+    run: neverRun, // a NULL path can select nothing — the runner must never even be invoked
+  });
+
+  // Fails CLOSED: a gated check with no path to re-run is treated as still-red, never a silent pass.
+  expect(result.stillRed).toEqual([ac.id]);
+  expect(result.advisory).toEqual([]);
+  expect(result.ran[0]?.outcome).toBe("gated-red");
+
+  const signals = listSignals(db, ticketId).filter(
+    (s) => s.signal_type === "ac-check-post-implement",
+  );
+  db.close();
+  expect(signals[0]?.result).toBe("fail");
+});
