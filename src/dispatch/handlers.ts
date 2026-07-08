@@ -1140,6 +1140,12 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       });
     }
 
+    // M4 §8a: the component-suite verdict is DEMOTED to advisory — record the (possibly-fail)
+    // result for observability and RETURN normally; never throw on it. The AC-checks gate
+    // (verify:checks-gate) is now the only per-change hard gate. The realImpacted run loop + the
+    // A1 behavioral-no-test check above still COMPUTE `result`/`detail` as before — only the
+    // terminal throw is removed. `advisory: true` marks this signal so implementFeedback (and any
+    // other reader) knows it never gates and must not be fed back as a re-coding instruction.
     insertSignal(ctx.db, {
       ticketId: ctx.ticket.id,
       workUnitId: ctx.workUnitId,
@@ -1147,10 +1153,9 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       result,
       command: lastCommand,
       branchHeadSha: latestSha,
-      detail,
+      detail: { ...detail, advisory: true },
     });
 
-    if (result !== "pass") throw new Error(`verify:check ${checkType}: ${result}`);
     return { check: checkType, result };
   });
 

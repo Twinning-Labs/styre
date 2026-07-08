@@ -127,6 +127,24 @@ test("advisory ran-all-unowned (untouched-stack red) is excluded from re-coding 
   expect(fb).toBe(""); // the only signal is advisory → no corrective feedback
 });
 
+test("advisory verify:check suite failure (M4 demotion) is excluded from re-coding feedback", () => {
+  const { db, ticketId } = makeTestDb();
+  const u = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend" });
+  seedAttempt(db, ticketId, u.id, "sha1");
+  // A demoted per-unit suite verdict — advisory:true in detail, never gates.
+  insertSignal(db, {
+    ticketId,
+    workUnitId: u.id,
+    signalType: "test",
+    result: "fail",
+    branchHeadSha: "sha1",
+    detail: { ran: [{ component: "app", exitCode: 1, timedOut: false }], advisory: true },
+  });
+  const fb = implementFeedback(db, u.id);
+  db.close();
+  expect(fb).toBe(""); // the only signal is advisory → no corrective feedback
+});
+
 test("gateFeedback lists the still-red ACs + their check paths from the ac-check-gate signal", () => {
   const { db, ticketId } = makeTestDb();
   const ac = insertAc(db, {

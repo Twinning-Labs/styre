@@ -459,6 +459,39 @@ test("nextUnrunCheck: a check that passed at an OLD commit is unrun at the new c
   expect(check).toBe("test"); // stale pass does NOT satisfy the current commit
 });
 
+test("nextUnrunCheck: a FAIL at the current commit still satisfies the check (advisory ran-at-sha, M4 §8b)", () => {
+  const { db, ticketId } = makeTestDb();
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test", "build"],
+  });
+  setStatus(db, unit.id, "verifying");
+  const d = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0003",
+    seq: nextSeq(db, ticketId),
+    workUnitId: unit.id,
+  });
+  completeDispatch(db, d.id, { outcome: "clean-success", branchHeadSha: "cur" });
+  // A recorded advisory FAIL — not a pass — at the current commit.
+  insertSignal(db, {
+    ticketId,
+    workUnitId: unit.id,
+    signalType: "test",
+    result: "fail",
+    branchHeadSha: "cur",
+    detail: { advisory: true },
+  });
+  const u = getById(db, unit.id);
+  if (!u) throw new Error("no unit");
+  const check = nextUnrunCheck(db, u);
+  db.close();
+  // "test" ran (fail recorded) → satisfied; "build" never ran → next unrun check.
+  expect(check).toBe("build");
+});
+
 test("nextUnrunCheck: a PASS at the current commit satisfies the check", () => {
   const { db, ticketId } = makeTestDb();
   const unit = insertWorkUnit(db, {

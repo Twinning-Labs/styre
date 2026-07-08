@@ -123,6 +123,11 @@ export function applyFailurePolicy(
     return { decision: "escalated" };
   }
 
+  // M4 §8b: verify:check (per-unit) is demoted to advisory — a genuine suite verdict no longer
+  // throws, so this branch is now reached only on an INFRA crash / real precondition throw
+  // (empty-diff, no-components, behavioral-no-code, check-absent — see handlers.ts verify:check).
+  // The genuine-failure -> loopback path below is effectively dead for the demoted suite verdict
+  // but stays live for those precondition throws and for any other unit-scoped verify step.
   if (step.step_type === "verify" && step.work_unit_id !== null) {
     const workUnitId = step.work_unit_id;
     const signature = failureSignature(step);

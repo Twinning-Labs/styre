@@ -11,15 +11,19 @@ export function implementFeedback(db: Database, workUnitId: number): string {
   if (sha === null) {
     return "";
   }
-  const failures = listByUnit(db, workUnitId).filter(
-    (s) =>
-      s.branch_head_sha === sha &&
-      s.result !== "pass" &&
-      s.signal_type !== "scope_diff" &&
-      // advisory run-all-on-unowned sweeps surface UNTOUCHED stacks' pre-existing red — never feed
-      // them to the re-coding agent (it can't and shouldn't iterate on stacks this unit didn't touch).
-      s.signal_type !== "ran-all-unowned",
-  );
+  const failures = listByUnit(db, workUnitId).filter((s) => {
+    if (s.branch_head_sha !== sha || s.result === "pass") return false;
+    // advisory run-all-on-unowned sweeps surface UNTOUCHED stacks' pre-existing red — never feed
+    // them to the re-coding agent (it can't and shouldn't iterate on stacks this unit didn't touch).
+    if (s.signal_type === "scope_diff" || s.signal_type === "ran-all-unowned") return false;
+    // M4 §8b: verify:check's suite verdict is demoted to advisory (never gates) — a unit reset to
+    // pending for some OTHER reason (completeness, code review) must not be told to "fix" a suite
+    // result that was never a gating failure in the first place. Marked by handlers.ts verify:check.
+    const detail =
+      s.detail_json === null ? {} : (JSON.parse(s.detail_json) as Record<string, unknown>);
+    if (detail.advisory === true) return false;
+    return true;
+  });
   if (failures.length === 0) {
     return "";
   }

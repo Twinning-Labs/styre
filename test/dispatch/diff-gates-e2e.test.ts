@@ -23,7 +23,7 @@ function gitRepo(): string {
   return root;
 }
 
-test("behavioral unit converges after the add-a-test bounce-back", async () => {
+test("behavioral unit with no test file still verifies on the first attempt (A1 is advisory, M4 demotion)", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
@@ -36,11 +36,10 @@ test("behavioral unit converges after the add-a-test bounce-back", async () => {
     verifyCheckTypes: ["test"],
   });
 
-  let attempt = 0;
+  // Single coding attempt, writes real code but no test file — A1 (behavioral-no-test) would have
+  // thrown pre-M4; now it's an advisory fail and no bounce-back / second attempt ever happens.
   const runner = new FakeAgentRunner((input) => {
-    attempt += 1;
-    writeFileSync(join(input.cwd, `feature-${attempt}.ts`), `export const v = ${attempt};\n`);
-    if (attempt >= 2) writeFileSync(join(input.cwd, "feature.test.ts"), "test('v', () => {});\n");
+    writeFileSync(join(input.cwd, "feature.ts"), "export const v = 1;\n");
     return {
       completed: true,
       exitCode: 0,
@@ -71,8 +70,10 @@ test("behavioral unit converges after the add-a-test bounce-back", async () => {
   const finalUnit = getUnit(db, unit.id);
   db.close();
   expect(finalUnit?.status).toBe("verified");
-  expect(results.some((r) => r.signal_type === "test" && r.result === "fail")).toBe(true); // the A1 failure kept
-  expect(results.some((r) => r.signal_type === "test" && r.result === "pass")).toBe(true);
+  const testSig = results.find((r) => r.signal_type === "test");
+  expect(testSig?.result).toBe("fail"); // A1 behavioral-no-test — advisory, recorded but never gates
+  expect(JSON.parse(testSig?.detail_json ?? "{}").reason).toBe("behavioral-no-test");
+  expect(JSON.parse(testSig?.detail_json ?? "{}").advisory).toBe(true);
 });
 
 test("integration fails then a reconcile unit makes it pass", async () => {
