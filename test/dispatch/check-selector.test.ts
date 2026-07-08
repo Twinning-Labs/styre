@@ -126,3 +126,127 @@ describe("buildCheckSelector", () => {
     });
   });
 });
+
+import { interpretRunOutput, signalResultForCoarse } from "../../src/dispatch/check-selector.ts";
+
+const run = (
+  o: Partial<{ exitCode: number | null; stdout: string; stderr: string; timedOut: boolean }>,
+) => ({
+  exitCode: 0,
+  stdout: "",
+  stderr: "",
+  timedOut: false,
+  ...o,
+});
+
+describe("interpretRunOutput", () => {
+  test("a timeout or a failure to launch is always error (couldn't attempt)", () => {
+    expect(interpretRunOutput("pytest", run({ timedOut: true, exitCode: null }))).toBe("error");
+    expect(interpretRunOutput("go", run({ exitCode: null }))).toBe("error");
+    expect(
+      interpretRunOutput("jest", run({ exitCode: 127, stderr: "jest: command not found" })),
+    ).toBe("error");
+  });
+
+  test("pytest: 0=green, 1=red (assertion), 2=red (collection/import), 5=selected-none", () => {
+    expect(interpretRunOutput("pytest", run({ exitCode: 0 }))).toBe("green");
+    expect(interpretRunOutput("pytest", run({ exitCode: 1 }))).toBe("red");
+    expect(
+      interpretRunOutput("pytest", run({ exitCode: 2, stdout: "errors during collection" })),
+    ).toBe("red");
+    expect(interpretRunOutput("pytest", run({ exitCode: 5 }))).toBe("selected-none");
+  });
+
+  test("jest/vitest: green, red on failure/import error, selected-none on no-match", () => {
+    expect(interpretRunOutput("jest", run({ exitCode: 0 }))).toBe("green");
+    expect(
+      interpretRunOutput(
+        "jest",
+        run({ exitCode: 0, stderr: "No tests found, exiting with code 0" }),
+      ),
+    ).toBe("selected-none");
+    // file loaded but the anchored -t matched zero tests (nested describe) → exit 0, "0 total"
+    expect(interpretRunOutput("jest", run({ exitCode: 0, stdout: "Tests:       0 total" }))).toBe(
+      "selected-none",
+    );
+    expect(
+      interpretRunOutput("jest", run({ exitCode: 1, stderr: "Cannot find module '../prefs'" })),
+    ).toBe("red");
+    expect(interpretRunOutput("jest", run({ exitCode: 1, stdout: "1 failed" }))).toBe("red");
+    expect(interpretRunOutput("vitest", run({ exitCode: 1, stderr: "No test files found" }))).toBe(
+      "selected-none",
+    );
+  });
+
+  test("go: green, red on FAIL or build error, selected-none on no tests to run", () => {
+    expect(interpretRunOutput("go", run({ exitCode: 0, stdout: "ok  pkg/api  0.01s" }))).toBe(
+      "green",
+    );
+    expect(
+      interpretRunOutput("go", run({ exitCode: 0, stdout: "testing: warning: no tests to run" })),
+    ).toBe("selected-none");
+    expect(interpretRunOutput("go", run({ exitCode: 1, stdout: "--- FAIL: TestOK" }))).toBe("red");
+    expect(interpretRunOutput("go", run({ exitCode: 2, stderr: "undefined: Prefs" }))).toBe("red");
+  });
+
+  test("cargo: green, red on failure/compile error, selected-none on 0 tests", () => {
+    expect(
+      interpretRunOutput("cargo", run({ exitCode: 0, stdout: "test result: ok. 1 passed" })),
+    ).toBe("green");
+    expect(interpretRunOutput("cargo", run({ exitCode: 0, stdout: "running 0 tests" }))).toBe(
+      "selected-none",
+    );
+    expect(interpretRunOutput("cargo", run({ exitCode: 101, stdout: "test result: FAILED" }))).toBe(
+      "red",
+    );
+  });
+
+  test("junit maven/gradle: selected-none on no-match, red on failure/compile", () => {
+    expect(interpretRunOutput("junit-maven", run({ exitCode: 0 }))).toBe("green");
+    expect(
+      interpretRunOutput("junit-maven", run({ exitCode: 1, stdout: "No tests were executed!" })),
+    ).toBe("selected-none");
+    expect(
+      interpretRunOutput("junit-maven", run({ exitCode: 1, stdout: "COMPILATION ERROR" })),
+    ).toBe("red");
+    expect(
+      interpretRunOutput(
+        "junit-gradle",
+        run({ exitCode: 1, stderr: "No tests found for given includes" }),
+      ),
+    ).toBe("selected-none");
+    expect(interpretRunOutput("junit-gradle", run({ exitCode: 1, stdout: "Tests FAILED" }))).toBe(
+      "red",
+    );
+  });
+
+  test("rspec/minitest/phpunit: green, selected-none on 0 examples, red otherwise", () => {
+    expect(interpretRunOutput("rspec", run({ exitCode: 0, stdout: "1 example, 0 failures" }))).toBe(
+      "green",
+    );
+    expect(
+      interpretRunOutput("rspec", run({ exitCode: 0, stdout: "0 examples, 0 failures" })),
+    ).toBe("selected-none");
+    expect(
+      interpretRunOutput("rspec", run({ exitCode: 1, stdout: "10 examples, 1 failure" })),
+    ).toBe("red"); // \b: not selected-none
+    expect(interpretRunOutput("rspec", run({ exitCode: 1, stdout: "1 example, 1 failure" }))).toBe(
+      "red",
+    );
+    expect(
+      interpretRunOutput("minitest", run({ exitCode: 0, stdout: "0 runs, 0 assertions" })),
+    ).toBe("selected-none");
+    expect(interpretRunOutput("phpunit", run({ exitCode: 0, stdout: "No tests executed!" }))).toBe(
+      "selected-none",
+    );
+    expect(interpretRunOutput("phpunit", run({ exitCode: 2, stdout: "Error" }))).toBe("red");
+  });
+});
+
+describe("signalResultForCoarse", () => {
+  test("maps the coarse bucket to the ground_truth_signal vocabulary (§9)", () => {
+    expect(signalResultForCoarse("green")).toBe("pass");
+    expect(signalResultForCoarse("red")).toBe("fail");
+    expect(signalResultForCoarse("error")).toBe("error");
+  });
+});
