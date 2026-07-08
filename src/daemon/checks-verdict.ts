@@ -5,12 +5,18 @@ import {
   supersedeByAc,
 } from "../db/repos/ac-check.ts";
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
+import { classificationForAcCheck } from "../db/repos/ground-truth-signal.ts";
 import { insertPending as insertSignal } from "../db/repos/signal.ts";
 import { setTicketStatus } from "../db/repos/ticket.ts";
 import { getByKey, resetToPending } from "../db/repos/workflow-step.ts";
 
 export interface ChecksVerdictResult {
   decision: "clean" | "loopback" | "escalated";
+}
+
+interface VacuousFinding {
+  acId: number;
+  reason: string;
 }
 
 /** Escalate when an AC has been re-authored this many ROUNDS (`reauthorRoundsForAc`, i.e. distinct
@@ -29,6 +35,23 @@ function reauthorFindings(db: Database, ticketId: number): number[] {
   return [...new Set(listUnresolvedByTicket(db, ticketId).map((r) => r.ac_id))].sort(
     (a, b) => a - b,
   );
+}
+
+/** DISPLAY-only companion to `reauthorFindings` (Task 3e): the re-author REASON for each flagged AC,
+ *  sourced from the `ac-check-classification` ground_truth_signal keyed by the check's LIVE row id
+ *  (`classificationForAcCheck` — never "the latest signal for the AC", since the log is append-only and
+ *  ids are never reused). This is audit/prompt-text sourcing, NOT control flow — which ACs are flagged
+ *  and the escalate counter both come from `reauthorFindings`/`ac_check` columns, unchanged. An AC that
+ *  owns >1 active unresolved check keeps its last row's reason (mirrors the pre-M4 by-AC dedup). Feeds
+ *  `checksFeedback`'s "prior check was vacuous — <reason>" text at the re-author `checks:dispatch`. */
+function reauthorFindingsWithReasons(db: Database, ticketId: number): VacuousFinding[] {
+  const byAc = new Map<number, string>();
+  for (const row of listUnresolvedByTicket(db, ticketId)) {
+    byAc.set(row.ac_id, classificationForAcCheck(db, row.id)?.detail.reason ?? "");
+  }
+  return [...byAc.entries()]
+    .map(([acId, reason]) => ({ acId, reason }))
+    .sort((a, b) => a.acId - b.acId);
 }
 
 /** The flagged AC ids of the latest checks re-author event (or null). `checks:dispatch` reads this to
@@ -55,6 +78,9 @@ export function applyChecksVerdict(
 ): ChecksVerdictResult {
   const flagged = reauthorFindings(db, ticketId);
   if (flagged.length === 0) return { decision: "clean" };
+  // Read BEFORE the transaction supersedes the flagged rows — findingsWithReasons keys off the
+  // still-active unresolved rows' live ids (display-only; see its docstring).
+  const findings = reauthorFindingsWithReasons(db, ticketId);
   let escalated = false;
   db.transaction(() => {
     // Re-author = supersede the flagged active generation (never delete). Count ROUNDS AFTER
@@ -91,7 +117,7 @@ export function applyChecksVerdict(
       loop: "checks",
       routeTo: "checks:classify",
       signature: `checks:${flagged.join(",")}`, // audit label only (no longer read for repeat-detect)
-      payload: { acIds: flagged },
+      payload: { acIds: flagged, findings },
     });
   })();
   return escalated ? { decision: "escalated" } : { decision: "loopback" };

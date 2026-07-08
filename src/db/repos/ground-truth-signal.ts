@@ -124,3 +124,33 @@ export function signalForAcCheck(
   if (!row) return null;
   return { row, detail: JSON.parse(row.detail_json ?? "{}") as RedFirstDetail };
 }
+
+/** The parsed shape `checks:classify` (`src/dispatch/handlers.ts`) persists in an
+ *  `ac-check-classification` signal's detail. */
+export interface ClassificationDetail {
+  acCheckId: number;
+  acId: number;
+  class: string;
+  reason: string;
+}
+
+/** Read the classification signal for a check by its LIVE `ac_check.id` (§3 read contract, mirrors
+ *  `signalForAcCheck`). DISPLAY-sourcing only — the re-author prompt's "why the prior check was
+ *  flagged" text (Task 3e). Control flow (which ACs to re-author, the escalate counter) never reads
+ *  this; it reads `ac_check.red_class`/`disposition` directly (the M4 anti-pattern fix). Returns the
+ *  newest matching signal + its parsed detail, or null. */
+export function classificationForAcCheck(
+  db: Database,
+  acCheckId: number,
+): { row: GroundTruthSignalRow; detail: ClassificationDetail } | null {
+  const row = db
+    .query<GroundTruthSignalRow, [number]>(
+      `SELECT ${COLS} FROM ground_truth_signal
+       WHERE signal_type = 'ac-check-classification'
+         AND json_extract(detail_json, '$.acCheckId') = ?
+       ORDER BY id DESC LIMIT 1`,
+    )
+    .get(acCheckId);
+  if (!row) return null;
+  return { row, detail: JSON.parse(row.detail_json ?? "{}") as ClassificationDetail };
+}
