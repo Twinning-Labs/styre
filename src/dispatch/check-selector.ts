@@ -88,6 +88,13 @@ function classFromFile(testFile: string): string {
   return basename(testFile).replace(/\.[^.]+$/, "");
 }
 
+/** Wrap a string as one shell-safe single-quoted argument (POSIX): `'` → `'\''`. runArgs are run
+ *  via `sh -c`, and free-form test names (jest/vitest/rspec titles, pytest parametrized ids) can
+ *  contain quotes/spaces that would otherwise break the command. */
+function shq(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
 /** Construct the framework-native selection args that run ONLY the one authored check (§5.2). The
  *  returned `runArgs` are appended to the framework binary by M2b; `precision` records the scoping
  *  tier (precise > anchored > package > file). For file-addressable frameworks the styre-authored
@@ -100,11 +107,17 @@ export function buildCheckSelector(
   const { testFile, testName } = p;
   switch (fw) {
     case "pytest":
-      return { runArgs: `${testFile}::${testName}`, precision: "precise" };
+      return { runArgs: shq(`${testFile}::${testName}`), precision: "precise" };
     case "jest":
-      return { runArgs: `${testFile} -t '^${escapeRegex(testName)}$'`, precision: "anchored" };
+      return {
+        runArgs: `${testFile} -t ${shq(`^${escapeRegex(testName)}$`)}`,
+        precision: "anchored",
+      };
     case "vitest":
-      return { runArgs: `run ${testFile} -t '^${escapeRegex(testName)}$'`, precision: "anchored" };
+      return {
+        runArgs: `run ${testFile} -t ${shq(`^${escapeRegex(testName)}$`)}`,
+        precision: "anchored",
+      };
     case "go":
       return {
         runArgs: `-run '^${escapeRegex(testName)}$' ./${dirname(testFile)}`,
@@ -129,7 +142,7 @@ export function buildCheckSelector(
       };
     case "rspec":
       // rspec -e is a substring match; the styre-authored file is the real scope (safe by identity).
-      return { runArgs: `${testFile} -e '${testName}'`, precision: "file" };
+      return { runArgs: `${testFile} -e ${shq(testName)}`, precision: "file" };
     case "minitest":
       return { runArgs: `${testFile} -n '/^${escapeRegex(testName)}$/'`, precision: "file" };
     case "phpunit":
@@ -172,6 +185,7 @@ export function interpretRunOutput(fw: CheckFramework, run: RunOutcome): CoarseO
       return "error"; // 3=internal, 4=usage, etc.
     case "jest":
     case "vitest":
+      // TODO(M3): confirm vitest loaded-but-no-match phrasing
       // "no tests found" = no file matched. "tests: 0 total" / "no tests ran" = the file loaded but
       // the anchored -t name matched ZERO tests (jest matches the CONCATENATED describe+it title, so
       // `^name$` can miss a nested test) — exits 0 with no "not found" phrase. Both are selects-none,

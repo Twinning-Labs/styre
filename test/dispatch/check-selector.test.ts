@@ -47,11 +47,11 @@ describe("frameworkFor", () => {
 import { buildCheckSelector } from "../../src/dispatch/check-selector.ts";
 
 describe("buildCheckSelector", () => {
-  test("pytest → an exact node id (precise)", () => {
+  test("pytest → an exact node id (precise), shell-quoted", () => {
     expect(
       buildCheckSelector("pytest", { testFile: "tests/test_api.py", testName: "test_ok" }),
     ).toEqual({
-      runArgs: "tests/test_api.py::test_ok",
+      runArgs: "'tests/test_api.py::test_ok'",
       precision: "precise",
     });
   });
@@ -124,6 +124,30 @@ describe("buildCheckSelector", () => {
       runArgs: "--filter '/::testOk$/' tests/ApiTest.php",
       precision: "file",
     });
+  });
+
+  test("free-form test names with an apostrophe are shell-safely escaped (sh -c breakage otherwise)", () => {
+    expect(
+      buildCheckSelector("rspec", {
+        testFile: "spec/a_spec.rb",
+        testName: "works when it's valid",
+      }),
+    ).toEqual({
+      runArgs: "spec/a_spec.rb -e 'works when it'\\''s valid'",
+      precision: "file",
+    });
+    expect(buildCheckSelector("jest", { testFile: "a.test.ts", testName: "it's ok" }).runArgs).toBe(
+      "a.test.ts -t '^it'\\''s ok$'",
+    );
+    expect(
+      buildCheckSelector("vitest", { testFile: "a.test.ts", testName: "it's ok" }).runArgs,
+    ).toBe("run a.test.ts -t '^it'\\''s ok$'");
+    expect(
+      buildCheckSelector("pytest", {
+        testFile: "tests/test_api.py",
+        testName: "test_it's_ok",
+      }).runArgs,
+    ).toBe("'tests/test_api.py::test_it'\\''s_ok'");
   });
 });
 
