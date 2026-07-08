@@ -10,3 +10,5 @@ Project stack notes: {{stack}}
 {{feedback}}
 
 {{authored_checks}}
+
+{{gate_feedback}}

@@ -100,6 +100,7 @@ export function implementVars(
   profile: Profile,
   feedback = "",
   authoredChecks: { test_path: string | null }[] = [],
+  gateFeedbackText = "",
 ): Record<string, string> {
   const files: string[] = unit.files_to_touch ? JSON.parse(unit.files_to_touch) : [];
   const impacted = impactedComponents(profile.components, files);
@@ -122,6 +123,7 @@ export function implementVars(
     stack: "",
     feedback,
     authored_checks,
+    gate_feedback: gateFeedbackText,
     ...profile.promptVars,
   };
 }

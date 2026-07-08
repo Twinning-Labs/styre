@@ -67,7 +67,7 @@ import {
 import { deriveAndPersistAcs } from "./derive-acs.ts";
 import { designFeedback } from "./design-feedback.ts";
 import { ExtractOutputSchema, validateCdotImpact, validateExtraction } from "./extract-schema.ts";
-import { implementFeedback } from "./feedback.ts";
+import { gateFeedback, implementFeedback } from "./feedback.ts";
 import { hasTicketPlan } from "./plan-frontmatter.ts";
 import { rerunAcChecks } from "./post-implement-rerun.ts";
 import type { Profile } from "./profile.ts";
@@ -688,6 +688,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           deps.profile,
           implementFeedback(ctx.db, unit.id),
           listAcChecks(ctx.db, ctx.ticket.id),
+          gateFeedback(ctx.db, ctx.ticket.id),
         ),
         loopback: isUnitLoopback(ctx, unit.seq),
         runnerCommands,

@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
+import { insertAcCheck } from "../../src/db/repos/ac-check.ts";
+import { insertAc } from "../../src/db/repos/acceptance-criterion.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
-import { implementFeedback } from "../../src/dispatch/feedback.ts";
+import { gateFeedback, implementFeedback } from "../../src/dispatch/feedback.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 function seedAttempt(
@@ -123,4 +125,51 @@ test("advisory ran-all-unowned (untouched-stack red) is excluded from re-coding 
   const fb = implementFeedback(db, u.id);
   db.close();
   expect(fb).toBe(""); // the only signal is advisory → no corrective feedback
+});
+
+test("gateFeedback lists the still-red ACs + their check paths from the ac-check-gate signal", () => {
+  const { db, ticketId } = makeTestDb();
+  const ac = insertAc(db, {
+    ticketId,
+    seq: 1,
+    text: "returns the created record",
+    source: "checklist",
+  });
+  insertAcCheck(db, {
+    ticketId,
+    acId: ac.id,
+    selector: "api/tests/styre_checks/ENG-1_ac7_test.py::test_ac",
+    testPath: "api/tests/styre_checks/ENG-1_ac7_test.py",
+  });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-gate",
+    result: "fail",
+    detail: { stillRed: [ac.id], tampered: [], advisory: [] },
+  });
+  const fb = gateFeedback(db, ticketId);
+  db.close();
+  expect(fb).toContain(`AC ${ac.id}`);
+  expect(fb).toContain("ENG-1_ac7_test.py");
+  expect(fb.toLowerCase()).toContain("do not edit");
+});
+
+test("gateFeedback is empty when the latest gate passed (stillRed=[])", () => {
+  const { db, ticketId } = makeTestDb();
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-gate",
+    result: "pass",
+    detail: { stillRed: [], tampered: [], advisory: [] },
+  });
+  const fb = gateFeedback(db, ticketId);
+  db.close();
+  expect(fb).toBe("");
+});
+
+test("gateFeedback is empty when no gate signal exists", () => {
+  const { db, ticketId } = makeTestDb();
+  const fb = gateFeedback(db, ticketId);
+  db.close();
+  expect(fb).toBe("");
 });
