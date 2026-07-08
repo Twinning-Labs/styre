@@ -51,8 +51,8 @@ CREATE TABLE schema_meta (
     note        TEXT
 );
 INSERT INTO schema_meta (version, applied_at, note)
-VALUES (4, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-        'v4: acceptance_criterion + ac_check (change-scoped verify — AC identity + authored-check registry)');
+VALUES (5, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+        'v5: ac_check.disposition (M3 green-on-HEAD per-check) + M3 owns red_class/disposition storage, M6 projects');
 
 -- ============================================================================
 -- §A  PROJECT + TICKET   (replaces issue-state.json + stage:* / pipeline:* labels)
@@ -398,7 +398,8 @@ CREATE INDEX idx_finding_open ON review_finding (ticket_id, status, blocks_ship)
 -- acceptance_criterion — one concern per row, derived deterministically from the
 -- ticket description (parseAcChecklist): a GFM task-list item, else the whole
 -- description as a single AC. `source` records which. (M1 writes id/seq/text/source;
--- disposition columns for assessed-satisfied / not-expressible are added at M6.)
+-- the per-check disposition lives on ac_check (M3 writes it); the AC-level
+-- assessed-satisfied is a rollup M6 projects, so no disposition column lives here.)
 CREATE TABLE acceptance_criterion (
     id          INTEGER PRIMARY KEY,
     ticket_id   INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
@@ -414,10 +415,10 @@ CREATE INDEX idx_ac_ticket ON acceptance_criterion (ticket_id, seq);
 -- ac_check — the authored-check REGISTRY: one row per native test the plan-blind
 -- checks:dispatch step (M2) writes for an AC. `selector` is the in-suite selection
 -- (e.g. a pytest node-id / -k expression) run within the suite's setup context.
--- `red_first_result` is the COARSE RED-first outcome on clean HEAD (M2 fills);
--- `red_class` is the graded taxonomy assertion/absence/environmental (M3 fills).
--- Both are NULL until their milestone populates them. Per-run verdicts at each sha
--- go to ground_truth_signal, not here.
+-- `red_class` is the graded taxonomy assertion/absence/environmental (M3 fills, write-once);
+-- `disposition` is the green-on-HEAD per-check outcome satisfied/not-expressible (M3 fills).
+-- Both are NULL until M3 populates them; M6 projects the AC-level rollup. Per-run verdicts at
+-- each sha go to ground_truth_signal, not here.
 CREATE TABLE ac_check (
     id               INTEGER PRIMARY KEY,
     ticket_id        INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
@@ -426,6 +427,7 @@ CREATE TABLE ac_check (
     test_path        TEXT,                           -- authored test file, repo-relative
     red_first_result TEXT CHECK (red_first_result IS NULL OR red_first_result IN ('red','green','error')),  -- M2 coarse
     red_class        TEXT CHECK (red_class IS NULL OR red_class IN ('assertion','absence','environmental')), -- M3 graded
+    disposition      TEXT CHECK (disposition IS NULL OR disposition IN ('satisfied','not-expressible')),      -- M3 green-on-HEAD per-check
     created_at       TEXT    NOT NULL,
     updated_at       TEXT    NOT NULL
 );
