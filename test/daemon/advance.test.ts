@@ -94,6 +94,7 @@ test("an advance descriptor sets the stage and writes a transition event", async
   });
   registry.register("provision", () => ({}));
   registry.register("checks:dispatch", () => ({}));
+  registry.register("checks:classify", () => ({}));
   registry.register("implement:dispatch", () => ({}));
   // run design:dispatch
   await advanceOneStep(db, ticketId, registry);
@@ -101,11 +102,12 @@ test("an advance descriptor sets the stage and writes a transition event", async
   await advanceOneStep(db, ticketId, registry);
   // mark the track fast so design advances rather than asking for review
   setTicketTrack(db, ticketId, "fast");
-  // provision and checks:dispatch must actually RUN (mark-succeeded) — a registered-but-unrun
-  // provision would make the next advanceOneStep call return stepped/provision, not the
-  // implement step below.
+  // provision, checks:dispatch, and checks:classify must actually RUN (mark-succeeded) — a
+  // registered-but-unrun step would make the next advanceOneStep call return stepped/<that step>,
+  // not the implement step below.
   await advanceOneStep(db, ticketId, registry); // provision
   await advanceOneStep(db, ticketId, registry); // checks:dispatch
+  await advanceOneStep(db, ticketId, registry); // checks:classify
   // next advance: collapse design→implement, then run implement:wu1:dispatch
   const outcome = await advanceOneStep(db, ticketId, registry);
   const ticket = getTicket(db, ticketId);
