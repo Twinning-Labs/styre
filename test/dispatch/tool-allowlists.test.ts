@@ -78,6 +78,14 @@ test("checks:dispatch is authoring-only — Read/Grep/Glob/Write/Edit and NO Bas
   expect(tools).not.toContain("Bash");
 });
 
+test("checks:classify is read-only — Read/Grep/Glob and NO Write/Edit/Bash", () => {
+  const tools = allowlistFor("checks:classify");
+  expect(tools).toEqual(["Read", "Grep", "Glob"]);
+  expect(tools).not.toContain("Write");
+  expect(tools).not.toContain("Edit");
+  expect(tools).not.toContain("Bash");
+});
+
 test("an unknown handlerKey throws", () => {
   expect(() => allowlistFor("verify:integration")).toThrow();
 });
