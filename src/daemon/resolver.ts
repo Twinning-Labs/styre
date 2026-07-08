@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { listActiveByTicket as listAcChecks } from "../db/repos/ac-check.ts";
 import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";
 import * as gts from "../db/repos/ground-truth-signal.ts";
 import { hasDelivered } from "../db/repos/signal.ts";
@@ -135,6 +136,20 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
       }
       if (allUnitsVerified(db, ticketId)) {
         const branchSha = getLatestForTicket(db, ticketId)?.branch_head_sha ?? null;
+        const gateHasChecks = listAcChecks(db, ticketId).length > 0; // active checks only
+        if (gateHasChecks) {
+          const gatePassedShas = gts.passingShasFor(db, {
+            ticketId,
+            workUnitId: null,
+            signalType: "ac-check-gate",
+          });
+          if (branchSha === null || !gatePassedShas.includes(branchSha)) {
+            if (!done(db, ticketId, "provision")) {
+              return step("provision", "provision", "provision", null);
+            }
+            return step("verify:checks-gate", "verify", "verify:checks-gate", null);
+          }
+        }
         const integrationPassedShas = gts.passingShasFor(db, {
           ticketId,
           workUnitId: null,

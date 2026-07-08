@@ -40,6 +40,7 @@ import {
 import { pythonImportName } from "../setup/lang/python.ts";
 import { runCommand } from "../util/run-command.ts";
 import { type AdjClass, ChecksClassifyOutputSchema } from "./adjudicate-schema.ts";
+import { checkIntegrityViolations } from "./check-integrity.ts";
 import {
   type CheckFramework,
   type CoarseResult,
@@ -68,6 +69,7 @@ import { designFeedback } from "./design-feedback.ts";
 import { ExtractOutputSchema, validateCdotImpact, validateExtraction } from "./extract-schema.ts";
 import { implementFeedback } from "./feedback.ts";
 import { hasTicketPlan } from "./plan-frontmatter.ts";
+import { rerunAcChecks } from "./post-implement-rerun.ts";
 import type { Profile } from "./profile.ts";
 import {
   type AdjudicateItem,
@@ -1205,6 +1207,49 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     });
     if (result !== "pass") throw new Error(`verify:integration: ${result}`);
     return { integration: result };
+  });
+
+  registry.register("verify:checks-gate", async (ctx: HandlerContext) => {
+    const checks = listAcChecks(ctx.db, ctx.ticket.id);
+    if (checks.length === 0) return { gated: 0, stillRed: 0 }; // no AC-checks → nothing to gate
+    const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
+    ensureWorktree(repoPath, branch, worktreePath);
+    const headSha = getLatestForTicket(ctx.db, ctx.ticket.id)?.branch_head_sha;
+    if (!headSha) throw new Error("verify:checks-gate: no branch head sha");
+
+    // §2b integrity FIRST — a tampered check is untrustworthy at re-run.
+    const violations = checkIntegrityViolations(ctx.db, ctx.ticket.id, worktreePath, headSha);
+    for (const v of violations) {
+      insertSignal(ctx.db, {
+        ticketId: ctx.ticket.id,
+        signalType: "ac-check-integrity",
+        result: "fail",
+        branchHeadSha: headSha,
+        detail: v,
+      });
+    }
+    // §4 re-run in the implemented env (throws loud on a NULL/NULL row).
+    const rerun = await rerunAcChecks({
+      db: ctx.db,
+      ticketId: ctx.ticket.id,
+      components: deps.profile.components,
+      worktreePath,
+      headSha,
+      timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
+      run: deps.runCheckCommand,
+    });
+    // Gate blocks on the union of tampered ACs + not-flipped gated ACs.
+    const stillRed = [...new Set([...violations.map((v) => v.acId), ...rerun.stillRed])].sort(
+      (a, b) => a - b,
+    );
+    insertSignal(ctx.db, {
+      ticketId: ctx.ticket.id,
+      signalType: "ac-check-gate",
+      result: stillRed.length === 0 ? "pass" : "fail",
+      branchHeadSha: headSha,
+      detail: { stillRed, tampered: violations.map((v) => v.acId), advisory: rerun.advisory },
+    });
+    return { gated: checks.length, stillRed: stillRed.length };
   });
 
   registry.register("review", async (ctx: HandlerContext) => {

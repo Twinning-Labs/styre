@@ -296,6 +296,29 @@ test("a provision failure escalates immediately and never loops back (even under
   expect(afterUnit?.status).toBe("verifying"); // never bounced to pending
 });
 
+test("a failed verify:checks-gate step escalates cleanly (never an integration-reconcile unit/event)", () => {
+  const { db, ticketId } = makeTestDb();
+  const step = failedStep(db, ticketId, {
+    stepKey: "verify:checks-gate",
+    stepType: "verify",
+    attempts: 1,
+  });
+  const result = applyFailurePolicy(db, ticketId, step);
+  const ticket = getTicket(db, ticketId);
+  const pending = listPending(db, ticketId);
+  const escalations = listEvents(db, ticketId).filter((e) => e.kind === "escalated");
+  const loopbacks = listEvents(db, ticketId).filter((e) => e.kind === "loopback");
+  const reconcile = listByTicket(db, ticketId).find((u) => u.kind === "reconcile");
+  db.close();
+  expect(result.decision).toBe("escalated");
+  if (!ticket) throw new Error("ticket missing");
+  expect(ticket.status).toBe("waiting");
+  expect(pending.some((s) => s.signal_type === "human_resume")).toBe(true);
+  expect(escalations.length).toBe(1);
+  expect(loopbacks.length).toBe(0); // never integration-reconcile
+  expect(reconcile).toBeUndefined();
+});
+
 test("completeness under-delivery loops the unit back to implement", () => {
   const { db, ticketId } = makeTestDb();
   setTicketStage(db, ticketId, "implement");

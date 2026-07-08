@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import { nextActionableUnit, nextStepKey, nextUnrunCheck } from "../../src/daemon/resolver.ts";
+import { insertAcCheck } from "../../src/db/repos/ac-check.ts";
+import { insertAc } from "../../src/db/repos/acceptance-criterion.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { insertPending, markDelivered } from "../../src/db/repos/signal.ts";
@@ -218,6 +220,37 @@ test("implement: all units verified + no docs → verify:integration then advanc
   const afterIntegration = nextStepKey(db, ticketId);
   db.close();
   expect(afterIntegration).toEqual({ kind: "advance", from: "implement", to: "review" });
+});
+
+test("implement: all units verified + an active ac_check + no gate pass at HEAD → verify:checks-gate (after provision)", async () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verified",
+  });
+  const ac = insertAc(db, { ticketId, seq: 1, text: "does the thing", source: "checklist" });
+  insertAcCheck(db, {
+    ticketId,
+    acId: ac.id,
+    selector: "tests/test_x.py::test_thing",
+    testPath: "tests/test_x.py",
+  });
+  // Provision gates the gate step too (mirrors the integration gate's provision hoist).
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "provision" });
+  await succeed(db, ticketId, "provision");
+  const d = nextStepKey(db, ticketId);
+  db.close();
+  expect(d).toEqual({
+    kind: "step",
+    stepKey: "verify:checks-gate",
+    stepType: "verify",
+    handlerKey: "verify:checks-gate",
+    workUnitId: null,
+  });
 });
 
 test("implement: needs_docs routes through docs:revise before advancing", () => {

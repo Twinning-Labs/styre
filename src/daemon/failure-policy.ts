@@ -101,6 +101,28 @@ export function applyFailurePolicy(
     return { decision: "escalated" };
   }
 
+  // A throwing verify:checks-gate is an infra/invariant fault (missing branch sha, git fault, or a
+  // NULL/NULL unresolved check), NOT a still-red verdict — that path SUCCEEDS and routes via
+  // applyAcCheckGateVerdict (advance.ts onSucceed). Escalate cleanly; never spin up an
+  // integration-reconcile unit for it (review FIX 2).
+  if (step.step_key === "verify:checks-gate") {
+    db.transaction(() => {
+      setTicketStatus(db, ticketId, "waiting");
+      insertSignal(db, {
+        ticketId,
+        signalType: "human_resume",
+        reason: `step 'verify:checks-gate' failed: ${failureSignature(step)}`,
+      });
+      appendEvent(db, {
+        ticketId,
+        kind: "escalated",
+        reason: "verify:checks-gate failed (infra/invariant fault)",
+        signature: failureSignature(step),
+      });
+    })();
+    return { decision: "escalated" };
+  }
+
   if (step.step_type === "verify" && step.work_unit_id !== null) {
     const workUnitId = step.work_unit_id;
     const signature = failureSignature(step);
