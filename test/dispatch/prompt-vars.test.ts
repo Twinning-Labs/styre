@@ -3,11 +3,13 @@ import type { WorkUnitRow } from "../../src/db/repos/work-unit.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import type { Component } from "../../src/dispatch/profile.ts";
 import {
+  CHECKS_TEMPLATE,
   DESIGN_REVIEW_TEMPLATE,
   DESIGN_TEMPLATE,
   EXTRACT_TEMPLATE,
   IMPLEMENT_TEMPLATE,
   REVIEW_TEMPLATE,
+  checksVars,
   designReviewVars,
   designVars,
   extractVars,
@@ -191,4 +193,25 @@ test("designVars fills review_feedback (empty default renders cleanly)", () => {
     designVars(ticket, profile, "PRIOR REVIEW: fix the regex"),
   );
   expect(r.ok && r.prompt.includes("PRIOR REVIEW: fix the regex")).toBe(true);
+});
+
+test("checksVars fills every placeholder in the checks template (no CL-PROFILE miss)", () => {
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: "/tmp/r",
+    components: [
+      { name: "api", kind: "python", paths: ["api/**"], commands: { test: "pytest -q" } },
+    ],
+  });
+  const vars = checksVars({ ident: "ENG-1", title: "T" }, profile, [
+    { id: 7, text: "returns 200 on GET /health" },
+    { id: 8, text: "rejects an unauthenticated request" },
+  ]);
+  const rendered = renderPrompt(CHECKS_TEMPLATE, vars);
+  expect(rendered.ok).toBe(true);
+  if (rendered.ok) {
+    expect(rendered.prompt).toContain("ac_id=7");
+    expect(rendered.prompt).toContain("returns 200 on GET /health");
+    expect(rendered.prompt).toContain("api (kind: python)");
+  }
 });
