@@ -152,12 +152,16 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
             return step("verify:checks-gate", "verify", "verify:checks-gate", null);
           }
         }
-        const integrationPassedShas = gts.passingShasFor(db, {
+        // M4 §8c: verify:integration is demoted to advisory — ran-at-sha (ANY recorded result),
+        // not passingShasFor. Coupled with handlers.ts's throw removal (same commit): a handler that
+        // records an advisory fail with no pass at HEAD would otherwise leave this gate re-emitting
+        // forever against the journal replay (MAX_TRANSITIONS).
+        const integrationRanShas = gts.ranShasFor(db, {
           ticketId,
           workUnitId: null,
           signalType: "integration",
         });
-        if (branchSha === null || !integrationPassedShas.includes(branchSha)) {
+        if (branchSha === null || !integrationRanShas.includes(branchSha)) {
           if (!done(db, ticketId, "provision")) {
             return step("provision", "provision", "provision", null);
           }

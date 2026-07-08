@@ -1203,15 +1203,18 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         break;
       }
     }
+    // M4 §8c: demoted to advisory (§3/§7) — record the (possibly-fail) result and RETURN normally;
+    // never throw on the suite verdict. Coupled with the resolver's integration gate flip to
+    // ranShasFor (below) in this SAME commit — an advisory fail with no pass at HEAD would otherwise
+    // re-emit this step forever against the journal replay (MAX_TRANSITIONS deadlock).
     insertSignal(ctx.db, {
       ticketId: ctx.ticket.id,
       signalType: "integration",
       result,
       command: lastCommand,
       branchHeadSha,
-      detail: { ran },
+      detail: { ran, advisory: true },
     });
-    if (result !== "pass") throw new Error(`verify:integration: ${result}`);
     return { integration: result };
   });
 

@@ -222,6 +222,44 @@ test("implement: all units verified + no docs → verify:integration then advanc
   expect(afterIntegration).toEqual({ kind: "advance", from: "implement", to: "review" });
 });
 
+test("implement: a FAILED integration signal at HEAD still advances past verify:integration (ran-at-sha, M4 §8c)", async () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  const u = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verified",
+  });
+  expect(u.status).toBe("verified");
+  await succeed(db, ticketId, "provision");
+  const beforeIntegration = nextStepKey(db, ticketId);
+  expect(beforeIntegration.kind === "step" && beforeIntegration.handlerKey).toBe(
+    "verify:integration",
+  );
+  // Simulate the demoted integration handler: an advisory FAIL (not a pass) recorded at HEAD.
+  const disp = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0001",
+    seq: nextSeq(db, ticketId),
+  });
+  completeDispatch(db, disp.id, { outcome: "clean-success", branchHeadSha: "sha-abc" });
+  insertSignal(db, {
+    ticketId,
+    workUnitId: null,
+    signalType: "integration",
+    result: "fail",
+    branchHeadSha: "sha-abc",
+    detail: { advisory: true },
+  });
+  const afterIntegration = nextStepKey(db, ticketId);
+  db.close();
+  // Advanced past integration — NOT re-emitted (would be a MAX_TRANSITIONS-class deadlock under
+  // the old passingShasFor gate, since this signal is a fail, never a pass).
+  expect(afterIntegration).toEqual({ kind: "advance", from: "implement", to: "review" });
+});
+
 test("implement: all units verified + an active ac_check + no gate pass at HEAD → verify:checks-gate (after provision)", async () => {
   const { db, ticketId } = makeTestDb();
   setTicketStage(db, ticketId, "implement");

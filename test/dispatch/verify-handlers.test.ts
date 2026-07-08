@@ -263,7 +263,7 @@ test("verify:integration passes when build and test pass, recording an integrati
   expect(sigs[0]?.result).toBe("pass");
 });
 
-test("verify:integration fails the step when a command fails", async () => {
+test("verify:integration records an advisory fail when a command fails, and the step SUCCEEDS (M4 §8c)", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   const registry = registryFor(repo, { build: "true", test: "false" });
@@ -273,12 +273,13 @@ test("verify:integration fails the step when a command fails", async () => {
   const outcome = await advanceOneStep(db, ticketId, registry);
   const sigs = db
     .query(
-      "SELECT result FROM ground_truth_signal WHERE ticket_id = ? AND signal_type = 'integration'",
+      "SELECT result, detail_json FROM ground_truth_signal WHERE ticket_id = ? AND signal_type = 'integration'",
     )
-    .all(ticketId) as Array<{ result: string }>;
+    .all(ticketId) as Array<{ result: string; detail_json: string }>;
   db.close();
-  expect(["retry", "loopback", "escalated"]).toContain(outcome.kind);
+  expect(outcome.kind).toBe("stepped");
   expect(sigs[0]?.result).toBe("fail");
+  expect(JSON.parse(sigs[0]?.detail_json ?? "{}").advisory).toBe(true);
 });
 
 test("a timed-out check records an error signal (not fail)", async () => {
