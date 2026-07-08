@@ -1,7 +1,10 @@
 import type { Database } from "bun:sqlite";
-import { deleteByAc, listByTicket as listAcChecks } from "../db/repos/ac-check.ts";
+import {
+  listUnresolvedByTicket,
+  reauthorRoundsForAc,
+  supersedeByAc,
+} from "../db/repos/ac-check.ts";
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
-import { listByTicket as listSignals } from "../db/repos/ground-truth-signal.ts";
 import { insertPending as insertSignal } from "../db/repos/signal.ts";
 import { setTicketStatus } from "../db/repos/ticket.ts";
 import { getByKey, resetToPending } from "../db/repos/workflow-step.ts";
@@ -10,55 +13,26 @@ export interface ChecksVerdictResult {
   decision: "clean" | "loopback" | "escalated";
 }
 
-interface VacuousFinding {
-  acId: number;
-  reason: string;
-}
+/** Escalate when an AC has been re-authored this many ROUNDS (`reauthorRoundsForAc`, i.e. distinct
+ *  `supersedeByAc` calls — NOT superseded rows, since one round can supersede several rows for a
+ *  multi-check AC) and is STILL flagged (§5). The verdict supersedes BEFORE counting, so 2 ⇒ escalate
+ *  on the 2nd consecutive round — the exact bound M3's predecessor-compare had. Monotone + per-AC: it
+ *  replaces the log-signature machinery, which depended on live-id reuse (the anti-pattern the
+ *  supersede schema deleted). */
+const REAUTHOR_ESCALATE_CAP = 2;
 
-/** The re-author findings of the CURRENT round: classification signals of class `vacuous` OR `weak`
- *  whose acCheckId is a LIVE ac_check row (§3/§7 by-live-id — a re-author deletes the prior round's
- *  rows, so its stale findings point to dead ids and drop out). Distinct by AC. */
-function currentReauthorFindings(db: Database, ticketId: number): VacuousFinding[] {
-  const liveIds = new Set(listAcChecks(db, ticketId).map((r) => r.id));
-  const byAc = new Map<number, string>();
-  for (const s of listSignals(db, ticketId)) {
-    if (s.signal_type !== "ac-check-classification") continue;
-    const d = JSON.parse(s.detail_json ?? "{}") as {
-      acCheckId?: number;
-      acId?: number;
-      class?: string;
-      reason?: string;
-    };
-    if (
-      (d.class !== "vacuous" && d.class !== "weak") ||
-      d.acCheckId === undefined ||
-      !liveIds.has(d.acCheckId)
-    )
-      continue;
-    if (d.acId !== undefined) byAc.set(d.acId, d.reason ?? "");
-  }
-  return [...byAc.entries()].map(([acId, reason]) => ({ acId, reason }));
-}
-
-/** Signature keyed on ac_ids ALONE (reason-agnostic): a stuck AC repeats its signature whether
- *  stuck-vacuous, stuck-weak, or oscillating → escalate trips (§5). */
-function vacuousSignature(findings: VacuousFinding[]): string {
-  return `checks:${findings
-    .map((f) => f.acId)
-    .sort((a, b) => a - b)
-    .join(",")}`;
-}
-
-/** True when the previous checks-origin loopback carried the same signature (no progress). */
-function isRepeatedChecksLoopback(db: Database, ticketId: number, signature: string): boolean {
-  const prior = listEvents(db, ticketId).filter(
-    (e) => e.kind === "loopback" && e.loop === "checks",
+/** The ACs flagged for re-author THIS round = the active checks `checks:classify` left unresolved
+ *  (a vacuous/weak verdict sets neither red_class nor disposition). Read from the TABLE (active state
+ *  via the active-scoped listUnresolvedByTicket), NEVER from the append-only signal log by id — the
+ *  schema, not the log, is the control-state source (§3/§7, the M4 anti-pattern fix). */
+function reauthorFindings(db: Database, ticketId: number): number[] {
+  return [...new Set(listUnresolvedByTicket(db, ticketId).map((r) => r.ac_id))].sort(
+    (a, b) => a - b,
   );
-  return prior[prior.length - 1]?.signature === signature;
 }
 
 /** The flagged AC ids of the latest checks re-author event (or null). `checks:dispatch` reads this to
- *  scope its re-author to only those ACs (§2b). */
+ *  scope its re-author to only those ACs (§2b). (Routing state on the event — not the anti-pattern.) */
 export function latestChecksReauthorAcs(db: Database, ticketId: number): number[] | null {
   const events = listEvents(db, ticketId).filter(
     (e) => e.kind === "loopback" && e.loop === "checks",
@@ -69,27 +43,46 @@ export function latestChecksReauthorAcs(db: Database, ticketId: number): number[
   return acIds && acIds.length > 0 ? acIds : null;
 }
 
-function escalate(db: Database, ticketId: number, reason: string, signature: string): void {
-  db.transaction(() => {
-    setTicketStatus(db, ticketId, "waiting");
-    insertSignal(db, { ticketId, signalType: "human_resume", reason });
-    appendEvent(db, { ticketId, kind: "escalated", reason, signature });
-  })();
-}
-
-function checksLoopback(
+/** M3/M4 verdict (§2/§5/§7): a `vacuous`/`weak` active check (left unresolved by classify) drives an
+ *  AC-scoped re-author loopback — the verdict SUPERSEDES the flagged active generation (exactly-once;
+ *  history preserved) and re-arms checks:dispatch/checks:classify. An AC superseded ≥ cap times and
+ *  still flagged escalates (a per-AC monotone counter, reason-agnostic). Ground-truth over
+ *  self-report — reads persisted TABLE state, never an agent verdict. Mirrors `applyReviewVerdict`. */
+export function applyChecksVerdict(
   db: Database,
   ticketId: number,
-  findings: VacuousFinding[],
-  signature: string,
-): void {
+  _opts: { stepKey: string },
+): ChecksVerdictResult {
+  const flagged = reauthorFindings(db, ticketId);
+  if (flagged.length === 0) return { decision: "clean" };
+  let escalated = false;
   db.transaction(() => {
-    for (const f of findings) deleteByAc(db, f.acId); // scoped: only the flagged ACs' checks
+    // Re-author = supersede the flagged active generation (never delete). Count ROUNDS AFTER
+    // superseding — reauthorRoundsForAc counts DISTINCT superseded_at values, not rows, so a
+    // multi-check AC's whole round (all its rows, one shared timestamp) counts as ONE.
+    for (const acId of flagged) supersedeByAc(db, acId);
+    const exhausted = flagged.filter(
+      (acId) => reauthorRoundsForAc(db, acId) >= REAUTHOR_ESCALATE_CAP,
+    );
+    if (exhausted.length > 0) {
+      setTicketStatus(db, ticketId, "waiting");
+      insertSignal(db, {
+        ticketId,
+        signalType: "human_resume",
+        reason: `no progress: AC-check(s) ${exhausted.join(",")} still flagged after ${REAUTHOR_ESCALATE_CAP} re-authors`,
+      });
+      appendEvent(db, {
+        ticketId,
+        kind: "escalated",
+        reason: "no progress: repeated re-author of the same AC-check",
+        signature: `checks:${exhausted.join(",")}`,
+      });
+      escalated = true;
+      return;
+    }
     for (const key of ["checks:dispatch", "checks:classify"]) {
       const step = getByKey(db, ticketId, key);
-      if (step) {
-        resetToPending(db, step.id);
-      }
+      if (step) resetToPending(db, step.id);
     }
     // No stage flip — checks:dispatch + checks:classify are both in the design stage.
     appendEvent(db, {
@@ -97,28 +90,9 @@ function checksLoopback(
       kind: "loopback",
       loop: "checks",
       routeTo: "checks:classify",
-      signature,
-      payload: { acIds: findings.map((f) => f.acId), findings },
+      signature: `checks:${flagged.join(",")}`, // audit label only (no longer read for repeat-detect)
+      payload: { acIds: flagged },
     });
   })();
-}
-
-/** M3/M4 verdict (§2/§5/§7): a `vacuous` or `weak` green-on-HEAD check triggers an AC-scoped
- *  re-author loopback; a repeated ac_ids signature (reason-agnostic — see `vacuousSignature`)
- *  escalates. Ground-truth over self-report — reads the persisted classification signals, never
- *  an agent verdict. Mirrors `applyReviewVerdict`. */
-export function applyChecksVerdict(
-  db: Database,
-  ticketId: number,
-  _opts: { stepKey: string },
-): ChecksVerdictResult {
-  const findings = currentReauthorFindings(db, ticketId);
-  if (findings.length === 0) return { decision: "clean" };
-  const signature = vacuousSignature(findings);
-  if (isRepeatedChecksLoopback(db, ticketId, signature)) {
-    escalate(db, ticketId, "no progress: identical vacuous-check AC(s) after re-author", signature);
-    return { decision: "escalated" };
-  }
-  checksLoopback(db, ticketId, findings, signature);
-  return { decision: "loopback" };
+  return escalated ? { decision: "escalated" } : { decision: "loopback" };
 }
