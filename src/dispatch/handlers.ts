@@ -7,7 +7,12 @@ import type { AgentRunner } from "../agent/runner.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
 import { StepRegistry } from "../daemon/step-registry.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
-import { deleteByTicket, insertAcCheck } from "../db/repos/ac-check.ts";
+import {
+  classifyAcCheck,
+  deleteByTicket,
+  insertAcCheck,
+  listUnresolvedByTicket,
+} from "../db/repos/ac-check.ts";
 import { listByTicket as listAcs } from "../db/repos/acceptance-criterion.ts";
 import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";
 import { listByTicket as listEvents } from "../db/repos/event-log.ts";
@@ -15,6 +20,7 @@ import {
   insertSignal,
   listByUnit,
   listByTicket as listSignalsByTicket,
+  signalForAcCheck,
 } from "../db/repos/ground-truth-signal.ts";
 import { getProject } from "../db/repos/project.ts";
 import { enqueue } from "../db/repos/projection-outbox.ts";
@@ -30,6 +36,7 @@ import {
 } from "../db/repos/work-unit.ts";
 import { pythonImportName } from "../setup/lang/python.ts";
 import { runCommand } from "../util/run-command.ts";
+import { type AdjClass, ChecksClassifyOutputSchema } from "./adjudicate-schema.ts";
 import {
   type CheckFramework,
   type CoarseResult,
@@ -40,6 +47,7 @@ import {
 } from "./check-selector.ts";
 import { runCheckForRed } from "./checks-run.ts";
 import { ChecksOutputSchema } from "./checks-schema.ts";
+import { classifyPrior } from "./classify-prior.ts";
 import { classifyDisposition, reconcileScope } from "./completeness.ts";
 import { ComplexityGradeSchema } from "./complexity-schema.ts";
 import {
@@ -58,6 +66,8 @@ import { implementFeedback } from "./feedback.ts";
 import { hasTicketPlan } from "./plan-frontmatter.ts";
 import type { Profile } from "./profile.ts";
 import {
+  type AdjudicateItem,
+  CHECKS_CLASSIFY_TEMPLATE,
   CHECKS_TEMPLATE,
   DESIGN_COMPLEXITY_GRADE_TEMPLATE,
   DESIGN_REVIEW_TEMPLATE,
@@ -65,6 +75,7 @@ import {
   EXTRACT_TEMPLATE,
   IMPLEMENT_TEMPLATE,
   REVIEW_TEMPLATE,
+  adjudicateVars,
   checksVars,
   complexityGradeVars,
   designReviewVars,
@@ -484,6 +495,137 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     })();
 
     return { authored: records.length, acs: acs.length };
+  });
+
+  registry.register("checks:classify", async (ctx: HandlerContext) => {
+    // Classify ONLY unresolved rows (§7 write-once): a re-author round re-classifies only the freshly
+    // re-authored NULL rows; every previously-classified row is frozen.
+    const unresolved = listUnresolvedByTicket(ctx.db, ctx.ticket.id);
+    if (unresolved.length === 0) return { classified: 0, adjudicated: 0, vacuous: 0 };
+
+    const acs = listAcs(ctx.db, ctx.ticket.id);
+    const acTextById = new Map(acs.map((a) => [a.id, a.text]));
+
+    // 1) Read each check's RED-first trace by LIVE id (§3), run the prior.
+    type Pending = { row: (typeof unresolved)[number]; coarse: CoarseResult; item: AdjudicateItem };
+    const settled: Array<{
+      acCheckId: number;
+      acId: number;
+      redClass: "absence" | "environmental";
+    }> = [];
+    const pending: Pending[] = [];
+    for (const row of unresolved) {
+      const sig = signalForAcCheck(ctx.db, row.id);
+      const coarse = (row.red_first_result ?? "error") as CoarseResult;
+      const rawOutput = sig?.detail.rawOutput ?? "";
+      const prior = classifyPrior({ coarse, rawOutput });
+      if (prior.kind === "settled-red") {
+        settled.push({ acCheckId: row.id, acId: row.ac_id, redClass: prior.redClass });
+        continue;
+      }
+      pending.push({
+        row,
+        coarse,
+        item: {
+          acCheckId: row.id,
+          acText: acTextById.get(row.ac_id) ?? "",
+          testPath: row.test_path,
+          testName: row.selector,
+          coarse,
+          rawOutput,
+        },
+      });
+    }
+
+    // 2) Adjudicate the ambiguous checks (agent-skip when the prior settled everything, §5). A
+    //    missing per-check result re-dispatches ONLY the affected checks (fault isolation), bounded.
+    const results = new Map<number, AdjClass>();
+    const reasons = new Map<number, string>();
+    let toAsk = pending;
+    for (let round = 0; round < 2 && toAsk.length > 0; round++) {
+      const { output } = await runAgentDispatch(
+        ctx,
+        depsFor(ctx, deps, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+        {
+          handlerKey: "checks:classify",
+          template: CHECKS_CLASSIFY_TEMPLATE,
+          vars: adjudicateVars(
+            ctx.ticket,
+            deps.profile,
+            toAsk.map((p) => p.item),
+          ),
+          postcondition: () => {}, // read-only: nothing commits
+        },
+      );
+      const parsed = extractSidecar(output, ChecksClassifyOutputSchema);
+      if (parsed.ok) {
+        const asked = new Set(toAsk.map((p) => p.row.id));
+        for (const c of parsed.value.classifications) {
+          if (!asked.has(c.ac_check_id)) continue; // ignore ids we did not ask about
+          results.set(c.ac_check_id, c.class);
+          reasons.set(c.ac_check_id, c.reason);
+        }
+      }
+      toAsk = toAsk.filter((p) => !results.has(p.row.id));
+    }
+    if (toAsk.length > 0) {
+      // Absent after the fault-isolated bound = transport failure → failure-policy re-dispatches.
+      throw new Error(
+        `checks:classify: adjudicator omitted ${toAsk.length} check(s): ${toAsk.map((p) => p.row.id).join(", ")}`,
+      );
+    }
+
+    // 3) Validate class↔coarse bucket, map to storage, persist ALL in one txn (crash-resume: an
+    //    interrupted classify rolls back whole; §7 recompute-all-in-txn).
+    const RED_CLASSES = new Set<AdjClass>(["assertion", "absence", "environmental"]);
+    const GREEN_CLASSES = new Set<AdjClass>(["vacuous", "already-satisfied", "not-expressible"]);
+    let vacuous = 0;
+    ctx.db.transaction(() => {
+      for (const s of settled) {
+        classifyAcCheck(ctx.db, { acCheckId: s.acCheckId, redClass: s.redClass });
+        insertSignal(ctx.db, {
+          ticketId: ctx.ticket.id,
+          signalType: "ac-check-classification",
+          result: "fail",
+          detail: {
+            acCheckId: s.acCheckId,
+            acId: s.acId,
+            class: s.redClass,
+            reason: "deterministic prior",
+          },
+        });
+      }
+      for (const p of pending) {
+        const cls = results.get(p.row.id) as AdjClass;
+        const reason = reasons.get(p.row.id) ?? "";
+        const isGreen = p.coarse === "green";
+        if (isGreen ? !GREEN_CLASSES.has(cls) : !RED_CLASSES.has(cls)) {
+          throw new Error(
+            `checks:classify: class '${cls}' invalid for coarse '${p.coarse}' (check ${p.row.id})`,
+          );
+        }
+        if (cls === "vacuous") {
+          vacuous += 1; // no column set — triggers a re-author (§7); recorded as a signal for the verdict
+        } else if (cls === "already-satisfied") {
+          classifyAcCheck(ctx.db, { acCheckId: p.row.id, disposition: "satisfied" });
+        } else if (cls === "not-expressible") {
+          classifyAcCheck(ctx.db, { acCheckId: p.row.id, disposition: "not-expressible" });
+        } else {
+          classifyAcCheck(ctx.db, {
+            acCheckId: p.row.id,
+            redClass: cls as "assertion" | "absence" | "environmental",
+          });
+        }
+        insertSignal(ctx.db, {
+          ticketId: ctx.ticket.id,
+          signalType: "ac-check-classification",
+          result: cls === "already-satisfied" || cls === "not-expressible" ? "pass" : "fail",
+          detail: { acCheckId: p.row.id, acId: p.row.ac_id, class: cls, reason },
+        });
+      }
+    })();
+
+    return { classified: settled.length + pending.length, adjudicated: pending.length, vacuous };
   });
 
   registry.register("implement:dispatch", async (ctx: HandlerContext) => {
