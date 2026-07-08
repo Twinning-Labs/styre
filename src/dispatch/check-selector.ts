@@ -231,3 +231,33 @@ export function interpretRunOutput(fw: CheckFramework, run: RunOutcome): CoarseO
 export function signalResultForCoarse(coarse: CoarseResult): "pass" | "fail" | "error" {
   return coarse === "green" ? "pass" : coarse === "red" ? "fail" : "error";
 }
+
+/** The framework binary the runner prepends to `buildCheckSelector`'s `runArgs` (M2a decision 3). The
+ *  go/cargo binaries carry the `test` subcommand (their runArgs omit it → `go test -run … ./pkg`);
+ *  maven/gradle/vitest carry their goal/task/`run` IN the runArgs, so their binary is bare. pytest
+ *  uses the resolved interpreter (`resolvePythonInterpreter`) so it runs against the provisioned env,
+ *  not a bare `pytest` that may be absent. */
+export function binaryFor(fw: CheckFramework, opts?: { interp?: string }): string {
+  switch (fw) {
+    case "pytest":
+      return `${opts?.interp ?? "python3"} -m pytest`;
+    case "jest":
+      return "jest";
+    case "vitest":
+      return "vitest";
+    case "go":
+      return "go test";
+    case "cargo":
+      return "cargo test";
+    case "junit-maven":
+      return "mvn";
+    case "junit-gradle":
+      return "gradle";
+    case "rspec":
+      return "rspec";
+    case "minitest":
+      return "ruby -Itest";
+    case "phpunit":
+      return "phpunit";
+  }
+}

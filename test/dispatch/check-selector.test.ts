@@ -274,3 +274,27 @@ describe("signalResultForCoarse", () => {
     expect(signalResultForCoarse("error")).toBe("error");
   });
 });
+
+import { binaryFor } from "../../src/dispatch/check-selector.ts";
+
+describe("binaryFor (M2a decision 3: go/cargo carry the subcommand; maven/gradle/vitest carry it in runArgs)", () => {
+  test("pytest uses the resolved interpreter", () => {
+    expect(binaryFor("pytest", { interp: "/venv/bin/python" })).toBe("/venv/bin/python -m pytest");
+    expect(binaryFor("pytest")).toBe("python3 -m pytest");
+  });
+  test("go/cargo binary carries the test subcommand", () => {
+    expect(binaryFor("go")).toBe("go test");
+    expect(binaryFor("cargo")).toBe("cargo test");
+  });
+  test("maven/gradle/vitest binaries are bare (the subcommand rides in runArgs)", () => {
+    expect(binaryFor("junit-maven")).toBe("mvn");
+    expect(binaryFor("junit-gradle")).toBe("gradle");
+    expect(binaryFor("vitest")).toBe("vitest");
+  });
+  test("jest/rspec/phpunit are bare binaries; minitest is ruby -Itest", () => {
+    expect(binaryFor("jest")).toBe("jest");
+    expect(binaryFor("rspec")).toBe("rspec");
+    expect(binaryFor("phpunit")).toBe("phpunit");
+    expect(binaryFor("minitest")).toBe("ruby -Itest");
+  });
+});
