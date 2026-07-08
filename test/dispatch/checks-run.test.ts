@@ -21,6 +21,7 @@ describe("runCheckForRed", () => {
     expect(res.command).toBe("python3 -m pytest 'tests/t.py::test_ok'");
     expect(res.coarse).toBe("red");
     expect(res.rawOutput).toContain("1 failed");
+    expect(res.exitCode).toBe(1);
   });
 
   test("passes selected-none straight through (identity reject signal, §5.1)", async () => {
@@ -45,5 +46,6 @@ describe("runCheckForRed", () => {
       run: fakeRun({ exitCode: null, timedOut: true }),
     });
     expect(res.coarse).toBe("error");
+    expect(res.exitCode).toBeNull();
   });
 });

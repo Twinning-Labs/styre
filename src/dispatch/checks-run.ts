@@ -9,6 +9,8 @@ export interface CheckRunResult {
   command: string;
   /** Combined stdout+stderr, stored in ground_truth_signal.detail_json (M3 subdivides `red` from it). */
   rawOutput: string;
+  /** The process exit code, or `null` on timeout/spawn failure (M3: recorded in the signal detail). */
+  exitCode: number | null;
 }
 
 /** Run ONE authored check RED-first, in-suite: assemble `<binary> <runArgs>`, run it in the component
@@ -30,5 +32,6 @@ export async function runCheckForRed(p: {
     coarse: interpretRunOutput(p.framework, out),
     command,
     rawOutput: `${out.stdout}\n${out.stderr}`.trim(),
+    exitCode: out.exitCode,
   };
 }

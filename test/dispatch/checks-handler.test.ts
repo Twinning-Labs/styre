@@ -103,6 +103,11 @@ test("checks:dispatch authors, verifies identity, runs RED-first, and persists a
   // Vocab map (§9): red → fail in ground_truth_signal (never 'red').
   expect(signals.length).toBe(2);
   expect(signals.every((s) => s.result === "fail")).toBe(true);
+  // M3: the per-check exit code + framework + command are recorded at the source (detail_json).
+  const details = signals.map((s) => JSON.parse(s.detail_json ?? "{}"));
+  expect(details.every((d) => d.exitCode === 1)).toBe(true);
+  expect(details.every((d) => d.framework === "pytest")).toBe(true);
+  expect(details.every((d) => typeof d.command === "string" && d.command.length > 0)).toBe(true);
 });
 
 test("checks:dispatch rejects a MODIFIED file (identity: added-only) → postcondition fails", async () => {

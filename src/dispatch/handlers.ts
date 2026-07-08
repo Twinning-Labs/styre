@@ -31,6 +31,7 @@ import {
 import { pythonImportName } from "../setup/lang/python.ts";
 import { runCommand } from "../util/run-command.ts";
 import {
+  type CheckFramework,
   type CoarseResult,
   binaryFor,
   buildCheckSelector,
@@ -381,6 +382,9 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       testPath: string;
       coarse: CoarseResult;
       rawOutput: string;
+      exitCode: number | null;
+      framework: CheckFramework | null;
+      command: string | null;
     }> = [];
     const covered = new Set<number>();
 
@@ -396,6 +400,8 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       let coarse: CoarseResult;
       let selector = c.test_file; // NOT-NULL fallback when no framework (decision 2)
       let rawOutput = "";
+      let exitCode: number | null = null;
+      let command: string | null = null;
 
       if (!comp || !fw) {
         coarse = "error"; // can't attempt — no framework (§5.2)
@@ -422,11 +428,22 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
             run,
           });
           rawOutput = res.rawOutput;
+          exitCode = res.exitCode;
+          command = res.command;
           if (res.coarse === "selected-none") continue; // selects 0 → identity reject (§5.1)
           coarse = res.coarse;
         }
       }
-      records.push({ acId: c.ac_id, selector, testPath: c.test_file, coarse, rawOutput });
+      records.push({
+        acId: c.ac_id,
+        selector,
+        testPath: c.test_file,
+        coarse,
+        rawOutput,
+        exitCode,
+        framework: fw,
+        command,
+      });
       covered.add(c.ac_id);
     }
 
@@ -455,7 +472,13 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           signalType: "ac-check-red-first",
           result: signalResultForCoarse(r.coarse),
           branchHeadSha: sha,
-          detail: { rawOutput: r.rawOutput, acCheckId: row.id },
+          detail: {
+            rawOutput: r.rawOutput,
+            exitCode: r.exitCode,
+            framework: r.framework,
+            command: r.command,
+            acCheckId: row.id,
+          },
         });
       }
     })();
