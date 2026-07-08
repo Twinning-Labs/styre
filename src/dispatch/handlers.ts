@@ -590,9 +590,10 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
 
     // 3) Validate class↔coarse bucket, map to storage, persist ALL in one txn (crash-resume: an
     //    interrupted classify rolls back whole; §7 recompute-all-in-txn).
-    const RED_CLASSES = new Set<AdjClass>(["assertion", "absence", "environmental"]);
+    const RED_CLASSES = new Set<AdjClass>(["assertion", "absence", "environmental", "weak"]);
     const GREEN_CLASSES = new Set<AdjClass>(["vacuous", "already-satisfied", "not-expressible"]);
     let vacuous = 0;
+    let weak = 0;
     ctx.db.transaction(() => {
       for (const s of settled) {
         classifyAcCheck(ctx.db, { acCheckId: s.acCheckId, redClass: s.redClass });
@@ -619,6 +620,8 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         }
         if (cls === "vacuous") {
           vacuous += 1; // no column set — triggers a re-author (§7); recorded as a signal for the verdict
+        } else if (cls === "weak") {
+          weak += 1; // no column set — triggers a re-author (§5); recorded as a signal for the verdict
         } else if (cls === "already-satisfied") {
           classifyAcCheck(ctx.db, { acCheckId: p.row.id, disposition: "satisfied" });
         } else if (cls === "not-expressible") {
@@ -638,7 +641,12 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       }
     })();
 
-    return { classified: settled.length + pending.length, adjudicated: pending.length, vacuous };
+    return {
+      classified: settled.length + pending.length,
+      adjudicated: pending.length,
+      vacuous,
+      weak,
+    };
   });
 
   registry.register("implement:dispatch", async (ctx: HandlerContext) => {

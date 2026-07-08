@@ -196,3 +196,56 @@ test("a vacuous green sets NO column but records a vacuous classification signal
   expect(vac.length).toBe(1);
   db.close();
 });
+
+test("a weak verdict on a red check re-authors (no red_class persisted)", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  const c1 = seedCheck(db, ticketId, 1, "red", "E   assert response.status_code == 200");
+
+  const runner = new FakeAgentRunner(() => ({
+    completed: true,
+    exitCode: 0,
+    stdout: `\`\`\`styre-sidecar\n${JSON.stringify({
+      classifications: [{ ac_check_id: c1.acCheckId, class: "weak", reason: "status-only" }],
+    })}\n\`\`\``,
+    stderr: "",
+    timedOut: false,
+    costUsd: null,
+    tokensIn: null,
+    tokensOut: null,
+  }));
+  const registry = registryWith(repo, runner);
+  const handler = registry.resolve("checks:classify");
+  if (!handler) throw new Error("checks:classify handler not registered");
+  await runStep(db, {
+    ticketId,
+    stepKey: "checks:classify",
+    stepType: "dispatch",
+    effectful: true,
+    execute: (step) =>
+      handler({
+        db,
+        ticket: {
+          id: ticketId,
+          ident: "ENG-1",
+          title: null,
+          project_id: projectId,
+          stage: "design",
+        } as never,
+        step,
+        workUnitId: null,
+        config: undefined as never,
+      }),
+  });
+  const row = listAcChecks(db, ticketId)[0];
+  expect(row?.red_class).toBeNull();
+  expect(row?.disposition).toBeNull();
+  const sig = listSignals(db, ticketId).find(
+    (s) =>
+      s.signal_type === "ac-check-classification" &&
+      JSON.parse(s.detail_json ?? "{}").class === "weak",
+  );
+  expect(sig?.result).toBe("fail");
+  db.close();
+});

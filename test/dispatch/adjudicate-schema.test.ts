@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ChecksClassifyOutputSchema } from "../../src/dispatch/adjudicate-schema.ts";
+import { AdjClassEnum, ChecksClassifyOutputSchema } from "../../src/dispatch/adjudicate-schema.ts";
 
 test("accepts a well-formed per-check classification batch", () => {
   const parsed = ChecksClassifyOutputSchema.safeParse({
@@ -31,4 +31,8 @@ test("rejects an empty reason", () => {
     classifications: [{ ac_check_id: 1, class: "absence", reason: "" }],
   });
   expect(parsed.success).toBe(false);
+});
+
+test("AdjClassEnum admits the transient weak flag", () => {
+  expect(AdjClassEnum.safeParse("weak").success).toBe(true);
 });
