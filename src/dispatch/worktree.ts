@@ -78,3 +78,24 @@ export function changedFilesBetween(
   const out = git(["diff", "--name-only", `${baseSha}..${headSha}`], worktreePath);
   return out === "" ? [] : out.split("\n").filter((l) => l !== "");
 }
+
+/** Files ADDED (git-status `A`) by commit `sha` — its diff vs its parent, `--diff-filter=A` only.
+ *  M2's checks-identity (§5.1) accepts a check ONLY when its test file is newly added: the file-scoped
+ *  selector is safe precisely because the added file contains nothing but styre's check. A modified
+ *  (`M`) file is rejected — it would re-admit the pre-existing tests around the edit. */
+export function addedFilesAt(sha: string, worktreePath: string): string[] {
+  const out = git(
+    ["diff-tree", "--no-commit-id", "-r", "--name-only", "--diff-filter=A", sha],
+    worktreePath,
+  );
+  return out === "" ? [] : out.split("\n").filter((l) => l !== "");
+}
+
+/** The committed content of `file` at `sha` (`git show <sha>:<file>`), or `null` when the path is
+ *  absent at that commit. Used by checks-identity (§5.1) to confirm the authored `test_name` is
+ *  present in the committed added file (every line of an added file is a `+` line, so "on a `+`
+ *  line" reduces to substring presence — M2a plan-time decision 2). */
+export function fileContentAt(sha: string, file: string, worktreePath: string): string | null {
+  const res = Bun.spawnSync(["git", "show", `${sha}:${file}`], { cwd: worktreePath });
+  return res.success ? res.stdout.toString() : null;
+}

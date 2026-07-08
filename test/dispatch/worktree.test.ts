@@ -3,10 +3,12 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  addedFilesAt,
   changedFilesAt,
   changedFilesBetween,
   commitWorktree,
   ensureWorktree,
+  fileContentAt,
   removeWorktree,
   worktreeHasChanges,
 } from "../../src/dispatch/worktree.ts";
@@ -167,4 +169,43 @@ test("worktree mode still creates a separate worktree (regression)", () => {
       .stdout.toString()
       .trim(),
   ).toBe("styre/eng-1");
+});
+
+function repoWithCommits(): { root: string; addSha: string; modSha: string } {
+  const root = mkdtempSync(join(tmpdir(), "styre-wt-"));
+  roots.push(root);
+  const git = (a: string[]) => {
+    const r = Bun.spawnSync(["git", ...a], { cwd: root });
+    if (!r.success) throw new Error(`git ${a.join(" ")}: ${r.stderr.toString()}`);
+    return r.stdout.toString().trim();
+  };
+  git(["init", "-b", "main"]);
+  git(["config", "user.email", "t@s.dev"]);
+  git(["config", "user.name", "T"]);
+  writeFileSync(join(root, "existing.py"), "x = 1\n");
+  git(["add", "-A"]);
+  git(["commit", "-m", "base"]);
+  // commit that ADDS a new file
+  writeFileSync(join(root, "new_test.py"), "def test_ok():\n    assert False\n");
+  git(["add", "-A"]);
+  git(["commit", "-m", "add"]);
+  const addSha = git(["rev-parse", "HEAD"]);
+  // commit that MODIFIES an existing file
+  writeFileSync(join(root, "existing.py"), "x = 2\n");
+  git(["add", "-A"]);
+  git(["commit", "-m", "mod"]);
+  const modSha = git(["rev-parse", "HEAD"]);
+  return { root, addSha, modSha };
+}
+
+test("addedFilesAt returns only git-status A (added) files, not modified ones", () => {
+  const { root, addSha, modSha } = repoWithCommits();
+  expect(addedFilesAt(addSha, root)).toEqual(["new_test.py"]);
+  expect(addedFilesAt(modSha, root)).toEqual([]); // a modify commit adds nothing
+});
+
+test("fileContentAt reads committed content, null when the path is absent at that sha", () => {
+  const { root, addSha } = repoWithCommits();
+  expect(fileContentAt(addSha, "new_test.py", root)).toContain("def test_ok()");
+  expect(fileContentAt(addSha, "does_not_exist.py", root)).toBeNull();
 });
