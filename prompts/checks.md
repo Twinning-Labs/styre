@@ -15,6 +15,11 @@ Rules — follow them exactly:
   will not collide (include the ticket ident, e.g. `…/styre_checks/{{ident}}_ac<id>_test.<ext>`). For Go
   or Rust, give the file its own package/module directory.
 - The file must contain **only** this criterion's check(s) — nothing else.
+- **Assert the criterion's *observable output*, not just that the surface responded.** Check the
+  returned data shape / a persisted value / a produced side-effect — the thing the AC actually
+  promises. A status-code-only or existence-only assertion (e.g. `assert resp.status == 201` with no
+  check of the body, or `assert hasattr(mod, "fn")`) is too weak: a stub that returns `201 {}` would
+  pass it. Make the assertion one a stub cannot satisfy without doing the work.
 - You do NOT run anything and you do NOT report a verdict — the runner executes your checks. Report only
   what you wrote.
 
