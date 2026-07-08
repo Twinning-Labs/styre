@@ -4,7 +4,7 @@
 
 **Goal:** Make M4 the first *gating* milestone. Rework verification so the authored **AC-checks are the hard gate** (an assertion/absence check must flip green after implement, graded by M3's frozen `red_class`; else bounded loopback-to-implement + escalate-on-repeat), while the whole component suite + build become a **non-blocking advisory sweep**. Add the **implement-sees-checks seam**, the **check-strengthening** (behavioral-assertion prompt requirement + the M3 adjudicator's `weak` flag), and — the load-bearing piece the reviews caught — the **check-file integrity gate** (freeze each check file + its `conftest.py` chain to its authoring sha; any change = gate fail), without which the whole gate is bypassable by implement rewriting its own check.
 
-**Architecture:** Two independent loopbacks stay separate. (1) The **check re-author loopback** (`checks:classify` → `applyChecksVerdict`, `loop:"checks"`) gains the `weak` flag alongside `vacuous`. (2) A **net-new ticket-level hard gate** `verify:checks-gate` runs in the `implement` stage after all units verify: it runs the §2b integrity gate, then re-runs each authored check in the *implemented / re-provisioned* HEAD via a net-new harness, gates on the frozen `red_class`, records a post-implement result **separate** from `red_class`, and — via a new `applyAcCheckGateVerdict` on the `advance` onSucceed hook (mirroring `applyChecksVerdict`) — routes clean / loopback-to-implement / escalate. Separately, **both** the existing per-unit `verify:check` **and** the ticket-level `verify:integration` (repo-wide build+test) are **demoted to advisory** (record, never throw; routing advances once a check-type has *run* at the current sha — a `ranShasFor` gate replacing the `passingShasFor` gate). This is the literal reading of design §3/§7 ("component suite + build → advisory sweep"; "regression safety rests entirely on the MERGE human + real CI"), and demoting `verify:integration` is **mandatory-coupled with the resolver gate flip** — a handler that records an advisory `fail` with no `pass` signal at HEAD would otherwise re-emit forever against the journal replay → `MAX_TRANSITIONS` deadlock (see Task 8c). Cross-loopbacks that move HEAD after the gate passed (`codeLoopback`/`redesignLoopback`/integration-reconcile) also **reset the ticket-level verify steps** so the stale success is not replayed (Task 8d). No schema changes: the authoring sha is already on the M2b RED-first signal; the post-implement result and gate verdict are new open-vocab `ground_truth_signal.signal_type`s.
+**Architecture:** Two independent loopbacks stay separate. (1) The **check re-author loopback** (`checks:classify` → `applyChecksVerdict`, `loop:"checks"`) gains the `weak` flag alongside `vacuous`. (2) A **net-new ticket-level hard gate** `verify:checks-gate` runs in the `implement` stage after all units verify: it runs the §2b integrity gate, then re-runs each authored check in the *implemented / re-provisioned* HEAD via a net-new harness, gates on the frozen `red_class`, records a post-implement result **separate** from `red_class`, and — via a new `applyAcCheckGateVerdict` on the `advance` onSucceed hook (mirroring `applyChecksVerdict`) — routes clean / loopback-to-implement / escalate. Separately, **both** the existing per-unit `verify:check` **and** the ticket-level `verify:integration` (repo-wide build+test) are **demoted to advisory** (record, never throw; routing advances once a check-type has *run* at the current sha — a `ranShasFor` gate replacing the `passingShasFor` gate). This is the literal reading of design §3/§7 ("component suite + build → advisory sweep"; "regression safety rests entirely on the MERGE human + real CI"), and demoting `verify:integration` is **mandatory-coupled with the resolver gate flip** — a handler that records an advisory `fail` with no `pass` signal at HEAD would otherwise re-emit forever against the journal replay → `MAX_TRANSITIONS` deadlock (see Task 8c). Cross-loopbacks that move HEAD after the gate passed (`codeLoopback`/`redesignLoopback`/integration-reconcile) also **reset the ticket-level verify steps** so the stale success is not replayed (Task 8d). **One schema change (Tasks 3a–3d, the re-author anti-pattern fix):** `ac_check` gains a nullable `superseded_at` and an `AUTOINCREMENT` id (schema v5→6, both `schema.sql` copies + the migrate tests) so a scoped re-author **supersedes** (never deletes → no id-reuse) and the loop reads live state from the TABLE, not by scanning the append log by a reused id. The per-run/gate records stay schema-free: the authoring sha is already on the M2b RED-first signal; the post-implement result and gate verdict are new open-vocab `ground_truth_signal.signal_type`s.
 
 **Tech Stack:** TypeScript, Bun, `bun:sqlite`, zod (structured sidecar), `bun test`.
 
@@ -12,17 +12,17 @@
 
 ## Split assessment (one plan vs. many)
 
-**Decision: ONE plan, 10 tasks, leaves-first.** M4 is large but the pieces share one design and must land coherently (the gate is worthless without the integrity gate; the seam makes tampering acute; the demotion and the new gate must swap atomically so the suite is never gate-less *in tests*). Splitting into separate plans would fragment the review of a single frozen spec. The `verify:check` rework (the centerpiece) **is** split — the *new gate* (Tasks 5-7) is separated from the *demotion of the old gates* (Task 8), and Task 8 itself is sub-staged (8a per-unit handler-stops-throwing · 8b per-unit routing/failure-policy/test-rewrites · 8c demote `verify:integration` · 8d reset ticket-level verify steps on cross-loopbacks) because the test churn is the dominant cost. Order guarantees each task leaves `bun test` green: the new gate is added **guarded to no-op when there are no AC-checks** (Task 7) so it is inert for every existing test, *then* the old per-unit and integration gates are demoted (Task 8) with their tests rewritten in the same sub-stage.
+**Decision: ONE plan, 14 tasks (the original 10 + the 4 schema-rework sub-tasks 3a–3d inserted after Task 3), leaves-first.** M4 is large but the pieces share one design and must land coherently (the gate is worthless without the integrity gate; the seam makes tampering acute; the demotion and the new gate must swap atomically so the suite is never gate-less *in tests*). Splitting into separate plans would fragment the review of a single frozen spec. The `verify:check` rework (the centerpiece) **is** split — the *new gate* (Tasks 5-7) is separated from the *demotion of the old gates* (Task 8), and Task 8 itself is sub-staged (8a per-unit handler-stops-throwing · 8b per-unit routing/failure-policy/test-rewrites · 8c demote `verify:integration` · 8d reset ticket-level verify steps on cross-loopbacks) because the test churn is the dominant cost. Order guarantees each task leaves `bun test` green: the new gate is added **guarded to no-op when there are no AC-checks** (Task 7) so it is inert for every existing test, *then* the old per-unit and integration gates are demoted (Task 8) with their tests rewritten in the same sub-stage.
 
-Task order: (1) `checks.md` behavioral-assertion strengthening · (2) the `weak` adjudicator enum + handler acceptance + prompt · (3) the re-author collector counts `weak`+`vacuous`, signature stays AC-id-set · (4) the implement-sees-checks seam · (5) the integrity-gate module · (6) the post-implement re-run harness module · (7) the `verify:checks-gate` step + resolver placement + gate verdict (loopback/escalate) + the failure-policy escalate-guard (7a) + the gate-fail re-code feedback carrier (7c) · (8) demote per-unit `verify:check` (8a/8b) AND `verify:integration` (8c) to advisory + reset ticket-level verify steps on cross-loopbacks (8d) + rewrite disturbed tests · (9) end-to-end integration tests (FakeAgentRunner) · (10) the M5 co-release note.
+Task order: (1) `checks.md` behavioral-assertion strengthening · (2) the `weak` adjudicator enum + handler acceptance + prompt · (3) the re-author collector counts `weak`+`vacuous`, signature stays AC-id-set **(COMMITTED `60f0e53`; its log-based body is REPLACED by 3d — no revert)** · **(3a) the schema rework — `ac_check.superseded_at` + `AUTOINCREMENT` id, v5→6, both `schema.sql` copies + migrate tests · (3b) the ac-check repo helpers — `listActiveByTicket`/`listActiveByAc`/`supersedeByAc`/`reauthorRoundsForAc`/`deleteActiveByAc` + active-scoped `listUnresolvedByTicket` · (3c) `checks:dispatch` scoped re-author inserts-only (`deleteActiveByAc` resume-dedup, never delete history) · (3d) `checks-verdict.ts` rework — findings from the TABLE + per-AC supersede escalate counter, dropping the log-scan/signature/predecessor-compare** · (4) the implement-sees-checks seam · (5) the integrity-gate module · (6) the post-implement re-run harness module · (7) the `verify:checks-gate` step + resolver placement + gate verdict (loopback/escalate) + the failure-policy escalate-guard (7a) + the gate-fail re-code feedback carrier (7c) · (8) demote per-unit `verify:check` (8a/8b) AND `verify:integration` (8c) to advisory + reset ticket-level verify steps on cross-loopbacks (8d) + rewrite disturbed tests · (9) end-to-end integration tests (FakeAgentRunner) · (10) the M5 co-release note. Tasks 4–7 read **ACTIVE** checks (`listActiveByTicket` / `superseded_at IS NULL`) throughout — the seam, integrity freeze, re-run, gate, and gate-feedback all scope to the live generation.
 
 ---
 
 ## Resolved under-specifications (plan-time decisions)
 
-1. **No schema changes.** The authoring sha is already persisted: `signalForAcCheck(acCheckId).row.branch_head_sha` (the M2b `ac-check-red-first` signal). The post-implement result is a **new open-vocab signal_type `ac-check-post-implement`** (keyed by `branch_head_sha`); the gate verdict is `ac-check-gate`; integrity failures are `ac-check-integrity`. All three are distinct from `red_class` (M3) and leave room for M5's own record. A per-`ac_check` `authoring_sha` column is the design's named "cleaner alternative" — deferred (YAGNI: the signal read is O(1) and already exists). **No `docs/architecture/schema.sql` dual-edit needed.**
+1. **Exactly ONE schema change — the re-author anti-pattern fix (Tasks 3a–3d), plus NO schema for the per-run/gate records.** *(v1 of this plan said "no schema changes"; an independent review + operator ruling on 2026-07-08 REVERSED that for the re-author path only — see the "Schema-based re-author rework" section.)* The change: `ac_check` gains a nullable `superseded_at TEXT` and an `AUTOINCREMENT` id; schema_meta v5→6; **both `src/db/schema.sql` AND `docs/architecture/schema.sql` are edited (the dual-schema rule) plus `test/migrate.test.ts` + `test/migrate-cli.test.ts`.** It is a pure `schema.sql` edit — styre's runtime DB is created fresh each run, so **no data migration / table rebuild.** Everything else is still schema-free: the authoring sha is already persisted (`signalForAcCheck(acCheckId).row.branch_head_sha`, the M2b `ac-check-red-first` signal); the post-implement result is a **new open-vocab signal_type `ac-check-post-implement`** (keyed by `branch_head_sha`); the gate verdict is `ac-check-gate`; integrity failures are `ac-check-integrity`. All three are distinct from `red_class` (M3) and leave room for M5's own record. A per-`ac_check` `authoring_sha` column is the design's named "cleaner alternative" — still deferred (YAGNI: the signal read is O(1) and already exists).
 2. **`weak` is transient only.** It is added to `AdjClassEnum` (the adjudicator's zod-output enum) and accepted by the `checks:classify` handler for a **red** coarse bucket, mapped to a re-author exactly like `vacuous`. It is **never** written to `ac_check.red_class`/`disposition` — the CHECK constraints (`red_class IN ('assertion','absence','environmental')`) continue to reject it by construction (the handler never calls `classifyAcCheck` with `weak`). No schema change.
-3. **Escalate signature stays reason-AGNOSTIC (the v2→v3 correction).** The re-author collector counts BOTH `weak` and `vacuous` (else a weak-only AC never enters the set → never escalates). The signature stays the sorted **AC-id set alone** — adding `reason` would let an AC oscillate `vacuous→weak→vacuous` forever (`isRepeatedChecksLoopback` is a predecessor-only compare). Verified by an explicit oscillation test (Task 3).
+3. **Escalate is reason-AGNOSTIC — now realized as a per-AC supersede COUNTER (Task 3d), which SUPERSEDES the signature/predecessor-compare of Task 3.** The re-author findings still count BOTH `weak` and `vacuous` (both leave an active check unresolved, so both appear in the table-read finding set — else a weak-only AC never escalates). Reason is *never read*: escalate fires when an AC has been superseded ≥ `REAUTHOR_ESCALATE_CAP` (=2) times and is still flagged, so an AC oscillating `vacuous→weak→vacuous` escalates on its 2nd flag exactly like a stuck-vacuous one. `REAUTHOR_ESCALATE_CAP = 2` because the verdict supersedes BEFORE counting, reproducing M3's escalate-on-2nd-flag bound (flag 1 → count 1 → loopback; flag 2 → count 2 ≥ 2 → escalate). Verified by an explicit oscillation test (Task 3d). **See "Flagged for the lead" #4 for the cap value + total-vs-consecutive-supersede question.**
 4. **Loop placement of the hard gate: a ticket-level `verify:checks-gate` step** in the `implement` stage, after `allUnitsVerified`, gated content-keyed on an `ac-check-gate` pass signal at the branch HEAD (mirrors `verify:integration`). AC-checks are ticket-level, not unit-level, so a ticket-level step is the natural home. It is **guarded to no-op when the ticket has zero `ac_check` rows**, keeping it inert for all existing tests.
 5. **Gate verdict via the `advance` onSucceed hook, not failure-policy.** The gate handler *succeeds* (records the still-red set) and a new `applyAcCheckGateVerdict` decides clean/loopback/escalate — this reuses the exact `applyChecksVerdict` precedent and sidesteps the `failure-policy` `work_unit_id===null` branch (which does integration-reconcile — wrong for the AC gate). Loopback resets all units to pending + re-arms the gate step; escalate on a repeated still-red AC-id set. A **NULL red_class AND NULL disposition** row is a loud `throw` from the harness (an invariant violation — under-verification is forbidden), surfaced as a hard step failure.
 6. **Advisory demotion scope: BOTH `verify:check` (per-unit) AND `verify:integration` (repo-wide).** The independent review's FIX 1 resolved the earlier "flagged for the lead #2" call in favor of the design's literal reading (§3 "component suite + build → advisory sweep"; §7 "regression safety rests entirely on the MERGE human + real CI"): the repo-wide integration gate is **also** demoted (Task 8c). The critical coupling the review caught: demoting `verify:integration` is **not** just "remove the throw." The resolver gates integration on a *pass* signal at HEAD (`resolver.ts:~138` `passingShasFor(…, "integration")`, filtering `result='pass'` in `ground-truth-signal.ts:85-97`). If the handler stops throwing and records an advisory `fail`, NO pass exists at HEAD → the resolver re-emits `verify:integration` → `runStep` replays the recorded success WITHOUT re-running (`step-journal.ts:74-80`) → re-emit → `advanceOneStep` hits `MAX_TRANSITIONS` (`advance.ts:18,157`) → **deadlock**. Task 8c therefore flips the integration gate from "passed at sha" to "**ran** at sha" (`ranShasFor`, introduced in Task 8b — any recorded `integration` signal at HEAD satisfies routing) in the SAME sub-stage that stops the throw. The `failure-policy.ts:148-170` integration-reconcile branch then fires only on an *infra crash* (handler threw), never a genuine test `fail`. **The AC-check gate stays content-keyed on `result='pass'`** (Task 7 / decision #4) — the `ranShasFor` relaxation is ONLY for the two demoted advisory gates, never the hard AC gate.
@@ -35,6 +35,8 @@ Task order: (1) `checks.md` behavioral-assertion strengthening · (2) the `weak`
 1. **Gate loopback feedback granularity — RESOLVED (folded, review FIX 3).** The review confirmed `implementFeedback` (`feedback.ts:7-41`) is UNIT-scoped (`listByUnit(workUnitId)`) so it can NEVER see the ticket-level `ac-check-gate` signal — a tweak to it was wrong. Task 7c adds a NEW `gateFeedback(db, ticketId)` reading the latest `ac-check-gate` signal's `stillRed` acIds → the ac_check `test_path`s + AC text, threaded as a distinct `{{gate_feedback}}` implement prompt-var (separate from Task 4's `{{authored_checks}}`, which lists ALL checks). So re-code sees both the files (seam) and *which* checks are still red.
 2. **Does `verify:integration` also demote to advisory? — RESOLVED (folded, review FIX 1).** Demoted (Task 8c), coupled with the `ranShasFor` resolver flip. See resolved under-spec #6.
 3. **Full-pipeline e2e blast radius.** Any existing test that authors real `ac_check` rows *and* drives design→review will now hit the gate and must either see the fakes flip the checks green or be adjusted. Task 7b includes an explicit audit sub-step; grep at plan-time found no test currently does both (the gate's zero-checks no-op covers the rest), but this must be verified during execution. Related: Task 8d's cross-loopback verify-step reset makes re-verify *live* in the review-loopback path that `review-e2e.test.ts:197-200` currently bypasses by seeding `stage='review'` — audit that path too.
+4. **The escalate cap value + counter semantics (per-AC total-ROUNDS vs consecutive) — DECIDED, confirm.** Task 3d escalates when `reauthorRoundsForAc(acId) >= REAUTHOR_ESCALATE_CAP` and the AC is still flagged. I set **`REAUTHOR_ESCALATE_CAP = 2`** because the verdict supersedes *before* counting, which reproduces M3's exact escalate-on-2nd-flag bound (M3's predecessor-compare escalated on the 2nd identical flag). Set it to `1` if you want escalate on the *first* repeat instead. The counter is **per-AC TOTAL re-author ROUNDS** — `COUNT(DISTINCT superseded_at)`, NOT a raw `COUNT(*)` of superseded rows. **This distinction is load-bearing, not cosmetic:** an AC can own multiple `ac_check` rows (multiple test cases per AC — supported + tested, e.g. `ac-check-classify.test.ts` inserts 2 checks for one AC), and `supersedeByAc` supersedes ALL of an AC's active rows in one round under ONE shared timestamp (a single `nowUtc()` bound once for the whole `UPDATE`); a naive row-`COUNT(*)` would read `k` for a `k`-check AC's first flag alone and escalate on round 1 instead of round 2 — an independent review caught this as a Critical, fixed by counting `DISTINCT superseded_at` (rounds) instead of rows. It is NOT a separate "consecutive-still-bad" tracker. This differs from M3's whole-*set* predecessor-compare in two benign ways: **(a) per-AC, not whole-set** — a single thrashing AC escalates on its own count without needing the identical AC-*set* to repeat (stricter/safer, and simpler); **(b) total, not consecutive** — the pathological "AC heals, then breaks again much later in the same run" case over-counts toward escalate (fails *closed* to a human, never a wrong pass; rare). If you want strict per-AC *consecutive* semantics, we'd need to reset the counter when an AC resolves — extra state I judged not worth it. **Confirm CAP=2 and total-rounds semantics.**
+5. **Supersede placement — the verdict, not `checks:dispatch` (deviation from the design brief's phrasing — I believe correct).** The design brief said "checks:dispatch ... change to supersedeByAc + insert active." I put the **supersede in `applyChecksVerdict`** (Task 3d) and made `checks:dispatch` **insert-only + `deleteActiveByAc` resume-dedup** (Task 3c) instead. Reason: `checks:dispatch` can crash-and-resume; the verdict runs exactly-once per `checks:classify` success (the step journal / `advance` onSucceed). If `checks:dispatch` superseded, a resume would re-supersede its own partial fresh inserts → inflate the escalate counter → spurious escalate. The *effect* is identical (the flagged active generation is superseded, fresh actives inserted; history preserved; ids never reused). Flagging in case the lead specifically wanted the supersede physically inside `checks:dispatch`.
 
 ---
 
@@ -47,7 +49,9 @@ Task order: (1) `checks.md` behavioral-assertion strengthening · (2) the `weak`
 - **Integrity before re-run.** A tampered check is untrustworthy at re-run; the §2b byte-compare runs first and its violations join the still-red set.
 - **`weak` is transient, never persisted.** The `red_class`/`disposition` CHECK constraints must still reject it.
 - **Escalate signature = the sorted AC-id set, reason-agnostic** (both loopbacks). Predecessor-only repeat compare.
-- **No schema changes** in M4 (see decision #1). If a task appears to need one, stop and re-check against decision #1.
+- **Exactly ONE schema change** in M4: `ac_check.superseded_at` + `AUTOINCREMENT` id (Tasks 3a–3d; see decision #1). Both `schema.sql` copies stay byte-identical + the migrate tests bump to v6. The per-run/gate/integrity records add NO columns (open-vocab `ground_truth_signal.signal_type`). If any OTHER task appears to need a schema change, stop and re-check against decision #1.
+- **Control state is read from the TABLE, never derived by scanning the append-only `ground_truth_signal` log** (the M4 anti-pattern ruling): active checks = `superseded_at IS NULL`; the re-author finding set = active-unresolved rows; escalate = a per-AC supersede COUNT. The log stays an AUDIT trail (classification/red-first/post-implement/gate signals) — written, never read for routing.
+- **Re-author SUPERSEDES, never deletes** (`supersedeByAc`), so history is preserved and `AUTOINCREMENT` ids are never reused. `deleteByTicket` (fresh/whole-ticket author) and `deleteActiveByAc` (checks:dispatch resume-dedup of its own not-yet-classified actives) are the only deletes; neither touches the superseded (classified) generation.
 - **Capability isolation unchanged.** `verify:checks-gate` is a daemon step (no agent, no tier/allowlist) — the runner runs the checks via `runCommand`, injectable as `deps.runCheckCommand` for tests. The `checks:classify` adjudicator stays Read/Grep/Glob (the `weak` flag needs no new capability — it already Reads the repo).
 
 ---
@@ -60,21 +64,26 @@ Task order: (1) `checks.md` behavioral-assertion strengthening · (2) the `weak`
 - `src/daemon/checks-gate-verdict.ts` — `applyAcCheckGateVerdict` (clean/loopback/escalate on the still-red AC-id set).
 - Test files: `test/dispatch/check-integrity.test.ts`, `test/dispatch/post-implement-rerun.test.ts`, `test/daemon/checks-gate-verdict.test.ts`, `test/dispatch/verify-gate-e2e.test.ts`.
 
+**Schema files (the ONE M4 schema change — Task 3a; keep byte-identical)**
+- `src/db/schema.sql` AND `docs/architecture/schema.sql` — `ac_check.superseded_at TEXT` + `id INTEGER PRIMARY KEY AUTOINCREMENT` + `idx_ac_check_active`; `schema_meta` v5→6.
+- `test/migrate.test.ts` (`toBe(5)`→`toBe(6)`, both places) + `test/migrate-cli.test.ts` (`"schema v5"`→`"schema v6"`).
+
 **Modified files**
+- `src/db/repos/ac-check.ts` — add `superseded_at` to `AcCheckRow`/`COLS`; new `listActiveByTicket`/`listActiveByAc`/`supersedeByAc`/`reauthorRoundsForAc`/`deleteActiveByAc`; active-scope `listUnresolvedByTicket` (Task 3b). `deleteByAc` kept (exported) but its callers removed.
 - `prompts/checks.md` — behavioral-assertion requirement (assert observable output; forbid status/existence-only).
 - `prompts/checks-classify.md` — the `weak` label + "Read the check file's assertions" instruction.
 - `prompts/implement.md` — a `{{authored_checks}}` slot ("make these pass; do NOT edit the check files") + a distinct `{{gate_feedback}}` slot (still-red ACs on a gate loopback, Task 7c).
 - `src/dispatch/adjudicate-schema.ts` — add `weak` to `AdjClassEnum`.
-- `src/dispatch/handlers.ts` — `checks:classify` accepts `weak` (→ re-author, no `red_class`); `implement:dispatch` passes authored-check paths + gate feedback; register `verify:checks-gate`; demote `verify:check` (Task 8a) and `verify:integration` (Task 8c) to advisory.
+- `src/dispatch/handlers.ts` — `checks:classify` accepts `weak` (→ re-author, no `red_class`); `checks:dispatch` scoped re-author inserts-only via `deleteActiveByAc` (Task 3c, replacing `deleteByAc`); `implement:dispatch` passes **active** authored-check paths + gate feedback; register `verify:checks-gate` (reads active checks); demote `verify:check` (Task 8a) and `verify:integration` (Task 8c) to advisory.
 - `src/dispatch/prompt-vars.ts` — `implementVars` gains `authored_checks` (Task 4) and `gate_feedback` (Task 7c).
 - `src/dispatch/feedback.ts` — new `gateFeedback(db, ticketId)` (Task 7c; ticket-level, reads the `ac-check-gate` signal).
-- `src/daemon/checks-verdict.ts` — collector counts `weak`+`vacuous` (renamed `currentReauthorFindings`); signature unchanged.
+- `src/daemon/checks-verdict.ts` — **reworked (Task 3d, REPLACES Task 3's log-based body):** findings from the TABLE (active-unresolved rows), the verdict SUPERSEDES the flagged generation + a per-AC supersede escalate counter (`REAUTHOR_ESCALATE_CAP`); the log-scan/`vacuousSignature`/`isRepeatedChecksLoopback`/`deleteByAc` are all dropped; `latestChecksReauthorAcs` retained.
 - `src/daemon/resolver.ts` — insert the `verify:checks-gate` step in the `implement` stage (Task 7); change `nextUnrunCheck` (Task 8b) AND the `verify:integration` gate (Task 8c) to "ran at sha".
 - `src/db/repos/ground-truth-signal.ts` — new `ranShasFor` (Task 8b; mirror of `passingShasFor` without the `result='pass'` filter).
 - `src/daemon/failure-policy.ts` — dead per-unit verify branch cleanup (Task 8b); a `verify:checks-gate` escalate-guard before the integration-reconcile branch (Task 7a, review FIX 2); reset ticket-level verify steps in the integration-reconcile branch (Task 8d).
 - `src/daemon/review-verdict.ts` — reset ticket-level verify steps (`verify:integration` + `verify:checks-gate`) in `codeLoopback`/`redesignLoopback` (Task 8d, review FIX 4).
 - `src/daemon/advance.ts` — add `verify:checks-gate` to `VERDICT_BEARING_STEPS`; branch onSucceed to `applyAcCheckGateVerdict`.
-- Disturbed tests: `test/dispatch/verify-e2e.test.ts`, `test/dispatch/verify-routing.test.ts`, `test/dispatch/verify-handlers.test.ts`, `test/dispatch/verify-integration.test.ts` (Task 8c — asserts the demoted throw), `test/dispatch/feedback.test.ts`, `test/daemon/failure-policy.test.ts`, `test/daemon/resolver.test.ts`, `test/daemon/review-verdict.test.ts` (Task 8d), `test/daemon/checks-verdict.test.ts`, `test/dispatch/checks-classify-handler.test.ts`, `test/dispatch/adjudicate-schema.test.ts`.
+- Disturbed tests: `test/migrate.test.ts` + `test/migrate-cli.test.ts` (Task 3a, v6), `test/db/repos/ac-check.test.ts` / `ac-check-classify.test.ts` (Task 3b, new helpers), `test/dispatch/checks-handler.test.ts` (Task 3c, scoped inserts-only), `test/daemon/checks-verdict.test.ts` (Task 3d, table-read + counter — full rewrite), `test/dispatch/verify-e2e.test.ts`, `test/dispatch/verify-routing.test.ts`, `test/dispatch/verify-handlers.test.ts`, `test/dispatch/verify-integration.test.ts` (Task 8c — asserts the demoted throw), `test/dispatch/feedback.test.ts`, `test/daemon/failure-policy.test.ts`, `test/daemon/resolver.test.ts`, `test/daemon/review-verdict.test.ts` (Task 8d), `test/dispatch/checks-classify-handler.test.ts`, `test/dispatch/adjudicate-schema.test.ts`.
 
 ---
 
@@ -159,7 +168,19 @@ test("a weak verdict on a red check re-authors (no red_class persisted)", async 
 
 ---
 
-## Task 3: the re-author collector counts `weak`+`vacuous`; signature stays AC-id-set (leaf)
+## Task 3: the re-author collector counts `weak`+`vacuous`; signature stays AC-id-set (leaf) — COMMITTED (`60f0e53`); its log-based body is REPLACED by Task 3d
+
+> **Superseded-in-place, do NOT revert.** Task 3 shipped the weak-inclusion the OLD log-based way
+> (`currentReauthorFindings` scans `ground_truth_signal` by live `ac_check.id`; `vacuousSignature` +
+> `isRepeatedChecksLoopback` do predecessor-compare). An independent review ruled that deriving
+> control state from the append log is the anti-pattern: because `ac_check.id` had no `AUTOINCREMENT`,
+> a scoped re-author's `deleteByAc` + re-insert made the new row REUSE the deleted id, so a stale
+> "vacuous" log line pointed at a live (reused) id → a healed AC stayed flagged → a false
+> "no-progress" escalate. **The fix is in the SCHEMA (Tasks 3a–3d), which OVERWRITE this task's
+> `checks-verdict.ts` body** (findings now read the TABLE; escalate is a per-AC supersede counter).
+> The weak-inclusion *intent* survives (the table-based findings still include weak). No git revert —
+> Task 3d produces the schema-based end state. Task 3 stays recorded here as the shipped-then-replaced
+> increment. This section is unchanged below for history.
 
 **Files:** Modify `src/daemon/checks-verdict.ts`; extend `test/daemon/checks-verdict.test.ts`.
 
@@ -181,6 +202,443 @@ test("an AC oscillating vacuous->weak->vacuous still escalates (reason-agnostic 
 - [ ] Run red.
 - [ ] In `checks-verdict.ts`: rename `currentVacuousFindings` → `currentReauthorFindings`; change the filter from `d.class !== "vacuous"` to `d.class !== "vacuous" && d.class !== "weak"` (count both). Leave `vacuousSignature` (the sorted AC-id `join`) **unchanged** — do NOT introduce `reason`. Update its comment to "keyed on ac_ids ALONE (reason-agnostic): a stuck AC repeats its signature whether stuck-vacuous, stuck-weak, or oscillating → escalate trips (§5)." Update `applyChecksVerdict`'s call site + any name references.
 - [ ] Run green: `bun test test/daemon/checks-verdict.test.ts`. Commit: `feat(checks): re-author collector counts weak+vacuous; escalate signature stays AC-id-set`.
+
+---
+
+# Schema-based re-author rework (Tasks 3a–3d) — the anti-pattern fix
+
+**Why (operator ruling, 2026-07-08).** M3's re-author loop derives control-flow state ("which
+AC-checks are still bad") by scanning the append-only `ground_truth_signal` log, filtered by "is this
+`ac_check.id` still live." Because `ac_check.id` had no `AUTOINCREMENT`, a scoped re-author
+(`deleteByAc` + re-insert) makes the new check REUSE the deleted id — so a stale "vacuous" log line
+points at a live (reused) id → a healed AC stays flagged → a false "no-progress" escalate to a human.
+**The operator ruled: deriving control state from an append log is the anti-pattern — solve it in the
+SCHEMA.** The confirmed design:
+
+1. **Stop deleting on re-author — SUPERSEDE.** Add nullable `ac_check.superseded_at TEXT` (UTC; `NULL`
+   = active). A re-author sets `superseded_at` on the AC's active check(s) and inserts fresh active
+   one(s). Nothing is ever deleted → history preserved AND the id-reuse root cause is gone.
+2. **Enable `AUTOINCREMENT` on `ac_check.id`** — belt-and-suspenders; stable identities made explicit
+   (SQLite reuses a rowid only when the tail row is deleted; `AUTOINCREMENT` forbids reuse outright).
+3. **The loop reads the TABLE, not the log.** *Active check(s) for an AC* = `superseded_at IS NULL`.
+   *Which ACs need re-authoring this round* = the active checks `checks:classify` left unresolved
+   (vacuous/weak set neither `red_class` nor `disposition`) — a table read, not the log.
+   *Escalate-on-repeat* = a per-AC COUNT of superseded rows ≥ a cap → escalate; a plain monotone
+   counter that REPLACES the `vacuousSignature`/`isRepeatedChecksLoopback` log-signature machinery.
+
+**Ephemeral-DB note.** styre's runtime SQLite is created fresh from `schema.sql` each `styre run`, so
+this is ONLY: edit BOTH `src/db/schema.sql` and `docs/architecture/schema.sql` (identical), bump the
+`schema_meta` version 5→6, update `test/migrate.test.ts` + `test/migrate-cli.test.ts`. **No
+data-migration / table-rebuild.**
+
+**Supersede placement (resolved under-spec — see "Flagged for the lead" #4).** The supersede lives in
+the VERDICT (`applyChecksVerdict`, run on `checks:classify` onSucceed — exactly-once via the step
+journal), NOT in `checks:dispatch`. `checks:dispatch` can crash-and-resume; if IT superseded, a resume
+would re-supersede its own partial fresh inserts → inflate the escalate counter. So `checks:dispatch`
+is pure **insert + `deleteActiveByAc` resume-dedup**; the verdict is the single, exactly-once
+supersede+count+route point. (This resolves the design brief's "checks:dispatch does supersedeByAc"
+phrasing in favour of correctness; the *effect* — the flagged active generation is superseded, fresh
+actives inserted — is identical.)
+
+**Task-order rationale (green intermediates).** 3a schema → 3b repo → **3c `checks:dispatch`
+(insert-only + `deleteActiveByAc`) → 3d verdict (supersede + counter)**. 3c must land BEFORE 3d: while
+3c changes `checks:dispatch` to `deleteActiveByAc` the verdict still `deleteByAc`s (today's
+delete-in-verdict, insert-in-dispatch behaviour → green); 3d then removes the verdict's delete and
+adds the supersede+counter atomically, so the supersede history finally accrues and the counter goes
+live — every step leaves `bun test` green.
+
+---
+
+## Task 3a: schema — `superseded_at` + `AUTOINCREMENT` id (version 5→6)
+
+**Files:** `src/db/schema.sql` AND `docs/architecture/schema.sql` (keep byte-identical — the
+dual-schema rule); `test/migrate.test.ts`; `test/migrate-cli.test.ts`.
+
+- [ ] **Test first (version bump red).** In `test/migrate.test.ts`, change both `expect(result.version).toBe(5)` (bootstrap) and `expect(second.version).toBe(5)` (idempotent) to `toBe(6)`. In `test/migrate-cli.test.ts`, change `expect(out).toContain("schema v5")` to `"schema v6"`.
+- [ ] Run red: `bun test test/migrate.test.ts test/migrate-cli.test.ts` (schema still emits v5).
+- [ ] In BOTH schema files, the `ac_check` DDL: change `id INTEGER PRIMARY KEY` → `id INTEGER PRIMARY KEY AUTOINCREMENT`, and add a `superseded_at` column after `disposition`:
+```sql
+CREATE TABLE ac_check (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,  -- stable id: never reused (M4 supersede)
+    ticket_id        INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
+    ac_id            INTEGER NOT NULL REFERENCES acceptance_criterion(id) ON DELETE CASCADE,
+    selector         TEXT    NOT NULL,               -- in-suite selection (node-id / -k / …)
+    test_path        TEXT,                           -- authored test file, repo-relative
+    red_first_result TEXT CHECK (red_first_result IS NULL OR red_first_result IN ('red','green','error')),  -- M2 coarse
+    red_class        TEXT CHECK (red_class IS NULL OR red_class IN ('assertion','absence','environmental')), -- M3 graded
+    disposition      TEXT CHECK (disposition IS NULL OR disposition IN ('satisfied','not-expressible')),      -- M3 green-on-HEAD per-check
+    superseded_at    TEXT,                           -- M4 re-author supersede: NULL = active; set = replaced generation (never deleted)
+    created_at       TEXT    NOT NULL,
+    updated_at       TEXT    NOT NULL
+);
+CREATE INDEX idx_ac_check_ticket ON ac_check (ticket_id, ac_id);
+CREATE INDEX idx_ac_check_active ON ac_check (ticket_id, ac_id) WHERE superseded_at IS NULL;
+```
+  Update the `ac_check` block comment to note: "a re-author SUPERSEDES the flagged active generation (`superseded_at`) and inserts fresh active rows — never deletes; control state is read from this table (active = `superseded_at IS NULL`), never from the append-only signal log by (now-stable) id."
+- [ ] Bump the `schema_meta` INSERT in BOTH files:
+```sql
+INSERT INTO schema_meta (version, applied_at, note)
+    VALUES (6, '2026-07-08T00:00:00Z',
+        'v6: ac_check.superseded_at + AUTOINCREMENT id — M4 re-author SUPERSEDES (never deletes); control state is read from the table, not the append-only signal log');
+```
+  (Keep the existing `applied_at` timestamp format used by the file; match the surrounding style.)
+- [ ] **AUTOINCREMENT-on-existing-tests note.** On a fresh DB, ids still start at 1 and increment — `AUTOINCREMENT` only forbids *reuse after a tail delete*. Grep `test/` for any assertion that an `ac_check.id` equals a value it could only have by id-reuse-after-delete; plan-time none found, but confirm during execution.
+- [ ] Run green: `bun test test/migrate.test.ts test/migrate-cli.test.ts`.
+- [ ] Confirm the two schema files are byte-identical: `diff src/db/schema.sql docs/architecture/schema.sql` (empty output).
+- [ ] Commit: `feat(db): ac_check.superseded_at + AUTOINCREMENT id (M4 supersede substrate, schema v6)`.
+
+---
+
+## Task 3b: repo — active/supersede/count helpers + active-scoped unresolved (leaf)
+
+Add the table-read primitives the loop now uses; make `listUnresolvedByTicket` active-scoped (a
+superseded row must never be re-classified). `deleteByAc` stays in the file (still exported, its unit
+test unchanged) — only its *callers* are replaced (Tasks 3c/3d); `deleteByTicket` stays for the
+fresh/whole-ticket author path.
+
+**Files:** Modify `src/db/repos/ac-check.ts`; extend `test/db/repos/ac-check.test.ts` (or `ac-check-classify.test.ts`).
+
+- [ ] Add `superseded_at: string | null;` to `AcCheckRow` (after `disposition`), and add `superseded_at` to the `COLS` string (after `disposition`).
+- [ ] **Test first** — unit tests:
+```ts
+test("listActiveByTicket returns only superseded_at IS NULL rows", () => {
+  const a = insertAcCheck(db, { ticketId, acId, selector: "s", testPath: "p" });
+  supersedeByAc(db, acId);
+  const b = insertAcCheck(db, { ticketId, acId, selector: "s2", testPath: "p2" });
+  const active = listActiveByTicket(db, ticketId);
+  expect(active.map((r) => r.id)).toEqual([b.id]);
+  expect(b.id).not.toBe(a.id); // AUTOINCREMENT: the fresh row does NOT reuse the superseded id
+});
+test("supersedeByAc marks all active rows for the AC, is idempotent, leaves other ACs alone", () => {
+  insertAcCheck(db, { ticketId, acId, selector: "s", testPath: "p" });
+  insertAcCheck(db, { ticketId, acId: otherAc, selector: "o", testPath: "op" });
+  expect(supersedeByAc(db, acId)).toBe(1);
+  expect(supersedeByAc(db, acId)).toBe(0); // idempotent
+  expect(listActiveByAc(db, otherAc).length).toBe(1); // untouched
+});
+test("reauthorRoundsForAc counts DISTINCT re-author ROUNDS, not superseded rows", () => {
+  insertAcCheck(db, { ticketId, acId, selector: "s", testPath: "p" });
+  expect(reauthorRoundsForAc(db, acId)).toBe(0);
+  supersedeByAc(db, acId); // round 1: one UPDATE, one shared superseded_at
+  expect(reauthorRoundsForAc(db, acId)).toBe(1);
+});
+test("reauthorRoundsForAc counts ONE round even when an AC owns multiple checks (multi-test-case AC)", () => {
+  // A single AC can own >1 active ac_check row (multiple test cases per AC — supported + tested
+  // elsewhere, e.g. ac-check-classify.test.ts inserts 2 checks for one AC). supersedeByAc supersedes
+  // BOTH in one round, under ONE shared timestamp — a raw COUNT(*) of superseded rows would read 2
+  // here; the round-counter must still read 1 (the Critical this pins).
+  insertAcCheck(db, { ticketId, acId, selector: "s1", testPath: "p1" });
+  insertAcCheck(db, { ticketId, acId, selector: "s2", testPath: "p2" });
+  supersedeByAc(db, acId);
+  expect(reauthorRoundsForAc(db, acId)).toBe(1); // NOT 2
+});
+test("deleteActiveByAc deletes only active rows, preserving superseded history", () => {
+  insertAcCheck(db, { ticketId, acId, selector: "s", testPath: "p" });
+  supersedeByAc(db, acId);
+  insertAcCheck(db, { ticketId, acId, selector: "s2", testPath: "p2" }); // a fresh active
+  expect(deleteActiveByAc(db, acId)).toBe(1);              // only the active row
+  expect(reauthorRoundsForAc(db, acId)).toBe(1);           // history intact
+});
+test("listUnresolvedByTicket excludes superseded rows", () => {
+  insertAcCheck(db, { ticketId, acId, selector: "s", testPath: "p" });
+  supersedeByAc(db, acId);
+  expect(listUnresolvedByTicket(db, ticketId).length).toBe(0);
+});
+```
+- [ ] Run red.
+- [ ] In `ac-check.ts`, add the helpers and active-scope `listUnresolvedByTicket`:
+```ts
+export function listActiveByTicket(db: Database, ticketId: number): AcCheckRow[] {
+  return db
+    .query<AcCheckRow, [number]>(
+      `SELECT ${COLS} FROM ac_check WHERE ticket_id = ? AND superseded_at IS NULL ORDER BY id`,
+    )
+    .all(ticketId);
+}
+
+export function listActiveByAc(db: Database, acId: number): AcCheckRow[] {
+  return db
+    .query<AcCheckRow, [number]>(
+      `SELECT ${COLS} FROM ac_check WHERE ac_id = ? AND superseded_at IS NULL ORDER BY id`,
+    )
+    .all(acId);
+}
+
+/** Supersede (never delete) every ACTIVE check for one AC — the scoped re-author (§2/M4). Sets
+ *  superseded_at=now where it is NULL; returns the count superseded. `nowUtc()` is called ONCE and
+ *  bound to a single `$now`, so every row this call supersedes (an AC can own >1 active check — see
+ *  `reauthorRoundsForAc`) shares exactly ONE timestamp — that's what makes a "round" countable by
+ *  `COUNT(DISTINCT superseded_at)`. History is preserved and ids are never reused (AUTOINCREMENT), so
+ *  the control loop reads live state from THIS table, never from the append-only signal log by
+ *  (formerly-reused) id — the M4 anti-pattern fix. Idempotent: a second call supersedes 0. */
+export function supersedeByAc(db: Database, acId: number): number {
+  const res = db
+    .query(
+      "UPDATE ac_check SET superseded_at = $now, updated_at = $now WHERE ac_id = $ac AND superseded_at IS NULL",
+    )
+    .run({ $now: nowUtc(), $ac: acId });
+  return Number(res.changes);
+}
+
+/** How many times an AC has been RE-AUTHORED — i.e. the number of DISTINCT `supersedeByAc` rounds,
+ *  NOT the number of superseded rows. `supersedeByAc` supersedes every active row for the AC under one
+ *  shared timestamp per call, so `COUNT(DISTINCT superseded_at)` = number of rounds regardless of how
+ *  many checks the AC owns. The monotone escalate counter (M4 §5): ≥ REAUTHOR_ESCALATE_CAP ⇒ escalate.
+ *  Replaces M3's log-signature + predecessor-compare, which depended on live-id reuse.
+ *
+ *  Correctness note (an independent review's Critical): a plain `COUNT(*)` of superseded ROWS is
+ *  WRONG here — an AC with k active checks (multiple test cases per AC, e.g.
+ *  `ac-check-classify.test.ts`) has all k rows superseded in ONE round by ONE `supersedeByAc` call, so
+ *  a row-count reads k on the AC's FIRST flag and would escalate immediately instead of on the 2nd
+ *  round. Counting DISTINCT timestamps instead fixes this.
+ *
+ *  Robustness: this depends on distinct rounds getting distinct `superseded_at` values. In production
+ *  rounds are separated by a full re-author dispatch (seconds apart) → always distinct. `nowUtc()` is
+ *  millisecond-resolution, so a synchronous unit test driving 2+ LIVE rounds back-to-back could in
+ *  principle collide; such a test must force distinct timestamps (e.g. backdate the first round via a
+ *  direct SQL `UPDATE ac_check SET superseded_at = ? ...` before triggering the second, matching this
+ *  suite's existing nowUtc-override convention — see `test/cli/head-baseline.test.ts`). */
+export function reauthorRoundsForAc(db: Database, acId: number): number {
+  const row = db
+    .query<{ n: number }, [number]>(
+      "SELECT COUNT(DISTINCT superseded_at) AS n FROM ac_check WHERE ac_id = ? AND superseded_at IS NOT NULL",
+    )
+    .get(acId);
+  return row?.n ?? 0;
+}
+
+/** Delete only the ACTIVE (not-yet-superseded) rows for an AC — checks:dispatch's re-run/resume dedup
+ *  (§9). The scoped re-author's supersede lives in the VERDICT (exactly-once); checks:dispatch merely
+ *  inserts fresh actives, so on a crash-resume it first clears its OWN not-yet-classified actives.
+ *  Superseded history is untouched, so the escalate counter is never disturbed by a resume. */
+export function deleteActiveByAc(db: Database, acId: number): number {
+  const res = db.query("DELETE FROM ac_check WHERE ac_id = ? AND superseded_at IS NULL").run(acId);
+  return Number(res.changes);
+}
+```
+  And add `AND superseded_at IS NULL` to `listUnresolvedByTicket`'s WHERE clause (after the `disposition IS NULL` term), updating its doc comment to "…still unresolved AND active (`superseded_at IS NULL`): a superseded row is frozen history, never re-classified."
+- [ ] Run green: `bun test test/db/repos/`. Commit: `feat(db): ac_check active/supersede/count repo helpers (M4 table-read substrate)`.
+
+---
+
+## Task 3c: `checks:dispatch` — insert-only scoped re-author + resume-dedup (never delete history)
+
+Replace the scoped branch's `deleteByAc` (which deleted the AC's whole history) with `deleteActiveByAc`
+(clears only THIS dispatch's not-yet-classified actives, for crash-resume idempotency). The supersede
+of the flagged generation happens in the verdict (Task 3d), which runs before this dispatch; here we
+only insert fresh actives. At this task the verdict still `deleteByAc`s (Task 3's body), so the net
+behaviour is today's delete-in-verdict + insert-in-dispatch → `bun test` stays green.
+
+**Files:** Modify `src/dispatch/handlers.ts` (`checks:dispatch` scoped persist branch + imports); extend `test/dispatch/checks-handler.test.ts`.
+
+- [ ] **Test first** — a scoped re-author dispatch (arrange: an active `ac_check` for the flagged AC + a `loop:"checks"` loopback event naming that AC via `appendEvent`; scripted `FakeAgentRunner`/`runCheckCommand` so the author re-emits a check for that AC) → after the handler: a fresh ACTIVE row exists for the AC (new id), non-flagged ACs' rows are untouched, and running the scoped dispatch **twice** yields exactly ONE active row for the AC (the second run's `deleteActiveByAc` clears the first's fresh insert) with `reauthorRoundsForAc` unchanged (resume does not inflate the counter).
+- [ ] Run red.
+- [ ] In `handlers.ts`, update the `../db/repos/ac-check.ts` import: DROP `deleteByAc` (no longer used in this file), ADD `deleteActiveByAc` (biome-alphabetized among the existing names). Change the scoped persist branch (currently `for (const acId of acIds) deleteByAc(ctx.db, acId);`) to:
+```ts
+ctx.db.transaction(() => {
+  if (scoped) {
+    // Resume-dedup ONLY: clear this dispatch's own not-yet-classified actives (a crash-resume would
+    // otherwise double-insert). The flagged generation was already SUPERSEDED by the verdict
+    // (checks-verdict.ts, exactly-once) — never deleted here, so history + the escalate counter stand.
+    for (const acId of acIds) deleteActiveByAc(ctx.db, acId);
+  } else {
+    deleteByTicket(ctx.db, ctx.ticket.id); // fresh / crash-resume whole-ticket author (unchanged)
+  }
+  for (const r of records) {
+    const row = insertAcCheck(ctx.db, {
+      ticketId: ctx.ticket.id,
+      acId: r.acId,
+      selector: r.selector,
+      testPath: r.testPath,
+      redFirstResult: r.coarse,
+    });
+    insertSignal(ctx.db, {
+      ticketId: ctx.ticket.id,
+      signalType: "ac-check-red-first",
+      result: signalResultForCoarse(r.coarse),
+      branchHeadSha: sha,
+      detail: {
+        rawOutput: r.rawOutput,
+        exitCode: r.exitCode,
+        framework: r.framework,
+        command: r.command,
+        acCheckId: row.id,
+      },
+    });
+  }
+})();
+```
+  (Body identical to today's insert loop — only the `scoped` branch's `deleteByAc` → `deleteActiveByAc` changes.)
+- [ ] Run green: `bun test test/dispatch/checks-handler.test.ts test/dispatch/`. Commit: `feat(checks): checks:dispatch scoped re-author inserts-only (deleteActiveByAc resume-dedup)`.
+
+---
+
+## Task 3d: `checks-verdict.ts` rework — supersede in the verdict + per-AC escalate counter (REPLACES Task 3's body)
+
+The centerpiece of the anti-pattern fix. Findings now come from the **table** (active checks
+`checks:classify` left unresolved), the verdict **supersedes** the flagged active generation
+(exactly-once), and escalate is a **per-AC supersede COUNT ≥ cap** — deleting the log-scan
+(`currentReauthorFindings`), the signature (`vacuousSignature`), and the predecessor-compare
+(`isRepeatedChecksLoopback`) entirely.
+
+**Files:** Rewrite `src/daemon/checks-verdict.ts`; rewrite `test/daemon/checks-verdict.test.ts`.
+
+- [ ] **Test first** — rewrite the suite:
+```ts
+test("no unresolved active checks → clean", () => {
+  // a resolved (red_class set) active check → nothing to re-author
+  const r = insertAcCheck(db, { ticketId, acId: 1, selector: "s", testPath: "p" });
+  classifyAcCheck(db, { acCheckId: r.id, redClass: "assertion" });
+  expect(applyChecksVerdict(db, ticketId, { stepKey: "checks:classify" }).decision).toBe("clean");
+});
+test("a weak/vacuous active check (unresolved) → loopback; the flagged row is SUPERSEDED (not deleted)", () => {
+  const r = insertAcCheck(db, { ticketId, acId: 1, selector: "s", testPath: "p" }); // NULL/NULL = flagged
+  expect(applyChecksVerdict(db, ticketId, { stepKey: "checks:classify" }).decision).toBe("loopback");
+  expect(listByTicket(db, ticketId).find((x) => x.id === r.id)?.superseded_at).not.toBeNull(); // row still present, superseded
+  expect(reauthorRoundsForAc(db, 1)).toBe(1);
+  const ev = listEvents(db, ticketId).filter((e) => e.loop === "checks").at(-1);
+  expect(JSON.parse(ev!.payload_json!).acIds).toEqual([1]); // scopes checks:dispatch
+});
+test("the SAME AC flagged a second time (already superseded once) → escalate (counter ≥ cap)", () => {
+  insertAcCheck(db, { ticketId, acId: 1, selector: "s", testPath: "p" });
+  applyChecksVerdict(db, ticketId, { stepKey: "checks:classify" });   // round 1 → superseded (count 1), loopback
+  insertAcCheck(db, { ticketId, acId: 1, selector: "s2", testPath: "p2" }); // dispatch re-author, still flagged
+  expect(applyChecksVerdict(db, ticketId, { stepKey: "checks:classify" }).decision).toBe("escalated");
+  expect(getTicket(db, ticketId)?.status).toBe("waiting");
+});
+test("reason-agnostic: an AC flagged twice escalates regardless of vacuous-vs-weak (counter, not signature)", () => {
+  // identical to above — the reason is never read; two re-author rounds of the same AC escalate.
+});
+test("a multi-check AC (2 active checks) escalates on the 2nd re-author ROUND, not on hitting 2 superseded ROWS", () => {
+  // AC 1 owns TWO active checks (multiple test cases per one AC — supported + tested elsewhere, e.g.
+  // ac-check-classify.test.ts inserts 2 checks for one AC). Round 1 leaves BOTH unresolved (one
+  // vacuous, say) → applyChecksVerdict's single supersedeByAc(1) call supersedes BOTH rows under ONE
+  // shared timestamp = ONE round. This must be loopback, NOT escalate — a naive COUNT(*) of superseded
+  // rows would already read 2 here and wrongly escalate on the first flag (the Critical this pins).
+  insertAcCheck(db, { ticketId, acId: 1, selector: "s1", testPath: "p1" });
+  insertAcCheck(db, { ticketId, acId: 1, selector: "s2", testPath: "p2" });
+  const round1 = applyChecksVerdict(db, ticketId, { stepKey: "checks:classify" });
+  expect(round1.decision).toBe("loopback"); // NOT escalated, despite 2 rows superseded
+  expect(reauthorRoundsForAc(db, 1)).toBe(1); // ONE round
+
+  // Backdate round 1's superseded_at so round 2 below is guaranteed a distinct timestamp — ms-
+  // resolution nowUtc() could otherwise collide across two live rounds driven synchronously in this
+  // test (see the robustness note on reauthorRoundsForAc, Task 3b); production rounds are always
+  // seconds apart (a real re-author dispatch), so this only compensates for test speed.
+  db.query("UPDATE ac_check SET superseded_at = ? WHERE ac_id = ? AND superseded_at IS NOT NULL").run(
+    "2020-01-01T00:00:00.000Z",
+    1,
+  );
+
+  // Round 2: dispatch re-authors a single fresh active check for AC 1, still flagged.
+  insertAcCheck(db, { ticketId, acId: 1, selector: "s3", testPath: "p3" });
+  const round2 = applyChecksVerdict(db, ticketId, { stepKey: "checks:classify" });
+  expect(round2.decision).toBe("escalated"); // 2nd round ⇒ cap reached
+  expect(reauthorRoundsForAc(db, 1)).toBe(2);
+});
+```
+- [ ] Run red.
+- [ ] Rewrite `checks-verdict.ts` in full:
+```ts
+import type { Database } from "bun:sqlite";
+import {
+  listUnresolvedByTicket,
+  reauthorRoundsForAc,
+  supersedeByAc,
+} from "../db/repos/ac-check.ts";
+import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
+import { insertPending as insertSignal } from "../db/repos/signal.ts";
+import { setTicketStatus } from "../db/repos/ticket.ts";
+import { getByKey, resetToPending } from "../db/repos/workflow-step.ts";
+
+export interface ChecksVerdictResult {
+  decision: "clean" | "loopback" | "escalated";
+}
+
+/** Escalate when an AC has been re-authored this many ROUNDS (`reauthorRoundsForAc`, i.e. distinct
+ *  `supersedeByAc` calls — NOT superseded rows, since one round can supersede several rows for a
+ *  multi-check AC) and is STILL flagged (§5). The verdict supersedes BEFORE counting, so 2 ⇒ escalate
+ *  on the 2nd consecutive round — the exact bound M3's predecessor-compare had. Monotone + per-AC: it
+ *  replaces the log-signature machinery, which depended on live-id reuse (the anti-pattern the
+ *  supersede schema deleted). */
+const REAUTHOR_ESCALATE_CAP = 2;
+
+/** The ACs flagged for re-author THIS round = the active checks `checks:classify` left unresolved
+ *  (a vacuous/weak verdict sets neither red_class nor disposition). Read from the TABLE (active state
+ *  via the active-scoped listUnresolvedByTicket), NEVER from the append-only signal log by id — the
+ *  schema, not the log, is the control-state source (§3/§7, the M4 anti-pattern fix). */
+function reauthorFindings(db: Database, ticketId: number): number[] {
+  return [...new Set(listUnresolvedByTicket(db, ticketId).map((r) => r.ac_id))].sort((a, b) => a - b);
+}
+
+/** The flagged AC ids of the latest checks re-author event (or null). `checks:dispatch` reads this to
+ *  scope its re-author to only those ACs (§2b). (Routing state on the event — not the anti-pattern.) */
+export function latestChecksReauthorAcs(db: Database, ticketId: number): number[] | null {
+  const events = listEvents(db, ticketId).filter(
+    (e) => e.kind === "loopback" && e.loop === "checks",
+  );
+  const latest = events[events.length - 1];
+  if (!latest?.payload_json) return null;
+  const acIds = (JSON.parse(latest.payload_json) as { acIds?: number[] }).acIds;
+  return acIds && acIds.length > 0 ? acIds : null;
+}
+
+/** M3/M4 verdict (§2/§5/§7): a `vacuous`/`weak` active check (left unresolved by classify) drives an
+ *  AC-scoped re-author loopback — the verdict SUPERSEDES the flagged active generation (exactly-once;
+ *  history preserved) and re-arms checks:dispatch/checks:classify. An AC superseded ≥ cap times and
+ *  still flagged escalates (a per-AC monotone counter, reason-agnostic). Ground-truth over
+ *  self-report — reads persisted TABLE state, never an agent verdict. Mirrors `applyReviewVerdict`. */
+export function applyChecksVerdict(
+  db: Database,
+  ticketId: number,
+  _opts: { stepKey: string },
+): ChecksVerdictResult {
+  const flagged = reauthorFindings(db, ticketId);
+  if (flagged.length === 0) return { decision: "clean" };
+  let escalated = false;
+  db.transaction(() => {
+    // Re-author = supersede the flagged active generation (never delete). Count ROUNDS AFTER
+    // superseding — reauthorRoundsForAc counts DISTINCT superseded_at values, not rows, so a
+    // multi-check AC's whole round (all its rows, one shared timestamp) counts as ONE.
+    for (const acId of flagged) supersedeByAc(db, acId);
+    const exhausted = flagged.filter(
+      (acId) => reauthorRoundsForAc(db, acId) >= REAUTHOR_ESCALATE_CAP,
+    );
+    if (exhausted.length > 0) {
+      setTicketStatus(db, ticketId, "waiting");
+      insertSignal(db, {
+        ticketId,
+        signalType: "human_resume",
+        reason: `no progress: AC-check(s) ${exhausted.join(",")} still flagged after ${REAUTHOR_ESCALATE_CAP} re-authors`,
+      });
+      appendEvent(db, {
+        ticketId,
+        kind: "escalated",
+        reason: "no progress: repeated re-author of the same AC-check",
+        signature: `checks:${exhausted.join(",")}`,
+      });
+      escalated = true;
+      return;
+    }
+    for (const key of ["checks:dispatch", "checks:classify"]) {
+      const step = getByKey(db, ticketId, key);
+      if (step) resetToPending(db, step.id);
+    }
+    // No stage flip — checks:dispatch + checks:classify are both in the design stage.
+    appendEvent(db, {
+      ticketId,
+      kind: "loopback",
+      loop: "checks",
+      routeTo: "checks:classify",
+      signature: `checks:${flagged.join(",")}`, // audit label only (no longer read for repeat-detect)
+      payload: { acIds: flagged },
+    });
+  })();
+  return escalated ? { decision: "escalated" } : { decision: "loopback" };
+}
+```
+  Note the dropped symbols: `deleteByAc`, `listByTicket as listAcChecks`, `listByTicket as listSignals` (ground-truth), `VacuousFinding`, `currentReauthorFindings`, `vacuousSignature`, `isRepeatedChecksLoopback`, `escalate`, `checksLoopback` — all gone. `latestChecksReauthorAcs` is retained (routing, not log-derived control state).
+- [ ] Run green: `bun test test/daemon/checks-verdict.test.ts`. Then the wider sweep `bun test test/daemon/ test/dispatch/` to confirm the full re-author path (classify → verdict supersede → dispatch insert → classify → escalate) is green end-to-end. Commit: `feat(checks): read re-author state from the table + per-AC supersede escalate counter (drop the log-scan)`.
 
 ---
 
@@ -214,19 +672,19 @@ const authored_checks = paths.length === 0 ? "" :
   paths.map((p) => `- ${p}`).join("\n");
 return { ...existing, authored_checks };
 ```
-- [ ] In `handlers.ts` `implement:dispatch`, pass the ticket's checks:
+- [ ] In `handlers.ts` `implement:dispatch`, pass the ticket's **active** checks (a superseded check is stale — the seam must point implement only at the live generation):
 ```ts
 vars: implementVars(ctx.ticket, unit, deps.profile, implementFeedback(ctx.db, unit.id),
   listAcChecks(ctx.db, ctx.ticket.id)),
 ```
-  Add `listByTicket as listAcChecks` to the existing `../db/repos/ac-check.ts` import block. **Biome-alphabetize (FIX 5b):** it sorts between `insertAcCheck` and `listUnresolvedByTicket` (`listByTicket` < `listUnresolvedByTicket`):
+  Add `listActiveByTicket as listAcChecks` to the `../db/repos/ac-check.ts` import (Task 3c already dropped `deleteByAc` and added `deleteActiveByAc`). **Biome-alphabetize:** `listActiveByTicket` sorts between `insertAcCheck` and `listUnresolvedByTicket`. The resulting block:
 ```ts
 import {
   classifyAcCheck,
-  deleteByAc,
+  deleteActiveByAc,
   deleteByTicket,
   insertAcCheck,
-  listByTicket as listAcChecks,
+  listActiveByTicket as listAcChecks,
   listUnresolvedByTicket,
 } from "../db/repos/ac-check.ts";
 ```
@@ -250,7 +708,7 @@ import {
 ```ts
 import type { Database } from "bun:sqlite";
 import { dirname, join } from "node:path";
-import { listByTicket as listAcChecks } from "../db/repos/ac-check.ts";
+import { listActiveByTicket as listAcChecks } from "../db/repos/ac-check.ts";
 import { signalForAcCheck } from "../db/repos/ground-truth-signal.ts";
 import { fileContentAt } from "./worktree.ts";
 
@@ -277,10 +735,11 @@ function conftestChain(testPath: string): string[] {
   return [...new Set(out)];
 }
 
-/** §2b integrity gate: every ac_check's test file (and any conftest.py in its dir chain) must be
- *  byte-identical between its checks:dispatch authoring sha and the verify HEAD. A difference means
- *  implement rewrote the check it is gated by. Reads both versions with `fileContentAt`
- *  (git show <sha>:<path>) — added-only check files (M2 §5.1) make a whole-file freeze clean. */
+/** §2b integrity gate: every ACTIVE ac_check's test file (and any conftest.py in its dir chain) must
+ *  be byte-identical between its checks:dispatch authoring sha and the verify HEAD. A difference means
+ *  implement rewrote the check it is gated by. Superseded (re-authored-away) checks are NOT frozen —
+ *  only the live generation gates. Reads both versions with `fileContentAt` (git show <sha>:<path>) —
+ *  added-only check files (M2 §5.1) make a whole-file freeze clean. */
 export function checkIntegrityViolations(
   db: Database,
   ticketId: number,
@@ -329,7 +788,7 @@ Re-run each authored check in the *implemented* env; gate by frozen `red_class`;
 ```ts
 import type { Database } from "bun:sqlite";
 import { join } from "node:path";
-import { listByTicket as listAcChecks } from "../db/repos/ac-check.ts";
+import { listActiveByTicket as listAcChecks } from "../db/repos/ac-check.ts";
 import { insertSignal } from "../db/repos/ground-truth-signal.ts";
 import { type CoarseResult, binaryFor, frameworkFor } from "./check-selector.ts";
 import { runCheckForRed } from "./checks-run.ts";
@@ -367,7 +826,8 @@ interface RerunParams {
   worktreePath: string; headSha: string; timeoutMs: number; run?: CmdRunner;
 }
 
-/** §4: re-run each authored check on the IMPLEMENTED HEAD (not the frozen authoring env). Gate on the
+/** §4: re-run each ACTIVE authored check on the IMPLEMENTED HEAD (not the frozen authoring env;
+ *  superseded/re-authored-away checks don't gate — `listAcChecks` = listActiveByTicket). Gate on the
  *  frozen M3 red_class: assertion/absence must be green else gated; environmental → advisory;
  *  dispositions don't gate; NULL red_class AND NULL disposition = loud error. Records a separate
  *  `ac-check-post-implement` signal per check (distinct from red_class; M5 writes its own too). */
@@ -455,15 +915,18 @@ registry.register("verify:checks-gate", async (ctx: HandlerContext) => {
 });
 ```
   Add imports: `checkIntegrityViolations` from `./check-integrity.ts`, `rerunAcChecks` from `./post-implement-rerun.ts` (`listAcChecks`, `getLatestForTicket`, `insertSignal` already imported).
-- [ ] In `resolver.ts`, import `listByTicket as listAcChecks` from `../db/repos/ac-check.ts`. **Biome-alphabetize (FIX 5b):** import statements sort by source path, so this line goes immediately after `import type { Database } from "bun:sqlite";` and before `import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";` (`ac-check` < `dispatch`):
+- [ ] In `resolver.ts`, import `listActiveByTicket as listAcChecks` from `../db/repos/ac-check.ts` (the gate no-ops when there are no **active** checks — a fully-superseded ticket can't happen in practice, but active is the correct predicate). **Biome-alphabetize (FIX 5b):** import statements sort by source path, so this line goes immediately after `import type { Database } from "bun:sqlite";` and before `import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";` (`ac-check` < `dispatch`):
 ```ts
 import type { Database } from "bun:sqlite";
-import { listByTicket as listAcChecks } from "../db/repos/ac-check.ts";
+import { listActiveByTicket as listAcChecks } from "../db/repos/ac-check.ts";
 import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";
 ```
   In the `implement` stage `allUnitsVerified` block, **before** the `verify:integration` gate:
 ```ts
-const gateHasChecks = listAcChecks(db, ticketId).length > 0;
+const gateHasChecks = listAcChecks(db, ticketId).length > 0; // active checks only
+```
+  Note the `verify:checks-gate` **handler** already reads active checks — its `listAcChecks` alias is the `listActiveByTicket` one imported in Task 4 (`const checks = listAcChecks(ctx.db, ctx.ticket.id);` → active). Its zero-length no-op guard, the integrity gate, and the re-run harness therefore all scope to the live generation. Continue the resolver block:
+```ts
 if (gateHasChecks) {
   const gatePassedShas = gts.passingShasFor(db, { ticketId, workUnitId: null, signalType: "ac-check-gate" });
   if (branchSha === null || !gatePassedShas.includes(branchSha)) {
@@ -576,6 +1039,7 @@ export function applyAcCheckGateVerdict(
   return { decision: "loopback" };
 }
 ```
+- [ ] **Named note — the gate loop's oscillation weakness (flagged for the lead, not a required code change).** `isRepeatedGateLoopback` keeps the SAME predecessor-signature compare that Task 3d's re-author loop replaced with a per-AC round counter (`reauthorRoundsForAc`) precisely because predecessor-compare can't see oscillation: a `stillRed` set alternating `[1]→[2]→[1]→[2]…` never repeats the IMMEDIATE predecessor, so `isRepeatedGateLoopback` never trips and the gate loops forever on paper. In practice this is bounded — the gate is `step_type:"verify"` and every dispatch retry is itself capped, so a runaway oscillation still fails *closed* eventually via the ordinary attempt-budget/`MAX_TRANSITIONS` machinery, not via this comparator — and it exactly mirrors the accepted `applyReviewVerdict` precedent (same predecessor-only compare, same acknowledged limitation). Left as-is for M4: swapping it for a round-counter would be a bigger, out-of-scope rework of the gate verdict (it resets ALL units, not one AC, so "round" doesn't cleanly decompose per-AC the way the re-author loop's does). Calling it out here so it isn't silently carried forward as if it were already fixed.
 - [ ] In `advance.ts`: add `"verify:checks-gate"` to `VERDICT_BEARING_STEPS`; in the `onSucceed` branch, extend the ternary:
 ```ts
 verdictBox.value =
@@ -613,9 +1077,9 @@ test("gateFeedback is empty when no gate signal exists", () => {
 });
 ```
 - [ ] Run red.
-- [ ] In `feedback.ts`, add the imports and the function (the existing file already imports `Database` and `listByUnit as ground-truth`; add the two ticket-level lists, biome-alphabetized by source: `../db/repos/ac-check.ts` < `../db/repos/acceptance-criterion.ts` < `../db/repos/ground-truth-signal.ts`):
+- [ ] In `feedback.ts`, add the imports and the function (the existing file already imports `Database` and `listByUnit as ground-truth`; add the two ticket-level lists, biome-alphabetized by source: `../db/repos/ac-check.ts` < `../db/repos/acceptance-criterion.ts` < `../db/repos/ground-truth-signal.ts`). Use `listActiveByTicket` — a superseded check's path must not be surfaced to re-code:
 ```ts
-import { listByTicket as listAcChecks } from "../db/repos/ac-check.ts";
+import { listActiveByTicket as listAcChecks } from "../db/repos/ac-check.ts";
 import { listByTicket as listAcs } from "../db/repos/acceptance-criterion.ts";
 import { listByTicket as listSignals } from "../db/repos/ground-truth-signal.ts";
 
@@ -780,7 +1244,8 @@ if (gate) resetToPending(db, gate.id);
 - [ ] **The integrity gate fails on a tampered check.** Arrange: an `ac_check` authored at A whose `test_path` content differs at HEAD (implement rewrote it). Assert an `ac-check-integrity` violation signal, the AC in `stillRed`, decision `loopback` — even though the scripted re-run would read green.
 - [ ] **The advisory sweep does not block (per-unit AND repo-wide).** Arrange: a passing AC-check gate (assertion flips green) but BOTH a failing component whole-suite (`verify:check` records advisory `fail`) and a failing repo-wide `verify:integration` (records advisory `fail`). Assert the ticket advances implement→review (both failures recorded, neither gates; routing is "ran at sha" for each — no `MAX_TRANSITIONS`).
 - [ ] **A code-loopback re-verifies (FIX 4 end-to-end).** Arrange: a ticket whose gate passed and reached `review`, then a blocking code-review finding drives `codeLoopback`. Assert the ticket re-runs `verify:checks-gate` (its step was reset to `pending`) after re-implement — not a replay of the stale success — and does not hit `MAX_TRANSITIONS`.
-- [ ] **The weak-flag re-author + escalate** (may live in `checks-reauthor-e2e.test.ts`): a `weak` classification drives a `loop:"checks"` re-author; a repeated AC-id set escalates.
+- [ ] **The weak-flag re-author + escalate** (may live in `checks-reauthor-e2e.test.ts`): a `weak` classification drives a `loop:"checks"` re-author; the same AC flagged a 2nd time escalates via the supersede counter (`REAUTHOR_ESCALATE_CAP`).
+- [ ] **Supersede, not delete — the id-reuse regression (the anti-pattern this milestone fixes).** Drive a scoped re-author: assert the flagged AC's prior check row is still present with `superseded_at` set (NOT deleted), the fresh active check has a NEW id (`AUTOINCREMENT`, not the superseded id), and — the money assertion — an AC that goes `vacuous → re-author → now-GREEN` on the next round is **classified clean and does NOT re-appear in the finding set** (under the old log-scan-by-reused-id this healed AC would have stayed flagged → false escalate). `reauthorRoundsForAc` reflects the number of re-author rounds.
 - [ ] Run green: `bun test test/dispatch/verify-gate-e2e.test.ts`. Commit: `test(verify): M4 gate e2e — blocking, integrity, advisory, weak-reauthor`.
 
 ---
@@ -801,5 +1266,6 @@ M4's gate false-blocks a correct ticket on a wrong-shape check (§7); M5's arbit
 - [ ] `bun test` — full suite green.
 - [ ] `bunx tsc --noEmit` (or the repo's typecheck) — clean.
 - [ ] Manual trace: confirm three distinct records exist for a gated check after a run — the M3 `ac-check-red-first` (clean-HEAD), the M4 `ac-check-post-implement` (flip), and room for M5's own — with `red_class` never overwritten.
-- [ ] Confirm no schema file changed (decision #1).
+- [ ] Confirm the ONLY schema change is Task 3a's (`ac_check.superseded_at` + `AUTOINCREMENT`, v6): `diff src/db/schema.sql docs/architecture/schema.sql` is empty; `git diff --stat` shows no other `schema.sql` hunk; the per-run/gate records added no columns.
+- [ ] Manual trace: after a scoped re-author, confirm the old check row is SUPERSEDED (present, `superseded_at` set) not deleted, the fresh check has a new id, and the finding set / escalate come from the table, never a log scan.
 - [ ] Open a PR into `main` (no auto-merge; operator merges).
