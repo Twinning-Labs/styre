@@ -13,7 +13,12 @@ import {
   listByTicket as listUnits,
   setStatus as setUnitStatus,
 } from "../db/repos/work-unit.ts";
-import { getByKey, listStepsForUnit, resetToPending } from "../db/repos/workflow-step.ts";
+import {
+  getByKey,
+  listStepsForUnit,
+  resetAttempt,
+  resetToPending,
+} from "../db/repos/workflow-step.ts";
 
 export type ReviewDecision = "clean" | "loopback" | "escalated";
 
@@ -42,10 +47,14 @@ function isRepeatedReviewLoopback(db: Database, ticketId: number, signature: str
  *  keyed to the OLD head, so leaving them 'succeeded' replays a stale gate pass at the new HEAD →
  *  resolver re-emit → MAX_TRANSITIONS. Reset is a no-op when a step doesn't exist (getByKey null). */
 function resetTicketVerifySteps(db: Database, ticketId: number): void {
-  for (const key of ["verify:integration", "verify:checks-gate"]) {
+  for (const key of ["verify:integration", "verify:checks-gate", "checks:arbitrate", "checks:reauthor"]) {
     const s = getByKey(db, ticketId, key);
     if (s) resetToPending(db, s.id);
   }
+  // §6: review/design re-entry is NOT a gate-origin round → reset the monotone gate-round counter, so
+  // a healthy ticket that loops review does not accumulate attempts toward a false escalate.
+  const gate = getByKey(db, ticketId, "verify:checks-gate");
+  if (gate) resetAttempt(db, gate.id);
 }
 
 function escalate(db: Database, ticketId: number, reason: string, signature: string): void {

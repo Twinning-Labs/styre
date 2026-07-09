@@ -353,6 +353,49 @@ test("whole-project failure also resets the sibling verify:checks-gate (M4 §8d,
   expect(gateAfter?.status).toBe("pending");
 });
 
+test("whole-project failure resets the gate-round counter + checks:arbitrate/checks:reauthor (§6: integration re-entry is not a gate-origin round)", () => {
+  const { db, ticketId } = makeTestDb();
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verified",
+  });
+  const intStep = insertPending(db, {
+    ticketId,
+    stepKey: "verify:integration",
+    stepType: "verify",
+  });
+  markRunning(db, intStep.id, {});
+  markFailed(db, intStep.id, new Error("integration red"));
+  // The gate had already run a couple of gate-round arbitrations (attempt=2) before this infra crash.
+  const gateStep = insertPending(db, {
+    ticketId,
+    stepKey: "verify:checks-gate",
+    stepType: "verify",
+  });
+  markRunning(db, gateStep.id, {});
+  markRunning(db, gateStep.id, {});
+  markSucceeded(db, gateStep.id, { gated: 1, stillRed: 0 });
+  for (const key of ["checks:arbitrate", "checks:reauthor"]) {
+    const s = insertPending(db, { ticketId, stepKey: key, stepType: "dispatch" });
+    db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
+  }
+  const s = getStep(db, intStep.id);
+  if (!s) throw new Error("no step");
+  const r = applyFailurePolicy(db, ticketId, s);
+  const gateAfter = getStepByKey(db, ticketId, "verify:checks-gate");
+  const arbitrateAfter = getStepByKey(db, ticketId, "checks:arbitrate");
+  const reauthorAfter = getStepByKey(db, ticketId, "checks:reauthor");
+  db.close();
+  expect(r.decision).toBe("loopback");
+  expect(gateAfter?.status).toBe("pending");
+  expect(gateAfter?.attempt).toBe(0); // fresh count for the new verify pass
+  expect(arbitrateAfter?.status).toBe("pending");
+  expect(reauthorAfter?.status).toBe("pending");
+});
+
 test("completeness under-delivery loops the unit back to implement", () => {
   const { db, ticketId } = makeTestDb();
   setTicketStage(db, ticketId, "implement");

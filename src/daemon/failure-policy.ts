@@ -8,7 +8,12 @@ import {
   listByTicket as listUnits,
   setStatus as setUnitStatus,
 } from "../db/repos/work-unit.ts";
-import { getByKey, listStepsForUnit, resetToPending } from "../db/repos/workflow-step.ts";
+import {
+  getByKey,
+  listStepsForUnit,
+  resetAttempt,
+  resetToPending,
+} from "../db/repos/workflow-step.ts";
 import type { WorkflowStepRow } from "../db/repos/workflow-step.ts";
 
 export type FailureDecision = "retry" | "loopback" | "escalated";
@@ -189,7 +194,14 @@ export function applyFailurePolicy(
       });
       resetToPending(db, step.id);
       const gate = getByKey(db, ticketId, "verify:checks-gate");
-      if (gate) resetToPending(db, gate.id);
+      if (gate) {
+        resetToPending(db, gate.id);
+        resetAttempt(db, gate.id); // §6: integration re-entry is not a gate-origin round
+      }
+      for (const key of ["checks:arbitrate", "checks:reauthor"]) {
+        const s = getByKey(db, ticketId, key);
+        if (s) resetToPending(db, s.id);
+      }
       appendEvent(db, {
         ticketId,
         kind: "loopback",
