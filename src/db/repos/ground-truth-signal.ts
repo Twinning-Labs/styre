@@ -206,3 +206,24 @@ export function latestBlameAtSha(db: Database, ticketId: number, sha: string): B
     .filter((s) => s.signal_type === "ac-check-blame" && s.branch_head_sha === sha)
     .map((s) => JSON.parse(s.detail_json ?? "{}") as BlameDetail);
 }
+
+export interface ReauthorDetail {
+  acId: number;
+  acCheckId: number;
+  disposition: "installed" | "rejected";
+}
+
+/** The shas at which any `ac-check-reauthor` disposition exists (the round key: a disposition present
+ *  ⇒ checks:reauthor already ran for that arbiter round). */
+export function reauthorShasFor(db: Database, ticketId: number): string[] {
+  return listByTicket(db, ticketId)
+    .filter((s) => s.signal_type === "ac-check-reauthor" && s.branch_head_sha !== null)
+    .map((s) => s.branch_head_sha as string);
+}
+
+/** The re-author dispositions recorded at `sha` (one per check-wrong AC the reauthor step handled). */
+export function latestReauthorAtSha(db: Database, ticketId: number, sha: string): ReauthorDetail[] {
+  return listByTicket(db, ticketId)
+    .filter((s) => s.signal_type === "ac-check-reauthor" && s.branch_head_sha === sha)
+    .map((s) => JSON.parse(s.detail_json ?? "{}") as ReauthorDetail);
+}

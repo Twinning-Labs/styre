@@ -50,7 +50,7 @@ export function gateOriginLoopback(
       setUnitStatus(db, u.id, "pending");
       for (const s of listStepsForUnit(db, ticketId, u.id)) resetToPending(db, s.id);
     }
-    for (const key of ["verify:checks-gate", "checks:arbitrate"]) {
+    for (const key of ["verify:checks-gate", "checks:arbitrate", "checks:reauthor"]) {
       const s = getByKey(db, ticketId, key);
       if (s) resetToPending(db, s.id); // resetToPending never touches attempt → counter survives
     }

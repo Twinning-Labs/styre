@@ -4,8 +4,10 @@ import {
   blameShasFor,
   insertSignal,
   latestBlameAtSha,
+  latestReauthorAtSha,
   listByUnit,
   passingShasFor,
+  reauthorShasFor,
 } from "../../../src/db/repos/ground-truth-signal.ts";
 import * as gts from "../../../src/db/repos/ground-truth-signal.ts";
 import { insertWorkUnit } from "../../../src/db/repos/work-unit.ts";
@@ -146,5 +148,27 @@ test("blameShasFor / latestBlameAtSha round-key the ac-check-blame signal", () =
     { acId: 4, acCheckId: 40, blame: "code-wrong", reason: "r" },
   ]);
   expect(latestBlameAtSha(db, ticketId, "S2")).toEqual([]);
+  db.close();
+});
+
+test("reauthorShasFor / latestReauthorAtSha round-key the ac-check-reauthor disposition", () => {
+  const { db, ticketId } = makeTestDb();
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-reauthor",
+    result: "pass",
+    branchHeadSha: "S1",
+    detail: { acId: 4, acCheckId: 41, disposition: "installed" },
+  });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-reauthor",
+    result: "fail",
+    branchHeadSha: "S1",
+    detail: { acId: 5, acCheckId: 51, disposition: "rejected" },
+  });
+  expect(reauthorShasFor(db, ticketId)).toContain("S1");
+  expect(latestReauthorAtSha(db, ticketId, "S1")).toHaveLength(2);
+  expect(latestReauthorAtSha(db, ticketId, "S2")).toEqual([]);
   db.close();
 });
