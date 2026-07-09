@@ -155,6 +155,15 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
             if (behavioral && !blamed) {
               return step("checks:arbitrate", "dispatch", "checks:arbitrate", null);
             }
+            // A check-wrong round: the arbiter recorded blame at branchSha and looped to checks:reauthor
+            // (resetting it to pending). Serve reauthor until it succeeds this round; ITS verdict then
+            // re-serves the gate (pure check-wrong) or loops implement (mixed / rejected). Once a re-author
+            // commits, branchSha moves → blamed(newHead)=false → this arm is skipped (fall through to the
+            // gate). Pure code-wrong never reaches here: gateOriginLoopback resets units, so the pending
+            // unit is served first (nextActionableUnit) — reauthor is only reached with all units verified.
+            if (blamed && !done(db, ticketId, "checks:reauthor")) {
+              return step("checks:reauthor", "dispatch", "checks:reauthor", null);
+            }
             if (!done(db, ticketId, "provision")) {
               return step("provision", "provision", "provision", null);
             }

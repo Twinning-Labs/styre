@@ -326,7 +326,7 @@ test("resolver serves checks:arbitrate when the gate failed with behavioral stil
   expect(d).toMatchObject({ stepKey: "checks:arbitrate", handlerKey: "checks:arbitrate" });
 });
 
-test("resolver does NOT re-serve checks:arbitrate once a blame exists at the gate sha (falls through)", () => {
+test("resolver does NOT re-serve checks:arbitrate once a blame exists at the gate sha (falls through to checks:reauthor)", () => {
   const { db, ticketId } = makeTestDb();
   setTicketStage(db, ticketId, "implement");
   insertWorkUnit(db, {
@@ -365,8 +365,54 @@ test("resolver does NOT re-serve checks:arbitrate once a blame exists at the gat
   });
   const d = nextStepKey(db, ticketId);
   db.close();
-  // falls through past the arbiter arm to the provision gate (not yet done).
-  expect(d).toMatchObject({ stepKey: "provision" });
+  // falls through past the arbiter arm — blame exists, checks:reauthor is pending (not yet run this
+  // round) → served next.
+  expect(d).toMatchObject({ stepKey: "checks:reauthor", handlerKey: "checks:reauthor" });
+});
+
+test("resolver falls through past checks:reauthor once it has succeeded this round (HEAD unchanged) — serves provision then the gate", async () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verified",
+  });
+  const ac = insertAc(db, { ticketId, seq: 1, text: "does the thing", source: "checklist" });
+  insertAcCheck(db, {
+    ticketId,
+    acId: ac.id,
+    selector: "tests/test_x.py::test_thing",
+    testPath: "tests/test_x.py",
+  });
+  const disp = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0001",
+    seq: nextSeq(db, ticketId),
+  });
+  completeDispatch(db, disp.id, { outcome: "clean-success", branchHeadSha: "S1" });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-gate",
+    result: "fail",
+    branchHeadSha: "S1",
+    detail: { stillRed: [ac.id], tampered: [], advisory: [] },
+  });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-blame",
+    result: "fail",
+    branchHeadSha: "S1",
+    detail: { acId: ac.id, acCheckId: 1, blame: "check-wrong", reason: "r" },
+  });
+  await succeed(db, ticketId, "checks:reauthor"); // this round's reauthor already ran; HEAD is still S1
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "provision" });
+  await succeed(db, ticketId, "provision");
+  const d = nextStepKey(db, ticketId);
+  db.close();
+  expect(d).toMatchObject({ stepKey: "verify:checks-gate" });
 });
 
 test("implement: needs_docs routes through docs:revise before advancing", () => {
