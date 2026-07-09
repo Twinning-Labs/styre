@@ -16,7 +16,9 @@ test("clean run: criteria list, no advisory/provenance sections", () => {
   });
   expect(out).toContain("### Change-scoped verify");
   expect(out).toContain("✅ AC-1 — returns 201");
-  expect(out).toContain("Confirmed by an automated test that failed before this change and passes now.");
+  expect(out).toContain(
+    "Confirmed by an automated test that failed before this change and passes now.",
+  );
   expect(out).not.toContain("Please review before merging");
   expect(out).not.toContain("How the automated checks changed");
 });
@@ -68,7 +70,10 @@ test("advisory section: suite/integration/env-red with the 'not a merge gate' wo
 test("provenance section only for installed/rejected", () => {
   const out = renderVerifyReport({
     ...base,
-    criteria: [{ seq: 1, text: "x", label: "verified" }, { seq: 2, text: "y", label: "check-unreplaced" }],
+    criteria: [
+      { seq: 1, text: "x", label: "verified" },
+      { seq: 2, text: "y", label: "check-unreplaced" },
+    ],
     provenance: [
       { seq: 1, disposition: "installed", reason: "asserted stale field" },
       { seq: 2, disposition: "rejected", reason: "no correct check possible" },
@@ -83,7 +88,7 @@ test("provenance section only for installed/rejected", () => {
 });
 
 test("AC text is escaped and truncated (M3)", () => {
-  const nasty = "`code` <details>bad</details> " + "x".repeat(200);
+  const nasty = `\`code\` <details>bad</details> ${"x".repeat(200)}`;
   const out = renderVerifyReport({
     ...base,
     criteria: [{ seq: 1, text: nasty, label: "verified" }],
@@ -93,6 +98,7 @@ test("AC text is escaped and truncated (M3)", () => {
   expect(out).not.toContain("`code`");
   expect(out).toContain("&lt;details");
   // truncated to <= 120 chars of AC text (plus ellipsis)
-  const acLine = out.split("\n").find((l) => l.includes("✅ AC-1"))!;
+  const acLine = out.split("\n").find((l) => l.includes("✅ AC-1")) ?? "";
+  expect(acLine.length).toBeGreaterThan(0);
   expect(acLine.length).toBeLessThan(160);
 });

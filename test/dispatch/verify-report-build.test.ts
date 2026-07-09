@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
+import { classifyAcCheck, insertAcCheck, supersedeByAc } from "../../src/db/repos/ac-check.ts";
 import { insertAc } from "../../src/db/repos/acceptance-criterion.ts";
-import { insertAcCheck, classifyAcCheck, supersedeByAc } from "../../src/db/repos/ac-check.ts";
-import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
+import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { buildVerifyReport } from "../../src/dispatch/verify-report.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
@@ -19,8 +19,19 @@ test("verified: an assertion check green at HEAD", () => {
   const ac = insertAc(db, { ticketId, seq: 1, text: "returns 201 on create", source: "checklist" });
   const chk = insertAcCheck(db, { ticketId, acId: ac.id, selector: "s", testPath: "t" });
   classifyAcCheck(db, { acCheckId: chk.id, redClass: "assertion" });
-  insertSignal(db, { ticketId, signalType: "ac-check-post-implement", result: "pass",
-    branchHeadSha: HEAD, detail: { acCheckId: chk.id, acId: ac.id, coarse: "green", redClass: "assertion", outcome: "green" } });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-post-implement",
+    result: "pass",
+    branchHeadSha: HEAD,
+    detail: {
+      acCheckId: chk.id,
+      acId: ac.id,
+      coarse: "green",
+      redClass: "assertion",
+      outcome: "green",
+    },
+  });
   const r = buildVerifyReport(db, ticketId);
   expect(r.criteria).toEqual([{ seq: 1, text: "returns 201 on create", label: "verified" }]);
   expect(r.allClean).toBe(true);
@@ -47,8 +58,19 @@ test("environmental check green at HEAD is NOT verified (I1)", () => {
   const ac = insertAc(db, { ticketId, seq: 1, text: "env only", source: "checklist" });
   const chk = insertAcCheck(db, { ticketId, acId: ac.id, selector: "s", testPath: "t" });
   classifyAcCheck(db, { acCheckId: chk.id, redClass: "environmental" });
-  insertSignal(db, { ticketId, signalType: "ac-check-post-implement", result: "pass",
-    branchHeadSha: HEAD, detail: { acCheckId: chk.id, acId: ac.id, coarse: "green", redClass: "environmental", outcome: "advisory-red" } });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-post-implement",
+    result: "pass",
+    branchHeadSha: HEAD,
+    detail: {
+      acCheckId: chk.id,
+      acId: ac.id,
+      coarse: "green",
+      redClass: "environmental",
+      outcome: "advisory-red",
+    },
+  });
   const r = buildVerifyReport(db, ticketId);
   expect(r.criteria[0].label).toBe("environmental");
   expect(r.allClean).toBe(false);
@@ -60,8 +82,19 @@ test("environmental still-red emits an advisory caveat tagged to its AC", () => 
   const ac = insertAc(db, { ticketId, seq: 1, text: "env red", source: "checklist" });
   const chk = insertAcCheck(db, { ticketId, acId: ac.id, selector: "s", testPath: "t" });
   classifyAcCheck(db, { acCheckId: chk.id, redClass: "environmental" });
-  insertSignal(db, { ticketId, signalType: "ac-check-post-implement", result: "fail",
-    branchHeadSha: HEAD, detail: { acCheckId: chk.id, acId: ac.id, coarse: "red", redClass: "environmental", outcome: "advisory-red" } });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-post-implement",
+    result: "fail",
+    branchHeadSha: HEAD,
+    detail: {
+      acCheckId: chk.id,
+      acId: ac.id,
+      coarse: "red",
+      redClass: "environmental",
+      outcome: "advisory-red",
+    },
+  });
   const r = buildVerifyReport(db, ticketId);
   expect(r.advisory).toContainEqual({ kind: "environmental-red", seq: 1 });
 });
@@ -73,16 +106,46 @@ test("C1: an active check with a rejected re-author is check-unreplaced, even if
   const chk = insertAcCheck(db, { ticketId, acId: ac.id, selector: "s", testPath: "t" });
   classifyAcCheck(db, { acCheckId: chk.id, redClass: "assertion" });
   // Post-implement went green (implement coded to the wrong shape) — must NOT read as verified.
-  insertSignal(db, { ticketId, signalType: "ac-check-post-implement", result: "pass",
-    branchHeadSha: HEAD, detail: { acCheckId: chk.id, acId: ac.id, coarse: "green", redClass: "assertion", outcome: "green" } });
-  insertSignal(db, { ticketId, signalType: "ac-check-blame", result: "fail", branchHeadSha: "roundsha",
-    detail: { acId: ac.id, acCheckId: chk.id, blame: "check-wrong", reason: "asserts 200, AC says 201" } });
-  insertSignal(db, { ticketId, signalType: "ac-check-reauthor", result: "fail", branchHeadSha: "roundsha",
-    detail: { acId: ac.id, acCheckId: chk.id, disposition: "rejected" } });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-post-implement",
+    result: "pass",
+    branchHeadSha: HEAD,
+    detail: {
+      acCheckId: chk.id,
+      acId: ac.id,
+      coarse: "green",
+      redClass: "assertion",
+      outcome: "green",
+    },
+  });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-blame",
+    result: "fail",
+    branchHeadSha: "roundsha",
+    detail: {
+      acId: ac.id,
+      acCheckId: chk.id,
+      blame: "check-wrong",
+      reason: "asserts 200, AC says 201",
+    },
+  });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-reauthor",
+    result: "fail",
+    branchHeadSha: "roundsha",
+    detail: { acId: ac.id, acCheckId: chk.id, disposition: "rejected" },
+  });
   const r = buildVerifyReport(db, ticketId);
   expect(r.criteria[0].label).toBe("check-unreplaced");
   expect(r.allClean).toBe(false);
-  expect(r.provenance).toContainEqual({ seq: 1, disposition: "rejected", reason: "asserts 200, AC says 201" });
+  expect(r.provenance).toContainEqual({
+    seq: 1,
+    disposition: "rejected",
+    reason: "asserts 200, AC says 201",
+  });
 });
 
 test("superseded checks do not leak into the rollup", () => {
@@ -94,8 +157,19 @@ test("superseded checks do not leak into the rollup", () => {
   supersedeByAc(db, ac.id); // supersede the old generation
   const neu = insertAcCheck(db, { ticketId, acId: ac.id, selector: "new", testPath: "t" });
   classifyAcCheck(db, { acCheckId: neu.id, redClass: "assertion" });
-  insertSignal(db, { ticketId, signalType: "ac-check-post-implement", result: "pass",
-    branchHeadSha: HEAD, detail: { acCheckId: neu.id, acId: ac.id, coarse: "green", redClass: "assertion", outcome: "green" } });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-post-implement",
+    result: "pass",
+    branchHeadSha: HEAD,
+    detail: {
+      acCheckId: neu.id,
+      acId: ac.id,
+      coarse: "green",
+      redClass: "assertion",
+      outcome: "green",
+    },
+  });
   const r = buildVerifyReport(db, ticketId);
   expect(r.criteria[0].label).toBe("verified"); // reads the new active check only
 });
@@ -103,10 +177,19 @@ test("superseded checks do not leak into the rollup", () => {
 test("advisory sweeps surface sha-agnostically (I2)", () => {
   const { db, ticketId } = makeTestDb();
   seedHead(db, ticketId); // HEAD = headsha123
-  insertSignal(db, { ticketId, signalType: "integration", result: "fail", branchHeadSha: "OLDER_SHA",
-    detail: { advisory: true, ran: [{ label: "backend:test", exitCode: 1 }] } });
+  insertSignal(db, {
+    ticketId,
+    signalType: "integration",
+    result: "fail",
+    branchHeadSha: "OLDER_SHA",
+    detail: { advisory: true, ran: [{ label: "backend:test", exitCode: 1 }] },
+  });
   const r = buildVerifyReport(db, ticketId);
-  expect(r.advisory).toContainEqual({ kind: "integration", result: "fail", firstFailingJob: "backend:test" });
+  expect(r.advisory).toContainEqual({
+    kind: "integration",
+    result: "fail",
+    firstFailingJob: "backend:test",
+  });
 });
 
 test("precedence: green gating + environmental-red on one AC → verified headline + env caveat + not clean (design §6)", () => {
@@ -115,12 +198,34 @@ test("precedence: green gating + environmental-red on one AC → verified headli
   const ac = insertAc(db, { ticketId, seq: 1, text: "mixed", source: "checklist" });
   const gate = insertAcCheck(db, { ticketId, acId: ac.id, selector: "g", testPath: "t" });
   classifyAcCheck(db, { acCheckId: gate.id, redClass: "assertion" });
-  insertSignal(db, { ticketId, signalType: "ac-check-post-implement", result: "pass",
-    branchHeadSha: HEAD, detail: { acCheckId: gate.id, acId: ac.id, coarse: "green", redClass: "assertion", outcome: "green" } });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-post-implement",
+    result: "pass",
+    branchHeadSha: HEAD,
+    detail: {
+      acCheckId: gate.id,
+      acId: ac.id,
+      coarse: "green",
+      redClass: "assertion",
+      outcome: "green",
+    },
+  });
   const env = insertAcCheck(db, { ticketId, acId: ac.id, selector: "e", testPath: "t" });
   classifyAcCheck(db, { acCheckId: env.id, redClass: "environmental" });
-  insertSignal(db, { ticketId, signalType: "ac-check-post-implement", result: "fail",
-    branchHeadSha: HEAD, detail: { acCheckId: env.id, acId: ac.id, coarse: "red", redClass: "environmental", outcome: "advisory-red" } });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-post-implement",
+    result: "fail",
+    branchHeadSha: HEAD,
+    detail: {
+      acCheckId: env.id,
+      acId: ac.id,
+      coarse: "red",
+      redClass: "environmental",
+      outcome: "advisory-red",
+    },
+  });
   const r = buildVerifyReport(db, ticketId);
   expect(r.criteria[0].label).toBe("verified"); // gating check green — headline reflects gating only
   expect(r.advisory).toContainEqual({ kind: "environmental-red", seq: 1 }); // env red still surfaced
@@ -135,18 +240,48 @@ test("installed re-author → new active check verified + installed provenance l
   classifyAcCheck(db, { acCheckId: old.id, redClass: "assertion" });
   // Arbiter blamed the old check check-wrong; reauthor INSTALLED — the signal records the OLD (about-to-be
   // superseded) id, per handlers.ts checks:reauthor.
-  insertSignal(db, { ticketId, signalType: "ac-check-blame", result: "fail", branchHeadSha: "roundsha",
-    detail: { acId: ac.id, acCheckId: old.id, blame: "check-wrong", reason: "asserted stale field" } });
-  insertSignal(db, { ticketId, signalType: "ac-check-reauthor", result: "pass", branchHeadSha: "roundsha",
-    detail: { acId: ac.id, acCheckId: old.id, disposition: "installed" } });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-blame",
+    result: "fail",
+    branchHeadSha: "roundsha",
+    detail: {
+      acId: ac.id,
+      acCheckId: old.id,
+      blame: "check-wrong",
+      reason: "asserted stale field",
+    },
+  });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-reauthor",
+    result: "pass",
+    branchHeadSha: "roundsha",
+    detail: { acId: ac.id, acCheckId: old.id, disposition: "installed" },
+  });
   supersedeByAc(db, ac.id);
   const neu = insertAcCheck(db, { ticketId, acId: ac.id, selector: "new", testPath: "t" });
   classifyAcCheck(db, { acCheckId: neu.id, redClass: "assertion" });
-  insertSignal(db, { ticketId, signalType: "ac-check-post-implement", result: "pass",
-    branchHeadSha: HEAD, detail: { acCheckId: neu.id, acId: ac.id, coarse: "green", redClass: "assertion", outcome: "green" } });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-post-implement",
+    result: "pass",
+    branchHeadSha: HEAD,
+    detail: {
+      acCheckId: neu.id,
+      acId: ac.id,
+      coarse: "green",
+      redClass: "assertion",
+      outcome: "green",
+    },
+  });
   const r = buildVerifyReport(db, ticketId);
   expect(r.criteria[0].label).toBe("verified"); // installed id is the superseded old id → not in rejected set
-  expect(r.provenance).toContainEqual({ seq: 1, disposition: "installed", reason: "asserted stale field" });
+  expect(r.provenance).toContainEqual({
+    seq: 1,
+    disposition: "installed",
+    reason: "asserted stale field",
+  });
 });
 
 test("no ACs → empty report", () => {

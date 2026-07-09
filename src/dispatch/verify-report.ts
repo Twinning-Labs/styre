@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
-import { listByTicket as listAcs } from "../db/repos/acceptance-criterion.ts";
 import { listActiveByTicket as listActiveChecks } from "../db/repos/ac-check.ts";
+import { listByTicket as listAcs } from "../db/repos/acceptance-criterion.ts";
 import { getLatestForTicket } from "../db/repos/dispatch.ts";
 import {
   advisorySweeps,
