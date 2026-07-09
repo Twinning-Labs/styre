@@ -146,6 +146,15 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
             signalType: "ac-check-gate",
           });
           if (branchSha === null || !gatePassedShas.includes(branchSha)) {
+            // M5: the gate already ran at this sha and left behavioral still-red, and the arbiter has
+            // not judged this round → serve the arbiter (it may re-author check-wrong checks). The
+            // integrity-only fail path never reaches here (its verdict loops back, resetting the gate).
+            const behavioral =
+              branchSha !== null && gts.behavioralStillRed(db, ticketId, branchSha).length > 0;
+            const blamed = branchSha !== null && gts.blameShasFor(db, ticketId).includes(branchSha);
+            if (behavioral && !blamed) {
+              return step("checks:arbitrate", "dispatch", "checks:arbitrate", null);
+            }
             if (!done(db, ticketId, "provision")) {
               return step("provision", "provision", "provision", null);
             }

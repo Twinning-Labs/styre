@@ -8,6 +8,7 @@ import { ParkSignal } from "../engine/park-signal.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { awaitSignal } from "../engine/signals.ts";
 import { runStep } from "../engine/step-journal.ts";
+import { applyArbiterVerdict } from "./arbiter-verdict.ts";
 import { type GateVerdictResult, applyAcCheckGateVerdict } from "./checks-gate-verdict.ts";
 import { type ChecksVerdictResult, applyChecksVerdict } from "./checks-verdict.ts";
 import { applyFailurePolicy } from "./failure-policy.ts";
@@ -23,6 +24,7 @@ const VERDICT_BEARING_STEPS = new Set([
   "design:review",
   "checks:classify",
   "verify:checks-gate",
+  "checks:arbitrate",
 ]);
 
 export type AdvanceOutcome =
@@ -119,7 +121,9 @@ export async function advanceOneStep(
                   ? applyChecksVerdict(db, ticketId, { stepKey: d.stepKey })
                   : d.stepKey === "verify:checks-gate"
                     ? applyAcCheckGateVerdict(db, ticketId, { stepKey: d.stepKey })
-                    : applyReviewVerdict(db, ticketId, cfg, { stepKey: d.stepKey });
+                    : d.stepKey === "checks:arbitrate"
+                      ? applyArbiterVerdict(db, ticketId, { stepKey: d.stepKey })
+                      : applyReviewVerdict(db, ticketId, cfg, { stepKey: d.stepKey });
             }
           : undefined,
       });
