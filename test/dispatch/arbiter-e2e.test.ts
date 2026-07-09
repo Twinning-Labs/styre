@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
+import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
+import { driveToTerminal } from "../../src/daemon/run-ticket.ts";
 import {
   classifyAcCheck,
   insertAcCheck,
@@ -19,6 +21,7 @@ import {
   latestReauthorAtSha,
   listByTicket as listSignals,
 } from "../../src/db/repos/ground-truth-signal.ts";
+import { listPending } from "../../src/db/repos/signal.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { getByKey } from "../../src/db/repos/workflow-step.ts";
@@ -26,6 +29,9 @@ import type { RegistryDeps } from "../../src/dispatch/handlers.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
+import { fakeChecks } from "../../src/integrations/adapters/fake-checks.ts";
+import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
+import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 function gitRepo(): { root: string; initSha: string } {
@@ -1133,4 +1139,87 @@ test("Flow 7 — supersede + id-reuse healing: TWO consecutive check-wrong re-au
 
   // Pure check-wrong across BOTH generations: never a real re-code loop, never a false escalate.
   expect(implementLoopbacks.length).toBe(0);
+});
+
+// ─── Task 12: the pure-code-wrong stuck-HEAD (commit-nothing) livelock — driven through the REAL
+// driveToTerminal (the actual `styre run` terminal-detection loop, not just advanceOneStep), so the
+// no-progress spin (or its fix) is observed exactly as an operator would see it. ────────────────────
+
+test("Flow 8 — LIVENESS: a pure-code-wrong round where the re-implement commits NOTHING (HEAD frozen) escalates cleanly instead of spinning to no-progress", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const { root: repo } = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET ident = ?, stage = 'implement' WHERE id = ?").run(
+    "ENG-1F8",
+    ticketId,
+  );
+
+  mkdirSync(join(repo, "checks"), { recursive: true });
+  writeFileSync(join(repo, "checks", "ac1_test.py"), "def test_ac():\n    assert False\n");
+  const commitA = commitAll(repo, "author check");
+
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    behavioral: 0,
+    verifyCheckTypes: ["test"],
+    status: "verified",
+  });
+  const { checkId } = seedGatedAssertionCheck(db, ticketId, commitA);
+  const disp = insertDispatch(db, { ticketId, dispatchId: "seed-1", seq: nextSeq(db, ticketId) });
+  completeDispatch(db, disp.id, { outcome: "clean-success", branchHeadSha: commitA });
+
+  const blameReason =
+    "the check faithfully encodes the AC (201); the code returns 200 (assert 200 == 201)";
+  const runner = new FakeAgentRunner((input) => {
+    if (isArbitratePrompt(input.prompt)) return codeWrongArbitration([checkId], blameReason);
+    // implement:dispatch (the re-code round) writes NOTHING — commitWorktree() sees a clean
+    // worktree and returns the unchanged sha (`changed: false`). This is the reproduce-first
+    // case: an empty diff is NOT a dispatch failure (handlers.ts:822), so HEAD never moves.
+    return { ...ok, stdout: "{}" };
+  });
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      checksSystem: "none",
+      components: [CHECKS_COMPONENT, appComponent("true")],
+    }),
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-arb8-wt-")),
+    // The real post-implement rerun stays red every round (HEAD never moves, so it must).
+    runCheckCommand: async () => ({
+      exitCode: 1,
+      stdout: "F\n...\nE   assert 200 == 201\n1 failed in 0.01s",
+      stderr: "",
+      timedOut: false,
+    }),
+  });
+
+  const r = await driveToTerminal(db, registry, {
+    ticketId,
+    config: DEFAULT_RUNTIME_CONFIG,
+    ports: {
+      issueTracker: fakeIssueTracker(),
+      forge: fakeForge(),
+      checks: fakeChecks("passing"),
+    },
+    profile: { checksSystem: "none" },
+    cap: 25, // well below DEFAULT_CAP=200 — a clean escalate must land long before the global cap
+  });
+
+  const ticket = getTicket(db, ticketId);
+  const pending = listPending(db, ticketId);
+  const gateStep = getByKey(db, ticketId, "verify:checks-gate");
+  db.close();
+
+  // The FIX: a clean, bounded escalate (`waiting` + `human_resume`) — NEVER `no-progress`. The gate
+  // step's own `attempt` freezes below GATE_ROUND_CAP (proving this is NOT the gate's own cap check
+  // catching it — the resolver detects the stuck replay before the cap is ever reached).
+  expect(r.outcome).toBe("blocked");
+  expect(ticket?.status).toBe("waiting");
+  expect(pending.some((s) => s.signal_type === "human_resume")).toBe(true);
+  expect(gateStep?.attempt ?? 0).toBeLessThan(3); // GATE_ROUND_CAP — never reached; not a cap escalate
 });

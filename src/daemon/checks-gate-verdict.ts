@@ -24,7 +24,19 @@ function latestGate(db: Database, ticketId: number): { stillRed: number[]; sha: 
   return { stillRed: stillRed.slice().sort((a, b) => a - b), sha: sig.branch_head_sha };
 }
 
-function escalate(db: Database, ticketId: number, reason: string): void {
+/** Mutating escalate (ticket → waiting + human_resume signal + an 'escalated' event). Exported so
+ *  advance.ts's interpreter can call it for the resolver's `{ kind: "escalate" }` descriptor (Task
+ *  12 LIVENESS fix, see resolver.ts's `case "implement"` — the resolver stays pure/descriptor-only;
+ *  this is the ONE place that performs the actual mutation for both the cap-based escalates below
+ *  AND the stuck-replay escalate). `signature` defaults to the gate-round-cap shape for the two
+ *  existing (cap-reached) call sites; the stuck-replay call site passes a distinct signature since
+ *  it fires BELOW the cap, for a different reason (see resolver.ts's docstring). */
+export function escalate(
+  db: Database,
+  ticketId: number,
+  reason: string,
+  signature = `gate-cap:${GATE_ROUND_CAP}`,
+): void {
   db.transaction(() => {
     setTicketStatus(db, ticketId, "waiting");
     insertSignal(db, { ticketId, signalType: "human_resume", reason });
@@ -32,7 +44,7 @@ function escalate(db: Database, ticketId: number, reason: string): void {
       ticketId,
       kind: "escalated",
       reason,
-      signature: `gate-cap:${GATE_ROUND_CAP}`,
+      signature,
     });
   })();
 }
