@@ -1,0 +1,107 @@
+# Change-scoped verify M5 — the persistent-red arbiter (code-wrong / check-wrong blame)
+
+**Status:** Design (brainstorm output) — **v3, revised after THREE independent-review rounds** (feasibility + adversarial, then a second-round adversarial on v2, 2026-07-09). Core shape approved by the operator through a live design dialogue. v1→v2 folded two Criticals (both broke M4's "no silent pass" by replacing the RED-first ground-truth oracle with an oracle-less agent judgment): dropped the environmental blame route (two-way blame) + RED-first-validate the re-author + require a positive AC-contradiction. **v2→v3 folds the second-round review, which caught a fresh Critical the v2 folds planted** (C1: a re-authored check *classified* `environmental` flows into M4's retained `environmental→advisory` mapping → the same silent pass, reintroduced deterministically — §5.3 now rejects it) plus the precise RED-first predicate (`coarse == red`, §5.2), the clean-HEAD-sha cross-wiring + check-file-overlay hazards (§5.2), and the gate-round counter's review/integration re-entry over-count (§6). Throughline: **M5 keeps the RED-first oracle** and **no agent — nor any classification — can un-gate a check**. Pending written-spec re-review. On branch `feat/change-scoped-verify-m5` (off merged main = M1+M2a+M2b+M3+M4).
+**Date:** 2026-07-09
+**Scope:** M5 — the **arbiter on a check that stays red after implement**. M4 made the AC-checks the hard gate but its response to a still-red assertion/absence check is a blind loopback-to-implement + escalate-on-repeat — which burns the whole implement budget then blocks a *correct* ticket whenever the check's plan-blind shape-guess was wrong (M4 §7). M5 replaces that blind response with an **adjudicated blame decision per still-red check: code-wrong (loop implement) / check-wrong (re-author the check, AC-driven + RED-first-validated)** — and retires M4's oscillation-prone predecessor-signature escalate in favour of a monotone gate-round counter.
+
+**Key v2 changes from v1 (the review folds):**
+- **Two-way blame, not three.** The `environmental` route is **dropped** (operator decision) — it was a silent-pass hole (an agent re-deciding a *frozen* clean-HEAD fact post-implement could demote a genuinely broken feature to advisory and merge it). A gated check that ERRORS post-implement is **code-wrong**, never advisory (§3).
+- **Every check-wrong re-author is RED-first-validated against the frozen clean-HEAD sha** (§5) — restoring the M2b oracle that v1 wrongly claimed "doesn't apply post-implement."
+- **check-wrong requires a *positive* AC-contradiction** (§4) — when the AC is silent on the disputed detail, the arbiter must NOT route check-wrong (which would conform the check to the code); it defaults to code-wrong → escalate.
+
+**Requirements carried from M4 §11 (R1–R6):** three-way→**two-way** blame (R1, revised), separate verdict record (R2), termination via a counter (R3), structurally blind to false-greens (R4), consumes M4 outputs (R5), placement on the gate-fail branch (R6).
+
+**Release / co-release (unchanged):** dark until a release after all Mx; operator committed to not releasing until M6; M5 co-ships with M4's gate.
+
+`CLAUDE.md` load-bearing: **ground truth over self-report** (verdicts from build/tests, never agent self-scoring) — *this is the invariant v1 violated and v2 restores*; current state in the SoT table, the signal log is audit-only (the M4 lesson); loop-not-halt; capability isolation; structured (zod) agent output.
+
+---
+
+## 1. What M5 delivers (and defers)
+
+**Delivers:**
+- **A new arbiter dispatch step** (`checks:arbitrate`) served on the gate-fail branch, per round (§2). Capability-isolated (Read/Grep/Glob, **no Bash**, never re-runs), zod output.
+- **Two-way blame per behavioral still-red check** (§3): **code-wrong** → loopback to implement; **check-wrong** → re-author the check (§4–5). No environmental route.
+- **The check-wrong re-author pipeline** (§5): author from the AC (code-blind, fresh dispatch) → **RED-first-validate on the frozen clean-HEAD sha** → classify → install (supersede + integrity re-freeze) → re-run at the gate.
+- **A monotone per-ticket gate-round counter** (§6) bounding both routes → escalate at the cap; retires M4's predecessor-signature compare.
+- **A separate blame verdict record** (§7).
+
+**Defers:** M6 (project the dispositions + advisory sweep + the blame record to the MERGE human gate).
+
+## 2. When/where the arbiter fires — routes each round; integrity split out first
+
+M4's gate: `verify:checks-gate` runs the integrity gate + the post-implement re-run, records an `ac-check-gate` signal with `detail:{ stillRed, tampered, advisory }` (integrity violations vs behavioral still-red are ALREADY recorded separately — `handlers.ts:1259`); `applyAcCheckGateVerdict` (onSucceed) does blind loopback + signature-escalate.
+
+M5 restructures the **fail** branch, each round:
+1. **Split first (integrity is never arbitrated).** The `tampered` set is a **hard fail** — implement must not be able to force a re-author by tampering (R5). Only the **behavioral** still-red set (`stillRed \ tampered`) is arbitrated. If the behavioral set is empty (fail was integrity-only), the arbiter is a **no-op** → the tampered checks route straight to loopback/escalate as M4 does.
+2. **Serve the arbiter.** When behavioral still-red is non-empty, the resolver serves **`checks:arbitrate`** (a new agent dispatch), which reads each behavioral still-red check + its post-implement trace + its AC text and emits a blame per check.
+3. **The gate verdict routes on the persisted blame** (§4). *(Feasibility note: this is a RESTRUCTURE, not a drop-in. Today the verdict fires the loopback synchronously in `onSucceed`; M5 must defer that and add a "gate=fail-with-behavioral-still-red → serve arbiter" arm to the resolver `case "verify"`. `applyAcCheckGateVerdict` is rewritten, not extended.)*
+
+## 3. Two-way blame + the adjudicator
+
+Per **behavioral** still-red check, the arbiter (capability-isolated; judges from the AC text + the check source + the recorded post-implement trace + the repo; **never re-runs**) emits one of:
+- **`code-wrong`** — the code doesn't satisfy a check that faithfully encodes the AC → **loopback to implement**. **This includes a check that ERRORS post-implement** (import break, 500, collection error): a gated assertion/absence check RAN on clean HEAD (M3 classed it assertion/absence, NOT environmental), and M4 §4 already re-provisions the implemented HEAD before re-running, so a post-implement error is the *code's* fault, not the env's → code-wrong.
+
+  *Two distinct "environmental"s — don't conflate them.* What v1 **dropped** is the arbiter's post-implement environmental **blame ROUTE** (an agent re-deciding a frozen fact → un-gating a broken feature — the silent-pass hole). What is **retained** is M3's clean-HEAD environmental **CLASSIFICATION** (`red_class`): a check that couldn't run on *clean HEAD* is frozen `environmental` → advisory by M4's `rerunAcChecks`, so it **never reaches the arbiter** as a gated check. So no agent ever un-gates a check; only the frozen clean-HEAD class demotes, and it does so before the gate. (This is also why a re-authored check must not be *classified* environmental — §5.3.)
+- **`check-wrong`** — the check **positively contradicts the AC** (§4) → **re-author the check** (§5).
+
+zod output `{ ac_check_id, blame ∈ {code-wrong, check-wrong}, reason }`; absent/malformed = transport failure (re-dispatch), not a default. A behavioral still-red check with **no AC text** is a **loud error** (M4 §4 NULL/NULL-adjacent), never an arbiter input.
+
+## 4. check-wrong requires a POSITIVE AC-contradiction (closes the code-as-oracle hole)
+
+The check-wrong route is available **only when the arbiter can establish the check asserts something the AC explicitly rules out** (AC says "201", the check asserts 200; AC says "persists then returns it", the check asserts it's absent). It is NOT "the code and the check disagree," and NOT "the check might be wrong."
+
+**When the AC is silent on the disputed detail** (the AC says "returns the full name" but not the JSON key; the check guessed `name`, the code returns `fullName`), the arbiter **cannot** route check-wrong — because "re-author from the AC" has no content on a detail the AC doesn't specify, so the only reference left would be the code, and conforming the check to the code is the exact code-as-oracle bug the feature exists to delete. So an AC-silent dispute defaults to **code-wrong** → loop implement → (the code can't satisfy a guess the AC doesn't pin down) → the gate-round counter escalates → **a human resolves the underspecified AC.** Fails closed (escalate an ambiguous AC), never a false-green.
+
+## 5. The check-wrong re-author — AC-driven AND RED-first-validated (the oracle)
+
+When the arbiter routes check-wrong, the re-author is a pipeline, not a single agent turn:
+1. **Author from the AC — a fresh capability-isolated authoring dispatch** (the M2b `checks:dispatch` author, scoped to this one AC), with **no code and no arbiter reasoning in its context** — so code-blindness is a capability boundary, not a prompt hope. (It must read repo structure to write a runnable check; code-blind means "the code's output is not an input.")
+2. **RED-first-validate against the FROZEN clean-HEAD sha.** The clean-HEAD sha is the **ticket's original clean-HEAD baseline** — read from the *original* (first, now-superseded) check's `ac-check-red-first` signal, or a ticket-level clean-HEAD baseline record. **NOT** from `signalForAcCheck` on the new check: §4-install writes a *new* `ac-check-red-first` at the re-author (post-implement) sha for the integrity re-freeze, and `signalForAcCheck` is keyed by the live `ac_check.id`, so on the new check it returns the *re-author* sha — replaying there is an invalid oracle (the behavior may exist ⇒ wrongly green). The two shas live on the same signal type — a cross-wiring trap; the plan must fetch the baseline explicitly.
+   - **The replay harness must overlay the re-author content:** the re-authored check file is authored/committed at the *implemented* HEAD and does **not exist** at the clean-HEAD sha; a bare checkout gives no file → `selected-none`/`error`. So the harness checks out the clean-HEAD sha AND writes the re-author's (not-yet-at-that-sha) check content into it before running.
+   - **The predicate is `coarse == red` (tighter than "not green").** `interpretRunOutput` already buckets absence-shaped failures — pytest collection/import error (exit 2), go/cargo build error — as coarse **`red`** (not `error`); coarse-`error` is the narrow infra-fault set (timeout, exit 127, pytest 3/4). So a *new-surface* re-author is coarse-`red` on clean HEAD and is **accepted** (the feared new-surface rejection does not occur). Reject: **`green`** (vacuous / already-satisfied), **`selected-none`** (identity failure — the selector matches nothing), and **`error`** (cannot-validate → retry/re-dispatch, never install — accepting `error` would re-open C1 below). Only coarse-`red` installs.
+3. **Classify** the validated check via the M3 **adjudicator directly** (NOT through `applyChecksVerdict` — that pre-implement verdict would re-trigger its own escalate on `reauthorRoundsForAc`, which the supersede inflates). **A re-authored check that classifies `environmental` is a REJECTION, never installed** (retry within the counter / escalate) — a *gating* AC's re-author must be `assertion`/`absence`. This applies the same "no un-gating" rule at classify time: without it, a check-wrong re-author classified `environmental` would flow into M4's retained `environmental → advisory` mapping (`post-implement-rerun.ts`) → the AC silently stops gating → a fresh silent pass. (Belt-and-suspenders with the step-2 `error`-rejects predicate, which already blocks the coarse-error→environmental path.)
+4. **Install:** `supersedeByAc` the wrong check + insert the new active `assertion`/`absence` check; **write its authoring-sha signal** (the new `ac-check-red-first` at the re-author commit sha) so the §2b integrity gate **re-freezes at the new baseline** (automatic *given this write* — omit it and the integrity gate throws `missing-authoring-sha`).
+5. The new check **re-runs at the next gate round**: green post-implement ⇒ the code satisfies the correctly-shaped check ⇒ gate advances; still red ⇒ code-wrong ⇒ loop implement. **The code can never become the oracle:** on a *pre-existing* surface a code-conforming re-author greens on clean HEAD → RED-first rejects it; on a *new* surface a code-conforming re-author is red on clean HEAD (surface absent) so RED-first can't catch it — there, **§4's positive-AC-contradiction rule is the guard** (it won't route check-wrong on an AC-silent detail). The two rules together close it; neither alone.
+
+`red_class` (M3's clean-HEAD fact) belongs to the *new* check's own clean-HEAD classification; the blame is M5's own record (§7).
+
+## 6. The escalate bound — a monotone per-ticket gate-round counter
+
+Two things loop at the gate: **code-wrong** loops implement (no supersede → `reauthorRoundsForAc` doesn't move) and **check-wrong** re-authors (supersede → it does). So the supersede counter alone under-bounds a code-wrong AC implement can never satisfy. M5 bounds **total gate rounds for the ticket** via the **`verify:checks-gate` step's `attempt` count** — feasibility-confirmed monotone: `resetToPending` (used by every loopback path incl. M4's `resetTicketVerifySteps`) never touches `attempt`; only `markRunning` increments it; only the `provision` step is ever `resetAttempt`'d. So the gate step attempt survives both the gate-loopback AND the implement-loopback, is readable in the verdict via `getByKey`, and never reads the append-log.
+- **Granularity is per-ticket** (one `verify:checks-gate` row per ticket) — the right unit: the gate runs once per round over *all* checks, so its attempt count *is* the gate-round count, bounding both routes.
+- **It must count GATE-ORIGIN rounds only (the review caught this).** The raw `attempt` pools EVERY re-entry to verify — not just the gate's own code-wrong loop, but also the **review→implement / review→design loopbacks** (`review-verdict.ts` `resetTicketVerifySteps`) and the **integration-reconcile loopback** (`failure-policy.ts`), all of which `resetToPending` the gate (preserving `attempt`). So a *healthy* ticket that passes the gate, takes a legitimate review nit, loops back, re-verifies (gate passes again), another nit… accumulates `attempt` on every re-entry though the gate is healthy each time → a **false escalation of a healthy ticket** (fails closed — no wrong merge — but strands it, defeating M5's anti-false-block purpose). **Fix: reset the gate `attempt` on non-gate-origin re-entries** — the review/integration loopback paths must `resetAttempt` the gate step (fresh count for the new verify pass); only the gate's OWN code-wrong loopback preserves it. Then `attempt` counts *consecutive gate-fail rounds within one verify pass* — exactly the bound M5 wants. *(Alternative: a dedicated per-AC gate-round column; heavier. The reset-on-non-gate-origin approach is preferred.)*
+- **No conflict with `reauthorRoundsForAc`:** that per-AC counter is read only by the *pre-implement* `applyChecksVerdict` (checks:classify), which does not run post-implement. A check-wrong supersede increments it as a side effect, but nothing post-implement reads it for escalate — M5's escalate keys **only** on the gate-round counter.
+- Exceed the cap ⇒ **escalate** (`waiting` + `human_resume` — the existing terminal). **Retires M4's `isRepeatedGateLoopback`** predecessor-signature compare (the `{1}→{2}→{1}` oscillation the M4 whole-branch review named — a monotone counter can't be evaded).
+
+## 7. The separate blame verdict record
+
+A new open-vocab `ground_truth_signal` type `ac-check-blame` (the `signal_type` column has no CHECK — additive). It NEVER overwrites `red_class` (M3), `ac-check-post-implement` (M4), or `ac-check-gate` (M4). The `gateFeedback` carrier (already wired into the implement loopback prompt, `feedback.ts:53` / `prompt-vars.ts:126`) is extended to surface the code-wrong blame reason into the re-code feedback. M6 projects the blame to MERGE.
+
+## 8. Structurally blind to false-greens (unchanged, R4)
+
+M5 adjudicates persistent **red**. It does NOT close the false-*green* hole (an absence-red check that stub-greens) — no wild-side oracle exists. The AC-driven + RED-first-validated re-author (§5) keeps M5 from *adding* false-greens (a code-conforming or vacuous re-author is rejected); it doesn't remove the pre-existing residual.
+
+## 9. Named risks / residuals
+
+- **Arbiter mis-blame (bounded, fails closed).** code-wrong vs check-wrong is an agent judgment, but both failure directions fail *closed*: a mis-called check-wrong → the AC-driven RED-first-validated re-author either can't be validated (rejected) or, if valid, stays red against wrong code → flips to code-wrong; a mis-called code-wrong → loops implement until the gate-round counter escalates. Never a wrong *pass*. Bounded by the counter.
+- **M5 fixes the false-block only for PRECISE ACs (honesty).** A vague AC → the arbiter can't route check-wrong (§4, no positive contradiction) → code-wrong → loop → escalate. That is M4 §7's false-block *converted from a silent budget-burn to a clean human escalation of an underspecified AC* — safer, but M5 does not magically fix a vague AC; it surfaces it. State plainly.
+- **Re-author validity rests on RED-first-replay + §4, not the static weak-flag.** v1 leaned on M4's `weak` flag (an *agent* judgment inline in checks:classify, not deterministic static analysis, and clean-HEAD-coupled). v2's oracle is RED-first-replay on the clean-HEAD sha (ground truth). The weak-flag may still run as a secondary check but is not the guarantee.
+- **The gate-fail-path restructure + verdict rewrite** (§2) disturbs the resolver `case "verify"` + the loop/verify tests (like M4's gate insert) — the plan must budget it, plus the arbiter step's tier/allowlist entries + the zero-behavioral-still-red no-op.
+- **Clean-HEAD-sha replay harness (§5.2) is the trickiest net-new machinery** — two hazards the plan must handle: (a) fetch the clean-HEAD baseline sha from the ORIGINAL/superseded check (or a ticket-level baseline), NOT `signalForAcCheck` on the new check (which returns the re-author sha); (b) the re-author check file is absent at the clean-HEAD sha, so the harness must check out that sha AND overlay the re-author content before running. Predicate = `coarse == red`.
+- **A re-authored check classified `environmental` is a rejection (§5.3), never installed** — else it re-enters M4's `environmental→advisory` mapping = a fresh silent pass (the C1 the second-round review caught). Belt-and-suspenders with the step-2 `error`-rejects predicate.
+- **The gate-round counter must reset on non-gate-origin re-entries (§6)** — else a healthy ticket that loops review/integration false-escalates; the plan must `resetAttempt` the gate step in the review/integration loopback paths, preserving it only on the gate's own code-wrong loop.
+
+## 10. Explicitly NOT in M5
+
+M6 (MERGE projection of dispositions + advisory sweep + the blame record).
+
+## 11. Changelog
+
+- **2026-07-09 — plan written (`docs/plans/2026-07-09-m5-arbiter.md`) + executed:** TWO new agent-orchestrated steps mirroring M3's `checks:classify → checks:dispatch` — `checks:arbitrate` (deep, read-only) emits two-way blame; a separate `checks:reauthor` runs the check-wrong re-author (code-blind author → clean-HEAD replay oracle → classify → install) so a session-limit death mid-re-author re-runs only the re-author; gate-verdict split integrity/behavioral; monotone gate-round counter (`verify:checks-gate.attempt`, CAP=3) replacing `isRepeatedGateLoopback`.
+
+---
+
+## 12. Execution Handoff
+
+`superpowers:writing-plans` (after re-review), then subagent-driven execution. Likely task shape: (1) the arbiter contract (zod two-way blame + prompt requiring a positive AC-contradiction for check-wrong + tier/allowlist no-Bash); (2) split integrity vs behavioral on the gate-fail branch + the `checks:arbitrate` dispatch handler; (3) the check-wrong re-author pipeline — fresh code-blind authoring dispatch + the **clean-HEAD replay harness** (baseline sha from the ORIGINAL check not the new one; overlay the re-author content onto the checkout; predicate `coarse == red`, reject green/selected-none/error) + classify **via the adjudicator directly** with **`environmental`-classification = rejection** + supersede/install + the authoring-sha signal write (integrity re-freeze); (4) the gate-round counter (the `verify:checks-gate` step attempt; **`resetAttempt` it on the review/integration loopback paths, preserve on the gate's own loop**) + rewrite the gate verdict to route on blame + counter-escalate (drop `isRepeatedGateLoopback`); (5) resolver placement + affected loop/verify tests + the no-op; (6) the `ac-check-blame` record + the gateFeedback blame extension.

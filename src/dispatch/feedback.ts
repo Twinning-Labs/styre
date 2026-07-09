@@ -2,7 +2,11 @@ import type { Database } from "bun:sqlite";
 import { listActiveByTicket as listAcChecks } from "../db/repos/ac-check.ts";
 import { listByTicket as listAcs } from "../db/repos/acceptance-criterion.ts";
 import { getLatestByWorkUnit } from "../db/repos/dispatch.ts";
-import { listByUnit, listByTicket as listSignals } from "../db/repos/ground-truth-signal.ts";
+import {
+  latestBlameAtSha,
+  listByUnit,
+  listByTicket as listSignals,
+} from "../db/repos/ground-truth-signal.ts";
 
 /** Build the corrective feedback for re-coding a bounced-back unit, from the prior coding
  *  attempt's non-pass check results. Empty string on the first attempt (no prior failures). */
@@ -71,5 +75,17 @@ export function gateFeedback(db: Database, ticketId: number): string {
     const text = acText.get(acId) ?? "";
     return `- AC ${acId}${text ? `: ${text}` : ""} — still-red check(s): ${where}. Make the code satisfy it.`;
   });
-  return `The acceptance-check gate failed: these acceptance criteria are not yet satisfied by your code. Do NOT edit, weaken, or delete the check files (the runner freezes them and re-fails the gate on any change) — fix the CODE so they pass:\n${lines.join("\n")}`;
+  // §7: surface the arbiter's code-wrong reasons (the WHY, not just the which) into the re-code prompt.
+  const gateSha = latest.branch_head_sha;
+  const blameLines =
+    gateSha === null
+      ? []
+      : latestBlameAtSha(db, ticketId, gateSha)
+          .filter((b) => b.blame === "code-wrong")
+          .map((b) => `- AC-check ${b.acCheckId}: ${b.reason}`);
+  const blameBlock =
+    blameLines.length > 0
+      ? `\n\nArbiter blame (fix the CODE, not the check):\n${blameLines.join("\n")}`
+      : "";
+  return `The acceptance-check gate failed: these acceptance criteria are not yet satisfied by your code. Do NOT edit, weaken, or delete the check files (the runner freezes them and re-fails the gate on any change) — fix the CODE so they pass:\n${lines.join("\n")}${blameBlock}`;
 }

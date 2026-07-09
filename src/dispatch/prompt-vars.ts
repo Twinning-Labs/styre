@@ -1,3 +1,4 @@
+import checksArbitrateTemplate from "../../prompts/checks-arbitrate.md" with { type: "text" };
 import checksClassifyTemplate from "../../prompts/checks-classify.md" with { type: "text" };
 import checksTemplate from "../../prompts/checks.md" with { type: "text" };
 import complexityGradeTemplate from "../../prompts/design-complexity-grade.md" with {
@@ -55,6 +56,7 @@ function runtimeVars(profile: Profile): Record<string, string> {
 
 export const CHECKS_TEMPLATE = checksTemplate;
 export const CHECKS_CLASSIFY_TEMPLATE = checksClassifyTemplate;
+export const CHECKS_ARBITRATE_TEMPLATE = checksArbitrateTemplate;
 export const DESIGN_TEMPLATE = designTemplate;
 export const DESIGN_REVIEW_TEMPLATE = designReviewTemplate;
 export const DESIGN_COMPLEXITY_GRADE_TEMPLATE = complexityGradeTemplate;
@@ -219,6 +221,46 @@ export function adjudicateVars(
     title: ticket.title ? ` — ${ticket.title}` : "",
     slug: profile.slug,
     checks_to_classify: blocks,
+    ...profile.promptVars,
+  };
+}
+
+/** One still-red check the `checks:arbitrate` adjudicator must blame: the AC text, the check's
+ *  source at the implemented HEAD, and its recorded post-implement trace (never re-run). */
+export interface ArbitrateItem {
+  acCheckId: number;
+  acText: string;
+  testPath: string | null;
+  testName: string;
+  coarse: string;
+  /** The recorded post-implement trace (ac-check-post-implement detail rawOutput, or the gate re-run). */
+  trace: string;
+  /** The check's source at the implemented HEAD (fileContentAt). */
+  source: string;
+}
+
+/** Prompt vars for the `checks:arbitrate` adjudicator (M5): the AC text, check source, and recorded
+ *  post-implement trace per still-red check. Read-only; the agent never re-runs. */
+export function arbitrateVars(
+  ticket: { ident: string; title: string | null },
+  profile: Profile,
+  items: ArbitrateItem[],
+): Record<string, string> {
+  const blocks = items
+    .map(
+      (it) =>
+        `### ac_check_id=${it.acCheckId} (coarse: ${it.coarse})\n` +
+        `Acceptance criterion: ${it.acText}\n` +
+        `Test: ${it.testPath ?? "(no path)"} :: ${it.testName}\n` +
+        `Check source:\n\`\`\`\n${it.source || "(unavailable)"}\n\`\`\`\n` +
+        `Recorded post-implement trace:\n\`\`\`\n${it.trace || "(empty)"}\n\`\`\``,
+    )
+    .join("\n\n");
+  return {
+    ident: ticket.ident,
+    title: ticket.title ? ` — ${ticket.title}` : "",
+    slug: profile.slug,
+    checks_to_arbitrate: blocks,
     ...profile.promptVars,
   };
 }

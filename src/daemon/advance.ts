@@ -8,7 +8,12 @@ import { ParkSignal } from "../engine/park-signal.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { awaitSignal } from "../engine/signals.ts";
 import { runStep } from "../engine/step-journal.ts";
-import { type GateVerdictResult, applyAcCheckGateVerdict } from "./checks-gate-verdict.ts";
+import { applyArbiterVerdict, applyReauthorVerdict } from "./arbiter-verdict.ts";
+import {
+  type GateVerdictResult,
+  applyAcCheckGateVerdict,
+  escalate,
+} from "./checks-gate-verdict.ts";
 import { type ChecksVerdictResult, applyChecksVerdict } from "./checks-verdict.ts";
 import { applyFailurePolicy } from "./failure-policy.ts";
 import { enqueueStageProjection } from "./projector.ts";
@@ -23,6 +28,8 @@ const VERDICT_BEARING_STEPS = new Set([
   "design:review",
   "checks:classify",
   "verify:checks-gate",
+  "checks:arbitrate",
+  "checks:reauthor",
 ]);
 
 export type AdvanceOutcome =
@@ -80,6 +87,14 @@ export async function advanceOneStep(
       return { kind: "blocked", reason: d.reason };
     }
 
+    if (d.kind === "escalate") {
+      // The resolver only DETECTED the terminal stuck-replay state (Task 12 LIVENESS fix); the
+      // mutation (ticket → waiting + human_resume signal + an 'escalated' event) happens here, the
+      // interpreter — never inside the pure resolver.
+      escalate(db, ticketId, d.reason, "gate-stuck-head");
+      return { kind: "escalated", stepKey: "verify:checks-gate" };
+    }
+
     // d.kind === "step"
     const ticket = getTicket(db, ticketId);
     if (!ticket) {
@@ -119,7 +134,11 @@ export async function advanceOneStep(
                   ? applyChecksVerdict(db, ticketId, { stepKey: d.stepKey })
                   : d.stepKey === "verify:checks-gate"
                     ? applyAcCheckGateVerdict(db, ticketId, { stepKey: d.stepKey })
-                    : applyReviewVerdict(db, ticketId, cfg, { stepKey: d.stepKey });
+                    : d.stepKey === "checks:arbitrate"
+                      ? applyArbiterVerdict(db, ticketId, { stepKey: d.stepKey })
+                      : d.stepKey === "checks:reauthor"
+                        ? applyReauthorVerdict(db, ticketId, { stepKey: d.stepKey })
+                        : applyReviewVerdict(db, ticketId, cfg, { stepKey: d.stepKey });
             }
           : undefined,
       });

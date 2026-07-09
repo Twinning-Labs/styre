@@ -449,6 +449,7 @@ Status legend: **DECIDED** (confirmed by operator) · **RATIFIED** (proposed, no
   `docs/brainstorms/2026-07-07-codex-provider-adapter-design.md`; plan:
   `docs/plans/2026-07-07-codex-provider-adapter.md`.
 - **2026-07-09 — M4 gate co-release constraint recorded.** **M4 gate co-release (hard):** the change-scoped AC-check gate must not reach a release without M5's arbiter (re-authors a persistent wrong-shape red instead of thrashing implement) and M6's MERGE projection. Satisfied by the operator's not-release-until-M6 commitment (2026-07-08).
+- **2026-07-09 — M5 arbiter ships; co-released with M6 MERGE projection.** **M5 arbiter co-release (hard):** the gate-fail branch now serves `checks:arbitrate` (two-way blame) → `checks:reauthor` (the clean-HEAD-replay-validated re-author) with the monotone gate-round counter.
 
 ---
 

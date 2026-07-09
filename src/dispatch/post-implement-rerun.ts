@@ -20,11 +20,11 @@ async function rerunOne(
   p: RerunParams,
   testPath: string | null,
   selector: string,
-): Promise<CoarseResult> {
-  if (testPath === null) return "error";
+): Promise<{ coarse: CoarseResult; rawOutput: string }> {
+  if (testPath === null) return { coarse: "error", rawOutput: "" };
   const comp = impactedComponents(p.components, [testPath])[0];
   const fw = comp ? frameworkFor(comp) : null;
-  if (!comp || !fw) return "error";
+  if (!comp || !fw) return { coarse: "error", rawOutput: "" };
   let interp: string | undefined;
   if (fw === "pytest") {
     // PATH-dependent (FIX 5c): resolves python3/python from $PATH, same as checks:dispatch. The
@@ -34,7 +34,7 @@ async function rerunOne(
     try {
       interp = resolvePythonInterpreter();
     } catch {
-      return "error";
+      return { coarse: "error", rawOutput: "" };
     }
   }
   const res = await runCheckForRed({
@@ -46,7 +46,8 @@ async function rerunOne(
     run: p.run,
   });
   // selected-none post-implement = the check no longer selects (identity lost) → NOT green.
-  return res.coarse === "selected-none" ? "error" : res.coarse;
+  const coarse = res.coarse === "selected-none" ? "error" : res.coarse;
+  return { coarse, rawOutput: res.rawOutput };
 }
 
 interface RerunParams {
@@ -78,7 +79,7 @@ export async function rerunAcChecks(p: RerunParams): Promise<RerunResult> {
       ran.push({ acId: check.ac_id, acCheckId: check.id, coarse: "green", outcome: "disposition" });
       continue; // satisfied / not-expressible → M6 surfaces; does not gate
     }
-    const coarse = await rerunOne(p, check.test_path, check.selector);
+    const { coarse, rawOutput } = await rerunOne(p, check.test_path, check.selector);
     let outcome: GateOutcome;
     if (check.red_class === "environmental") {
       outcome = "advisory-red";
@@ -101,6 +102,7 @@ export async function rerunAcChecks(p: RerunParams): Promise<RerunResult> {
         coarse,
         redClass: check.red_class,
         outcome,
+        rawOutput, // FIX I2: the arbiter's evidence — the actual failure trace, not just the coarse bucket.
       },
     });
   }

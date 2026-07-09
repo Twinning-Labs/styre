@@ -103,6 +103,28 @@ test("an assertion check re-run coarse red is in stillRed", async () => {
   expect(signals[0]?.result).toBe("fail");
 });
 
+test("a gated check's rawOutput (the actual failure trace) is persisted in the ac-check-post-implement signal (FIX I2)", async () => {
+  const { db, ticketId } = makeTestDb();
+  seedCheck(db, ticketId, { redClass: "assertion" });
+
+  await rerunAcChecks({
+    db,
+    ticketId,
+    components: [PY_COMPONENT],
+    worktreePath: "/repo",
+    headSha: "deadbeef",
+    timeoutMs: 1000,
+    run: fakeRun({ exitCode: 1, stdout: "assert 200 == 201", stderr: "" }),
+  });
+
+  const signals = listSignals(db, ticketId).filter(
+    (s) => s.signal_type === "ac-check-post-implement",
+  );
+  db.close();
+  const detail = JSON.parse(signals[0]?.detail_json ?? "{}") as { rawOutput?: string };
+  expect(detail.rawOutput).toContain("assert 200 == 201");
+});
+
 test("an absence check re-run red is in stillRed", async () => {
   const { db, ticketId } = makeTestDb();
   const { acId } = seedCheck(db, ticketId, { redClass: "absence" });

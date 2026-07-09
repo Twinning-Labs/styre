@@ -19,6 +19,7 @@ export type StepDescriptor =
   | { kind: "mark-verified"; workUnitId: number }
   | { kind: "wait"; signalType: string }
   | { kind: "blocked"; reason: string }
+  | { kind: "escalate"; reason: string }
   | { kind: "done" };
 
 function done(db: Database, ticketId: number, stepKey: string): boolean {
@@ -146,6 +147,48 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
             signalType: "ac-check-gate",
           });
           if (branchSha === null || !gatePassedShas.includes(branchSha)) {
+            // M5: the gate already ran at this sha and left behavioral still-red, and the arbiter has
+            // not judged this round → serve the arbiter (it may re-author check-wrong checks). The
+            // integrity-only fail path never reaches here (its verdict loops back, resetting the gate).
+            const behavioral =
+              branchSha !== null && gts.behavioralStillRed(db, ticketId, branchSha).length > 0;
+            const blamed = branchSha !== null && gts.blameShasFor(db, ticketId).includes(branchSha);
+            if (behavioral && !blamed) {
+              return step("checks:arbitrate", "dispatch", "checks:arbitrate", null);
+            }
+            // A check-wrong round: the arbiter recorded blame at branchSha and looped to checks:reauthor
+            // (resetting it to pending). Serve reauthor until it succeeds this round; ITS verdict then
+            // re-serves the gate (pure check-wrong) or loops implement (mixed / rejected). Once a re-author
+            // commits, branchSha moves → blamed(newHead)=false → this arm is skipped (fall through to the
+            // gate). Pure code-wrong never reaches here: gateOriginLoopback resets units, so the pending
+            // unit is served first (nextActionableUnit) — reauthor is only reached with all units verified.
+            if (blamed && !done(db, ticketId, "checks:reauthor")) {
+              return step("checks:reauthor", "dispatch", "checks:reauthor", null);
+            }
+            // LIVENESS (Task 12): a pure-code-wrong stuck-HEAD round — the re-implement committed
+            // NOTHING new (commitWorktree returns the unchanged sha, handlers.ts:822's empty-diff
+            // guard) — leaves `branchSha` frozen. `blamed` stays true at that sha forever (blame is
+            // never re-computed once recorded), so the `behavioral && !blamed` arm above is
+            // permanently skipped (the arbiter is never re-served), and `checks:reauthor` — served
+            // exactly once above as a route===null no-op (nothing was routed there for a pure
+            // code-wrong blame) — is now permanently `done`, skipping the arm right above too. The
+            // ONLY thing left to serve is `verify:checks-gate` itself — but if it has ALREADY
+            // succeeded once this round (this exact `blamed`, un-reset state), re-serving it here
+            // would only REPLAY its cached success (`runStep`: a `succeeded` step never re-executes
+            // and never re-invokes `onSucceed` — control-loop §3/§6.2's exactly-once journal), so
+            // `applyAcCheckGateVerdict`'s own cap check can never run again either. This is the
+            // terminal stuck state — provably nothing left can change it (verified: any real
+            // loopback, from any verdict, always resets `verify:checks-gate` back to `pending`
+            // first) — so escalate NOW rather than replay a doomed no-op toward the 200-tick cap.
+            // PURE: this only DETECTS the condition; advance.ts's interpreter performs the mutation
+            // (control-loop's resolver/handler split — the resolver never writes).
+            if (blamed && done(db, ticketId, "verify:checks-gate")) {
+              return {
+                kind: "escalate",
+                reason:
+                  "gate: check(s) still red at HEAD after arbitration/reauthor — no further HEAD movement possible (stuck)",
+              };
+            }
             if (!done(db, ticketId, "provision")) {
               return step("provision", "provision", "provision", null);
             }
