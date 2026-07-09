@@ -10,9 +10,10 @@ import { StepRegistry } from "../daemon/step-registry.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
 import {
   classifyAcCheck,
-  deleteByAc,
+  deleteActiveByAc,
   deleteByTicket,
   insertAcCheck,
+  listActiveByTicket as listAcChecks,
   listUnresolvedByTicket,
 } from "../db/repos/ac-check.ts";
 import { listByTicket as listAcs } from "../db/repos/acceptance-criterion.ts";
@@ -39,6 +40,7 @@ import {
 import { pythonImportName } from "../setup/lang/python.ts";
 import { runCommand } from "../util/run-command.ts";
 import { type AdjClass, ChecksClassifyOutputSchema } from "./adjudicate-schema.ts";
+import { checkIntegrityViolations } from "./check-integrity.ts";
 import {
   type CheckFramework,
   type CoarseResult,
@@ -65,8 +67,9 @@ import {
 import { deriveAndPersistAcs } from "./derive-acs.ts";
 import { designFeedback } from "./design-feedback.ts";
 import { ExtractOutputSchema, validateCdotImpact, validateExtraction } from "./extract-schema.ts";
-import { implementFeedback } from "./feedback.ts";
+import { gateFeedback, implementFeedback } from "./feedback.ts";
 import { hasTicketPlan } from "./plan-frontmatter.ts";
+import { rerunAcChecks } from "./post-implement-rerun.ts";
 import type { Profile } from "./profile.ts";
 import {
   type AdjudicateItem,
@@ -479,9 +482,12 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     // via the vocab map (never write 'red' into ground_truth_signal).
     ctx.db.transaction(() => {
       if (scoped) {
-        for (const acId of acIds) deleteByAc(ctx.db, acId); // leave every non-flagged AC's rows frozen
+        // Resume-dedup ONLY: clear this dispatch's own not-yet-classified actives (a crash-resume would
+        // otherwise double-insert). The flagged generation was already SUPERSEDED by the verdict
+        // (checks-verdict.ts, exactly-once) — never deleted here, so history + the escalate counter stand.
+        for (const acId of acIds) deleteActiveByAc(ctx.db, acId);
       } else {
-        deleteByTicket(ctx.db, ctx.ticket.id);
+        deleteByTicket(ctx.db, ctx.ticket.id); // fresh / crash-resume whole-ticket author (unchanged)
       }
       for (const r of records) {
         const row = insertAcCheck(ctx.db, {
@@ -590,9 +596,10 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
 
     // 3) Validate class↔coarse bucket, map to storage, persist ALL in one txn (crash-resume: an
     //    interrupted classify rolls back whole; §7 recompute-all-in-txn).
-    const RED_CLASSES = new Set<AdjClass>(["assertion", "absence", "environmental"]);
+    const RED_CLASSES = new Set<AdjClass>(["assertion", "absence", "environmental", "weak"]);
     const GREEN_CLASSES = new Set<AdjClass>(["vacuous", "already-satisfied", "not-expressible"]);
     let vacuous = 0;
+    let weak = 0;
     ctx.db.transaction(() => {
       for (const s of settled) {
         classifyAcCheck(ctx.db, { acCheckId: s.acCheckId, redClass: s.redClass });
@@ -619,6 +626,8 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         }
         if (cls === "vacuous") {
           vacuous += 1; // no column set — triggers a re-author (§7); recorded as a signal for the verdict
+        } else if (cls === "weak") {
+          weak += 1; // no column set — triggers a re-author (§5); recorded as a signal for the verdict
         } else if (cls === "already-satisfied") {
           classifyAcCheck(ctx.db, { acCheckId: p.row.id, disposition: "satisfied" });
         } else if (cls === "not-expressible") {
@@ -638,7 +647,12 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       }
     })();
 
-    return { classified: settled.length + pending.length, adjudicated: pending.length, vacuous };
+    return {
+      classified: settled.length + pending.length,
+      adjudicated: pending.length,
+      vacuous,
+      weak,
+    };
   });
 
   registry.register("implement:dispatch", async (ctx: HandlerContext) => {
@@ -668,7 +682,14 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       {
         handlerKey: "implement:dispatch",
         template: IMPLEMENT_TEMPLATE,
-        vars: implementVars(ctx.ticket, unit, deps.profile, implementFeedback(ctx.db, unit.id)),
+        vars: implementVars(
+          ctx.ticket,
+          unit,
+          deps.profile,
+          implementFeedback(ctx.db, unit.id),
+          listAcChecks(ctx.db, ctx.ticket.id),
+          gateFeedback(ctx.db, ctx.ticket.id),
+        ),
         loopback: isUnitLoopback(ctx, unit.seq),
         runnerCommands,
         // Empty-diff is no longer a dispatch-level failure: the plan gate guarantees non-empty
@@ -1119,6 +1140,12 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       });
     }
 
+    // M4 §8a: the component-suite verdict is DEMOTED to advisory — record the (possibly-fail)
+    // result for observability and RETURN normally; never throw on it. The AC-checks gate
+    // (verify:checks-gate) is now the only per-change hard gate. The realImpacted run loop + the
+    // A1 behavioral-no-test check above still COMPUTE `result`/`detail` as before — only the
+    // terminal throw is removed. `advisory: true` marks this signal so implementFeedback (and any
+    // other reader) knows it never gates and must not be fed back as a re-coding instruction.
     insertSignal(ctx.db, {
       ticketId: ctx.ticket.id,
       workUnitId: ctx.workUnitId,
@@ -1126,10 +1153,9 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       result,
       command: lastCommand,
       branchHeadSha: latestSha,
-      detail,
+      detail: { ...detail, advisory: true },
     });
 
-    if (result !== "pass") throw new Error(`verify:check ${checkType}: ${result}`);
     return { check: checkType, result };
   });
 
@@ -1177,16 +1203,62 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         break;
       }
     }
+    // M4 §8c: demoted to advisory (§3/§7) — record the (possibly-fail) result and RETURN normally;
+    // never throw on the suite verdict. Coupled with the resolver's integration gate flip to
+    // ranShasFor (below) in this SAME commit — an advisory fail with no pass at HEAD would otherwise
+    // re-emit this step forever against the journal replay (MAX_TRANSITIONS deadlock).
     insertSignal(ctx.db, {
       ticketId: ctx.ticket.id,
       signalType: "integration",
       result,
       command: lastCommand,
       branchHeadSha,
-      detail: { ran },
+      detail: { ran, advisory: true },
     });
-    if (result !== "pass") throw new Error(`verify:integration: ${result}`);
     return { integration: result };
+  });
+
+  registry.register("verify:checks-gate", async (ctx: HandlerContext) => {
+    const checks = listAcChecks(ctx.db, ctx.ticket.id);
+    if (checks.length === 0) return { gated: 0, stillRed: 0 }; // no AC-checks → nothing to gate
+    const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
+    ensureWorktree(repoPath, branch, worktreePath);
+    const headSha = getLatestForTicket(ctx.db, ctx.ticket.id)?.branch_head_sha;
+    if (!headSha) throw new Error("verify:checks-gate: no branch head sha");
+
+    // §2b integrity FIRST — a tampered check is untrustworthy at re-run.
+    const violations = checkIntegrityViolations(ctx.db, ctx.ticket.id, worktreePath, headSha);
+    for (const v of violations) {
+      insertSignal(ctx.db, {
+        ticketId: ctx.ticket.id,
+        signalType: "ac-check-integrity",
+        result: "fail",
+        branchHeadSha: headSha,
+        detail: v,
+      });
+    }
+    // §4 re-run in the implemented env (throws loud on a NULL/NULL row).
+    const rerun = await rerunAcChecks({
+      db: ctx.db,
+      ticketId: ctx.ticket.id,
+      components: deps.profile.components,
+      worktreePath,
+      headSha,
+      timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
+      run: deps.runCheckCommand,
+    });
+    // Gate blocks on the union of tampered ACs + not-flipped gated ACs.
+    const stillRed = [...new Set([...violations.map((v) => v.acId), ...rerun.stillRed])].sort(
+      (a, b) => a - b,
+    );
+    insertSignal(ctx.db, {
+      ticketId: ctx.ticket.id,
+      signalType: "ac-check-gate",
+      result: stillRed.length === 0 ? "pass" : "fail",
+      branchHeadSha: headSha,
+      detail: { stillRed, tampered: violations.map((v) => v.acId), advisory: rerun.advisory },
+    });
+    return { gated: checks.length, stillRed: stillRed.length };
   });
 
   registry.register("review", async (ctx: HandlerContext) => {

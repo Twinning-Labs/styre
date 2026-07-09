@@ -8,7 +8,8 @@ import { ParkSignal } from "../engine/park-signal.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { awaitSignal } from "../engine/signals.ts";
 import { runStep } from "../engine/step-journal.ts";
-import { applyChecksVerdict } from "./checks-verdict.ts";
+import { type GateVerdictResult, applyAcCheckGateVerdict } from "./checks-gate-verdict.ts";
+import { type ChecksVerdictResult, applyChecksVerdict } from "./checks-verdict.ts";
 import { applyFailurePolicy } from "./failure-policy.ts";
 import { enqueueStageProjection } from "./projector.ts";
 import { nextStepKey } from "./resolver.ts";
@@ -17,7 +18,12 @@ import type { StepRegistry } from "./step-registry.ts";
 
 const MAX_TRANSITIONS = 100;
 
-const VERDICT_BEARING_STEPS = new Set(["review", "design:review", "checks:classify"]);
+const VERDICT_BEARING_STEPS = new Set([
+  "review",
+  "design:review",
+  "checks:classify",
+  "verify:checks-gate",
+]);
 
 export type AdvanceOutcome =
   | { kind: "stepped"; stepKey: string }
@@ -88,7 +94,9 @@ export async function advanceOneStep(
       // (onSucceed). Otherwise a crash between the two would leave a `succeeded` review with an
       // un-applied verdict, and resume would advance review→merge past blocking findings (the
       // ground-truth verdict must survive crash-resume — invariants 3 + 4).
-      const verdictBox: { value: ReviewVerdictResult | null } = { value: null };
+      const verdictBox: {
+        value: ReviewVerdictResult | ChecksVerdictResult | GateVerdictResult | null;
+      } = { value: null };
       await runStep(db, {
         ticketId,
         workUnitId: d.workUnitId,
@@ -109,7 +117,9 @@ export async function advanceOneStep(
               verdictBox.value =
                 d.stepKey === "checks:classify"
                   ? applyChecksVerdict(db, ticketId, { stepKey: d.stepKey })
-                  : applyReviewVerdict(db, ticketId, cfg, { stepKey: d.stepKey });
+                  : d.stepKey === "verify:checks-gate"
+                    ? applyAcCheckGateVerdict(db, ticketId, { stepKey: d.stepKey })
+                    : applyReviewVerdict(db, ticketId, cfg, { stepKey: d.stepKey });
             }
           : undefined,
       });

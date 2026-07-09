@@ -23,7 +23,7 @@ function gitRepo(): string {
   return root;
 }
 
-test("a unit that fails then passes ends verified, with both results on record", async () => {
+test("a unit whose suite fails on the first attempt still ends verified (advisory, M4 demotion — no bounce-back retry)", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
@@ -36,12 +36,9 @@ test("a unit that fails then passes ends verified, with both results on record",
     verifyCheckTypes: ["test"],
   });
 
-  // The profile test command checks for a marker file the agent writes only on its 2nd attempt.
-  let attempt = 0;
+  // The profile test command always fails — the marker file it checks for is never written.
   const runner = new FakeAgentRunner((input) => {
-    attempt += 1;
-    writeFileSync(join(input.cwd, `change-${attempt}.ts`), `export const v = ${attempt};\n`);
-    if (attempt >= 2) writeFileSync(join(input.cwd, "PASS"), "ok");
+    writeFileSync(join(input.cwd, "change.ts"), "export const v = 1;\n");
     return {
       completed: true,
       exitCode: 0,
@@ -71,8 +68,10 @@ test("a unit that fails then passes ends verified, with both results on record",
   const results = listByUnit(db, unit.id);
   const finalUnit = getUnit(db, unit.id);
   db.close();
+  // Demoted (M4 §8a/§8b): the suite verdict never gates — the unit reaches verified on the ONE
+  // coding attempt, with the advisory fail on record (no automatic retry occurs).
   expect(finalUnit?.status).toBe("verified");
-  expect(results.some((r) => r.result === "fail")).toBe(true); // the first attempt's failure is kept
-  expect(results.some((r) => r.result === "pass")).toBe(true); // the second attempt's pass
-  expect(new Set(results.map((r) => r.branch_head_sha)).size).toBeGreaterThan(1); // distinct commits
+  const testSig = results.find((r) => r.signal_type === "test");
+  expect(testSig?.result).toBe("fail");
+  expect(JSON.parse(testSig?.detail_json ?? "{}").advisory).toBe(true);
 });

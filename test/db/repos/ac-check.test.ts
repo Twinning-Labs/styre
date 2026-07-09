@@ -3,8 +3,8 @@ import * as acChecks from "../../../src/db/repos/ac-check.ts";
 import * as acs from "../../../src/db/repos/acceptance-criterion.ts";
 import { makeTestDb } from "../../helpers/db.ts";
 
-function seedAc(db: Parameters<typeof acs.insertAc>[0], ticketId: number): number {
-  return acs.insertAc(db, { ticketId, seq: 1, text: "ac", source: "checklist" }).id;
+function seedAc(db: Parameters<typeof acs.insertAc>[0], ticketId: number, seq = 1): number {
+  return acs.insertAc(db, { ticketId, seq, text: "ac", source: "checklist" }).id;
 }
 
 test("insertAcCheck round-trips; RED-first columns default to NULL", () => {
@@ -79,4 +79,77 @@ test("deleteByTicket removes this ticket's rows and returns the count (resume-de
   db.close();
   expect(deleted).toBe(2);
   expect(remaining).toEqual([]);
+});
+
+test("listActiveByTicket returns only superseded_at IS NULL rows", () => {
+  const { db, ticketId } = makeTestDb();
+  const acId = seedAc(db, ticketId);
+  const a = acChecks.insertAcCheck(db, { ticketId, acId, selector: "s", testPath: "p" });
+  acChecks.supersedeByAc(db, acId);
+  const b = acChecks.insertAcCheck(db, { ticketId, acId, selector: "s2", testPath: "p2" });
+  const active = acChecks.listActiveByTicket(db, ticketId);
+  db.close();
+  expect(active.map((r) => r.id)).toEqual([b.id]);
+  expect(b.id).not.toBe(a.id); // AUTOINCREMENT: the fresh row does NOT reuse the superseded id
+});
+
+test("supersedeByAc marks all active rows for the AC, is idempotent, leaves other ACs alone", () => {
+  const { db, ticketId } = makeTestDb();
+  const acId = seedAc(db, ticketId, 1);
+  const otherAc = seedAc(db, ticketId, 2);
+  acChecks.insertAcCheck(db, { ticketId, acId, selector: "s", testPath: "p" });
+  acChecks.insertAcCheck(db, { ticketId, acId: otherAc, selector: "o", testPath: "op" });
+  expect(acChecks.supersedeByAc(db, acId)).toBe(1);
+  expect(acChecks.supersedeByAc(db, acId)).toBe(0); // idempotent
+  const otherActive = acChecks.listActiveByAc(db, otherAc).length;
+  db.close();
+  expect(otherActive).toBe(1); // untouched
+});
+
+test("reauthorRoundsForAc counts DISTINCT re-author ROUNDS, not superseded rows", () => {
+  const { db, ticketId } = makeTestDb();
+  const acId = seedAc(db, ticketId);
+  acChecks.insertAcCheck(db, { ticketId, acId, selector: "s", testPath: "p" });
+  expect(acChecks.reauthorRoundsForAc(db, acId)).toBe(0);
+  acChecks.supersedeByAc(db, acId); // round 1: one UPDATE, one shared superseded_at
+  const rounds = acChecks.reauthorRoundsForAc(db, acId);
+  db.close();
+  expect(rounds).toBe(1);
+});
+
+test("reauthorRoundsForAc counts ONE round even when an AC owns multiple checks (multi-test-case AC)", () => {
+  // A single AC can own >1 active ac_check row (multiple test cases per AC — supported + tested
+  // elsewhere, e.g. ac-check-classify.test.ts inserts 2 checks for one AC). supersedeByAc supersedes
+  // BOTH in one round, under ONE shared timestamp — a raw COUNT(*) of superseded rows would read 2
+  // here; the round-counter must still read 1 (the Critical this pins).
+  const { db, ticketId } = makeTestDb();
+  const acId = seedAc(db, ticketId);
+  acChecks.insertAcCheck(db, { ticketId, acId, selector: "s1", testPath: "p1" });
+  acChecks.insertAcCheck(db, { ticketId, acId, selector: "s2", testPath: "p2" });
+  acChecks.supersedeByAc(db, acId);
+  const rounds = acChecks.reauthorRoundsForAc(db, acId);
+  db.close();
+  expect(rounds).toBe(1); // NOT 2
+});
+
+test("deleteActiveByAc deletes only active rows, preserving superseded history", () => {
+  const { db, ticketId } = makeTestDb();
+  const acId = seedAc(db, ticketId);
+  acChecks.insertAcCheck(db, { ticketId, acId, selector: "s", testPath: "p" });
+  acChecks.supersedeByAc(db, acId);
+  acChecks.insertAcCheck(db, { ticketId, acId, selector: "s2", testPath: "p2" }); // a fresh active
+  expect(acChecks.deleteActiveByAc(db, acId)).toBe(1); // only the active row
+  const rounds = acChecks.reauthorRoundsForAc(db, acId);
+  db.close();
+  expect(rounds).toBe(1); // history intact
+});
+
+test("listUnresolvedByTicket excludes superseded rows", () => {
+  const { db, ticketId } = makeTestDb();
+  const acId = seedAc(db, ticketId);
+  acChecks.insertAcCheck(db, { ticketId, acId, selector: "s", testPath: "p" });
+  acChecks.supersedeByAc(db, acId);
+  const unresolved = acChecks.listUnresolvedByTicket(db, ticketId).length;
+  db.close();
+  expect(unresolved).toBe(0);
 });

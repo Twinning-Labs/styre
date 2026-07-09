@@ -8,3 +8,7 @@ Run the project's build/test as you go: {{test_command}}
 Project stack notes: {{stack}}
 
 {{feedback}}
+
+{{authored_checks}}
+
+{{gate_feedback}}

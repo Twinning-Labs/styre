@@ -107,7 +107,7 @@ test("verify:integration runs all components' build+test + repoCommands and reco
   expect(labels).toHaveLength(5);
 });
 
-test("verify:integration fails when one component's test command fails", async () => {
+test("verify:integration records an advisory fail when one component's test command fails, and the step SUCCEEDS (M4 demotion)", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   seedAllVerified(db, ticketId, projectId, repo);
@@ -147,16 +147,17 @@ test("verify:integration fails when one component's test command fails", async (
   });
 
   await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
-  const outcome = await advanceOneStep(db, ticketId, registry);
+  const outcome = await advanceOneStep(db, ticketId, registry); // verify:integration → advisory fail, step succeeds
   const sigs = db
     .query(
-      "SELECT result FROM ground_truth_signal WHERE ticket_id = ? AND signal_type = 'integration'",
+      "SELECT result, detail_json FROM ground_truth_signal WHERE ticket_id = ? AND signal_type = 'integration'",
     )
-    .all(ticketId) as Array<{ result: string }>;
+    .all(ticketId) as Array<{ result: string; detail_json: string }>;
   db.close();
 
-  expect(["retry", "loopback", "escalated"]).toContain(outcome.kind);
+  expect(outcome.kind).toBe("stepped"); // never throws — the integration verdict is advisory (M4 §8c)
   expect(sigs[0]?.result).toBe("fail");
+  expect(JSON.parse(sigs[0]?.detail_json ?? "{}").advisory).toBe(true);
 });
 
 // --- Task 3: verify:integration test-job command resolution routes through reuseAwareTestCommand ---
@@ -199,7 +200,8 @@ test("verify:integration test command for a python component with no ready env f
     .all(ticketId) as Array<{ result: string; command: string; detail_json: string }>;
   db.close();
 
-  expect(["retry", "loopback", "escalated"]).toContain(outcome.kind); // "tox" isn't a real binary here
+  // "tox" isn't a real binary here, but the integration verdict is advisory (M4 §8c) — no throw.
+  expect(outcome.kind).toBe("stepped");
   const detail = JSON.parse(sigs[0]?.detail_json ?? "{}") as {
     ran: Array<{ label: string; exitCode: number | null }>;
   };

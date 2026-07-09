@@ -96,6 +96,24 @@ export function passingShasFor(
   return rows.map((r) => r.branch_head_sha).filter((s): s is string => s !== null);
 }
 
+/** Like passingShasFor but result-agnostic: the shas at which a signal of this type was RECORDED
+ *  (any result). Used to route advisory gates (verify:check, verify:integration) on "ran at sha",
+ *  so a recorded advisory `fail` still advances instead of re-emitting forever (M4 demotion). The
+ *  HARD AC-check gate keeps using passingShasFor (`result='pass'`) — do NOT swap it here. */
+export function ranShasFor(
+  db: Database,
+  args: { ticketId: number; workUnitId: number | null; signalType: string },
+): string[] {
+  const rows = db
+    .query<{ branch_head_sha: string | null }, [number, number | null, string]>(
+      `SELECT branch_head_sha FROM ground_truth_signal
+       WHERE ticket_id = ? AND work_unit_id IS ? AND signal_type = ?
+         AND branch_head_sha IS NOT NULL`,
+    )
+    .all(args.ticketId, args.workUnitId, args.signalType);
+  return rows.map((r) => r.branch_head_sha).filter((s): s is string => s !== null);
+}
+
 /** The parsed shape M2b's `checks:dispatch` persists in an `ac-check-red-first` signal's detail. */
 export interface RedFirstDetail {
   rawOutput: string;
@@ -123,4 +141,34 @@ export function signalForAcCheck(
     .get(acCheckId);
   if (!row) return null;
   return { row, detail: JSON.parse(row.detail_json ?? "{}") as RedFirstDetail };
+}
+
+/** The parsed shape `checks:classify` (`src/dispatch/handlers.ts`) persists in an
+ *  `ac-check-classification` signal's detail. */
+export interface ClassificationDetail {
+  acCheckId: number;
+  acId: number;
+  class: string;
+  reason: string;
+}
+
+/** Read the classification signal for a check by its LIVE `ac_check.id` (§3 read contract, mirrors
+ *  `signalForAcCheck`). DISPLAY-sourcing only — the re-author prompt's "why the prior check was
+ *  flagged" text (Task 3e). Control flow (which ACs to re-author, the escalate counter) never reads
+ *  this; it reads `ac_check.red_class`/`disposition` directly (the M4 anti-pattern fix). Returns the
+ *  newest matching signal + its parsed detail, or null. */
+export function classificationForAcCheck(
+  db: Database,
+  acCheckId: number,
+): { row: GroundTruthSignalRow; detail: ClassificationDetail } | null {
+  const row = db
+    .query<GroundTruthSignalRow, [number]>(
+      `SELECT ${COLS} FROM ground_truth_signal
+       WHERE signal_type = 'ac-check-classification'
+         AND json_extract(detail_json, '$.acCheckId') = ?
+       ORDER BY id DESC LIMIT 1`,
+    )
+    .get(acCheckId);
+  if (!row) return null;
+  return { row, detail: JSON.parse(row.detail_json ?? "{}") as ClassificationDetail };
 }

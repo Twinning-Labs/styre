@@ -99,6 +99,8 @@ export function implementVars(
   unit: WorkUnitRow,
   profile: Profile,
   feedback = "",
+  authoredChecks: { test_path: string | null }[] = [],
+  gateFeedbackText = "",
 ): Record<string, string> {
   const files: string[] = unit.files_to_touch ? JSON.parse(unit.files_to_touch) : [];
   const impacted = impactedComponents(profile.components, files);
@@ -106,6 +108,11 @@ export function implementVars(
   const testCommands = source
     .map((c) => commandFor(c, "test"))
     .filter((c): c is string => c !== undefined);
+  const paths = authoredChecks.map((c) => c.test_path).filter((p): p is string => p !== null);
+  const authored_checks =
+    paths.length === 0
+      ? ""
+      : `## Acceptance checks (make these pass — do NOT edit the check files)\n\nThese test files encode this ticket's acceptance criteria. Read them and write code so they pass. You MUST NOT edit, weaken, or delete them (the runner freezes them and fails the gate on any change):\n${paths.map((p) => `- ${p}`).join("\n")}`;
   return {
     ident: ticket.ident,
     slug: profile.slug,
@@ -115,6 +122,8 @@ export function implementVars(
     test_command: testCommands.join(" && "),
     stack: "",
     feedback,
+    authored_checks,
+    gate_feedback: gateFeedbackText,
     ...profile.promptVars,
   };
 }

@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { listActiveByTicket as listAcChecks } from "../db/repos/ac-check.ts";
 import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";
 import * as gts from "../db/repos/ground-truth-signal.ts";
 import { hasDelivered } from "../db/repos/signal.ts";
@@ -55,17 +56,19 @@ function currentShaForUnit(db: Database, workUnitId: number): string | null {
   return getLatestByWorkUnit(db, workUnitId)?.branch_head_sha ?? null;
 }
 
-/** First declared check-type for the unit that has NOT passed at the unit's current commit.
- *  A pass recorded against an older commit does not count (content-keyed re-verification). */
+/** First declared check-type for the unit that has NOT RUN at the unit's current commit. `verify:check`
+ *  is demoted to advisory (M4 §8b) — ANY recorded result (pass or fail) at the current sha satisfies
+ *  routing, so a genuine suite failure never wedges the unit re-emitting forever. A result recorded
+ *  against an older commit does not count (content-keyed re-verification). */
 export function nextUnrunCheck(db: Database, unit: workUnits.WorkUnitRow): string | null {
   const sha = currentShaForUnit(db, unit.id);
   for (const check of workUnits.parseVerifyCheckTypes(unit)) {
-    const passedShas = gts.passingShasFor(db, {
+    const ranShas = gts.ranShasFor(db, {
       ticketId: unit.ticket_id,
       workUnitId: unit.id,
       signalType: check,
     });
-    const satisfied = sha !== null && passedShas.includes(sha);
+    const satisfied = sha !== null && ranShas.includes(sha);
     if (!satisfied) {
       return check;
     }
@@ -135,12 +138,30 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
       }
       if (allUnitsVerified(db, ticketId)) {
         const branchSha = getLatestForTicket(db, ticketId)?.branch_head_sha ?? null;
-        const integrationPassedShas = gts.passingShasFor(db, {
+        const gateHasChecks = listAcChecks(db, ticketId).length > 0; // active checks only
+        if (gateHasChecks) {
+          const gatePassedShas = gts.passingShasFor(db, {
+            ticketId,
+            workUnitId: null,
+            signalType: "ac-check-gate",
+          });
+          if (branchSha === null || !gatePassedShas.includes(branchSha)) {
+            if (!done(db, ticketId, "provision")) {
+              return step("provision", "provision", "provision", null);
+            }
+            return step("verify:checks-gate", "verify", "verify:checks-gate", null);
+          }
+        }
+        // M4 §8c: verify:integration is demoted to advisory — ran-at-sha (ANY recorded result),
+        // not passingShasFor. Coupled with handlers.ts's throw removal (same commit): a handler that
+        // records an advisory fail with no pass at HEAD would otherwise leave this gate re-emitting
+        // forever against the journal replay (MAX_TRANSITIONS).
+        const integrationRanShas = gts.ranShasFor(db, {
           ticketId,
           workUnitId: null,
           signalType: "integration",
         });
-        if (branchSha === null || !integrationPassedShas.includes(branchSha)) {
+        if (branchSha === null || !integrationRanShas.includes(branchSha)) {
           if (!done(db, ticketId, "provision")) {
             return step("provision", "provision", "provision", null);
           }

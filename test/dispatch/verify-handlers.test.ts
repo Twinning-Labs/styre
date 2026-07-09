@@ -123,7 +123,7 @@ test("a passing check records a pass signal (with command) and the step succeeds
   expect(step?.status).toBe("succeeded");
 });
 
-test("a failing check records a fail signal and fails the step (→ failure-policy loops the unit back)", async () => {
+test("a failing check records an advisory fail signal but the step SUCCEEDS (no throw, no loopback — M4 demotion)", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
@@ -163,16 +163,17 @@ test("a failing check records a fail signal and fails the step (→ failure-poli
   await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
   await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // completeness:wu1 (declared=∅ → no throw)
-  const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test
+  const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test → advisory fail, step succeeds
   const sigs = listByUnit(db, unit.id);
   const step = getByKey(db, ticketId, "verify:wu1:test");
   const after = getUnit(db, unit.id);
   db.close();
-  expect(["retry", "loopback", "escalated"]).toContain(outcome.kind);
+  expect(outcome.kind).toBe("stepped"); // never throws — the suite verdict is advisory (M4 §8a)
   const testSig = sigs.find((s) => s.signal_type === "test");
   expect(testSig?.result).toBe("fail");
-  expect(step?.status).toBe("pending"); // failure-policy reset
-  expect(after?.status).toBe("pending"); // generic verify loopback reset the unit
+  expect(JSON.parse(testSig?.detail_json ?? "{}").advisory).toBe(true);
+  expect(step?.status).toBe("succeeded"); // no failure-policy involvement — routing advances
+  expect(after?.status).toBe("verifying"); // unit is NOT bounced back to pending
 });
 
 test("an absent check (component has no command for the declared check-type) records an error signal", async () => {
@@ -262,7 +263,7 @@ test("verify:integration passes when build and test pass, recording an integrati
   expect(sigs[0]?.result).toBe("pass");
 });
 
-test("verify:integration fails the step when a command fails", async () => {
+test("verify:integration records an advisory fail when a command fails, and the step SUCCEEDS (M4 §8c)", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   const registry = registryFor(repo, { build: "true", test: "false" });
@@ -272,12 +273,13 @@ test("verify:integration fails the step when a command fails", async () => {
   const outcome = await advanceOneStep(db, ticketId, registry);
   const sigs = db
     .query(
-      "SELECT result FROM ground_truth_signal WHERE ticket_id = ? AND signal_type = 'integration'",
+      "SELECT result, detail_json FROM ground_truth_signal WHERE ticket_id = ? AND signal_type = 'integration'",
     )
-    .all(ticketId) as Array<{ result: string }>;
+    .all(ticketId) as Array<{ result: string; detail_json: string }>;
   db.close();
-  expect(["retry", "loopback", "escalated"]).toContain(outcome.kind);
+  expect(outcome.kind).toBe("stepped");
   expect(sigs[0]?.result).toBe("fail");
+  expect(JSON.parse(sigs[0]?.detail_json ?? "{}").advisory).toBe(true);
 });
 
 test("a timed-out check records an error signal (not fail)", async () => {
@@ -795,7 +797,8 @@ test("verify:check test command for a python component with no ready env falls b
   const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test → runs "tox"
   const sigs = listByUnit(db, unit.id);
   db.close();
-  expect(["retry", "loopback", "escalated"]).toContain(outcome.kind); // "tox" isn't a real binary here
+  // "tox" isn't a real binary here, but the suite verdict is advisory (M4 §8a) — no throw.
+  expect(outcome.kind).toBe("stepped");
   const testSig = sigs.find((s) => s.signal_type === "test");
   expect(testSig?.command).toBe("tox");
 });

@@ -296,6 +296,63 @@ test("a provision failure escalates immediately and never loops back (even under
   expect(afterUnit?.status).toBe("verifying"); // never bounced to pending
 });
 
+test("a failed verify:checks-gate step escalates cleanly (never an integration-reconcile unit/event)", () => {
+  const { db, ticketId } = makeTestDb();
+  const step = failedStep(db, ticketId, {
+    stepKey: "verify:checks-gate",
+    stepType: "verify",
+    attempts: 1,
+  });
+  const result = applyFailurePolicy(db, ticketId, step);
+  const ticket = getTicket(db, ticketId);
+  const pending = listPending(db, ticketId);
+  const escalations = listEvents(db, ticketId).filter((e) => e.kind === "escalated");
+  const loopbacks = listEvents(db, ticketId).filter((e) => e.kind === "loopback");
+  const reconcile = listByTicket(db, ticketId).find((u) => u.kind === "reconcile");
+  db.close();
+  expect(result.decision).toBe("escalated");
+  if (!ticket) throw new Error("ticket missing");
+  expect(ticket.status).toBe("waiting");
+  expect(pending.some((s) => s.signal_type === "human_resume")).toBe(true);
+  expect(escalations.length).toBe(1);
+  expect(loopbacks.length).toBe(0); // never integration-reconcile
+  expect(reconcile).toBeUndefined();
+});
+
+test("whole-project failure also resets the sibling verify:checks-gate (M4 §8d, reconcile unit moves HEAD)", () => {
+  const { db, ticketId } = makeTestDb();
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verified",
+  });
+  const intStep = insertPending(db, {
+    ticketId,
+    stepKey: "verify:integration",
+    stepType: "verify",
+  });
+  markRunning(db, intStep.id, {});
+  markFailed(db, intStep.id, new Error("integration red"));
+  // The AC-check gate had already passed before this infra crash — it must re-run once the
+  // reconcile unit moves HEAD, or its stale success replays at the new HEAD (MAX_TRANSITIONS).
+  const gateStep = insertPending(db, {
+    ticketId,
+    stepKey: "verify:checks-gate",
+    stepType: "verify",
+  });
+  markRunning(db, gateStep.id, {});
+  markSucceeded(db, gateStep.id, { gated: 1, stillRed: 0 });
+  const s = getStep(db, intStep.id);
+  if (!s) throw new Error("no step");
+  const r = applyFailurePolicy(db, ticketId, s);
+  const gateAfter = getStepByKey(db, ticketId, "verify:checks-gate");
+  db.close();
+  expect(r.decision).toBe("loopback");
+  expect(gateAfter?.status).toBe("pending");
+});
+
 test("completeness under-delivery loops the unit back to implement", () => {
   const { db, ticketId } = makeTestDb();
   setTicketStage(db, ticketId, "implement");

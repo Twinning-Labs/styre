@@ -5,7 +5,13 @@ import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
-import { classifyAcCheck, listByTicket as listAcChecks } from "../../src/db/repos/ac-check.ts";
+import {
+  classifyAcCheck,
+  listByTicket as listAcChecks,
+  listActiveByAc,
+  reauthorRoundsForAc,
+  supersedeByAc,
+} from "../../src/db/repos/ac-check.ts";
 import { appendEvent } from "../../src/db/repos/event-log.ts";
 import { listByTicket as listSignals } from "../../src/db/repos/ground-truth-signal.ts";
 import { setTicketTrack } from "../../src/db/repos/ticket.ts";
@@ -291,4 +297,166 @@ test("checks:dispatch on a checks re-author loopback re-authors ONLY the flagged
   expect(ac2CheckAfter?.id).toBe(ac2CheckBefore?.id);
   expect(ac2CheckAfter?.test_path).toBe(ac2CheckBefore?.test_path);
   expect(ac2CheckAfter?.red_class).toBe("assertion");
+});
+
+test("checks:dispatch scoped re-author is insert-only (deleteActiveByAc): a crash-resume re-run dedupes its own fresh insert without touching superseded history or the escalate counter", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET description = ? WHERE id = ?").run(
+    "- [ ] first thing\n- [ ] second thing\n",
+    ticketId,
+  );
+  await markDesignDone(db, ticketId);
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
+  setTicketTrack(db, ticketId, "fast");
+
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-chwt-resume-"));
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+  });
+  const runCheckCommand = async () => ({
+    exitCode: 1,
+    stdout: "1 failed",
+    stderr: "",
+    timedOut: false,
+  });
+
+  // Round 1: fresh dispatch — whole-ticket author, both ACs covered.
+  const runner1 = new FakeAgentRunner((input) => {
+    const dir = join(input.cwd, "checks");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "ac1.py"), "def test_ac1():\n    assert False\n");
+    writeFileSync(join(dir, "ac2.py"), "def test_ac2():\n    assert False\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout:
+        '```styre-sidecar\n{"checksAuthored":[' +
+        '{"ac_id":1,"test_file":"checks/ac1.py","test_name":"test_ac1"},' +
+        '{"ac_id":2,"test_file":"checks/ac2.py","test_name":"test_ac2"}' +
+        "]}\n```",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const registry1 = buildDispatchRegistry({
+    runner: runner1,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile,
+    worktreeRoot,
+    runCheckCommand,
+  });
+  await advanceOneStep(db, ticketId, registry1); // provision
+  await advanceOneStep(db, ticketId, registry1); // checks:dispatch (whole-ticket)
+
+  const checksRound1 = listAcChecks(db, ticketId);
+  const ac1Round1 = checksRound1.find((c) => c.ac_id === 1);
+  const ac2Round1 = checksRound1.find((c) => c.ac_id === 2);
+  expect(ac1Round1).toBeDefined();
+  expect(ac2Round1).toBeDefined();
+
+  // Simulate the verdict (Task 3d): it SUPERSEDES AC-1's round-1 row (never deletes it) — the one
+  // round the escalate counter must see, and the baseline `reauthorRoundsForAc` must stay pinned at.
+  supersedeByAc(db, 1);
+  expect(reauthorRoundsForAc(db, 1)).toBe(1);
+
+  // The verdict's loopback flags ONLY AC-1 for re-authoring.
+  appendEvent(db, {
+    ticketId,
+    kind: "loopback",
+    loop: "checks",
+    routeTo: "checks:classify",
+    signature: "checks:1",
+    payload: { acIds: [1], findings: [{ acId: 1, reason: "prior check was vacuous" }] },
+  });
+  const dispatchStep = getByKey(db, ticketId, "checks:dispatch");
+  if (!dispatchStep) throw new Error("checks:dispatch step missing before scoped round");
+
+  // Round 2: the scoped re-author dispatch inserts a fresh active AC-1 check.
+  const runner2 = new FakeAgentRunner((input) => {
+    const dir = join(input.cwd, "checks");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "ac1_v2.py"), "def test_ac1_v2():\n    assert False\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout:
+        '```styre-sidecar\n{"checksAuthored":[' +
+        '{"ac_id":1,"test_file":"checks/ac1_v2.py","test_name":"test_ac1_v2"}' +
+        "]}\n```",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const registry2 = buildDispatchRegistry({
+    runner: runner2,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile,
+    worktreeRoot,
+    runCheckCommand,
+  });
+  resetToPending(db, dispatchStep.id);
+  await advanceOneStep(db, ticketId, registry2); // checks:dispatch (scoped, first run)
+
+  const activeAc1AfterFirstRun = listActiveByAc(db, 1);
+  expect(activeAc1AfterFirstRun.length).toBe(1);
+  const ac1FirstFreshInsert = activeAc1AfterFirstRun[0];
+  expect(ac1FirstFreshInsert?.id).not.toBe(ac1Round1?.id);
+  expect(ac1FirstFreshInsert?.test_path).toBe("checks/ac1_v2.py");
+  expect(reauthorRoundsForAc(db, 1)).toBe(1); // dispatch never supersedes — round count untouched
+
+  // Simulate a crash-resume: the SAME round's dispatch step is re-run (no new loopback, no new
+  // supersede) — it must dedupe its own not-yet-classified active insert, not double-insert.
+  const runner3 = new FakeAgentRunner((input) => {
+    const dir = join(input.cwd, "checks");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "ac1_v2.py"), "def test_ac1_v2():\n    assert False\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout:
+        '```styre-sidecar\n{"checksAuthored":[' +
+        '{"ac_id":1,"test_file":"checks/ac1_v2.py","test_name":"test_ac1_v2"}' +
+        "]}\n```",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const registry3 = buildDispatchRegistry({
+    runner: runner3,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile,
+    worktreeRoot,
+    runCheckCommand,
+  });
+  resetToPending(db, dispatchStep.id);
+  await advanceOneStep(db, ticketId, registry3); // checks:dispatch (scoped, resumed)
+
+  const activeAc1AfterResume = listActiveByAc(db, 1);
+  const checksAfterResume = listAcChecks(db, ticketId);
+  const ac2AfterResume = checksAfterResume.find((c) => c.ac_id === 2);
+  const roundsAfterResume = reauthorRoundsForAc(db, 1);
+  db.close();
+
+  // Exactly ONE active AC-1 row survives the resume — the resume's deleteActiveByAc cleared the
+  // first run's fresh insert before inserting its own.
+  expect(activeAc1AfterResume.length).toBe(1);
+  expect(activeAc1AfterResume[0]?.id).not.toBe(ac1FirstFreshInsert?.id);
+  expect(roundsAfterResume).toBe(1); // resume did NOT inflate the round counter
+
+  // AC-2 (never flagged) is untouched by either scoped round.
+  expect(ac2AfterResume?.id).toBe(ac2Round1?.id);
+  expect(ac2AfterResume?.test_path).toBe(ac2Round1?.test_path);
 });

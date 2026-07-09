@@ -1,10 +1,12 @@
 import { z } from "zod";
 
 /** The six labels the M3 adjudicator may return (§5): three red classes for coarse-red checks, three
- *  green-on-HEAD dispositions for coarse-green checks. */
+ *  green-on-HEAD dispositions for coarse-green checks — plus the transient `weak` surface-only flag,
+ *  never persisted. */
 export const AdjClassEnum = z.enum([
   "assertion",
   "absence",
+  "weak",
   "environmental",
   "vacuous",
   "already-satisfied",
