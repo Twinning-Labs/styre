@@ -172,3 +172,37 @@ export function classificationForAcCheck(
   if (!row) return null;
   return { row, detail: JSON.parse(row.detail_json ?? "{}") as ClassificationDetail };
 }
+
+/** The behavioral still-red AC-id set at `sha` = the latest `ac-check-gate` signal's stillRed minus
+ *  its tampered (integrity is never arbitrated). Empty when the gate passed / was integrity-only. */
+export function behavioralStillRed(db: Database, ticketId: number, sha: string): number[] {
+  const sig = listByTicket(db, ticketId)
+    .filter((s) => s.signal_type === "ac-check-gate" && s.branch_head_sha === sha)
+    .at(-1);
+  if (!sig) return [];
+  const d = JSON.parse(sig.detail_json ?? "{}") as { stillRed?: number[]; tampered?: number[] };
+  const tampered = new Set(d.tampered ?? []);
+  return (d.stillRed ?? []).filter((id) => !tampered.has(id));
+}
+
+/** The shas at which any `ac-check-blame` signal exists (the round key: blame present ⇒ the arbiter
+ *  already ran for that gate round). */
+export function blameShasFor(db: Database, ticketId: number): string[] {
+  return listByTicket(db, ticketId)
+    .filter((s) => s.signal_type === "ac-check-blame" && s.branch_head_sha !== null)
+    .map((s) => s.branch_head_sha as string);
+}
+
+export interface BlameDetail {
+  acId: number;
+  acCheckId: number;
+  blame: string;
+  reason: string;
+}
+
+/** The blames recorded at `sha` (one per behavioral check the arbiter judged that round). */
+export function latestBlameAtSha(db: Database, ticketId: number, sha: string): BlameDetail[] {
+  return listByTicket(db, ticketId)
+    .filter((s) => s.signal_type === "ac-check-blame" && s.branch_head_sha === sha)
+    .map((s) => JSON.parse(s.detail_json ?? "{}") as BlameDetail);
+}

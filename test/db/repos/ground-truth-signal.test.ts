@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import {
+  behavioralStillRed,
+  blameShasFor,
   insertSignal,
+  latestBlameAtSha,
   listByUnit,
   passingShasFor,
 } from "../../../src/db/repos/ground-truth-signal.ts";
@@ -114,4 +117,34 @@ test("records branch_head_sha and reports the SHAs a check passed at", () => {
   const passed = passingShasFor(db, { ticketId, workUnitId: unit.id, signalType: "test" });
   db.close();
   expect(passed).toEqual(["bbb"]); // only the passing SHA, history of the fail kept
+});
+
+test("behavioralStillRed subtracts tampered from stillRed of the gate signal at a sha", () => {
+  const { db, ticketId } = makeTestDb();
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-gate",
+    result: "fail",
+    branchHeadSha: "S1",
+    detail: { stillRed: [4, 7], tampered: [7], advisory: [] },
+  });
+  expect(behavioralStillRed(db, ticketId, "S1")).toEqual([4]);
+  db.close();
+});
+
+test("blameShasFor / latestBlameAtSha round-key the ac-check-blame signal", () => {
+  const { db, ticketId } = makeTestDb();
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-blame",
+    result: "fail",
+    branchHeadSha: "S1",
+    detail: { acId: 4, acCheckId: 40, blame: "code-wrong", reason: "r" },
+  });
+  expect(blameShasFor(db, ticketId)).toContain("S1");
+  expect(latestBlameAtSha(db, ticketId, "S1")).toEqual([
+    { acId: 4, acCheckId: 40, blame: "code-wrong", reason: "r" },
+  ]);
+  expect(latestBlameAtSha(db, ticketId, "S2")).toEqual([]);
+  db.close();
 });

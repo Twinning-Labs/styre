@@ -191,3 +191,42 @@ test("gateFeedback is empty when no gate signal exists", () => {
   db.close();
   expect(fb).toBe("");
 });
+
+test("gateFeedback appends the arbiter's code-wrong blame reason when one was recorded at the gate sha", () => {
+  const { db, ticketId } = makeTestDb();
+  const ac = insertAc(db, {
+    ticketId,
+    seq: 1,
+    text: "returns the created record",
+    source: "checklist",
+  });
+  const check = insertAcCheck(db, {
+    ticketId,
+    acId: ac.id,
+    selector: "api/tests/styre_checks/ENG-1_ac7_test.py::test_ac",
+    testPath: "api/tests/styre_checks/ENG-1_ac7_test.py",
+  });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-gate",
+    result: "fail",
+    branchHeadSha: "S1",
+    detail: { stillRed: [ac.id], tampered: [], advisory: [] },
+  });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-blame",
+    result: "fail",
+    branchHeadSha: "S1",
+    detail: {
+      acId: ac.id,
+      acCheckId: check.id,
+      blame: "code-wrong",
+      reason: "returns 201 not 200",
+    },
+  });
+  const fb = gateFeedback(db, ticketId);
+  db.close();
+  expect(fb).toContain("Arbiter blame");
+  expect(fb).toContain("returns 201 not 200");
+});
