@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { branchNameFor } from "../agent/branch.ts";
 import type { AgentRunner } from "../agent/runner.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
+import { latestReauthorRoute } from "../daemon/arbiter-verdict.ts";
 import { latestChecksReauthorAcs } from "../daemon/checks-verdict.ts";
 import { StepRegistry } from "../daemon/step-registry.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
@@ -15,6 +16,7 @@ import {
   insertAcCheck,
   listActiveByTicket as listAcChecks,
   listUnresolvedByTicket,
+  supersedeByAc,
 } from "../db/repos/ac-check.ts";
 import { listByTicket as listAcs } from "../db/repos/acceptance-criterion.ts";
 import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";
@@ -102,6 +104,7 @@ import {
   resolvePythonInterpreter,
   sourceCheckCommand,
 } from "./provision.ts";
+import { baselineShaForAc, replayCheckAtBaseline } from "./replay-harness.ts";
 import { reuseAwareTestCommand } from "./reuse.ts";
 import { ReviewOutputSchema, computeBlocksShip, validateReviewFindings } from "./review-schema.ts";
 import type { DispatchDeps } from "./run-dispatch.ts";
@@ -203,6 +206,99 @@ export async function adjudicateOne(
   const parsed = extractSidecar(output, ChecksClassifyOutputSchema);
   if (!parsed.ok) return null;
   return parsed.value.classifications.find((c) => c.ac_check_id === item.acCheckId)?.class ?? null;
+}
+
+/** §5: the check-wrong re-author pipeline for ONE AC. Code-blind author (reuses checks:dispatch) →
+ *  clean-HEAD replay (coarse==red installs; green/selected-none/error reject) → classify via the
+ *  adjudicator directly (environmental rejects) → supersede + insert + red-first at the re-author sha
+ *  (integrity re-freeze). Resume-safe: supersede-then-insert in one txn, and the escalate counter is
+ *  the gate attempt (never reauthorRoundsForAc), so a resumed extra round never premature-escalates. */
+async function reauthorCheckWrong(
+  ctx: HandlerContext,
+  deps: RegistryDeps,
+  acId: number,
+  supersedeTargetId: number,
+): Promise<"installed" | "rejected"> {
+  const baselineSha = baselineShaForAc(ctx.db, acId);
+  if (baselineSha === null) return "rejected"; // can't validate → fail closed
+  const ac = listAcs(ctx.db, ctx.ticket.id).find((a) => a.id === acId);
+  if (!ac) return "rejected";
+  const { repoPath, worktreePath } = worktreeFor(ctx, deps);
+
+  // 1) Code-blind author (AC text only; reuses checks:dispatch's plan-blind prompt + no-Bash allowlist).
+  const { sha: reauthorSha, output } = await runAgentDispatch(
+    ctx,
+    depsFor(ctx, deps, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    {
+      handlerKey: "checks:dispatch",
+      template: CHECKS_TEMPLATE,
+      vars: checksVars(ctx.ticket, deps.profile, [{ id: ac.id, text: ac.text }], ""),
+      postcondition: () => {},
+    },
+  );
+  const parsed = extractSidecar(output, ChecksOutputSchema);
+  if (!parsed.ok) return "rejected";
+  const authored = parsed.value.checksAuthored.find((c) => c.ac_id === acId);
+  if (!authored) return "rejected";
+
+  // 2) Identity: added file + the test name present in the committed content.
+  if (!new Set(addedFilesAt(reauthorSha, worktreePath)).has(authored.test_file)) return "rejected";
+  const content = fileContentAt(reauthorSha, authored.test_file, worktreePath);
+  if (content === null || !content.includes(authored.test_name)) return "rejected";
+
+  // 3) Clean-HEAD replay — the RED-first oracle. coarse == red installs; everything else rejects.
+  const coarse = await replayCheckAtBaseline({
+    repoPath,
+    baselineSha,
+    components: deps.profile.components,
+    testFile: authored.test_file,
+    testName: authored.test_name,
+    content,
+    timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
+    run: deps.runCheckCommand,
+  });
+  if (String(coarse) !== "red") return "rejected"; // green / selected-none / error
+
+  // 4) Classify via the adjudicator directly (NOT applyChecksVerdict). environmental → reject.
+  const cls = await adjudicateOne(ctx, deps, {
+    acCheckId: supersedeTargetId,
+    acText: ac.text,
+    testPath: authored.test_file,
+    testName: authored.test_name,
+    coarse: "red",
+    rawOutput: "", // the replay trace is red-shaped; the prior/adjudicator judge absence vs assertion
+  });
+  if (cls !== "assertion" && cls !== "absence") return "rejected"; // environmental/weak/null → reject
+
+  // 5) Install: supersede the old generation + insert the new active + red-first at the re-author sha.
+  // (The replay above already resolved a component+framework for this same test_file — coarse would
+  // have been "error" otherwise, rejecting before this point — but fail closed here too, no assertion.)
+  const installComp = impactedComponents(deps.profile.components, [authored.test_file])[0];
+  const installFw = installComp ? frameworkFor(installComp) : null;
+  if (!installComp || !installFw) return "rejected";
+  const sel = buildCheckSelector(installFw, {
+    testFile: authored.test_file,
+    testName: authored.test_name,
+  }).runArgs;
+  ctx.db.transaction(() => {
+    supersedeByAc(ctx.db, acId); // supersedes ALL active for the AC (resume-safe; counter is gate attempt)
+    const row = insertAcCheck(ctx.db, {
+      ticketId: ctx.ticket.id,
+      acId,
+      selector: sel,
+      testPath: authored.test_file,
+      redFirstResult: "red",
+    });
+    classifyAcCheck(ctx.db, { acCheckId: row.id, redClass: cls });
+    insertSignal(ctx.db, {
+      ticketId: ctx.ticket.id,
+      signalType: "ac-check-red-first",
+      result: "fail",
+      branchHeadSha: reauthorSha, // §5.4 integrity re-freeze at the new baseline
+      detail: { rawOutput: "", exitCode: 1, framework: null, command: null, acCheckId: row.id },
+    });
+  })();
+  return "installed";
 }
 
 /** Deterministic templated PR description from facts the daemon already has (M6b-1; a cheap-LLM
@@ -1389,6 +1485,48 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       }
     })();
     return { arbitrated: items.length };
+  });
+
+  registry.register("checks:reauthor", async (ctx: HandlerContext) => {
+    const route = latestReauthorRoute(ctx.db, ctx.ticket.id); // { acIds, sha } | null
+    if (route === null || route.acIds.length === 0) return { reauthored: 0 }; // no-op (nothing routed)
+    const roundSha = route.sha;
+
+    const active = listAcChecks(ctx.db, ctx.ticket.id); // the check-wrong generation (still active)
+    const byAc = new Map(active.map((c) => [c.ac_id, c]));
+
+    // Re-author each check-wrong AC (sequential: each author dispatch commits, moving HEAD). The
+    // installs commit; a rejected AC leaves its old check active (fail-closed).
+    const dispositions: Array<{
+      acId: number;
+      acCheckId: number;
+      disposition: "installed" | "rejected";
+    }> = [];
+    for (const acId of route.acIds) {
+      const check = byAc.get(acId);
+      if (check === undefined) {
+        // The check-wrong AC's active check vanished (shouldn't happen) → fail closed as rejected.
+        dispositions.push({ acId, acCheckId: -1, disposition: "rejected" });
+        continue;
+      }
+      const outcome = await reauthorCheckWrong(ctx, deps, acId, check.id);
+      dispositions.push({ acId, acCheckId: check.id, disposition: outcome });
+    }
+
+    // Record dispositions at the ROUND sha. Open-vocab signal_type (no schema change), never overwrites
+    // the arbiter's ac-check-blame at the same sha.
+    ctx.db.transaction(() => {
+      for (const d of dispositions) {
+        insertSignal(ctx.db, {
+          ticketId: ctx.ticket.id,
+          signalType: "ac-check-reauthor",
+          result: d.disposition === "installed" ? "pass" : "fail",
+          branchHeadSha: roundSha,
+          detail: { acId: d.acId, acCheckId: d.acCheckId, disposition: d.disposition },
+        });
+      }
+    })();
+    return { reauthored: dispositions.filter((d) => d.disposition === "installed").length };
   });
 
   registry.register("review", async (ctx: HandlerContext) => {

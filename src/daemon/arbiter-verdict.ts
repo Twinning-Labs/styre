@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { getLatestForTicket } from "../db/repos/dispatch.ts"; // the current branch HEAD sha source used by the resolver
-import { appendEvent } from "../db/repos/event-log.ts";
+import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { latestBlameAtSha } from "../db/repos/ground-truth-signal.ts";
 import { insertPending as insertSignal } from "../db/repos/signal.ts";
 import { setTicketStatus } from "../db/repos/ticket.ts";
@@ -52,4 +52,27 @@ export function applyArbiterVerdict(
     blame: blames.map((b) => ({ acCheckId: b.acCheckId, blame: b.blame })),
   });
   return { decision: "loopback" };
+}
+
+/** The check-wrong ACs + round sha the arbiter last routed to checks:reauthor (payload of its
+ *  `loop:"reauthor" routeTo:"checks:reauthor"` loopback event). Mirrors checks-verdict.ts's
+ *  latestChecksReauthorAcs in shape (same `{acIds}` payload), but on a DISTINCT `loop:"reauthor"`
+ *  label (FIX I1) — NOT `loop:"checks"`. latestChecksReauthorAcs (checks-verdict.ts) and checksFeedback
+ *  (checks-feedback.ts) both select the latest `loop==="checks"` event with NO route_to filter; had
+ *  this route also used `loop:"checks"`, a future design-stage checks:dispatch re-entry could silently
+ *  pick up THIS event's acIds as its own re-author scope (same payload shape, different meaning). The
+ *  distinct label makes that impossible by construction — do not rename this back to "checks". Null
+ *  when no such event exists / the payload is empty. */
+export function latestReauthorRoute(
+  db: Database,
+  ticketId: number,
+): { acIds: number[]; sha: string } | null {
+  const events = listEvents(db, ticketId).filter(
+    (e) => e.kind === "loopback" && e.loop === "reauthor" && e.route_to === "checks:reauthor",
+  );
+  const latest = events[events.length - 1];
+  if (!latest?.payload_json) return null;
+  const p = JSON.parse(latest.payload_json) as { acIds?: number[]; sha?: string };
+  if (!p.acIds || p.acIds.length === 0 || !p.sha) return null;
+  return { acIds: p.acIds, sha: p.sha };
 }
