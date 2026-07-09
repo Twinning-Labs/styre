@@ -340,6 +340,46 @@ test("advisory sweeps surface sha-agnostically (I2)", () => {
   expect(r.advisory).toContainEqual({ kind: "integration", result: "fail", firstFailingJob: "backend:test" });
 });
 
+test("precedence: green gating + environmental-red on one AC → verified headline + env caveat + not clean (design §6)", () => {
+  const { db, ticketId } = makeTestDb();
+  seedHead(db, ticketId);
+  const ac = insertAc(db, { ticketId, seq: 1, text: "mixed", source: "checklist" });
+  const gate = insertAcCheck(db, { ticketId, acId: ac.id, selector: "g", testPath: "t" });
+  classifyAcCheck(db, { acCheckId: gate.id, redClass: "assertion" });
+  insertSignal(db, { ticketId, signalType: "ac-check-post-implement", result: "pass",
+    branchHeadSha: HEAD, detail: { acCheckId: gate.id, acId: ac.id, coarse: "green", redClass: "assertion", outcome: "green" } });
+  const env = insertAcCheck(db, { ticketId, acId: ac.id, selector: "e", testPath: "t" });
+  classifyAcCheck(db, { acCheckId: env.id, redClass: "environmental" });
+  insertSignal(db, { ticketId, signalType: "ac-check-post-implement", result: "fail",
+    branchHeadSha: HEAD, detail: { acCheckId: env.id, acId: ac.id, coarse: "red", redClass: "environmental", outcome: "advisory-red" } });
+  const r = buildVerifyReport(db, ticketId);
+  expect(r.criteria[0].label).toBe("verified"); // gating check green — headline reflects gating only
+  expect(r.advisory).toContainEqual({ kind: "environmental-red", seq: 1 }); // env red still surfaced
+  expect(r.allClean).toBe(false); // the advisory caveat forces it false
+});
+
+test("installed re-author → new active check verified + installed provenance line (M-2)", () => {
+  const { db, ticketId } = makeTestDb();
+  seedHead(db, ticketId);
+  const ac = insertAc(db, { ticketId, seq: 1, text: "re-authored ok", source: "checklist" });
+  const old = insertAcCheck(db, { ticketId, acId: ac.id, selector: "old", testPath: "t" });
+  classifyAcCheck(db, { acCheckId: old.id, redClass: "assertion" });
+  // Arbiter blamed the old check check-wrong; reauthor INSTALLED — the signal records the OLD (about-to-be
+  // superseded) id, per handlers.ts checks:reauthor.
+  insertSignal(db, { ticketId, signalType: "ac-check-blame", result: "fail", branchHeadSha: "roundsha",
+    detail: { acId: ac.id, acCheckId: old.id, blame: "check-wrong", reason: "asserted stale field" } });
+  insertSignal(db, { ticketId, signalType: "ac-check-reauthor", result: "pass", branchHeadSha: "roundsha",
+    detail: { acId: ac.id, acCheckId: old.id, disposition: "installed" } });
+  supersedeByAc(db, ac.id);
+  const neu = insertAcCheck(db, { ticketId, acId: ac.id, selector: "new", testPath: "t" });
+  classifyAcCheck(db, { acCheckId: neu.id, redClass: "assertion" });
+  insertSignal(db, { ticketId, signalType: "ac-check-post-implement", result: "pass",
+    branchHeadSha: HEAD, detail: { acCheckId: neu.id, acId: ac.id, coarse: "green", redClass: "assertion", outcome: "green" } });
+  const r = buildVerifyReport(db, ticketId);
+  expect(r.criteria[0].label).toBe("verified"); // installed id is the superseded old id → not in rejected set
+  expect(r.provenance).toContainEqual({ seq: 1, disposition: "installed", reason: "asserted stale field" });
+});
+
 test("no ACs → empty report", () => {
   const { db, ticketId } = makeTestDb();
   seedHead(db, ticketId);
@@ -459,13 +499,23 @@ export function buildVerifyReport(db: Database, ticketId: number): VerifyReport 
     }
   }
 
-  const provenance: ProvenanceLine[] = prov
-    .filter((p) => seqByAcId.has(p.acId))
-    .map((p) => ({
-      seq: seqByAcId.get(p.acId) as number,
-      disposition: p.disposition,
-      reason: p.reason,
-    }))
+  // One provenance line per AC — a multi-round AC has several acCheckId generations in `prov`; keep the
+  // newest generation (highest acCheckId, AUTOINCREMENT-monotonic) so the section shows one line per AC
+  // (design §3, review finding M-1).
+  const provByAc = new Map<number, { acCheckId: number; line: ProvenanceLine }>();
+  for (const p of prov) {
+    const seq = seqByAcId.get(p.acId);
+    if (seq === undefined) continue;
+    const cur = provByAc.get(p.acId);
+    if (!cur || p.acCheckId > cur.acCheckId) {
+      provByAc.set(p.acId, {
+        acCheckId: p.acCheckId,
+        line: { seq, disposition: p.disposition, reason: p.reason },
+      });
+    }
+  }
+  const provenance: ProvenanceLine[] = [...provByAc.values()]
+    .map((v) => v.line)
     .sort((a, b) => a.seq - b.seq);
 
   const allClean =
@@ -480,7 +530,7 @@ export function buildVerifyReport(db: Database, ticketId: number): VerifyReport 
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `bun test test/dispatch/verify-report-build.test.ts`
-Expected: PASS (8 tests).
+Expected: PASS (10 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -932,7 +982,10 @@ In `src/integrations/adapters/github.ts`, replace the `if (found) return { ... }
 ```ts
       const found = open[0];
       if (found) {
-        if ((found.body ?? "") !== body) {
+        // Normalize CRLF → LF before comparing: GitHub stores/returns PR bodies with \r\n, while the
+        // composed body joins on \n. Without this, every resume/drain re-issues a no-op body update
+        // (review finding I-2). This path is adapter-only (not unit-tested), so get it right here.
+        if ((found.body ?? "").replace(/\r\n/g, "\n") !== body) {
           await octokit.pulls.update({ owner, repo, pull_number: found.number, body });
         }
         return { ref: String(found.number), url: found.html_url };
@@ -955,7 +1008,7 @@ Expected: PASS (2 tests).
 - [ ] **Step 5: Run the existing forge/merge tests to confirm no regression**
 
 Run: `bun test test/dispatch/merge-e2e.test.ts test/dispatch/merge-handlers.test.ts`
-Expected: PASS (the existing assertions only check `ensurePr` was called + `response_ref` non-null; the new ref scheme `fake-pr-1` is still non-null). If any test asserts an exact old ref string, update it to assert non-null.
+Expected: PASS (the existing assertions only check `ensurePr` was called + `response_ref` non-null; the new ref scheme `fake-pr-1` is still non-null on a first call). If any test asserts an exact old ref string, update it to assert non-null. Also fix the now-stale comment at `test/dispatch/merge-e2e.test.ts:94` ("returns ref = `fake-pr-${calls.length}`") to reflect the per-branch `fake-pr-${prs.size+1}` scheme (comment only).
 
 - [ ] **Step 6: Commit**
 
