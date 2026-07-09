@@ -112,6 +112,7 @@ import { runAgentDispatch } from "./run-dispatch.ts";
 import { extractSidecar } from "./sidecar.ts";
 import { isTestFile } from "./test-file.ts";
 import { combineTrack, sizeTrack } from "./track-sizing.ts";
+import { buildVerifyReport, renderVerifyReport } from "./verify-report.ts";
 import {
   addedFilesAt,
   branchHeadSha,
@@ -336,15 +337,24 @@ export function renderPrBody(
           }),
         ]
       : [];
+  const report = buildVerifyReport(db, ticket.id);
+  const verifyBlock = renderVerifyReport(report); // "" when the ticket has no ACs
+  const verifyLines = verifyBlock === "" ? [] : ["", verifyBlock];
+  // Keep the closing assurance only when there is nothing to caveat: no ACs at all (block empty), or a
+  // fully clean report. A ⚠/⚪/➖ AC or an advisory failure means "verified" would over-claim (design §3).
+  const keepClosing = verifyBlock === "" || report.allClean;
+  const closingLines = keepClosing
+    ? ["", "Verified against the project's checks and passed independent review."]
+    : [];
   return [
     `Automated PR for ${ticket.ident}${ticket.title ? ` — ${ticket.title}` : ""}.`,
     "",
     "Work units:",
     ...(lines.length > 0 ? lines : ["- (none)"]),
+    ...verifyLines,
     ...riskLines,
     ...sweepLines,
-    "",
-    "Verified against the project's checks and passed independent review.",
+    ...closingLines,
   ].join("\n");
 }
 

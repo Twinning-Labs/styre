@@ -4,8 +4,9 @@ export interface ForgePort {
   /** Push the feature branch to the remote at `sha`. Probe-idempotent: skip if the remote ref is
    *  already at `sha`. Feature branch only; force is with-lease and never on a protected branch. */
   push(opts: { branch: string; sha: string }): Promise<void>;
-  /** Ensure a PR exists for `branch` into `base`. Probe-idempotent: reuse an existing PR if present.
-   *  Returns the PR ref (number) + url. */
+  /** Ensure a PR exists for `branch` into `base` with the given `body`. Probe-idempotent: reuse an
+   *  existing open PR if present, and update its body when it differs (so a projected report stays
+   *  current). Returns the PR ref (number) + url. */
   ensurePr(opts: { branch: string; base: string; title: string; body: string }): Promise<{
     ref: string;
     url: string;

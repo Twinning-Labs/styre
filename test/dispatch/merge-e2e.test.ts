@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { tick } from "../../src/daemon/loop.ts";
+import { classifyAcCheck, insertAcCheck } from "../../src/db/repos/ac-check.ts";
+import { insertAc } from "../../src/db/repos/acceptance-criterion.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
+import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { listPending as listSignals } from "../../src/db/repos/signal.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
@@ -91,7 +94,7 @@ test("merge-write flow: push + PR opened, ticket parks awaiting external_checks"
     )
     .get(ticketId);
   expect(sentPrRow?.status).toBe("sent");
-  // fakeForge.ensurePr returns ref = `fake-pr-${calls.length}` — a non-null string.
+  // fakeForge.ensurePr returns ref = `fake-pr-${prs.size + 1}` (per-branch) — a non-null string.
   expect(sentPrRow?.response_ref).not.toBeNull();
   expect(typeof sentPrRow?.response_ref).toBe("string");
 
@@ -147,6 +150,55 @@ test("idempotent re-drive: a second tick does not enqueue duplicate forge rows o
 
   // Fake forge call count did not grow — already-sent rows are not re-applied.
   expect(forge.calls.length).toBe(forgeCallCountAfterFirstRun);
+
+  db.close();
+});
+
+test("merge PR body carries the change-scoped verify criteria list", async () => {
+  const { db, ticketId } = makeTestDb();
+  seedMergeTicket(db, ticketId); // completes a dispatch at branch_head_sha 'headsha123'
+  // Seed one verified AC at the SAME sha the seeded dispatch used, so the at-HEAD reads resolve.
+  const ac = insertAc(db, {
+    ticketId,
+    seq: 1,
+    text: "returns 201 on create",
+    source: "checklist",
+  });
+  const chk = insertAcCheck(db, {
+    ticketId,
+    acId: ac.id,
+    selector: "s",
+    testPath: "t",
+  });
+  classifyAcCheck(db, { acCheckId: chk.id, redClass: "assertion" });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-post-implement",
+    result: "pass",
+    branchHeadSha: "headsha123",
+    detail: {
+      acCheckId: chk.id,
+      acId: ac.id,
+      coarse: "green",
+      redClass: "assertion",
+      outcome: "green",
+    },
+  });
+
+  const reg = registryFor();
+  const forge = fakeForge();
+  const ports = { issueTracker: fakeIssueTracker(), forge };
+  let t = getTicket(db, ticketId);
+  let i = 0;
+  while (t?.status !== "waiting" && i < 10) {
+    await tick(db, reg, { ports });
+    t = getTicket(db, ticketId);
+    i++;
+  }
+  const prCall = forge.calls.find((c) => c.method === "ensurePr");
+  const body = (prCall?.args[0] as { body: string }).body;
+  expect(body).toContain("### Change-scoped verify");
+  expect(body).toContain("✅ AC-1 — returns 201 on create");
 
   db.close();
 });
