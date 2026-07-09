@@ -121,3 +121,92 @@ export function buildVerifyReport(db: Database, ticketId: number): VerifyReport 
 
   return { criteria, advisory, provenance, allClean };
 }
+
+/** Truncate an AC to one line and neutralize markdown/HTML so a crafted AC cannot break the list or
+ *  inject markup into a cross-team PR body (design §5, review finding M3). */
+function acText(raw: string): string {
+  const oneLine = raw.replace(/\s+/g, " ").trim();
+  const clipped = oneLine.length > 120 ? `${oneLine.slice(0, 117)}…` : oneLine;
+  return clipped.replace(/</g, "&lt;").replace(/`/g, "'");
+}
+
+const SYMBOL: Record<AcLabel, string> = {
+  verified: "✅",
+  satisfied: "✅",
+  "not-expressible": "⚪",
+  environmental: "⚪",
+  "still-red": "⚠️",
+  "check-unreplaced": "⚠️",
+  "no-check": "➖",
+};
+
+const EXPLAIN: Record<AcLabel, string> = {
+  verified: "Confirmed by an automated test that failed before this change and passes now.",
+  satisfied:
+    "Already working before this change. An automated test found the behavior was already present, so this criterion needed no new code.",
+  "not-expressible":
+    "Could not be checked automatically — no reliable test could capture this criterion, so it was left to human code review instead.",
+  environmental:
+    'Could not be checked reliably — the automated check needs tooling or configuration that was not available here (an "environmental" check), so its result does not confirm the criterion. Please confirm by review.',
+  "still-red":
+    "The automated check for this criterion did not end in a passing state as expected. Please verify this one by review.",
+  "check-unreplaced":
+    "A check for this criterion was judged to not actually match it, and no correct replacement could be created. The criterion may show as passing without truly being met — please verify this one carefully by review.",
+  "no-check": "No automated check was created for this criterion.",
+};
+
+function renderAdvisory(a: AdvisoryLine): string {
+  if (a.kind === "integration") {
+    const job = a.firstFailingJob ? ` (first failing job: \`${a.firstFailingJob}\`)` : "";
+    return `- ⚠️ The full integration test run ${a.result === "error" ? "did not complete" : "FAILED"}${job}. This was not used as a merge gate.`;
+  }
+  if (a.kind === "suite") {
+    return `- ⚠️ The \`${a.checkType}\` test suite did not pass (result: ${a.result}). This was not used as a merge gate.`;
+  }
+  return `- ⚠️ The automated check for AC-${a.seq} is still failing, but the failure looks environmental (for example, missing tooling or configuration) rather than something this change caused.`;
+}
+
+/** The `### Change-scoped verify` block, or "" when the ticket has no acceptance criteria. Pure. */
+export function renderVerifyReport(report: VerifyReport): string {
+  if (report.criteria.length === 0) return "";
+  const lines: string[] = [
+    "### Change-scoped verify",
+    "",
+    "For each acceptance criterion on this ticket, Styre tried to write an automated test that fails before the change and passes after it. Here is what those checks found.",
+    "",
+    "**Acceptance criteria**",
+    "",
+  ];
+  for (const c of report.criteria) {
+    lines.push(`- ${SYMBOL[c.label]} AC-${c.seq} — ${acText(c.text)}`);
+    lines.push(`  ${EXPLAIN[c.label]}`);
+    lines.push("");
+  }
+  if (report.advisory.length > 0) {
+    lines.push("**Please review before merging — these did NOT block the merge**");
+    lines.push("");
+    lines.push(
+      "These are advisory signals. Styre did not treat any of them as a reason to stop, so a human should look before merging.",
+    );
+    lines.push("");
+    for (const a of report.advisory) lines.push(renderAdvisory(a));
+    lines.push("");
+  }
+  if (report.provenance.length > 0) {
+    lines.push("**How the automated checks changed during verification**");
+    lines.push("");
+    for (const p of report.provenance) {
+      if (p.disposition === "installed") {
+        lines.push(
+          `- The automated check for AC-${p.seq} was rewritten mid-verification because the original one was judged wrong — it did not actually match the criterion. Reason: ${p.reason}.`,
+        );
+      } else {
+        lines.push(
+          `- The automated check for AC-${p.seq} was judged wrong and could not be replaced with a correct one. Reason: ${p.reason}.`,
+        );
+      }
+    }
+    lines.push("");
+  }
+  return lines.join("\n").trimEnd();
+}
