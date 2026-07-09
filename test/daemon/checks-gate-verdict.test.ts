@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { expect, test } from "bun:test";
 import { GATE_ROUND_CAP } from "../../src/daemon/arbiter-verdict.ts";
 import { applyAcCheckGateVerdict } from "../../src/daemon/checks-gate-verdict.ts";
 import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";

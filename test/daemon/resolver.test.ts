@@ -308,7 +308,11 @@ test("resolver serves checks:arbitrate when the gate failed with behavioral stil
     selector: "tests/test_x.py::test_thing",
     testPath: "tests/test_x.py",
   });
-  const disp = insertDispatch(db, { ticketId, dispatchId: "ENG-1-d0001", seq: nextSeq(db, ticketId) });
+  const disp = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0001",
+    seq: nextSeq(db, ticketId),
+  });
   completeDispatch(db, disp.id, { outcome: "clean-success", branchHeadSha: "S1" });
   insertSignal(db, {
     ticketId,
@@ -339,7 +343,11 @@ test("resolver does NOT re-serve checks:arbitrate once a blame exists at the gat
     selector: "tests/test_x.py::test_thing",
     testPath: "tests/test_x.py",
   });
-  const disp = insertDispatch(db, { ticketId, dispatchId: "ENG-1-d0001", seq: nextSeq(db, ticketId) });
+  const disp = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0001",
+    seq: nextSeq(db, ticketId),
+  });
   completeDispatch(db, disp.id, { outcome: "clean-success", branchHeadSha: "S1" });
   insertSignal(db, {
     ticketId,

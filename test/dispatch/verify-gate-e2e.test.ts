@@ -84,14 +84,15 @@ const blockingCodeFinding = sidecar(
 );
 
 /** Seed one AC + one active `ac_check` (already graded `red_class='assertion'` — this suite drives
- *  the M4 GATE, not the M2/M3 authoring/classification loop, which `checks-reauthor-e2e.test.ts`
+ *  the M4/M5 GATE, not the M2/M3 authoring/classification loop, which `checks-reauthor-e2e.test.ts`
  *  covers separately) authored at `authoringSha`, with its check file committed unchanged into
- *  `repo` at `checks/ac1_test.py`. Returns the AC id. */
+ *  `repo` at `checks/ac1_test.py`. Returns the AC id + the live ac_check id (the arbiter's
+ *  `ac_check_id`). */
 function seedGatedAssertionCheck(
   db: ReturnType<typeof makeTestDb>["db"],
   ticketId: number,
   authoringSha: string,
-): number {
+): { acId: number; checkId: number } {
   const ac = insertAc(db, { ticketId, seq: 1, text: "does the thing", source: "checklist" });
   const check = insertAcCheck(db, {
     ticketId,
@@ -114,12 +115,29 @@ function seedGatedAssertionCheck(
       acCheckId: check.id,
     },
   });
-  return ac.id;
+  return { acId: ac.id, checkId: check.id };
+}
+
+/** A `FakeAgentRunner` reply for the `checks:arbitrate` prompt: blames every still-red check
+ *  `code-wrong` (the M5 default per the prompt's hard rules — no positive AC contradiction here). */
+function codeWrongArbitration(checkIds: number[]): { stdout: string } & typeof ok {
+  return {
+    ...ok,
+    stdout: sidecar(
+      JSON.stringify({
+        arbitrations: checkIds.map((id) => ({
+          ac_check_id: id,
+          blame: "code-wrong",
+          reason: "the check faithfully encodes the AC; the code never satisfies it",
+        })),
+      }),
+    ),
+  };
 }
 
 // ─── 1. The gate blocks a not-green assertion check: loopback then escalate ─────────────────────
 
-test("the gate blocks a not-green assertion check: first round loopbacks, repeated still-red escalates", async () => {
+test("the gate defers a not-green (behavioral) assertion check to the arbiter: code-wrong loops implement, repeated code-wrong escalates at the gate-round cap (M5)", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
@@ -139,12 +157,15 @@ test("the gate blocks a not-green assertion check: first round loopbacks, repeat
     verifyCheckTypes: ["test"],
     status: "verified",
   });
-  const acId = seedGatedAssertionCheck(db, ticketId, commitA);
+  const { acId, checkId } = seedGatedAssertionCheck(db, ticketId, commitA);
   const disp = insertDispatch(db, { ticketId, dispatchId: "seed-1", seq: nextSeq(db, ticketId) });
   completeDispatch(db, disp.id, { outcome: "clean-success", branchHeadSha: commitA });
 
   let n = 0;
   const runner = new FakeAgentRunner((input) => {
+    if (input.prompt.includes("Adjudicate blame for a still-red")) {
+      return codeWrongArbitration([checkId]);
+    }
     n += 1;
     writeFileSync(join(input.cwd, `note-${n}.ts`), "export const x = 1;\n"); // never touches checks/
     return { ...ok, stdout: "{}" };
@@ -164,8 +185,10 @@ test("the gate blocks a not-green assertion check: first round loopbacks, repeat
   const outcomeProvision = await advanceOneStep(db, ticketId, registry); // provision (no-op)
   expect(outcomeProvision.kind).toBe("stepped");
 
+  // M5: a BEHAVIORAL still-red (assertion class, no tampering) DEFERS — the gate step still succeeds
+  // ("stepped"), but the verdict is "clean" (no route) so the resolver serves the arbiter next.
   const outcomeGate1 = await advanceOneStep(db, ticketId, registry); // verify:checks-gate, round 1
-  expect(outcomeGate1.kind).toBe("loopback");
+  expect(outcomeGate1.kind).toBe("stepped");
 
   const gateSig1 = listSignals(db, ticketId)
     .filter((s) => s.signal_type === "ac-check-gate")
@@ -173,17 +196,27 @@ test("the gate blocks a not-green assertion check: first round loopbacks, repeat
   expect(gateSig1?.result).toBe("fail");
   expect(JSON.parse(gateSig1?.detail_json ?? "{}").stillRed).toEqual([acId]);
 
-  const unitAfterLoopback = getUnit(db, unit.id);
-  expect(unitAfterLoopback?.status).toBe("pending"); // the M4 gate verdict resets all units
-  const loopbackEvents = listEvents(db, ticketId).filter(
-    (e) => e.kind === "loopback" && e.loop === "implement" && e.route_to === "verify:checks-gate",
-  );
-  expect(loopbackEvents.length).toBe(1);
+  const outcomeArbitrate1 = await advanceOneStep(db, ticketId, registry); // checks:arbitrate, round 1
+  expect(outcomeArbitrate1.kind).toBe("loopback");
 
-  // Drive round 2 (re-implement -> completeness -> verify:check -> the gate again): the SAME
-  // still-red AC-id set repeats -> escalate (bounded loopback, not an infinite bounce).
+  const blameSig1 = listSignals(db, ticketId)
+    .filter((s) => s.signal_type === "ac-check-blame")
+    .at(-1);
+  expect(blameSig1?.result).toBe("fail");
+  expect(JSON.parse(blameSig1?.detail_json ?? "{}").blame).toBe("code-wrong");
+
+  const unitAfterLoopback = getUnit(db, unit.id);
+  expect(unitAfterLoopback?.status).toBe("pending"); // the arbiter verdict resets all units (Task 5)
+  const arbiterLoopbackEvents = listEvents(db, ticketId).filter(
+    (e) => e.kind === "loopback" && e.loop === "implement" && e.route_to === "checks:arbitrate",
+  );
+  expect(arbiterLoopbackEvents.length).toBe(1);
+
+  // Drive further rounds (re-implement -> completeness -> verify:check -> gate -> arbitrate): the
+  // check stays red and every blame is code-wrong -> bounded loopback, escalating once the gate-round
+  // counter (verify:checks-gate attempt) reaches GATE_ROUND_CAP.
   let finalOutcome: Awaited<ReturnType<typeof advanceOneStep>> | undefined;
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 20; i++) {
     finalOutcome = await advanceOneStep(db, ticketId, registry);
     if (finalOutcome.kind === "escalated") break;
   }
@@ -219,7 +252,7 @@ test("the integrity gate fails on a tampered check, even though the scripted re-
     verifyCheckTypes: ["test"],
     status: "verified",
   });
-  const acId = seedGatedAssertionCheck(db, ticketId, commitA);
+  const { acId } = seedGatedAssertionCheck(db, ticketId, commitA);
   const disp = insertDispatch(db, { ticketId, dispatchId: "seed-1", seq: nextSeq(db, ticketId) });
   completeDispatch(db, disp.id, { outcome: "clean-success", branchHeadSha: commitB });
 

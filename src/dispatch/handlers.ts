@@ -20,6 +20,7 @@ import { listByTicket as listAcs } from "../db/repos/acceptance-criterion.ts";
 import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";
 import { listByTicket as listEvents } from "../db/repos/event-log.ts";
 import {
+  behavioralStillRed,
   insertSignal,
   listByUnit,
   listByTicket as listSignalsByTicket,
@@ -40,6 +41,7 @@ import {
 import { pythonImportName } from "../setup/lang/python.ts";
 import { runCommand } from "../util/run-command.ts";
 import { type AdjClass, ChecksClassifyOutputSchema } from "./adjudicate-schema.ts";
+import { ChecksArbitrateOutputSchema } from "./arbitrate-schema.ts";
 import { checkIntegrityViolations } from "./check-integrity.ts";
 import {
   type CheckFramework,
@@ -73,6 +75,8 @@ import { rerunAcChecks } from "./post-implement-rerun.ts";
 import type { Profile } from "./profile.ts";
 import {
   type AdjudicateItem,
+  type ArbitrateItem,
+  CHECKS_ARBITRATE_TEMPLATE,
   CHECKS_CLASSIFY_TEMPLATE,
   CHECKS_TEMPLATE,
   DESIGN_COMPLEXITY_GRADE_TEMPLATE,
@@ -82,6 +86,7 @@ import {
   IMPLEMENT_TEMPLATE,
   REVIEW_TEMPLATE,
   adjudicateVars,
+  arbitrateVars,
   checksVars,
   complexityGradeVars,
   designReviewVars,
@@ -1285,6 +1290,105 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       detail: { stillRed, tampered: violations.map((v) => v.acId), advisory: rerun.advisory },
     });
     return { gated: checks.length, stillRed: stillRed.length };
+  });
+
+  registry.register("checks:arbitrate", async (ctx: HandlerContext) => {
+    const { worktreePath } = worktreeFor(ctx, deps);
+    const headSha = getLatestForTicket(ctx.db, ctx.ticket.id)?.branch_head_sha;
+    if (!headSha) throw new Error("checks:arbitrate: no branch head sha");
+    const behavioral = behavioralStillRed(ctx.db, ctx.ticket.id, headSha);
+    if (behavioral.length === 0) return { arbitrated: 0 }; // no-op (integrity-only fail)
+
+    const acs = listAcs(ctx.db, ctx.ticket.id);
+    const acTextById = new Map(acs.map((a) => [a.id, a.text]));
+    const active = listAcChecks(ctx.db, ctx.ticket.id); // active checks
+    const byAc = new Map(active.map((c) => [c.ac_id, c]));
+    const checkById = new Map(active.map((c) => [c.id, c]));
+
+    const items: ArbitrateItem[] = [];
+    for (const acId of behavioral) {
+      const check = byAc.get(acId);
+      const acText = acTextById.get(acId) ?? "";
+      if (check === undefined || acText === "") {
+        throw new Error(
+          `checks:arbitrate: behavioral still-red AC ${acId} has no active check or no AC text (invariant: never an arbiter input)`,
+        );
+      }
+      const pi = listSignalsByTicket(ctx.db, ctx.ticket.id)
+        .filter((s) => s.signal_type === "ac-check-post-implement")
+        .reverse()
+        .find(
+          (s) =>
+            (JSON.parse(s.detail_json ?? "{}") as { acCheckId?: number }).acCheckId === check.id,
+        );
+      // FIX I2: prefer the persisted `rawOutput` (the actual failure trace, e.g. "assert 200 == 201" —
+      // Task 4c's post-implement-rerun.ts extension) so the arbiter has real evidence for a
+      // positive-AC-contradiction judgment, not just the coarse bucket. Fall back to `String(coarse)`
+      // only if an older signal predates the rawOutput field (defensive; should not occur post-M5).
+      const piDetail = pi
+        ? (JSON.parse(pi.detail_json ?? "{}") as { coarse?: string; rawOutput?: string })
+        : null;
+      const trace = piDetail ? piDetail.rawOutput || String(piDetail.coarse ?? "") : "";
+      const source = check.test_path
+        ? (fileContentAt(headSha, check.test_path, worktreePath) ?? "")
+        : "";
+      items.push({
+        acCheckId: check.id,
+        acText,
+        testPath: check.test_path,
+        testName: check.selector,
+        coarse: "red",
+        trace,
+        source,
+      });
+    }
+
+    // Fault-isolated arbiter dispatch (bounded 2 rounds; a missing per-check verdict re-asks only it).
+    const blame = new Map<number, { blame: string; reason: string }>();
+    let toAsk = items;
+    for (let round = 0; round < 2 && toAsk.length > 0; round++) {
+      const { output } = await runAgentDispatch(
+        ctx,
+        depsFor(ctx, deps, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+        {
+          handlerKey: "checks:arbitrate",
+          template: CHECKS_ARBITRATE_TEMPLATE,
+          vars: arbitrateVars(ctx.ticket, deps.profile, toAsk),
+          postcondition: () => {},
+        },
+      );
+      const parsed = extractSidecar(output, ChecksArbitrateOutputSchema);
+      if (parsed.ok) {
+        const asked = new Set(toAsk.map((i) => i.acCheckId));
+        for (const a of parsed.value.arbitrations) {
+          if (!asked.has(a.ac_check_id)) continue;
+          blame.set(a.ac_check_id, { blame: a.blame, reason: a.reason });
+        }
+      }
+      toAsk = toAsk.filter((i) => !blame.has(i.acCheckId));
+    }
+    if (toAsk.length > 0) {
+      throw new Error(
+        `checks:arbitrate: arbiter omitted ${toAsk.length} check(s): ${toAsk.map((i) => i.acCheckId).join(", ")}`,
+      );
+    }
+
+    // This handler stays BLAME-ONLY. Task 6 does NOT touch it — the check-wrong re-author lives in the
+    // SEPARATE checks:reauthor step; applyArbiterVerdict routes check-wrong there (not into this handler).
+    ctx.db.transaction(() => {
+      for (const it of items) {
+        const b = blame.get(it.acCheckId) as { blame: string; reason: string };
+        const check = checkById.get(it.acCheckId) as (typeof active)[number];
+        insertSignal(ctx.db, {
+          ticketId: ctx.ticket.id,
+          signalType: "ac-check-blame",
+          result: "fail",
+          branchHeadSha: headSha,
+          detail: { acId: check.ac_id, acCheckId: check.id, blame: b.blame, reason: b.reason },
+        });
+      }
+    })();
+    return { arbitrated: items.length };
   });
 
   registry.register("review", async (ctx: HandlerContext) => {

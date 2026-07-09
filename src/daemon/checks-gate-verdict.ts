@@ -16,7 +16,9 @@ export interface GateVerdictResult {
 
 /** The latest ac-check-gate signal's full stillRed set + its HEAD sha (empty when the gate passed). */
 function latestGate(db: Database, ticketId: number): { stillRed: number[]; sha: string | null } {
-  const sig = listSignals(db, ticketId).filter((s) => s.signal_type === "ac-check-gate").at(-1);
+  const sig = listSignals(db, ticketId)
+    .filter((s) => s.signal_type === "ac-check-gate")
+    .at(-1);
   if (!sig) return { stillRed: [], sha: null };
   const stillRed = (JSON.parse(sig.detail_json ?? "{}") as { stillRed?: number[] }).stillRed ?? [];
   return { stillRed: stillRed.slice().sort((a, b) => a - b), sha: sig.branch_head_sha };
@@ -26,13 +28,23 @@ function escalate(db: Database, ticketId: number, reason: string): void {
   db.transaction(() => {
     setTicketStatus(db, ticketId, "waiting");
     insertSignal(db, { ticketId, signalType: "human_resume", reason });
-    appendEvent(db, { ticketId, kind: "escalated", reason, signature: `gate-cap:${GATE_ROUND_CAP}` });
+    appendEvent(db, {
+      ticketId,
+      kind: "escalated",
+      reason,
+      signature: `gate-cap:${GATE_ROUND_CAP}`,
+    });
   })();
 }
 
 /** Reset all units + the gate step to pending (an implement loopback). PRESERVES the gate attempt
  *  (this IS a gate-origin loop). Also resets the arbiter step so it re-runs next round. */
-export function gateOriginLoopback(db: Database, ticketId: number, routeTo: string, payload: unknown): void {
+export function gateOriginLoopback(
+  db: Database,
+  ticketId: number,
+  routeTo: string,
+  payload: Record<string, unknown>,
+): void {
   db.transaction(() => {
     for (const u of listUnits(db, ticketId)) {
       setUnitStatus(db, u.id, "pending");
@@ -42,7 +54,14 @@ export function gateOriginLoopback(db: Database, ticketId: number, routeTo: stri
       const s = getByKey(db, ticketId, key);
       if (s) resetToPending(db, s.id); // resetToPending never touches attempt → counter survives
     }
-    appendEvent(db, { ticketId, kind: "loopback", loop: "implement", routeTo, signature: `gate:${routeTo}`, payload });
+    appendEvent(db, {
+      ticketId,
+      kind: "loopback",
+      loop: "implement",
+      routeTo,
+      signature: `gate:${routeTo}`,
+      payload,
+    });
   })();
 }
 
@@ -64,7 +83,11 @@ export function applyAcCheckGateVerdict(
   }
   // integrity-only
   if (gateRoundExceeded(db, ticketId, GATE_ROUND_CAP)) {
-    escalate(db, ticketId, `gate: check(s) ${stillRed.join(",")} tampered after ${GATE_ROUND_CAP} rounds`);
+    escalate(
+      db,
+      ticketId,
+      `gate: check(s) ${stillRed.join(",")} tampered after ${GATE_ROUND_CAP} rounds`,
+    );
     return { decision: "escalated" };
   }
   gateOriginLoopback(db, ticketId, "verify:checks-gate", { tampered: stillRed });
