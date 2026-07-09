@@ -174,6 +174,32 @@ function depsFor(ctx: HandlerContext, deps: RegistryDeps, timeoutMs: number): Di
   };
 }
 
+/** Classify ONE check (the M5 re-author's classify step, §5.3): the deterministic prior first, then
+ *  the checks:classify adjudicator for the ambiguous case. Returns the AdjClass or null (transport
+ *  miss). Reused by the checks:arbitrate re-author pipeline — NOT applyChecksVerdict (which would
+ *  re-trigger the pre-implement reauthorRoundsForAc escalate). */
+export async function adjudicateOne(
+  ctx: HandlerContext,
+  deps: RegistryDeps,
+  item: AdjudicateItem,
+): Promise<AdjClass | null> {
+  const prior = classifyPrior({ coarse: item.coarse as CoarseResult, rawOutput: item.rawOutput });
+  if (prior.kind === "settled-red") return prior.redClass;
+  const { output } = await runAgentDispatch(
+    ctx,
+    depsFor(ctx, deps, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    {
+      handlerKey: "checks:classify",
+      template: CHECKS_CLASSIFY_TEMPLATE,
+      vars: adjudicateVars(ctx.ticket, deps.profile, [item]),
+      postcondition: () => {},
+    },
+  );
+  const parsed = extractSidecar(output, ChecksClassifyOutputSchema);
+  if (!parsed.ok) return null;
+  return parsed.value.classifications.find((c) => c.ac_check_id === item.acCheckId)?.class ?? null;
+}
+
 /** Deterministic templated PR description from facts the daemon already has (M6b-1; a cheap-LLM
  *  write-up is a later polish). Exported for unit-testing the rendered sections. */
 export function renderPrBody(
