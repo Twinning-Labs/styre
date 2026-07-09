@@ -86,6 +86,41 @@ test("integrity-only still-red loopbacks under the cap; units + gate step reset 
   expect(JSON.parse(events[0]?.payload_json ?? "{}").tampered).toEqual([7]);
 });
 
+test("LIVENESS: behavioral still-red at the gate-round cap → escalated (closes the pure-code-wrong stuck-HEAD livelock)", () => {
+  // A pure-code-wrong stuck-HEAD round: the re-implement commits nothing new, so the arbiter is
+  // never re-served (blame already exists at HEAD) and checks:reauthor short-circuits to a no-op
+  // 'clean' verdict (route===null guard) — the ONLY place left that can observe the round count is
+  // the gate's own defer path, which previously deferred unconditionally with no cap check. This
+  // proves the gate itself now closes the gap: once its OWN attempt (bumped by repeated re-serves
+  // of verify:checks-gate, exactly as traced in the resolver) reaches the cap, behavioral still-red
+  // escalates instead of deferring forever.
+  const { db, ticketId } = makeTestDb();
+  seedUnitAndGateStep(db, ticketId, GATE_ROUND_CAP);
+  gateSignal(db, ticketId, { stillRed: [4], tampered: [], sha: "S1" });
+
+  const r = applyAcCheckGateVerdict(db, ticketId, { stepKey: "verify:checks-gate" });
+  const ticket = getTicket(db, ticketId);
+  const pending = listPending(db, ticketId);
+  db.close();
+
+  expect(r.decision).toBe("escalated");
+  expect(ticket?.status).toBe("waiting");
+  expect(pending.some((s) => s.signal_type === "human_resume")).toBe(true);
+});
+
+test("behavioral still-red UNDER the cap still defers (clean) — a healthy multi-round arbitration is not false-escalated", () => {
+  const { db, ticketId } = makeTestDb();
+  seedUnitAndGateStep(db, ticketId, GATE_ROUND_CAP - 1);
+  gateSignal(db, ticketId, { stillRed: [4], tampered: [], sha: "S1" });
+
+  const r = applyAcCheckGateVerdict(db, ticketId, { stepKey: "verify:checks-gate" });
+  const ticket = getTicket(db, ticketId);
+  db.close();
+
+  expect(r.decision).toBe("clean"); // still defers to the arbiter — not yet at cap
+  expect(ticket?.status).not.toBe("waiting");
+});
+
 test("integrity-only still-red at the gate-round cap → escalated, ticket waiting", () => {
   const { db, ticketId } = makeTestDb();
   seedUnitAndGateStep(db, ticketId, GATE_ROUND_CAP);

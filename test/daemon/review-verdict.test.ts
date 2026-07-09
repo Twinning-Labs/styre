@@ -91,7 +91,11 @@ test("code-review loopback resets the gate-round counter (§6: review re-entry i
   const { unit, did } = seedReviewRound(db, ticketId);
   // Seed the gate step with attempt=2 (mid gate-round arbitration) plus its arbiter/reauthor
   // siblings, already succeeded from that round.
-  const gateStep = insertPending(db, { ticketId, stepKey: "verify:checks-gate", stepType: "verify" });
+  const gateStep = insertPending(db, {
+    ticketId,
+    stepKey: "verify:checks-gate",
+    stepType: "verify",
+  });
   markRunning(db, gateStep.id, {});
   markRunning(db, gateStep.id, {});
   for (const key of ["checks:arbitrate", "checks:reauthor"]) {
@@ -219,7 +223,11 @@ test("plan-defect redesign loopback also resets the gate-round counter (§6)", (
     const s = insertPending(db, { ticketId, stepKey: k, stepType: "dispatch" });
     db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
   }
-  const gateStep = insertPending(db, { ticketId, stepKey: "verify:checks-gate", stepType: "verify" });
+  const gateStep = insertPending(db, {
+    ticketId,
+    stepKey: "verify:checks-gate",
+    stepType: "verify",
+  });
   markRunning(db, gateStep.id, {});
   markRunning(db, gateStep.id, {});
   insertFinding(db, {

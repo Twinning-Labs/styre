@@ -47,7 +47,12 @@ function isRepeatedReviewLoopback(db: Database, ticketId: number, signature: str
  *  keyed to the OLD head, so leaving them 'succeeded' replays a stale gate pass at the new HEAD →
  *  resolver re-emit → MAX_TRANSITIONS. Reset is a no-op when a step doesn't exist (getByKey null). */
 function resetTicketVerifySteps(db: Database, ticketId: number): void {
-  for (const key of ["verify:integration", "verify:checks-gate", "checks:arbitrate", "checks:reauthor"]) {
+  for (const key of [
+    "verify:integration",
+    "verify:checks-gate",
+    "checks:arbitrate",
+    "checks:reauthor",
+  ]) {
     const s = getByKey(db, ticketId, key);
     if (s) resetToPending(db, s.id);
   }
