@@ -96,6 +96,12 @@ M5 adjudicates persistent **red**. It does NOT close the false-*green* hole (an 
 
 M6 (MERGE projection of dispositions + advisory sweep + the blame record).
 
-## 11. Next
+## 11. Changelog
+
+- **2026-07-09 — plan written (`docs/plans/2026-07-09-m5-arbiter.md`) + executed:** TWO new agent-orchestrated steps mirroring M3's `checks:classify → checks:dispatch` — `checks:arbitrate` (deep, read-only) emits two-way blame; a separate `checks:reauthor` runs the check-wrong re-author (code-blind author → clean-HEAD replay oracle → classify → install) so a session-limit death mid-re-author re-runs only the re-author; gate-verdict split integrity/behavioral; monotone gate-round counter (`verify:checks-gate.attempt`, CAP=3) replacing `isRepeatedGateLoopback`.
+
+---
+
+## 12. Execution Handoff
 
 `superpowers:writing-plans` (after re-review), then subagent-driven execution. Likely task shape: (1) the arbiter contract (zod two-way blame + prompt requiring a positive AC-contradiction for check-wrong + tier/allowlist no-Bash); (2) split integrity vs behavioral on the gate-fail branch + the `checks:arbitrate` dispatch handler; (3) the check-wrong re-author pipeline — fresh code-blind authoring dispatch + the **clean-HEAD replay harness** (baseline sha from the ORIGINAL check not the new one; overlay the re-author content onto the checkout; predicate `coarse == red`, reject green/selected-none/error) + classify **via the adjudicator directly** with **`environmental`-classification = rejection** + supersede/install + the authoring-sha signal write (integrity re-freeze); (4) the gate-round counter (the `verify:checks-gate` step attempt; **`resetAttempt` it on the review/integration loopback paths, preserve on the gate's own loop**) + rewrite the gate verdict to route on blame + counter-escalate (drop `isRepeatedGateLoopback`); (5) resolver placement + affected loop/verify tests + the no-op; (6) the `ac-check-blame` record + the gateFeedback blame extension.
