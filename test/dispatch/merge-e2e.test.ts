@@ -91,7 +91,7 @@ test("merge-write flow: push + PR opened, ticket parks awaiting external_checks"
     )
     .get(ticketId);
   expect(sentPrRow?.status).toBe("sent");
-  // fakeForge.ensurePr returns ref = `fake-pr-${calls.length}` — a non-null string.
+  // fakeForge.ensurePr returns ref = `fake-pr-${prs.size + 1}` (per-branch) — a non-null string.
   expect(sentPrRow?.response_ref).not.toBeNull();
   expect(typeof sentPrRow?.response_ref).toBe("string");
 

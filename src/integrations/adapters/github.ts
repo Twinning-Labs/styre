@@ -131,7 +131,15 @@ export function githubForge(opts: { repoPath: string; token?: string }): ForgePo
         state: "open",
       });
       const found = open[0];
-      if (found) return { ref: String(found.number), url: found.html_url };
+      if (found) {
+        // Normalize CRLF → LF before comparing: GitHub stores/returns PR bodies with \r\n, while the
+        // composed body joins on \n. Without this, every resume/drain re-issues a no-op body update
+        // (review finding I-2). This path is adapter-only (not unit-tested), so get it right here.
+        if ((found.body ?? "").replace(/\r\n/g, "\n") !== body) {
+          await octokit.pulls.update({ owner, repo, pull_number: found.number, body });
+        }
+        return { ref: String(found.number), url: found.html_url };
+      }
       const created = await octokit.pulls.create({ owner, repo, head: branch, base, title, body });
       return { ref: String(created.data.number), url: created.data.html_url };
     },
