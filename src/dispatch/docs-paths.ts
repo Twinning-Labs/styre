@@ -11,6 +11,10 @@ const MKDOCS = /^mkdocs\.yml$/i;
 /** True iff `file` (a repo-root-relative path) is documentation styre may sync. */
 export function isDocPath(file: string): boolean {
   const p = file.replace(/\\/g, "/").replace(/^\.\//, "");
+  // Defense-in-depth: a `..` segment escapes the tree (`docs/../src/x`), so a prefix match on
+  // `docs/` would wrongly accept a source path. Git status/diff never emits `..` paths, so this is
+  // unreachable via the commitGuard wiring — but the predicate gates real commits, so fail closed.
+  if (p.split("/").includes("..")) return false;
   if (ROOT_DOCS_TREE.test(p)) return true;
   if (!p.includes("/") && (ROOT_DOC_FILE.test(p) || MKDOCS.test(p))) return true;
   return false;

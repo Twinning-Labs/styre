@@ -25,6 +25,8 @@ test("rejects source/tests and nested docs (fail-closed)", () => {
     "pkg/docs/gen.go",
     "docsource/x.md",
     "app/mkdocs.yml",
+    "docs/../src/foo.ts",
+    "docs/../../etc/passwd",
   ]) {
     expect(isDocPath(p)).toBe(false);
   }
