@@ -126,7 +126,7 @@ function harness(repoPath: string, runner: FakeAgentRunner) {
 
 test("A (the crux): a real docs edit reaches review — no 'no handler registered' crash, no no-progress wedge", async () => {
   const { db, ticketId, repoPath } = gitRepoWithProject();
-  seedDocsReviseReady(db, ticketId, repoPath);
+  const V = seedDocsReviseReady(db, ticketId, repoPath);
 
   let callCount = 0;
   const runner = new FakeAgentRunner((input) => {
@@ -173,6 +173,9 @@ test("A (the crux): a real docs edit reaches review — no 'no handler registere
   // Carry-forward signals exist at the docs sha (a NEW sha, distinct from the seeded V).
   const docsSha = docsDispatch?.branch_head_sha;
   expect(docsSha).toBeTruthy();
+  // Load-bearing: the doc edit MUST have moved HEAD (V→C1) — otherwise this test degrades into the
+  // no-op case (C) and no longer proves the carry-forward/wedge fix (T7 review).
+  expect(docsSha).not.toBe(V);
   const atDocsSha = listGtSignals(db, ticketId).filter((s) => s.branch_head_sha === docsSha);
   expect(atDocsSha.some((s) => s.signal_type === "integration")).toBe(true);
   expect(atDocsSha.some((s) => s.signal_type === "ac-check-gate")).toBe(true);
