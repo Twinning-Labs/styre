@@ -114,6 +114,18 @@ Expected: FAIL — `pendingChanges`/`revertWorktree`/`worktreeHead` are not expo
 Append to `src/dispatch/worktree.ts` (reuse the existing module-private `git`):
 
 ```ts
+/** Like the module-private `git`, but returns RAW stdout (NO trim). Required for `--porcelain -z`
+ *  parsing: an unstaged entry's status column is `" M path"` (leading space), and the existing
+ *  `git()` `.trim()` would strip that space off the FIRST entry, corrupting its path (review
+ *  Blocker-1). Mirrors `git`'s spawn + error handling. */
+function gitRaw(args: string[], cwd: string): string {
+  const res = Bun.spawnSync(["git", ...args], { cwd });
+  if (!res.success) {
+    throw new Error(`git ${args.join(" ")} failed: ${res.stderr.toString().trim()}`);
+  }
+  return res.stdout.toString();
+}
+
 /** The current HEAD commit sha of the worktree. */
 export function worktreeHead(worktreePath: string): string {
   return git(["rev-parse", "HEAD"], worktreePath);
@@ -125,7 +137,10 @@ export function worktreeHead(worktreePath: string): string {
  *  Load-bearing for the docs:revise commitGuard: an agent with Write can CREATE an untracked
  *  source file, which a bare `git diff` would miss (review finding B1). */
 export function pendingChanges(worktreePath: string): string[] {
-  const out = git(
+  // gitRaw (NOT git): porcelain -z status columns can start with a space (" M path"); trimming
+  // would corrupt the first entry's path (review Blocker-1). The trailing NUL is dropped by the
+  // `!== ""` filter below.
+  const out = gitRaw(
     ["-c", "core.quotePath=false", "status", "--porcelain=v1", "-z"],
     worktreePath,
   );
@@ -210,7 +225,7 @@ function dispatchHarness(files: Record<string, string>) {
 }
 ```
 
-> NOTE to the implementer: `runAgentDispatch` takes `(ctx: HandlerContext, deps: DispatchDeps, spec: DispatchSpec)`. **Copy the ctx/deps harness from `test/dispatch/real-dispatch-e2e.test.ts`** (the closest existing `runAgentDispatch` test), setting `deps.worktreePath` to a real temp git repo. `FakeAgentRunner(handler)`: the handler receives `input` and must **write the prescribed files into `input.cwd`** (which is `deps.worktreePath`, the worktree) then return an `AgentRunResult` (`{ completed: true, timedOut: false, exitCode: 0, stdout: "{}" }`). The ticket must have a `workflow_step` row so `ctx.step` resolves. The three assertions below are the contract:
+> NOTE to the implementer: `runAgentDispatch` takes `(ctx: HandlerContext, deps: DispatchDeps, spec: DispatchSpec)`. **Copy the `ctxFor` (test/dispatch/run-dispatch.test.ts:28 — builds a `HandlerContext` with a real `workflow_step`) and `depsFor` (:39 — builds `DispatchDeps` with `repoPath`/`worktreePath`/`branch`) builders from `test/dispatch/run-dispatch.test.ts`** (the existing direct-`runAgentDispatch` test), setting `deps.worktreePath` to a real temp git repo. `FakeAgentRunner(handler)`: the handler receives `input` and must **write the prescribed files into `input.cwd`** (which is `deps.worktreePath`, the worktree) then return an `AgentRunResult` (`{ completed: true, timedOut: false, exitCode: 0, stdout: "{}" }`). The ticket must have a `workflow_step` row so `ctx.step` resolves. The three assertions below are the contract:
 
 ```ts
 test("commitGuard: docs-only edit commits (clean-success)", async () => {
@@ -640,7 +655,7 @@ git commit -m "feat(dispatch): carryVerifiedVerdictForward — replicate verifie
 
 - [ ] **Step 1: Write the failing test**
 
-Create `test/dispatch/docs-revise-handler.test.ts` — drive the registered handler via a FakeAgentRunner (mirror an existing handler unit test, e.g. `checks:dispatch`/`design` tests, for the ctx/registry/deps harness):
+Create `test/dispatch/docs-revise-handler.test.ts` — build the registry (`buildDispatchRegistry`) with a FakeAgentRunner and invoke the registered `docs:revise` handler. **Copy the ctx/registry/deps harness from `test/dispatch/checks-classify-handler.test.ts`** (an existing registered-handler unit test); the FakeAgentRunner handler writes the prescribed files into `input.cwd` (the worktree):
 
 ```ts
 // Harness: build the dispatch registry (buildDispatchRegistry) with a FakeAgentRunner that writes
@@ -722,7 +737,7 @@ git commit -m "feat(loop): register docs:revise handler (Bug A — closes the no
 
 - [ ] **Step 1: Write the failing test**
 
-Create `test/daemon/docs-revise-resolve.test.ts`. Seed a ticket at `stage='implement'`, `needs_docs=1`, with all work units `verified` and (if using the ac-check path) an `ac-check-gate` pass + `integration` signal at the verified HEAD `V`; build the registry with a FakeAgentRunner. Mirror `merge-e2e.test.ts` / `verify-routing.test.ts` for the tick-driving harness.
+Create `test/daemon/docs-revise-resolve.test.ts`. Seed a ticket at `stage='implement'`, `needs_docs=1`, with all work units `verified` and (if using the ac-check path) an `ac-check-gate` pass + `integration` signal at the verified HEAD `V`; drive the real loop. **Copy the full-loop harness from `test/helpers/run-harness.ts`** (drives `driveToTerminal` with a real git repo + `FakeAgentRunner` + fake ports, ticket pre-seeded via `gitRepoWithProject()`) — and see `test/daemon/run-ticket.test.ts` for how it's used. (Note: `merge-e2e.test.ts` / `verify-routing.test.ts` under `test/daemon/` do NOT exist — use `run-harness.ts`.)
 
 ```ts
 // Seed: stage='implement', needs_docs=1, all units verified, ac-check-gate PASS + integration at V.
