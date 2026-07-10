@@ -177,7 +177,11 @@ const RETRY_FEEDBACK_SUFFIX = "--- end of prior rejection (address it before any
 /** The human-readable message of the prior attempt's rejection, from `workflow_step.error_json`
  *  (serializeError → {name, message}). "" when there was no prior failure / it can't be parsed —
  *  so the first attempt and any malformed record prepend nothing. General: any dispatch step's own
- *  thrown postcondition/validation/sidecar rejection is carried into its retry. */
+ *  thrown postcondition/validation/sidecar rejection is carried into its retry. NOTE: the message is
+ *  prepended verbatim into the agent prompt — today every gate message is styre-controlled (static
+ *  text + integer seqs); if a future gate ever interpolates agent/ticket free-text into its thrown
+ *  message, that text would be fed back verbatim (still self-to-self — the agent's own prior output —
+ *  never a privilege escalation, but worth keeping gate messages free of untrusted content). */
 function rejectionFrom(errorJson: string | null): string {
   if (!errorJson) return "";
   try {
@@ -230,7 +234,9 @@ git commit -m "feat(loop): runAgentDispatch prepends the prior attempt's rejecti
 
 - [ ] **Step 1: Write the failing test**
 
-Create `test/dispatch/design-extract-retry-feedback.test.ts`. **Copy the harness from `test/dispatch/design-extract.test.ts`** (`readyForExtract(db, ticketId)` marks `design:dispatch` succeeded at `stage='design'` so the resolver routes to `design:extract`; an `advanceOneStep(db, ticketId, registry)` drive-loop; a `sidecar(json)` builder for `ExtractOutputSchema`; a prompt-branching `FakeAgentRunner((input) => …)`).
+Create `test/dispatch/design-extract-retry-feedback.test.ts`. **Reuse from `test/dispatch/design-extract.test.ts`:** `readyForExtract(db, ticketId)` (marks `design:dispatch` succeeded at `stage='design'` so the resolver routes to `design:extract`), `registryFor(repo, runner)`, and the `sidecar(json)` builder for `ExtractOutputSchema`; use a prompt-branching `FakeAgentRunner((input) => …)`.
+
+> **AUTHOR the drive-loop — do NOT copy it (review I-2):** `design-extract.test.ts` calls `advanceOneStep` exactly ONCE per test; there is no multi-tick loop to copy. Write it as **`let o; do { o = await advanceOneStep(db, ticketId, registryFor(repo, runner)); } while (o.kind === "retry");`** (review I-1). This is load-bearing: `advanceOneStep` returns `{kind:"retry"}` on a dispatch failure (design:extract's default failure-policy path), `{kind:"stepped"}` on success, `{kind:"escalated"}` on exhaustion. A "loop until escalated" would over-advance PAST design:extract's success into `design:size`/`design:review` — which Test A's runner returns an *extraction* sidecar for, not a valid size/review output → those steps fail → escalate at design:size → **self-inflicting the very `escalated` event Test A asserts against**. The `while (kind === "retry")` bound stops at `stepped` (Test A) and `escalated` (Test B) correctly.
 
 ```ts
 // Test A (the crux — reproduces & fixes darkreader, generically):
