@@ -99,3 +99,57 @@ export function fileContentAt(sha: string, file: string, worktreePath: string): 
   const res = Bun.spawnSync(["git", "show", `${sha}:${file}`], { cwd: worktreePath });
   return res.success ? res.stdout.toString() : null;
 }
+
+/** Like the module-private `git`, but returns RAW stdout (NO trim). Required for `--porcelain -z`
+ *  parsing: an unstaged entry's status column is `" M path"` (leading space), and the existing
+ *  `git()` `.trim()` would strip that space off the FIRST entry, corrupting its path (review
+ *  Blocker-1). Mirrors `git`'s spawn + error handling. */
+function gitRaw(args: string[], cwd: string): string {
+  const res = Bun.spawnSync(["git", ...args], { cwd });
+  if (!res.success) {
+    throw new Error(`git ${args.join(" ")} failed: ${res.stderr.toString().trim()}`);
+  }
+  return res.stdout.toString();
+}
+
+/** The current HEAD commit sha of the worktree. */
+export function worktreeHead(worktreePath: string): string {
+  return git(["rev-parse", "HEAD"], worktreePath);
+}
+
+/** Every path in the uncommitted working-tree delta vs HEAD — tracked modifications/deletions,
+ *  untracked additions, and BOTH sides of a rename/copy. Uses `--porcelain=v1 -z` (NUL-delimited,
+ *  never octal-quoted, `core.quotePath=false`) so no path escaping/quoting can hide an entry.
+ *  Load-bearing for the docs:revise commitGuard: an agent with Write can CREATE an untracked
+ *  source file, which a bare `git diff` would miss (review finding B1). */
+export function pendingChanges(worktreePath: string): string[] {
+  // gitRaw (NOT git): porcelain -z status columns can start with a space (" M path"); trimming
+  // would corrupt the first entry's path (review Blocker-1). The trailing NUL is dropped by the
+  // `!== ""` filter below.
+  const out = gitRaw(
+    ["-c", "core.quotePath=false", "status", "--porcelain=v1", "-z"],
+    worktreePath,
+  );
+  if (out === "") return [];
+  const tokens = out.split("\0").filter((t) => t !== "");
+  const paths: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const entry = tokens[i];
+    const status = entry.slice(0, 2); // XY
+    paths.push(entry.slice(3)); // the (new) path
+    // Rename/copy entries are followed by a second token: the ORIGINAL path.
+    if (status.includes("R") || status.includes("C")) {
+      i++;
+      if (i < tokens.length) paths.push(tokens[i]);
+    }
+  }
+  return paths;
+}
+
+/** Discard every uncommitted change (tracked restore + untracked removal), restoring HEAD.
+ *  `git clean -fd` (no `-x`) spares ignored files, so the ephemeral SQLite under XDG state is
+ *  untouched even when `worktreePath === repoPath` (in-place). */
+export function revertWorktree(worktreePath: string): void {
+  git(["checkout", "--", "."], worktreePath);
+  git(["clean", "-fd"], worktreePath);
+}
