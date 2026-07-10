@@ -99,19 +99,19 @@ After the agent runs and before committing (replacing the current `commitGuard` 
 `commitWorktree` call, `run-dispatch.ts:158–174`):
 
 ```
-preHead = worktreeHead(worktree)          // capture BEFORE any revert, for dispatch-failed
+preHead = worktreeHead(worktree)          // capture BEFORE any undo, for dispatch-failed
 entries = pendingEntries(worktree)        // [{ path, isNew }], NUL-safe, rename/quote-safe
 
-// Only untracked files created during THIS dispatch are in the scope's jurisdiction.
-// Tracked edits/deletions are always this dispatch's (prior write steps commit; read-only
-// steps don't edit tracked files), so they are judged as-is.
+// Only untracked files created during THIS dispatch are in the scope's jurisdiction (see the
+// "attempt cleanup" invariant below — a failed prior attempt leaves NO residue, so a `??` file
+// present now that isn't in untrackedBefore was created by THIS attempt).
 judged = entries.filter(e => !(e.isNew && untrackedBefore.has(e.path)))
 
 if (spec.commitScope) {                    // ── write step ──
   inScope   = spec.commitScope(result.stdout)
   offenders = judged.filter(e => !inScope(e.path, e.isNew))
   if (offenders.length > 0) {
-    revertWorktree(worktree)               // discard the whole attempt (fix + scratch)
+    undoAttempt(worktree, untrackedBefore) // surgically discard THIS attempt (see below)
     completeDispatch(..., "dispatch-failed", branchHeadSha = preHead)
     throw Error("commit rejected — out-of-scope files (declare in the fix or delete them): …")
     //   → failure-policy retries; Bug B retry-feedback prepends this message verbatim
@@ -125,13 +125,44 @@ if (spec.commitScope) {                    // ── write step ──
 }
 ```
 
-The reject path preserves the existing `commitGuard` semantics exactly (revert → `dispatch-failed`
-with HEAD unchanged at `preHead` → rethrow → failure-policy). The additions are (a) offender
-computation from a scope predicate rather than a fixed guard, (b) the untracked-before snapshot so
-only dispatch-created files are judged, (c) named staging, and (d) the read-only telemetry branch.
-`preHead` is captured before `revertWorktree` (the reject path records `branchHeadSha = preHead`; the
-agent never commits, so HEAD is in fact unchanged, but the capture must precede the revert exactly as
-the current block does at `run-dispatch.ts:159/166–169`).
+`preHead` is captured before any undo (the reject path records `branchHeadSha = preHead`; the agent
+never commits, so HEAD is in fact unchanged, but the capture must precede the undo exactly as the
+current block does at `run-dispatch.ts:159/166–169`).
+
+#### Attempt cleanup — the invariant that makes `untrackedBefore` correct (review B1, the round-2 Blocker)
+
+The per-attempt `untrackedBefore` snapshot is only sound if **a failed attempt leaves the worktree in
+the same state its retry will start from** — otherwise a file created in attempt *N* lingers, attempt
+*N+1*'s snapshot treats it as pre-existing cruft, and it is silently dropped *and* wedged forever.
+Today, only the reject path reverts; transport-failure (`run-dispatch.ts:152`) and park (`:143`) throw
+**without** cleaning up, and no retry/loopback path cleans the worktree. So the fix has two parts:
+
+1. **`undoAttempt(worktree, untrackedBefore)`** — surgically undo the current attempt, *sparing
+   pre-existing cruft*:
+   ```
+   git checkout -- .                                  // restore all tracked files to HEAD
+   strays = pendingEntries(worktree).filter(e => e.isNew && !untrackedBefore.has(e.path))
+   if (strays) git clean -fd -- <strays>              // remove ONLY this attempt's new files
+   ```
+   This returns the worktree to exactly its state at the top of the attempt (HEAD + `untrackedBefore`),
+   so `provision`'s `*.egg-info` and any earlier read-only stray survive — a **blanket**
+   `revertWorktree`/`git clean` would delete `egg-info` and break the editable install, which is why
+   `undoAttempt` is scoped to the delta.
+2. **Call `undoAttempt` on every PRE-commit failure exit:** the scope-reject path (above), the
+   **transport-failure** path (`:152`), and the **park** path (`:143`). (Postcondition failure
+   `:185` happens *after* the commit, so this attempt's files are already tracked — no untracked
+   residue, no snapshot corruption; it is left as-is.) `undoAttempt` **replaces** the reject path's
+   current blanket `revertWorktree` call.
+
+With this, every attempt of a step starts from the identical baseline, so a genuine new file created
+by *any* attempt is always judged (committed if declared, rejected if not) and never mistaken for
+cruft — the "never drop a legit file" guarantee holds across transport failures, park/resume, and
+loopbacks.
+
+> **Park/resume:** `undoAttempt` on park discards the parked attempt's *uncommitted worktree edits*,
+> not its carried context. Resume re-runs the interrupted step with the transcript hint (advisory);
+> per CLAUDE.md the repository + journal are the source of truth, and resume already re-checks the
+> branch HEAD — so a clean worktree on resume is correct, not lossy.
 
 ### 3.3 `commitWorktree` — named staging (no more `git add -A`)
 
@@ -157,13 +188,27 @@ export function commitWorktree(
 }
 ```
 
-`git add -u` stages every modification/deletion of an already-tracked file — always in scope, since a
-scratch file is never a tracked file. `git add -- <newPaths>` stages exactly the declared new files
-(`git add -u` alone does **not** stage new files — the named add is what commits legitimate new
-work). Nothing else is staged, so even if a scope predicate is ever wrong, undeclared scratch is not
-committed (defense-in-depth, in addition to the reject gate). Ignored files (the ephemeral SQLite
-under XDG state, git-ignored build artifacts) are invisible to `git add`, so they are excluded
-exactly as before.
+`stagedIndexEmpty` runs `git diff --cached --quiet` via a **non-throwing** spawn and maps the exit
+code explicitly (review MINOR 5): **`0` → empty** (nothing staged), **`1` → non-empty** (has staged
+changes), **anything else (≥128) → a real git error → throw** (never silently treated as "has
+changes", which would `git commit` a possibly-broken index).
+
+`git add -u` stages every modification/deletion of an already-tracked file. `git add -- <newPaths>`
+stages exactly the declared new files (`git add -u` alone does **not** stage new files — the named add
+is what commits legitimate new work). Nothing else is staged, so even if a scope predicate is wrong,
+undeclared *untracked* scratch is not committed (defense-in-depth alongside the reject gate). Ignored
+files (the ephemeral SQLite under XDG state, git-ignored build artifacts) are invisible to `git add`,
+so they are excluded exactly as before.
+
+> **Scope of the guarantee (review M3 — honest bound):** this fix eliminates the observed bug —
+> **undeclared *untracked* scratch** (the astropy repo-root scripts). It does **not** police *tracked*
+> mutations: `git add -u` stages every tracked edit in the worktree, so if a *successful* prior step's
+> test run wrote back to a tracked file (a regenerated snapshot/golden file, a tracked `.coverage`)
+> and left it uncommitted, the next write step's `git add -u` still sweeps it in. That is a distinct,
+> pre-existing leak class (`git add -A` did it too), rarer than untracked scratch, and out of scope
+> here — `undoAttempt` covers a *failed* attempt's tracked edits, but not a *succeeded* upstream
+> step's. If it ever bites, the follow-up is a symmetric `dirtyBefore` tracked snapshot + selective
+> `git add -- <this dispatch's tracked mods>`; deferred under YAGNI, noted so the claim isn't oversold.
 
 > **Empty-diff note:** `changed` means "this commit added a new HEAD". Emptiness is measured on the
 > **staged index** (`git diff --cached --quiet`), not the working tree. So `git add -u` with no
@@ -185,6 +230,13 @@ export interface PendingEntry { path: string; isNew: boolean; }
  *  leading `?` of the XY status. */
 export function pendingEntries(worktreePath: string): PendingEntry[];
 ```
+
+**Rename second-token caution (review MINOR 4):** the existing `-z` parser (`worktree.ts:136–145`)
+emits a staged rename/copy's **original path as a bare second token with no XY status prefix**.
+`pendingEntries` must assign that second token `isNew=false` (it is the deletion half) — **not**
+status-parse its first two characters (which would misread path bytes as a status). Only a staged
+rename (`R`) produces this two-token record and agents cannot stage, so it is low-probability, but the
+helper must handle it explicitly. Add a `git mv`-shaped porcelain record to the helper's tests.
 
 `pendingChanges` (paths-only) is kept as a thin wrapper (`pendingEntries(...).map(e => e.path)`) so
 current callers are undisturbed.
@@ -259,11 +311,22 @@ export const ImplementOutputSchema = z.object({
   status output, repo-relative, forward-slash, `quotePath=false`). Normalize declared paths by
   stripping a leading `./` before set membership. Absolute paths / `..` escapes never match a
   pending path (they simply fail the scope check → treated as undeclared).
-- **`checks:dispatch` reuse:** add the same optional `new_files` field to `ChecksOutputSchema`. The
-  checks commit scope is `checksAuthored[].test_file` ∪ `new_files` — the authored test files are
-  already declared (no redundant re-listing), and `new_files` exists only for the occasional non-test
-  helper (fixture/`conftest.py`) so a legitimate helper is never wedged. Same lenient parsing (absent
-  → the `checksAuthored` set alone).
+- **`checks:dispatch` reuse:** add the same optional `new_files` field to `ChecksOutputSchema`. When
+  the sidecar **parses**, the checks commit scope is `checksAuthored[].test_file` ∪ `new_files` — the
+  authored test files are already declared (no redundant re-listing), and `new_files` exists only for
+  the occasional non-test helper (fixture/`conftest.py`) so a legitimate helper is never wedged.
+- **Checks scope must NOT gate on an *unparseable* sidecar (review M2).** Both checks call sites — the
+  register (`handlers.ts:542`) and `reauthorCheckWrong` (`:234`) — parse the sidecar *after* commit and
+  have established semantics for an absent/malformed one: the main handler treats it as a transport
+  failure (re-dispatch), `reauthorCheckWrong` returns a clean `"rejected"` (`:244–245`). If the
+  pre-commit scope instead treated a malformed sidecar as `declared = ∅`, the freshly-authored test
+  file would become an offender → the scope would throw, converting `reauthorCheckWrong`'s clean
+  `return "rejected"` into an uncaught throw that propagates through `checks:arbitrate` and burns its
+  attempts — a control-flow change on an error path. So the checks scope predicate **defers on an
+  unparseable sidecar**: if `extractSidecar` returns `absent`/`malformed`, the scope allows everything
+  (no scope rejection) and lets the handler's existing post-commit logic decide. Scope enforcement
+  applies only when the declaration is actually readable. (This preserves the pre-existing behavior
+  that a malformed-sidecar checks attempt commits then fails downstream — `git add -A` did the same.)
 
 ## 6. Observability (non-gating)
 
@@ -278,16 +341,19 @@ Both anomaly paths are recorded so scratch frequency is visible without reading 
   `IN ('transition','loopback','escalated','resumed','note','parked')` (`schema.sql:289`, mirrored by
   the `EventKind` union), so a novel kind like `"scratch-ignored"` would throw on INSERT and *gate*
   the step — the opposite of the intent (review B2). Use `kind:"note"`, `reason` = the step/handler
-  key, `payload_json` = the stray paths. Non-gating: the dispatch still records `clean-success` and
-  the loop proceeds. `ctx.db` is in scope in `runAgentDispatch`. Surfacing in the PR body is available
-  later if it ever proves necessary, but a should-never-fire tripwire does not warrant it now (YAGNI).
+  key, and pass the stray paths **as an object** — `appendEvent`'s `payload?: Record<string, unknown>`
+  is `JSON.stringify`'d (`event-log.ts:63,83`), so the call is `payload: { stray }`, not the bare
+  `string[]` (review NIT 6). Non-gating: the dispatch still records `clean-success` and the loop
+  proceeds. `ctx.db` is in scope in `runAgentDispatch`. Surfacing in the PR body is available later if
+  it ever proves necessary, but a should-never-fire tripwire does not warrant it now (YAGNI).
 
 ## 7. Error handling & edge cases
 
-- **Revert discards the whole attempt.** On reject, `revertWorktree` (`git checkout -- .` +
-  `git clean -fd`, no `-x`) throws away the fix *and* the scratch; the retry re-implements from the
-  branch HEAD. This is the accepted "costs loops" price of the loud path. The prompt (prevention)
-  keeps rejects rare, so a full-redo is the exception, not the rule.
+- **`undoAttempt` discards the whole attempt (surgically).** On reject — and on transport-failure and
+  park (§3.2) — `undoAttempt` restores tracked files to HEAD and removes *only this attempt's* new
+  untracked files, sparing pre-existing cruft (`egg-info`). The retry re-implements from the branch
+  HEAD. This is the accepted "costs loops" price of the loud path. The prompt (prevention) keeps
+  rejects rare, so a full-redo is the exception, not the rule.
 - **Wedge → escalate (bounded).** If an agent both needs an unplanned file *and* refuses to declare
   it across `DEFAULT_MAX_ATTEMPTS` (3), attempt-exhaustion escalates — loud, never silent, and the
   same ceiling every dispatch already has. No new wedge class is introduced.
@@ -315,7 +381,11 @@ Both anomaly paths are recorded so scratch frequency is visible without reading 
   behavior).
 - Verify gates, the review verdict taxonomy, the projector, the MERGE gate — all unchanged.
 - `checks:dispatch`'s post-commit identity/coverage checks — unchanged (complementary to the scope).
-- The failure-policy, retry-feedback (Bug B), and park/resume paths — reused, not modified.
+- The failure-policy and retry-feedback (Bug B) — reused, not modified.
+- **Changed (small):** the transport-failure and park exits in `runAgentDispatch` gain an
+  `undoAttempt(worktree, untrackedBefore)` call before they throw (§3.2). This only cleans the failed
+  attempt's *uncommitted* worktree delta; it changes no journal/outbox/resume-HEAD logic. Park's
+  carried context (the transcript) and resume's HEAD re-check are untouched.
 
 ## 9. Testing
 
@@ -329,22 +399,36 @@ Both anomaly paths are recorded so scratch frequency is visible without reading 
 - **`commitWorktree` named staging:** additionally — a read-only step with an undeclared untracked
   stray and no tracked edit → **empty staged index → `changed:false`, no commit, no throw** (the B1
   regression guard: proves emptiness is measured on the index, not `git status --porcelain`).
-- **`runAgentDispatch` wiring:** offender → `revertWorktree` called, `dispatch-failed` with
+- **`runAgentDispatch` wiring:** offender → `undoAttempt` called, `dispatch-failed` with
   `branchHeadSha=preHead`, error message names the offenders (→ becomes retry-feedback); in-scope →
-  `clean-success`; read-only stray → `recordStray` emits an `event_log` row (`kind:"note"`) AND the
-  dispatch still `clean-success` (non-gating).
+  `clean-success`; read-only stray → `recordStray` emits an `event_log` row (`kind:"note"`, `payload:
+  { stray }`) AND the dispatch still `clean-success` (non-gating).
 - **Pre-existing untracked (M5):** a stray present *before* the dispatch (seed an untracked file, then
   run) is neither committed nor an offender — a write step whose agent makes a clean in-scope edit
   still `clean-success` despite the pre-existing stray; the stray never enters the commit.
+- **No-drop across a transport-failure retry (review B1 — the round-2 regression guard):** attempt 1
+  creates a new file then transport-fails → assert `undoAttempt` removed it (worktree back to HEAD +
+  pre-existing cruft); attempt 2 re-creates the same path + declares it → it **commits** (never
+  silently dropped). And a paired case: attempt 1 leaves an undeclared scratch file + transport-fails
+  → `undoAttempt` removes it, so attempt 2's snapshot is clean.
+- **`undoAttempt` spares cruft:** seed a git-ignored/pre-existing untracked `pkg.egg-info` before the
+  dispatch; on reject/transport-failure `undoAttempt` removes the attempt's new files but **leaves
+  `pkg.egg-info` intact**.
+- **`stagedIndexEmpty` exit-code mapping:** pure deletion → `changed:true`; nothing staged →
+  `changed:false`; a forced git error → throws (not silently "has changes").
 - **Unstaged rename (M4):** an agent delete+add pair → the new half is an offender for `implement`
-  unless declared in `new_files` (not silently swept, not silently dropped).
+  unless declared in `new_files` (not silently swept, not silently dropped); `pendingEntries` on a
+  `git mv`-shaped `-z` record assigns the second (original-path) token `isNew=false`.
+- **checks unparseable-sidecar deferral (M2):** `reauthorCheckWrong` with an absent/malformed sidecar
+  → the scope does **not** reject (defers) → the handler's existing `return "rejected"` path runs, not
+  an uncaught throw; a *parseable* sidecar with an undeclared scratch file → reject.
 - **implement `new_files`:** valid sidecar declaring a new file → committed; absent sidecar +
   new file → rejected; absent sidecar + pure edit → clean.
 - **Test migration (review MINOR 6 — explicit):** `test/dispatch/worktree-guard.test.ts` currently
   exercises `commitGuard` as a generic mechanism (specs with a `commitGuard:` field). Since
   `commitScope` **replaces** `commitGuard`, those tests are **rewritten** to `commitScope`, preserving
-  the reject-path assertions (`dispatch-failed`, `branch_head_sha===preHead`, `revertWorktree`
-  invoked). `docs-revise-handler.test.ts` (non-doc edit rejected) must stay green under the migrated
+  the reject-path assertions (`dispatch-failed`, `branch_head_sha===preHead`, worktree undone via
+  `undoAttempt`). `docs-revise-handler.test.ts` (non-doc edit rejected) must stay green under the migrated
   predicate — assert `(path)=>isDocPath(path)` yields an offender for a **tracked** non-doc edit
   (`isNew=false`, `isDocPath` false → `!inScope` true), not only for a new file. Any `commitWorktree`
   caller/test updates for the new `newPaths` argument are part of this.
