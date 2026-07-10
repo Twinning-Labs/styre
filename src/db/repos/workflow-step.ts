@@ -112,7 +112,7 @@ export function markSucceeded(db: Database, id: number, result: unknown): void {
   // terminal states so a finished step never carries a now-defunct (and possibly recycled) pid.
   db.query(
     `UPDATE workflow_step
-       SET status = 'succeeded', result_json = $r, pid = NULL, ended_at = $now, updated_at = $now
+       SET status = 'succeeded', result_json = $r, error_json = NULL, pid = NULL, ended_at = $now, updated_at = $now
      WHERE id = $id`,
   ).run({ $r: JSON.stringify(result === undefined ? null : result), $now: now, $id: id });
 }
