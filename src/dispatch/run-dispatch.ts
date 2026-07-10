@@ -10,7 +10,13 @@ import { nowUtc } from "../util/time.ts";
 import type { Profile } from "./profile.ts";
 import { renderPrompt } from "./render-prompt.ts";
 import { allowlistFor } from "./tool-allowlists.ts";
-import { commitWorktree, ensureWorktree } from "./worktree.ts";
+import {
+  commitWorktree,
+  ensureWorktree,
+  pendingChanges,
+  revertWorktree,
+  worktreeHead,
+} from "./worktree.ts";
 
 export interface DispatchDeps {
   runner: AgentRunner;
@@ -34,6 +40,12 @@ export interface DispatchSpec {
   /** Bash runner commands to scope the implement allowlist to (string commands only). Other
    *  handlers omit this (their allowlists do not scope Bash). */
   runnerCommands?: string[];
+  /** Optional PRE-commit scope gate. When set, `runAgentDispatch` computes the full working-tree
+   *  delta (incl untracked) after the agent runs and BEFORE committing, and calls this. A throw
+   *  means "do not commit": the worktree is reverted, the dispatch is recorded `dispatch-failed`
+   *  with the head UNCHANGED, and the error rethrows (→ failure-policy). Handlers that omit it are
+   *  unaffected. Used by `docs:revise` to guarantee a docs-only commit. */
+  commitGuard?: (args: { worktreePath: string; pending: string[] }) => void;
 }
 
 const CARRYOVER_PREFIX =
@@ -109,6 +121,22 @@ export async function runAgentDispatch(
     throw new Error(
       `dispatch ${did} transport failure (exit ${result.exitCode}, timedOut=${result.timedOut})`,
     );
+  }
+
+  if (spec.commitGuard) {
+    const preHead = worktreeHead(deps.worktreePath);
+    const pending = pendingChanges(deps.worktreePath);
+    try {
+      spec.commitGuard({ worktreePath: deps.worktreePath, pending });
+    } catch (err) {
+      revertWorktree(deps.worktreePath);
+      completeDispatch(ctx.db, inserted.id, {
+        outcome: "dispatch-failed",
+        branchHeadSha: preHead,
+        endedAt: nowUtc(),
+      });
+      throw err;
+    }
   }
 
   const { sha, changed } = commitWorktree(deps.worktreePath, `${did} ${spec.handlerKey}`);
