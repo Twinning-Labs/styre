@@ -1,6 +1,6 @@
 {
   "name": "styre",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "The open-source autonomous-SDLC execution core: drives a structured ticket design → released.",
   "type": "module",
   "bin": {
