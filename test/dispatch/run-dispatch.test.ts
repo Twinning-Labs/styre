@@ -8,7 +8,7 @@ import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import type { HandlerContext } from "../../src/daemon/step-registry.ts";
 import { listByTicket } from "../../src/db/repos/dispatch.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
-import { insertPending } from "../../src/db/repos/workflow-step.ts";
+import { getById, insertPending, markFailed } from "../../src/db/repos/workflow-step.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runAgentDispatch } from "../../src/dispatch/run-dispatch.ts";
 import { makeTestDb } from "../helpers/db.ts";
@@ -176,6 +176,114 @@ test("a postcondition failure throws and records postcondition-failed", async ()
   const rows = listByTicket(db, ticketId);
   db.close();
   expect(rows[0]?.outcome).toBe("postcondition-failed");
+});
+
+test("retry-feedback: a prior attempt's error_json is prepended to the retry prompt", async () => {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-retry-${Date.now()}`);
+  const ctx = ctxFor(db, ticketId);
+  markFailed(db, ctx.step.id, new Error("REJECTED: unit seq 3 declares no files_to_touch"));
+  const fresh = getById(db, ctx.step.id);
+  if (!fresh) throw new Error("step missing after markFailed");
+  const ctx2 = { ...ctx, step: fresh };
+  const runner = new FakeAgentRunner(() => ({
+    completed: true,
+    exitCode: 0,
+    stdout: "{}",
+    stderr: "",
+    timedOut: false,
+    costUsd: null,
+    tokensIn: null,
+    tokensOut: null,
+  }));
+  await runAgentDispatch(
+    ctx2,
+    { runner, ...depsFor(repo, wt) },
+    {
+      handlerKey: "design:extract",
+      template: "PLAN {{ident}}",
+      vars: { ident: "ENG-1" },
+      postcondition: () => {},
+    },
+  );
+  db.close();
+  const promptSeen = runner.inputs[0]?.prompt ?? "";
+  expect(promptSeen).toContain("REJECTED: unit seq 3 declares no files_to_touch");
+  expect(promptSeen).toContain("previous attempt");
+});
+
+test("no retry-feedback on the first attempt (error_json null)", async () => {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-noretry-${Date.now()}`);
+  const ctx = ctxFor(db, ticketId);
+  const runner = new FakeAgentRunner(() => ({
+    completed: true,
+    exitCode: 0,
+    stdout: "{}",
+    stderr: "",
+    timedOut: false,
+    costUsd: null,
+    tokensIn: null,
+    tokensOut: null,
+  }));
+  await runAgentDispatch(
+    ctx,
+    { runner, ...depsFor(repo, wt) },
+    {
+      handlerKey: "design:extract",
+      template: "PLAN {{ident}}",
+      vars: { ident: "ENG-1" },
+      postcondition: () => {},
+    },
+  );
+  db.close();
+  expect(runner.inputs[0]?.prompt ?? "").not.toContain("previous attempt");
+});
+
+test("compose: retry-feedback AND resumeContext carryover both survive (fail→park→resume)", async () => {
+  // The load-bearing ${rendered.prompt}→${prompt} chaining fix: with the old code the carryover
+  // would re-base on rendered.prompt and DROP the retry-feedback prepend. This is the only case
+  // (both prepends present) that observes it — a direct regression guard (T2 review Minor-1).
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-compose-${Date.now()}`);
+  const ctx = ctxFor(db, ticketId);
+  markFailed(db, ctx.step.id, new Error("REJECTED: unit seq 3 declares no files_to_touch"));
+  const fresh = getById(db, ctx.step.id);
+  if (!fresh) throw new Error("step missing after markFailed");
+  const ctx2 = { ...ctx, step: fresh };
+  const runner = new FakeAgentRunner(() => ({
+    completed: true,
+    exitCode: 0,
+    stdout: "{}",
+    stderr: "",
+    timedOut: false,
+    costUsd: null,
+    tokensIn: null,
+    tokensOut: null,
+  }));
+  await runAgentDispatch(
+    ctx2,
+    {
+      runner,
+      ...depsFor(repo, wt),
+      resumeContext: { stepKey: fresh.step_key, transcript: "PRIOR PARTIAL OUTPUT" },
+    },
+    {
+      handlerKey: "design:extract",
+      template: "PLAN {{ident}}",
+      vars: { ident: "ENG-1" },
+      postcondition: () => {},
+    },
+  );
+  db.close();
+  const promptSeen = runner.inputs[0]?.prompt ?? "";
+  expect(promptSeen).toContain("previous attempt was interrupted"); // CARRYOVER present
+  expect(promptSeen).toContain("PRIOR PARTIAL OUTPUT"); // resume transcript present
+  expect(promptSeen).toContain("REJECTED: unit seq 3 declares no files_to_touch"); // retry-feedback NOT clobbered
+  expect(promptSeen).toContain("PLAN ENG-1"); // rendered base present
 });
 
 test("a transport failure records dispatch-failed and does NOT commit", async () => {
