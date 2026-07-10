@@ -242,6 +242,50 @@ test("no retry-feedback on the first attempt (error_json null)", async () => {
   expect(runner.inputs[0]?.prompt ?? "").not.toContain("previous attempt");
 });
 
+test("compose: retry-feedback AND resumeContext carryover both survive (fail→park→resume)", async () => {
+  // The load-bearing ${rendered.prompt}→${prompt} chaining fix: with the old code the carryover
+  // would re-base on rendered.prompt and DROP the retry-feedback prepend. This is the only case
+  // (both prepends present) that observes it — a direct regression guard (T2 review Minor-1).
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-compose-${Date.now()}`);
+  const ctx = ctxFor(db, ticketId);
+  markFailed(db, ctx.step.id, new Error("REJECTED: unit seq 3 declares no files_to_touch"));
+  const fresh = getById(db, ctx.step.id);
+  if (!fresh) throw new Error("step missing after markFailed");
+  const ctx2 = { ...ctx, step: fresh };
+  const runner = new FakeAgentRunner(() => ({
+    completed: true,
+    exitCode: 0,
+    stdout: "{}",
+    stderr: "",
+    timedOut: false,
+    costUsd: null,
+    tokensIn: null,
+    tokensOut: null,
+  }));
+  await runAgentDispatch(
+    ctx2,
+    {
+      runner,
+      ...depsFor(repo, wt),
+      resumeContext: { stepKey: fresh.step_key, transcript: "PRIOR PARTIAL OUTPUT" },
+    },
+    {
+      handlerKey: "design:extract",
+      template: "PLAN {{ident}}",
+      vars: { ident: "ENG-1" },
+      postcondition: () => {},
+    },
+  );
+  db.close();
+  const promptSeen = runner.inputs[0]?.prompt ?? "";
+  expect(promptSeen).toContain("previous attempt was interrupted"); // CARRYOVER present
+  expect(promptSeen).toContain("PRIOR PARTIAL OUTPUT"); // resume transcript present
+  expect(promptSeen).toContain("REJECTED: unit seq 3 declares no files_to_touch"); // retry-feedback NOT clobbered
+  expect(promptSeen).toContain("PLAN ENG-1"); // rendered base present
+});
+
 test("a transport failure records dispatch-failed and does NOT commit", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
