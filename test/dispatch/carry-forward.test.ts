@@ -29,6 +29,11 @@ test("carries the integration signal verbatim (result+detail) to the new sha; ac
   expect(integ?.command).toBe("tox");
   const gate = atC1.find((s) => s.signal_type === "ac-check-gate");
   expect(gate?.result).toBe("pass");
+  // The load-bearing invariant: both carried rows MUST be ticket-level (work_unit_id NULL), else
+  // they fall outside passingShasFor/ranShasFor's `work_unit_id IS NULL` filter and the resolver
+  // wedges instead of advancing. (T5 review — the mechanism, previously untested.)
+  expect(integ?.work_unit_id).toBeNull();
+  expect(gate?.work_unit_id).toBeNull();
 });
 
 test("no ac-check-gate carry when the ticket has no active checks", () => {
