@@ -60,7 +60,15 @@ const priorRejection = rejectionFrom(ctx.step.error_json);
 if (priorRejection !== "") {
   prompt = `${RETRY_FEEDBACK_PREFIX}\n\n${priorRejection}\n\n${RETRY_FEEDBACK_SUFFIX}\n\n${prompt}`;
 }
-// (the existing resumeContext carryover prepend follows, unchanged)
+// The EXISTING resumeContext carryover block MUST be changed to chain off `prompt` (not
+// `rendered.prompt`) so the two prepends COMPOSE. Both are reachable together (fail → park →
+// resume: the park never clears error_json). Today the block rebuilds from `rendered.prompt`,
+// which would clobber the retry-feedback prepend above — so change its trailing `${rendered.prompt}`
+// to `${prompt}`:
+if (deps.resumeContext && deps.resumeContext.stepKey === ctx.step.step_key) {
+  prompt = `${CARRYOVER_PREFIX}\n\n${deps.resumeContext.transcript}\n\n${CARRYOVER_SUFFIX}\n\n${prompt}`;
+  //                                                                                     ^^^^^^ was rendered.prompt
+}
 ```
 
 - `rejectionFrom(error_json: string | null): string` — `""` when null/malformed/empty; else the
@@ -104,10 +112,13 @@ no `extractVars` param, no `{{extract_feedback}}` prompt slot, no new `extract-v
 - **Staleness after a success (loopback re-run)** — `markSucceeded` now clears `error_json`, so a
   step that succeeded then is reset by a loopback re-runs with `error_json` null → no stale prepend.
   (Without the clear, `markSucceeded` left the old failure; this is the one staleness hole, closed.)
-- **Park/resume is orthogonal** — a session-limit park does **not** `markFailed` (it's attempt-neutral,
-  ENG-164: `decrementAttempt`), so it never sets `error_json`. Retry-feedback (error_json) and
-  `resumeContext` (park carryover) are mutually exclusive in practice; both prepends compose harmlessly
-  if they ever co-occurred.
+- **Park/resume composition (review Important, fixed in §1)** — a session-limit park does **not**
+  `markFailed`, so a park alone never sets `error_json`. BUT the two *can* co-occur: fail attempt-1
+  (`error_json` set) → retry → attempt-2 parks → resume. The park never clears `error_json`, so on the
+  resumed re-dispatch BOTH `priorRejection` and `resumeContext` match. The existing carryover block
+  rebuilds `prompt` from `rendered.prompt` — so it MUST be changed to chain off `prompt` (§1), else it
+  silently drops the retry-feedback. With the §1 fix both prepends compose (worst case without it =
+  that corner loses the retry-feedback improvement; never a false-pass).
 - **Prepend-all scope** (operator-chosen) — infra errors ("project not found", "missing workUnitId")
   get prepended too. Harmless: they're rare, agent-inert, and escalate quickly without looping; no
   error taxonomy to maintain. A future actionable-only filter is a deferitable refinement.
@@ -137,13 +148,14 @@ no `extractVars` param, no `{{extract_feedback}}` prompt slot, no new `extract-v
 - **e2e (the crux — reproduces & fixes darkreader, generically):** drive a ticket to `design:extract`;
   the FakeAgentRunner emits a vacuous-unit extraction on attempt 1 (→ `validateExtraction` throws →
   `markFailed` records it), and on attempt 2 — **only if `input.prompt` now contains the prior
-  rejection** — emits a valid extraction; assert the ticket advances past `design:extract` to
-  implement (no escalate), proving the retry was informed by the generic primitive. And the negative:
-  a runner that emits the identical vacuous unit on all 3 attempts → escalates on
-  **attempt-exhaustion** (`step 'design:extract' failed`, NOT a no-progress reason). Copy the harness
-  from `test/dispatch/design-extract.test.ts` (`readyForExtract` + `advanceOneStep` drive-loop +
-  prompt-branching FakeAgentRunner) — NOT `run-harness.ts` (a park harness that never reaches this
-  step). Place the test in `test/dispatch/`.
+  rejection** (assert `runner.inputs[1].prompt` contains `RETRY_FEEDBACK_PREFIX` + the error) — emits a
+  valid extraction. **Positive assertion (tightened per review):** `design:extract` **succeeded**
+  (work_units inserted) and NO `escalated` event — not "reaches implement" (which would also need
+  `design:size`/`design:review` scripted). The negative: a runner that emits the identical vacuous unit
+  on all 3 attempts → escalates on **attempt-exhaustion** (`step 'design:extract' failed`, NOT a
+  no-progress reason). Copy the harness from `test/dispatch/design-extract.test.ts` (`readyForExtract` +
+  `advanceOneStep` drive-loop + prompt-branching FakeAgentRunner) — NOT `run-harness.ts` (a park harness
+  that never reaches this step). Place the test in `test/dispatch/`.
 - **Generality spot-check (unit):** a *second* dispatch step (e.g. seed a `checks:dispatch` or
   `design:dispatch` step row with `error_json` set) → its `runAgentDispatch` prompt also carries the
   rejection — proving the primitive is not `design:extract`-specific.
@@ -167,7 +179,13 @@ no `extractVars` param, no `{{extract_feedback}}` prompt slot, no new `extract-v
 
 ## §6 — Changelog
 
-- **2026-07-10** — Redirected from the per-step `extractFeedback` (symptomatic) to a general
+- **2026-07-10 (v2)** — Folded independent review (design sound, general, no false-pass, staleness fix
+  safe). **Important:** the `resumeContext` carryover block rebuilds from `rendered.prompt`, so leaving
+  it "unchanged" would clobber the retry-feedback prepend in a reachable fail→park→resume corner — §1
+  now specifies chaining both prepends off the same `prompt` (`${rendered.prompt}`→`${prompt}`). Minor:
+  tightened the e2e positive assertion to "design:extract succeeded + no escalated event" (not "reaches
+  implement"). Verdict: ready to build.
+- **2026-07-10 (v1)** — Redirected from the per-step `extractFeedback` (symptomatic) to a general
   `runAgentDispatch` retry-feedback primitive (operator steer: "fix a general class"). Prepends a
   dispatch step's own prior rejection (`ctx.step.error_json`, already captured by `markFailed`) into
   its retry prompt, mirroring `resumeContext`; `markSucceeded` clears `error_json` for staleness.
