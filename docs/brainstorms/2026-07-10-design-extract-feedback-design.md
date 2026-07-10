@@ -1,3 +1,5 @@
+> ⚠️ **SUPERSEDED** (2026-07-10) by the general-class fix in `docs/brainstorms/2026-07-10-dispatch-retry-feedback-design.md` — the per-step `extractFeedback` was symptomatic; the general `runAgentDispatch` retry-feedback primitive replaces it. Kept for history.
+
 # `design:extract` validation feedback-carry — Bug B fix
 
 **Status:** design, awaiting independent review + operator sign-off

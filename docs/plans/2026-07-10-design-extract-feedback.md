@@ -1,3 +1,5 @@
+> ⚠️ **SUPERSEDED** (2026-07-10) by the general-class fix in `docs/brainstorms/2026-07-10-dispatch-retry-feedback-design.md` — the per-step `extractFeedback` was symptomatic; the general `runAgentDispatch` retry-feedback primitive replaces it. Kept for history.
+
 # `design:extract` Validation Feedback-Carry — Bug B Fix Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
