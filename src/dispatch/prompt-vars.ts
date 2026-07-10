@@ -7,10 +7,12 @@ import complexityGradeTemplate from "../../prompts/design-complexity-grade.md" w
 import designExtractTemplate from "../../prompts/design-extract.md" with { type: "text" };
 import designReviewTemplate from "../../prompts/design-review.md" with { type: "text" };
 import designTemplate from "../../prompts/design.md" with { type: "text" };
+import docsReviseTemplate from "../../prompts/docs-revise.md" with { type: "text" };
 import implementTemplate from "../../prompts/implement.md" with { type: "text" };
 import reviewTemplate from "../../prompts/review.md" with { type: "text" };
 import type { WorkUnitRow } from "../db/repos/work-unit.ts";
 import { commandFor, impactedComponents } from "./components.ts";
+import { DOC_PATHS_HINT } from "./docs-paths.ts";
 import type { Component, Profile } from "./profile.ts";
 
 /** One line per detected component for the `{{detected_stacks}}` prompt slot: name, kind, paths,
@@ -63,6 +65,7 @@ export const DESIGN_COMPLEXITY_GRADE_TEMPLATE = complexityGradeTemplate;
 export const EXTRACT_TEMPLATE = designExtractTemplate;
 export const IMPLEMENT_TEMPLATE = implementTemplate;
 export const REVIEW_TEMPLATE = reviewTemplate;
+export const DOCS_REVISE_TEMPLATE = docsReviseTemplate;
 
 export function extractVars(
   ticket: { ident: string; title: string | null },
@@ -139,6 +142,21 @@ export function reviewVars(
     title: ticket.title ?? "",
     slug: profile.slug,
     ...profile.promptVars,
+  };
+}
+
+/** Prompt vars for `docs:revise` — mirrors `reviewVars` (Bash-less, reads the worktree + plan) plus
+ *  the allowed-doc-paths hint, kept in lockstep with the commitGuard's `isDocPath`. */
+export function docsVars(
+  ticket: { ident: string; title: string | null },
+  profile: Profile,
+): Record<string, string> {
+  return {
+    ident: ticket.ident,
+    title: ticket.title ?? "",
+    slug: profile.slug,
+    ...profile.promptVars,
+    doc_paths: DOC_PATHS_HINT,
   };
 }
 
