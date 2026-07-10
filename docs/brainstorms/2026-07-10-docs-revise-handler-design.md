@@ -1,6 +1,6 @@
 # `docs:revise` handler — Bug A fix (spec'd-but-unbuilt step)
 
-**Status:** design v2 (independent review folded), awaiting re-review + operator sign-off
+**Status:** design v2.1 — two independent review rounds folded; implemented (7 tasks, subagent-driven TDD) and whole-branch-reviewed READY-TO-MERGE; awaiting operator merge
 **Date:** 2026-07-10
 **Branch/worktree:** `fix/docs-revise-handler` (off `origin/main` @ #67 `1d5f43a`)
 

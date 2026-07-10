@@ -11,8 +11,10 @@ import { insertSignal, listByTicket } from "../db/repos/ground-truth-signal.ts";
  *   - an `ac-check-gate` `pass` signal — ONLY when the ticket has active ac-checks (matches the
  *     resolver's `gateHasChecks` guard). */
 export function carryVerifiedVerdictForward(db: Database, ticketId: number, sha: string): void {
+  // The ticket-level (work_unit_id NULL) integration signal — the one `ranShasFor` reads. Filtering
+  // on NULL hardens the read against any future work-unit-scoped integration signal (none today).
   const integ = listByTicket(db, ticketId)
-    .filter((s) => s.signal_type === "integration")
+    .filter((s) => s.signal_type === "integration" && s.work_unit_id === null)
     .at(-1);
   db.transaction(() => {
     if (integ) {
