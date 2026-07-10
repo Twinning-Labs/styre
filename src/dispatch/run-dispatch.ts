@@ -54,6 +54,31 @@ const CARRYOVER_PREFIX =
   "truth; verify the current state before redoing or relying on anything it claims to have done.";
 const CARRYOVER_SUFFIX = "--- end of interrupted attempt's partial output ---";
 
+const RETRY_FEEDBACK_PREFIX =
+  "## Your previous attempt at this step was REJECTED\n\nFix exactly the problem described below " +
+  "and produce a corrected result — do NOT repeat the output that caused it. (If a planned work " +
+  "unit has no files to change, it is redundant: remove it. If your structured output was malformed, " +
+  "emit valid output.)";
+const RETRY_FEEDBACK_SUFFIX = "--- end of prior rejection (address it before anything else) ---";
+
+/** The human-readable message of the prior attempt's rejection, from `workflow_step.error_json`
+ *  (serializeError → {name, message}). "" when there was no prior failure / it can't be parsed —
+ *  so the first attempt and any malformed record prepend nothing. General: any dispatch step's own
+ *  thrown postcondition/validation/sidecar rejection is carried into its retry. NOTE: the message is
+ *  prepended verbatim into the agent prompt — today every gate message is styre-controlled (static
+ *  text + integer seqs); if a future gate ever interpolates agent/ticket free-text into its thrown
+ *  message, that text would be fed back verbatim (still self-to-self — the agent's own prior output —
+ *  never a privilege escalation, but worth keeping gate messages free of untrusted content). */
+function rejectionFrom(errorJson: string | null): string {
+  if (!errorJson) return "";
+  try {
+    const msg = (JSON.parse(errorJson) as { message?: string }).message ?? "";
+    return typeof msg === "string" ? msg.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
 function dispatchId(ident: string, seq: number): string {
   return `${ident}-d${String(seq).padStart(4, "0")}`;
 }
@@ -74,8 +99,15 @@ export async function runAgentDispatch(
   }
 
   let prompt = rendered.prompt;
+  // CL-RETRY: prepend the prior attempt's rejection so a retry is informed, not blind. error_json
+  // is captured generically by markFailed for every dispatch throw and survives resetToPending.
+  const priorRejection = rejectionFrom(ctx.step.error_json);
+  if (priorRejection !== "") {
+    prompt = `${RETRY_FEEDBACK_PREFIX}\n\n${priorRejection}\n\n${RETRY_FEEDBACK_SUFFIX}\n\n${prompt}`;
+  }
   if (deps.resumeContext && deps.resumeContext.stepKey === ctx.step.step_key) {
-    prompt = `${CARRYOVER_PREFIX}\n\n${deps.resumeContext.transcript}\n\n${CARRYOVER_SUFFIX}\n\n${rendered.prompt}`;
+    // chain off `prompt` (NOT rendered.prompt) so both prepends compose (design §1, review Important)
+    prompt = `${CARRYOVER_PREFIX}\n\n${deps.resumeContext.transcript}\n\n${CARRYOVER_SUFFIX}\n\n${prompt}`;
   }
 
   ensureWorktree(deps.repoPath, deps.branch, deps.worktreePath);

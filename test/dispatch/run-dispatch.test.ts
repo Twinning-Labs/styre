@@ -8,7 +8,7 @@ import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import type { HandlerContext } from "../../src/daemon/step-registry.ts";
 import { listByTicket } from "../../src/db/repos/dispatch.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
-import { insertPending } from "../../src/db/repos/workflow-step.ts";
+import { getById, insertPending, markFailed } from "../../src/db/repos/workflow-step.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runAgentDispatch } from "../../src/dispatch/run-dispatch.ts";
 import { makeTestDb } from "../helpers/db.ts";
@@ -176,6 +176,70 @@ test("a postcondition failure throws and records postcondition-failed", async ()
   const rows = listByTicket(db, ticketId);
   db.close();
   expect(rows[0]?.outcome).toBe("postcondition-failed");
+});
+
+test("retry-feedback: a prior attempt's error_json is prepended to the retry prompt", async () => {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-retry-${Date.now()}`);
+  const ctx = ctxFor(db, ticketId);
+  markFailed(db, ctx.step.id, new Error("REJECTED: unit seq 3 declares no files_to_touch"));
+  const fresh = getById(db, ctx.step.id);
+  if (!fresh) throw new Error("step missing after markFailed");
+  const ctx2 = { ...ctx, step: fresh };
+  const runner = new FakeAgentRunner(() => ({
+    completed: true,
+    exitCode: 0,
+    stdout: "{}",
+    stderr: "",
+    timedOut: false,
+    costUsd: null,
+    tokensIn: null,
+    tokensOut: null,
+  }));
+  await runAgentDispatch(
+    ctx2,
+    { runner, ...depsFor(repo, wt) },
+    {
+      handlerKey: "design:extract",
+      template: "PLAN {{ident}}",
+      vars: { ident: "ENG-1" },
+      postcondition: () => {},
+    },
+  );
+  db.close();
+  const promptSeen = runner.inputs[0]?.prompt ?? "";
+  expect(promptSeen).toContain("REJECTED: unit seq 3 declares no files_to_touch");
+  expect(promptSeen).toContain("previous attempt");
+});
+
+test("no retry-feedback on the first attempt (error_json null)", async () => {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-noretry-${Date.now()}`);
+  const ctx = ctxFor(db, ticketId);
+  const runner = new FakeAgentRunner(() => ({
+    completed: true,
+    exitCode: 0,
+    stdout: "{}",
+    stderr: "",
+    timedOut: false,
+    costUsd: null,
+    tokensIn: null,
+    tokensOut: null,
+  }));
+  await runAgentDispatch(
+    ctx,
+    { runner, ...depsFor(repo, wt) },
+    {
+      handlerKey: "design:extract",
+      template: "PLAN {{ident}}",
+      vars: { ident: "ENG-1" },
+      postcondition: () => {},
+    },
+  );
+  db.close();
+  expect(runner.inputs[0]?.prompt ?? "").not.toContain("previous attempt");
 });
 
 test("a transport failure records dispatch-failed and does NOT commit", async () => {
