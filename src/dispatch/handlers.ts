@@ -44,6 +44,7 @@ import { pythonImportName } from "../setup/lang/python.ts";
 import { runCommand } from "../util/run-command.ts";
 import { type AdjClass, ChecksClassifyOutputSchema } from "./adjudicate-schema.ts";
 import { ChecksArbitrateOutputSchema } from "./arbitrate-schema.ts";
+import { carryVerifiedVerdictForward } from "./carry-forward.ts";
 import { checkIntegrityViolations } from "./check-integrity.ts";
 import {
   type CheckFramework,
@@ -70,6 +71,7 @@ import {
 } from "./components.ts";
 import { deriveAndPersistAcs } from "./derive-acs.ts";
 import { designFeedback } from "./design-feedback.ts";
+import { isDocPath } from "./docs-paths.ts";
 import { ExtractOutputSchema, validateCdotImpact, validateExtraction } from "./extract-schema.ts";
 import { gateFeedback, implementFeedback } from "./feedback.ts";
 import { hasTicketPlan } from "./plan-frontmatter.ts";
@@ -84,6 +86,7 @@ import {
   DESIGN_COMPLEXITY_GRADE_TEMPLATE,
   DESIGN_REVIEW_TEMPLATE,
   DESIGN_TEMPLATE,
+  DOCS_REVISE_TEMPLATE,
   EXTRACT_TEMPLATE,
   IMPLEMENT_TEMPLATE,
   REVIEW_TEMPLATE,
@@ -93,6 +96,7 @@ import {
   complexityGradeVars,
   designReviewVars,
   designVars,
+  docsVars,
   extractVars,
   implementVars,
   reviewVars,
@@ -496,6 +500,29 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       });
     }
     return { findings: parsed.value.findings.length, blocking };
+  });
+
+  registry.register("docs:revise", async (ctx: HandlerContext) => {
+    const { sha, changed } = await runAgentDispatch(
+      ctx,
+      depsFor(ctx, deps, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+      {
+        handlerKey: "docs:revise",
+        template: DOCS_REVISE_TEMPLATE,
+        vars: docsVars(ctx.ticket, deps.profile),
+        commitGuard: ({ pending }) => {
+          const offenders = pending.filter((f) => !isDocPath(f));
+          if (offenders.length > 0) {
+            throw new Error(
+              `docs:revise may only edit documentation; refusing to commit: ${offenders.join(", ")}`,
+            );
+          }
+        },
+        postcondition: () => {},
+      },
+    );
+    if (changed) carryVerifiedVerdictForward(ctx.db, ctx.ticket.id, sha);
+    return { docsRevised: changed };
   });
 
   registry.register("checks:dispatch", async (ctx: HandlerContext) => {
