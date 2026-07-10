@@ -406,7 +406,10 @@ The core, atomic change: the moment `commitWorktree` stops doing `git add -A`, e
 - Modify: `src/dispatch/worktree.ts` (`commitWorktree` signature)
 - Modify: `src/dispatch/run-dispatch.ts` (`DispatchSpec`, `runAgentDispatch`)
 - Modify: `src/dispatch/handlers.ts` (5 write call sites + docs:revise migration)
-- Modify: `test/dispatch/run-dispatch.test.ts`, `test/dispatch/worktree-guard.test.ts`, `test/dispatch/docs-revise-handler.test.ts`
+- Modify (direct): `test/dispatch/run-dispatch.test.ts`, `test/dispatch/worktree-guard.test.ts`, `test/dispatch/docs-revise-handler.test.ts`, `test/dispatch/worktree.test.ts`
+- Modify (restore-green — existing implement/checks-flow runners, review B1): `test/helpers/run-harness.ts` and every e2e/handler test whose fake implement runner creates a new file (Step 14 audits and lists them).
+
+**Why this task is large but atomic:** the moment `commitWorktree` stops doing `git add -A` (Step 1) and the real handlers gain `commitScope` (Step 9), every existing test that drives `implement:dispatch` with a fake runner creating an *undeclared* new file starts getting rejected. Those cannot be fixed independently of the mechanism, so the task's green state depends on Steps 14. Do not commit until the FULL suite is green.
 
 **Interfaces:**
 - Consumes: `pendingEntries`, `undoAttempt`, `stagedIndexEmpty`, `worktreeHead` (Task 1); `CommitScope`, `implementScope`, `checksScope`, `planScope`, `docScope` (Task 2); `appendEvent` (`src/db/repos/event-log.ts`).
@@ -437,9 +440,33 @@ export function commitWorktree(
 }
 ```
 
-- [ ] **Step 2: Update `DispatchSpec` — replace `commitGuard` with `commitScope`**
+- [ ] **Step 2: Update `DispatchSpec` — replace `commitGuard` with `commitScope`, and fix imports**
 
-In `src/dispatch/run-dispatch.ts`: add `import type { CommitScope } from "./commit-scope.ts";`, add `appendEvent` to the `event-log` imports (`import { appendEvent } from "../db/repos/event-log.ts";`), and add `pendingEntries`, `undoAttempt` to the `worktree.ts` import block (already imports `commitWorktree`, `ensureWorktree`, `worktreeHead`; remove `revertWorktree` from this import — it is no longer used here). Then in the `DispatchSpec` interface replace the `commitGuard?: ...` field (`run-dispatch.ts:43-48`) with:
+In `src/dispatch/run-dispatch.ts`:
+- Add `import type { CommitScope } from "./commit-scope.ts";`
+- Add `import { appendEvent } from "../db/repos/event-log.ts";`
+- Rewrite the `worktree.ts` import block. It currently is exactly:
+  ```ts
+  import {
+    commitWorktree,
+    ensureWorktree,
+    pendingChanges,
+    revertWorktree,
+    worktreeHead,
+  } from "./worktree.ts";
+  ```
+  Change it to (drop **both** `pendingChanges` and `revertWorktree` — both become unused after Step 5, and `tsconfig` has `noUnusedLocals:true`; add `pendingEntries` + `undoAttempt`):
+  ```ts
+  import {
+    commitWorktree,
+    ensureWorktree,
+    pendingEntries,
+    undoAttempt,
+    worktreeHead,
+  } from "./worktree.ts";
+  ```
+
+Then in the `DispatchSpec` interface replace the `commitGuard?: ...` field (`run-dispatch.ts:43-48`) with:
 
 ```ts
   /** Per-step commit scope (control-loop §4). Given the agent's stdout, a predicate over each pending
@@ -548,7 +575,9 @@ const runner = new FakeAgentRunner((input) => {
   commitScope: implementScope, postcondition: ({ changed }) => { if (!changed) throw new Error("empty diff"); } },
 ```
 
-Import `implementScope` at the top. Apply the same `commitScope: implementScope` + declaring sidecar to every existing test whose runner creates a new file and expects `changed:true`/`clean-success` (the stdout-marker test at :87 can declare its `feature-stdout.ts`). The transport-failure test (:289) needs no scope (it fails before commit); leave it, but assert its file was undone (add `expect(existsSync(join(input.cwd, "should-not-be-committed.ts"))).toBe(false)` after — `undoAttempt` removed it).
+Import `implementScope` at the top. Apply the same `commitScope: implementScope` + declaring sidecar to every existing test in THIS file whose runner creates a new file and asserts `changed:true`/`clean-success` (the first test :50, the postcondition-failure test :150 which expects the empty-diff throw — but note :150's runner writes NO file, so it stays a pure-edit no-op → `changed:false` → its "empty diff" postcondition still throws; leave :150 as-is).
+- **Leave the stdout-marker test (:87) UNTOUCHED (review M6).** It asserts `result.output === "MARKER-STDOUT"` exactly and its postcondition is a no-op (does not require `changed`). With **no** `commitScope` it takes the read-only branch: its new `feature-stdout.ts` becomes a logged stray, `changed:false`, and `output` is unchanged → the test passes as written. Do NOT add a sidecar (would break the exact `toBe`) and do NOT add `commitScope` (would reject the undeclared file).
+- The transport-failure test (:289) needs no scope (it fails before commit); leave its spec, and additionally assert its file was undone: `expect(existsSync(join(wt, "should-not-be-committed.ts"))).toBe(false)` (`undoAttempt` removed it). Import `existsSync` from `node:fs`.
 
 - [ ] **Step 7: Add new `run-dispatch.test.ts` cases (the behaviors the design guarantees)**
 
@@ -636,18 +665,54 @@ In the `docs:revise` handler (`handlers.ts:505-526`) replace the `commitGuard: (
 
 - [ ] **Step 11: Migrate the guard tests**
 
-- `test/dispatch/worktree-guard.test.ts`: the two `commitGuard:` specs (the "docs-only edit commits" ~:110 and "non-doc edit reverts, head unchanged" ~:136) → rewrite to `commitScope: docScope`. Keep the assertions: docs edit → `clean-success` + committed; a non-doc edit (tracked OR new) → `dispatch-failed`, `branch_head_sha === preHead`, worktree undone. Import `docScope`. The standalone `revertWorktree` test (~:54) stays (the function is still exported).
-- `test/dispatch/docs-revise-handler.test.ts`: the "non-doc edit rejected" case (~:118) must stay green under `docScope` — assert a **tracked** non-doc edit is rejected (predicate false for `isNew=false`, non-doc path), not only a new file.
+- `test/dispatch/worktree-guard.test.ts`:
+  - The two `commitGuard:` specs (the "docs-only edit commits" ~:110 and "non-doc edit reverts, head unchanged" ~:136) → rewrite to `commitScope: docScope`. Keep the assertions: docs edit → `clean-success` + committed; a non-doc edit (tracked OR new) → `dispatch-failed`, `branch_head_sha === preHead`, worktree undone. **Update the throw regex** at ~:156 from `/non-doc path in diff/` to `/out-of-scope files/` (review M5 — the new reject path throws a different message). Import `docScope`.
+  - **Rewrite the "no commitGuard → commits, clean-success" test at ~:166 (review B3).** It writes a NEW untracked `src/foo.py` with no guard and asserts `changed===true`. Under the new read-only semantics (no `commitScope`) that file is a logged stray and `git add -u` stages nothing → `changed:false`. Re-target it: either make its runner edit a **tracked** file (→ `changed:true`, `clean-success`) to keep testing "unscoped step commits tracked work", OR assert the new read-only-stray behavior (`changed:false` + an `event_log` `note`). Prefer the tracked-edit variant to preserve the test's original intent.
+  - The standalone `revertWorktree` test (~:54) stays (the function is still exported and unchanged).
+- `test/dispatch/docs-revise-handler.test.ts`: the "non-doc edit rejected" case (~:118) must stay green under `docScope` — assert a **tracked** non-doc edit is rejected (predicate false for `isNew=false`, non-doc path), not only a new file. **Update its throw regex** at ~:140 from `/docs:revise may only edit documentation/` to `/out-of-scope files/` (review M5 — docs:revise no longer emits its bespoke message; the generic scope-reject message applies).
 
-- [ ] **Step 12: Run the full suite + typecheck**
+- [ ] **Step 12: Fix the existing `commitWorktree` callers in `test/dispatch/worktree.test.ts` (review B2)**
 
-Run: `bun test` then `bun run typecheck` (or `tsc --noEmit` per the repo's script).
-Expected: all PASS. If a fresh worktree shows unrelated missing-dep failures, run `bun install` first (no dependency changes here), then re-run.
+`test/dispatch/worktree.test.ts:59` and `:70` call `commitWorktree(wt, "…")` with two args. The signature is now 3-arg (required), so `strict` typecheck fails and `newPaths.length` throws at runtime. Update both calls: pass a third argument — `[]` if the test only exercises tracked edits, or the created file's path(s) if it creates new files and expects them committed. Adjust each test's assertion to the named-staging behavior (a new file passed in `newPaths` commits; one omitted does not).
 
-- [ ] **Step 13: Commit**
+- [ ] **Step 13: Implement Steps 1-11, then run the DIRECT tests**
+
+Run: `bun test test/dispatch/worktree.test.ts test/dispatch/run-dispatch.test.ts test/dispatch/commit-scope.test.ts test/dispatch/worktree-guard.test.ts test/dispatch/docs-revise-handler.test.ts`
+Expected: PASS. (The broader suite is expected to be RED here — Step 14 restores it. If a fresh worktree shows unrelated missing-dep failures, run `bun install` first.)
+
+- [ ] **Step 14: Restore green — audit & fix existing implement/checks-flow test runners (review B1)**
+
+The `commitScope` wiring now rejects any fake runner that creates an *undeclared* new file in an implement/checks flow. Fix them:
+
+1. **Central fix — the shared harness** (`test/helpers/run-harness.ts:269`): its `callCount === 1` implement branch writes `harness-impl.ts` with `stdout: "done"`. Change that `stdout` to declare the file:
+   ```ts
+   stdout: 'done\n```styre-sidecar\n{"new_files":["harness-impl.ts"]}\n```',
+   ```
+   This fixes every test that drives implement through the harness in one edit.
+
+2. **Inline runners — audit and fix each.** Find them:
+   ```bash
+   rg -n "writeFileSync\(join\(input\.cwd" test/ | rg -v "test/dispatch/(worktree|run-dispatch|commit-scope)\.test\.ts"
+   ```
+   For each fake runner that (a) drives `implement:dispatch` (via `buildDispatchRegistry`/`advanceOneStep`/the harness) and (b) creates a NEW file and (c) expects that step to commit/verify, append a declaring sidecar to its `stdout` naming exactly the file(s) it writes:
+   ```ts
+   // before: stdout: "{}"   (or "done", etc.)
+   stdout: '{}\n```styre-sidecar\n{"new_files":["feature.ts"]}\n```',
+   ```
+   Known files to check (from the plan-review): `test/dispatch/diff-gates-e2e.test.ts` (`feature.ts`, `c.ts`), `test/dispatch/verify-e2e.test.ts` (`feature.ts`), `test/dispatch/verify-gate-e2e.test.ts` (`note-*.ts`), `test/dispatch/arbiter-e2e.test.ts` (multiple `note*.ts`), `test/dispatch/verify-handlers.test.ts`, `test/dispatch/verify-routing-e2e.test.ts`, `test/dispatch/verify-routing.test.ts`, `test/dispatch/handlers.test.ts`, `test/dispatch/implement-allowlist.test.ts`, `test/dispatch/docs-revise-resolve.test.ts`.
+   - **Checks-flow runners are already safe**: they emit a `checksAuthored` sidecar whose `test_file` `checksScope` declares — verify (don't blindly edit) that `test/dispatch/checks-handler.test.ts` and any checks e2e still pass; add a `new_files` entry only if a runner creates a NON-test helper file.
+   - Do NOT add a sidecar to a runner whose test asserts an **exact** stdout string; instead let that step run unscoped/read-only (as with `run-dispatch.test.ts:87`) if it isn't asserting a commit.
+
+- [ ] **Step 15: Run the full suite + typecheck**
+
+Run: `bun test` then the repo's typecheck (`bun run typecheck` / `tsc --noEmit`).
+Expected: ALL PASS. Iterate Step 14 until green — every remaining red implement/checks test is a runner that still creates an undeclared new file.
+
+- [ ] **Step 16: Commit**
 
 ```bash
-git add src/dispatch/worktree.ts src/dispatch/run-dispatch.ts src/dispatch/handlers.ts test/dispatch/run-dispatch.test.ts test/dispatch/worktree-guard.test.ts test/dispatch/docs-revise-handler.test.ts
+git add -- src/dispatch/worktree.ts src/dispatch/run-dispatch.ts src/dispatch/handlers.ts test/dispatch/ test/helpers/run-harness.ts
+# plus any other test files touched in Step 14 (name them explicitly):
 git commit -m "feat(scoped-commit): named staging + per-step commit scope + undoAttempt in the dispatch flow"
 ```
 
@@ -725,7 +790,7 @@ git commit -m "feat(scoped-commit): implement prompt declares new_files + forbid
 - §5 implement `new_files` schema + checks `new_files` + unparseable-sidecar deferral → Task 2 (Steps 1-5) + Task 4 (prompt).
 - §6 `event_log` `kind:"note"`, `payload:{ stray }` → Task 3 (Step 5).
 - §7/§8 edge cases (rename, ignored, cruft, undoAttempt) → covered by Task 1 + Task 3 tests.
-- §9 test migration → Task 3 (Steps 6, 7, 11).
+- §9 test migration → Task 3 (Steps 6, 7, 11) + green-keeping across the existing e2e/harness suite → Task 3 (Steps 12-15: `worktree.test.ts` callers, the shared harness runner, and every inline implement-flow runner that creates an undeclared new file).
 - §10 strict planning scope + non-gating read-only → Task 2 (`planScope`) + Task 3 (Step 5).
 
 **2. Placeholder scan** — no TBD/TODO; every code step shows real code; every test shows real assertions.
