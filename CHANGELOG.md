@@ -1,6 +1,15 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.6.2] - 2026-07-11
+
+### Bug Fixes
+
+- **Fixed checks being marked as run when they actually failed to run.** Previously, a check that errored out (for example, due to an empty diff, missing components, or an infrastructure crash) was incorrectly treated as a completed check, which let the ticket advance instead of retrying — silently skipping the failure-recovery retry logic. Errors now correctly trigger a bounded retry before escalating.
+- **Rejected authors no longer leave invalid files behind.** When an author's work is rejected during check dispatch, the branch is now rolled back to the state before that author ran, so invalid or incomplete test files no longer pollute the eventual pull request or contaminate the next retry.
+- **Fixed stale external state after loopback corrections.** When a ticket is sent back from review to implementation or design for corrective work, the stage change is now properly synced to external systems, so those systems no longer show outdated status during the correction.
+- **Fixed missed updates when a ticket re-enters a stage.** State updates are now tracked per correction cycle, so re-entering a stage after being sent back for rework is no longer mistakenly treated as a duplicate and dropped.
+
 ## [0.6.1] - 2026-07-11
 
 ### Bug Fixes
