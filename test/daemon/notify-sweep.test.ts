@@ -3,7 +3,7 @@ import { RuntimeConfigSchema } from "../../src/config/runtime-config.ts";
 import { createNotifier } from "../../src/daemon/notify.ts";
 import { appendEvent } from "../../src/db/repos/event-log.ts";
 import { listPending } from "../../src/db/repos/projection-outbox.ts";
-import { recordDelivered } from "../../src/db/repos/signal.ts";
+import { insertPending, recordDelivered } from "../../src/db/repos/signal.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 function cfg(notify: "escalations" | "transitions" | "everything") {
@@ -42,12 +42,11 @@ test("sweepNew enqueues escalated+parked at 'escalations', adds transition/loopb
   db2.close();
 });
 
-test("notifyTerminal enqueues pr-ready(success) and no-progress(high); skips blocked/parked", () => {
+test("notifyTerminal enqueues pr-ready(success) and no-progress(high); skips parked", () => {
   const { db, ticketId } = makeTestDb();
   const n = createNotifier(cfg("escalations"));
   n.notifyTerminal(db, ticketId, "pr-ready");
   n.notifyTerminal(db, ticketId, "no-progress");
-  n.notifyTerminal(db, ticketId, "blocked");
   n.notifyTerminal(db, ticketId, "parked");
   const got = payloads(db);
   db.close();
@@ -55,6 +54,24 @@ test("notifyTerminal enqueues pr-ready(success) and no-progress(high); skips blo
     { event: "PR ready to merge", severity: "success" },
     { event: "gave up (no progress)", severity: "high" },
   ]);
+});
+
+test("blocked terminal: dead-end notifies, escalation-blocked does not (already evented)", () => {
+  // dead-end: no pending human_resume → a "gave up (blocked)" notification.
+  // Reuse the file's existing `payloads(db)` helper (returns {event, severity}).
+  const a = makeTestDb();
+  createNotifier(cfg("escalations")).notifyTerminal(a.db, a.ticketId, "blocked");
+  const aPayloads = payloads(a.db);
+  a.db.close();
+  expect(aPayloads).toEqual([{ event: "gave up (blocked)", severity: "high" }]);
+
+  // escalation-blocked: a pending human_resume → NO terminal notification.
+  const b = makeTestDb();
+  insertPending(b.db, { ticketId: b.ticketId, signalType: "human_resume", reason: "boom" });
+  createNotifier(cfg("escalations")).notifyTerminal(b.db, b.ticketId, "blocked");
+  const bCount = payloads(b.db).length;
+  b.db.close();
+  expect(bCount).toBe(0);
 });
 
 test("disabled notifier enqueues nothing", () => {

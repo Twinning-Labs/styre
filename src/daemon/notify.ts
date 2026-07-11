@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { type EventLogRow, listByTicketSince } from "../db/repos/event-log.ts";
 import { enqueue } from "../db/repos/projection-outbox.ts";
-import { getDeliveredPayload } from "../db/repos/signal.ts";
+import { getDeliveredPayload, listPending } from "../db/repos/signal.ts";
 import { getTicket } from "../db/repos/ticket.ts";
 import type { NotificationMessage, NotifySeverity } from "../integrations/notifier.ts";
 
@@ -30,9 +30,10 @@ function eventDecision(
   }
 }
 
-/** Map a terminal outcome → (severity, event) or null. `blocked`/`parked` are intentionally null:
- *  their notification already went out as a swept event (`escalated`/`parked`); the rare dead-end
- *  `blocked` is exit-code-only for v1 (deferred, to avoid double-notifying escalation-blocked). */
+/** Map a terminal outcome → (severity, event) or null. `parked` is intentionally null: its
+ *  notification already went out as a swept event. `blocked` is handled separately in
+ *  `notifyTerminal` (it depends on DB state — whether a `human_resume` signal is pending — to
+ *  distinguish an already-notified escalation from a resolver dead-end). */
 function terminalDecision(outcome: string): { severity: NotifySeverity; event: string } | null {
   switch (outcome) {
     case "pr-ready":
@@ -97,6 +98,16 @@ export function createNotifier(config: RuntimeConfig): {
     },
     notifyTerminal(db, ticketId, outcome) {
       if (!enabled) return;
+      if (outcome === "blocked") {
+        // Escalation-blocked already emitted an `escalated` event (swept). Only a resolver
+        // dead-end (no pending human_resume) needs a terminal ping.
+        const pending = listPending(db, ticketId);
+        if (pending.some((s) => s.signal_type === "human_resume")) return;
+        post(db, ticketId, `notify:${ticketId}:term:blocked`, {
+          ...buildMsg(db, ticketId, "gave up (blocked)", "high"),
+        });
+        return;
+      }
       const d = terminalDecision(outcome);
       if (!d) return;
       post(
