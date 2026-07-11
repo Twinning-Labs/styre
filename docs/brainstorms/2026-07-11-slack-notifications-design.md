@@ -229,8 +229,10 @@ withdrawn: `appendEvent(db, e)` carries no `rc`, and ~11 escalation callers — 
   enqueues keyed on the outcome. A best-effort enqueue that itself fails is logged and dropped — never
   fatal to the run.
 
-Both parts feed the outbox; the per-tick drain flushes mid-run rows promptly and the **post-loop
-drain (§2 BLOCKER-1 fix)** flushes the tail. `everything`-tier loopbacks ride the same event sweep,
+Both parts feed the outbox; the per-tick drain flushes mid-run rows and the **post-loop drain (§2
+BLOCKER-1 fix)** flushes the tail. (Minor latency note: the per-tick sweep runs *after* that tick's
+own internal drain, so a mid-run ping is delivered by the *next* tick's drain — a one-tick lag, not
+"immediately"; terminal delivery is unaffected.) `everything`-tier loopbacks ride the same event sweep,
 admitted by the policy filter only at `everything` — no extra wiring.
 
 ---

@@ -631,7 +631,13 @@ function cfg(notify: "escalations" | "transitions" | "everything") {
 const payloads = (db: ReturnType<typeof makeTestDb>["db"]) =>
   listPending(db)
     .filter((r) => r.target === "notify")
-    .map((r) => JSON.parse(r.payload_json as string) as { event: string; severity: string });
+    .map((r) => {
+      // Pick fields explicitly — the stored message also has `ticketIdent`, and toEqual is a deep
+      // check that would fail on the extra key. (The ident IS load-bearing; don't drop it from the
+      // message — strip it here, in the test helper.)
+      const p = JSON.parse(r.payload_json as string) as { event: string; severity: string };
+      return { event: p.event, severity: p.severity };
+    });
 
 test("sweepNew enqueues escalated+parked at 'escalations', adds transition/loopback by tier", () => {
   const { db, ticketId } = makeTestDb();
@@ -819,16 +825,21 @@ git commit -m "feat(notify): driver-level sweep (policy filter + terminal) enque
 import { expect, test } from "bun:test";
 import { driveToTerminal } from "../../src/daemon/run-ticket.ts";
 import { RuntimeConfigSchema } from "../../src/config/runtime-config.ts";
+import { setTicketStatus } from "../../src/db/repos/ticket.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import { fakeNotifier } from "../../src/integrations/adapters/fake-notifier.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 test("a drive that idles to no-progress delivers the terminal 'gave up' notification (post-loop drain)", async () => {
   const { db, ticketId } = makeTestDb();
+  // Park the ticket OUT of v_ready_tickets (status 'waiting', no pending signal) so no ready ticket
+  // exists → `tick` returns {advanced:0} without ever calling advanceOneStep → the (empty) registry
+  // is never consulted → driveToTerminal idles to "no-progress" after IDLE_CAP(3) ticks. (A pending
+  // human_resume would instead make it return "blocked" — don't use one here.)
+  setTicketStatus(db, ticketId, "waiting");
   const notifier = fakeNotifier();
   const config = RuntimeConfigSchema.parse({ notifier: "slack", notify: "escalations", slack: { channel: "#x" } });
 
-  // An empty registry never advances → driveToTerminal idles to "no-progress" in a few ticks.
   const result = await driveToTerminal(db, {} as never, {
     ticketId,
     config,
@@ -838,15 +849,22 @@ test("a drive that idles to no-progress delivers the terminal 'gave up' notifica
   db.close();
 
   expect(result.outcome).toBe("no-progress");
-  // The centerpiece guard: the terminal notify was DELIVERED, not left pending.
+  // The centerpiece guard: the terminal notify was DELIVERED (post-loop drain), not left pending.
   expect(notifier.calls.some((c) => c.event === "gave up (no progress)" && c.severity === "high")).toBe(true);
 });
 ```
 
-> If an empty registry throws instead of idling, seed the ticket into a state whose first step is
-> unregistered so `advanceOneStep` reports `advanced: 0`; the assertion (terminal notification
-> delivered) stays fixed. This test's job is to prove the `finish()` terminal-enqueue + post-loop
-> drain actually send — the per-event mapping is already covered by Task 6.
+> Why the ticket is parked, not left active: `makeTestDb()` seeds `ENG-1` at `stage='design',
+> status='active'`, which satisfies `v_ready_tickets` — so a live drive would call
+> `advanceOneStep` → `registry.resolve(...)` and the empty `{}` registry throws a `TypeError` on
+> the first tick (`advance.ts:103`), never reaching a terminal. Setting status `'waiting'` removes
+> it from the ready set so the registry is never touched. This test's job is to prove the
+> `finish()` terminal-enqueue + post-loop drain actually deliver — the per-event mapping is covered
+> by Task 6.
+>
+> **Verify `setTicketStatus` import:** `grep -n "export function setTicketStatus" src/db/repos/ticket.ts`
+> (it is the same helper `escalateProjection` uses in `projector.ts`). Adjust the import path if it
+> lives elsewhere.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -965,3 +983,7 @@ git commit -m "feat(notify): eager fail-loud + startup confirmation line in run.
 
 - **§1 abstraction** → Tasks 2, 3, 5. **§2 delivery (outbox + sweep + post-loop drain + non-escalate + seq idempotency)** → Tasks 4, 6, 7. **§3 policy dial + silent terminals** → Task 6 (+7 for the terminal path). **§4 setup/fail-loud** → Tasks 1, 2, 8. **§8 deferrals** honored (no two-way, no durable SoT).
 - **Known v1 narrowing (explicitly deferred, not silent):** message omits `ticketTitle`/`links`; dead-end `blocked` terminal is exit-code-only (avoids double-notifying escalation-blocked); Slack render is mrkdwn text, not Block Kit. Each is a trivial later enrichment.
+
+## Review log
+
+- **2026-07-11 (v2)** — Folded an independent code-grounded review that verified every API call against the real tree (imports, signatures, the `enqueue` JSON round-trip, the non-escalate guard, the 7 `finish()` sites, typecheck compatibility — all confirmed correct). Two **test** defects fixed (implementation code was accurate): **(1)** Task 7's `{} as never` registry throws a `TypeError` on a live/active ticket rather than idling — fixed by parking the ticket (`status='waiting'`, no signal) out of `v_ready_tickets` so the registry is never consulted, and corrected the (wrong) fallback note. **(2)** Task 6's `payloads` helper type-asserts but doesn't strip `ticketIdent`, so `toEqual` fails — fixed the helper to pick `{event, severity}` explicitly (the ident stays in the message; the assertion was the bug). NIT noted in the design (per-tick sweep runs after the tick's own drain → mid-run pings land one tick late; terminal delivery unaffected).
