@@ -1,6 +1,7 @@
 # Slack notifications — outbound notifier abstraction (Piece A)
 
-**Status:** design v2 — independent review folded (§10); awaiting operator sign-off
+**Status:** implemented — all 8 tasks landed on `feat/slack-notifications` (Tasks 1-8; Task 8 wires
+`assertSlackConfigured` + a startup confirmation log into `src/cli/run.ts`)
 **Date:** 2026-07-11
 **Branch/worktree:** `feat/slack-notifications` (off `origin/main` @ `f3e2987` v0.6.0)
 **Scope:** Piece **A** only (outbound notifications). Piece B (durable SoT) and Piece C
