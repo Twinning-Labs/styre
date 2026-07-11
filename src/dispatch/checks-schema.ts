@@ -18,6 +18,10 @@ export type AuthoredCheck = z.infer<typeof AuthoredCheckSchema>;
  *  well-formed). */
 export const ChecksOutputSchema = z.object({
   checksAuthored: z.array(AuthoredCheckSchema),
+  /** Any NON-test helper files (a fixture / conftest.py) the author created, so a legitimate helper
+   *  is committed rather than rejected as scratch. Test files themselves are already in
+   *  `checksAuthored[].test_file` and need not be repeated here. Absent/empty for the common case. */
+  new_files: z.array(z.string()).default([]),
 });
 
 export type ChecksOutput = z.infer<typeof ChecksOutputSchema>;
