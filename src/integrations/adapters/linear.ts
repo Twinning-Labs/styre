@@ -22,7 +22,7 @@
  * comment is posted; re-running the same idempotencyKey returns null (no duplicate).
  */
 import { LinearClient } from "@linear/sdk";
-import type { IssueState, IssueTrackerPort } from "../issue-tracker.ts";
+import type { IssueState, IssueTrackerPort, SetStateResult } from "../issue-tracker.ts";
 import { type IngestedTicket, deriveTypeLabel } from "../ticket-source.ts";
 
 /** Neutral IssueState → Linear workflow-state NAME. Resolved to a team-scoped state id per call. */
@@ -92,12 +92,12 @@ export function linearIssueTracker(opts?: { apiKey?: string }): IssueTrackerPort
       };
     },
 
-    async setState(ref: string, state: IssueState): Promise<void> {
+    async setState(ref: string, state: IssueState): Promise<SetStateResult> {
       const issue = await client.issue(ref);
       const targetName = LINEAR_STATE_NAME[state];
       // No-op if already there (declarative).
       const currentState = await issue.state;
-      if (currentState?.name === targetName) return;
+      if (currentState?.name === targetName) return { applied: true };
       const team = await issue.team;
       if (!team) throw new Error(`linear.setState: issue ${ref} has no team`);
       const states = await team.states();
@@ -108,6 +108,7 @@ export function linearIssueTracker(opts?: { apiKey?: string }): IssueTrackerPort
         );
       }
       await client.updateIssue(issue.id, { stateId: target.id });
+      return { applied: true };
     },
 
     async setLabels(ref: string, change: { add: string[]; remove: string[] }): Promise<void> {

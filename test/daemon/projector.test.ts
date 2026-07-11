@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { drainOutbox } from "../../src/daemon/projector.ts";
+import { listByTicket } from "../../src/db/repos/event-log.ts";
 import { enqueue, listPending } from "../../src/db/repos/projection-outbox.ts";
 import { listPending as listSignals } from "../../src/db/repos/signal.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
@@ -39,6 +40,28 @@ test("drainOutbox applies set_labels with the add/remove delta", async () => {
   db.close();
   expect(fake.calls[0]?.method).toBe("setLabels");
   expect(fake.calls[0]?.args[1]).toEqual({ add: ["stage:implement"], remove: ["stage:design"] });
+});
+
+test("a skipped state projection (applied:false) emits a projection_skipped note, row delivered", async () => {
+  const { db, ticketId } = makeTestDb();
+  enqueue(db, {
+    ticketId,
+    target: "issue_tracker",
+    op: "set_state",
+    payload: { state: "done" },
+    idempotencyKey: "k-skip",
+  });
+  const skipping = fakeIssueTracker();
+  skipping.setState = async () => ({ applied: false, reason: "no transition to Done" });
+  const out = await drainOutbox(db, { issueTracker: skipping });
+  const events = listByTicket(db, ticketId);
+  db.close();
+  expect(out.sent).toBe(1); // a skip is a delivered row, not a transport failure/retry
+  const note = events.find(
+    (e) => e.kind === "note" && (e.payload_json ?? "").includes("projection_skipped"),
+  );
+  expect(note).toBeDefined();
+  expect(note?.reason).toContain("no transition to Done");
 });
 
 test("a transient port error bumps attempts and keeps the row pending", async () => {
