@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.6.1] - 2026-07-11
+
+### Bug Fixes
+
+- **Dispatch commits no longer sweep up agent scratch files.** Previously, styre committed every changed file after each dispatch step, which could pull in stray reproduction scripts and debug files that the agent created but never intended to include. Each step now only commits the files it actually declares as its deliverable, so leftover scratch files are either left uncommitted (with a note in the event log) or cause the step to fail loudly and retry rather than silently polluting the diff.
+
 ## [0.6.0] - 2026-07-10
 
 ### Features
