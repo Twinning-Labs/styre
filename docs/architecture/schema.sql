@@ -52,7 +52,7 @@ CREATE TABLE schema_meta (
 );
 INSERT INTO schema_meta (version, applied_at, note)
 VALUES (7, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-        'v7: neutralize vendor-named identifiers (linear_* -> external_*, linear_id_cache -> external_id_cache) ahead of the JIRA adapter');
+        'v7: neutralize vendor-named identifiers to external_* naming ahead of the JIRA adapter');
 
 -- ============================================================================
 -- §A  PROJECT + TICKET   (replaces issue-state.json + stage:* / pipeline:* labels)
