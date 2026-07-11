@@ -11,7 +11,11 @@ const EMOJI: Record<NotificationMessage["severity"], string> = {
 /** Slack adapter: posts one message per notification via chat.postMessage. Token + channel are
  *  passed in (token originates from SLACK_BOT_TOKEN in env, resolved in makeProjectorPorts).
  *  `fetch` is injectable for tests. v1 renders mrkdwn text; Block Kit is a later enrichment. */
-export function slackNotifier(opts: { token: string; channel: string; fetch?: FetchLike }): NotifierPort {
+export function slackNotifier(opts: {
+  token: string;
+  channel: string;
+  fetch?: FetchLike;
+}): NotifierPort {
   const doFetch: FetchLike = opts.fetch ?? ((u, i) => fetch(u, i));
   return {
     async notify(msg) {

@@ -40,9 +40,7 @@ export function assertSlackConfigured(
 ): void {
   if (config.notifier !== "slack") return;
   if (!env.SLACK_BOT_TOKEN || env.SLACK_BOT_TOKEN.length === 0) {
-    throw new Error(
-      "notifier 'slack' is set but SLACK_BOT_TOKEN is missing from the environment",
-    );
+    throw new Error("notifier 'slack' is set but SLACK_BOT_TOKEN is missing from the environment");
   }
   if (!config.slack || config.slack.channel.length === 0) {
     throw new Error("notifier 'slack' is set but slack.channel is missing from config.json");

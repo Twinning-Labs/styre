@@ -9,7 +9,12 @@ test("slackNotifier posts chat.postMessage with token+channel and returns the ts
     return new Response(JSON.stringify({ ok: true, ts: "1700000000.000100" }), { status: 200 });
   };
   const port = slackNotifier({ token: "xoxb-abc", channel: "#styre", fetch: fakeFetch });
-  const r = await port.notify({ ticketIdent: "ENG-1", event: "escalated", severity: "high", reason: "step failed" });
+  const r = await port.notify({
+    ticketIdent: "ENG-1",
+    event: "escalated",
+    severity: "high",
+    reason: "step failed",
+  });
 
   expect(r.ref).toBe("1700000000.000100");
   expect(seen.url).toBe("https://slack.com/api/chat.postMessage");

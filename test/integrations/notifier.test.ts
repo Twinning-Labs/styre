@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { assertSlackConfigured, selectNotifier } from "../../src/integrations/notifier.ts";
 import { fakeNotifier } from "../../src/integrations/adapters/fake-notifier.ts";
+import { assertSlackConfigured, selectNotifier } from "../../src/integrations/notifier.ts";
 
 test("selectNotifier: 'none' → undefined, 'slack' → adapter, unknown → throw", () => {
   expect(selectNotifier({ notifier: "none" }, {})).toBeUndefined();
@@ -11,14 +11,17 @@ test("selectNotifier: 'none' → undefined, 'slack' → adapter, unknown → thr
 
 test("assertSlackConfigured: passes when off; throws on missing token or channel", () => {
   expect(() => assertSlackConfigured({ notifier: "none" }, {})).not.toThrow();
+  expect(() => assertSlackConfigured({ notifier: "slack", slack: { channel: "#x" } }, {})).toThrow(
+    /SLACK_BOT_TOKEN/,
+  );
+  expect(() => assertSlackConfigured({ notifier: "slack" }, { SLACK_BOT_TOKEN: "xoxb-1" })).toThrow(
+    /slack.channel/,
+  );
   expect(() =>
-    assertSlackConfigured({ notifier: "slack", slack: { channel: "#x" } }, {}),
-  ).toThrow(/SLACK_BOT_TOKEN/);
-  expect(() =>
-    assertSlackConfigured({ notifier: "slack" }, { SLACK_BOT_TOKEN: "xoxb-1" }),
-  ).toThrow(/slack.channel/);
-  expect(() =>
-    assertSlackConfigured({ notifier: "slack", slack: { channel: "#x" } }, { SLACK_BOT_TOKEN: "xoxb-1" }),
+    assertSlackConfigured(
+      { notifier: "slack", slack: { channel: "#x" } },
+      { SLACK_BOT_TOKEN: "xoxb-1" },
+    ),
   ).not.toThrow();
 });
 
@@ -28,5 +31,7 @@ test("fakeNotifier records calls and can force failure", async () => {
   expect(r.ref).toContain("fake-ts");
   expect(ok.calls[0]?.ticketIdent).toBe("ENG-1");
   const bad = fakeNotifier({ fail: true });
-  await expect(bad.notify({ ticketIdent: "ENG-2", event: "x", severity: "info" })).rejects.toThrow();
+  await expect(
+    bad.notify({ ticketIdent: "ENG-2", event: "x", severity: "info" }),
+  ).rejects.toThrow();
 });
