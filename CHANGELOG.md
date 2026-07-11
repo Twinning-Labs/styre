@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.6.3] - 2026-07-11
+
+### Bug Fixes
+
+- **Code review findings now reach the implement agent when work is bounced back for re-coding.** Previously, only verify feedback and still-failing acceptance criteria were passed along on a review-triggered loopback, so the implement agent had no idea what the review actually flagged. This caused the same finding to be raised again on the next review, and styre would eventually give up with a "no progress: identical review findings" error. The blocking findings from the latest review are now surfaced to the implement agent from the very first loopback.
+- **The checks agent is now told not to leave scratch or debug files behind, and how to declare legitimate helper files.** Since a recent change, any undeclared new file causes a commit to be rejected and retried, but the checks prompt never explained this or gave the agent a way to declare a genuine non-test helper file (like a fixture or `conftest.py`). Without that guidance, the agent could re-create the same scratch file on every retry and get stuck in a reject-and-retry loop until it ran out of attempts. The checks prompt now includes the same anti-scratch guidance and `new_files` declaration field that the implement prompt already had.
+
 ## [0.6.2] - 2026-07-11
 
 ### Bug Fixes
