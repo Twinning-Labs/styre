@@ -1,5 +1,5 @@
 import { defineCommand } from "citty";
-import { discoverRuntimeConfig } from "../config/discover.ts";
+import { discoverRuntimeConfig, slugForCwd } from "../config/discover.ts";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { slackNotifier } from "../integrations/adapters/slack.ts";
 import {
@@ -43,6 +43,10 @@ export const notifyCommand = defineCommand({
   args: {
     test: { type: "boolean", description: "Send one test message to the configured channel" },
     config: { type: "string", description: "Explicit config.json path" },
+    slug: {
+      type: "string",
+      description: "Project slug for per-project config (default: derived from the cwd repo)",
+    },
   },
   async run({ args }) {
     if (!args.test) {
@@ -50,7 +54,10 @@ export const notifyCommand = defineCommand({
       process.exitCode = 2;
       return;
     }
-    const rc = discoverRuntimeConfig({ explicitPath: args.config });
+    // Resolve config the same way `styre run` does, so per-project (per-slug) Slack config is
+    // picked up — otherwise `notify --test` could verify a different channel than a real run uses.
+    const slug = args.slug && args.slug.length > 0 ? args.slug : (slugForCwd() ?? undefined);
+    const rc = discoverRuntimeConfig({ explicitPath: args.config, slug });
     const ref = await runNotifyTest(rc, {});
     process.stderr.write(
       `notifier: ${rc.notifier} → ${rc.slack?.channel}\n✓ sent test message (ts ${ref})\n`,
