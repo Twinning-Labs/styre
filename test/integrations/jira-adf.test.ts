@@ -71,3 +71,31 @@ test("null / non-doc input returns empty string", () => {
   expect(adfToMarkdown({ type: "paragraph" })).toBe("");
   expect(adfToMarkdown("plain")).toBe("");
 });
+
+test("malformed doc with non-array content returns empty string, never throws", () => {
+  expect(adfToMarkdown({ type: "doc", content: "foo" })).toBe("");
+  expect(adfToMarkdown({ type: "doc", content: 5 })).toBe("");
+  expect(adfToMarkdown({ type: "doc", content: { a: 1 } })).toBe("");
+});
+
+test("blockquote and em/code marks render", () => {
+  const adf = {
+    type: "doc",
+    version: 1,
+    content: [
+      {
+        type: "blockquote",
+        content: [{ type: "paragraph", content: [{ type: "text", text: "quoted" }] }],
+      },
+      {
+        type: "paragraph",
+        content: [
+          { type: "text", text: "it", marks: [{ type: "em" }] },
+          { type: "text", text: " ", marks: [] },
+          { type: "text", text: "co", marks: [{ type: "code" }] },
+        ],
+      },
+    ],
+  };
+  expect(adfToMarkdown(adf)).toBe("> quoted\n\n*it* `co`");
+});

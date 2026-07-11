@@ -79,7 +79,8 @@ function renderBlock(node: AdfNode, indent: string): string {
   }
 }
 
-function renderBlocks(nodes: AdfNode[], indent: string): string {
+function renderBlocks(nodes: AdfNode[] | undefined, indent: string): string {
+  if (!Array.isArray(nodes)) return "";
   return nodes
     .map((n) => renderBlock(n, indent))
     .filter((s) => s.length > 0)
@@ -89,6 +90,6 @@ function renderBlocks(nodes: AdfNode[], indent: string): string {
 export function adfToMarkdown(doc: unknown): string {
   if (!doc || typeof doc !== "object") return "";
   const root = doc as AdfNode;
-  if (root.type !== "doc" || !root.content) return "";
+  if (root.type !== "doc" || !Array.isArray(root.content)) return "";
   return renderBlocks(root.content, "");
 }
