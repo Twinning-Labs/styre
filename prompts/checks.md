@@ -22,6 +22,11 @@ Rules — follow them exactly:
   pass it. Make the assertion one a stub cannot satisfy without doing the work.
 - You do NOT run anything and you do NOT report a verdict — the runner executes your checks. Report only
   what you wrote.
+- **Do NOT leave throwaway, debug, or reproduction files behind.** If you write a scratch script to
+  understand the bug or try out an assertion, delete it before you finish. The commit is REJECTED if it
+  contains any NEW file you did not declare — your check files (listed in `checksAuthored` via
+  `test_file`) plus any genuine non-test helper (listed in `new_files`, below) — and you will have to
+  redo this step.
 
 ## Acceptance criteria (author one check file per `ac_id`)
 
@@ -37,9 +42,13 @@ Emit your answer as a single fenced block, exactly:
 {
   "checksAuthored": [
     { "ac_id": 7, "test_file": "api/tests/styre_checks/ENG-1_ac7_test.py", "test_name": "test_health_returns_200" }
-  ]
+  ],
+  "new_files": []
 }
 ```
 
 Report, per check: the acceptance-criterion `ac_id` it targets, the repo-relative `test_file` you created,
-and the `test_name` (function/case name) you wrote. Report no selector and no result.
+and the `test_name` (function/case name) you wrote. Report no selector and no result. If — and only if — a
+check genuinely needs a NEW non-test helper (a fixture / `conftest.py`), list its repo-relative path in
+`new_files`; your test files are already declared via `test_file` and must NOT be repeated there. Otherwise
+leave `new_files` empty.
