@@ -20,8 +20,15 @@ Rules — follow them exactly:
   promises. A status-code-only or existence-only assertion (e.g. `assert resp.status == 201` with no
   check of the body, or `assert hasattr(mod, "fn")`) is too weak: a stub that returns `201 {}` would
   pass it. Make the assertion one a stub cannot satisfy without doing the work.
-- You do NOT run anything and you do NOT report a verdict — the runner executes your checks. Report only
-  what you wrote.
+- **Run each check you write and CONFIRM it FAILS on the current (unfixed) code before you finish.** Use
+  the detected test command for the matching stack. A check that PASSES right now is *vacuous* — it is not
+  testing the criterion — so if it passes, or fails only for a trivial reason (import/syntax/collection
+  error rather than the asserted behavior), fix it until it fails *because the criterion is unmet*. You
+  still do NOT report a verdict — the runner re-runs your checks as the source of truth; you run them only
+  to prove they are genuinely RED-first.
+- **For a numeric, data-shape, or algorithmic criterion, assert the SPECIFIC correct value the fixed code
+  must produce** (the one that differs from the current wrong output) — never a property that holds
+  regardless of the fix. If you cannot state the exact expected value, read the code/docs until you can.
 - **Do NOT leave throwaway, debug, or reproduction files behind.** If you write a scratch script to
   understand the bug or try out an assertion, delete it before you finish. The commit is REJECTED if it
   contains any NEW file you did not declare — your check files (listed in `checksAuthored` via

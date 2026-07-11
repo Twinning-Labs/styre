@@ -42,6 +42,23 @@ test("checksFeedback surfaces the classification reason after a vacuous re-autho
   expect(out).toContain("AC 1");
 });
 
+test("checksFeedback tells the re-author the prior check passed on broken code and to run it", () => {
+  const { db, ticketId } = makeTestDb();
+  insertAc(db, { ticketId, seq: 1, text: "ac", source: "checklist" });
+  const check = insertAcCheck(db, { ticketId, acId: 1, selector: "s", testPath: "p" });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-classification",
+    result: "fail",
+    detail: { acCheckId: check.id, acId: 1, class: "vacuous", reason: "asserts a constant" },
+  });
+  applyChecksVerdict(db, ticketId, { stepKey: "checks:classify" });
+  const out = checksFeedback(db, ticketId).toLowerCase();
+  db.close();
+  expect(out).toContain("passed"); // it passed on the still-broken code
+  expect(out).toMatch(/run .*(it|check|test)/); // instruct running to confirm RED
+});
+
 test("checksFeedback reads the most recent checks loopback, not an earlier one", () => {
   const { db, ticketId } = makeTestDb();
   // Two DISTINCT ACs (not two rounds of the same AC) so both loopbacks stay "first round" — an escalate
