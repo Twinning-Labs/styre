@@ -2,51 +2,212 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a first-class JIRA Cloud adapter implementing the existing `IssueTrackerPort`, config-selected as `issueTracker: "jira"`, at functional parity with the Linear adapter (inbound fetch + outbound state/labels/comments).
+**Goal:** Add a first-class JIRA Cloud adapter implementing the existing `IssueTrackerPort`, config-selected as `issueTracker: "jira"`, at functional parity with the Linear adapter (inbound fetch + outbound state/labels/comments) — including a structured, monitorable telemetry event when a state projection is skipped.
 
-**Architecture:** One new adapter file `src/integrations/adapters/jira.ts` (the vendor edge, hand-rolled `fetch` — no SDK) plus a small `src/integrations/adapters/jira-adf.ts` (ADF→markdown for descriptions). Following the established adapter convention (`linear.ts` / `github.ts`): **all decision logic lives in pure, unit-tested helpers; the HTTP-calling methods are thin shells, covered by the loop-level fake port + a documented operator smoke test, not unit tests.** Registration + config + env touch-ups are additive; no schema change (M-jira-2 touches no SQLite).
+**Architecture:** One new adapter file `src/integrations/adapters/jira.ts` (the vendor edge, hand-rolled `fetch` — no SDK) plus `src/integrations/adapters/jira-adf.ts` (ADF→markdown for descriptions). Following the established adapter convention (`linear.ts` / `github.ts`): **all decision logic lives in pure, unit-tested helpers; the HTTP-calling methods are thin shells, covered by the loop-level fake port + a documented operator smoke test, not unit tests.** A foundation task first makes `setState` return a disposition so the **projector** (which holds the DB + ticket) writes a structured `projection_skipped` telemetry event when the board can't be updated — the DB-backed telemetry path Styre already uses, keeping the vendor adapter free of telemetry plumbing.
 
 **Tech Stack:** TypeScript, Bun (`bun test`), `zod` (config), the global `fetch`. No new dependencies.
 
 ## Global Constraints
 
-- **Never commit to `main`.** Work on the M-jira-2 branch (`feat/jira-adapter`, branched after M-jira-1). Branch prefix `feat/`; PR-only; **no auto-merge** (operator merges).
-- **Depends on M-jira-1** (the `externalId` / `external_*` neutralization — PR #74). This plan assumes those neutral names exist. `IngestedTicket` fields: `ident`, `title`, `description: string | null`, `typeLabel: "Bug"|"Feature"|"Improvement"`, `externalId: string | null`, `url: string | null`.
-- **The vendor edge stays in `jira.ts`.** No `fetch`/JIRA calls anywhere else. The core depends only on `../issue-tracker.ts`.
-- **`IssueState` values (exact):** `"in_progress" | "in_review" | "done" | "canceled" | "blocked"` (from `src/integrations/issue-tracker.ts:6`).
-- **Testing convention (binding):** unit-test ONLY the pure helpers (mirrors `test/integrations/linear-adapter.test.ts`). Do NOT write unit tests that hit `fetch` or mock the HTTP layer for the adapter methods — they are verified by typecheck + build + the loop-level fake + the operator smoke test documented in the adapter docstring.
+- **Never commit to `main`.** Work on `feat/jira-adapter` (branched after M-jira-1). Branch prefix `feat/`; PR-only; **no auto-merge** (operator merges).
+- **Depends on M-jira-1** (the `externalId` / `external_*` neutralization — PR #74). `IngestedTicket` fields: `ident`, `title`, `description: string | null`, `typeLabel: "Bug"|"Feature"|"Improvement"`, `externalId: string | null`, `url: string | null`.
+- **The vendor edge stays in `jira.ts`.** No `fetch`/JIRA calls anywhere else. The core depends only on `../issue-tracker.ts`. The adapter gets NO `db`, `emit`, or telemetry handle — it is a pure vendor edge (linear.ts:1-8 precedent).
+- **`IssueState` values (exact):** `"in_progress" | "in_review" | "done" | "canceled" | "blocked"` (`src/integrations/issue-tracker.ts:6`).
+- **`setState` return contract (NEW — Task 1):** `setState(ref, state): Promise<SetStateResult>` where `SetStateResult = { applied: boolean; reason?: string }`. `applied: true` = state set (or already correct); `applied: false` = projection skipped, board left unchanged (a workflow mismatch, NOT a transport failure). This changes the shared `IssueTrackerPort` and both existing implementers (Linear + fake) plus the projector — a small typed change, done in Task 1 before the JIRA adapter uses it.
+- **Observable soft-fail (the resolved design decision):** on a workflow mismatch / screen-field rejection, `setState` **returns `{ applied: false, reason }`** (never throws, never `console.warn`). The projector turns that into a **structured telemetry event** via `appendEvent(db, { kind: "note", reason, payload: { event: "projection_skipped", target_state } })`, which the existing per-run emitter streams to the NDJSON feed (the same DB-backed path the projector already uses for escalations). This is the monitorable board-drift signal the design requires. Genuine transport errors (5xx / 401 / network) still **throw** so the outbox retries. (We reuse the existing `event_log` kind `"note"` + a machine-readable payload discriminator — **no schema change**; a dedicated `EventKind` is a trivial future promotion if monitoring wants one.)
+- **No schema change** in M-jira-2 (uses the existing `"note"` event kind).
 - **Auth:** JIRA Cloud, REST API v3 at `<JIRA_BASE_URL>/rest/api/3`, Basic auth `base64(JIRA_EMAIL:JIRA_API_TOKEN)`. Missing any of the three env vars → a setup/GOAL-INSTALL error (mirrors `linear.ts:71`).
-- **Loop-not-halt:** `setState` soft-fails (leaves the board unchanged, does NOT throw) on a workflow mismatch or a screen-field rejection; genuine transport errors (5xx / 401 / network) still throw so the outbox retries.
-- **AC parsing depends on the ADF renderer:** JIRA v3 descriptions are always ADF; the renderer MUST turn ADF `taskList`/`taskItem` nodes into GFM `- [ ]` / `- [x]` so `parseAcChecklist` (`src/dispatch/ac-checklist.ts`, regex `^\s*[-*+]\s+\[[ xX]\]`) sees them.
+- **AC parsing depends on the ADF renderer:** JIRA v3 descriptions are always ADF; the renderer MUST turn `taskList`/`taskItem` nodes into GFM `- [ ]` / `- [x]` so `parseAcChecklist` (`src/dispatch/ac-checklist.ts`, regex `^\s*[-*+]\s+\[[ xX]\]`) sees them.
+- **Testing convention (binding):** unit-test ONLY the pure helpers (mirrors `test/integrations/linear-adapter.test.ts`). Do NOT write unit tests that hit `fetch` or mock the HTTP layer for the adapter methods — they are verified by typecheck + build + the loop-level fake + the operator smoke test documented in the adapter docstring.
 - **Commands** (from worktree root): typecheck `bun run typecheck`, tests `bun test`, lint `bun run lint`. Commits: Conventional Commits with the `Co-Authored-By: Claude Opus 4.8 (1M context)` + `Claude-Session:` trailers.
-- **OPEN DECISION (flag at review, do not silently resolve):** the `setState` soft-fail's *observable signal*. The adapter layer receives no telemetry `emit` handle today (`makeProjectorPorts` builds ports from config+profile only). This plan emits a distinct `[jira] setState …` `console.warn` (captured in `styre run` stderr) as the signal, and notes routing it through the telemetry NDJSON stream as a follow-up that needs an `emit` threaded into the adapter. Operator to confirm this is acceptable for M-jira-2 or approve the extra plumbing.
 
 ---
 
 ## File Structure
 
-- Create: `src/integrations/adapters/jira-adf.ts` — pure ADF `doc` → markdown renderer (one direction, descriptions).
-- Create: `test/integrations/jira-adf.test.ts` — renderer unit tests.
-- Create: `src/integrations/adapters/jira.ts` — the adapter: pure helpers (type map, status-target resolve, transition pick, label ops, comment ADF + marker, error map) + `request()` + factory with the 4 `IssueTrackerPort` methods.
-- Create: `test/integrations/jira-adapter.test.ts` — unit tests for the pure helpers only.
-- Modify: `src/config/runtime-config.ts` — add the optional `jira` block to `RuntimeConfigSchema`.
-- Modify: `test/config/runtime-config.test.ts` — assert the `jira` block parses.
-- Modify: `src/daemon/ports.ts` — register `jira` in the issue-tracker adapter map + thread `runtimeConfig.jira`.
-- Modify: `src/cli/setup.ts` — make `credNote` tracker-aware (JIRA trio vs `LINEAR_API_KEY`).
-- Create/Modify: `test/cli/setup-cred-note.test.ts` — test the tracker-aware `credNote` (new file; `credNote` is not currently exported — export it).
-- Modify: `src/agent/agent-env.ts` — add `JIRA_API_TOKEN` to `AGENT_ENV_DENYLIST`.
-- Modify: `test/…/agent-env` test (or add one) — assert `agentEnv` scrubs `JIRA_API_TOKEN`.
+- Modify: `src/integrations/issue-tracker.ts` — add `SetStateResult`; change `setState` return type. (Task 1)
+- Modify: `src/integrations/adapters/linear.ts` — return the disposition. (Task 1)
+- Modify: `src/integrations/adapters/fake-issue-tracker.ts` — return the disposition. (Task 1)
+- Modify: `src/daemon/projector.ts` — capture the `setState` disposition; emit the `projection_skipped` note. (Task 1)
+- Modify: `test/daemon/projector.test.ts` — add the projection-skipped-emits-a-note test. (Task 1)
+- Create: `src/integrations/adapters/jira-adf.ts` + `test/integrations/jira-adf.test.ts` — ADF→markdown renderer. (Task 2)
+- Create: `src/integrations/adapters/jira.ts` — pure helpers (Task 3) + factory/methods (Task 4).
+- Create: `test/integrations/jira-adapter.test.ts` — pure-helper unit tests. (Task 3)
+- Modify: `src/config/runtime-config.ts` + `test/config/runtime-config.test.ts` — the `jira` config block. (Task 3)
+- Modify: `src/daemon/ports.ts` + `test/integrations/issue-tracker.test.ts` — register `jira`. (Task 4)
+- Modify: `src/cli/setup.ts` + create `test/cli/setup-cred-note.test.ts` — tracker-aware readiness. (Task 5)
+- Modify: `src/agent/agent-env.ts` + `test/agent/agent-env.test.ts` — scrub `JIRA_API_TOKEN`. (Task 5)
 
 ---
 
-## Task 1: ADF → markdown renderer
+## Task 1: `setState` disposition + structured `projection_skipped` telemetry
+
+**Files:**
+- Modify: `src/integrations/issue-tracker.ts:6-19`
+- Modify: `src/integrations/adapters/linear.ts:95-111`
+- Modify: `src/integrations/adapters/fake-issue-tracker.ts:23-25`
+- Modify: `src/daemon/projector.ts:107-109`
+- Test: `test/daemon/projector.test.ts`
+
+**Interfaces:**
+- Produces: `interface SetStateResult { applied: boolean; reason?: string }`, exported from `issue-tracker.ts`; `IssueTrackerPort.setState(ref, state): Promise<SetStateResult>`. Consumed by every adapter (Linear now, JIRA in Task 4) and by the projector.
+
+- [ ] **Step 1: Write the failing projector test**
+
+Add to `test/daemon/projector.test.ts` (note the imports it needs — `listByTicket` from the event-log repo; check the file's existing imports and add if missing):
+
+```ts
+import { listByTicket } from "../../src/db/repos/event-log.ts";
+
+test("a skipped state projection (applied:false) emits a projection_skipped note, row delivered", async () => {
+  const { db, ticketId } = makeTestDb();
+  enqueue(db, {
+    ticketId,
+    target: "issue_tracker",
+    op: "set_state",
+    payload: { state: "done" },
+    idempotencyKey: "k-skip",
+  });
+  const skipping = fakeIssueTracker();
+  skipping.setState = async () => ({ applied: false, reason: "no transition to Done" });
+  const out = await drainOutbox(db, { issueTracker: skipping });
+  const events = listByTicket(db, ticketId);
+  db.close();
+  expect(out.sent).toBe(1); // a skip is a delivered row, not a transport failure/retry
+  const note = events.find(
+    (e) => e.kind === "note" && (e.payload_json ?? "").includes("projection_skipped"),
+  );
+  expect(note).toBeDefined();
+  expect(note?.reason).toContain("no transition to Done");
+});
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `bun test test/daemon/projector.test.ts`
+Expected: FAIL — `applied`/return-type mismatch (the fake `setState` returns void today) and no `projection_skipped` note is written.
+
+- [ ] **Step 3: Add `SetStateResult` and change the port in `src/integrations/issue-tracker.ts`**
+
+```ts
+// after the IssueState line (line 6), add:
+export interface SetStateResult {
+  /** true = the tracker state was set (or already correct); false = the projection was skipped and
+   *  the board left unchanged (a workflow mismatch — NOT a transport failure, which throws). */
+  applied: boolean;
+  /** when !applied: a short human reason, surfaced in the projection_skipped telemetry note. */
+  reason?: string;
+}
+```
+```ts
+// change the setState signature in the interface (line 13):
+// before
+  setState(ref: string, state: IssueState): Promise<void>;
+// after
+  setState(ref: string, state: IssueState): Promise<SetStateResult>;
+```
+
+- [ ] **Step 4: Return the disposition from the Linear adapter (`src/integrations/adapters/linear.ts`)**
+
+```ts
+// import (add SetStateResult to the existing type import on line 25):
+import type { IssueState, IssueTrackerPort, SetStateResult } from "../issue-tracker.ts";
+```
+```ts
+// setState signature (line 95):
+    async setState(ref: string, state: IssueState): Promise<SetStateResult> {
+```
+```ts
+// the already-there no-op (line 100):
+// before
+      if (currentState?.name === targetName) return;
+// after
+      if (currentState?.name === targetName) return { applied: true };
+```
+```ts
+// end of setState, after `await client.updateIssue(issue.id, { stateId: target.id });` (line 110):
+      return { applied: true };
+```
+(The existing `throw`s for a missing team / missing workflow state stay — those are hard config/transport errors, not soft skips. Linear's behavior is otherwise unchanged.)
+
+- [ ] **Step 5: Return the disposition from the fake (`src/integrations/adapters/fake-issue-tracker.ts`)**
+
+```ts
+// import (line 1):
+import type { IssueState, IssueTrackerPort, SetStateResult } from "../issue-tracker.ts";
+```
+```ts
+// setState (lines 23-25):
+// before
+    async setState(ref: string, state: IssueState) {
+      calls.push({ method: "setState", args: [ref, state] });
+    },
+// after
+    async setState(ref: string, state: IssueState): Promise<SetStateResult> {
+      calls.push({ method: "setState", args: [ref, state] });
+      return { applied: true };
+    },
+```
+
+- [ ] **Step 6: Emit the note in the projector (`src/daemon/projector.ts`)**
+
+`appendEvent` is already imported (used by `escalateProjection`). Change the `set_state` case (lines 107-109):
+
+```ts
+// before
+      case "set_state":
+        await it.setState(ref, payload.state as IssueState);
+        return null;
+// after
+      case "set_state": {
+        const res = await it.setState(ref, payload.state as IssueState);
+        if (!res.applied) {
+          // Board could not be updated (workflow mismatch) — NOT a transport failure. Record a
+          // structured, monitorable telemetry note; the row is still delivered (control runs on).
+          appendEvent(db, {
+            ticketId: row.ticket_id,
+            kind: "note",
+            reason: res.reason ?? "issue-tracker state projection skipped (board left unchanged)",
+            payload: { event: "projection_skipped", target_state: payload.state },
+          });
+        }
+        return null;
+      }
+```
+
+- [ ] **Step 7: Run tests + typecheck + lint**
+
+Run: `bun test test/daemon/projector.test.ts` → PASS (the new test + the existing ones; the two `throwing.setState = async () => { throw … }` stubs still typecheck — a thrown promise is assignable to `Promise<SetStateResult>`).
+Run: `bun test` → PASS (full suite; every `setState` caller now returns/handles the disposition).
+Run: `bun run typecheck` → PASS. Run: `bun run lint` → PASS.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/integrations/issue-tracker.ts src/integrations/adapters/linear.ts \
+  src/integrations/adapters/fake-issue-tracker.ts src/daemon/projector.ts test/daemon/projector.test.ts
+git commit -m "feat(projector): setState disposition + projection_skipped telemetry note
+
+setState returns { applied, reason? }; when a state projection is skipped
+(board unchanged, not a transport failure) the projector writes a structured
+event_log 'note' (payload.event=projection_skipped) that streams to the NDJSON
+telemetry feed. Foundation for the JIRA adapter's soft-fail. (M-jira-2)
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LnpZSryugjuH1W1rQgUFcp"
+```
+
+---
+
+## Task 2: ADF → markdown renderer
 
 **Files:**
 - Create: `src/integrations/adapters/jira-adf.ts`
 - Test: `test/integrations/jira-adf.test.ts`
 
 **Interfaces:**
-- Produces: `adfToMarkdown(doc: unknown): string` — renders a JIRA v3 ADF `doc` object to markdown; returns `""` for `null`/non-doc input; never throws. Consumed by `jira.ts` `fetchTicket` (Task 3).
+- Produces: `adfToMarkdown(doc: unknown): string` — renders a JIRA v3 ADF `doc` object to markdown; returns `""` for `null`/non-doc input; never throws. Consumed by `jira.ts` `fetchTicket` (Task 4).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -127,8 +288,7 @@ Expected: FAIL — `adfToMarkdown` is not defined / module missing.
  *  issue DESCRIPTIONS (always an ADF `doc` or null). We render to markdown so the existing
  *  parseAcChecklist sees GFM task-list items — the taskList/taskItem node is the load-bearing case
  *  (that is how a JIRA checklist becomes acceptance criteria). Unknown nodes degrade to their text
- *  content; the renderer never throws. Pure + unit-tested. Comments do NOT use this (markdown->ADF
- *  is not needed — the add_comment path is dead for both trackers). */
+ *  content; the renderer never throws. Pure + unit-tested. Comments do NOT use this. */
 
 type Mark = { type: string; attrs?: Record<string, unknown> };
 type AdfNode = {
@@ -151,7 +311,6 @@ function applyMarks(text: string, marks?: Mark[]): string {
   return out;
 }
 
-/** Inline content (text + marks + hardBreak) → a single string. */
 function renderInline(nodes: AdfNode[] | undefined): string {
   if (!nodes) return "";
   let out = "";
@@ -221,7 +380,7 @@ export function adfToMarkdown(doc: unknown): string {
 }
 ```
 
-Note on `renderList`: list items wrap their text in a `paragraph` child, so it reads `item.content?.[0]?.content` (the paragraph's inline content). This is the minimal-but-correct handling; deeply nested lists degrade gracefully (documented).
+Note on `renderList`: list items wrap their text in a `paragraph` child, so it reads `item.content?.[0]?.content` (the paragraph's inline content). Minimal-but-correct; deeply nested lists degrade gracefully.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -243,16 +402,16 @@ Claude-Session: https://claude.ai/code/session_01LnpZSryugjuH1W1rQgUFcp"
 
 ---
 
-## Task 2: Adapter pure helpers + config schema
+## Task 3: Adapter pure helpers + config schema
 
 **Files:**
-- Create: `src/integrations/adapters/jira.ts` (helpers + types only in this task; the factory/methods are Task 3)
+- Create: `src/integrations/adapters/jira.ts` (helpers + types only in this task; the factory/methods are Task 4)
 - Test: `test/integrations/jira-adapter.test.ts`
 - Modify: `src/config/runtime-config.ts`
 - Test: `test/config/runtime-config.test.ts`
 
 **Interfaces:**
-- Produces (from `jira.ts`), consumed by Task 3:
+- Produces (from `jira.ts`), consumed by Task 4:
   - `interface JiraStatusTarget { status: string; resolution?: string }`
   - `interface JiraAdapterConfig { statusMap?: Record<string, JiraStatusTarget>; bugTypeNames?: string[] }`
   - `jiraTypeLabel(issueTypeName: string, bugTypeNames?: string[]): TypeLabel`
@@ -305,7 +464,7 @@ const tr = (id: string, toName: string, fields?: Record<string, { required: bool
 });
 
 test("pickTransition: matches target status by name (case-insensitive)", () => {
-  const pick = pickTransition([tr("11", "In Progress"), tr("21", "Done")], { status: "done".length ? "In Progress" : "" });
+  const pick = pickTransition([tr("11", "In Progress"), tr("21", "Done")], { status: "in progress" });
   expect(pick).toEqual({ kind: "found", id: "11", setResolution: false });
 });
 
@@ -337,10 +496,9 @@ test("labelUpdateOps: atomic add/remove ops", () => {
 test("projKeyMarker / adfComment / commentHasMarker round-trip", () => {
   const marker = projKeyMarker("k1");
   expect(marker).toBe("[proj-key:k1]");
-  const adf = adfComment("hello", "k1") as { content: { content: { text: string }[] }[] };
+  const adf = adfComment("hello", "k1");
   expect(JSON.stringify(adf)).toContain("hello");
   expect(JSON.stringify(adf)).toContain(marker);
-  // dedup probe scans serialized ADF bodies
   expect(commentHasMarker([adfComment("other", "k1")], "k1")).toBe(true);
   expect(commentHasMarker([adfComment("other", "k2")], "k1")).toBe(false);
 });
@@ -356,14 +514,6 @@ test("mapJiraError: 401 -> expired/invalid token; parses JIRA error body", () =>
 });
 ```
 
-Fix the deliberately-awkward line in the "matches target status" test before running — write it plainly:
-```ts
-test("pickTransition: matches target status by name (case-insensitive)", () => {
-  const pick = pickTransition([tr("11", "In Progress"), tr("21", "Done")], { status: "in progress" });
-  expect(pick).toEqual({ kind: "found", id: "11", setResolution: false });
-});
-```
-
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `bun test test/integrations/jira-adapter.test.ts`
@@ -371,7 +521,7 @@ Expected: FAIL — module/exports missing.
 
 - [ ] **Step 3: Implement the helpers in `src/integrations/adapters/jira.ts`**
 
-Create the file with the docstring + helpers (the factory is added in Task 3 — leave a `// --- factory added in Task 3 ---` marker at the end so Task 3 knows where it goes):
+Create the file with the docstring + helpers (the factory is appended in Task 4 — leave a `// --- factory (jiraIssueTracker) added in Task 4 ---` marker at the end):
 
 ```ts
 /**
@@ -389,15 +539,15 @@ Create the file with the docstring + helpers (the factory is added in Task 3 —
  *     import { jiraIssueTracker } from "./src/integrations/adapters/jira.ts";
  *     const t = jiraIssueTracker();
  *     console.log(await t.fetchTicket("PROJ-1"));
- *     await t.setState("PROJ-1", "in_progress");
+ *     console.log(await t.setState("PROJ-1", "in_progress"));
  *     await t.setLabels("PROJ-1", { add: ["styre"], remove: [] });
  *     console.log(await t.addComment("PROJ-1", "smoke from styre", "smoke-" + Date.now()));
  *   '
  *
- * Expect: the ticket prints; the issue transitions to In Progress (or a warned no-op if the workflow
- * has no path); the "styre" label is added; a comment posts and a repeat idempotencyKey returns null.
+ * Expect: the ticket prints; setState returns {applied:true} (or {applied:false, reason} if the
+ * workflow has no path); the "styre" label is added; a comment posts and a repeat key returns null.
  */
-import type { IssueState, IssueTrackerPort } from "../issue-tracker.ts";
+import type { IssueState, IssueTrackerPort, SetStateResult } from "../issue-tracker.ts";
 import type { IngestedTicket, TypeLabel } from "../ticket-source.ts";
 import { adfToMarkdown } from "./jira-adf.ts";
 
@@ -516,10 +666,10 @@ export function mapJiraError(status: number, bodyText: string): Error & { status
   return e;
 }
 
-// --- factory (jiraIssueTracker) added in Task 3 ---
+// --- factory (jiraIssueTracker) added in Task 4 ---
 ```
 
-Note: `IngestedTicket` and `IssueTrackerPort` are imported now (used by Task 3) — if `bun run lint`/`tsc` flags them as unused in this task, add the factory stub in Task 3 in the same PR; the tasks ship together, but to keep THIS commit typecheck-clean, temporarily prefix the two type imports you don't yet use with `type` (already `import type`) — unused `import type` does not error under this repo's `tsc` config. Verify with Step 5.
+(The `IngestedTicket` / `IssueTrackerPort` / `SetStateResult` type imports are used by the Task-4 factory; unused `import type` does not error under this repo's `tsc`. Verify in Step 6.)
 
 - [ ] **Step 4: Add the `jira` block to `RuntimeConfigSchema`**
 
@@ -539,7 +689,7 @@ In `src/config/runtime-config.ts`, add after the `issueTracker` line (line 15):
 
 - [ ] **Step 5: Add a config parse test**
 
-In `test/config/runtime-config.test.ts`, add:
+In `test/config/runtime-config.test.ts` (add the `RuntimeConfigSchema` import if absent):
 
 ```ts
 test("parses an optional jira block (statusMap + bugTypeNames)", () => {
@@ -556,13 +706,9 @@ test("jira block is optional (absent -> undefined)", () => {
 });
 ```
 
-(If `RuntimeConfigSchema` isn't already imported in that test file, add `import { RuntimeConfigSchema } from "../../src/config/runtime-config.ts";`.)
-
 - [ ] **Step 6: Run tests + typecheck + lint**
 
-Run: `bun test test/integrations/jira-adapter.test.ts test/config/runtime-config.test.ts`
-Expected: PASS — all helper tests + both config tests green.
-
+Run: `bun test test/integrations/jira-adapter.test.ts test/config/runtime-config.test.ts` → PASS.
 Run: `bun run typecheck` → PASS. Run: `bun run lint` → PASS.
 
 - [ ] **Step 7: Commit**
@@ -582,7 +728,7 @@ Claude-Session: https://claude.ai/code/session_01LnpZSryugjuH1W1rQgUFcp"
 
 ---
 
-## Task 3: The adapter factory + port methods + registration
+## Task 4: The adapter factory + port methods + registration
 
 **Files:**
 - Modify: `src/integrations/adapters/jira.ts` (append the factory)
@@ -590,14 +736,14 @@ Claude-Session: https://claude.ai/code/session_01LnpZSryugjuH1W1rQgUFcp"
 - Test: `test/integrations/issue-tracker.test.ts` (add one registration/selection test)
 
 **Interfaces:**
-- Consumes (from Task 1/2): `adfToMarkdown`, `resolveStatusTarget`, `jiraTypeLabel`, `pickTransition`, `labelUpdateOps`, `adfComment`, `commentHasMarker`, `mapJiraError`, and the config/transition types.
+- Consumes (from Tasks 1/2/3): `SetStateResult`, `adfToMarkdown`, `resolveStatusTarget`, `jiraTypeLabel`, `pickTransition`, `labelUpdateOps`, `adfComment`, `commentHasMarker`, `mapJiraError`, and the config/transition types.
 - Produces: `jiraIssueTracker(opts?: JiraAdapterConfig & { baseUrl?: string; email?: string; token?: string }): IssueTrackerPort`. Registered in `ports.ts` as `jira: () => jiraIssueTracker(runtimeConfig.jira)`.
 
-**Testing note:** per the binding convention, the four methods and `request()` are NOT unit-tested (they hit `fetch`). This task's automated coverage is: (a) typecheck + build; (b) a selection test proving `"jira"` resolves through `makeProjectorPorts`; (c) the loop-level fake (unchanged). Correct runtime behavior is verified by the operator smoke test in the docstring.
+**Testing note:** per the binding convention, the four methods and `request()` are NOT unit-tested (they hit `fetch`). This task's automated coverage is: (a) typecheck + build; (b) a selection test proving `"jira"` resolves through `makeProjectorPorts`; (c) the loop-level fake (unchanged). Runtime behavior is verified by the operator smoke test in the docstring.
 
 - [ ] **Step 1: Append the factory to `src/integrations/adapters/jira.ts`**
 
-Replace the `// --- factory (jiraIssueTracker) added in Task 3 ---` marker with:
+Replace the `// --- factory (jiraIssueTracker) added in Task 4 ---` marker with:
 
 ```ts
 /**
@@ -657,24 +803,24 @@ export function jiraIssueTracker(
       };
     },
 
-    async setState(ref: string, state: IssueState): Promise<void> {
+    async setState(ref: string, state: IssueState): Promise<SetStateResult> {
       const target = resolveStatusTarget(state, opts);
-      // Probe current status: skip if already there (idempotent, crash-safe — CL-3).
+      // Probe current status: already there → applied (idempotent, crash-safe — CL-3).
       const cur = (await request("GET", `/issue/${ref}?fields=status`)) as {
         fields?: { status?: { name?: string } };
       };
-      if (cur.fields?.status?.name?.toLowerCase() === target.status.toLowerCase()) return;
+      if (cur.fields?.status?.name?.toLowerCase() === target.status.toLowerCase()) {
+        return { applied: true };
+      }
 
       const tr = (await request("GET", `/issue/${ref}/transitions?expand=transitions.fields`)) as {
         transitions?: JiraTransition[];
       };
       const pick = pickTransition(tr.transitions ?? [], target);
       if (pick.kind !== "found") {
-        // Soft-fail: no reachable transition / unsatisfiable required field. Never wedge the loop.
-        console.warn(
-          `[jira] setState(${ref} -> ${target.status}): ${pick.kind} — leaving board state unchanged`,
-        );
-        return;
+        // Soft-fail: no reachable transition / unsatisfiable required field. Board left unchanged;
+        // the projector records a structured projection_skipped telemetry note.
+        return { applied: false, reason: `${pick.kind}: no usable transition to "${target.status}"` };
       }
       const payload: { transition: { id: string }; fields?: { resolution: { name: string } } } = {
         transition: { id: pick.id },
@@ -684,14 +830,12 @@ export function jiraIssueTracker(
       }
       try {
         await request("POST", `/issue/${ref}/transitions`, payload);
+        return { applied: true };
       } catch (err) {
         const st = (err as { status?: number }).status;
         if (st === 400 || st === 422) {
           // Screen/field rejection = workflow mismatch → soft-fail (not a transport failure).
-          console.warn(
-            `[jira] setState(${ref} -> ${target.status}): transition rejected (${st}) — leaving board unchanged`,
-          );
-          return;
+          return { applied: false, reason: `transition to "${target.status}" rejected (HTTP ${st})` };
         }
         throw err; // transport (5xx/401/network) → outbox retries
       }
@@ -753,7 +897,7 @@ Register `jira` in the default adapter map (line 21):
 
 - [ ] **Step 3: Add a selection/registration test**
 
-In `test/integrations/issue-tracker.test.ts`, add a test proving `"jira"` resolves and constructs when env is set (do NOT call any method — construction only):
+In `test/integrations/issue-tracker.test.ts`, add (do NOT call any method — construction only):
 
 ```ts
 test("makeProjectorPorts selects the jira adapter when configured", () => {
@@ -774,14 +918,13 @@ test("makeProjectorPorts selects the jira adapter when configured", () => {
   }
 });
 ```
-(Add `import { makeProjectorPorts } from "../../src/daemon/ports.ts";` if not already present. If a shared assertion in this file already imports differently, match the existing style.)
+(Add `import { makeProjectorPorts } from "../../src/daemon/ports.ts";` if not already present; match the file's existing import/assertion style.)
 
 - [ ] **Step 4: Typecheck, test, lint**
 
-Run: `bun run typecheck` → PASS (the factory now uses the imported types, resolving any unused-import concern from Task 2).
+Run: `bun run typecheck` → PASS (the factory now uses the imported types).
 Run: `bun test test/integrations/issue-tracker.test.ts` → PASS.
-Run: `bun test` → PASS (full suite; nothing else affected).
-Run: `bun run lint` → PASS.
+Run: `bun test` → PASS (full suite). Run: `bun run lint` → PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -790,10 +933,9 @@ git add src/integrations/adapters/jira.ts src/daemon/ports.ts test/integrations/
 git commit -m "feat(jira): adapter factory + port methods + registration
 
 Hand-rolled fetch client (Basic auth, v3), fetchTicket, transition-based
-setState (idempotent probe + resolution + soft-fail), atomic setLabels,
-paginated-dedup addComment. Registered as issueTracker: 'jira'. Vendor I/O
-paths covered by the fake + the docstring smoke test per adapter convention.
-(M-jira-2)
+setState (idempotent probe + resolution + soft-fail via {applied:false}),
+atomic setLabels, paginated-dedup addComment. Registered as issueTracker:
+'jira'. Vendor I/O paths covered by the fake + docstring smoke test. (M-jira-2)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01LnpZSryugjuH1W1rQgUFcp"
@@ -801,7 +943,7 @@ Claude-Session: https://claude.ai/code/session_01LnpZSryugjuH1W1rQgUFcp"
 
 ---
 
-## Task 4: Cross-cutting — setup readiness + credential isolation
+## Task 5: Cross-cutting — setup readiness + credential isolation
 
 **Files:**
 - Modify: `src/cli/setup.ts` (export + rewrite `credNote`)
@@ -914,7 +1056,7 @@ export const AGENT_ENV_DENYLIST = ["LINEAR_API_KEY", "GITHUB_TOKEN", "JIRA_API_T
 ```
 (`VERIFY_ENV_DENYLIST` derives from it, so verify-time scrubbing is covered by this one edit. Only the token is secret; `JIRA_EMAIL`/`JIRA_BASE_URL` are non-secret identifiers.)
 
-Add a test. If `test/agent/agent-env.test.ts` exists, add this case; otherwise create it:
+Add a test (create `test/agent/agent-env.test.ts` if it does not exist; otherwise add the case):
 ```ts
 import { expect, test } from "bun:test";
 import { agentEnv, verifyEnv } from "../../src/agent/agent-env.ts";
@@ -923,16 +1065,14 @@ test("agentEnv and verifyEnv scrub JIRA_API_TOKEN", () => {
   const parent = { JIRA_API_TOKEN: "secret", JIRA_EMAIL: "a@b.com", PATH: "/bin" };
   expect(agentEnv(parent).JIRA_API_TOKEN).toBeUndefined();
   expect(verifyEnv(parent).JIRA_API_TOKEN).toBeUndefined();
-  // non-secret identifier + unrelated vars pass through
-  expect(agentEnv(parent).JIRA_EMAIL).toBe("a@b.com");
+  expect(agentEnv(parent).JIRA_EMAIL).toBe("a@b.com"); // non-secret identifier passes through
   expect(agentEnv(parent).PATH).toBe("/bin");
 });
 ```
 
 - [ ] **Step 6: Full verification**
 
-Run: `bun test` → PASS (whole suite).
-Run: `bun run typecheck` → PASS. Run: `bun run lint` → PASS.
+Run: `bun test` → PASS (whole suite). Run: `bun run typecheck` → PASS. Run: `bun run lint` → PASS.
 
 - [ ] **Step 7: Commit**
 
@@ -953,19 +1093,19 @@ Claude-Session: https://claude.ai/code/session_01LnpZSryugjuH1W1rQgUFcp"
 ## Self-Review
 
 **Spec coverage** (against `docs/brainstorms/2026-07-11-jira-issue-tracker-adapter-design.md`):
-- Placement `jira.ts` + register in `ports.ts` → Task 3. ✓
-- Auth (3 env vars, Basic, v3, 401→expired, Retry-After, Content-Type) → Task 2 (`mapJiraError`) + Task 3 (`request`). ✓
-- `fetchTicket` (key→ident, ADF→md description, type map, externalId, url) → Task 1 (renderer) + Task 2 (`jiraTypeLabel`) + Task 3. ✓
-- `setState` full model (idempotent probe, transitions-with-fields, resolution, soft-fail scoped to mismatch/400, observable signal) → Task 2 (`pickTransition`/`resolveStatusTarget`) + Task 3 (method). Observability = tagged `console.warn` (OPEN DECISION flagged in Global Constraints). ✓
-- `setLabels` atomic `update.labels` → Task 2 (`labelUpdateOps`) + Task 3. ✓
-- `addComment` minimal ADF + marker + paginated dedup → Task 2 (`adfComment`/`commentHasMarker`) + Task 3. ✓
-- Config `jira` block (statusMap + bugTypeNames) → Task 2. ✓
-- Tracker-aware `setup.ts` + `JIRA_API_TOKEN` denylist → Task 4. ✓
-- Testing = pure helpers unit-tested; vendor I/O via fake + smoke docstring → per-task tests + Task 3 note. ✓
-- No schema change (correct — M-jira-2 touches no SQLite). ✓
+- Placement `jira.ts` + register in `ports.ts` → Task 4. ✓
+- Auth (3 env vars, Basic, v3, 401→expired, Retry-After, Content-Type) → Task 3 (`mapJiraError`) + Task 4 (`request`). ✓
+- `fetchTicket` (key→ident, ADF→md, type map, externalId, url) → Task 2 (renderer) + Task 3 (`jiraTypeLabel`) + Task 4. ✓
+- `setState` full model (idempotent probe, transitions-with-fields, resolution, soft-fail, **observable structured signal**) → Task 1 (disposition + projector telemetry note) + Task 3 (`pickTransition`/`resolveStatusTarget`) + Task 4 (method returns `{applied,reason}`). The observability decision is RESOLVED: a structured `projection_skipped` `event_log` note on the NDJSON feed, not a console.warn. ✓
+- `setLabels` atomic `update.labels` → Task 3 (`labelUpdateOps`) + Task 4. ✓
+- `addComment` minimal ADF + marker + paginated dedup → Task 3 + Task 4. ✓
+- Config `jira` block → Task 3. ✓
+- Tracker-aware `setup.ts` + `JIRA_API_TOKEN` denylist → Task 5. ✓
+- Testing = pure helpers unit-tested; vendor I/O via fake + smoke docstring → per-task tests + Task 4 note. ✓
+- No schema change (uses existing `event_log` kind `"note"`). ✓
 
-**Placeholder scan:** every code step shows complete code; every command has an expected result. The one deliberately-awkward test line (Task 2 Step 1, the "matches target status" case) has an explicit corrected version in Step 1 before the run step. No TBD/TODO.
+**Placeholder scan:** every code step shows complete code; every command has an expected result. No TBD/TODO.
 
-**Type consistency:** `JiraAdapterConfig` / `JiraStatusTarget` / `JiraTransition` / `TransitionPick` are defined in Task 2 and consumed with identical names in Task 3; `resolveStatusTarget`/`pickTransition`/`labelUpdateOps`/`adfComment`/`commentHasMarker`/`mapJiraError`/`jiraTypeLabel`/`adfToMarkdown` signatures match between their producing task and Task 3's usage. `runtimeConfig.jira` type in `ports.ts` (Task 3) matches the zod-inferred shape from Task 2.
+**Type consistency:** `SetStateResult` (Task 1) is consumed by Linear/fake (Task 1) and the JIRA factory (Task 4) with identical shape; `JiraAdapterConfig`/`JiraStatusTarget`/`JiraTransition`/`TransitionPick` defined in Task 3 and used in Task 4; the projector's `set_state` case (Task 1) reads `res.applied`/`res.reason` exactly as returned. `runtimeConfig.jira` type in `ports.ts` (Task 4) matches the zod-inferred shape from Task 3.
 
-**Open item to raise at plan review:** the `setState` soft-fail observability (tagged `console.warn` now vs threading a telemetry `emit` into the adapter) — see Global Constraints OPEN DECISION.
+**Ordering:** Task 1 (port disposition) precedes Task 4 (JIRA `setState` returning it) and Task 3 references it only as a type — correct. Task 2 (renderer) precedes Task 4 (`fetchTicket` uses it). Each task ends green and is independently reviewable.
