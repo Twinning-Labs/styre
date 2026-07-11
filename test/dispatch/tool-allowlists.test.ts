@@ -72,10 +72,18 @@ test("no allowlist ever contains an outward tool", () => {
   }
 });
 
-test("checks:dispatch is authoring-only — Read/Grep/Glob/Write/Edit and NO Bash", () => {
+test("checks:dispatch drops Bash entirely when there are no runner commands (never bare)", () => {
   const tools = allowlistFor("checks:dispatch");
   expect(tools).toEqual(["Read", "Grep", "Glob", "Write", "Edit"]);
-  expect(tools).not.toContain("Bash");
+  expect(tools.some((t) => t.startsWith("Bash"))).toBe(false);
+});
+
+test("checks:dispatch gets Bash scoped to the runner commands (self-run its RED-first checks, never bare)", () => {
+  const tools = allowlistFor("checks:dispatch", { runnerCommands: ["pytest", "npm test"] });
+  expect(tools).toContain("Bash(pytest:*)");
+  expect(tools).toContain("Bash(npm test:*)");
+  expect(tools).not.toContain("Bash"); // never bare, unscoped Bash
+  expect(tools).toEqual(expect.arrayContaining(["Read", "Grep", "Glob", "Write", "Edit"]));
 });
 
 test("checks:classify is read-only — Read/Grep/Glob and NO Write/Edit/Bash", () => {
