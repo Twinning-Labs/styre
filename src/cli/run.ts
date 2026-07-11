@@ -14,6 +14,7 @@ import { getTicket } from "../db/repos/ticket.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
+import { assertSlackConfigured } from "../integrations/notifier.ts";
 import { createAnalytics } from "../telemetry/analytics/index.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
 import { buildSummary } from "../telemetry/emitter.ts";
@@ -84,6 +85,13 @@ export const runCommand = defineCommand({
     }
     assertResolved(profile);
     const runtimeConfig = discoverRuntimeConfig({ explicitPath: args.config, slug });
+    assertSlackConfigured(runtimeConfig);
+    if (runtimeConfig.notifier !== "none") {
+      // human-readable status → stderr (stdout carries only NDJSON telemetry)
+      process.stderr.write(
+        `notifier: ${runtimeConfig.notifier} → ${runtimeConfig.slack?.channel} (policy: ${runtimeConfig.notify})\n`,
+      );
+    }
 
     const analytics = createAnalytics(runtimeConfig);
     const startedAt = Date.now();
