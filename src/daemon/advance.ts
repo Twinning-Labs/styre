@@ -8,6 +8,13 @@ import { ParkSignal } from "../engine/park-signal.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { awaitSignal } from "../engine/signals.ts";
 import { runStep } from "../engine/step-journal.ts";
+import { applyArbiterVerdict, applyReauthorVerdict } from "./arbiter-verdict.ts";
+import {
+  type GateVerdictResult,
+  applyAcCheckGateVerdict,
+  escalate,
+} from "./checks-gate-verdict.ts";
+import { type ChecksVerdictResult, applyChecksVerdict } from "./checks-verdict.ts";
 import { applyFailurePolicy } from "./failure-policy.ts";
 import { enqueueStageProjection } from "./projector.ts";
 import { nextStepKey } from "./resolver.ts";
@@ -16,7 +23,14 @@ import type { StepRegistry } from "./step-registry.ts";
 
 const MAX_TRANSITIONS = 100;
 
-const VERDICT_BEARING_STEPS = new Set(["review", "design:review"]);
+const VERDICT_BEARING_STEPS = new Set([
+  "review",
+  "design:review",
+  "checks:classify",
+  "verify:checks-gate",
+  "checks:arbitrate",
+  "checks:reauthor",
+]);
 
 export type AdvanceOutcome =
   | { kind: "stepped"; stepKey: string }
@@ -73,6 +87,14 @@ export async function advanceOneStep(
       return { kind: "blocked", reason: d.reason };
     }
 
+    if (d.kind === "escalate") {
+      // The resolver only DETECTED the terminal stuck-replay state (Task 12 LIVENESS fix); the
+      // mutation (ticket → waiting + human_resume signal + an 'escalated' event) happens here, the
+      // interpreter — never inside the pure resolver.
+      escalate(db, ticketId, d.reason, "gate-stuck-head");
+      return { kind: "escalated", stepKey: "verify:checks-gate" };
+    }
+
     // d.kind === "step"
     const ticket = getTicket(db, ticketId);
     if (!ticket) {
@@ -87,7 +109,9 @@ export async function advanceOneStep(
       // (onSucceed). Otherwise a crash between the two would leave a `succeeded` review with an
       // un-applied verdict, and resume would advance review→merge past blocking findings (the
       // ground-truth verdict must survive crash-resume — invariants 3 + 4).
-      const verdictBox: { value: ReviewVerdictResult | null } = { value: null };
+      const verdictBox: {
+        value: ReviewVerdictResult | ChecksVerdictResult | GateVerdictResult | null;
+      } = { value: null };
       await runStep(db, {
         ticketId,
         workUnitId: d.workUnitId,
@@ -104,12 +128,17 @@ export async function advanceOneStep(
           }),
         onSucceed: VERDICT_BEARING_STEPS.has(d.stepKey)
           ? () => {
-              verdictBox.value = applyReviewVerdict(
-                db,
-                ticketId,
-                opts?.config ?? DEFAULT_RUNTIME_CONFIG,
-                { stepKey: d.stepKey },
-              );
+              const cfg = opts?.config ?? DEFAULT_RUNTIME_CONFIG;
+              verdictBox.value =
+                d.stepKey === "checks:classify"
+                  ? applyChecksVerdict(db, ticketId, { stepKey: d.stepKey })
+                  : d.stepKey === "verify:checks-gate"
+                    ? applyAcCheckGateVerdict(db, ticketId, { stepKey: d.stepKey })
+                    : d.stepKey === "checks:arbitrate"
+                      ? applyArbiterVerdict(db, ticketId, { stepKey: d.stepKey })
+                      : d.stepKey === "checks:reauthor"
+                        ? applyReauthorVerdict(db, ticketId, { stepKey: d.stepKey })
+                        : applyReviewVerdict(db, ticketId, cfg, { stepKey: d.stepKey });
             }
           : undefined,
       });

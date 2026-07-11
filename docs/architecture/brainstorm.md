@@ -442,6 +442,14 @@ Status legend: **DECIDED** (confirmed by operator) · **RATIFIED** (proposed, no
 - **2026-06-18** — added §5.7 context assembly (the make-or-break retrieval problem); added §5.8 the consolidated Unified Gate Layer spec. Locked the tagging split (deterministic scope-gating fields vs model-written narrative). §5.8.4/5.8.5/5.8.6 carry verbatim-fidelity content (HITL scope capture, index keys, working set) — do not lossy-edit.
 - **2026-06-18** — operator simplifications: OK to shut down 1–2 weeks; greenfield-piecemeal acceptable; SQLite confirmed. Added §9 migration plan (downtime-window clean cutover + checklist). Locked stack: TS + SQLite + defer-Docker + keep-CLI-leaf. Resolved OQ-7 (isolation) and OQ-8 (migration).
 - **2026-06-18→19** — closed the spec: added §10 Open Decisions Register. Operator confirmed: fully-human-gated merge (D2); behavioral-vs-non-behavioral test gate (A1); sizing rubric (C2). Revised C1 — implementation decomposes into focused per-work-unit dispatches tagged by kind (backend/frontend/…); no hardcoded `ui` stage; UI = a frontend work-unit + a verify check-type (fixes the "overloaded implement" concern). Only E2 (vocabularies) remains OPEN and is post-cutover. Substrate spec CLOSED.
+- **2026-07-07 — Codex added as a second agent provider.** Sibling `src/agent/providers/codex.ts`
+  behind the unchanged `AgentRunner` seam; closed three designed-but-unwired gaps (config-driven
+  provider selection, the `stdout`=final-message contract with a Claude retrofit, provider-parametric
+  capability gates incl. the F4 verifyEnv fix). Claude stays the binary default. Design:
+  `docs/brainstorms/2026-07-07-codex-provider-adapter-design.md`; plan:
+  `docs/plans/2026-07-07-codex-provider-adapter.md`.
+- **2026-07-09 — M4 gate co-release constraint recorded.** **M4 gate co-release (hard):** the change-scoped AC-check gate must not reach a release without M5's arbiter (re-authors a persistent wrong-shape red instead of thrashing implement) and M6's MERGE projection. Satisfied by the operator's not-release-until-M6 commitment (2026-07-08).
+- **2026-07-09 — M5 arbiter ships; co-released with M6 MERGE projection.** **M5 arbiter co-release (hard):** the gate-fail branch now serves `checks:arbitrate` (two-way blame) → `checks:reauthor` (the clean-HEAD-replay-validated re-author) with the monotone gate-round counter.
 
 ---
 

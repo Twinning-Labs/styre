@@ -18,6 +18,14 @@ test("extract/docs/pr-ensure are the cheap tier", () => {
   expect(resolveTier("merge:pr-ensure")).toBe("cheap");
 });
 
+test("checks:dispatch is the standard tier (implement-class authoring)", () => {
+  expect(resolveTier("checks:dispatch")).toBe("standard");
+});
+
+test("checks:classify is the standard tier (adjudication)", () => {
+  expect(resolveTier("checks:classify")).toBe("standard");
+});
+
 test("an unknown handlerKey throws", () => {
   expect(() => resolveTier("verify:integration")).toThrow();
 });

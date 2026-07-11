@@ -1,8 +1,13 @@
 import { expect, test } from "bun:test";
 import {
+  behavioralStillRed,
+  blameShasFor,
   insertSignal,
+  latestBlameAtSha,
+  latestReauthorAtSha,
   listByUnit,
   passingShasFor,
+  reauthorShasFor,
 } from "../../../src/db/repos/ground-truth-signal.ts";
 import * as gts from "../../../src/db/repos/ground-truth-signal.ts";
 import { insertWorkUnit } from "../../../src/db/repos/work-unit.ts";
@@ -114,4 +119,56 @@ test("records branch_head_sha and reports the SHAs a check passed at", () => {
   const passed = passingShasFor(db, { ticketId, workUnitId: unit.id, signalType: "test" });
   db.close();
   expect(passed).toEqual(["bbb"]); // only the passing SHA, history of the fail kept
+});
+
+test("behavioralStillRed subtracts tampered from stillRed of the gate signal at a sha", () => {
+  const { db, ticketId } = makeTestDb();
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-gate",
+    result: "fail",
+    branchHeadSha: "S1",
+    detail: { stillRed: [4, 7], tampered: [7], advisory: [] },
+  });
+  expect(behavioralStillRed(db, ticketId, "S1")).toEqual([4]);
+  db.close();
+});
+
+test("blameShasFor / latestBlameAtSha round-key the ac-check-blame signal", () => {
+  const { db, ticketId } = makeTestDb();
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-blame",
+    result: "fail",
+    branchHeadSha: "S1",
+    detail: { acId: 4, acCheckId: 40, blame: "code-wrong", reason: "r" },
+  });
+  expect(blameShasFor(db, ticketId)).toContain("S1");
+  expect(latestBlameAtSha(db, ticketId, "S1")).toEqual([
+    { acId: 4, acCheckId: 40, blame: "code-wrong", reason: "r" },
+  ]);
+  expect(latestBlameAtSha(db, ticketId, "S2")).toEqual([]);
+  db.close();
+});
+
+test("reauthorShasFor / latestReauthorAtSha round-key the ac-check-reauthor disposition", () => {
+  const { db, ticketId } = makeTestDb();
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-reauthor",
+    result: "pass",
+    branchHeadSha: "S1",
+    detail: { acId: 4, acCheckId: 41, disposition: "installed" },
+  });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-reauthor",
+    result: "fail",
+    branchHeadSha: "S1",
+    detail: { acId: 5, acCheckId: 51, disposition: "rejected" },
+  });
+  expect(reauthorShasFor(db, ticketId)).toContain("S1");
+  expect(latestReauthorAtSha(db, ticketId, "S1")).toHaveLength(2);
+  expect(latestReauthorAtSha(db, ticketId, "S2")).toEqual([]);
+  db.close();
 });

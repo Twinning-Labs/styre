@@ -1,11 +1,10 @@
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defineCommand } from "citty";
-import { claudeAgentRunner } from "../agent/providers/claude.ts";
-import { selectAgentRunner } from "../agent/registry.ts";
+import { resolveAgentRunner } from "../agent/resolve.ts";
 import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
-import { DEFAULT_RUNTIME_CONFIG, RuntimeConfigSchema } from "../config/runtime-config.ts";
+import { discoverRuntimeConfig, loadProfileByConvention, slugForCwd } from "../config/discover.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
 import { realRecoverDeps, recover } from "../daemon/recover.ts";
 import { runTicket } from "../daemon/run-ticket.ts";
@@ -43,7 +42,16 @@ export const runCommand = defineCommand({
   meta: { name: "run", description: "Ingest one ticket and drive it to PR-ready, then exit." },
   args: {
     ticket: { type: "positional", required: false, description: "Ticket ref (e.g. ENG-123)" },
-    profile: { type: "string", required: true, description: "Path to the project-profile JSON" },
+    profile: {
+      type: "string",
+      description:
+        "Path to the project-profile JSON (default: ~/.config/styre/<slug>/profile.json for the cwd repo)",
+    },
+    slug: {
+      type: "string",
+      description:
+        "Project slug to locate the profile + per-project config (default: derived from the cwd repo)",
+    },
     config: { type: "string", description: "Path to a runtime config.json (optional)" },
     db: { type: "string", description: "DB path (default: a fresh per-run temp DB)" },
     resume: { type: "string", description: "Resume a parked run by ticket ident" },
@@ -52,18 +60,50 @@ export const runCommand = defineCommand({
       description: "Resume even though the branch HEAD moved (drops carryover)",
     },
     inspect: { type: "boolean", description: "Print resume diagnostics and exit without running" },
+    "in-place": {
+      type: "boolean",
+      description:
+        "Work on a branch in the repo root instead of a worktree (disposable single-use checkout only)",
+    },
   },
   async run({ args }) {
-    const profile = loadProfile(args.profile);
+    let profile: Profile;
+    let slug: string;
+    if (args.profile && args.profile.length > 0) {
+      profile = loadProfile(args.profile);
+      slug = args.slug && args.slug.length > 0 ? args.slug : profile.slug;
+    } else {
+      const derived = args.slug && args.slug.length > 0 ? args.slug : slugForCwd();
+      if (!derived) {
+        throw new Error(
+          "styre run: no --profile given and the current directory is not a git repo — cd into the target repo, or pass --profile / --slug.",
+        );
+      }
+      slug = derived;
+      profile = loadProfileByConvention(slug);
+    }
     assertResolved(profile);
-    const runtimeConfig =
-      args.config && args.config.length > 0
-        ? RuntimeConfigSchema.parse(JSON.parse(readFileSync(args.config, "utf8")))
-        : DEFAULT_RUNTIME_CONFIG;
+    const runtimeConfig = discoverRuntimeConfig({ explicitPath: args.config, slug });
 
     const analytics = createAnalytics(runtimeConfig);
     const startedAt = Date.now();
     try {
+      if (args["in-place"] && !(args.resume && args.resume.length > 0)) {
+        const { discoverRepoRoot, assertInPlaceSafe, assertInPlaceIdentity } = await import(
+          "../dispatch/in-place.ts"
+        );
+        // cwd git-toplevel; THROWS (fail-closed) if not a repo — never falls through to the stale profile path
+        const discovered = discoverRepoRoot();
+        if (discovered !== profile.targetRepo) {
+          console.error(
+            `IN-PLACE: discovered repo root ${discovered} differs from the profile's targetRepo ${profile.targetRepo}; using the discovered root (components/commands still come from the profile).`,
+          );
+        }
+        profile.targetRepo = discovered;
+        assertInPlaceSafe(profile.targetRepo);
+        await assertInPlaceIdentity(profile.targetRepo, profile);
+      }
+
       if (args.resume && args.resume.length > 0) {
         const { resumeRun } = await import("./park.ts");
         await resumeRun(
@@ -87,12 +127,14 @@ export const runCommand = defineCommand({
       recover(db, realRecoverDeps());
 
       const ports = makeProjectorPorts(runtimeConfig, profile);
-      const runner = selectAgentRunner(DEFAULT_AGENT_CONFIG, { claude: () => claudeAgentRunner() });
+      const agentConfig = runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG;
+      const runner = resolveAgentRunner(agentConfig);
       const registry = buildDispatchRegistry({
         runner,
-        agentConfig: DEFAULT_AGENT_CONFIG,
+        agentConfig,
         profile,
         worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-")),
+        inPlace: (args["in-place"] as boolean | undefined) ?? false,
       });
 
       analytics.runStarted({
@@ -129,7 +171,7 @@ export const runCommand = defineCommand({
         const dir = parkDir(profile.slug, ident);
         console.error(
           `Parked: ${out.park.cause}${out.park.resetAt ? ` (resets ${out.park.resetAt})` : ""}.\n` +
-            `Resume with: styre run --resume ${ident} --profile ${args.profile}\n` +
+            `Resume with: styre run --resume ${ident} ${args.profile ? `--profile ${args.profile}` : `--slug ${slug}`}\n` +
             `Dump: ${dir}`,
         );
       }

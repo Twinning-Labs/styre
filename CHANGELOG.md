@@ -1,6 +1,49 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.6.1] - 2026-07-11
+
+### Bug Fixes
+
+- **Dispatch commits no longer sweep up agent scratch files.** Previously, styre committed every changed file after each dispatch step, which could pull in stray reproduction scripts and debug files that the agent created but never intended to include. Each step now only commits the files it actually declares as its deliverable, so leftover scratch files are either left uncommitted (with a note in the event log) or cause the step to fail loudly and retry rather than silently polluting the diff.
+
+## [0.6.0] - 2026-07-10
+
+### Features
+
+- **Change-scoped verify** is now fully wired end-to-end: styre derives a ground-truth check per acceptance criterion, authors and runs it RED-first on a clean baseline, classifies persistent red as either a code problem or a wrong-shape check, and gates merges on the checks that actually encode your acceptance criteria rather than the whole test suite.
+- When an AC-check stays red after implementation, styre now adjudicates the blame instead of looping blindly: it either sends the ticket back to implement (code is wrong) or re-authors the check itself (the check is wrong), validating any re-authored check is genuinely red on a clean baseline before trusting it.
+- The whole component test suite and integration checks are now advisory rather than blocking, since without a pre-change baseline they can't reliably distinguish pre-existing failures from regressions; they're still recorded for review.
+- Pull request descriptions now include a "Change-scoped verify" section at merge time, showing exactly which acceptance criteria were verified, satisfied, not checkable, or re-authored — including a call-out whenever a check had to be corrected, so the merge decision is never based on an overstated report.
+- The `design` and `design:review` prompts are sharper: the design agent is now told to inspect the actual repo before planning, present work units in a scannable labelled format, and map each acceptance criterion to the work that satisfies it; the review prompt has calibrated severity levels and clearer guidance on what to actually judge versus what's already mechanically checked.
+
+### Bug Fixes
+
+- Fixed a crash where a `docs:revise` step had no handler at all, which could wedge a ticket's workflow indefinitely.
+- When a dispatch step fails its own check (for example, a malformed report or a rejected extraction), retrying that step now includes the specific reason it failed, so the agent can fix the actual problem instead of repeating the same mistake.
+- Fixed a case where a blocking finding from code review could trigger a redesign without carrying the reviewer's actual feedback along, leaving the redesign blind to why it was sent back.
+
+## [0.5.0] - 2026-07-07
+
+### Features
+
+- **Codex is now a supported agent provider.** You can configure `styre` to run tickets through OpenAI's `codex` CLI instead of Claude by adding an `agent` block to `config.json`; Claude remains the default when nothing is configured.
+- **`styre run` and `styre setup` now work without path flags.** Set up your profile and workspace config once under `~/.config/styre` (globally or per-project), then run `styre run ENG-123` from inside any project directory and it discovers the right config and profile automatically. Explicit `--profile`/`--config` flags still work exactly as before for hermetic overrides.
+- **Release notes are now written in plain language.** GitHub releases and `CHANGELOG.md` entries describe what changed for users rather than listing raw commit subjects.
+
+### Bug Fixes
+
+- **Design review feedback no longer gets lost on redesign loops.** When a plan review sends a ticket back for redesign, per-unit findings (like decomposition or feasibility issues on a specific work unit) now carry through to the redesign instead of being silently discarded, so the redesign actually addresses what the reviewer flagged.
+- **Design review loops converge instead of looping forever on already-correct plans.** A ticket sent back from review for redesign now checks its own updated plan (not an unrelated fresh commit) and gets the reviewer's actual feedback passed along, so a nearly-right plan can pass review on the next pass instead of bouncing indefinitely.
+
+## [0.4.0] - 2026-07-06
+
+### Features
+- Deterministic completeness step (fixes the empty-diff false-block) (#49)
+- Verify reuses a ready env instead of rebuilding (#51)
+- In-place execution for disposable checkouts (branch in the repo root, not a worktree) (#52)
+
+
 ## [0.3.0] - 2026-07-04
 
 ### Features

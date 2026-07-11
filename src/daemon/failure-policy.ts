@@ -8,7 +8,12 @@ import {
   listByTicket as listUnits,
   setStatus as setUnitStatus,
 } from "../db/repos/work-unit.ts";
-import { listStepsForUnit, resetToPending } from "../db/repos/workflow-step.ts";
+import {
+  getByKey,
+  listStepsForUnit,
+  resetAttempt,
+  resetToPending,
+} from "../db/repos/workflow-step.ts";
 import type { WorkflowStepRow } from "../db/repos/workflow-step.ts";
 
 export type FailureDecision = "retry" | "loopback" | "escalated";
@@ -101,6 +106,33 @@ export function applyFailurePolicy(
     return { decision: "escalated" };
   }
 
+  // A throwing verify:checks-gate is an infra/invariant fault (missing branch sha, git fault, or a
+  // NULL/NULL unresolved check), NOT a still-red verdict — that path SUCCEEDS and routes via
+  // applyAcCheckGateVerdict (advance.ts onSucceed). Escalate cleanly; never spin up an
+  // integration-reconcile unit for it (review FIX 2).
+  if (step.step_key === "verify:checks-gate") {
+    db.transaction(() => {
+      setTicketStatus(db, ticketId, "waiting");
+      insertSignal(db, {
+        ticketId,
+        signalType: "human_resume",
+        reason: `step 'verify:checks-gate' failed: ${failureSignature(step)}`,
+      });
+      appendEvent(db, {
+        ticketId,
+        kind: "escalated",
+        reason: "verify:checks-gate failed (infra/invariant fault)",
+        signature: failureSignature(step),
+      });
+    })();
+    return { decision: "escalated" };
+  }
+
+  // M4 §8b: verify:check (per-unit) is demoted to advisory — a genuine suite verdict no longer
+  // throws, so this branch is now reached only on an INFRA crash / real precondition throw
+  // (empty-diff, no-components, behavioral-no-code, check-absent — see handlers.ts verify:check).
+  // The genuine-failure -> loopback path below is effectively dead for the demoted suite verdict
+  // but stays live for those precondition throws and for any other unit-scoped verify step.
   if (step.step_type === "verify" && step.work_unit_id !== null) {
     const workUnitId = step.work_unit_id;
     const signature = failureSignature(step);
@@ -144,7 +176,10 @@ export function applyFailurePolicy(
   }
 
   // Whole-project (integration) failure → ticket-scoped reconcile: add a fix unit that runs
-  // after all others, then re-open the integration check.
+  // after all others, then re-open the integration check. M4 §8c: this branch now fires only on
+  // an infra crash (the handler threw before/without recording a verdict — a genuine test fail
+  // SUCCEEDS + advises instead). M4 §8d: the reconcile unit moves HEAD, so the sibling
+  // verify:checks-gate (a passed gate is content-keyed to the OLD head) must also re-run.
   if (step.step_type === "verify" && step.work_unit_id === null) {
     db.transaction(() => {
       const units = listUnits(db, ticketId);
@@ -158,6 +193,15 @@ export function applyFailurePolicy(
         dependsOn: units.map((u) => u.seq),
       });
       resetToPending(db, step.id);
+      const gate = getByKey(db, ticketId, "verify:checks-gate");
+      if (gate) {
+        resetToPending(db, gate.id);
+        resetAttempt(db, gate.id); // §6: integration re-entry is not a gate-origin round
+      }
+      for (const key of ["checks:arbitrate", "checks:reauthor"]) {
+        const s = getByKey(db, ticketId, key);
+        if (s) resetToPending(db, s.id);
+      }
       appendEvent(db, {
         ticketId,
         kind: "loopback",

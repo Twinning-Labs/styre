@@ -144,9 +144,11 @@ output* vs *a real "no" decision*. If they share one channel, a formatting slip 
 deny, the runner conservatively re-runs an expensive agent, and the format-error rate is
 unmeasurable (so unhardenable). The validated-interface pattern dissolves this:
 
-- structured values are submitted via **forced-schema tool calls** (Anthropic SDK constrained
-  decoding): the model **cannot** emit a shape that violates the schema; a malformed call returns a
-  tool-error and the model **self-corrects in-context** (cheap, same dispatch — no re-run).
+- structured values are submitted via a **validated sidecar**: the agent emits a fenced
+  ```` ```styre-sidecar ```` JSON block that the runner extracts and zod-validates
+  (`dispatch/sidecar.ts`); an absent/malformed block is a transport failure (re-dispatch), never a
+  verdict. (Provider-native constrained decoding — e.g. Codex `--output-schema` — is a possible
+  future hardening, DEC-CX-8b; the fenced sidecar is provider-independent and ships today.)
 - the runner then only ever observes two unambiguous states: **completed** (a clean dispatch end /
   an explicit `complete()` call → state present → deterministic decision) or **transport failure**
   (dispatch died / never completed → retry the dispatch). These are separately counted and

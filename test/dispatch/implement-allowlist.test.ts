@@ -83,7 +83,7 @@ test("implement: touching rust file → scoped to cargo, NOT vite/playwright, no
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["src-tauri-impl.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -122,7 +122,7 @@ test("implement: empty filesToTouch → scoped union fallback (cargo+vite), stil
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["impl.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -161,7 +161,7 @@ test("implement: all-unavailable profile → NO Bash token at all, Write/Edit st
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["impl.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,

@@ -7,9 +7,11 @@ import { insertFinding } from "../../src/db/repos/review-finding.ts";
 import { listPending } from "../../src/db/repos/signal.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit, listByTicket as listUnits } from "../../src/db/repos/work-unit.ts";
-import { getByKey } from "../../src/db/repos/workflow-step.ts";
+import { getByKey, markRunning } from "../../src/db/repos/workflow-step.ts";
 import { insertPending } from "../../src/db/repos/workflow-step.ts";
+import { designFeedback } from "../../src/dispatch/design-feedback.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { insertDesignReviewDispatch } from "../helpers/dispatch-fixtures.ts";
 
 function seedReviewRound(db: ReturnType<typeof makeTestDb>["db"], ticketId: number) {
   db.query("UPDATE ticket SET stage = 'review' WHERE id = ?").run(ticketId);
@@ -53,6 +55,74 @@ test("blocking code finding → loopback to implement (unit + review step reset,
   expect(ticket?.stage).toBe("implement");
   expect(reviewStep?.status).toBe("pending");
   expect(events.some((e) => e.kind === "loopback" && e.loop === "implement")).toBe(true);
+});
+
+test("code-review loopback resets the ticket-level verify:checks-gate + verify:integration steps (M4 §8d)", () => {
+  const { db, ticketId } = makeTestDb();
+  const { unit, did } = seedReviewRound(db, ticketId);
+  // Seed BOTH ticket-level verify steps as already-succeeded (the pre-loopback gate pass).
+  for (const key of ["verify:integration", "verify:checks-gate"]) {
+    const s = insertPending(db, { ticketId, stepKey: key, stepType: "verify" });
+    db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
+  }
+  insertFinding(db, {
+    ticketId,
+    reviewKind: "code",
+    dispatchId: did,
+    severity: "major",
+    category: "correctness",
+    deferralCandidate: 0,
+    blocksShip: 1,
+    workUnitId: unit.id,
+    location: "a.ts:1",
+  });
+  const r = applyReviewVerdict(db, ticketId, DEFAULT_RUNTIME_CONFIG, { stepKey: "review" });
+  const integrationAfter = getByKey(db, ticketId, "verify:integration");
+  const gateAfter = getByKey(db, ticketId, "verify:checks-gate");
+  db.close();
+  expect(r.decision).toBe("loopback");
+  // Reset to pending so a HEAD-moving re-code doesn't replay the stale success at the new HEAD.
+  expect(integrationAfter?.status).toBe("pending");
+  expect(gateAfter?.status).toBe("pending");
+});
+
+test("code-review loopback resets the gate-round counter (§6: review re-entry is not a gate-origin round) and resets checks:arbitrate/checks:reauthor", () => {
+  const { db, ticketId } = makeTestDb();
+  const { unit, did } = seedReviewRound(db, ticketId);
+  // Seed the gate step with attempt=2 (mid gate-round arbitration) plus its arbiter/reauthor
+  // siblings, already succeeded from that round.
+  const gateStep = insertPending(db, {
+    ticketId,
+    stepKey: "verify:checks-gate",
+    stepType: "verify",
+  });
+  markRunning(db, gateStep.id, {});
+  markRunning(db, gateStep.id, {});
+  for (const key of ["checks:arbitrate", "checks:reauthor"]) {
+    const s = insertPending(db, { ticketId, stepKey: key, stepType: "dispatch" });
+    db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
+  }
+  insertFinding(db, {
+    ticketId,
+    reviewKind: "code",
+    dispatchId: did,
+    severity: "major",
+    category: "correctness",
+    deferralCandidate: 0,
+    blocksShip: 1,
+    workUnitId: unit.id,
+    location: "a.ts:1",
+  });
+  const r = applyReviewVerdict(db, ticketId, DEFAULT_RUNTIME_CONFIG, { stepKey: "review" });
+  const gateAfter = getByKey(db, ticketId, "verify:checks-gate");
+  const arbitrateAfter = getByKey(db, ticketId, "checks:arbitrate");
+  const reauthorAfter = getByKey(db, ticketId, "checks:reauthor");
+  db.close();
+  expect(r.decision).toBe("loopback");
+  expect(gateAfter?.status).toBe("pending");
+  expect(gateAfter?.attempt).toBe(0); // fresh count for the new verify pass
+  expect(arbitrateAfter?.status).toBe("pending");
+  expect(reauthorAfter?.status).toBe("pending");
 });
 
 test("blocking plan-defect, config escalate → escalated (parked on human_resume, stays open)", () => {
@@ -109,6 +179,165 @@ test("blocking plan-defect, config redesign → loopback to design (units cleare
   expect(ticket?.stage).toBe("design");
   expect(units.length).toBe(0);
   expect(designStep?.status).toBe("pending");
+});
+
+test("plan-defect redesign loopback also resets the ticket-level verify steps (M4 §8d)", () => {
+  const { db, ticketId } = makeTestDb();
+  const { did } = seedReviewRound(db, ticketId);
+  for (const k of ["design:dispatch", "design:extract"]) {
+    const s = insertPending(db, { ticketId, stepKey: k, stepType: "dispatch" });
+    db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
+  }
+  for (const key of ["verify:integration", "verify:checks-gate"]) {
+    const s = insertPending(db, { ticketId, stepKey: key, stepType: "verify" });
+    db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
+  }
+  insertFinding(db, {
+    ticketId,
+    reviewKind: "code",
+    dispatchId: did,
+    severity: "major",
+    category: "plan-defect",
+    deferralCandidate: 0,
+    blocksShip: 1,
+    location: null,
+  });
+  const r = applyReviewVerdict(
+    db,
+    ticketId,
+    { ...DEFAULT_RUNTIME_CONFIG, onPlanDefect: "redesign" },
+    { stepKey: "review" },
+  );
+  const integrationAfter = getByKey(db, ticketId, "verify:integration");
+  const gateAfter = getByKey(db, ticketId, "verify:checks-gate");
+  db.close();
+  expect(r.decision).toBe("loopback");
+  expect(integrationAfter?.status).toBe("pending");
+  expect(gateAfter?.status).toBe("pending");
+});
+
+test("plan-defect redesign loopback also resets the gate-round counter (§6)", () => {
+  const { db, ticketId } = makeTestDb();
+  const { did } = seedReviewRound(db, ticketId);
+  for (const k of ["design:dispatch", "design:extract"]) {
+    const s = insertPending(db, { ticketId, stepKey: k, stepType: "dispatch" });
+    db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
+  }
+  const gateStep = insertPending(db, {
+    ticketId,
+    stepKey: "verify:checks-gate",
+    stepType: "verify",
+  });
+  markRunning(db, gateStep.id, {});
+  markRunning(db, gateStep.id, {});
+  insertFinding(db, {
+    ticketId,
+    reviewKind: "code",
+    dispatchId: did,
+    severity: "major",
+    category: "plan-defect",
+    deferralCandidate: 0,
+    blocksShip: 1,
+    location: null,
+  });
+  const r = applyReviewVerdict(
+    db,
+    ticketId,
+    { ...DEFAULT_RUNTIME_CONFIG, onPlanDefect: "redesign" },
+    { stepKey: "review" },
+  );
+  const gateAfter = getByKey(db, ticketId, "verify:checks-gate");
+  db.close();
+  expect(r.decision).toBe("loopback");
+  expect(gateAfter?.attempt).toBe(0);
+});
+
+test("code-review plan-defect redesign carries the triggering findings into the design feedback (ENG-272)", () => {
+  const { db, ticketId } = makeTestDb();
+  const { unit, did } = seedReviewRound(db, ticketId);
+  // seed the design steps the redesign route resets
+  for (const k of ["design:dispatch", "design:extract"]) {
+    const s = insertPending(db, { ticketId, stepKey: k, stepType: "dispatch" });
+    db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
+  }
+  insertFinding(db, {
+    ticketId,
+    reviewKind: "code",
+    dispatchId: did,
+    severity: "major",
+    category: "plan-defect",
+    deferralCandidate: 0,
+    blocksShip: 1,
+    workUnitId: unit.id, // per-unit finding: its unit is deleted by the redesign
+    location: "src/a.ts:12",
+    rationale: "CODE-REVIEW-PLAN-DEFECT",
+  });
+  // a non-blocking finding in the same round must NOT be snapshotted into the feedback
+  insertFinding(db, {
+    ticketId,
+    reviewKind: "code",
+    dispatchId: did,
+    severity: "nit",
+    category: "maintainability",
+    deferralCandidate: 0,
+    blocksShip: 0,
+    location: "src/b.ts:3",
+    rationale: "NON-BLOCKING-NIT",
+  });
+  const r = applyReviewVerdict(
+    db,
+    ticketId,
+    { ...DEFAULT_RUNTIME_CONFIG, onPlanDefect: "redesign" },
+    { stepKey: "review" },
+  );
+  const ticket = getTicket(db, ticketId);
+  const feedback = designFeedback(db, ticketId);
+  db.close();
+  expect(r.decision).toBe("loopback");
+  expect(ticket?.stage).toBe("design");
+  // The code-review finding is rendered into the redesign feedback (was empty before ENG-272).
+  expect(feedback).toContain("CODE-REVIEW-PLAN-DEFECT");
+  expect(feedback).toContain("src/a.ts:12");
+  expect(feedback).not.toContain("NON-BLOCKING-NIT"); // non-blocking excluded from the snapshot
+});
+
+test("plan-review redesign preserves a per-unit blocking finding for the redesign feedback", () => {
+  const { db, ticketId } = makeTestDb();
+  const unit = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", filesToTouch: ["a.ts"] });
+  const did = insertDesignReviewDispatch(db, ticketId); // design:review step + dispatch
+
+  insertFinding(db, {
+    ticketId,
+    dispatchId: did,
+    reviewKind: "plan",
+    severity: "major",
+    category: "decomposition",
+    location: "plan.md:10",
+    rationale: "PER-UNIT-DECOMP-ISSUE",
+    blocksShip: 1,
+    workUnitId: unit.id,
+  });
+  insertFinding(db, {
+    ticketId,
+    dispatchId: did,
+    reviewKind: "plan",
+    severity: "major",
+    category: "completeness",
+    location: "plan.md:2",
+    rationale: "PLAN-WIDE-ISSUE",
+    blocksShip: 1,
+    workUnitId: null,
+  });
+
+  const r = applyReviewVerdict(db, ticketId, DEFAULT_RUNTIME_CONFIG, { stepKey: "design:review" });
+  const units = listUnits(db, ticketId);
+  const feedback = designFeedback(db, ticketId);
+  db.close();
+
+  expect(r.decision).toBe("loopback");
+  expect(units.length).toBe(0); // redesign still clears the decomposition
+  expect(feedback).toContain("PER-UNIT-DECOMP-ISSUE"); // survives the cascade now
+  expect(feedback).toContain("PLAN-WIDE-ISSUE"); // still there
 });
 
 test("non-blocking major + deferral_candidate → escalated", () => {

@@ -2,11 +2,12 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { defineCommand } from "citty";
-import { claudeAgentRunner } from "../agent/providers/claude.ts";
-import { selectAgentRunner } from "../agent/registry.ts";
-import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
+import { resolveAgentRunner } from "../agent/resolve.ts";
+import { DEFAULT_AGENT_CONFIG, requiredEnvFor } from "../config/agent-config.ts";
+import { discoverRuntimeConfig } from "../config/discover.ts";
 import { configDir } from "../config/paths.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../config/runtime-config.ts";
+import { deriveSlug } from "../config/slug.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
 import { unrootedManifestWarnings } from "../setup/detect-components.ts";
@@ -78,7 +79,11 @@ export function deriveSetupInput(profile: Profile): SetupInput {
 }
 
 /** Probe a repo, enrich its runtime context via the agent, and write the profile JSON. Testable
- *  core (the citty command is a thin wrapper that supplies the real runner + cred precondition). */
+ *  core (the citty command is a thin wrapper that supplies the real runner + cred precondition).
+ *  Assumes `args.repo` is an explicit, operator-named path — it does NOT itself gate on the
+ *  disposability marker. Any future caller that passes a discovered / no-arg repo MUST call
+ *  `assertInPlaceMarker(repo)` first, as the citty wrapper below does. Do not let this wrapper-only
+ *  gate silently erode. */
 export async function runSetup(args: {
   repo: string;
   out?: string;
@@ -182,7 +187,12 @@ function credNote(profile: Profile): string | null {
 export const setupCommand = defineCommand({
   meta: { name: "setup", description: "Probe a repo and write a Styre profile JSON." },
   args: {
-    repo: { type: "positional", required: true, description: "Path to the target repo" },
+    repo: {
+      type: "positional",
+      required: false,
+      description:
+        "Path to the target repo (omit to discover the cwd repo — requires a .styre-disposable marker)",
+    },
     out: {
       type: "string",
       description: "Output path (default: $XDG_CONFIG_HOME/styre/<slug>/profile.json)",
@@ -194,6 +204,10 @@ export const setupCommand = defineCommand({
       type: "boolean",
       description: "Re-probe from scratch, discarding operator-resolved runtime context",
     },
+    config: {
+      type: "string",
+      description: "Path to a runtime config.json (selects the agent provider)",
+    },
     "trust-agent-commands": {
       type: "boolean",
       description:
@@ -201,19 +215,34 @@ export const setupCommand = defineCommand({
     },
   },
   async run({ args }) {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      throw new Error("setup: ANTHROPIC_API_KEY is required (runtime-context prose enrichment)");
+    // No positional `repo`: discover the cwd repo and gate it on the disposability marker BEFORE
+    // any write-capable enrichment agent call (runSetup's enrichRuntimeContext/discoverComponents).
+    // An explicit `setup <repo>` requires no marker — the operator named the target.
+    let repo = args.repo;
+    if (!repo) {
+      const { discoverRepoRoot, assertInPlaceMarker } = await import("../dispatch/in-place.ts");
+      repo = discoverRepoRoot(); // no-arg → discover cwd's repo (throws fail-closed if not a git repo)
+      assertInPlaceMarker(repo); // gate BEFORE runSetup's write-capable enrichment agent
     }
-    const runner = selectAgentRunner(DEFAULT_AGENT_CONFIG, { claude: () => claudeAgentRunner() });
+    const effSlug = args.slug && args.slug.length > 0 ? args.slug : deriveSlug(resolve(repo));
+    const runtimeConfig = discoverRuntimeConfig({ explicitPath: args.config, slug: effSlug });
+    const agentConfig = runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG;
+    const requiredKey = requiredEnvFor(agentConfig.provider);
+    if (requiredKey && !process.env[requiredKey]) {
+      throw new Error(
+        `setup: ${requiredKey} is required for provider '${agentConfig.provider}' (runtime-context prose enrichment)`,
+      );
+    }
+    const runner = resolveAgentRunner(agentConfig);
     const { outPath, profile, needsInput } = await runSetup({
-      repo: args.repo,
+      repo,
       out: args.out,
       checks: args.checks,
-      slug: args.slug,
+      slug: effSlug,
       force: args.force,
       reprobe: args.reprobe,
       trustAgentCommands: args["trust-agent-commands"] === true,
-      deps: { runner, agentConfig: DEFAULT_AGENT_CONFIG },
+      deps: { runner, agentConfig },
     });
     console.log(`setup: wrote ${outPath}`);
     if (needsInput.length > 0) {

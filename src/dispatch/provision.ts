@@ -79,7 +79,7 @@ export const SOURCE_CHECK_SCRIPT_NAME = ".styre-provision-check.py";
  *  neutral location — never the script's own directory. Exits 0 iff `sys.argv[1]` resolves (via
  *  `importlib.util.find_spec`) to a module whose origin file sits under `sys.argv[2]`; else exits
  *  1 (not found, or found but shadowed from elsewhere on `sys.path`). */
-const SOURCE_CHECK_SCRIPT = `import sys
+export const SOURCE_CHECK_SCRIPT = `import sys
 del sys.path[0]
 import importlib.util
 import pathlib

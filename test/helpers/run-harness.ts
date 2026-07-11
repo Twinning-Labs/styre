@@ -270,7 +270,7 @@ export async function resumeParkedTicket(
               return {
                 completed: true,
                 exitCode: 0,
-                stdout: "done",
+                stdout: 'done\n```styre-sidecar\n{"new_files":["harness-impl.ts"]}\n```',
                 stderr: "",
                 timedOut: false,
                 costUsd: null,

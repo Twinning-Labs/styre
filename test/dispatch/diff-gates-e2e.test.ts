@@ -23,7 +23,7 @@ function gitRepo(): string {
   return root;
 }
 
-test("behavioral unit converges after the add-a-test bounce-back", async () => {
+test("behavioral unit with no test file still verifies on the first attempt (A1 is advisory, M4 demotion)", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
@@ -36,15 +36,14 @@ test("behavioral unit converges after the add-a-test bounce-back", async () => {
     verifyCheckTypes: ["test"],
   });
 
-  let attempt = 0;
+  // Single coding attempt, writes real code but no test file — A1 (behavioral-no-test) would have
+  // thrown pre-M4; now it's an advisory fail and no bounce-back / second attempt ever happens.
   const runner = new FakeAgentRunner((input) => {
-    attempt += 1;
-    writeFileSync(join(input.cwd, `feature-${attempt}.ts`), `export const v = ${attempt};\n`);
-    if (attempt >= 2) writeFileSync(join(input.cwd, "feature.test.ts"), "test('v', () => {});\n");
+    writeFileSync(join(input.cwd, "feature.ts"), "export const v = 1;\n");
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -71,11 +70,13 @@ test("behavioral unit converges after the add-a-test bounce-back", async () => {
   const finalUnit = getUnit(db, unit.id);
   db.close();
   expect(finalUnit?.status).toBe("verified");
-  expect(results.some((r) => r.signal_type === "test" && r.result === "fail")).toBe(true); // the A1 failure kept
-  expect(results.some((r) => r.signal_type === "test" && r.result === "pass")).toBe(true);
+  const testSig = results.find((r) => r.signal_type === "test");
+  expect(testSig?.result).toBe("fail"); // A1 behavioral-no-test — advisory, recorded but never gates
+  expect(JSON.parse(testSig?.detail_json ?? "{}").reason).toBe("behavioral-no-test");
+  expect(JSON.parse(testSig?.detail_json ?? "{}").advisory).toBe(true);
 });
 
-test("integration fails then a reconcile unit makes it pass", async () => {
+test("a failing integration suite is advisory and advances the ticket without spawning a reconcile unit (M4 §8c)", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
@@ -88,17 +89,12 @@ test("integration fails then a reconcile unit makes it pass", async () => {
     verifyCheckTypes: ["test"],
   });
 
-  // Integration command passes only once a RECONCILE marker file exists; the reconcile unit writes it.
-  let coded = 0;
   const runner = new FakeAgentRunner((input) => {
-    coded += 1;
-    writeFileSync(join(input.cwd, `c-${coded}.ts`), `export const v = ${coded};\n`);
-    // The reconcile unit (2nd+ coding) writes the marker that makes integration pass.
-    if (coded >= 2) writeFileSync(join(input.cwd, "RECONCILED"), "ok");
+    writeFileSync(join(input.cwd, "c.ts"), "export const v = 1;\n");
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["c.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -113,39 +109,39 @@ test("integration fails then a reconcile unit makes it pass", async () => {
       slug: "demo",
       targetRepo: repo,
       components: [
-        {
-          name: "app",
-          kind: "app",
-          paths: ["**"],
-          commands: { test: "true", build: "test -f RECONCILED || test -f STOP" },
-        },
+        // build always fails — the integration suite is red for the whole run.
+        { name: "app", kind: "app", paths: ["**"], commands: { test: "true", build: "false" } },
       ],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-dgint-")),
   });
 
-  // Drive until integration PASSES — checked at the top BEFORE each tick, so we stop before the
-  // tick that would advance implement→review (no review handler exists yet; that would throw).
-  const integrationPassed = () =>
+  // Drive until the integration signal is recorded — checked at the top BEFORE each tick, so we
+  // stop before the tick that would advance implement→review (no review handler exists yet).
+  const integrationRan = () =>
     (
       db
         .query(
-          "SELECT COUNT(*) AS n FROM ground_truth_signal WHERE ticket_id = ? AND signal_type = 'integration' AND result = 'pass'",
+          "SELECT COUNT(*) AS n FROM ground_truth_signal WHERE ticket_id = ? AND signal_type = 'integration'",
         )
         .get(ticketId) as { n: number }
     ).n > 0;
   for (let i = 0; i < 20; i++) {
-    if (integrationPassed()) break;
+    if (integrationRan()) break;
     await advanceOneStep(db, ticketId, registry);
   }
   const intSigs = db
     .query(
-      "SELECT result, branch_head_sha FROM ground_truth_signal WHERE ticket_id = ? AND signal_type = 'integration' ORDER BY id",
+      "SELECT result, detail_json FROM ground_truth_signal WHERE ticket_id = ? AND signal_type = 'integration' ORDER BY id",
     )
-    .all(ticketId) as Array<{ result: string; branch_head_sha: string | null }>;
+    .all(ticketId) as Array<{ result: string; detail_json: string }>;
+  const reconcileUnits = db
+    .query("SELECT kind FROM work_unit WHERE ticket_id = ? AND kind = 'reconcile'")
+    .all(ticketId);
   db.close();
-  // integration failed at least once, then passed at a later commit (after the reconcile unit).
-  expect(intSigs.some((s) => s.result === "fail")).toBe(true);
-  expect(intSigs.some((s) => s.result === "pass")).toBe(true);
-  expect(new Set(intSigs.map((s) => s.branch_head_sha)).size).toBeGreaterThan(1);
+  // Advisory fail recorded — no throw, so failure-policy's integration-reconcile branch never fires.
+  expect(intSigs.length).toBe(1);
+  expect(intSigs[0]?.result).toBe("fail");
+  expect(JSON.parse(intSigs[0]?.detail_json ?? "{}").advisory).toBe(true);
+  expect(reconcileUnits.length).toBe(0);
 });

@@ -10,8 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { branchNameFor } from "../agent/branch.ts";
-import { claudeAgentRunner } from "../agent/providers/claude.ts";
-import { selectAgentRunner } from "../agent/registry.ts";
+import { resolveAgentRunner } from "../agent/resolve.ts";
 import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { stateDir } from "../config/paths.ts";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
@@ -176,6 +175,11 @@ export async function resumeRun(
   if (!ticket) throw new Error("resume: ticket vanished");
   const project = getProject(db, ticket.project_id);
   if (!project) throw new Error("resume: project missing");
+  // Same-container in-place derivation: no schema/dump change — the persisted worktree_path on
+  // the latest dispatch IS the signal. In-place there is no separate worktree to wipe/re-mint,
+  // and the deps installed by `provision` persist in the repo root across the park.
+  const staleWorktreePath = getLatestWorktreePath(db, ticketId);
+  const inPlace = staleWorktreePath === project.target_repo;
   const branch = branchNameFor(ticket);
   const parkedStep = listByStatus(db, "running").find((s) => s.ticket_id === ticketId) ?? null;
 
@@ -200,23 +204,47 @@ export async function resumeRun(
     return;
   }
 
+  // Defense-in-depth (whole-branch review I-2 / Task 3 F1): `assertInPlaceSafe` is NOT reusable on
+  // resume (HEAD legitimately sits on the styre branch mid-run in the supported same-container
+  // path, and the run's own in-progress commits legitimately dirty the tree), so resume drives
+  // `ensureWorktree`'s `checkout -B` with no dirty-tree gate at all. Marker PRESENCE (language-
+  // agnostic — unlike the python-only identity probe below) IS the resume gate: a reused park dir
+  // whose `target_repo` path happens to collide with a foreign checkout would otherwise let resume
+  // hijack it with zero disposability check for a non-python repo. The IDENTITY probe is also
+  // reusable: in a foreign checkout the active env's `<pkg>` won't resolve under the repo root, so
+  // it fails fast BEFORE the stale-worktree cleanup / dispatch below ever mutates the repo.
+  if (inPlace) {
+    profile.targetRepo = project.target_repo; // re-apply the discovered override — forge ports read profile.targetRepo
+    const { assertInPlaceMarker, assertInPlaceIdentity } = await import("../dispatch/in-place.ts");
+    assertInPlaceMarker(project.target_repo); // language-agnostic disposability re-check before checkout -B
+    await assertInPlaceIdentity(project.target_repo, profile);
+  }
+
   // --- Stale-worktree cleanup (Fix B) ---
   // The parked run left its worktree checked out. git will refuse `worktree add -B <branch>`
   // if the branch is already checked out in another worktree. Remove it best-effort.
-  const staleWorktreePath = getLatestWorktreePath(db, ticketId);
-  if (staleWorktreePath) {
-    try {
-      removeWorktree(project.target_repo, staleWorktreePath);
-    } catch {
-      // Already gone / never registered — fine; cleanup must not abort the resume.
+  // In-place: there is no separate worktree — the repo root IS the worktree — so there is
+  // nothing stale to remove (and `removeWorktree` already no-ops on worktreePath===repoPath;
+  // skipping here also avoids the harmless-but-pointless `git worktree prune`).
+  if (!inPlace) {
+    if (staleWorktreePath) {
+      try {
+        removeWorktree(project.target_repo, staleWorktreePath);
+      } catch {
+        // Already gone / never registered — fine; cleanup must not abort the resume.
+      }
+      // Belt-and-suspenders: prune dangling worktree refs in git's internal tracking.
+      Bun.spawnSync(["git", "worktree", "prune"], { cwd: project.target_repo });
     }
-    // Belt-and-suspenders: prune dangling worktree refs in git's internal tracking.
-    Bun.spawnSync(["git", "worktree", "prune"], { cwd: project.target_repo });
   }
 
-  // The worktree above is gone (wiped/rebuilt fresh below) — any deps a succeeded `provision`
-  // step installed are gone with it. Re-arm provision so it re-runs before the next verify.
-  resetProvisionForResume(db, ticketId);
+  // Worktree mode: the worktree above is gone (wiped/rebuilt fresh below) — any deps a succeeded
+  // `provision` step installed are gone with it. Re-arm provision so it re-runs before the next
+  // verify. In-place: the repo root is never wiped, so the deps persist — resetting here would
+  // needlessly discard the reuse payoff (re-running provision for no reason).
+  if (!inPlace) {
+    resetProvisionForResume(db, ticketId);
+  }
 
   setTicketStatus(db, ticketId, "active");
   let resumeContext: { stepKey: string; transcript: string } | undefined;
@@ -240,10 +268,12 @@ export async function resumeRun(
   const registry: StepRegistry = deps?.buildRegistry
     ? deps.buildRegistry(resumeContext)
     : buildDispatchRegistry({
-        runner: selectAgentRunner(DEFAULT_AGENT_CONFIG, { claude: () => claudeAgentRunner() }),
-        agentConfig: DEFAULT_AGENT_CONFIG,
+        runner: resolveAgentRunner(runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG),
+        agentConfig: runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG,
         profile,
-        worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-")),
+        inPlace,
+        // worktreeRoot is unused in-place (any value is inert) — avoid minting a tmpdir for it.
+        worktreeRoot: inPlace ? project.target_repo : mkdtempSync(join(tmpdir(), "styre-wt-")),
         resumeContext,
       });
 

@@ -26,10 +26,28 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   },
 };
 
+/** Built-in Codex preset (DEC-CX-7). Model ids are OPERATOR-SET config, not core truth — these are
+ *  drop-in defaults to confirm/override in workspace config.json. */
+export const CODEX_PRESET: AgentConfig = {
+  provider: "codex",
+  command: "codex",
+  models: { deep: "gpt-5.4", standard: "gpt-5.4-codex", cheap: "gpt-5.4-codex-mini" },
+};
+
 export function parseAgentConfig(raw: unknown): AgentConfig {
   return AgentConfigSchema.parse(raw);
 }
 
 export function modelForTier(config: AgentConfig, tier: Tier): string {
   return config.models[tier];
+}
+
+/** Provider → the env var it needs to authenticate its CLI (DEC-CX-6). Used by the setup gate. */
+const PROVIDER_REQUIRED_ENV: Record<string, string> = {
+  claude: "ANTHROPIC_API_KEY",
+  codex: "OPENAI_API_KEY",
+};
+
+export function requiredEnvFor(provider: string): string | undefined {
+  return PROVIDER_REQUIRED_ENV[provider];
 }

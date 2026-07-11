@@ -3,6 +3,7 @@ import {
   DEFAULT_AGENT_CONFIG,
   modelForTier,
   parseAgentConfig,
+  requiredEnvFor,
 } from "../../src/config/agent-config.ts";
 
 test("the default config is the Claude preset", () => {
@@ -30,4 +31,10 @@ test("parseAgentConfig rejects a config missing a tier model", () => {
 test("modelForTier resolves each tier", () => {
   expect(modelForTier(DEFAULT_AGENT_CONFIG, "deep")).toBe("claude-opus-4-8");
   expect(modelForTier(DEFAULT_AGENT_CONFIG, "cheap")).toBe("claude-haiku-4-5-20251001");
+});
+
+test("requiredEnvFor maps providers to their auth env var", () => {
+  expect(requiredEnvFor("claude")).toBe("ANTHROPIC_API_KEY");
+  expect(requiredEnvFor("codex")).toBe("OPENAI_API_KEY");
+  expect(requiredEnvFor("unknown")).toBeUndefined();
 });

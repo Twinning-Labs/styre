@@ -13,7 +13,12 @@ import {
   listByTicket as listUnits,
   setStatus as setUnitStatus,
 } from "../db/repos/work-unit.ts";
-import { getByKey, listStepsForUnit, resetToPending } from "../db/repos/workflow-step.ts";
+import {
+  getByKey,
+  listStepsForUnit,
+  resetAttempt,
+  resetToPending,
+} from "../db/repos/workflow-step.ts";
 
 export type ReviewDecision = "clean" | "loopback" | "escalated";
 
@@ -36,6 +41,25 @@ function isRepeatedReviewLoopback(db: Database, ticketId: number, signature: str
   );
   const prev = prior[prior.length - 1];
   return prev?.signature === signature;
+}
+
+/** Ticket-level verify steps re-arm on any HEAD-moving loopback: their recorded success is content-
+ *  keyed to the OLD head, so leaving them 'succeeded' replays a stale gate pass at the new HEAD →
+ *  resolver re-emit → MAX_TRANSITIONS. Reset is a no-op when a step doesn't exist (getByKey null). */
+function resetTicketVerifySteps(db: Database, ticketId: number): void {
+  for (const key of [
+    "verify:integration",
+    "verify:checks-gate",
+    "checks:arbitrate",
+    "checks:reauthor",
+  ]) {
+    const s = getByKey(db, ticketId, key);
+    if (s) resetToPending(db, s.id);
+  }
+  // §6: review/design re-entry is NOT a gate-origin round → reset the monotone gate-round counter, so
+  // a healthy ticket that loops review does not accumulate attempts toward a false escalate.
+  const gate = getByKey(db, ticketId, "verify:checks-gate");
+  if (gate) resetAttempt(db, gate.id);
 }
 
 function escalate(db: Database, ticketId: number, reason: string, signature: string): void {
@@ -77,6 +101,7 @@ function codeLoopback(
     if (reviewStep) {
       resetToPending(db, reviewStep.id);
     }
+    resetTicketVerifySteps(db, ticketId);
     setTicketStage(db, ticketId, "implement");
     appendEvent(db, {
       ticketId,
@@ -88,7 +113,22 @@ function codeLoopback(
   })();
 }
 
-function redesignLoopback(db: Database, ticketId: number, signature: string): void {
+function redesignLoopback(
+  db: Database,
+  ticketId: number,
+  signature: string,
+  blocking: ReviewFindingRow[],
+): void {
+  // Snapshot the blocking findings that forced this redesign into the loopback event's payload, so
+  // the re-dispatched design agent (via designFeedback) sees exactly what to fix — regardless of
+  // which review step raised them (plan review OR code review, ENG-272). The snapshot rides
+  // event_log.payload_json (no schema change) and survives the deleteByTicket below, so no detach
+  // of per-unit findings is needed.
+  const findings = blocking.map((f) => ({
+    category: f.category,
+    location: f.location,
+    rationale: f.rationale,
+  }));
   db.transaction(() => {
     deleteByTicket(db, ticketId);
     for (const key of ["design:dispatch", "design:extract", "design:review", "review"]) {
@@ -97,6 +137,7 @@ function redesignLoopback(db: Database, ticketId: number, signature: string): vo
         resetToPending(db, step.id);
       }
     }
+    resetTicketVerifySteps(db, ticketId);
     setTicketStage(db, ticketId, "design");
     appendEvent(db, {
       ticketId,
@@ -104,6 +145,7 @@ function redesignLoopback(db: Database, ticketId: number, signature: string): vo
       loop: "design",
       routeTo: "review",
       signature,
+      payload: { findings },
     });
   })();
 }
@@ -137,7 +179,7 @@ export function applyReviewVerdict(
       escalate(db, ticketId, "no progress: identical plan-review findings", signature);
       return { decision: "escalated" };
     }
-    redesignLoopback(db, ticketId, signature);
+    redesignLoopback(db, ticketId, signature, blocking);
     return { decision: "loopback" };
   }
 
@@ -155,7 +197,9 @@ export function applyReviewVerdict(
     const isPlanDefect = blocking.some((f) => f.category === "plan-defect");
     if (isPlanDefect) {
       if (config.onPlanDefect === "redesign") {
-        redesignLoopback(db, ticketId, signature);
+        // Carry the triggering code-review findings into the redesign so the design agent knows
+        // what forced it (ENG-272): redesignLoopback snapshots them into the loopback event.
+        redesignLoopback(db, ticketId, signature, blocking);
         return { decision: "loopback" };
       }
       escalate(

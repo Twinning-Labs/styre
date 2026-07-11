@@ -4,13 +4,21 @@ import type { AgentConfig } from "../config/agent-config.ts";
 import { modelForTier } from "../config/agent-config.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../db/repos/dispatch.ts";
+import { appendEvent } from "../db/repos/event-log.ts";
 import { setPid } from "../db/repos/workflow-step.ts";
 import { ParkSignal } from "../engine/park-signal.ts";
 import { nowUtc } from "../util/time.ts";
+import type { CommitScope } from "./commit-scope.ts";
 import type { Profile } from "./profile.ts";
 import { renderPrompt } from "./render-prompt.ts";
 import { allowlistFor } from "./tool-allowlists.ts";
-import { commitWorktree, ensureWorktree } from "./worktree.ts";
+import {
+  commitWorktree,
+  ensureWorktree,
+  pendingEntries,
+  undoAttempt,
+  worktreeHead,
+} from "./worktree.ts";
 
 export interface DispatchDeps {
   runner: AgentRunner;
@@ -34,6 +42,11 @@ export interface DispatchSpec {
   /** Bash runner commands to scope the implement allowlist to (string commands only). Other
    *  handlers omit this (their allowlists do not scope Bash). */
   runnerCommands?: string[];
+  /** Per-step commit scope (control-loop §4). Given the agent's stdout, a predicate over each pending
+   *  path: (path, isNew) => true means in-scope. PRESENT ⇒ a write step: an out-of-scope file this
+   *  dispatch created is rejected (revert + dispatch-failed + retry). ABSENT ⇒ read-only step: a
+   *  brand-new file is logged (event_log note) and left uncommitted; never gates. */
+  commitScope?: CommitScope;
 }
 
 const CARRYOVER_PREFIX =
@@ -41,6 +54,31 @@ const CARRYOVER_PREFIX =
   "context only — it may be incomplete or stale. The repository and journal are the source of " +
   "truth; verify the current state before redoing or relying on anything it claims to have done.";
 const CARRYOVER_SUFFIX = "--- end of interrupted attempt's partial output ---";
+
+const RETRY_FEEDBACK_PREFIX =
+  "## Your previous attempt at this step was REJECTED\n\nFix exactly the problem described below " +
+  "and produce a corrected result — do NOT repeat the output that caused it. (If a planned work " +
+  "unit has no files to change, it is redundant: remove it. If your structured output was malformed, " +
+  "emit valid output.)";
+const RETRY_FEEDBACK_SUFFIX = "--- end of prior rejection (address it before anything else) ---";
+
+/** The human-readable message of the prior attempt's rejection, from `workflow_step.error_json`
+ *  (serializeError → {name, message}). "" when there was no prior failure / it can't be parsed —
+ *  so the first attempt and any malformed record prepend nothing. General: any dispatch step's own
+ *  thrown postcondition/validation/sidecar rejection is carried into its retry. NOTE: the message is
+ *  prepended verbatim into the agent prompt — today every gate message is styre-controlled (static
+ *  text + integer seqs); if a future gate ever interpolates agent/ticket free-text into its thrown
+ *  message, that text would be fed back verbatim (still self-to-self — the agent's own prior output —
+ *  never a privilege escalation, but worth keeping gate messages free of untrusted content). */
+function rejectionFrom(errorJson: string | null): string {
+  if (!errorJson) return "";
+  try {
+    const msg = (JSON.parse(errorJson) as { message?: string }).message ?? "";
+    return typeof msg === "string" ? msg.trim() : "";
+  } catch {
+    return "";
+  }
+}
 
 function dispatchId(ident: string, seq: number): string {
   return `${ident}-d${String(seq).padStart(4, "0")}`;
@@ -62,11 +100,26 @@ export async function runAgentDispatch(
   }
 
   let prompt = rendered.prompt;
+  // CL-RETRY: prepend the prior attempt's rejection so a retry is informed, not blind. error_json
+  // is captured generically by markFailed for every dispatch throw and survives resetToPending.
+  const priorRejection = rejectionFrom(ctx.step.error_json);
+  if (priorRejection !== "") {
+    prompt = `${RETRY_FEEDBACK_PREFIX}\n\n${priorRejection}\n\n${RETRY_FEEDBACK_SUFFIX}\n\n${prompt}`;
+  }
   if (deps.resumeContext && deps.resumeContext.stepKey === ctx.step.step_key) {
-    prompt = `${CARRYOVER_PREFIX}\n\n${deps.resumeContext.transcript}\n\n${CARRYOVER_SUFFIX}\n\n${rendered.prompt}`;
+    // chain off `prompt` (NOT rendered.prompt) so both prepends compose (design §1, review Important)
+    prompt = `${CARRYOVER_PREFIX}\n\n${deps.resumeContext.transcript}\n\n${CARRYOVER_SUFFIX}\n\n${prompt}`;
   }
 
   ensureWorktree(deps.repoPath, deps.branch, deps.worktreePath);
+
+  // Only files THIS dispatch creates are in the scope's jurisdiction; pre-existing untracked cruft
+  // (an earlier stray, provision's *.egg-info) is captured here and excluded from judgment/staging.
+  const untrackedBefore = new Set(
+    pendingEntries(deps.worktreePath)
+      .filter((e) => e.isNew)
+      .map((e) => e.path),
+  );
 
   const seq = nextSeq(ctx.db, ctx.ticket.id);
   const did = dispatchId(ctx.ticket.ident, seq);
@@ -98,6 +151,7 @@ export async function runAgentDispatch(
     const cause = result.timedOut ? "transient" : (result.cause ?? "transient");
     if (cause === "session-limit" || cause === "out-of-credits") {
       completeDispatch(ctx.db, inserted.id, { outcome: "parked", endedAt: nowUtc() });
+      undoAttempt(deps.worktreePath, untrackedBefore);
       throw new ParkSignal({
         cause,
         resetAt: result.resetAt ?? null,
@@ -106,12 +160,54 @@ export async function runAgentDispatch(
       });
     }
     completeDispatch(ctx.db, inserted.id, { outcome: "dispatch-failed", endedAt: nowUtc() });
+    undoAttempt(deps.worktreePath, untrackedBefore);
     throw new Error(
       `dispatch ${did} transport failure (exit ${result.exitCode}, timedOut=${result.timedOut})`,
     );
   }
 
-  const { sha, changed } = commitWorktree(deps.worktreePath, `${did} ${spec.handlerKey}`);
+  const preHead = worktreeHead(deps.worktreePath);
+  const entries = pendingEntries(deps.worktreePath);
+  // Judge only what this dispatch created (undoAttempt guarantees a failed prior attempt left none).
+  const judged = entries.filter((e) => !(e.isNew && untrackedBefore.has(e.path)));
+
+  let sha: string;
+  let changed: boolean;
+  if (spec.commitScope) {
+    const inScope = spec.commitScope(result.stdout);
+    const offenders = judged.filter((e) => !inScope(e.path, e.isNew));
+    if (offenders.length > 0) {
+      undoAttempt(deps.worktreePath, untrackedBefore);
+      completeDispatch(ctx.db, inserted.id, {
+        outcome: "dispatch-failed",
+        branchHeadSha: preHead,
+        endedAt: nowUtc(),
+      });
+      throw new Error(
+        `dispatch ${did} out-of-scope files (declare them as part of the change, or delete them if they are throwaway/debug files): ${offenders
+          .map((e) => e.path)
+          .join(", ")}`,
+      );
+    }
+    ({ sha, changed } = commitWorktree(
+      deps.worktreePath,
+      `${did} ${spec.handlerKey}`,
+      judged.filter((e) => e.isNew).map((e) => e.path),
+    ));
+  } else {
+    const stray = judged.filter((e) => e.isNew).map((e) => e.path);
+    if (stray.length > 0) {
+      // Read-only step produced a file it should not have. Loop-not-halt: record, do not gate.
+      appendEvent(ctx.db, {
+        ticketId: ctx.ticket.id,
+        kind: "note",
+        reason: `scratch-ignored:${spec.handlerKey}`,
+        payload: { stray },
+      });
+    }
+    ({ sha, changed } = commitWorktree(deps.worktreePath, `${did} ${spec.handlerKey}`, []));
+  }
+
   const completion = {
     branchHeadSha: sha,
     endedAt: nowUtc(),

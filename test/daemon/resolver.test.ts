@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import { nextActionableUnit, nextStepKey, nextUnrunCheck } from "../../src/daemon/resolver.ts";
+import { insertAcCheck } from "../../src/db/repos/ac-check.ts";
+import { insertAc } from "../../src/db/repos/acceptance-criterion.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { insertPending, markDelivered } from "../../src/db/repos/signal.ts";
@@ -50,14 +52,35 @@ test("design: units present + track unset → routes to design:size", async () =
   });
 });
 
-test("design fast-track: with units + track=fast, advances to implement", async () => {
+test("design fast-track: units + track=fast → provision, then checks:dispatch, then advance", async () => {
   const { db, ticketId } = makeTestDb();
   await succeed(db, ticketId, "design:dispatch");
   setTicketTrack(db, ticketId, "fast");
   insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", verifyCheckTypes: ["test"] });
-  const d = nextStepKey(db, ticketId);
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "provision" });
+  await succeed(db, ticketId, "provision");
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "checks:dispatch" });
+  await succeed(db, ticketId, "checks:dispatch");
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "checks:classify" });
+  await succeed(db, ticketId, "checks:classify");
+  expect(nextStepKey(db, ticketId)).toEqual({ kind: "advance", from: "design", to: "implement" });
   db.close();
-  expect(d).toEqual({ kind: "advance", from: "design", to: "implement" });
+});
+
+test("design full-track: after design:review, still routes through provision → checks:dispatch → advance", async () => {
+  const { db, ticketId } = makeTestDb();
+  await succeed(db, ticketId, "design:dispatch");
+  setTicketTrack(db, ticketId, "full");
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", verifyCheckTypes: ["test"] });
+  await succeed(db, ticketId, "design:review");
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "provision" });
+  await succeed(db, ticketId, "provision");
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "checks:dispatch" });
+  await succeed(db, ticketId, "checks:dispatch");
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "checks:classify" });
+  await succeed(db, ticketId, "checks:classify");
+  expect(nextStepKey(db, ticketId)).toEqual({ kind: "advance", from: "design", to: "implement" });
+  db.close();
 });
 
 test("design full-track: with units + track=full, asks for design:review before advancing", async () => {
@@ -197,6 +220,199 @@ test("implement: all units verified + no docs → verify:integration then advanc
   const afterIntegration = nextStepKey(db, ticketId);
   db.close();
   expect(afterIntegration).toEqual({ kind: "advance", from: "implement", to: "review" });
+});
+
+test("implement: a FAILED integration signal at HEAD still advances past verify:integration (ran-at-sha, M4 §8c)", async () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  const u = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verified",
+  });
+  expect(u.status).toBe("verified");
+  await succeed(db, ticketId, "provision");
+  const beforeIntegration = nextStepKey(db, ticketId);
+  expect(beforeIntegration.kind === "step" && beforeIntegration.handlerKey).toBe(
+    "verify:integration",
+  );
+  // Simulate the demoted integration handler: an advisory FAIL (not a pass) recorded at HEAD.
+  const disp = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0001",
+    seq: nextSeq(db, ticketId),
+  });
+  completeDispatch(db, disp.id, { outcome: "clean-success", branchHeadSha: "sha-abc" });
+  insertSignal(db, {
+    ticketId,
+    workUnitId: null,
+    signalType: "integration",
+    result: "fail",
+    branchHeadSha: "sha-abc",
+    detail: { advisory: true },
+  });
+  const afterIntegration = nextStepKey(db, ticketId);
+  db.close();
+  // Advanced past integration — NOT re-emitted (would be a MAX_TRANSITIONS-class deadlock under
+  // the old passingShasFor gate, since this signal is a fail, never a pass).
+  expect(afterIntegration).toEqual({ kind: "advance", from: "implement", to: "review" });
+});
+
+test("implement: all units verified + an active ac_check + no gate pass at HEAD → verify:checks-gate (after provision)", async () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verified",
+  });
+  const ac = insertAc(db, { ticketId, seq: 1, text: "does the thing", source: "checklist" });
+  insertAcCheck(db, {
+    ticketId,
+    acId: ac.id,
+    selector: "tests/test_x.py::test_thing",
+    testPath: "tests/test_x.py",
+  });
+  // Provision gates the gate step too (mirrors the integration gate's provision hoist).
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "provision" });
+  await succeed(db, ticketId, "provision");
+  const d = nextStepKey(db, ticketId);
+  db.close();
+  expect(d).toEqual({
+    kind: "step",
+    stepKey: "verify:checks-gate",
+    stepType: "verify",
+    handlerKey: "verify:checks-gate",
+    workUnitId: null,
+  });
+});
+
+test("resolver serves checks:arbitrate when the gate failed with behavioral still-red and no blame yet", () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verified",
+  });
+  const ac = insertAc(db, { ticketId, seq: 1, text: "does the thing", source: "checklist" });
+  insertAcCheck(db, {
+    ticketId,
+    acId: ac.id,
+    selector: "tests/test_x.py::test_thing",
+    testPath: "tests/test_x.py",
+  });
+  const disp = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0001",
+    seq: nextSeq(db, ticketId),
+  });
+  completeDispatch(db, disp.id, { outcome: "clean-success", branchHeadSha: "S1" });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-gate",
+    result: "fail",
+    branchHeadSha: "S1",
+    detail: { stillRed: [ac.id], tampered: [], advisory: [] },
+  });
+  const d = nextStepKey(db, ticketId);
+  db.close();
+  expect(d).toMatchObject({ stepKey: "checks:arbitrate", handlerKey: "checks:arbitrate" });
+});
+
+test("resolver does NOT re-serve checks:arbitrate once a blame exists at the gate sha (falls through to checks:reauthor)", () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verified",
+  });
+  const ac = insertAc(db, { ticketId, seq: 1, text: "does the thing", source: "checklist" });
+  insertAcCheck(db, {
+    ticketId,
+    acId: ac.id,
+    selector: "tests/test_x.py::test_thing",
+    testPath: "tests/test_x.py",
+  });
+  const disp = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0001",
+    seq: nextSeq(db, ticketId),
+  });
+  completeDispatch(db, disp.id, { outcome: "clean-success", branchHeadSha: "S1" });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-gate",
+    result: "fail",
+    branchHeadSha: "S1",
+    detail: { stillRed: [ac.id], tampered: [], advisory: [] },
+  });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-blame",
+    result: "fail",
+    branchHeadSha: "S1",
+    detail: { acId: ac.id, acCheckId: 1, blame: "code-wrong", reason: "r" },
+  });
+  const d = nextStepKey(db, ticketId);
+  db.close();
+  // falls through past the arbiter arm — blame exists, checks:reauthor is pending (not yet run this
+  // round) → served next.
+  expect(d).toMatchObject({ stepKey: "checks:reauthor", handlerKey: "checks:reauthor" });
+});
+
+test("resolver falls through past checks:reauthor once it has succeeded this round (HEAD unchanged) — serves provision then the gate", async () => {
+  const { db, ticketId } = makeTestDb();
+  setTicketStage(db, ticketId, "implement");
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verified",
+  });
+  const ac = insertAc(db, { ticketId, seq: 1, text: "does the thing", source: "checklist" });
+  insertAcCheck(db, {
+    ticketId,
+    acId: ac.id,
+    selector: "tests/test_x.py::test_thing",
+    testPath: "tests/test_x.py",
+  });
+  const disp = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0001",
+    seq: nextSeq(db, ticketId),
+  });
+  completeDispatch(db, disp.id, { outcome: "clean-success", branchHeadSha: "S1" });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-gate",
+    result: "fail",
+    branchHeadSha: "S1",
+    detail: { stillRed: [ac.id], tampered: [], advisory: [] },
+  });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-blame",
+    result: "fail",
+    branchHeadSha: "S1",
+    detail: { acId: ac.id, acCheckId: 1, blame: "check-wrong", reason: "r" },
+  });
+  await succeed(db, ticketId, "checks:reauthor"); // this round's reauthor already ran; HEAD is still S1
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "provision" });
+  await succeed(db, ticketId, "provision");
+  const d = nextStepKey(db, ticketId);
+  db.close();
+  expect(d).toMatchObject({ stepKey: "verify:checks-gate" });
 });
 
 test("implement: needs_docs routes through docs:revise before advancing", () => {
@@ -403,6 +619,39 @@ test("nextUnrunCheck: a check that passed at an OLD commit is unrun at the new c
   const check = nextUnrunCheck(db, u);
   db.close();
   expect(check).toBe("test"); // stale pass does NOT satisfy the current commit
+});
+
+test("nextUnrunCheck: a FAIL at the current commit still satisfies the check (advisory ran-at-sha, M4 §8b)", () => {
+  const { db, ticketId } = makeTestDb();
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test", "build"],
+  });
+  setStatus(db, unit.id, "verifying");
+  const d = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0003",
+    seq: nextSeq(db, ticketId),
+    workUnitId: unit.id,
+  });
+  completeDispatch(db, d.id, { outcome: "clean-success", branchHeadSha: "cur" });
+  // A recorded advisory FAIL — not a pass — at the current commit.
+  insertSignal(db, {
+    ticketId,
+    workUnitId: unit.id,
+    signalType: "test",
+    result: "fail",
+    branchHeadSha: "cur",
+    detail: { advisory: true },
+  });
+  const u = getById(db, unit.id);
+  if (!u) throw new Error("no unit");
+  const check = nextUnrunCheck(db, u);
+  db.close();
+  // "test" ran (fail recorded) → satisfied; "build" never ran → next unrun check.
+  expect(check).toBe("build");
 });
 
 test("nextUnrunCheck: a PASS at the current commit satisfies the check", () => {

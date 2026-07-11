@@ -26,6 +26,8 @@ export function skeletonRegistry(): StepRegistry {
     setTicketTrack(ctx.db, ctx.ticket.id, "fast");
     return { units: 1 };
   });
+  r.register("checks:dispatch", () => ({ authored: 0 }));
+  r.register("checks:classify", () => ({ classified: 0 }));
   r.register("implement:dispatch", (ctx: HandlerContext) => {
     if (ctx.workUnitId !== null) {
       setUnitStatus(ctx.db, ctx.workUnitId, "verifying");

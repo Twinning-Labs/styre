@@ -9,9 +9,9 @@
  * the remote. So push is a `git -C ${repoPath} push origin ${branch}` (probe-skipped if the remote
  * ref is already at the target sha); PRs/comments go through Octokit.
  *
- * Zero lock-in: every `@octokit/*` import stays here. The pure `parseGitHubRemote` helper below is
- * unit-tested; the SDK/git-calling paths are not (the fake port covers the core, and they need a live
- * token + remote), verified only by typecheck + build.
+ * Zero lock-in: every `@octokit/*` import stays here. The SDK/git-calling paths are not unit-tested
+ * (the fake port covers the core, and they need a live token + remote), verified only by typecheck
+ * + build.
  *
  * SMOKE TEST (operator-run, no real API/push in CI — the Linear-adapter precedent): the adapter needs
  * a real GitHub repo cloned at `repoPath` with a pushed feature branch + commit, and a token with
@@ -31,30 +31,14 @@
  */
 import { execFileSync } from "node:child_process";
 import { Octokit } from "@octokit/rest";
+import { parseGitHubRemote } from "../../config/slug.ts";
 import type { ForgePort } from "../forge.ts";
+
+export { parseGitHubRemote }; // re-exported so existing importers (probe, tests) are unchanged
 
 /** The hidden idempotency tag appended to a PR comment and probed for on dedup. Pure. */
 export function projKeyTag(idempotencyKey: string): string {
   return `<!-- proj-key: ${idempotencyKey} -->`;
-}
-
-/**
- * Parse a git remote URL into `{ owner, repo }`, or null if it isn't a GitHub remote.
- * Handles SSH (`git@github.com:owner/repo.git`), HTTPS (`https://github.com/owner/repo.git`), and
- * `ssh://git@github.com/owner/repo.git`, with or without a trailing `.git` / slash / whitespace.
- * A non-GitHub host or a missing owner/repo segment returns null. Pure.
- */
-export function parseGitHubRemote(url: string): { owner: string; repo: string } | null {
-  const trimmed = url.trim();
-  // SCP-like SSH: git@github.com:owner/repo(.git)
-  const scp = /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?\/?$/.exec(trimmed);
-  if (scp) return { owner: scp[1], repo: scp[2] };
-  // URL forms: https://github.com/owner/repo(.git) or ssh://git@github.com/owner/repo(.git)
-  const proto = /^(?:https?|ssh|git):\/\/(?:[^@]+@)?github\.com\/([^/]+)\/(.+?)(?:\.git)?\/?$/.exec(
-    trimmed,
-  );
-  if (proto) return { owner: proto[1], repo: proto[2] };
-  return null;
 }
 
 /** Resolve `{ owner, repo }` from the `origin` remote of the git repo at `repoPath`. */
@@ -147,7 +131,15 @@ export function githubForge(opts: { repoPath: string; token?: string }): ForgePo
         state: "open",
       });
       const found = open[0];
-      if (found) return { ref: String(found.number), url: found.html_url };
+      if (found) {
+        // Normalize CRLF → LF before comparing: GitHub stores/returns PR bodies with \r\n, while the
+        // composed body joins on \n. Without this, every resume/drain re-issues a no-op body update
+        // (review finding I-2). This path is adapter-only (not unit-tested), so get it right here.
+        if ((found.body ?? "").replace(/\r\n/g, "\n") !== body) {
+          await octokit.pulls.update({ owner, repo, pull_number: found.number, body });
+        }
+        return { ref: String(found.number), url: found.html_url };
+      }
       const created = await octokit.pulls.create({ owner, repo, head: branch, base, title, body });
       return { ref: String(created.data.number), url: created.data.html_url };
     },

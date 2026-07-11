@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
@@ -14,6 +14,7 @@ import {
 import { getByKey } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
+import { resolvePythonInterpreter } from "../../src/dispatch/provision.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 function gitRepo(): string {
@@ -88,7 +89,7 @@ test("a passing check records a pass signal (with command) and the step succeeds
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -122,7 +123,7 @@ test("a passing check records a pass signal (with command) and the step succeeds
   expect(step?.status).toBe("succeeded");
 });
 
-test("a failing check records a fail signal and fails the step (→ failure-policy loops the unit back)", async () => {
+test("a failing check records an advisory fail signal but the step SUCCEEDS (no throw, no loopback — M4 demotion)", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
@@ -140,7 +141,7 @@ test("a failing check records a fail signal and fails the step (→ failure-poli
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -162,16 +163,17 @@ test("a failing check records a fail signal and fails the step (→ failure-poli
   await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
   await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
   await advanceOneStep(db, ticketId, registry); // completeness:wu1 (declared=∅ → no throw)
-  const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test
+  const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test → advisory fail, step succeeds
   const sigs = listByUnit(db, unit.id);
   const step = getByKey(db, ticketId, "verify:wu1:test");
   const after = getUnit(db, unit.id);
   db.close();
-  expect(["retry", "loopback", "escalated"]).toContain(outcome.kind);
+  expect(outcome.kind).toBe("stepped"); // never throws — the suite verdict is advisory (M4 §8a)
   const testSig = sigs.find((s) => s.signal_type === "test");
   expect(testSig?.result).toBe("fail");
-  expect(step?.status).toBe("pending"); // failure-policy reset
-  expect(after?.status).toBe("pending"); // generic verify loopback reset the unit
+  expect(JSON.parse(testSig?.detail_json ?? "{}").advisory).toBe(true);
+  expect(step?.status).toBe("succeeded"); // no failure-policy involvement — routing advances
+  expect(after?.status).toBe("verifying"); // unit is NOT bounced back to pending
 });
 
 test("an absent check (component has no command for the declared check-type) records an error signal", async () => {
@@ -192,7 +194,7 @@ test("an absent check (component has no command for the declared check-type) rec
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -261,7 +263,7 @@ test("verify:integration passes when build and test pass, recording an integrati
   expect(sigs[0]?.result).toBe("pass");
 });
 
-test("verify:integration fails the step when a command fails", async () => {
+test("verify:integration records an advisory fail when a command fails, and the step SUCCEEDS (M4 §8c)", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   const registry = registryFor(repo, { build: "true", test: "false" });
@@ -271,12 +273,13 @@ test("verify:integration fails the step when a command fails", async () => {
   const outcome = await advanceOneStep(db, ticketId, registry);
   const sigs = db
     .query(
-      "SELECT result FROM ground_truth_signal WHERE ticket_id = ? AND signal_type = 'integration'",
+      "SELECT result, detail_json FROM ground_truth_signal WHERE ticket_id = ? AND signal_type = 'integration'",
     )
-    .all(ticketId) as Array<{ result: string }>;
+    .all(ticketId) as Array<{ result: string; detail_json: string }>;
   db.close();
-  expect(["retry", "loopback", "escalated"]).toContain(outcome.kind);
+  expect(outcome.kind).toBe("stepped");
   expect(sigs[0]?.result).toBe("fail");
+  expect(JSON.parse(sigs[0]?.detail_json ?? "{}").advisory).toBe(true);
 });
 
 test("a timed-out check records an error signal (not fail)", async () => {
@@ -298,7 +301,7 @@ test("a timed-out check records an error signal (not fail)", async () => {
       return {
         completed: true,
         exitCode: 0,
-        stdout: "{}",
+        stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
         stderr: "",
         timedOut: false,
         costUsd: null,
@@ -345,7 +348,7 @@ test("verify:check stamps the verified commit on the signal", async () => {
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -395,7 +398,7 @@ test("behavioral unit: green test command but no test in the diff fails with beh
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -444,7 +447,7 @@ test("behavioral unit: a test file in the diff passes the test check", async () 
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts","feature.test.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -491,7 +494,7 @@ test("scope_diff records an advisory fail for out-of-scope files but does NOT fa
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["allowed.ts","sneaky.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -542,7 +545,7 @@ test("hard-gate: verify:check runs a non-root component's command in its module 
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -596,7 +599,7 @@ test("hard-gate: a root component (no dir) still runs at the worktree root (no r
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -651,7 +654,7 @@ test("advisory sweep: the swept untouched component's command runs in its module
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["unowned.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -747,3 +750,157 @@ test("verify:integration runs a component job in its module dir and a repoComman
   expect(outcome.kind).toBe("stepped");
   expect(sigs[0]?.result).toBe("pass");
 });
+
+// --- Task 2: verify:check test-command resolution routes through reuseAwareTestCommand ---
+
+test("verify:check test command for a python component with no ready env falls back to the configured harness unchanged", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo(); // no pyproject.toml / editable install anywhere → never provably "ready"
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    behavioral: 0,
+    verifyCheckTypes: ["test"],
+  });
+  const runner = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "feature.py"), "x = 1\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.py"]}\n\`\`\``,
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      // kind: "python" + checkType "test" is exactly what reuseAwareTestCommand self-gates on;
+      // "tox" here is the "detected harness" that must survive unchanged when reuse isn't proven.
+      components: [{ name: "py", kind: "python", paths: ["**"], commands: { test: "tox" } }],
+    }),
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfy-pynoready-")),
+  });
+
+  await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
+  await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
+  await advanceOneStep(db, ticketId, registry); // completeness:wu1
+  const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test → runs "tox"
+  const sigs = listByUnit(db, unit.id);
+  db.close();
+  // "tox" isn't a real binary here, but the suite verdict is advisory (M4 §8a) — no throw.
+  expect(outcome.kind).toBe("stepped");
+  const testSig = sigs.find((s) => s.signal_type === "test");
+  expect(testSig?.command).toBe("tox");
+});
+
+// RUN_LIVE-gated: exercises the real reuse resolver end to end through the handler — a real
+// editable pip install (via the existing `provision` step) makes the python env provably ready,
+// so verify:check must run pytest directly instead of the configured "false" harness (which would
+// fail the step if it ran unchanged — the strongest possible proof the wiring is live, not mocked).
+const live = process.env.RUN_LIVE === "1" ? test : test.skip;
+
+live(
+  "verify:check: a ready python env resolves the test command to pytest, not the configured harness",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "styre-vfy-pyready-"));
+    const interp = resolvePythonInterpreter();
+    const pytestCheck = Bun.spawnSync([interp, "-m", "pytest", "--version"]);
+    const installedPytest = pytestCheck.exitCode !== 0;
+    try {
+      const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
+      run(["init", "-b", "main"]);
+      run(["config", "user.email", "t@s.dev"]);
+      run(["config", "user.name", "T"]);
+      mkdirSync(join(root, "pkg"), { recursive: true });
+      writeFileSync(join(root, "pkg", "__init__.py"), "");
+      mkdirSync(join(root, "tests"), { recursive: true });
+      writeFileSync(join(root, "tests", "test_x.py"), "def test_x():\n    assert True\n");
+      writeFileSync(
+        join(root, "setup.py"),
+        "from setuptools import setup\nsetup(name='pkg', version='0.0.1', packages=['pkg'])\n",
+      );
+      run(["add", "-A"]);
+      run(["commit", "-m", "init"]);
+
+      const { db, ticketId, projectId } = makeTestDb();
+      db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(root, projectId);
+      db.query("UPDATE ticket SET stage = 'implement' WHERE id = ?").run(ticketId);
+      const unit = insertWorkUnit(db, {
+        ticketId,
+        seq: 1,
+        kind: "backend",
+        behavioral: 0,
+        verifyCheckTypes: ["test"],
+      });
+      const runner = new FakeAgentRunner((input) => {
+        writeFileSync(join(input.cwd, "pkg", "extra.py"), "X = 1\n");
+        return {
+          completed: true,
+          exitCode: 0,
+          stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["pkg/extra.py"]}\n\`\`\``,
+          stderr: "",
+          timedOut: false,
+          costUsd: null,
+          tokensIn: null,
+          tokensOut: null,
+        };
+      });
+      const registry = buildDispatchRegistry({
+        runner,
+        agentConfig: DEFAULT_AGENT_CONFIG,
+        profile: parseProfile({
+          slug: "demo",
+          targetRepo: root,
+          components: [
+            {
+              name: "pkg",
+              kind: "python",
+              paths: ["**"],
+              // "false" would fail the step if it ran unchanged — proves reuse actually replaced it.
+              commands: { test: "false" },
+              prepare: `${interp} -m pip install --break-system-packages --user pytest && ${interp} -m pip install --break-system-packages --user -e .`,
+            },
+          ],
+        }),
+        worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfywt-pyready-")),
+      });
+
+      await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
+      await advanceOneStep(db, ticketId, registry); // provision → real editable install (env → ready)
+      await advanceOneStep(db, ticketId, registry); // completeness:wu1
+      const outcome = await advanceOneStep(db, ticketId, registry); // verify:check test → pytest
+      const sigs = listByUnit(db, unit.id);
+      db.close();
+      expect(outcome.kind).toBe("stepped");
+      const testSig = sigs.find((s) => s.signal_type === "test");
+      expect(testSig?.result).toBe("pass");
+      expect(testSig?.command).toBe(`${interp} -m pytest`);
+    } finally {
+      await Bun.spawn([interp, "-m", "pip", "uninstall", "-y", "--break-system-packages", "pkg"])
+        .exited;
+      if (installedPytest) {
+        await Bun.spawn([
+          interp,
+          "-m",
+          "pip",
+          "uninstall",
+          "-y",
+          "--break-system-packages",
+          "pytest",
+        ]).exited;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  120_000,
+);

@@ -9,6 +9,9 @@ const READ_ONLY = ["Read", "Grep", "Glob"];
 const ALLOWLISTS: Record<string, string[]> = {
   "design:dispatch": [...READ_ONLY, "Write", "Edit", "WebSearch", "WebFetch"],
   "implement:dispatch": [...READ_ONLY, "Write", "Edit", "Bash"],
+  "checks:dispatch": [...READ_ONLY, "Write", "Edit"],
+  "checks:classify": [...READ_ONLY],
+  "checks:arbitrate": [...READ_ONLY],
   "docs:revise": [...READ_ONLY, "Write", "Edit"],
   "design:extract": [...READ_ONLY],
   "design:size": [...READ_ONLY],

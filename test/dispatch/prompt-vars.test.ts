@@ -3,11 +3,13 @@ import type { WorkUnitRow } from "../../src/db/repos/work-unit.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import type { Component } from "../../src/dispatch/profile.ts";
 import {
+  CHECKS_TEMPLATE,
   DESIGN_REVIEW_TEMPLATE,
   DESIGN_TEMPLATE,
   EXTRACT_TEMPLATE,
   IMPLEMENT_TEMPLATE,
   REVIEW_TEMPLATE,
+  checksVars,
   designReviewVars,
   designVars,
   extractVars,
@@ -68,6 +70,18 @@ test("implementVars carries the feedback var (empty by default)", () => {
   } as unknown as WorkUnitRow;
   expect(implementVars(ticket, unit, profile).feedback).toBe("");
   expect(implementVars(ticket, unit, profile, "fix the build").feedback).toBe("fix the build");
+});
+
+test("implementVars renders the authored check paths + a do-not-edit instruction", () => {
+  const vars = implementVars(ticket, unit, profile, "", [
+    { test_path: "api/tests/styre_checks/ENG-1_ac7_test.py" },
+  ]);
+  expect(vars.authored_checks).toContain("ENG-1_ac7_test.py");
+  expect(vars.authored_checks.toLowerCase()).toContain("do not edit");
+});
+
+test("implementVars with no authored checks renders an empty slot", () => {
+  expect(implementVars(ticket, unit, profile, "", []).authored_checks).toBe("");
 });
 
 test("review template renders with reviewVars (no missing placeholders)", () => {
@@ -178,4 +192,44 @@ test("detected_stacks falls back to a no-detect note when the profile has no com
   const v = extractVars({ ident: "E", title: "T" }, profile).detected_stacks;
   expect(v).toContain("no stacks auto-detected");
   expect(stackSummary([])).toBe(""); // the pure helper still returns "" — the fallback is var-level
+});
+
+test("design template has a review_feedback slot", () => {
+  expect(placeholders(DESIGN_TEMPLATE)).toContain("review_feedback");
+});
+
+test("designVars fills review_feedback (empty default renders cleanly)", () => {
+  expect(renderPrompt(DESIGN_TEMPLATE, designVars(ticket, profile)).ok).toBe(true); // "" fills the slot
+  const r = renderPrompt(
+    DESIGN_TEMPLATE,
+    designVars(ticket, profile, "PRIOR REVIEW: fix the regex"),
+  );
+  expect(r.ok && r.prompt.includes("PRIOR REVIEW: fix the regex")).toBe(true);
+});
+
+test("checksVars fills every placeholder in the checks template (no CL-PROFILE miss)", () => {
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: "/tmp/r",
+    components: [
+      { name: "api", kind: "python", paths: ["api/**"], commands: { test: "pytest -q" } },
+    ],
+  });
+  const vars = checksVars({ ident: "ENG-1", title: "T" }, profile, [
+    { id: 7, text: "returns 200 on GET /health" },
+    { id: 8, text: "rejects an unauthenticated request" },
+  ]);
+  const rendered = renderPrompt(CHECKS_TEMPLATE, vars);
+  expect(rendered.ok).toBe(true);
+  if (rendered.ok) {
+    expect(rendered.prompt).toContain("ac_id=7");
+    expect(rendered.prompt).toContain("returns 200 on GET /health");
+    expect(rendered.prompt).toContain("api (kind: python)");
+  }
+});
+
+test("implement prompt instructs new_files declaration + scratch prevention", () => {
+  expect(IMPLEMENT_TEMPLATE).toContain("new_files");
+  expect(IMPLEMENT_TEMPLATE.toLowerCase()).toContain("do not leave");
+  expect(IMPLEMENT_TEMPLATE).toContain("```styre-sidecar");
 });
