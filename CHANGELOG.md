@@ -1,6 +1,16 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.8.0] - 2026-07-11
+
+### Features
+
+- **JIRA Cloud is now a supported issue tracker.** Set `issueTracker: "jira"` in your config to run styre against JIRA Cloud instead of Linear, with the same fetch, state transitions, labels, and comments support as the Linear adapter.
+- JIRA authentication uses a simple Basic-auth setup with `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`; the setup command's credential summary now reports these when they're present, and `JIRA_API_TOKEN` is kept out of any spawned agent's environment.
+- JIRA ticket descriptions written in Atlassian's rich-text format are converted to markdown, including checklists, so acceptance-criteria parsing works the same way it does for Linear.
+- An optional `jira` config block lets you customize status-to-transition mapping and bug issue-type names if your JIRA workflow doesn't match the defaults.
+- When a ticket's status update is skipped because of a workflow mismatch (not a connection failure), styre now records a structured note in the run log so you can see why the state wasn't projected.
+
 ## [0.7.0] - 2026-07-11
 
 ### Features
