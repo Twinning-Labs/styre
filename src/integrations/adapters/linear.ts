@@ -4,7 +4,7 @@
  * vendor SDK; the core depends solely on `../issue-tracker.ts` (the AgentRunner/provider precedent).
  *
  * Zero lock-in: every `@linear/sdk` import stays here. Name→id resolution is live per call (the
- * `linear_id_cache` optimization is deferred). The pure mapping helpers below are unit-tested; the
+ * `external_id_cache` optimization is deferred). The pure mapping helpers below are unit-tested; the
  * SDK-calling paths are not (the fake port covers the core), verified only by typecheck + build.
  *
  * SMOKE TEST (operator-run, no real API in CI — the Claude-adapter precedent): the adapter needs a

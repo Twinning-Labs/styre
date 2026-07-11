@@ -51,8 +51,8 @@ CREATE TABLE schema_meta (
     note        TEXT
 );
 INSERT INTO schema_meta (version, applied_at, note)
-VALUES (6, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-        'v6: ac_check.superseded_at + AUTOINCREMENT id — M4 re-author SUPERSEDES (never deletes); control state is read from the table, not the append-only signal log');
+VALUES (7, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+        'v7: neutralize vendor-named identifiers (linear_* -> external_*, linear_id_cache -> external_id_cache) ahead of the JIRA adapter');
 
 -- ============================================================================
 -- §A  PROJECT + TICKET   (replaces issue-state.json + stage:* / pipeline:* labels)
@@ -64,7 +64,7 @@ CREATE TABLE project (
     slug                TEXT    NOT NULL UNIQUE,        -- PROJECT_SLUG (frozen at setup)
     target_repo         TEXT    NOT NULL,               -- absolute path on host
     default_branch      TEXT    NOT NULL DEFAULT 'main',
-    linear_team_key     TEXT,                           -- e.g. 'ENG' (projector scope)
+    external_project_key TEXT,                          -- e.g. 'ENG' / JIRA project key (projector scope)
     config_json         TEXT CHECK (config_json IS NULL OR json_valid(config_json)),
     -- Checks system (CL-CHECKS): which system answers "are the checks green?" +
     -- how to reach it. One translator per kind; build 'github' + 'none' now.
@@ -83,7 +83,7 @@ CREATE TABLE ticket (
     id                    INTEGER PRIMARY KEY,
     project_id            INTEGER NOT NULL REFERENCES project(id),
     ident                 TEXT    NOT NULL,                  -- 'ENG-5'
-    linear_issue_uuid     TEXT,                              -- resolved lazily; for projection
+    external_id           TEXT,                              -- tracker issue id; for projection
     title                 TEXT,
     description           TEXT,                              -- the ingested ticket body (design input)
 
@@ -113,7 +113,7 @@ CREATE TABLE ticket (
     current_dispatch_id   TEXT,                              -- 'ENG-5-d0003'
 
     -- Linear projection mirror (read-only view of what we last projected).
-    linear_state          TEXT,                              -- 'Todo'/'In Progress'/...
+    external_state        TEXT,                              -- 'Todo'/'In Progress'/...
     priority              INTEGER,
 
     created_at            TEXT NOT NULL,
@@ -442,8 +442,8 @@ CREATE INDEX idx_ac_check_active ON ac_check (ticket_id, ac_id) WHERE superseded
 -- §G  LINEAR / GITHUB PROJECTION   (move 2 / §9.4 #4 — one-way, idempotent)
 -- ============================================================================
 
--- linear_id_cache — the linear-ids.json cache, in the SoT for the projector.
-CREATE TABLE linear_id_cache (
+-- external_id_cache — the tracker id-resolution cache, in the SoT for the projector.
+CREATE TABLE external_id_cache (
     id          INTEGER PRIMARY KEY,
     project_id  INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
     entity_type TEXT NOT NULL CHECK (entity_type IN ('team','project','state','label')),
@@ -461,7 +461,7 @@ CREATE TABLE projection_state (
     projected_stage_label  TEXT,                        -- last 'stage:*' set
     projected_status_labels_json TEXT CHECK (projected_status_labels_json IS NULL
                                              OR json_valid(projected_status_labels_json)),
-    projected_linear_state TEXT,                        -- 'In Progress'/...
+    projected_external_state TEXT,                      -- 'In Progress'/...
     last_projected_at      TEXT,
     UNIQUE (ticket_id, target)
 );

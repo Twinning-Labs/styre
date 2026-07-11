@@ -39,7 +39,7 @@ export function insertTicket(
   const res = db
     .query(
       `INSERT INTO ticket
-         (project_id, ident, title, description, type_label, branch_prefix, linear_issue_uuid,
+         (project_id, ident, title, description, type_label, branch_prefix, external_id,
           stage, status, track, needs_docs, created_at, updated_at)
        VALUES ($pid, $ident, $title, $description, $typeLabel, $branchPrefix, $externalId,
           $stage, $status, $track, $needsDocs, $now, $now)`,
