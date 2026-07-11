@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 import { fakeNotifier } from "../../src/integrations/adapters/fake-notifier.ts";
-import { assertSlackConfigured, selectNotifier } from "../../src/integrations/notifier.ts";
+import {
+  NotificationMessageSchema,
+  assertSlackConfigured,
+  selectNotifier,
+} from "../../src/integrations/notifier.ts";
 
 test("selectNotifier: 'none' → undefined, 'slack' → adapter, unknown → throw", () => {
   expect(selectNotifier({ notifier: "none" }, {})).toBeUndefined();
@@ -34,4 +38,26 @@ test("fakeNotifier records calls and can force failure", async () => {
   await expect(
     bad.notify({ ticketIdent: "ENG-2", event: "x", severity: "info" }),
   ).rejects.toThrow();
+});
+
+test("NotificationMessageSchema accepts optional title/prUrl and rejects a bad severity", () => {
+  const ok = NotificationMessageSchema.parse({
+    ticketIdent: "ENG-1",
+    event: "escalated",
+    severity: "high",
+    reason: "boom",
+    ticketTitle: "Fix widget",
+    prUrl: "https://gh/pr/1",
+  });
+  expect(ok.ticketTitle).toBe("Fix widget");
+  expect(ok.prUrl).toBe("https://gh/pr/1");
+  // minimal message still valid (fields optional)
+  expect(
+    NotificationMessageSchema.parse({ ticketIdent: "ENG-2", event: "x", severity: "info" })
+      .ticketTitle,
+  ).toBeUndefined();
+  // invalid severity rejected
+  expect(() =>
+    NotificationMessageSchema.parse({ ticketIdent: "ENG-3", event: "x", severity: "loud" }),
+  ).toThrow();
 });

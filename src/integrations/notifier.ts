@@ -3,6 +3,8 @@
  *  (src/integrations/issue-tracker.ts). Outbound-only: a notification is a one-way projection and
  *  must never be read for control flow. */
 
+import { z } from "zod";
+
 export type NotifySeverity = "high" | "success" | "info";
 
 export interface NotificationMessage {
@@ -10,7 +12,18 @@ export interface NotificationMessage {
   event: string; // "escalated" | "implement→verify" | "PR ready to merge" | ...
   severity: NotifySeverity;
   reason?: string;
+  ticketTitle?: string;
+  prUrl?: string;
 }
+
+export const NotificationMessageSchema = z.object({
+  ticketIdent: z.string(),
+  event: z.string(),
+  severity: z.enum(["high", "success", "info"]),
+  reason: z.string().optional(),
+  ticketTitle: z.string().optional(),
+  prUrl: z.string().optional(),
+});
 
 export interface NotifierPort {
   /** Deliver one rendered notification. Returns a provider ref (e.g. Slack ts). Throws on
@@ -36,7 +49,7 @@ export function selectNotifier(
  *  adapter — a lazy read would surface as a swallowed transport error (no escalate) = silent drop. */
 export function assertSlackConfigured(
   config: { notifier: string; slack?: { channel: string } },
-  env: { SLACK_BOT_TOKEN?: string } = process.env as { SLACK_BOT_TOKEN?: string },
+  env: { SLACK_BOT_TOKEN?: string } = { SLACK_BOT_TOKEN: process.env.SLACK_BOT_TOKEN },
 ): void {
   if (config.notifier !== "slack") return;
   if (!env.SLACK_BOT_TOKEN || env.SLACK_BOT_TOKEN.length === 0) {

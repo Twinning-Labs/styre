@@ -14,7 +14,8 @@ import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
 import type { ChecksPort } from "../integrations/checks.ts";
 import type { ForgePort } from "../integrations/forge.ts";
 import type { IssueState, IssueTrackerPort } from "../integrations/issue-tracker.ts";
-import type { NotificationMessage, NotifierPort } from "../integrations/notifier.ts";
+import { NotificationMessageSchema } from "../integrations/notifier.ts";
+import type { NotifierPort } from "../integrations/notifier.ts";
 
 const PushPayload = z.object({ branch: z.string(), sha: z.string() });
 const PrCreatePayload = z.object({
@@ -153,7 +154,8 @@ async function applyRow(
     }
     switch (row.op) {
       case "post": {
-        const { ref } = await ports.notifier.notify(payload as unknown as NotificationMessage);
+        const msg = NotificationMessageSchema.parse(payload);
+        const { ref } = await ports.notifier.notify(msg);
         return ref;
       }
       default:
