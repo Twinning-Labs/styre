@@ -9,7 +9,11 @@ import {
   commitWorktree,
   ensureWorktree,
   fileContentAt,
+  pendingChanges,
+  pendingEntries,
   removeWorktree,
+  stagedIndexEmpty,
+  undoAttempt,
   worktreeHasChanges,
 } from "../../src/dispatch/worktree.ts";
 
@@ -208,4 +212,58 @@ test("fileContentAt reads committed content, null when the path is absent at tha
   const { root, addSha } = repoWithCommits();
   expect(fileContentAt(addSha, "new_test.py", root)).toContain("def test_ok()");
   expect(fileContentAt(addSha, "does_not_exist.py", root)).toBeNull();
+});
+
+// --- pendingEntries / pendingChanges / stagedIndexEmpty / undoAttempt (Task 1) -----------------
+
+function repo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "styre-wt-"));
+  roots.push(dir);
+  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: dir });
+  run(["init", "-b", "main"]);
+  run(["config", "user.email", "t@s.dev"]);
+  run(["config", "user.name", "T"]);
+  writeFileSync(join(dir, "tracked.txt"), "v1\n");
+  run(["add", "-A"]);
+  run(["commit", "-m", "init"]);
+  return dir;
+}
+
+test("pendingEntries: new file → isNew, tracked edit → not isNew, deletion → not isNew", () => {
+  const dir = repo();
+  writeFileSync(join(dir, "tracked.txt"), "v2\n"); // modify tracked
+  writeFileSync(join(dir, "brand_new.py"), "x\n"); // untracked new
+  Bun.spawnSync(["git", "rm", "--quiet", "already.txt"], { cwd: dir }); // (no-op if absent)
+  const entries = pendingEntries(dir).sort((a, b) => a.path.localeCompare(b.path));
+  expect(entries.find((e) => e.path === "brand_new.py")?.isNew).toBe(true);
+  expect(entries.find((e) => e.path === "tracked.txt")?.isNew).toBe(false);
+  expect(pendingChanges(dir).sort()).toEqual(["brand_new.py", "tracked.txt"]);
+});
+
+test("pendingEntries: a staged rename's original-path token is isNew=false", () => {
+  const dir = repo();
+  Bun.spawnSync(["git", "mv", "tracked.txt", "renamed.txt"], { cwd: dir }); // staged rename → `R  renamed.txt\0tracked.txt`
+  const entries = pendingEntries(dir);
+  // Both the new path and the original path appear; neither is a brand-new untracked file.
+  expect(entries.every((e) => e.isNew === false)).toBe(true);
+  expect(entries.map((e) => e.path).sort()).toEqual(["renamed.txt", "tracked.txt"]);
+});
+
+test("stagedIndexEmpty: true when nothing staged, false with a staged deletion", () => {
+  const dir = repo();
+  expect(stagedIndexEmpty(dir)).toBe(true);
+  Bun.spawnSync(["git", "rm", "--quiet", "tracked.txt"], { cwd: dir }); // staged deletion
+  expect(stagedIndexEmpty(dir)).toBe(false);
+});
+
+test("undoAttempt: restores tracked, removes this attempt's new files, spares pre-existing cruft", () => {
+  const dir = repo();
+  writeFileSync(join(dir, "cruft.egg-info"), "pre\n"); // pre-existing untracked cruft
+  const untrackedBefore = new Set(pendingEntries(dir).filter((e) => e.isNew).map((e) => e.path));
+  // the "attempt": edit tracked + create a new file
+  writeFileSync(join(dir, "tracked.txt"), "attempt\n");
+  writeFileSync(join(dir, "scratch.py"), "junk\n");
+  undoAttempt(dir, untrackedBefore);
+  expect(Bun.spawnSync(["git", "status", "--porcelain"], { cwd: dir }).stdout.toString().trim())
+    .toBe("?? cruft.egg-info"); // tracked restored, scratch.py gone, cruft spared
 });

@@ -24,3 +24,11 @@ export function isDocPath(file: string): boolean {
 export const DOC_PATHS_HINT =
   "the repo-root `docs/` directory tree, and the repo-root files README*, CHANGELOG*, " +
   "CONTRIBUTING*, and mkdocs.yml — nothing else (no source, tests, or config)";
+
+const ROOT_PLANS_TREE = /^docs\/plans\//i;
+/** True iff `file` (repo-root-relative) is under the repo-root docs/plans/ tree. Fail-closed on `..`. */
+export function isPlanPath(file: string): boolean {
+  const p = file.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (p.split("/").includes("..")) return false;
+  return ROOT_PLANS_TREE.test(p);
+}

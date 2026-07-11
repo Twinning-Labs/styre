@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { DOC_PATHS_HINT, isDocPath } from "../../src/dispatch/docs-paths.ts";
+import { DOC_PATHS_HINT, isDocPath, isPlanPath } from "../../src/dispatch/docs-paths.ts";
 
 test("accepts repo-root docs/ tree and root doc-family (case-insensitive)", () => {
   for (const p of [
@@ -40,4 +40,12 @@ test("normalizes ./ prefix and backslashes", () => {
 
 test("DOC_PATHS_HINT is a non-empty human-readable string", () => {
   expect(DOC_PATHS_HINT.length).toBeGreaterThan(0);
+});
+
+test("isPlanPath: docs/plans/ only", () => {
+  expect(isPlanPath("docs/plans/ENG-1.md")).toBe(true);
+  expect(isPlanPath("./docs/plans/x.md")).toBe(true);
+  expect(isPlanPath("docs/design/x.md")).toBe(false);
+  expect(isPlanPath("src/plans/x.py")).toBe(false);
+  expect(isPlanPath("docs/plans/../../src/x.py")).toBe(false);
 });
