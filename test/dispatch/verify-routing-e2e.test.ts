@@ -42,7 +42,7 @@ test("a unit whose suite fails on the first attempt still ends verified (advisor
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["change.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,

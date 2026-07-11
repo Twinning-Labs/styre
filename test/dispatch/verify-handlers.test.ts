@@ -89,7 +89,7 @@ test("a passing check records a pass signal (with command) and the step succeeds
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -141,7 +141,7 @@ test("a failing check records an advisory fail signal but the step SUCCEEDS (no 
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -194,7 +194,7 @@ test("an absent check (component has no command for the declared check-type) rec
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -301,7 +301,7 @@ test("a timed-out check records an error signal (not fail)", async () => {
       return {
         completed: true,
         exitCode: 0,
-        stdout: "{}",
+        stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
         stderr: "",
         timedOut: false,
         costUsd: null,
@@ -348,7 +348,7 @@ test("verify:check stamps the verified commit on the signal", async () => {
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -398,7 +398,7 @@ test("behavioral unit: green test command but no test in the diff fails with beh
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -447,7 +447,7 @@ test("behavioral unit: a test file in the diff passes the test check", async () 
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts","feature.test.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -494,7 +494,7 @@ test("scope_diff records an advisory fail for out-of-scope files but does NOT fa
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["allowed.ts","sneaky.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -545,7 +545,7 @@ test("hard-gate: verify:check runs a non-root component's command in its module 
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -599,7 +599,7 @@ test("hard-gate: a root component (no dir) still runs at the worktree root (no r
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -654,7 +654,7 @@ test("advisory sweep: the swept untouched component's command runs in its module
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["unowned.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -770,7 +770,7 @@ test("verify:check test command for a python component with no ready env falls b
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.py"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -847,7 +847,7 @@ live(
         return {
           completed: true,
           exitCode: 0,
-          stdout: "{}",
+          stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["pkg/extra.py"]}\n\`\`\``,
           stderr: "",
           timedOut: false,
           costUsd: null,

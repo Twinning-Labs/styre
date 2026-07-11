@@ -58,6 +58,7 @@ import { checksFeedback } from "./checks-feedback.ts";
 import { runCheckForRed } from "./checks-run.ts";
 import { ChecksOutputSchema } from "./checks-schema.ts";
 import { classifyPrior } from "./classify-prior.ts";
+import { checksScope, docScope, implementScope, planScope } from "./commit-scope.ts";
 import { classifyDisposition, reconcileScope } from "./completeness.ts";
 import { ComplexityGradeSchema } from "./complexity-schema.ts";
 import {
@@ -71,7 +72,6 @@ import {
 } from "./components.ts";
 import { deriveAndPersistAcs } from "./derive-acs.ts";
 import { designFeedback } from "./design-feedback.ts";
-import { isDocPath } from "./docs-paths.ts";
 import { ExtractOutputSchema, validateCdotImpact, validateExtraction } from "./extract-schema.ts";
 import { gateFeedback, implementFeedback } from "./feedback.ts";
 import { hasTicketPlan } from "./plan-frontmatter.ts";
@@ -238,6 +238,7 @@ async function reauthorCheckWrong(
       handlerKey: "checks:dispatch",
       template: CHECKS_TEMPLATE,
       vars: checksVars(ctx.ticket, deps.profile, [{ id: ac.id, text: ac.text }], ""),
+      commitScope: checksScope,
       postcondition: () => {},
     },
   );
@@ -372,6 +373,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       handlerKey: "design:dispatch",
       template: DESIGN_TEMPLATE,
       vars: designVars(ctx.ticket, deps.profile, designFeedback(ctx.db, ctx.ticket.id)),
+      commitScope: planScope,
       postcondition: ({ worktreePath }) => {
         if (!hasTicketPlan(join(worktreePath, "docs", "plans"), ctx.ticket.ident)) {
           throw new Error(
@@ -510,14 +512,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         handlerKey: "docs:revise",
         template: DOCS_REVISE_TEMPLATE,
         vars: docsVars(ctx.ticket, deps.profile),
-        commitGuard: ({ pending }) => {
-          const offenders = pending.filter((f) => !isDocPath(f));
-          if (offenders.length > 0) {
-            throw new Error(
-              `docs:revise may only edit documentation; refusing to commit: ${offenders.join(", ")}`,
-            );
-          }
-        },
+        commitScope: docScope,
         postcondition: () => {},
       },
     );
@@ -546,6 +541,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         handlerKey: "checks:dispatch",
         template: CHECKS_TEMPLATE,
         vars: checksVars(ctx.ticket, deps.profile, acs, checksFeedback(ctx.db, ctx.ticket.id)),
+        commitScope: checksScope,
         // Identity + coverage are verified below against the committed diff, not on the raw diff here.
         postcondition: () => {},
       },
@@ -856,6 +852,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         ),
         loopback: isUnitLoopback(ctx, unit.seq),
         runnerCommands,
+        commitScope: implementScope,
         // Empty-diff is no longer a dispatch-level failure: the plan gate guarantees non-empty
         // declared files, and the completeness step (under-delivery) is what gates on it now.
         postcondition: () => {},

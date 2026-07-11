@@ -168,7 +168,7 @@ test("the gate defers a not-green (behavioral) assertion check to the arbiter: c
     }
     n += 1;
     writeFileSync(join(input.cwd, `note-${n}.ts`), "export const x = 1;\n"); // never touches checks/
-    return { ...ok, stdout: "{}" };
+    return { ...ok, stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["note-${n}.ts"]}\n\`\`\`` };
   });
   const registry = buildDispatchRegistry({
     runner,
@@ -314,7 +314,7 @@ test("a passing AC-check gate advances implement->review despite both a failing 
       return { ...ok, stdout: cleanFindings };
     }
     writeFileSync(join(input.cwd, "note.ts"), "export const x = 1;\n");
-    return { ...ok, stdout: "{}" };
+    return { ...ok, stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["note.ts"]}\n\`\`\`` };
   });
   const registry = buildDispatchRegistry({
     runner,
@@ -382,7 +382,7 @@ test("a code-review loopback that moves HEAD re-runs verify:checks-gate (reset s
     }
     noteN += 1;
     writeFileSync(join(input.cwd, `note-${noteN}.ts`), "export const x = 1;\n"); // never touches checks/
-    return { ...ok, stdout: "{}" };
+    return { ...ok, stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["note-${noteN}.ts"]}\n\`\`\`` };
   });
   const registry = buildDispatchRegistry({
     runner,

@@ -23,6 +23,7 @@ function gitRepo(): string {
   run(["config", "user.email", "t@s.dev"]);
   run(["config", "user.name", "T"]);
   Bun.write(join(root, "README.md"), "x");
+  writeFileSync(join(root, "app.py"), "print(1)\n"); // a tracked non-doc file for the reject test
   run(["add", "-A"]);
   run(["commit", "-m", "init"]);
   return root;
@@ -115,15 +116,16 @@ test("a docs-only edit commits and carries the verified verdict forward", async 
   db.close();
 });
 
-test("a source edit is rejected by the commitGuard: nothing commits, no carry-forward", async () => {
+test("a tracked source edit is rejected by docScope: nothing commits, no carry-forward", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
   const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-drwt-"));
 
+  // Edit a TRACKED non-doc file (isNew=false). docScope ignores isNew — a non-doc path is out of
+  // scope whether newly added or an existing edit — so this must be rejected too.
   const runner = new FakeAgentRunner((input) => {
-    mkdirSync(join(input.cwd, "src"), { recursive: true });
-    writeFileSync(join(input.cwd, "src", "evil.py"), "bad");
+    writeFileSync(join(input.cwd, "app.py"), "print(2)\n");
     return {
       completed: true,
       exitCode: 0,
@@ -138,7 +140,7 @@ test("a source edit is rejected by the commitGuard: nothing commits, no carry-fo
   const registry = registryWith(repo, runner, worktreeRoot);
 
   await expect(runDocsRevise(db, ticketId, projectId, registry)).rejects.toThrow(
-    /docs:revise may only edit documentation/,
+    /out-of-scope files/,
   );
 
   const worktreePath = join(worktreeRoot, "ENG-1");

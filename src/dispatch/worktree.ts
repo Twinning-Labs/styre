@@ -32,14 +32,19 @@ export function worktreeHasChanges(worktreePath: string): boolean {
   return git(["status", "--porcelain"], worktreePath) !== "";
 }
 
-/** Stage everything and commit (CL-COMMIT — the daemon commits, never the agent).
- *  No changes → no commit; returns the current HEAD sha with changed=false. */
+/** Stage the scoped surface and commit (CL-COMMIT — the daemon commits, never the agent):
+ *  `git add -u` (all tracked modifications/deletions — always in scope; scratch is never tracked)
+ *  plus the named new files. Emptiness is decided on the STAGED INDEX (see stagedIndexEmpty), so an
+ *  undeclared untracked file left in the worktree never forces an empty commit. No changes → no
+ *  commit; returns current HEAD with changed=false. */
 export function commitWorktree(
   worktreePath: string,
   message: string,
+  newPaths: string[],
 ): { sha: string; changed: boolean } {
-  git(["add", "-A"], worktreePath);
-  if (git(["status", "--porcelain"], worktreePath) === "") {
+  git(["add", "-u"], worktreePath);
+  if (newPaths.length > 0) git(["add", "--", ...newPaths], worktreePath);
+  if (stagedIndexEmpty(worktreePath)) {
     return { sha: git(["rev-parse", "HEAD"], worktreePath), changed: false };
   }
   git(["commit", "-m", message], worktreePath);
@@ -128,7 +133,15 @@ export interface PendingEntry {
  *  second token (the ORIGINAL path) with no status prefix — that half is the deletion of a tracked
  *  file, so it is recorded isNew=false rather than status-parsed (its path bytes are not a status). */
 export function pendingEntries(worktreePath: string): PendingEntry[] {
-  const out = gitRaw(["-c", "core.quotePath=false", "status", "--porcelain=v1", "-z"], worktreePath);
+  // `--untracked-files=all` is load-bearing: without it git COLLAPSES a brand-new directory to a
+  // single `dir/` entry, so an agent that creates `checks/ac1.py` would surface only `checks/` —
+  // which no declared path (`checks/ac1.py`) can match, making the scope gate reject every new-dir
+  // deliverable. Listing untracked files individually is what lets named staging + scope judgment
+  // work for files the agent creates in a new subtree (the common case).
+  const out = gitRaw(
+    ["-c", "core.quotePath=false", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    worktreePath,
+  );
   if (out === "") return [];
   const tokens = out.split("\0").filter((t) => t !== "");
   const entries: PendingEntry[] = [];
@@ -157,7 +170,9 @@ export function stagedIndexEmpty(worktreePath: string): boolean {
   const res = Bun.spawnSync(["git", "diff", "--cached", "--quiet"], { cwd: worktreePath });
   if (res.exitCode === 0) return true;
   if (res.exitCode === 1) return false;
-  throw new Error(`git diff --cached --quiet failed (exit ${res.exitCode}): ${res.stderr.toString().trim()}`);
+  throw new Error(
+    `git diff --cached --quiet failed (exit ${res.exitCode}): ${res.stderr.toString().trim()}`,
+  );
 }
 
 /** Surgically discard the current attempt: restore all tracked files to HEAD and remove ONLY the

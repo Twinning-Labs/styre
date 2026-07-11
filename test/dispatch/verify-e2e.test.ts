@@ -40,7 +40,7 @@ test("implement then real verify:check drives a work-unit to verified", async ()
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,

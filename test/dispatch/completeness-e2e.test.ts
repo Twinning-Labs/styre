@@ -31,15 +31,38 @@ function gitRepo(): string {
 }
 
 // A FakeAgentRunner whose Nth implement dispatch runs writers[N-1](cwd). A no-op writer ⇒ empty diff.
+// List brand-new untracked files (individually, not collapsed dirs) in the worktree.
+function untrackedNow(cwd: string): string[] {
+  const out = Bun.spawnSync(
+    [
+      "git",
+      "-c",
+      "core.quotePath=false",
+      "status",
+      "--porcelain=v1",
+      "-z",
+      "--untracked-files=all",
+    ],
+    { cwd },
+  ).stdout.toString();
+  return out
+    .split("\0")
+    .filter((t) => t.startsWith("?? "))
+    .map((t) => t.slice(3));
+}
+
 function sequencedRunner(writers: Array<(cwd: string) => void>): FakeAgentRunner {
   let call = 0;
   return new FakeAgentRunner((input) => {
+    const before = new Set(untrackedNow(input.cwd));
     writers[call]?.(input.cwd);
     call++;
+    // Declare exactly the new files this dispatch created so implementScope commits them.
+    const created = untrackedNow(input.cwd).filter((p) => !before.has(p));
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n${JSON.stringify({ new_files: created })}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,

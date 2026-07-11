@@ -43,7 +43,7 @@ test("behavioral unit with no test file still verifies on the first attempt (A1 
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -94,7 +94,7 @@ test("a failing integration suite is advisory and advances the ticket without sp
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["c.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
