@@ -9,3 +9,19 @@ test("complexityGrading defaults to false", () => {
 test("complexityGrading can be enabled", () => {
   expect(RuntimeConfigSchema.parse({ complexityGrading: true }).complexityGrading).toBe(true);
 });
+
+test("parses an optional jira block (statusMap + bugTypeNames)", () => {
+  const cfg = RuntimeConfigSchema.parse({
+    issueTracker: "jira",
+    jira: {
+      statusMap: { done: { status: "Done", resolution: "Fixed" } },
+      bugTypeNames: ["Bug", "Defect"],
+    },
+  });
+  expect(cfg.jira?.statusMap?.done).toEqual({ status: "Done", resolution: "Fixed" });
+  expect(cfg.jira?.bugTypeNames).toEqual(["Bug", "Defect"]);
+});
+
+test("jira block is optional (absent -> undefined)", () => {
+  expect(RuntimeConfigSchema.parse({}).jira).toBeUndefined();
+});

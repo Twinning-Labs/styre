@@ -13,6 +13,17 @@ export const RuntimeConfigSchema = z.object({
   complexityGrading: z.boolean().default(false),
   // M6a: which issue-tracker adapter projects ticket state outward. Vendor-neutral; creds via env.
   issueTracker: z.string().default("linear"),
+  // M-jira-2: JIRA adapter policy (non-secret). Absent -> built-in defaults; creds via env.
+  jira: z
+    .object({
+      // neutral IssueState -> target JIRA status (+ optional resolution)
+      statusMap: z
+        .record(z.string(), z.object({ status: z.string(), resolution: z.string().optional() }))
+        .optional(),
+      // issue-type names treated as Bug (default ["Bug"])
+      bugTypeNames: z.array(z.string()).optional(),
+    })
+    .optional(),
   // M6b: which forge (code-host) adapter handles push/PR ops. Vendor-neutral; creds via env.
   forge: z.string().default("github"),
   // OSS adoption analytics (PostHog). On by default; honors DO_NOT_TRACK / STYRE_TELEMETRY too.
