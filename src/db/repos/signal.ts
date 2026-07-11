@@ -76,6 +76,22 @@ export function hasDelivered(db: Database, ticketId: number, signalType: string)
   return (row?.n ?? 0) > 0;
 }
 
+export function getDeliveredPayload(
+  db: Database,
+  ticketId: number,
+  signalType: string,
+): Record<string, unknown> | null {
+  const row = db
+    .query<{ payload_json: string | null }, [number, string]>(
+      `SELECT payload_json FROM signal
+         WHERE ticket_id = ? AND signal_type = ? AND status IN ('delivered','consumed')
+         ORDER BY id DESC LIMIT 1`,
+    )
+    .get(ticketId, signalType);
+  if (!row || row.payload_json === null) return null;
+  return JSON.parse(row.payload_json) as Record<string, unknown>;
+}
+
 /** Insert a signal already in 'delivered' (a data-carrier the resolver never awaits, e.g.
  *  external_pr_result). Idempotent: INSERT OR IGNORE on the unique idempotency_key. */
 export function recordDelivered(
