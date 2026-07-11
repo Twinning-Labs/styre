@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { defineCommand, runMain } from "citty";
 import { migrateCommand } from "./cli/migrate.ts";
+import { notifyCommand } from "./cli/notify.ts";
 import { runCommand } from "./cli/run.ts";
 import { setupCommand } from "./cli/setup.ts";
 import { VERSION } from "./version.ts";
@@ -23,6 +24,7 @@ const main = defineCommand({
   },
   subCommands: {
     migrate: migrateCommand,
+    notify: notifyCommand,
     run: runCommand,
     setup: setupCommand,
   },

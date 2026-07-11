@@ -14,6 +14,8 @@ import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
 import type { ChecksPort } from "../integrations/checks.ts";
 import type { ForgePort } from "../integrations/forge.ts";
 import type { IssueState, IssueTrackerPort } from "../integrations/issue-tracker.ts";
+import { NotificationMessageSchema } from "../integrations/notifier.ts";
+import type { NotifierPort } from "../integrations/notifier.ts";
 
 const PushPayload = z.object({ branch: z.string(), sha: z.string() });
 const PrCreatePayload = z.object({
@@ -83,6 +85,7 @@ export interface ProjectorPorts {
   issueTracker: IssueTrackerPort;
   forge?: ForgePort;
   checks?: ChecksPort;
+  notifier?: NotifierPort;
 }
 
 /** Apply one outbox row to the configured port by NEUTRAL ROLE (never a vendor name). Returns the
@@ -145,6 +148,20 @@ async function applyRow(
         throw new Error(`projector: unknown forge op '${row.op}'`);
     }
   }
+  if (row.target === "notify") {
+    if (!ports.notifier) {
+      throw new Error("projector: notify outbox row but no notifier port configured");
+    }
+    switch (row.op) {
+      case "post": {
+        const msg = NotificationMessageSchema.parse(payload);
+        const { ref } = await ports.notifier.notify(msg);
+        return ref;
+      }
+      default:
+        throw new Error(`projector: unknown notify op '${row.op}'`);
+    }
+  }
   throw new Error(`projector: no adapter for target '${row.target}'`);
 }
 
@@ -180,7 +197,9 @@ export async function drainOutbox(
       const message = err instanceof Error ? err.message : String(err);
       if (row.attempts + 1 >= budget) {
         markFailed(db, row.id, message);
-        escalateProjection(db, row.ticket_id, `projection failing: ${message}`);
+        if (row.target !== "notify") {
+          escalateProjection(db, row.ticket_id, `projection failing: ${message}`);
+        }
         failed += 1;
       } else {
         bumpAttempt(db, row.id, message);

@@ -472,8 +472,8 @@ CREATE TABLE projection_state (
 CREATE TABLE projection_outbox (
     id              INTEGER PRIMARY KEY,
     ticket_id       INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
-    target          TEXT NOT NULL CHECK (target IN ('issue_tracker','forge')),
-    op              TEXT NOT NULL,                       -- 'set_labels'/'add_comment'/'set_state'
+    target          TEXT NOT NULL CHECK (target IN ('issue_tracker','forge','notify')),
+    op              TEXT NOT NULL,                       -- 'set_labels'/'add_comment'/'set_state'/'post'
                                                          -- /'push'/'pr_create'/'pr_merge'/...
     payload_json    TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
     idempotency_key TEXT NOT NULL UNIQUE,
