@@ -17,6 +17,9 @@ export const RuntimeConfigSchema = z.object({
   forge: z.string().default("github"),
   // OSS adoption analytics (PostHog). On by default; honors DO_NOT_TRACK / STYRE_TELEMETRY too.
   telemetry: z.boolean().default(true),
+  notifier: z.enum(["none", "slack"]).default("none"),
+  notify: z.enum(["escalations", "transitions", "everything"]).default("escalations"),
+  slack: z.object({ channel: z.string() }).optional(),
   // DEC-CX-5: the agent provider + per-tier models. Absent → the binary Claude preset.
   agent: AgentConfigSchema.optional(),
 });
