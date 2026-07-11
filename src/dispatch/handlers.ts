@@ -552,7 +552,8 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     ensureWorktree(repoPath, branch, worktreePath);
     const preHead = worktreeHead(worktreePath);
 
-    // Dispatch the plan-blind author (no Bash; commits via CL-COMMIT → sha).
+    // Dispatch the plan-blind author (scoped Bash to run/confirm its own RED-first checks; commits
+    // via CL-COMMIT → sha).
     const {
       sha,
       output,
@@ -561,6 +562,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       handlerKey: "checks:dispatch",
       template: CHECKS_TEMPLATE,
       vars: checksVars(ctx.ticket, deps.profile, acs, checksFeedback(ctx.db, ctx.ticket.id)),
+      runnerCommands: realRunnerCommands(deps.profile.components),
       commitScope: checksScope,
       // Identity + coverage are verified below against the committed diff, not on the raw diff here.
       postcondition: () => {},
