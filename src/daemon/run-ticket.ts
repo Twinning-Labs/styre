@@ -112,7 +112,7 @@ export async function runTicket(deps: {
     description: ingested.description,
     typeLabel: ingested.typeLabel,
     branchPrefix: branchPrefixFor(ingested.typeLabel),
-    linearIssueUuid: ingested.linearIssueUuid,
+    externalId: ingested.externalId,
   });
   const result = await driveToTerminal(deps.db, deps.registry, {
     ticketId,

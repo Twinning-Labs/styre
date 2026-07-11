@@ -8,7 +8,7 @@ export interface IngestedTicket {
   title: string;
   description: string | null;
   typeLabel: TypeLabel;
-  linearIssueUuid: string | null;
+  externalId: string | null;
   url: string | null;
 }
 

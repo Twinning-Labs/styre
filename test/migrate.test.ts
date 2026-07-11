@@ -23,16 +23,16 @@ const CORE_TABLES = [
   "review_finding",
   "acceptance_criterion",
   "ac_check",
-  "linear_id_cache",
+  "external_id_cache",
   "projection_state",
   "projection_outbox",
 ];
 
 describe("migrate", () => {
-  test("bootstraps a fresh DB at schema v4", () => {
+  test("bootstraps a fresh DB at schema v7", () => {
     const result = migrate(tmpDbPath());
     expect(result.created).toBe(true);
-    expect(result.version).toBe(6);
+    expect(result.version).toBe(7);
   });
 
   test("creates the core SoT tables", () => {
@@ -54,6 +54,6 @@ describe("migrate", () => {
     migrate(path);
     const second = migrate(path);
     expect(second.created).toBe(false);
-    expect(second.version).toBe(6);
+    expect(second.version).toBe(7);
   });
 });
