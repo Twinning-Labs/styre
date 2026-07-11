@@ -10,6 +10,7 @@ import type { HandlerContext } from "../../src/daemon/step-registry.ts";
 import { listByTicket } from "../../src/db/repos/dispatch.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
 import { insertPending } from "../../src/db/repos/workflow-step.ts";
+import { docScope } from "../../src/dispatch/commit-scope.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runAgentDispatch } from "../../src/dispatch/run-dispatch.ts";
 import {
@@ -107,7 +108,7 @@ function writesFiles(files: Record<string, string>): FakeAgentRunner {
   });
 }
 
-test("commitGuard: docs-only edit commits (clean-success)", async () => {
+test("commitScope docScope: docs-only edit commits (clean-success)", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = tmpRepo();
   const wt = repo;
@@ -116,14 +117,11 @@ test("commitGuard: docs-only edit commits (clean-success)", async () => {
     ctxFor(db, ticketId),
     { runner, ...depsFor(repo, wt) },
     {
-      handlerKey: "implement:dispatch",
+      handlerKey: "docs:revise",
       template: "revise docs {{ident}}",
       vars: { ident: "ENG-1" },
       postcondition: () => {},
-      commitGuard: ({ pending }) => {
-        const offender = pending.find((p) => !p.startsWith("docs/"));
-        if (offender) throw new Error(`non-doc path in diff: ${offender}`);
-      },
+      commitScope: docScope,
     },
   );
   const rows = listByTicket(db, ticketId);
@@ -133,7 +131,7 @@ test("commitGuard: docs-only edit commits (clean-success)", async () => {
   expect(rows[0]?.outcome).toBe("clean-success");
 });
 
-test("commitGuard: a non-doc edit (incl a NEW untracked source file) does NOT commit, reverts, head unchanged", async () => {
+test("commitScope docScope: a non-doc edit (incl a NEW untracked source file) does NOT commit, reverts, head unchanged", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = tmpRepo();
   const wt = repo;
@@ -143,17 +141,14 @@ test("commitGuard: a non-doc edit (incl a NEW untracked source file) does NOT co
     ctxFor(db, ticketId),
     { runner, ...depsFor(repo, wt) },
     {
-      handlerKey: "implement:dispatch",
+      handlerKey: "docs:revise",
       template: "revise docs {{ident}}",
       vars: { ident: "ENG-1" },
       postcondition: () => {},
-      commitGuard: ({ pending }) => {
-        const offender = pending.find((p) => !p.startsWith("docs/"));
-        if (offender) throw new Error(`non-doc path in diff: ${offender}`);
-      },
+      commitScope: docScope,
     },
   );
-  await expect(call).rejects.toThrow(/non-doc path in diff/);
+  await expect(call).rejects.toThrow(/out-of-scope files/);
   const rows = listByTicket(db, ticketId);
   db.close();
   expect(worktreeHasChanges(repo)).toBe(false);
@@ -163,16 +158,18 @@ test("commitGuard: a non-doc edit (incl a NEW untracked source file) does NOT co
   rmSync(repo, { recursive: true, force: true });
 });
 
-test("no commitGuard → behavior unchanged (commits, clean-success)", async () => {
+test("no commitScope (read-only step) → a tracked edit still commits, clean-success", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = tmpRepo();
   const wt = repo;
-  const runner = writesFiles({ "src/foo.py": "x" });
+  // Edit a TRACKED file (app.py exists in tmpRepo): `git add -u` stages it → changed. A read-only
+  // step commits its tracked work; only brand-new untracked files are treated as strays (logged).
+  const runner = writesFiles({ "app.py": "print(2)\n" });
   const out = await runAgentDispatch(
     ctxFor(db, ticketId),
     { runner, ...depsFor(repo, wt) },
     {
-      handlerKey: "implement:dispatch",
+      handlerKey: "review",
       template: "revise docs {{ident}}",
       vars: { ident: "ENG-1" },
       postcondition: () => {},

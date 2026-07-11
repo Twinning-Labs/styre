@@ -504,7 +504,7 @@ test("Flow 1 — code-wrong loop: the arbiter blames from the REAL post-implemen
     if (isArbitratePrompt(input.prompt)) return codeWrongArbitration([checkId], blameReason);
     n += 1;
     writeFileSync(join(input.cwd, `note-${n}.ts`), "export const x = 1;\n"); // never touches checks/
-    return { ...ok, stdout: "{}" };
+    return { ...ok, stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["note-${n}.ts"]}\n\`\`\`` };
   });
   const registry = buildDispatchRegistry({
     runner,
@@ -620,7 +620,7 @@ test("Flow 2 — check-wrong re-author installs: RED-first-validates at baseline
     }
     if (isReviewPrompt(input.prompt)) return { ...ok, stdout: cleanFindings };
     writeFileSync(join(input.cwd, "note.ts"), "export const x = 1;\n");
-    return { ...ok, stdout: "{}" };
+    return { ...ok, stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["note.ts"]}\n\`\`\`` };
   });
 
   const registry = buildDispatchRegistry({
@@ -715,7 +715,7 @@ test("Flow 3 — a code-conforming re-author is REJECTED by the RED-first oracle
       )(input);
     }
     writeFileSync(join(input.cwd, "note.ts"), "export const x = 1;\n");
-    return { ...ok, stdout: "{}" };
+    return { ...ok, stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["note.ts"]}\n\`\`\`` };
   });
 
   const registry = buildDispatchRegistry({
@@ -805,7 +805,7 @@ test("Flow 4 — AC-silent dispute: the arbiter correctly returns code-wrong whe
     if (isArbitratePrompt(input.prompt)) return codeWrongArbitration([checkId], acSilentReason);
     n += 1;
     writeFileSync(join(input.cwd, `note-${n}.ts`), "export const x = 1;\n");
-    return { ...ok, stdout: "{}" };
+    return { ...ok, stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["note-${n}.ts"]}\n\`\`\`` };
   });
   const registry = buildDispatchRegistry({
     runner,
@@ -899,7 +899,7 @@ test("Flow 5 — environmental-classify rejection: a re-author that RED-first-va
       )(input);
     }
     writeFileSync(join(input.cwd, "note.ts"), "export const x = 1;\n");
-    return { ...ok, stdout: "{}" };
+    return { ...ok, stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["note.ts"]}\n\`\`\`` };
   });
   const registry = buildDispatchRegistry({
     runner,
@@ -982,7 +982,7 @@ test("Flow 6 — counter no-false-escalate: repeated review loopbacks (nits) nev
     }
     noteN += 1;
     writeFileSync(join(input.cwd, `note-${noteN}.ts`), "export const x = 1;\n"); // never touches checks/
-    return { ...ok, stdout: "{}" };
+    return { ...ok, stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["note-${noteN}.ts"]}\n\`\`\`` };
   });
   const registry = buildDispatchRegistry({
     runner,
@@ -1091,7 +1091,7 @@ test("Flow 7 — supersede + id-reuse healing: TWO consecutive check-wrong re-au
     }
     if (isReviewPrompt(input.prompt)) return { ...ok, stdout: cleanFindings };
     writeFileSync(join(input.cwd, "note.ts"), "export const x = 1;\n");
-    return { ...ok, stdout: "{}" };
+    return { ...ok, stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["note.ts"]}\n\`\`\`` };
   });
 
   const registry = buildDispatchRegistry({

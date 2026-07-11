@@ -227,3 +227,9 @@ test("checksVars fills every placeholder in the checks template (no CL-PROFILE m
     expect(rendered.prompt).toContain("api (kind: python)");
   }
 });
+
+test("implement prompt instructs new_files declaration + scratch prevention", () => {
+  expect(IMPLEMENT_TEMPLATE).toContain("new_files");
+  expect(IMPLEMENT_TEMPLATE.toLowerCase()).toContain("do not leave");
+  expect(IMPLEMENT_TEMPLATE).toContain("```styre-sidecar");
+});

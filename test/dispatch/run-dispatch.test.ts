@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
@@ -7,8 +7,10 @@ import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import type { HandlerContext } from "../../src/daemon/step-registry.ts";
 import { listByTicket } from "../../src/db/repos/dispatch.ts";
+import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
 import { getById, insertPending, markFailed } from "../../src/db/repos/workflow-step.ts";
+import { implementScope } from "../../src/dispatch/commit-scope.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runAgentDispatch } from "../../src/dispatch/run-dispatch.ts";
 import { makeTestDb } from "../helpers/db.ts";
@@ -56,7 +58,7 @@ test("runs the agent, commits its edits (CL-COMMIT), records the dispatch with t
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: '{}\n```styre-sidecar\n{"new_files":["feature.ts"]}\n```',
       stderr: "",
       timedOut: false,
       costUsd: 0.1,
@@ -71,6 +73,7 @@ test("runs the agent, commits its edits (CL-COMMIT), records the dispatch with t
       handlerKey: "implement:dispatch",
       template: "implement {{ident}}",
       vars: { ident: "ENG-1" },
+      commitScope: implementScope,
       postcondition: ({ changed }) => {
         if (!changed) throw new Error("empty diff");
       },
@@ -318,7 +321,151 @@ test("a transport failure records dispatch-failed and does NOT commit", async ()
   );
   await expect(call).rejects.toThrow(/transport failure|timedOut/);
   const rows = listByTicket(db, ticketId);
-  db.close();
   expect(rows[0]?.outcome).toBe("dispatch-failed");
   expect(rows[0]?.branch_head_sha).toBeNull();
+  expect(existsSync(join(wt, "should-not-be-committed.ts"))).toBe(false); // undoAttempt removed it
+  db.close();
+});
+
+test("scope reject: an undeclared new file → dispatch-failed at preHead, worktree undone, offenders named", async () => {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-scope-${Date.now()}`);
+  const runner = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "fix.ts"), "export const x = 1;\n"); // legit edit target (new, undeclared)
+    writeFileSync(join(input.cwd, "test_bug.py"), "scratch\n"); // undeclared scratch
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: "no sidecar",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const ctx = ctxFor(db, ticketId);
+  const preHead = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repo })
+    .stdout.toString()
+    .trim();
+  const call = runAgentDispatch(
+    ctx,
+    { runner, ...depsFor(repo, wt) },
+    {
+      handlerKey: "implement:dispatch",
+      template: "implement {{ident}}",
+      vars: { ident: "ENG-1" },
+      commitScope: implementScope,
+      postcondition: () => {},
+    },
+  );
+  await expect(call).rejects.toThrow(/out-of-scope files.*test_bug\.py/);
+  const rows = listByTicket(db, ticketId);
+  expect(rows[0]?.outcome).toBe("dispatch-failed");
+  expect(rows[0]?.branch_head_sha).toBe(preHead);
+  expect(existsSync(join(wt, "fix.ts"))).toBe(false); // undoAttempt cleaned the whole attempt
+  db.close();
+});
+
+test("read-only stray: logged as an event_log note, dispatch still clean-success (non-gating)", async () => {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-ro-${Date.now()}`);
+  const runner = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "stray.txt"), "oops\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: "{}",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  await runAgentDispatch(
+    ctxFor(db, ticketId),
+    { runner, ...depsFor(repo, wt) },
+    {
+      handlerKey: "review",
+      template: "review {{ident}}",
+      vars: { ident: "ENG-1" },
+      postcondition: () => {},
+    },
+  ); // no commitScope
+  expect(listByTicket(db, ticketId)[0]?.outcome).toBe("clean-success");
+  const notes = listEvents(db, ticketId).filter(
+    (e) => e.kind === "note" && e.reason?.startsWith("scratch-ignored"),
+  );
+  expect(notes.length).toBe(1);
+  expect(JSON.parse(notes[0]?.payload_json ?? "{}").stray).toContain("stray.txt");
+  db.close();
+});
+
+test("no-drop across a transport-failure retry: a re-created declared file commits, never dropped", async () => {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-retry2-${Date.now()}`);
+  const deps = depsFor(repo, wt);
+  const stepCtx = ctxFor(db, ticketId); // same step across both attempts
+  // Attempt 1: creates helper.ts then transport-fails (no revert in the old world → the bug).
+  const run1 = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "helper.ts"), "export const h = 1;\n");
+    return {
+      completed: false,
+      exitCode: null,
+      stdout: "",
+      stderr: "boom",
+      timedOut: true,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  await expect(
+    runAgentDispatch(
+      stepCtx,
+      { runner: run1, ...deps },
+      {
+        handlerKey: "implement:dispatch",
+        template: "t {{ident}}",
+        vars: { ident: "ENG-1" },
+        commitScope: implementScope,
+        postcondition: () => {},
+      },
+    ),
+  ).rejects.toThrow();
+  expect(existsSync(join(wt, "helper.ts"))).toBe(false); // undoAttempt removed attempt-1's file
+  // Attempt 2 (retry of the same step): re-creates + declares helper.ts → it MUST commit.
+  const run2 = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "helper.ts"), "export const h = 2;\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: '```styre-sidecar\n{"new_files":["helper.ts"]}\n```',
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const out = await runAgentDispatch(
+    stepCtx,
+    { runner: run2, ...deps },
+    {
+      handlerKey: "implement:dispatch",
+      template: "t {{ident}}",
+      vars: { ident: "ENG-1" },
+      commitScope: implementScope,
+      postcondition: ({ changed }) => {
+        if (!changed) throw new Error("dropped!");
+      },
+    },
+  );
+  expect(out.changed).toBe(true);
+  expect(Bun.spawnSync(["git", "show", "HEAD:helper.ts"], { cwd: wt }).success).toBe(true); // committed, not dropped
+  db.close();
 });

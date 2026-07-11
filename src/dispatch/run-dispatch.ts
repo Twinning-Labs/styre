@@ -4,17 +4,19 @@ import type { AgentConfig } from "../config/agent-config.ts";
 import { modelForTier } from "../config/agent-config.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../db/repos/dispatch.ts";
+import { appendEvent } from "../db/repos/event-log.ts";
 import { setPid } from "../db/repos/workflow-step.ts";
 import { ParkSignal } from "../engine/park-signal.ts";
 import { nowUtc } from "../util/time.ts";
+import type { CommitScope } from "./commit-scope.ts";
 import type { Profile } from "./profile.ts";
 import { renderPrompt } from "./render-prompt.ts";
 import { allowlistFor } from "./tool-allowlists.ts";
 import {
   commitWorktree,
   ensureWorktree,
-  pendingChanges,
-  revertWorktree,
+  pendingEntries,
+  undoAttempt,
   worktreeHead,
 } from "./worktree.ts";
 
@@ -40,12 +42,11 @@ export interface DispatchSpec {
   /** Bash runner commands to scope the implement allowlist to (string commands only). Other
    *  handlers omit this (their allowlists do not scope Bash). */
   runnerCommands?: string[];
-  /** Optional PRE-commit scope gate. When set, `runAgentDispatch` computes the full working-tree
-   *  delta (incl untracked) after the agent runs and BEFORE committing, and calls this. A throw
-   *  means "do not commit": the worktree is reverted, the dispatch is recorded `dispatch-failed`
-   *  with the head UNCHANGED, and the error rethrows (→ failure-policy). Handlers that omit it are
-   *  unaffected. Used by `docs:revise` to guarantee a docs-only commit. */
-  commitGuard?: (args: { worktreePath: string; pending: string[] }) => void;
+  /** Per-step commit scope (control-loop §4). Given the agent's stdout, a predicate over each pending
+   *  path: (path, isNew) => true means in-scope. PRESENT ⇒ a write step: an out-of-scope file this
+   *  dispatch created is rejected (revert + dispatch-failed + retry). ABSENT ⇒ read-only step: a
+   *  brand-new file is logged (event_log note) and left uncommitted; never gates. */
+  commitScope?: CommitScope;
 }
 
 const CARRYOVER_PREFIX =
@@ -112,6 +113,14 @@ export async function runAgentDispatch(
 
   ensureWorktree(deps.repoPath, deps.branch, deps.worktreePath);
 
+  // Only files THIS dispatch creates are in the scope's jurisdiction; pre-existing untracked cruft
+  // (an earlier stray, provision's *.egg-info) is captured here and excluded from judgment/staging.
+  const untrackedBefore = new Set(
+    pendingEntries(deps.worktreePath)
+      .filter((e) => e.isNew)
+      .map((e) => e.path),
+  );
+
   const seq = nextSeq(ctx.db, ctx.ticket.id);
   const did = dispatchId(ctx.ticket.ident, seq);
   const tier = resolveTier(spec.handlerKey, { loopback: spec.loopback });
@@ -142,6 +151,7 @@ export async function runAgentDispatch(
     const cause = result.timedOut ? "transient" : (result.cause ?? "transient");
     if (cause === "session-limit" || cause === "out-of-credits") {
       completeDispatch(ctx.db, inserted.id, { outcome: "parked", endedAt: nowUtc() });
+      undoAttempt(deps.worktreePath, untrackedBefore);
       throw new ParkSignal({
         cause,
         resetAt: result.resetAt ?? null,
@@ -150,28 +160,54 @@ export async function runAgentDispatch(
       });
     }
     completeDispatch(ctx.db, inserted.id, { outcome: "dispatch-failed", endedAt: nowUtc() });
+    undoAttempt(deps.worktreePath, untrackedBefore);
     throw new Error(
       `dispatch ${did} transport failure (exit ${result.exitCode}, timedOut=${result.timedOut})`,
     );
   }
 
-  if (spec.commitGuard) {
-    const preHead = worktreeHead(deps.worktreePath);
-    const pending = pendingChanges(deps.worktreePath);
-    try {
-      spec.commitGuard({ worktreePath: deps.worktreePath, pending });
-    } catch (err) {
-      revertWorktree(deps.worktreePath);
+  const preHead = worktreeHead(deps.worktreePath);
+  const entries = pendingEntries(deps.worktreePath);
+  // Judge only what this dispatch created (undoAttempt guarantees a failed prior attempt left none).
+  const judged = entries.filter((e) => !(e.isNew && untrackedBefore.has(e.path)));
+
+  let sha: string;
+  let changed: boolean;
+  if (spec.commitScope) {
+    const inScope = spec.commitScope(result.stdout);
+    const offenders = judged.filter((e) => !inScope(e.path, e.isNew));
+    if (offenders.length > 0) {
+      undoAttempt(deps.worktreePath, untrackedBefore);
       completeDispatch(ctx.db, inserted.id, {
         outcome: "dispatch-failed",
         branchHeadSha: preHead,
         endedAt: nowUtc(),
       });
-      throw err;
+      throw new Error(
+        `dispatch ${did} out-of-scope files (declare them as part of the change, or delete them if they are throwaway/debug files): ${offenders
+          .map((e) => e.path)
+          .join(", ")}`,
+      );
     }
+    ({ sha, changed } = commitWorktree(
+      deps.worktreePath,
+      `${did} ${spec.handlerKey}`,
+      judged.filter((e) => e.isNew).map((e) => e.path),
+    ));
+  } else {
+    const stray = judged.filter((e) => e.isNew).map((e) => e.path);
+    if (stray.length > 0) {
+      // Read-only step produced a file it should not have. Loop-not-halt: record, do not gate.
+      appendEvent(ctx.db, {
+        ticketId: ctx.ticket.id,
+        kind: "note",
+        reason: `scratch-ignored:${spec.handlerKey}`,
+        payload: { stray },
+      });
+    }
+    ({ sha, changed } = commitWorktree(deps.worktreePath, `${did} ${spec.handlerKey}`, []));
   }
 
-  const { sha, changed } = commitWorktree(deps.worktreePath, `${did} ${spec.handlerKey}`);
   const completion = {
     branchHeadSha: sha,
     endedAt: nowUtc(),

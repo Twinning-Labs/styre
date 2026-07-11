@@ -52,7 +52,7 @@ test("docs-only diff with no owned files passes for non-behavioral unit", async 
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["docs/note.md"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -100,7 +100,7 @@ test("a stack with a real command runs and passes", async () => {
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["feature.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -152,7 +152,7 @@ test("behavioral unit in a test-unavailable stack degrades to reviewer-only", as
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["src/app.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -210,7 +210,7 @@ test("a declared check absent on an impacted component errors (loud)", async () 
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["src/app.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -260,7 +260,7 @@ test("mixed tested + untested behavioral unit: tested stack gates, untested stac
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["src-tauri/lib.rs","src-tauri/lib_test.rs","src/app.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -325,7 +325,7 @@ test("renderPrBody includes untested-merge-risk component name when degrade occu
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["src/app.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -388,7 +388,7 @@ test("zero components in profile → no-components-detected error, not vacuous p
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["main.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -430,7 +430,7 @@ test("behavioral unit with docs-only diff → behavioral-no-code fail", async ()
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["README.md"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -481,7 +481,7 @@ test("advisory sweep records ran-all-unowned for failing untouched stack, unit s
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["app/main.ts","deploy/cfg.yaml"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -539,7 +539,7 @@ test("advisory sweep with passing untouched stack emits no signal and unit passe
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["app/main.ts","deploy/cfg.yaml"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -592,7 +592,7 @@ test("all changed files unowned non-inert → no hard gate runs, advisory sweep,
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["config/settings.yaml"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -648,7 +648,7 @@ test("advisory sweep silently skips absent command on untouched stack (no error)
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["app/main.ts","deploy/cfg.yaml"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -701,7 +701,7 @@ test("inert-only diff (LICENSE) non-behavioral → passes via inert-only path, n
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["LICENSE"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -754,7 +754,7 @@ test("inert-only diff (LICENSE) behavioral → behavioral-no-code fail", async (
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["LICENSE"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -800,7 +800,7 @@ test("non-inert unowned file (cfg.yaml) still triggers advisory sweep", async ()
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["other/cfg.yaml"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -856,7 +856,7 @@ test("renderPrBody renders ran-all-unowned under its own section, separate from 
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["app/main.ts","deploy/cfg.yaml"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -917,7 +917,7 @@ test("sweep-cost signal fires with stacksSwept count when untouched stack has th
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["app/main.ts","config/settings.yaml"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -979,7 +979,7 @@ test("sweep-cost positive-trace: fires with stacksSwept:0 when untouched stacks 
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["app/main.ts","config/settings.yaml"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -1036,7 +1036,7 @@ test("no sweep-cost signal when all changed files are owned or inert", async () 
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["app/main.ts","LICENSE"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,

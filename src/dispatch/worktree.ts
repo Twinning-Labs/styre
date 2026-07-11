@@ -32,14 +32,19 @@ export function worktreeHasChanges(worktreePath: string): boolean {
   return git(["status", "--porcelain"], worktreePath) !== "";
 }
 
-/** Stage everything and commit (CL-COMMIT — the daemon commits, never the agent).
- *  No changes → no commit; returns the current HEAD sha with changed=false. */
+/** Stage the scoped surface and commit (CL-COMMIT — the daemon commits, never the agent):
+ *  `git add -u` (all tracked modifications/deletions — always in scope; scratch is never tracked)
+ *  plus the named new files. Emptiness is decided on the STAGED INDEX (see stagedIndexEmpty), so an
+ *  undeclared untracked file left in the worktree never forces an empty commit. No changes → no
+ *  commit; returns current HEAD with changed=false. */
 export function commitWorktree(
   worktreePath: string,
   message: string,
+  newPaths: string[],
 ): { sha: string; changed: boolean } {
-  git(["add", "-A"], worktreePath);
-  if (git(["status", "--porcelain"], worktreePath) === "") {
+  git(["add", "-u"], worktreePath);
+  if (newPaths.length > 0) git(["add", "--", ...newPaths], worktreePath);
+  if (stagedIndexEmpty(worktreePath)) {
     return { sha: git(["rev-parse", "HEAD"], worktreePath), changed: false };
   }
   git(["commit", "-m", message], worktreePath);
@@ -117,33 +122,70 @@ export function worktreeHead(worktreePath: string): string {
   return git(["rev-parse", "HEAD"], worktreePath);
 }
 
-/** Every path in the uncommitted working-tree delta vs HEAD — tracked modifications/deletions,
- *  untracked additions, and BOTH sides of a rename/copy. Uses `--porcelain=v1 -z` (NUL-delimited,
- *  never octal-quoted, `core.quotePath=false`) so no path escaping/quoting can hide an entry.
- *  Load-bearing for the docs:revise commitGuard: an agent with Write can CREATE an untracked
- *  source file, which a bare `git diff` would miss (review finding B1). */
-export function pendingChanges(worktreePath: string): string[] {
-  // gitRaw (NOT git): porcelain -z status columns can start with a space (" M path"); trimming
-  // would corrupt the first entry's path (review Blocker-1). The trailing NUL is dropped by the
-  // `!== ""` filter below.
+export interface PendingEntry {
+  path: string;
+  isNew: boolean;
+}
+
+/** Every path in the uncommitted working-tree delta vs HEAD, with an `isNew` flag. Uses
+ *  `--porcelain=v1 -z` (NUL-delimited, `quotePath=false`) so path escaping can never hide an entry.
+ *  isNew ⇔ the porcelain status is exactly `??` (a brand-new untracked file). A rename/copy emits a
+ *  second token (the ORIGINAL path) with no status prefix — that half is the deletion of a tracked
+ *  file, so it is recorded isNew=false rather than status-parsed (its path bytes are not a status). */
+export function pendingEntries(worktreePath: string): PendingEntry[] {
+  // `--untracked-files=all` is load-bearing: without it git COLLAPSES a brand-new directory to a
+  // single `dir/` entry, so an agent that creates `checks/ac1.py` would surface only `checks/` —
+  // which no declared path (`checks/ac1.py`) can match, making the scope gate reject every new-dir
+  // deliverable. Listing untracked files individually is what lets named staging + scope judgment
+  // work for files the agent creates in a new subtree (the common case).
   const out = gitRaw(
-    ["-c", "core.quotePath=false", "status", "--porcelain=v1", "-z"],
+    ["-c", "core.quotePath=false", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
     worktreePath,
   );
   if (out === "") return [];
   const tokens = out.split("\0").filter((t) => t !== "");
-  const paths: string[] = [];
+  const entries: PendingEntry[] = [];
   for (let i = 0; i < tokens.length; i++) {
     const entry = tokens[i];
     const status = entry.slice(0, 2); // XY
-    paths.push(entry.slice(3)); // the (new) path
-    // Rename/copy entries are followed by a second token: the ORIGINAL path.
+    entries.push({ path: entry.slice(3), isNew: status === "??" });
     if (status.includes("R") || status.includes("C")) {
       i++;
-      if (i < tokens.length) paths.push(tokens[i]);
+      if (i < tokens.length) entries.push({ path: tokens[i], isNew: false }); // original path of the rename/copy
     }
   }
-  return paths;
+  return entries;
+}
+
+/** The pending-change paths only — a convenience projection of `pendingEntries` for callers that
+ *  don't need the `isNew` flag (currently the worktree tests). */
+export function pendingChanges(worktreePath: string): string[] {
+  return pendingEntries(worktreePath).map((e) => e.path);
+}
+
+/** True iff the STAGED INDEX has no changes. Uses `git diff --cached --quiet` (a non-throwing
+ *  spawn): exit 0 → empty, exit 1 → has staged changes, anything else → a real git error → throw.
+ *  Measuring the index (not `git status --porcelain`, which also reports untracked files) is what
+ *  lets a read-only step with an untracked stray return changed=false instead of committing empty. */
+export function stagedIndexEmpty(worktreePath: string): boolean {
+  const res = Bun.spawnSync(["git", "diff", "--cached", "--quiet"], { cwd: worktreePath });
+  if (res.exitCode === 0) return true;
+  if (res.exitCode === 1) return false;
+  throw new Error(
+    `git diff --cached --quiet failed (exit ${res.exitCode}): ${res.stderr.toString().trim()}`,
+  );
+}
+
+/** Surgically discard the current attempt: restore all tracked files to HEAD and remove ONLY the
+ *  untracked files this attempt created (untracked-now minus `untrackedBefore`). Pre-existing cruft
+ *  (an earlier stray, provision's `*.egg-info`) is spared — a blanket `git clean` would delete it and
+ *  break the editable install. Called on every pre-commit failure exit so retries start clean. */
+export function undoAttempt(worktreePath: string, untrackedBefore: Set<string>): void {
+  git(["checkout", "--", "."], worktreePath);
+  const strays = pendingEntries(worktreePath)
+    .filter((e) => e.isNew && !untrackedBefore.has(e.path))
+    .map((e) => e.path);
+  if (strays.length > 0) git(["clean", "-fd", "--", ...strays], worktreePath);
 }
 
 /** Discard every uncommitted change (tracked restore + untracked removal), restoring HEAD.

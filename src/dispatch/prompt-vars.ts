@@ -146,7 +146,7 @@ export function reviewVars(
 }
 
 /** Prompt vars for `docs:revise` — mirrors `reviewVars` (Bash-less, reads the worktree + plan) plus
- *  the allowed-doc-paths hint, kept in lockstep with the commitGuard's `isDocPath`. */
+ *  the allowed-doc-paths hint, kept in lockstep with the `docScope` commit scope's `isDocPath`. */
 export function docsVars(
   ticket: { ident: string; title: string | null },
   profile: Profile,

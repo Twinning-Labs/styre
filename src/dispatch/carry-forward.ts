@@ -5,7 +5,7 @@ import { insertSignal, listByTicket } from "../db/repos/ground-truth-signal.ts";
 /** After a proven docs-only commit that moved HEAD (V→sha), record that the verified verdict still
  *  holds at `sha`, so the resolver's HEAD-keyed gate/integration re-checks pass at `sha` and it
  *  advances to review instead of re-gating (design §2, Blocker-1 fix). Sound because the
- *  commitGuard proved `sha` differs from V only in doc paths. Writes, in one transaction:
+ *  docScope commit scope proved `sha` differs from V only in doc paths. Writes, in one transaction:
  *   - the verified `integration` signal replicated verbatim (result + detail + command) — always
  *     (S4 integration always runs; `ranShasFor` is result-agnostic);
  *   - an `ac-check-gate` `pass` signal — ONLY when the ticket has active ac-checks (matches the

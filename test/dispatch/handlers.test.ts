@@ -54,7 +54,7 @@ test("implement:dispatch runs the agent, commits, sets the unit verifying", asyn
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["impl.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -131,7 +131,7 @@ test("implement:dispatch escalates to the deep tier after a bounce-back", async 
     return {
       completed: true,
       exitCode: 0,
-      stdout: "{}",
+      stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["f.ts"]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
