@@ -72,6 +72,19 @@ test("implementVars carries the feedback var (empty by default)", () => {
   expect(implementVars(ticket, unit, profile, "fix the build").feedback).toBe("fix the build");
 });
 
+test("implementVars threads reviewFeedbackText into the review_feedback var", () => {
+  const vars = implementVars(ticket, unit, profile, "", [], "", "REVIEWMARKER");
+  expect(vars.review_feedback).toBe("REVIEWMARKER");
+});
+
+test("implementVars review_feedback defaults to empty", () => {
+  expect(implementVars(ticket, unit, profile).review_feedback).toBe("");
+});
+
+test("implement prompt has a review_feedback slot", () => {
+  expect(IMPLEMENT_TEMPLATE).toContain("{{review_feedback}}");
+});
+
 test("implementVars renders the authored check paths + a do-not-edit instruction", () => {
   const vars = implementVars(ticket, unit, profile, "", [
     { test_path: "api/tests/styre_checks/ENG-1_ac7_test.py" },

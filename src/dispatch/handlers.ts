@@ -116,6 +116,7 @@ import {
 } from "./provision.ts";
 import { baselineShaForAc, replayCheckAtBaseline } from "./replay-harness.ts";
 import { reuseAwareTestCommand } from "./reuse.ts";
+import { reviewFeedback } from "./review-feedback.ts";
 import { ReviewOutputSchema, computeBlocksShip, validateReviewFindings } from "./review-schema.ts";
 import type { DispatchDeps } from "./run-dispatch.ts";
 import { runAgentDispatch } from "./run-dispatch.ts";
@@ -886,6 +887,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           implementFeedback(ctx.db, unit.id),
           listAcChecks(ctx.db, ctx.ticket.id),
           gateFeedback(ctx.db, ctx.ticket.id),
+          reviewFeedback(ctx.db, ctx.ticket.id, unit.id),
         ),
         loopback: isUnitLoopback(ctx, unit.seq),
         runnerCommands,
