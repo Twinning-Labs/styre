@@ -10,7 +10,8 @@ import { branchPrefixFor } from "../integrations/ticket-source.ts";
 import { type TelemetrySink, noopSink } from "../telemetry/emit.ts";
 import { createTelemetryEmitter } from "../telemetry/emitter.ts";
 import { tick } from "./loop.ts";
-import type { ProjectorPorts } from "./projector.ts";
+import { createNotifier } from "./notify.ts";
+import { type ProjectorPorts, drainOutbox } from "./projector.ts";
 import type { StepRegistry } from "./step-registry.ts";
 
 export type RunOutcome = "pr-ready" | "done" | "blocked" | "no-progress" | "parked";
@@ -42,9 +43,13 @@ export async function driveToTerminal(
 ): Promise<RunResult> {
   const cap = opts.cap ?? DEFAULT_CAP;
   const emitter = createTelemetryEmitter(opts.emit ?? noopSink);
-  const finish = (result: RunResult): RunResult => {
+  const notifier = createNotifier(opts.config);
+  const finish = async (result: RunResult): Promise<RunResult> => {
     emitter.flushNew(db, opts.ticketId);
     emitter.emitSummary(db, opts.ticketId, result);
+    notifier.sweepNew(db, opts.ticketId); // catch the final tick's events
+    notifier.notifyTerminal(db, opts.ticketId, result.outcome);
+    await drainOutbox(db, opts.ports); // BLOCKER-1 fix: flush the terminal + tail notify rows
     return result;
   };
   let idle = 0;
@@ -56,29 +61,31 @@ export async function driveToTerminal(
       profile: opts.profile,
     });
     emitter.flushNew(db, opts.ticketId);
+    notifier.sweepNew(db, opts.ticketId);
     const t = getTicket(db, opts.ticketId);
     if (!t) throw new Error(`driveToTerminal: ticket ${opts.ticketId} not found`);
     last = { stage: t.stage, status: t.status };
     const pending = listPending(db, opts.ticketId);
 
-    if (r.parked) return finish({ outcome: "parked", iterations: i, ...last, park: r.parked });
-    if (t.status === "done") return finish({ outcome: "done", iterations: i, ...last });
+    if (r.parked)
+      return await finish({ outcome: "parked", iterations: i, ...last, park: r.parked });
+    if (t.status === "done") return await finish({ outcome: "done", iterations: i, ...last });
     if (pending.some((s) => s.signal_type === "human_resume"))
-      return finish({ outcome: "blocked", iterations: i, ...last });
+      return await finish({ outcome: "blocked", iterations: i, ...last });
     if (t.stage === "merge" && pending.some((s) => s.signal_type === "human_merge_approval"))
-      return finish({ outcome: "pr-ready", iterations: i, ...last });
+      return await finish({ outcome: "pr-ready", iterations: i, ...last });
     // A resolver dead-end ('blocked': no actionable unit and not all verified) is terminal, not a
     // stall to grind on — surface it immediately rather than spinning to the iteration cap.
-    if (r.blocked) return finish({ outcome: "blocked", iterations: i, ...last });
+    if (r.blocked) return await finish({ outcome: "blocked", iterations: i, ...last });
 
     if (r.advanced === 0) {
       idle += 1;
-      if (idle >= IDLE_CAP) return finish({ outcome: "no-progress", iterations: i, ...last });
+      if (idle >= IDLE_CAP) return await finish({ outcome: "no-progress", iterations: i, ...last });
     } else {
       idle = 0;
     }
   }
-  return finish({ outcome: "no-progress", iterations: cap, ...last });
+  return await finish({ outcome: "no-progress", iterations: cap, ...last });
 }
 
 /** Ingest ONE ticket (read from the tracker) into the SoT, then drive it to a terminal. The single
