@@ -87,7 +87,7 @@ export function linearIssueTracker(opts?: { apiKey?: string }): IssueTrackerPort
         title: issue.title,
         description: issue.description ?? null,
         typeLabel,
-        linearIssueUuid: issue.id,
+        externalId: issue.id,
         url: issue.url ?? null,
       };
     },

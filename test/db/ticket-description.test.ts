@@ -13,7 +13,7 @@ test("insertTicket persists ingestion fields incl. description", () => {
     description: "## Context\nDo the thing.",
     typeLabel: "Bug",
     branchPrefix: "fix",
-    linearIssueUuid: "uuid-123",
+    externalId: "uuid-123",
   });
   const t = getTicket(db, id);
   expect(t?.title).toBe("Add a thing");

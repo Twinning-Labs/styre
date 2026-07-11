@@ -32,7 +32,7 @@ export function insertTicket(
     description?: string | null;
     typeLabel?: string | null;
     branchPrefix?: string | null;
-    linearIssueUuid?: string | null;
+    externalId?: string | null;
   },
 ): number {
   const now = nowUtc();
@@ -41,7 +41,7 @@ export function insertTicket(
       `INSERT INTO ticket
          (project_id, ident, title, description, type_label, branch_prefix, linear_issue_uuid,
           stage, status, track, needs_docs, created_at, updated_at)
-       VALUES ($pid, $ident, $title, $description, $typeLabel, $branchPrefix, $linearIssueUuid,
+       VALUES ($pid, $ident, $title, $description, $typeLabel, $branchPrefix, $externalId,
           $stage, $status, $track, $needsDocs, $now, $now)`,
     )
     .run({
@@ -51,7 +51,7 @@ export function insertTicket(
       $description: t.description ?? null,
       $typeLabel: t.typeLabel ?? null,
       $branchPrefix: t.branchPrefix ?? null,
-      $linearIssueUuid: t.linearIssueUuid ?? null,
+      $externalId: t.externalId ?? null,
       $stage: t.stage ?? "design",
       $status: t.status ?? "active",
       $track: t.track ?? null,

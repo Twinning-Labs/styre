@@ -139,7 +139,7 @@ test("resumeRun wires resetProvisionForResume into the resume path (S4)", async 
               title: "Wire test",
               description: "body",
               typeLabel: "Feature",
-              linearIssueUuid: "uuid-wire",
+              externalId: "uuid-wire",
               url: null,
             },
           }),

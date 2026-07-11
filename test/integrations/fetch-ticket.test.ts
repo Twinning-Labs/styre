@@ -8,7 +8,7 @@ test("fakeIssueTracker.fetchTicket returns the canned ticket and records the cal
       title: "T",
       description: "B",
       typeLabel: "Bug",
-      linearIssueUuid: "u",
+      externalId: "u",
       url: "http://x",
     },
   });

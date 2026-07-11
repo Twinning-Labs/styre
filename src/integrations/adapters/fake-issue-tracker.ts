@@ -11,7 +11,7 @@ export function fakeIssueTracker(opts?: { ticket?: IngestedTicket }): IssueTrack
     title: "fake ticket",
     description: "fake body",
     typeLabel: "Feature",
-    linearIssueUuid: "fake-uuid",
+    externalId: "fake-uuid",
     url: "https://fake/ENG-1",
   };
   return {
