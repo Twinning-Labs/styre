@@ -70,3 +70,14 @@ test("notify throws a diagnosable error on a non-JSON / non-OK body", async () =
     /502/,
   );
 });
+
+test("notify throws a diagnosable non-JSON error on an HTTP-200 non-JSON body", async () => {
+  const port = slackNotifier({
+    token: "t",
+    channel: "#x",
+    fetch: async () => new Response("not json at all", { status: 200 }),
+  });
+  await expect(port.notify({ ticketIdent: "ENG-1", event: "x", severity: "info" })).rejects.toThrow(
+    /non-JSON/i,
+  );
+});
