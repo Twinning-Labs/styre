@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
 import { enqueueStageProjection, stageToState } from "../../src/daemon/projector.ts";
 import { StepRegistry } from "../../src/daemon/step-registry.ts";
+import { appendEvent } from "../../src/db/repos/event-log.ts";
 import { listPending } from "../../src/db/repos/projection-outbox.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
 import { makeTestDb } from "../helpers/db.ts";
@@ -34,6 +35,29 @@ test("enqueueStageProjection enqueues a mapped set_state and a label swap, idemp
     add: ["stage:implement"],
     remove: ["stage:design"],
   });
+});
+
+test("re-entering a stage across a loopback cycle is NOT suppressed (cycle-epoch keys — codex P2)", () => {
+  const { db, ticketId } = makeTestDb();
+  const t = getTicket(db, ticketId);
+  if (!t) {
+    throw new Error("expected seeded ticket");
+  }
+  // First design→implement transition (its event drives the cycle epoch).
+  appendEvent(db, { ticketId, kind: "transition", fromStage: "design", toStage: "implement" });
+  enqueueStageProjection(db, t, "design", "implement");
+  const afterFirst = listPending(db).filter((r) => r.op === "set_state").length;
+  expect(afterFirst).toBe(1);
+
+  // A redesign loopback cycles back to design, then design→implement happens AGAIN. With only a
+  // from→to key the second projection would collide with the first and INSERT OR IGNORE would drop
+  // it, leaving the external mirror stale. A new stage-change event bumps the epoch → new key.
+  appendEvent(db, { ticketId, kind: "loopback", loop: "design", routeTo: "review" });
+  appendEvent(db, { ticketId, kind: "transition", fromStage: "design", toStage: "implement" });
+  enqueueStageProjection(db, t, "design", "implement");
+  const afterSecond = listPending(db).filter((r) => r.op === "set_state").length;
+  db.close();
+  expect(afterSecond).toBe(2); // the re-entry produced a SECOND set_state row (not suppressed)
 });
 
 test("advancing through advanceOneStep enqueues the projection (integration with the advance tx)", async () => {

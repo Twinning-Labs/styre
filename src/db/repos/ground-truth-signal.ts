@@ -96,6 +96,26 @@ export function passingShasFor(
   return rows.map((r) => r.branch_head_sha).filter((s): s is string => s !== null);
 }
 
+/** The shas at which this signal type was recorded with a REAL VERDICT (`pass` or `fail`) — i.e.
+ *  the check actually evaluated. Excludes `result='error'` (could-not-run: empty-diff, no-components,
+ *  infra crash). Used to route the demoted advisory verify:check on "reached a verdict at sha": a
+ *  genuine `fail` still satisfies routing (no re-emit wedge — the M4 demotion), but an `error` does
+ *  NOT count as satisfied, so failure-policy's could-not-run retry is honoured and the unit never
+ *  advances treating a check that never ran as complete (codex finding P1). */
+export function verdictShasFor(
+  db: Database,
+  args: { ticketId: number; workUnitId: number | null; signalType: string },
+): string[] {
+  const rows = db
+    .query<{ branch_head_sha: string | null }, [number, number | null, string]>(
+      `SELECT branch_head_sha FROM ground_truth_signal
+       WHERE ticket_id = ? AND work_unit_id IS ? AND signal_type = ?
+         AND result != 'error' AND branch_head_sha IS NOT NULL`,
+    )
+    .all(args.ticketId, args.workUnitId, args.signalType);
+  return rows.map((r) => r.branch_head_sha).filter((s): s is string => s !== null);
+}
+
 /** Like passingShasFor but result-agnostic: the shas at which a signal of this type was RECORDED
  *  (any result). Used to route advisory gates (verify:check, verify:integration) on "ran at sha",
  *  so a recorded advisory `fail` still advances instead of re-emitting forever (M4 demotion). The

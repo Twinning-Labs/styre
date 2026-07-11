@@ -7,7 +7,7 @@ import {
   listByDispatch,
 } from "../db/repos/review-finding.ts";
 import { insertPending as insertSignal } from "../db/repos/signal.ts";
-import { setTicketStage, setTicketStatus } from "../db/repos/ticket.ts";
+import { getTicket, setTicketStage, setTicketStatus } from "../db/repos/ticket.ts";
 import {
   deleteByTicket,
   listByTicket as listUnits,
@@ -19,6 +19,7 @@ import {
   resetAttempt,
   resetToPending,
 } from "../db/repos/workflow-step.ts";
+import { enqueueStageProjection } from "./projector.ts";
 
 export type ReviewDecision = "clean" | "loopback" | "escalated";
 
@@ -77,6 +78,8 @@ function codeLoopback(
   signature: string,
 ): void {
   db.transaction(() => {
+    const ticket = getTicket(db, ticketId);
+    const from = ticket?.stage ?? "review";
     const anyNullUnit = blocking.some((f) => f.work_unit_id === null);
     if (anyNullUnit) {
       // Conservative: a blocking code finding not tied to a unit re-codes the whole ticket.
@@ -110,6 +113,12 @@ function codeLoopback(
       routeTo: "review",
       signature,
     });
+    // Project the rewind so the external mirror follows the loop back out of review (projector
+    // contract: every stage change commits WITH its outbox intent — codex finding P1). Enqueued
+    // after the loopback event so the cycle epoch counts it (projector.stageChangeEpoch).
+    if (ticket && from !== "implement") {
+      enqueueStageProjection(db, ticket, from, "implement");
+    }
   })();
 }
 
@@ -130,6 +139,8 @@ function redesignLoopback(
     rationale: f.rationale,
   }));
   db.transaction(() => {
+    const ticket = getTicket(db, ticketId);
+    const from = ticket?.stage ?? "review";
     deleteByTicket(db, ticketId);
     for (const key of ["design:dispatch", "design:extract", "design:review", "review"]) {
       const step = getByKey(db, ticketId, key);
@@ -147,6 +158,12 @@ function redesignLoopback(
       signature,
       payload: { findings },
     });
+    // Project the rewind to design when it actually changes stage (code-review plan-defect: review→
+    // design). Plan-review redesign is already IN design (design→design) → guard skips it, no spurious
+    // projection. Enqueued after the loopback event so the cycle epoch counts it (finding P1/P2).
+    if (ticket && from !== "design") {
+      enqueueStageProjection(db, ticket, from, "design");
+    }
   })();
 }
 

@@ -19,7 +19,12 @@ import {
   supersedeByAc,
 } from "../db/repos/ac-check.ts";
 import { listByTicket as listAcs } from "../db/repos/acceptance-criterion.ts";
-import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";
+import {
+  completeDispatch,
+  getByDispatchId,
+  getLatestByWorkUnit,
+  getLatestForTicket,
+} from "../db/repos/dispatch.ts";
 import { listByTicket as listEvents } from "../db/repos/event-log.ts";
 import {
   behavioralStillRed,
@@ -42,6 +47,7 @@ import {
 } from "../db/repos/work-unit.ts";
 import { pythonImportName } from "../setup/lang/python.ts";
 import { runCommand } from "../util/run-command.ts";
+import { nowUtc } from "../util/time.ts";
 import { type AdjClass, ChecksClassifyOutputSchema } from "./adjudicate-schema.ts";
 import { ChecksArbitrateOutputSchema } from "./arbitrate-schema.ts";
 import { carryVerifiedVerdictForward } from "./carry-forward.ts";
@@ -125,6 +131,8 @@ import {
   ensureWorktree,
   fileContentAt,
   removeWorktree,
+  resetWorktreeHard,
+  worktreeHead,
 } from "./worktree.ts";
 
 export interface RegistryDeps {
@@ -533,147 +541,176 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     const acs = scoped ? allAcs.filter((a) => flaggedAcs.includes(a.id)) : allAcs;
     const acIds = new Set(acs.map((a) => a.id));
 
+    // Identity + coverage (below) are checked against the COMMITTED diff (added-only, §5.1), so the
+    // author is committed first — commitScope gates only path-scope, never AC coverage. Capture the
+    // pre-author HEAD so a REJECTED author (malformed sidecar / uncovered ACs / bad identity) is
+    // rolled back here: without it the invalid test commit stays on the branch, pollutes the PR, and
+    // poisons the retry's diff (codex finding P1). ensureWorktree is idempotent (runAgentDispatch
+    // re-runs it); the agent never commits, so HEAD is unchanged until CL-COMMIT below.
+    const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
+    ensureWorktree(repoPath, branch, worktreePath);
+    const preHead = worktreeHead(worktreePath);
+
     // Dispatch the plan-blind author (no Bash; commits via CL-COMMIT → sha).
-    const { sha, output } = await runAgentDispatch(
-      ctx,
-      depsFor(ctx, deps, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS),
-      {
-        handlerKey: "checks:dispatch",
-        template: CHECKS_TEMPLATE,
-        vars: checksVars(ctx.ticket, deps.profile, acs, checksFeedback(ctx.db, ctx.ticket.id)),
-        commitScope: checksScope,
-        // Identity + coverage are verified below against the committed diff, not on the raw diff here.
-        postcondition: () => {},
-      },
-    );
+    const {
+      sha,
+      output,
+      dispatchId: did,
+    } = await runAgentDispatch(ctx, depsFor(ctx, deps, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS), {
+      handlerKey: "checks:dispatch",
+      template: CHECKS_TEMPLATE,
+      vars: checksVars(ctx.ticket, deps.profile, acs, checksFeedback(ctx.db, ctx.ticket.id)),
+      commitScope: checksScope,
+      // Identity + coverage are verified below against the committed diff, not on the raw diff here.
+      postcondition: () => {},
+    });
 
-    // Structured output through the validated interface (§4): absent/malformed = transport failure.
-    const parsed = extractSidecar(output, ChecksOutputSchema);
-    if (!parsed.ok) {
-      throw new Error(`checks:dispatch sidecar ${parsed.reason}: ${parsed.detail}`);
-    }
+    try {
+      // Structured output through the validated interface (§4): absent/malformed = transport failure.
+      const parsed = extractSidecar(output, ChecksOutputSchema);
+      if (!parsed.ok) {
+        throw new Error(`checks:dispatch sidecar ${parsed.reason}: ${parsed.detail}`);
+      }
 
-    const { worktreePath } = worktreeFor(ctx, deps);
-    const added = new Set(addedFilesAt(sha, worktreePath));
-    const components = deps.profile.components;
-    const run = deps.runCheckCommand;
+      const added = new Set(addedFilesAt(sha, worktreePath));
+      const components = deps.profile.components;
+      const run = deps.runCheckCommand;
 
-    // Per authored check: identity (§5.1) → framework → RED-first execution (§5.3) → coarse (§5.4).
-    const records: Array<{
-      acId: number;
-      selector: string;
-      testPath: string;
-      coarse: CoarseResult;
-      rawOutput: string;
-      exitCode: number | null;
-      framework: CheckFramework | null;
-      command: string | null;
-    }> = [];
-    const covered = new Set<number>();
+      // Per authored check: identity (§5.1) → framework → RED-first execution (§5.3) → coarse (§5.4).
+      const records: Array<{
+        acId: number;
+        selector: string;
+        testPath: string;
+        coarse: CoarseResult;
+        rawOutput: string;
+        exitCode: number | null;
+        framework: CheckFramework | null;
+        command: string | null;
+      }> = [];
+      const covered = new Set<number>();
 
-    for (const c of parsed.value.checksAuthored) {
-      if (!acIds.has(c.ac_id)) continue; // unknown AC id → reject (decision 5)
-      if (!added.has(c.test_file)) continue; // not git-status A → reject (§5.1 added-only)
-      const content = fileContentAt(sha, c.test_file, worktreePath);
-      if (content === null || !content.includes(c.test_name)) continue; // name absent → reject
+      for (const c of parsed.value.checksAuthored) {
+        if (!acIds.has(c.ac_id)) continue; // unknown AC id → reject (decision 5)
+        if (!added.has(c.test_file)) continue; // not git-status A → reject (§5.1 added-only)
+        const content = fileContentAt(sha, c.test_file, worktreePath);
+        if (content === null || !content.includes(c.test_name)) continue; // name absent → reject
 
-      const comp = impactedComponents(components, [c.test_file])[0]; // decision 2
-      const fw = comp ? frameworkFor(comp) : null;
+        const comp = impactedComponents(components, [c.test_file])[0]; // decision 2
+        const fw = comp ? frameworkFor(comp) : null;
 
-      let coarse: CoarseResult;
-      let selector = c.test_file; // NOT-NULL fallback when no framework (decision 2)
-      let rawOutput = "";
-      let exitCode: number | null = null;
-      let command: string | null = null;
+        let coarse: CoarseResult;
+        let selector = c.test_file; // NOT-NULL fallback when no framework (decision 2)
+        let rawOutput = "";
+        let exitCode: number | null = null;
+        let command: string | null = null;
 
-      if (!comp || !fw) {
-        coarse = "error"; // can't attempt — no framework (§5.2)
-      } else {
-        let interp: string | undefined;
-        if (fw === "pytest") {
-          try {
-            interp = resolvePythonInterpreter();
-          } catch {
-            interp = undefined;
+        if (!comp || !fw) {
+          coarse = "error"; // can't attempt — no framework (§5.2)
+        } else {
+          let interp: string | undefined;
+          if (fw === "pytest") {
+            try {
+              interp = resolvePythonInterpreter();
+            } catch {
+              interp = undefined;
+            }
+          }
+          if (fw === "pytest" && interp === undefined) {
+            coarse = "error"; // no interpreter → can't attempt
+          } else {
+            const sel = buildCheckSelector(fw, { testFile: c.test_file, testName: c.test_name });
+            selector = sel.runArgs;
+            const res = await runCheckForRed({
+              framework: fw,
+              binary: binaryFor(fw, { interp }),
+              runArgs: sel.runArgs,
+              cwd: join(worktreePath, comp.dir ?? ""),
+              timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
+              run,
+            });
+            rawOutput = res.rawOutput;
+            exitCode = res.exitCode;
+            command = res.command;
+            if (res.coarse === "selected-none") continue; // selects 0 → identity reject (§5.1)
+            coarse = res.coarse;
           }
         }
-        if (fw === "pytest" && interp === undefined) {
-          coarse = "error"; // no interpreter → can't attempt
+        records.push({
+          acId: c.ac_id,
+          selector,
+          testPath: c.test_file,
+          coarse,
+          rawOutput,
+          exitCode,
+          framework: fw,
+          command,
+        });
+        covered.add(c.ac_id);
+      }
+
+      // Postcondition (§8): ≥1 identity-verified check per AC, else fail (bounded retry / escalate).
+      const uncovered = acs.filter((a) => !covered.has(a.id));
+      if (uncovered.length > 0) {
+        throw new Error(
+          `checks:dispatch postcondition: no valid check for AC seq ${uncovered.map((a) => a.seq).join(", ")}`,
+        );
+      }
+
+      // Persist (§9): delete-then-insert in ONE transaction (resume-dedup, decision 1) + the signal row
+      // via the vocab map (never write 'red' into ground_truth_signal).
+      ctx.db.transaction(() => {
+        if (scoped) {
+          // Resume-dedup ONLY: clear this dispatch's own not-yet-classified actives (a crash-resume would
+          // otherwise double-insert). The flagged generation was already SUPERSEDED by the verdict
+          // (checks-verdict.ts, exactly-once) — never deleted here, so history + the escalate counter stand.
+          for (const acId of acIds) deleteActiveByAc(ctx.db, acId);
         } else {
-          const sel = buildCheckSelector(fw, { testFile: c.test_file, testName: c.test_name });
-          selector = sel.runArgs;
-          const res = await runCheckForRed({
-            framework: fw,
-            binary: binaryFor(fw, { interp }),
-            runArgs: sel.runArgs,
-            cwd: join(worktreePath, comp.dir ?? ""),
-            timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
-            run,
+          deleteByTicket(ctx.db, ctx.ticket.id); // fresh / crash-resume whole-ticket author (unchanged)
+        }
+        for (const r of records) {
+          const row = insertAcCheck(ctx.db, {
+            ticketId: ctx.ticket.id,
+            acId: r.acId,
+            selector: r.selector,
+            testPath: r.testPath,
+            redFirstResult: r.coarse,
           });
-          rawOutput = res.rawOutput;
-          exitCode = res.exitCode;
-          command = res.command;
-          if (res.coarse === "selected-none") continue; // selects 0 → identity reject (§5.1)
-          coarse = res.coarse;
+          insertSignal(ctx.db, {
+            ticketId: ctx.ticket.id,
+            signalType: "ac-check-red-first",
+            result: signalResultForCoarse(r.coarse),
+            branchHeadSha: sha,
+            detail: {
+              rawOutput: r.rawOutput,
+              exitCode: r.exitCode,
+              framework: r.framework,
+              command: r.command,
+              acCheckId: row.id,
+            },
+          });
+        }
+      })();
+
+      return { authored: records.length, acs: acs.length };
+    } catch (err) {
+      // A rejected author: roll the branch back to the pre-author HEAD so the invalid test commit
+      // never reaches the PR, and record the dispatch as `reverted` (branch_head_sha ← preHead) so
+      // getLatestForTicket never returns the discarded sha. Then rethrow → failure-policy re-dispatches
+      // from a clean tree (codex finding P1). Guarded on sha !== preHead: a no-op author (nothing
+      // committed) leaves HEAD already at preHead — nothing to undo.
+      if (sha !== preHead) {
+        resetWorktreeHard(worktreePath, preHead);
+        const row = getByDispatchId(ctx.db, ctx.ticket.id, did);
+        if (row) {
+          completeDispatch(ctx.db, row.id, {
+            outcome: "reverted",
+            branchHeadSha: preHead,
+            endedAt: nowUtc(),
+          });
         }
       }
-      records.push({
-        acId: c.ac_id,
-        selector,
-        testPath: c.test_file,
-        coarse,
-        rawOutput,
-        exitCode,
-        framework: fw,
-        command,
-      });
-      covered.add(c.ac_id);
+      throw err;
     }
-
-    // Postcondition (§8): ≥1 identity-verified check per AC, else fail (bounded retry / escalate).
-    const uncovered = acs.filter((a) => !covered.has(a.id));
-    if (uncovered.length > 0) {
-      throw new Error(
-        `checks:dispatch postcondition: no valid check for AC seq ${uncovered.map((a) => a.seq).join(", ")}`,
-      );
-    }
-
-    // Persist (§9): delete-then-insert in ONE transaction (resume-dedup, decision 1) + the signal row
-    // via the vocab map (never write 'red' into ground_truth_signal).
-    ctx.db.transaction(() => {
-      if (scoped) {
-        // Resume-dedup ONLY: clear this dispatch's own not-yet-classified actives (a crash-resume would
-        // otherwise double-insert). The flagged generation was already SUPERSEDED by the verdict
-        // (checks-verdict.ts, exactly-once) — never deleted here, so history + the escalate counter stand.
-        for (const acId of acIds) deleteActiveByAc(ctx.db, acId);
-      } else {
-        deleteByTicket(ctx.db, ctx.ticket.id); // fresh / crash-resume whole-ticket author (unchanged)
-      }
-      for (const r of records) {
-        const row = insertAcCheck(ctx.db, {
-          ticketId: ctx.ticket.id,
-          acId: r.acId,
-          selector: r.selector,
-          testPath: r.testPath,
-          redFirstResult: r.coarse,
-        });
-        insertSignal(ctx.db, {
-          ticketId: ctx.ticket.id,
-          signalType: "ac-check-red-first",
-          result: signalResultForCoarse(r.coarse),
-          branchHeadSha: sha,
-          detail: {
-            rawOutput: r.rawOutput,
-            exitCode: r.exitCode,
-            framework: r.framework,
-            command: r.command,
-            acCheckId: row.id,
-          },
-        });
-      }
-    })();
-
-    return { authored: records.length, acs: acs.length };
   });
 
   registry.register("checks:classify", async (ctx: HandlerContext) => {

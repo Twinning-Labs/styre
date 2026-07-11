@@ -195,3 +195,13 @@ export function revertWorktree(worktreePath: string): void {
   git(["checkout", "--", "."], worktreePath);
   git(["clean", "-fd"], worktreePath);
 }
+
+/** Roll the branch back to `sha` (`git reset --hard`), discarding any commit(s) after it AND the
+ *  working tree. Used to un-do a daemon commit whose post-commit validation rejected it — so a
+ *  rejected authoring round leaves NO commit on the branch (codex finding P1). `git clean -fd`
+ *  (no `-x`) then removes any newly-untracked files the reset surfaced, sparing ignored files
+ *  (the ephemeral SQLite under XDG state) in in-place mode. */
+export function resetWorktreeHard(worktreePath: string, sha: string): void {
+  git(["reset", "--hard", sha], worktreePath);
+  git(["clean", "-fd"], worktreePath);
+}

@@ -57,19 +57,22 @@ function currentShaForUnit(db: Database, workUnitId: number): string | null {
   return getLatestByWorkUnit(db, workUnitId)?.branch_head_sha ?? null;
 }
 
-/** First declared check-type for the unit that has NOT RUN at the unit's current commit. `verify:check`
- *  is demoted to advisory (M4 §8b) — ANY recorded result (pass or fail) at the current sha satisfies
- *  routing, so a genuine suite failure never wedges the unit re-emitting forever. A result recorded
+/** First declared check-type for the unit that has NOT reached a VERDICT at the unit's current commit.
+ *  `verify:check` is demoted to advisory (M4 §8b) — a real verdict (pass OR fail) at the current sha
+ *  satisfies routing, so a genuine suite failure never wedges the unit re-emitting forever. A
+ *  could-not-run `error` (empty-diff / no-components / infra crash) does NOT satisfy — failure-policy
+ *  resets that check for a bounded retry, and treating the error-sha as "ran" would silently swallow
+ *  that retry and advance the unit as if the check had passed (codex finding P1). A verdict recorded
  *  against an older commit does not count (content-keyed re-verification). */
 export function nextUnrunCheck(db: Database, unit: workUnits.WorkUnitRow): string | null {
   const sha = currentShaForUnit(db, unit.id);
   for (const check of workUnits.parseVerifyCheckTypes(unit)) {
-    const ranShas = gts.ranShasFor(db, {
+    const verdictShas = gts.verdictShasFor(db, {
       ticketId: unit.ticket_id,
       workUnitId: unit.id,
       signalType: check,
     });
-    const satisfied = sha !== null && ranShas.includes(sha);
+    const satisfied = sha !== null && verdictShas.includes(sha);
     if (!satisfied) {
       return check;
     }

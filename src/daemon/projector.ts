@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { z } from "zod";
-import { appendEvent } from "../db/repos/event-log.ts";
+import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
 import {
   type OutboxRow,
   bumpAttempt,
@@ -39,28 +39,43 @@ export function stageToState(stage: string): IssueState {
   return STAGE_STATE[stage] ?? "in_progress";
 }
 
+/** The count of stage-changing events recorded for this ticket so far — forward `transition`s plus
+ *  `loopback` rewinds. Used as a CYCLE EPOCH in the projection idempotency keys: a stage a ticket
+ *  RE-ENTERS after a loopback (design→implement again post-redesign, implement→review after a
+ *  code-review bounce) must re-project to the external mirror, but a from→to-only key collides with
+ *  the first pass and `INSERT OR IGNORE` silently drops it (codex finding P2). The epoch is stable
+ *  WITHIN a transition's transaction — its own event is appended before enqueueStageProjection in
+ *  both advance.ts and review-verdict.ts — so enqueuing twice in one commit stays idempotent. */
+function stageChangeEpoch(db: Database, ticketId: number): number {
+  return listEvents(db, ticketId).filter((e) => e.kind === "transition" || e.kind === "loopback")
+    .length;
+}
+
 /** Enqueue the issue-tracker projection for a stage transition (projector §3): a mapped set_state
- *  and a stage-label swap. Deterministic keys → re-enqueue is a no-op (idempotent). MUST be called
- *  inside the same transaction as the stage change (advance.ts). */
+ *  and a stage-label swap. Keys carry a per-ticket cycle epoch so re-entering a stage after a
+ *  loopback re-projects (not suppressed), while a same-transaction re-enqueue stays a no-op
+ *  (idempotent). MUST be called inside the same transaction as the stage change — AFTER its
+ *  transition/loopback event is appended (advance.ts, review-verdict.ts) so the epoch counts it. */
 export function enqueueStageProjection(
   db: Database,
   ticket: { id: number; ident: string },
   from: string,
   to: string,
 ): void {
+  const epoch = stageChangeEpoch(db, ticket.id);
   enqueue(db, {
     ticketId: ticket.id,
     target: "issue_tracker",
     op: "set_state",
     payload: { state: stageToState(to) },
-    idempotencyKey: `${ticket.ident}:set_state:${to}`,
+    idempotencyKey: `${ticket.ident}:set_state:${to}:e${epoch}`,
   });
   enqueue(db, {
     ticketId: ticket.id,
     target: "issue_tracker",
     op: "set_labels",
     payload: { add: [`stage:${to}`], remove: [`stage:${from}`] },
-    idempotencyKey: `${ticket.ident}:set_labels:${from}->${to}`,
+    idempotencyKey: `${ticket.ident}:set_labels:${from}->${to}:e${epoch}`,
   });
 }
 

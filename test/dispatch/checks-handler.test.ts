@@ -12,6 +12,7 @@ import {
   reauthorRoundsForAc,
   supersedeByAc,
 } from "../../src/db/repos/ac-check.ts";
+import { listByTicket as listDispatches } from "../../src/db/repos/dispatch.ts";
 import { appendEvent } from "../../src/db/repos/event-log.ts";
 import { listByTicket as listSignals } from "../../src/db/repos/ground-truth-signal.ts";
 import { setTicketTrack } from "../../src/db/repos/ticket.ts";
@@ -165,6 +166,71 @@ test("checks:dispatch rejects a MODIFIED file (identity: added-only) → postcon
   expect(["retry", "escalated"]).toContain(outcome.kind);
   expect(step?.status).toBe("pending");
   expect(checks.length).toBe(0);
+});
+
+test("checks:dispatch reverts its author commit when coverage fails — no invalid test files reach the branch (codex P1)", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  // Two ACs — the agent will author a check for only ONE, so coverage fails on the other.
+  db.query("UPDATE ticket SET description = ? WHERE id = ?").run(
+    "- [ ] first thing\n- [ ] second thing\n",
+    ticketId,
+  );
+  await markDesignDone(db, ticketId);
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
+  setTicketTrack(db, ticketId, "fast");
+
+  // Author ONLY AC-1's check file (an otherwise-valid added test). AC-2 is left uncovered → the
+  // handler's coverage postcondition throws AFTER the daemon commit landed the file.
+  const runner = new FakeAgentRunner((input) => {
+    const dir = join(input.cwd, "checks");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "ac1.py"), "def test_ac1():\n    assert False\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout:
+        '```styre-sidecar\n{"checksAuthored":[{"ac_id":1,"test_file":"checks/ac1.py","test_name":"test_ac1"}]}\n```',
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-chwt-revert-"));
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+    }),
+    worktreeRoot,
+    runCheckCommand: async () => ({ exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false }),
+  });
+  await advanceOneStep(db, ticketId, registry); // provision
+  const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch → coverage fail
+
+  const worktreePath = join(worktreeRoot, "ENG-1");
+  const gitAt = (args: string[]) => Bun.spawnSync(["git", "-C", worktreePath, ...args]);
+  // The rejected author left NO commit on the branch: its test file is absent at HEAD.
+  const fileAtHead = gitAt(["cat-file", "-e", "HEAD:checks/ac1.py"]);
+  // And it is gone from the working tree too (reset --hard + clean).
+  const fileOnDisk = Bun.spawnSync(["test", "-f", join(worktreePath, "checks", "ac1.py")]);
+  const dispatches = listDispatches(db, ticketId);
+  const step = getByKey(db, ticketId, "checks:dispatch");
+  db.close();
+
+  expect(["retry", "escalated"]).toContain(outcome.kind);
+  expect(step?.status).toBe("pending"); // reset for the bounded retry
+  expect(fileAtHead.success).toBe(false); // HEAD:checks/ac1.py does not exist → commit was reverted
+  expect(fileOnDisk.success).toBe(false); // working tree cleaned too
+  // The dispatch is recorded `reverted` (not clean-success) so getLatestForTicket never returns the
+  // discarded author sha.
+  expect(dispatches.some((d) => d.outcome === "reverted")).toBe(true);
 });
 
 test("checks:dispatch on a checks re-author loopback re-authors ONLY the flagged AC — the other AC's row is untouched", async () => {
