@@ -6,7 +6,7 @@ import {
   planScope,
 } from "../../src/dispatch/commit-scope.ts";
 
-const sidecar = (obj: unknown) => "prose\n```styre-sidecar\n" + JSON.stringify(obj) + "\n```\n";
+const sidecar = (obj: unknown) => `prose\n\`\`\`styre-sidecar\n${JSON.stringify(obj)}\n\`\`\`\n`;
 
 test("implementScope: tracked edit always allowed; declared new file allowed; undeclared new rejected", () => {
   const inScope = implementScope(sidecar({ new_files: ["pkg/new.py"] }));
