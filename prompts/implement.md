@@ -13,6 +13,8 @@ Project stack notes: {{stack}}
 
 {{gate_feedback}}
 
+{{review_feedback}}
+
 ## Reporting the files you created (required whenever you add a file)
 
 Do NOT leave throwaway, debug, or reproduction files in the repository. If you write a script to
