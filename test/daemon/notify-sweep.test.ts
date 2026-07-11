@@ -66,3 +66,42 @@ test("disabled notifier enqueues nothing", () => {
   db.close();
   expect(got.length).toBe(0);
 });
+
+test("incremental sweep advances the watermark and never re-enqueues", () => {
+  const { db, ticketId } = makeTestDb();
+  const n = createNotifier(cfg("everything"));
+
+  // First sweep with one event
+  appendEvent(db, { ticketId, kind: "escalated", reason: "first" });
+  n.sweepNew(db, ticketId);
+  let rows = listPending(db).filter((r) => r.target === "notify");
+  expect(rows.length).toBe(1);
+
+  // Add another event and sweep again with the same notifier instance
+  appendEvent(db, { ticketId, kind: "transition", fromStage: "implement", toStage: "verify" });
+  n.sweepNew(db, ticketId);
+  rows = listPending(db).filter((r) => r.target === "notify");
+  expect(rows.length).toBe(2);
+
+  // Verify the first event (escalated) appears exactly once — the watermark advanced and
+  // did not re-enqueue it
+  const escalatedRows = rows.filter((r) => {
+    const msg = JSON.parse(r.payload_json as string) as { event: string };
+    return msg.event === "escalated";
+  });
+  expect(escalatedRows.length).toBe(1);
+
+  db.close();
+});
+
+test("idempotency key is seq-based, not reason-based", () => {
+  const { db, ticketId } = makeTestDb();
+  const ev = appendEvent(db, { ticketId, kind: "escalated", reason: "boom" });
+  createNotifier(cfg("escalations")).sweepNew(db, ticketId);
+
+  const rows = listPending(db).filter((r) => r.target === "notify");
+  expect(rows.length).toBe(1);
+  expect(rows[0].idempotency_key).toBe(`notify:${ticketId}:evt:${ev.seq}`);
+
+  db.close();
+});
