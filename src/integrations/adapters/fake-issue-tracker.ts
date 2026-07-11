@@ -1,4 +1,4 @@
-import type { IssueState, IssueTrackerPort } from "../issue-tracker.ts";
+import type { IssueState, IssueTrackerPort, SetStateResult } from "../issue-tracker.ts";
 import type { IngestedTicket } from "../ticket-source.ts";
 
 /** In-memory recording IssueTrackerPort for tests (the FakeAgentRunner analogue). */
@@ -20,8 +20,9 @@ export function fakeIssueTracker(opts?: { ticket?: IngestedTicket }): IssueTrack
       calls.push({ method: "fetchTicket", args: [ref] });
       return cannedTicket;
     },
-    async setState(ref: string, state: IssueState) {
+    async setState(ref: string, state: IssueState): Promise<SetStateResult> {
       calls.push({ method: "setState", args: [ref, state] });
+      return { applied: true };
     },
     async setLabels(ref: string, change: { add: string[]; remove: string[] }) {
       calls.push({ method: "setLabels", args: [ref, change] });

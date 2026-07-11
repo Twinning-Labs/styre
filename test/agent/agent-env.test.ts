@@ -39,3 +39,11 @@ test("agentEnv keeps OPENAI_API_KEY (codex CLI needs it)", () => {
   expect(e.OPENAI_API_KEY).toBe("o");
   expect(e.GITHUB_TOKEN).toBeUndefined();
 });
+
+test("agentEnv and verifyEnv scrub JIRA_API_TOKEN", () => {
+  const parent = { JIRA_API_TOKEN: "secret", JIRA_EMAIL: "a@b.com", PATH: "/bin" };
+  expect(agentEnv(parent).JIRA_API_TOKEN).toBeUndefined();
+  expect(verifyEnv(parent).JIRA_API_TOKEN).toBeUndefined();
+  expect(agentEnv(parent).JIRA_EMAIL).toBe("a@b.com"); // non-secret identifier passes through
+  expect(agentEnv(parent).PATH).toBe("/bin");
+});

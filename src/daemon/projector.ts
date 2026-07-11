@@ -89,13 +89,14 @@ export interface ProjectorPorts {
 }
 
 /** Apply one outbox row to the configured port by NEUTRAL ROLE (never a vendor name). Returns the
- *  response ref (e.g. a comment id) or null. Throws on a transient external failure (the drainer
- *  retries/escalates). */
+ *  response ref (e.g. a comment id) or null, plus an optional `skip` disposition when a state
+ *  projection soft-failed (board unchanged — the drainer emits a projection_skipped note WITH
+ *  markSent, atomically). Throws on a transient external failure (the drainer retries/escalates). */
 async function applyRow(
   db: Database,
   row: OutboxRow,
   ports: ProjectorPorts,
-): Promise<string | null> {
+): Promise<{ ref: string | null; skip?: { reason: string; targetState: string } }> {
   const ticket = getTicket(db, row.ticket_id);
   if (!ticket) {
     throw new Error(`projector: ticket ${row.ticket_id} not found`);
@@ -107,14 +108,24 @@ async function applyRow(
   if (row.target === "issue_tracker") {
     const it = ports.issueTracker;
     switch (row.op) {
-      case "set_state":
-        await it.setState(ref, payload.state as IssueState);
-        return null;
+      case "set_state": {
+        const res = await it.setState(ref, payload.state as IssueState);
+        return {
+          ref: null,
+          skip: res.applied
+            ? undefined
+            : {
+                reason:
+                  res.reason ?? "issue-tracker state projection skipped (board left unchanged)",
+                targetState: String(payload.state),
+              },
+        };
+      }
       case "set_labels":
         await it.setLabels(ref, payload as { add: string[]; remove: string[] });
-        return null;
+        return { ref: null };
       case "add_comment":
-        return await it.addComment(ref, payload.body as string, row.idempotency_key);
+        return { ref: await it.addComment(ref, payload.body as string, row.idempotency_key) };
       default:
         throw new Error(`projector: unknown issue_tracker op '${row.op}'`);
     }
@@ -127,7 +138,7 @@ async function applyRow(
     switch (row.op) {
       case "push":
         await f.push(PushPayload.parse(payload));
-        return null;
+        return { ref: null };
       case "pr_create": {
         const pr = await f.ensurePr(PrCreatePayload.parse(payload));
         // The drainer delivers external_pr_result (control-loop §7): the durable PR-ref record the
@@ -138,11 +149,11 @@ async function applyRow(
           payload: { ref: pr.ref, url: pr.url },
           idempotencyKey: `${ticket.ident}:pr_result`,
         });
-        return pr.ref; // → response_ref (the PR#)
+        return { ref: pr.ref }; // → response_ref (the PR#)
       }
       case "pr_comment": {
         const c = PrCommentPayload.parse(payload);
-        return await f.addPrComment(c.prRef, c.body, row.idempotency_key);
+        return { ref: await f.addPrComment(c.prRef, c.body, row.idempotency_key) };
       }
       default:
         throw new Error(`projector: unknown forge op '${row.op}'`);
@@ -156,7 +167,7 @@ async function applyRow(
       case "post": {
         const msg = NotificationMessageSchema.parse(payload);
         const { ref } = await ports.notifier.notify(msg);
-        return ref;
+        return { ref };
       }
       default:
         throw new Error(`projector: unknown notify op '${row.op}'`);
@@ -190,8 +201,21 @@ export async function drainOutbox(
   let failed = 0;
   for (const row of listPending(db)) {
     try {
-      const ref = await applyRow(db, row, ports);
-      markSent(db, row.id, ref);
+      const result = await applyRow(db, row, ports);
+      db.transaction(() => {
+        if (result.skip) {
+          // Board could not be updated (workflow mismatch) — NOT a transport failure. Record a
+          // structured, monitorable telemetry note, committed WITH markSent so a crash-replay can't
+          // double-emit (the row leaves listPending in the same transaction). Control runs on.
+          appendEvent(db, {
+            ticketId: row.ticket_id,
+            kind: "note",
+            reason: result.skip.reason,
+            payload: { event: "projection_skipped", target_state: result.skip.targetState },
+          });
+        }
+        markSent(db, row.id, result.ref);
+      })();
       sent += 1;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

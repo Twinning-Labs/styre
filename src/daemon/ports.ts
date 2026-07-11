@@ -1,5 +1,6 @@
 import { githubChecks } from "../integrations/adapters/github-checks.ts";
 import { githubForge } from "../integrations/adapters/github.ts";
+import { jiraIssueTracker } from "../integrations/adapters/jira.ts";
 import { linearIssueTracker } from "../integrations/adapters/linear.ts";
 import { slackNotifier } from "../integrations/adapters/slack.ts";
 import { type ChecksFactory, selectChecks } from "../integrations/checks.ts";
@@ -17,6 +18,7 @@ export function makeProjectorPorts(
     forge: string;
     notifier?: string;
     slack?: { channel: string };
+    jira?: import("../integrations/adapters/jira.ts").JiraAdapterConfig;
   },
   profile: { checksSystem: string; targetRepo: string },
   deps?: {
@@ -26,7 +28,10 @@ export function makeProjectorPorts(
     notifier?: Record<string, NotifierFactory>;
   },
 ): ProjectorPorts {
-  const itAdapters = deps?.issueTracker ?? { linear: () => linearIssueTracker() };
+  const itAdapters = deps?.issueTracker ?? {
+    linear: () => linearIssueTracker(),
+    jira: () => jiraIssueTracker(runtimeConfig.jira),
+  };
   const forgeAdapters = deps?.forge ?? {
     github: () => githubForge({ repoPath: profile.targetRepo }),
   };

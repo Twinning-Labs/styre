@@ -22,7 +22,7 @@
  * comment is posted; re-running the same idempotencyKey returns null (no duplicate).
  */
 import { LinearClient } from "@linear/sdk";
-import type { IssueState, IssueTrackerPort } from "../issue-tracker.ts";
+import type { IssueState, IssueTrackerPort, SetStateResult } from "../issue-tracker.ts";
 import { type IngestedTicket, deriveTypeLabel } from "../ticket-source.ts";
 
 /** Neutral IssueState → Linear workflow-state NAME. Resolved to a team-scoped state id per call. */
@@ -92,22 +92,24 @@ export function linearIssueTracker(opts?: { apiKey?: string }): IssueTrackerPort
       };
     },
 
-    async setState(ref: string, state: IssueState): Promise<void> {
+    async setState(ref: string, state: IssueState): Promise<SetStateResult> {
       const issue = await client.issue(ref);
       const targetName = LINEAR_STATE_NAME[state];
       // No-op if already there (declarative).
       const currentState = await issue.state;
-      if (currentState?.name === targetName) return;
+      if (currentState?.name === targetName) return { applied: true };
       const team = await issue.team;
       if (!team) throw new Error(`linear.setState: issue ${ref} has no team`);
       const states = await team.states();
       const target = states.nodes.find((s) => s.name === targetName);
       if (!target) {
-        throw new Error(
-          `linear.setState: team has no workflow state named "${targetName}" (for ${ref})`,
-        );
+        // Board has no workflow state with this name — a config gap, not a transport failure.
+        // Soft-fail (loop-not-halt), symmetric with the JIRA adapter: the projector records a
+        // projection_skipped telemetry note and control runs on.
+        return { applied: false, reason: `no workflow state named "${targetName}"` };
       }
       await client.updateIssue(issue.id, { stateId: target.id });
+      return { applied: true };
     },
 
     async setLabels(ref: string, change: { add: string[]; remove: string[] }): Promise<void> {

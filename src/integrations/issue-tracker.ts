@@ -5,12 +5,20 @@ import type { IngestedTicket } from "./ticket-source.ts";
 
 export type IssueState = "in_progress" | "in_review" | "done" | "canceled" | "blocked";
 
+export interface SetStateResult {
+  /** true = the tracker state was set (or already correct); false = the projection was skipped and
+   *  the board left unchanged (a workflow mismatch — NOT a transport failure, which throws). */
+  applied: boolean;
+  /** when !applied: a short human reason, surfaced in the projection_skipped telemetry note. */
+  reason?: string;
+}
+
 export interface IssueTrackerPort {
   /** Ingestion-only READ: fetch a ticket by ref to seed the SoT (control-loop trigger). MUST NOT
    *  be called from the control loop — the loop reads the SoT, never the tracker. */
   fetchTicket(ref: string): Promise<IngestedTicket>;
   /** Set the issue's coarse state. The adapter maps the neutral state to its vendor vocabulary. */
-  setState(ref: string, state: IssueState): Promise<void>;
+  setState(ref: string, state: IssueState): Promise<SetStateResult>;
   /** Apply a label delta, preserving labels outside the delta (label-safe; never clobbers). */
   setLabels(ref: string, change: { add: string[]; remove: string[] }): Promise<void>;
   /** Post a comment, deduped by idempotencyKey (the adapter probes existing comments). Returns

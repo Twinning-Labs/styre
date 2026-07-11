@@ -5,7 +5,7 @@
  *  NOTE: this is a denylist of the daemon's named creds; verify still inherits any OTHER env secret
  *  (AWS_*, NPM_TOKEN, CI vars) — the real boundary for the broad secret surface is environment
  *  isolation (Docker), see the M-A residual risks. */
-export const AGENT_ENV_DENYLIST = ["LINEAR_API_KEY", "GITHUB_TOKEN"];
+export const AGENT_ENV_DENYLIST = ["LINEAR_API_KEY", "GITHUB_TOKEN", "JIRA_API_TOKEN"];
 // F4 (DEC-CX-6): strip EVERY provider's agent key from verify — agent-authored code runs there.
 export const VERIFY_ENV_DENYLIST = [
   ...AGENT_ENV_DENYLIST,

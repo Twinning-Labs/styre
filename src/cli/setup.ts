@@ -175,12 +175,28 @@ export async function runSetup(args: {
   return { outPath, profile, needsInput: unknownRuntimeSections(profile) };
 }
 
-/** Non-fatal note about creds a later `styre run` will need. */
-function credNote(profile: Profile): string | null {
+/** Non-fatal note about creds a later `styre run` will need. Tracker-aware: if any JIRA_* var is
+ *  present we treat JIRA as the intended tracker and require the full trio; otherwise LINEAR_API_KEY. */
+export function credNote(profile: Profile): string | null {
   const missing: string[] = [];
   if (profile.checksSystem === "github" && !process.env.GITHUB_TOKEN)
     missing.push("GITHUB_TOKEN (PR/push + checks)");
-  if (!process.env.LINEAR_API_KEY) missing.push("LINEAR_API_KEY (ticket ingest + projection)");
+  const usingJira = !!(
+    process.env.JIRA_BASE_URL ||
+    process.env.JIRA_EMAIL ||
+    process.env.JIRA_API_TOKEN
+  );
+  if (usingJira) {
+    const jira: [string, string][] = [
+      ["JIRA_BASE_URL", "site URL"],
+      ["JIRA_EMAIL", "account email"],
+      ["JIRA_API_TOKEN", "API token"],
+    ];
+    for (const [k, label] of jira)
+      if (!process.env[k]) missing.push(`${k} (${label} — JIRA ticket ingest + projection)`);
+  } else if (!process.env.LINEAR_API_KEY) {
+    missing.push("LINEAR_API_KEY (ticket ingest + projection)");
+  }
   return missing.length > 0 ? `note — not set for \`styre run\`: ${missing.join(", ")}` : null;
 }
 
