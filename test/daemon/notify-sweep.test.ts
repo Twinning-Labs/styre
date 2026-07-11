@@ -3,6 +3,7 @@ import { RuntimeConfigSchema } from "../../src/config/runtime-config.ts";
 import { createNotifier } from "../../src/daemon/notify.ts";
 import { appendEvent } from "../../src/db/repos/event-log.ts";
 import { listPending } from "../../src/db/repos/projection-outbox.ts";
+import { recordDelivered } from "../../src/db/repos/signal.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 function cfg(notify: "escalations" | "transitions" | "everything") {
@@ -104,4 +105,23 @@ test("idempotency key is seq-based, not reason-based", () => {
   expect(rows[0].idempotency_key).toBe(`notify:${ticketId}:evt:${ev.seq}`);
 
   db.close();
+});
+
+test("sweep enriches the message with ticket title and PR url when available", () => {
+  const { db, ticketId } = makeTestDb(); // seeds ENG-1 (title null by default)
+  // give the ticket a title + a delivered PR result
+  db.query("UPDATE ticket SET title = ? WHERE id = ?").run("Fix the widget", ticketId);
+  recordDelivered(db, {
+    ticketId,
+    signalType: "external_pr_result",
+    payload: { ref: "42", url: "https://gh/pr/42" },
+    idempotencyKey: "ENG-1:pr_result",
+  });
+  appendEvent(db, { ticketId, kind: "escalated", reason: "boom" });
+  createNotifier(cfg("escalations")).sweepNew(db, ticketId);
+  const row = listPending(db).find((r) => r.target === "notify");
+  const msg = JSON.parse(row?.payload_json as string) as { ticketTitle?: string; prUrl?: string };
+  db.close();
+  expect(msg.ticketTitle).toBe("Fix the widget");
+  expect(msg.prUrl).toBe("https://gh/pr/42");
 });

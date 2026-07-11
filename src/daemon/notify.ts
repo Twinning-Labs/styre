@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { type EventLogRow, listByTicketSince } from "../db/repos/event-log.ts";
 import { enqueue } from "../db/repos/projection-outbox.ts";
+import { getDeliveredPayload } from "../db/repos/signal.ts";
 import { getTicket } from "../db/repos/ticket.ts";
 import type { NotificationMessage, NotifySeverity } from "../integrations/notifier.ts";
 
@@ -55,8 +56,25 @@ export function createNotifier(config: RuntimeConfig): {
   let lastEventSeq = 0;
   const enabled = config.notifier !== "none";
 
-  const identOf = (db: Database, ticketId: number): string =>
-    getTicket(db, ticketId)?.ident ?? String(ticketId);
+  const buildMsg = (
+    db: Database,
+    ticketId: number,
+    event: string,
+    severity: NotifySeverity,
+    reason?: string,
+  ): NotificationMessage => {
+    const t = getTicket(db, ticketId);
+    const pr = getDeliveredPayload(db, ticketId, "external_pr_result");
+    const prUrl = typeof pr?.url === "string" ? pr.url : undefined;
+    return {
+      ticketIdent: t?.ident ?? String(ticketId),
+      event,
+      severity,
+      reason,
+      ticketTitle: t?.title ?? undefined,
+      prUrl,
+    };
+  };
 
   const post = (db: Database, ticketId: number, key: string, msg: NotificationMessage): void => {
     enqueue(db, { ticketId, target: "notify", op: "post", payload: msg, idempotencyKey: key });
@@ -69,23 +87,24 @@ export function createNotifier(config: RuntimeConfig): {
         lastEventSeq = e.seq;
         const d = eventDecision(e, config.notify);
         if (!d) continue;
-        post(db, ticketId, `notify:${ticketId}:evt:${e.seq}`, {
-          ticketIdent: identOf(db, ticketId),
-          event: d.label,
-          severity: d.severity,
-          reason: e.reason ?? undefined,
-        });
+        post(
+          db,
+          ticketId,
+          `notify:${ticketId}:evt:${e.seq}`,
+          buildMsg(db, ticketId, d.label, d.severity, e.reason ?? undefined),
+        );
       }
     },
     notifyTerminal(db, ticketId, outcome) {
       if (!enabled) return;
       const d = terminalDecision(outcome);
       if (!d) return;
-      post(db, ticketId, `notify:${ticketId}:term:${outcome}`, {
-        ticketIdent: identOf(db, ticketId),
-        event: d.event,
-        severity: d.severity,
-      });
+      post(
+        db,
+        ticketId,
+        `notify:${ticketId}:term:${outcome}`,
+        buildMsg(db, ticketId, d.event, d.severity),
+      );
     },
   };
 }
