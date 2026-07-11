@@ -371,8 +371,7 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   command it chose; S3 is the **independent** re-run on the **committed SHA** with the **canonical**
   profile command, producing a **structured durable signal** the control loop trusts. It catches
   hallucinated/partial runs, weakened/deleted tests, dirty-env passes, and premature "done."
-- **Failure → route:** I3/I4/I5/I6 in §8 **when the failing gate was green on base**; a gate red on
-  base routes to `inconclusive` (I3b/I4b) — see the baseline-relative verdict below.
+- **Failure → route:** I3/I4/I5/I6 in §8.
 
 **S4 · `verify:integration`** — ticket-level ground truth (C3); always run
 - **Guard:** every `work_unit` is `verified`.
@@ -380,51 +379,7 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 - **Output:** `ground_truth_signal('integration')`; on pass → ready for `docs:revise` then review.
 - **Commands/Capability:** profile-declared full-suite commands only.
 - **Failure → route:** N1 in §8 — integration failure is cross-unit, so the loopback is a
-  **ticket-scoped reconcile** implement dispatch (may edit any unit's files), then re-run S4 — **but
-  only when the failing gate was green on base** (else `inconclusive`, below).
-
-**Baseline-relative verdict — the `inconclusive` outcome (applies to S3 and S4) `[CL-BASELINE — pending review]`**
-
-The gap this closes: a check that is *already red on the untouched base* (a build broken by a
-toolchain/version mismatch the project shipped; a pre-existing test failure) is not evidence about the
-change, yet today it routes to I3/I4/N1 and loops the agent forever on something no code edit can fix,
-then blocks a correct change. `inconclusive` gives the runner a third answer between pass and fail:
-*"couldn't judge your change through this check — here's why — a human should look."*
-
-- **Base-state check (the mechanic; lazy, on-demand):** when an S3/S4 gate exits non-zero, the runner
-  runs **that one gate** against the unit's `base_sha` in a provisioned base checkout, and records a
-  `ground_truth_signal(signal_type='baseline', result ∈ pass|fail|error, branch_head_sha=base_sha,
-  detail={component, checkType})`. Computed once per `(base_sha, gate)` and cached. It is lazy —
-  `base_sha` is already set by S2b `implement:dispatch`, and only *failing* gates pay for it.
-- **Derivation (runner, deterministic):**
-  - base **green** (or the check is genuinely new) and after **red** → **change-caused** → loop the
-    agent (I3/I4/N1, unchanged).
-  - base **red** (`fail`/`error`) → **`inconclusive`**: the runner emits an
-    `untested-merge-risk(reason='red-on-base', component, checkType)` and marks the gate
-    **resolved-but-not-verified** — the loop **advances** (does not re-run, does not loop the agent),
-    and the gate is **never** recorded as a verified `pass`.
-- **Advance semantics (the control-loop delta):** `inconclusive` is a *third disposition* the resolver
-  honours — "this check is settled, do not re-run it, but it did **not** pass." A unit/ticket whose only
-  non-passes are `inconclusive` proceeds to review/merge; nothing downstream may read it as a pass. This
-  is **not** the existing `{unavailable}`→`untested-merge-risk` degrade, which records `result='pass'`
-  (that path claims verified; `inconclusive` must not).
-- **Honesty (load-bearing):** `inconclusive` is *couldn't-judge*, never *verified*, never *exonerated*.
-  The projector (Merge / PR body) MUST surface the caveat and MUST NOT emit a "verified / passed the
-  project's checks" claim when any `inconclusive` signal exists for the ticket. Telemetry reports
-  `inconclusive` as a category distinct from pass/fail.
-- **Masking (accepted limit, P8):** component granularity cannot separate "the same pre-existing
-  failure" from "the pre-existing failure **+** a new regression the change added." `inconclusive`
-  therefore asserts only that the change's effect on this gate is *unknowable* and routes it to the
-  human — it does **not** claim the change is fine. Recovering an actual verdict here (per-test
-  isolation) is deferred (the frozen design's import-inference / method-level rung).
-- **Flaky-red base (P4/P6) [OPEN — D5]:** a single red base run must not license a permanent degrade.
-  The base-state check must confirm base-redness (re-run once; a non-deterministic base result is
-  treated as `error`→retry, not a degrade licence). Exact confirmation policy is open for this revision.
-- **Cost (P3):** the base-state check re-runs a *failing* gate against the base; for a heavy harness
-  this is expensive and can itself time out (base `error` → still `inconclusive` for an after-`error`).
-  It does **not** make a slow harness fast — the *slow-harness* case (astropy-class) is the separate
-  **provisioning** workstream, not this row. `inconclusive` fixes the *pre-existing-red gate blocks a
-  correct change* case (darkreader-class), only.
+  **ticket-scoped reconcile** implement dispatch (may edit any unit's files), then re-run S4.
 
 ### Docs
 
@@ -634,14 +589,6 @@ exit 75 on a session interruption, resumable with `styre run --resume` — are i
 - **P6 — Distinct-progress.** Each loop must move the **failure signature**; repeating the identical
   failure isn't progress and escalates fast.
 - **P7 — Deterministic routing now; learned routing later.**
-- **P8 — Red is not one thing; distinguish change-caused from pre-existing `[CL-BASELINE]`.** Before a
-  red check loops the agent, establish whether the check was *already red on the unit's base* (run that
-  one check against `base_sha` — the **base-state check**, §4). Green-on-base→red-now = the change broke
-  it (loop the agent, unchanged). Already-red-on-base = the change is not to blame; the runner cannot
-  judge the change through this check → **`inconclusive`** (advance with a surfaced caveat, never a
-  verified pass, never a loopback). `inconclusive` is *couldn't-judge*, **not** *exonerated* — at
-  component granularity a new regression can hide behind the pre-existing failure (masking); the caveat
-  says so and a human decides.
 
 ### 8.2 The mechanics under the table
 
@@ -682,9 +629,8 @@ exit 75 on a session interruption, resumable with `styre run --resume` — are i
 | **Implement + unit verify** ||||||
 | I1 | S2b | claude death / timeout | retry fresh dispatch (backoff) | unit | K_retry → escalate |
 | I2 | ~~S2b postcondition~~ | ~~noop — empty diff~~ — **superseded by CM1**: S2b no longer has a non-empty-diff postcondition (§ CL-POSTCOND); an empty dispatch diff for a real unit now surfaces as `under ≠ ∅` at `completeness:wuN` and routes via CM1 below | — | — | — |
-| I3 | S3 | build red **(green on base)** | → S2b with build error | unit | K_distinct → escalate |
-| I4 | S3 | tests red **(green on base)** | → S2b with failing tests | unit | K_distinct → escalate |
-| I3b/I4b | S3 | build/tests red **but red on base** (base-state check, CL-BASELINE) | **`inconclusive`** → deliver-with-caveat: advance, emit `untested-merge-risk`, **never a verified pass**, no agent loop | — | none (not a failure to bound; a base-`error` from a non-deterministic run → I6 retry per D5) |
+| I3 | S3 | build red | → S2b with build error | unit | K_distinct → escalate |
+| I4 | S3 | tests red | → S2b with failing tests | unit | K_distinct → escalate |
 | I5 | S3 | behavioral unit, no test in the diff | → S2b to add the test | unit | K_distinct → escalate |
 | I6 | S3 | toolchain/infra error | retry (transient) | — | K_retry → escalate(infra) |
 | **Provision** ||||||
@@ -692,8 +638,7 @@ exit 75 on a session interruption, resumable with `styre run --resume` — are i
 | **Completeness** ||||||
 | CM1 | S2d `completeness` | `under-delivered` — a declared file untouched by anyone (cumulative diff) ³ | → S2b, targeted (missing-files feedback) | unit | K_distinct (per-step `maxAttempts`) → escalate |
 | **Integration** ||||||
-| N1 | S4 | cross-unit integration red **(green on base)** | → ticket-scoped reconcile implement | ticket | K_distinct → escalate |
-| N1b | S4 | integration gate red **but red on base** (CL-BASELINE) | **`inconclusive`** → deliver-with-caveat: advance, `untested-merge-risk`, never a verified pass, **no reconcile** | — | none |
+| N1 | S4 | cross-unit integration red | → ticket-scoped reconcile implement | ticket | K_distinct → escalate |
 | **Docs** ||||||
 | C1 | docs:revise | claude death | retry | — | K_retry → escalate |
 | **Code review** ||||||
@@ -749,11 +694,6 @@ under-delivery, where the code is *missing* rather than wrong). **→ design / r
 park — budget exhausted, or an inherently human case: R3/R4, V-def, V6, P3, H1, X1/X2; **or an
 environment error, E1** — provision, always immediate, never bounded by attempt-count; in OSS the run
 exits with the trace, in the commercial Control Plane it surfaces in the needs-you inbox).
-**→ deliver-with-caveat (`inconclusive`, CL-BASELINE)** — *not a loopback and not a park*: a gate red on
-the unit's base (I3b/I4b/N1b) is not the change's fault and cannot be judged through it, so the ticket
-**advances** to PR-ready with the gap surfaced in the PR body and **never recorded as verified**. This is
-the third disposition P8 introduces alongside implement/design/escalate; it exists so a correct change
-is delivered (honestly caveated) instead of blocked by a check that was broken before it started.
 
 ### 8.5 Deleted by design (why most current failure reasons need no row)
 
