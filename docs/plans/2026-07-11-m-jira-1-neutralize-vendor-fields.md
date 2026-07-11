@@ -41,7 +41,8 @@
 - Modify: `src/db/schema.sql` — five identifiers + `schema_meta` version bump.
 - Modify: `docs/architecture/schema.sql` — the identical five identifiers + version bump (doc mirror).
 - Modify: `src/db/repos/ticket.ts` — the `linear_issue_uuid` column name inside the INSERT SQL string.
-- Modify: `test/migrate.test.ts` — `CORE_TABLES` entry + the two `version` assertions.
+- Modify: `src/integrations/adapters/linear.ts` — the `linear_id_cache` identifier in the docstring (line 7).
+- Modify: `test/migrate.test.ts` — `CORE_TABLES` entry, the stale test title, and the two `version` assertions.
 
 ---
 
@@ -106,17 +107,13 @@ Expected: FAIL — `tsc` reports errors at `linear.ts:90`, `fake-issue-tracker.t
     linearIssueUuid?: string | null;
     externalId?: string | null;
 ```
-```ts
-// line 44 (VALUES clause) — before / after
-          $stage, $status, $track, $needsDocs, $now, $now)`,   // ← the $linearIssueUuid token in this VALUES list
-       VALUES ($pid, $ident, $title, $description, $typeLabel, $branchPrefix, $externalId,
-```
-Concretely, the VALUES line becomes:
 ```sql
+-- line 44 (VALUES clause) — before
+       VALUES ($pid, $ident, $title, $description, $typeLabel, $branchPrefix, $linearIssueUuid,
+-- line 44 (VALUES clause) — after
        VALUES ($pid, $ident, $title, $description, $typeLabel, $branchPrefix, $externalId,
-          $stage, $status, $track, $needs_docs? ...
 ```
-(only `$linearIssueUuid` → `$externalId` changes on that line).
+(Only the `$linearIssueUuid` → `$externalId` placeholder token on line 44 changes. Leave the `linear_issue_uuid` **column** name on line 42 for Task 2.)
 ```ts
 // line 54 — before / after
       $linearIssueUuid: t.linearIssueUuid ?? null,
@@ -147,10 +144,13 @@ Expected: no output (empty).
 Run: `bun run typecheck`
 Expected: PASS (exit 0, no errors).
 
-- [ ] **Step 6: Run the full test suite**
+- [ ] **Step 6: Run the full test suite and lint**
 
 Run: `bun test`
 Expected: PASS — all tests green. (No behavior changed; the SQL column is still `linear_issue_uuid`, and `$externalId` binds into it positionally.)
+
+Run: `bun run lint`
+Expected: PASS (a pure key rename introduces no lint issues).
 
 - [ ] **Step 7: Commit**
 
@@ -175,7 +175,8 @@ Claude-Session: https://claude.ai/code/session_01LnpZSryugjuH1W1rQgUFcp"
 - Modify: `src/db/schema.sql:67,86,116,446,464` + version at line 54
 - Modify: `docs/architecture/schema.sql` (same five identifiers + version — the doc mirror)
 - Modify: `src/db/repos/ticket.ts:42` (the `linear_issue_uuid` column in the INSERT SQL string)
-- Modify: `test/migrate.test.ts:26,35,57`
+- Modify: `src/integrations/adapters/linear.ts:7` (the `linear_id_cache` identifier in the docstring)
+- Modify: `test/migrate.test.ts:26,32,35,57`
 
 **Interfaces:**
 - Produces: SQLite columns `ticket.external_id`, `project.external_project_key`, `ticket.external_state`, `projection_state.projected_external_state`, and table `external_id_cache`. `schema_meta` version is now `7`.
@@ -241,8 +242,9 @@ Apply the identical five identifier renames and the identical version-7 bump to 
 Run: `diff <(grep -n "external_id\|external_project_key\|external_state\|external_id_cache\|projected_external_state\|version, applied_at" src/db/schema.sql) <(grep -n "external_id\|external_project_key\|external_state\|external_id_cache\|projected_external_state\|version, applied_at" docs/architecture/schema.sql)`
 Expected: only line-number differences (if any), never a content difference in the matched identifier lines.
 
-- [ ] **Step 4: Update the INSERT column name in `src/db/repos/ticket.ts:42`**
+- [ ] **Step 4: Update the INSERT column name + the lingering docstring identifier**
 
+`src/db/repos/ticket.ts:42`:
 ```ts
 // before
          (project_id, ident, title, description, type_label, branch_prefix, linear_issue_uuid,
@@ -250,6 +252,14 @@ Expected: only line-number differences (if any), never a content difference in t
          (project_id, ident, title, description, type_label, branch_prefix, external_id,
 ```
 (The `$externalId` placeholder from Task 1 already matches; no other change here.)
+
+`src/integrations/adapters/linear.ts:7` — the docstring names the now-renamed table; neutralize it so the completeness grep (Step 6) is genuinely empty:
+```
+// before
+ * `linear_id_cache` optimization is deferred). The pure mapping helpers below are unit-tested; the
+// after
+ * `external_id_cache` optimization is deferred). The pure mapping helpers below are unit-tested; the
+```
 
 - [ ] **Step 5: Update `test/migrate.test.ts`**
 
@@ -259,6 +269,13 @@ Line 26 (`CORE_TABLES`):
   "linear_id_cache",
 // after
   "external_id_cache",
+```
+Line 32 (stale test title — currently says "schema v4"; correct it while we're here):
+```ts
+// before
+  test("bootstraps a fresh DB at schema v4", () => {
+// after
+  test("bootstraps a fresh DB at schema v7", () => {
 ```
 Lines 35 and 57 (version assertions):
 ```ts
@@ -273,7 +290,7 @@ Lines 35 and 57 (version assertions):
 - [ ] **Step 6: Verify no `linear_` identifier remains in code/schema/tests**
 
 Run: `grep -rn "linear_issue_uuid\|linear_team_key\|linear_state\|linear_id_cache\|projected_linear_state" src/ test/ docs/architecture/schema.sql`
-Expected: no output (empty). (Prose mentions of "Linear" in comments are fine and out of scope; this grep targets only the renamed identifiers.)
+Expected: no output (empty) — Step 4 removed the last one (the `linear.ts:7` docstring). This grep targets only the renamed *identifiers*; the plain word "Linear" in prose/comments is fine and out of scope.
 
 - [ ] **Step 7: Typecheck, test, lint**
 
@@ -289,7 +306,8 @@ Expected: PASS (no new issues).
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/db/schema.sql docs/architecture/schema.sql src/db/repos/ticket.ts test/migrate.test.ts
+git add src/db/schema.sql docs/architecture/schema.sql src/db/repos/ticket.ts \
+  src/integrations/adapters/linear.ts test/migrate.test.ts
 git commit -m "refactor(db): neutralize linear_* identifiers -> external_* (schema v7)
 
 Rename linear_issue_uuid->external_id, linear_team_key->external_project_key,
