@@ -47,11 +47,11 @@
 - Modify: `src/integrations/issue-tracker.ts:6-19`
 - Modify: `src/integrations/adapters/linear.ts:95-111`
 - Modify: `src/integrations/adapters/fake-issue-tracker.ts:23-25`
-- Modify: `src/daemon/projector.ts:107-109`
+- Modify: `src/daemon/projector.ts` — `applyRow` return type + returns (91-95, 107-114, 126-142), `drainOutbox` emit+markSent transaction (175-178)
 - Test: `test/daemon/projector.test.ts`
 
 **Interfaces:**
-- Produces: `interface SetStateResult { applied: boolean; reason?: string }`, exported from `issue-tracker.ts`; `IssueTrackerPort.setState(ref, state): Promise<SetStateResult>`. Consumed by every adapter (Linear now, JIRA in Task 4) and by the projector.
+- Produces: `interface SetStateResult { applied: boolean; reason?: string }`, exported from `issue-tracker.ts`; `IssueTrackerPort.setState(ref, state): Promise<SetStateResult>`. Consumed by every adapter (Linear now, JIRA in Task 4) and by the projector. `applyRow` now returns `{ ref: string | null; skip?: { reason: string; targetState: string } }` (internal to projector.ts).
 
 - [ ] **Step 1: Write the failing projector test**
 
@@ -129,7 +129,9 @@ import type { IssueState, IssueTrackerPort, SetStateResult } from "../issue-trac
 // end of setState, after `await client.updateIssue(issue.id, { stateId: target.id });` (line 110):
       return { applied: true };
 ```
-(The existing `throw`s for a missing team / missing workflow state stay — those are hard config/transport errors, not soft skips. Linear's behavior is otherwise unchanged.)
+(The existing `throw`s for a missing team / missing workflow state stay — Linear's behavior is otherwise unchanged.)
+
+> **Intentional asymmetry (flagged for the operator):** Linear still *throws* on a missing workflow state, which the projector escalates (parks the ticket) after the retry budget — so "board drift never blocks the loop" is realized for JIRA (soft-fail → note) but NOT for Linear (a Linear board simply lacking, e.g., an "In Review" state would hard-escalate). This is a deliberate M-jira-2 scoping choice: we do not change Linear's failure semantics here. Aligning Linear (convert its "no workflow state named X" — a config gap, distinct from a transition guard — to `{ applied: false }`) is a small, reasonable follow-up if the operator wants symmetric loop-not-halt across trackers.
 
 - [ ] **Step 5: Return the disposition from the fake (`src/integrations/adapters/fake-issue-tracker.ts`)**
 
@@ -150,31 +152,65 @@ import type { IssueState, IssueTrackerPort, SetStateResult } from "../issue-trac
     },
 ```
 
-- [ ] **Step 6: Emit the note in the projector (`src/daemon/projector.ts`)**
+- [ ] **Step 6: Emit the note ATOMICALLY in the projector (`src/daemon/projector.ts`)**
 
-`appendEvent` is already imported (used by `escalateProjection`). Change the `set_state` case (lines 107-109):
+The note MUST be committed in the same transaction as `markSent`. If it were written inside `applyRow` before `markSent` (a separate autocommit), a crash between them leaves the row `pending`, so on resume `drainOutbox` re-runs the row, `setState` soft-fails again, and a DUPLICATE note is written (`appendEvent` always INSERTs a fresh seq — it is not idempotent). Every other external effect on the outbox path is idempotent-by-probe; this write must be too. So `applyRow` RETURNS the skip disposition and `drainOutbox` commits the note + `markSent` together. `appendEvent` is already imported (`projector.ts:3`, used by `escalateProjection`).
 
+**6a — change `applyRow`'s return type + every return.** `applyRow` currently returns `Promise<string | null>` (the response ref). Change the signature (lines 91-95):
 ```ts
-// before
-      case "set_state":
-        await it.setState(ref, payload.state as IssueState);
-        return null;
-// after
+async function applyRow(
+  db: Database,
+  row: OutboxRow,
+  ports: ProjectorPorts,
+): Promise<{ ref: string | null; skip?: { reason: string; targetState: string } }> {
+```
+Update EVERY `return` in `applyRow` to the new shape (the `throw`s are unchanged):
+- `set_state` (lines 107-109):
+```ts
       case "set_state": {
         const res = await it.setState(ref, payload.state as IssueState);
-        if (!res.applied) {
+        return {
+          ref: null,
+          skip: res.applied
+            ? undefined
+            : {
+                reason: res.reason ?? "issue-tracker state projection skipped (board left unchanged)",
+                targetState: String(payload.state),
+              },
+        };
+      }
+```
+- `set_labels` (line 112): `return { ref: null };`
+- `add_comment` (line 114): `return { ref: await it.addComment(ref, payload.body as string, row.idempotency_key) };`
+- forge `push` (line 127): `return { ref: null };`
+- forge `pr_create` (line 138): `return { ref: pr.ref };`
+- forge `pr_comment` (line 142): `return { ref: await f.addPrComment(c.prRef, c.body, row.idempotency_key) };`
+
+**6b — wrap the emit + markSent in one transaction in `drainOutbox` (lines 175-178):**
+```ts
+// before
+      const ref = await applyRow(db, row, ports);
+      markSent(db, row.id, ref);
+      sent += 1;
+// after
+      const result = await applyRow(db, row, ports);
+      db.transaction(() => {
+        if (result.skip) {
           // Board could not be updated (workflow mismatch) — NOT a transport failure. Record a
-          // structured, monitorable telemetry note; the row is still delivered (control runs on).
+          // structured, monitorable telemetry note, committed WITH markSent so a crash-replay can't
+          // double-emit (the row leaves listPending in the same transaction). Control runs on.
           appendEvent(db, {
             ticketId: row.ticket_id,
             kind: "note",
-            reason: res.reason ?? "issue-tracker state projection skipped (board left unchanged)",
-            payload: { event: "projection_skipped", target_state: payload.state },
+            reason: result.skip.reason,
+            payload: { event: "projection_skipped", target_state: result.skip.targetState },
           });
         }
-        return null;
-      }
+        markSent(db, row.id, result.ref);
+      })();
+      sent += 1;
 ```
+(`db.transaction(fn)()` is the established idiom here — `escalateProjection` at projector.ts:156 uses it.)
 
 - [ ] **Step 7: Run tests + typecheck + lint**
 
@@ -416,7 +452,7 @@ Claude-Session: https://claude.ai/code/session_01LnpZSryugjuH1W1rQgUFcp"
   - `interface JiraAdapterConfig { statusMap?: Record<string, JiraStatusTarget>; bugTypeNames?: string[] }`
   - `jiraTypeLabel(issueTypeName: string, bugTypeNames?: string[]): TypeLabel`
   - `resolveStatusTarget(state: IssueState, cfg?: JiraAdapterConfig): JiraStatusTarget`
-  - `interface JiraTransition { id: string; name: string; to: { name: string }; fields?: Record<string, { required: boolean }> }`
+  - `interface JiraTransition { id: string; name: string; to: { name: string }; fields?: Record<string, { required: boolean; hasDefaultValue?: boolean }> }`
   - `type TransitionPick = { kind: "found"; id: string; setResolution: boolean } | { kind: "none" } | { kind: "unsatisfiable" }`
   - `pickTransition(transitions: JiraTransition[], target: JiraStatusTarget): TransitionPick`
   - `labelUpdateOps(change: { add: string[]; remove: string[] }): { update: { labels: ({ add: string } | { remove: string })[] } }`
@@ -459,9 +495,11 @@ test("resolveStatusTarget: defaults + config override", () => {
     .toEqual({ status: "Reviewing" });
 });
 
-const tr = (id: string, toName: string, fields?: Record<string, { required: boolean }>) => ({
-  id, name: `to ${toName}`, to: { name: toName }, fields,
-});
+const tr = (
+  id: string,
+  toName: string,
+  fields?: Record<string, { required: boolean; hasDefaultValue?: boolean }>,
+) => ({ id, name: `to ${toName}`, to: { name: toName }, fields });
 
 test("pickTransition: matches target status by name (case-insensitive)", () => {
   const pick = pickTransition([tr("11", "In Progress"), tr("21", "Done")], { status: "in progress" });
@@ -485,6 +523,14 @@ test("pickTransition: required resolution but none configured -> unsatisfiable",
 test("pickTransition: an OTHER required field we cannot supply -> unsatisfiable", () => {
   const pick = pickTransition([tr("41", "Done", { customfield_1: { required: true } })], { status: "Done", resolution: "Done" });
   expect(pick).toEqual({ kind: "unsatisfiable" });
+});
+
+test("pickTransition: a required field with hasDefaultValue -> JIRA auto-fills, so found", () => {
+  const pick = pickTransition(
+    [tr("51", "Done", { resolution: { required: true, hasDefaultValue: true } })],
+    { status: "Done" }, // no configured resolution, but JIRA defaults it
+  );
+  expect(pick).toEqual({ kind: "found", id: "51", setResolution: false });
 });
 
 test("labelUpdateOps: atomic add/remove ops", () => {
@@ -547,9 +593,11 @@ Create the file with the docstring + helpers (the factory is appended in Task 4 
  * Expect: the ticket prints; setState returns {applied:true} (or {applied:false, reason} if the
  * workflow has no path); the "styre" label is added; a comment posts and a repeat key returns null.
  */
-import type { IssueState, IssueTrackerPort, SetStateResult } from "../issue-tracker.ts";
-import type { IngestedTicket, TypeLabel } from "../ticket-source.ts";
-import { adfToMarkdown } from "./jira-adf.ts";
+// NOTE: import ONLY what the helpers below use (this repo's tsc has noUnusedLocals + biome
+// noUnusedImports — an unused import fails typecheck/lint). IssueTrackerPort, SetStateResult,
+// IngestedTicket, and adfToMarkdown are added in Task 4 on the same edit that adds the factory.
+import type { IssueState } from "../issue-tracker.ts";
+import type { TypeLabel } from "../ticket-source.ts";
 
 export interface JiraStatusTarget {
   status: string;
@@ -563,7 +611,12 @@ export interface JiraAdapterConfig {
   bugTypeNames?: string[];
 }
 
-/** Default neutral IssueState -> {status, resolution?}. Overridable via config.statusMap. */
+/** Default neutral IssueState -> {status, resolution?}. Overridable via config.statusMap.
+ *  NOTE: `resolution` is matched by NAME against the site's configured resolutions ("Done",
+ *  "Won't Do" are the current Jira Cloud defaults but instances vary — e.g. "Won't Fix" or
+ *  localized names). A name that doesn't exist yields a 400 on the transition, which setState
+ *  soft-fails (board unchanged + a projection_skipped note) rather than crashing — override via
+ *  config.statusMap if your site differs. */
 const DEFAULT_STATUS_MAP: Record<IssueState, JiraStatusTarget> = {
   in_progress: { status: "In Progress" },
   in_review: { status: "In Review" },
@@ -586,7 +639,9 @@ export interface JiraTransition {
   id: string;
   name: string;
   to: { name: string };
-  fields?: Record<string, { required: boolean }>;
+  // `hasDefaultValue`: JIRA auto-fills the field on the transition, so a required field with a
+  // default needs NO client value (transitions.fields carries this alongside `required`).
+  fields?: Record<string, { required: boolean; hasDefaultValue?: boolean }>;
 }
 
 export type TransitionPick =
@@ -596,14 +651,16 @@ export type TransitionPick =
 
 /** Given the issue's available transitions and the desired {status, resolution?}, choose the
  *  transition to POST. `none` = no transition reaches the target status; `unsatisfiable` = matched
- *  but a required screen field we cannot supply (we can only supply `resolution`, and only when
- *  configured). `setResolution` = send resolution (configured AND the screen offers the field). */
+ *  but a required screen field we can neither supply nor rely on JIRA to default (we can only supply
+ *  `resolution`, and only when configured). `setResolution` = send resolution (configured AND the
+ *  screen offers the field). */
 export function pickTransition(transitions: JiraTransition[], target: JiraStatusTarget): TransitionPick {
   const match = transitions.find((t) => t.to?.name?.toLowerCase() === target.status.toLowerCase());
   if (!match) return { kind: "none" };
   const fields = match.fields ?? {};
+  // A field JIRA will auto-fill (hasDefaultValue) needs no client value even if `required`.
   const required = Object.entries(fields)
-    .filter(([, f]) => f.required)
+    .filter(([, f]) => f.required && !f.hasDefaultValue)
     .map(([k]) => k);
   const canSupply = new Set<string>();
   if (target.resolution) canSupply.add("resolution");
@@ -669,7 +726,7 @@ export function mapJiraError(status: number, bodyText: string): Error & { status
 // --- factory (jiraIssueTracker) added in Task 4 ---
 ```
 
-(The `IngestedTicket` / `IssueTrackerPort` / `SetStateResult` type imports are used by the Task-4 factory; unused `import type` does not error under this repo's `tsc`. Verify in Step 6.)
+(Do NOT import `IngestedTicket` / `IssueTrackerPort` / `SetStateResult` / `adfToMarkdown` here — they're unused until the Task-4 factory and would fail `noUnusedLocals` + biome. Task 4 Step 1 adds them.)
 
 - [ ] **Step 4: Add the `jira` block to `RuntimeConfigSchema`**
 
@@ -741,9 +798,19 @@ Claude-Session: https://claude.ai/code/session_01LnpZSryugjuH1W1rQgUFcp"
 
 **Testing note:** per the binding convention, the four methods and `request()` are NOT unit-tested (they hit `fetch`). This task's automated coverage is: (a) typecheck + build; (b) a selection test proving `"jira"` resolves through `makeProjectorPorts`; (c) the loop-level fake (unchanged). Runtime behavior is verified by the operator smoke test in the docstring.
 
-- [ ] **Step 1: Append the factory to `src/integrations/adapters/jira.ts`**
+- [ ] **Step 1: Add the factory's imports, then append the factory to `src/integrations/adapters/jira.ts`**
 
-Replace the `// --- factory (jiraIssueTracker) added in Task 4 ---` marker with:
+First extend the import block at the top of the file (Task 3 imported only `IssueState` + `TypeLabel`); the factory needs four more:
+```ts
+// before (from Task 3)
+import type { IssueState } from "../issue-tracker.ts";
+import type { TypeLabel } from "../ticket-source.ts";
+// after
+import type { IssueState, IssueTrackerPort, SetStateResult } from "../issue-tracker.ts";
+import type { IngestedTicket, TypeLabel } from "../ticket-source.ts";
+import { adfToMarkdown } from "./jira-adf.ts";
+```
+Then replace the `// --- factory (jiraIssueTracker) added in Task 4 ---` marker with:
 
 ```ts
 /**
@@ -949,7 +1016,7 @@ Claude-Session: https://claude.ai/code/session_01LnpZSryugjuH1W1rQgUFcp"
 - Modify: `src/cli/setup.ts` (export + rewrite `credNote`)
 - Test: `test/cli/setup-cred-note.test.ts` (new)
 - Modify: `src/agent/agent-env.ts`
-- Test: `test/agent/agent-env.test.ts` (add a case; create if absent)
+- Test: `test/agent/agent-env.test.ts` (exists — append a case)
 
 **Interfaces:**
 - Produces: `credNote` exported from `setup.ts` (was private) for testing; `AGENT_ENV_DENYLIST` now includes `JIRA_API_TOKEN`.
@@ -1056,11 +1123,8 @@ export const AGENT_ENV_DENYLIST = ["LINEAR_API_KEY", "GITHUB_TOKEN", "JIRA_API_T
 ```
 (`VERIFY_ENV_DENYLIST` derives from it, so verify-time scrubbing is covered by this one edit. Only the token is secret; `JIRA_EMAIL`/`JIRA_BASE_URL` are non-secret identifiers.)
 
-Add a test (create `test/agent/agent-env.test.ts` if it does not exist; otherwise add the case):
+`test/agent/agent-env.test.ts` already exists and already imports `agentEnv`/`verifyEnv` — APPEND this case (do not recreate the file or re-add the import if present):
 ```ts
-import { expect, test } from "bun:test";
-import { agentEnv, verifyEnv } from "../../src/agent/agent-env.ts";
-
 test("agentEnv and verifyEnv scrub JIRA_API_TOKEN", () => {
   const parent = { JIRA_API_TOKEN: "secret", JIRA_EMAIL: "a@b.com", PATH: "/bin" };
   expect(agentEnv(parent).JIRA_API_TOKEN).toBeUndefined();
@@ -1109,3 +1173,21 @@ Claude-Session: https://claude.ai/code/session_01LnpZSryugjuH1W1rQgUFcp"
 **Type consistency:** `SetStateResult` (Task 1) is consumed by Linear/fake (Task 1) and the JIRA factory (Task 4) with identical shape; `JiraAdapterConfig`/`JiraStatusTarget`/`JiraTransition`/`TransitionPick` defined in Task 3 and used in Task 4; the projector's `set_state` case (Task 1) reads `res.applied`/`res.reason` exactly as returned. `runtimeConfig.jira` type in `ports.ts` (Task 4) matches the zod-inferred shape from Task 3.
 
 **Ordering:** Task 1 (port disposition) precedes Task 4 (JIRA `setState` returning it) and Task 3 references it only as a type — correct. Task 2 (renderer) precedes Task 4 (`fetchTicket` uses it). Each task ends green and is independently reviewable.
+
+---
+
+## Independent review dispositions (3-lens Opus panel, 2026-07-11)
+
+**Fixed in this revision**
+- [BLOCKER, execution] Task 3 imported `IssueTrackerPort`/`SetStateResult`/`IngestedTicket`/`adfToMarkdown` unused until Task 4 → fails `noUnusedLocals` + biome. → Task 3 now imports only `IssueState` + `TypeLabel`; the rest move to Task 4 Step 1. (Task 3 Step 3, Task 4 Step 1)
+- [MAJOR, telemetry] The `projection_skipped` note was written in `applyRow` before `markSent` (separate autocommits) → a crash between them re-runs the pending row on resume and double-emits the note (violates exactly-once). → `applyRow` now RETURNS the skip; `drainOutbox` commits the note + `markSent` in one `db.transaction()`. (Task 1 Step 6)
+- [MINOR, JIRA-API] `pickTransition` treated a `required` field with `hasDefaultValue` as unsatisfiable → spurious `projection_skipped` on common auto-defaulting "Done" workflows. → exclude `hasDefaultValue` fields from the must-supply set + a test. (Task 3)
+- [MINOR, JIRA-API] resolution-by-`name` is instance-fragile → docstring caveat on `DEFAULT_STATUS_MAP`. (Task 3)
+- [MINOR, execution] `test/agent/agent-env.test.ts` already exists → Task 5 now says append, not create. (Task 5 Step 5)
+
+**Flagged for the operator (not silently shipped)**
+- [MINOR, telemetry] Linear/JIRA soft-fail asymmetry: Linear still throws→escalates on a missing workflow state while JIRA soft-fails, so loop-not-halt for board drift holds only for JIRA. Explicit intentional-scoping note added (Task 1 Step 4); aligning Linear is an offered follow-up.
+- Event kind: reuse `"note"` + `payload.event="projection_skipped"` (no schema change) vs a dedicated `EventKind`. Panel confirmed `"note"`+payload is the established codebase pattern (precedent: `run-dispatch.ts` "scratch-ignored") and recommended keeping it; a dedicated kind remains a trivial future promotion.
+
+**Verified sound by the panel — no action (recorded so it isn't re-litigated)**
+- Every JIRA REST call/response shape (auth, `fields.description` ADF, transitions flow incl. `to.name`, `fields.resolution`, atomic `update.labels`, ADF comment bodies, comment pagination) matches live v3 docs. The ADF renderer node model matches real ADF; all 6 renderer tests and all helper tests produce the asserted outputs. `Buffer`/`fetch`/`process.env` need no imports (Bun globals). The `setState` blast radius is complete (only Linear + fake implement the port; no caller asserts the old `void` return; the two `throwing.setState` stubs stay valid). The telemetry note reaches the NDJSON feed and is flushed before the run ends. Invariants (one-way projection, single-writer, loop-not-halt) hold.
