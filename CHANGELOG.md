@@ -1,6 +1,20 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.7.0] - 2026-07-11
+
+### Features
+
+- **Slack notifications:** styre can now post to Slack for escalations, terminal states, and (at higher verbosity) stage transitions, so you can follow ticket progress without watching the CLI directly.
+- Slack messages include the ticket title and a "View PR" button linking to the pull request, formatted with Slack's rich Block Kit layout.
+- Dead-end `blocked` terminals now trigger a Slack notification distinct from escalation-blocked cases, so you get exactly one message per outcome instead of none or duplicates.
+- Added a `styre notify --test` command to send a test Slack message and confirm your bot token and channel configuration are working.
+- Set `SLACK_BOT_TOKEN` and configure your notification policy and channel in `config.json` to turn this on; styre fails loudly at startup if the configuration is incomplete.
+
+### Bug Fixes
+
+- Slack delivery failures are now surfaced with clearer diagnostic messages instead of failing silently, and they never cause a ticket to be escalated on their own.
+
 ## [0.6.4] - 2026-07-11
 
 ### Bug Fixes
