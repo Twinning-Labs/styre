@@ -3,6 +3,7 @@ import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import { applyReviewVerdict } from "../../src/daemon/review-verdict.ts";
 import { insertDispatch } from "../../src/db/repos/dispatch.ts";
 import { appendEvent, listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { listPending as listOutbox } from "../../src/db/repos/projection-outbox.ts";
 import { insertFinding } from "../../src/db/repos/review-finding.ts";
 import { listPending } from "../../src/db/repos/signal.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
@@ -55,6 +56,35 @@ test("blocking code finding → loopback to implement (unit + review step reset,
   expect(ticket?.stage).toBe("implement");
   expect(reviewStep?.status).toBe("pending");
   expect(events.some((e) => e.kind === "loopback" && e.loop === "implement")).toBe(true);
+});
+
+test("code-review loopback enqueues the stage projection (rewind review→implement is mirrored — codex P1)", () => {
+  const { db, ticketId } = makeTestDb();
+  const { unit, did } = seedReviewRound(db, ticketId);
+  insertFinding(db, {
+    ticketId,
+    reviewKind: "code",
+    dispatchId: did,
+    severity: "major",
+    category: "correctness",
+    deferralCandidate: 0,
+    blocksShip: 1,
+    workUnitId: unit.id,
+    location: "a.ts:1",
+  });
+  const r = applyReviewVerdict(db, ticketId, DEFAULT_RUNTIME_CONFIG, { stepKey: "review" });
+  const outbox = listOutbox(db);
+  db.close();
+  expect(r.decision).toBe("loopback");
+  // The rewind commits its outbox intent WITH the stage change: set_state → in_progress (implement)
+  // and a stage label swap review→implement. Before the fix these were absent (mirror stuck at review).
+  const state = outbox.find((o) => o.op === "set_state");
+  const labels = outbox.find((o) => o.op === "set_labels");
+  expect(JSON.parse(state?.payload_json ?? "{}").state).toBe("in_progress");
+  expect(JSON.parse(labels?.payload_json ?? "{}")).toEqual({
+    add: ["stage:implement"],
+    remove: ["stage:review"],
+  });
 });
 
 test("code-review loopback resets the ticket-level verify:checks-gate + verify:integration steps (M4 §8d)", () => {

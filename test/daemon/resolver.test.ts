@@ -654,6 +654,41 @@ test("nextUnrunCheck: a FAIL at the current commit still satisfies the check (ad
   expect(check).toBe("build");
 });
 
+test("nextUnrunCheck: an ERROR (could-not-run) at the current commit does NOT satisfy the check (codex P1)", () => {
+  const { db, ticketId } = makeTestDb();
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test", "build"],
+  });
+  setStatus(db, unit.id, "verifying");
+  const d = insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0009",
+    seq: nextSeq(db, ticketId),
+    workUnitId: unit.id,
+  });
+  completeDispatch(db, d.id, { outcome: "clean-success", branchHeadSha: "cur" });
+  // A could-not-run error (empty-diff / no-components / infra crash) recorded at the current commit.
+  // Unlike pass/fail this is NOT a verdict — the check never evaluated, so it must be re-served
+  // (failure-policy's could-not-run retry), never swallowed into a silent advance.
+  insertSignal(db, {
+    ticketId,
+    workUnitId: unit.id,
+    signalType: "test",
+    result: "error",
+    branchHeadSha: "cur",
+    detail: { reason: "empty-diff" },
+  });
+  const u = getById(db, unit.id);
+  if (!u) throw new Error("no unit");
+  const check = nextUnrunCheck(db, u);
+  db.close();
+  // "test" only has an error at cur → NOT satisfied → it is the first unrun check (re-served).
+  expect(check).toBe("test");
+});
+
 test("nextUnrunCheck: a PASS at the current commit satisfies the check", () => {
   const { db, ticketId } = makeTestDb();
   const unit = insertWorkUnit(db, {
