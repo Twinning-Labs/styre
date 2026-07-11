@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { nowUtc } from "../../util/time.ts";
 
-export type OutboxTarget = "issue_tracker" | "forge";
+export type OutboxTarget = "issue_tracker" | "forge" | "notify";
 
 export interface OutboxRow {
   id: number;
