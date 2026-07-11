@@ -103,9 +103,10 @@ export function linearIssueTracker(opts?: { apiKey?: string }): IssueTrackerPort
       const states = await team.states();
       const target = states.nodes.find((s) => s.name === targetName);
       if (!target) {
-        throw new Error(
-          `linear.setState: team has no workflow state named "${targetName}" (for ${ref})`,
-        );
+        // Board has no workflow state with this name — a config gap, not a transport failure.
+        // Soft-fail (loop-not-halt), symmetric with the JIRA adapter: the projector records a
+        // projection_skipped telemetry note and control runs on.
+        return { applied: false, reason: `no workflow state named "${targetName}"` };
       }
       await client.updateIssue(issue.id, { stateId: target.id });
       return { applied: true };
