@@ -1,6 +1,14 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.6.4] - 2026-07-11
+
+### Bug Fixes
+
+- **`checks:dispatch` can now catch its own vacuous checks:** the check-authoring agent has scoped `Bash` access (limited to the project's real runner commands) so it can run the check it just wrote and confirm it actually fails on the current, unfixed code before finishing, instead of submitting an unverified check that happens to pass on broken code.
+- Sharpened the authoring guidance to steer toward discriminating assertions for numeric, data, and algorithmic acceptance criteria, rather than assertions that hold true regardless of whether the fix is correct.
+- Feedback for a caught vacuous check now spells out that it passed on the broken code and tells the re-authoring pass to confirm the check fails (RED) before finishing, making retries more likely to converge.
+
 ## [0.6.3] - 2026-07-11
 
 ### Bug Fixes
