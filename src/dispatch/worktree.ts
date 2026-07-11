@@ -157,7 +157,8 @@ export function pendingEntries(worktreePath: string): PendingEntry[] {
   return entries;
 }
 
-/** Paths only (compat wrapper for existing callers). */
+/** The pending-change paths only — a convenience projection of `pendingEntries` for callers that
+ *  don't need the `isNew` flag (currently the worktree tests). */
 export function pendingChanges(worktreePath: string): string[] {
   return pendingEntries(worktreePath).map((e) => e.path);
 }
