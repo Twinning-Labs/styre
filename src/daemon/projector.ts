@@ -167,7 +167,7 @@ async function applyRow(
       case "post": {
         const msg = NotificationMessageSchema.parse(payload);
         const { ref } = await ports.notifier.notify(msg);
-        return ref;
+        return { ref };
       }
       default:
         throw new Error(`projector: unknown notify op '${row.op}'`);
