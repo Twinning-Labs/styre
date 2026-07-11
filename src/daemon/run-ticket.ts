@@ -47,7 +47,7 @@ export async function driveToTerminal(
   const finish = async (result: RunResult): Promise<RunResult> => {
     emitter.flushNew(db, opts.ticketId);
     emitter.emitSummary(db, opts.ticketId, result);
-    notifier.sweepNew(db, opts.ticketId); // catch the final tick's events
+    notifier.sweepNew(db, opts.ticketId); // backstop: the per-tick sweep already caught these; re-sweep in case a terminal enqueued late events
     notifier.notifyTerminal(db, opts.ticketId, result.outcome);
     await drainOutbox(db, opts.ports); // BLOCKER-1 fix: flush the terminal + tail notify rows
     return result;

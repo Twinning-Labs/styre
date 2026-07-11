@@ -103,9 +103,12 @@ export function createNotifier(config: RuntimeConfig): {
         // dead-end (no pending human_resume) needs a terminal ping.
         const pending = listPending(db, ticketId);
         if (pending.some((s) => s.signal_type === "human_resume")) return;
-        post(db, ticketId, `notify:${ticketId}:term:blocked`, {
-          ...buildMsg(db, ticketId, "gave up (blocked)", "high"),
-        });
+        post(
+          db,
+          ticketId,
+          `notify:${ticketId}:term:blocked`,
+          buildMsg(db, ticketId, "gave up (blocked)", "high"),
+        );
         return;
       }
       const d = terminalDecision(outcome);
