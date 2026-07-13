@@ -42,6 +42,12 @@ describe("declaredMatches", () => {
     expect(declaredMatches(decl, "docs/changes/modeling/12907.feature.rst")).toBe(false);
   });
 
+  test("literal regex metacharacters (the '.') are matched literally, not as wildcards", () => {
+    // Pins the regex-escaping: with an unescaped '.', this would wrongly match ('.'→any char).
+    expect(declaredMatches("<id>.bugfix.rst", "12907Xbugfix.rst")).toBe(false);
+    expect(declaredMatches("<id>.bugfix.rst", "12907.bugfix.rst")).toBe(true);
+  });
+
   test("multiple tokens in one path", () => {
     expect(declaredMatches("a/<x>/b/<y>.ts", "a/1/b/2.ts")).toBe(true);
     expect(declaredMatches("a/<x>/b/<y>.ts", "a/1/2/b/3.ts")).toBe(false);

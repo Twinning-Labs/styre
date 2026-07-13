@@ -12,8 +12,9 @@ export interface ScopeReconciliation {
 /** Does a declared `files_to_touch` entry match an actual produced path?
  *  A declared entry may contain `<token>` placeholders (angle brackets, any inner text) for an
  *  artifact whose exact name is not known at design time — e.g. a changelog fragment named by an
- *  unborn PR number: `docs/changes/modeling/<id>.bugfix.rst`. Each `<token>` matches exactly one
- *  path segment (`[^/]*`); every other character matches literally. A declared entry with no valid
+ *  unborn PR number: `docs/changes/modeling/<id>.bugfix.rst`. Each `<token>` matches within a single
+ *  path segment (`[^/]*` — any run of non-slash chars, never across `/`); every other character
+ *  matches literally. A declared entry with no valid
  *  `<...>` token is matched by exact string equality (the pre-existing behavior). */
 export function declaredMatches(declared: string, actual: string): boolean {
   if (!/<[^>]*>/.test(declared)) return declared === actual;
