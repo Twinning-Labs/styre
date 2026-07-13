@@ -1,8 +1,9 @@
 # Completeness name-reconciliation — design
 
-**Status:** proposed (brainstorm, pre-plan)
+**Status:** proposed (brainstorm, converged after independent review + ticket-kind analysis)
 **Author:** derived from the 2026-07-11 SMOKE=2 validation dig (astropy-12907 + darkreader-7241)
-**Scope of change:** `src/dispatch/completeness.ts` (`reconcileScope`) + its handler in `src/dispatch/handlers.ts`, and a design-prompt naming-stance tweak (`prompts/design-extract.md`). **No schema change. No gate removed.**
+**Scope of change:** `src/dispatch/completeness.ts` (`reconcileScope`) + its handler in `src/dispatch/handlers.ts`, and a design-prompt stance tweak (`prompts/design-extract.md`). **No schema change. No gate removed.**
+**Scope of applicability:** behavior-change tickets + product-test tickets. Non-behavioral acceptance-criterion handling (refactor/coverage AC → `not-expressible`) is out of scope — see **ENG-290**.
 
 ---
 
@@ -14,95 +15,101 @@ The deterministic completeness gate (`reconcileScope`) computes a work unit's un
 under = declared.filter((f) => !cumulativeTouched.has(f))   // completeness.ts
 ```
 
-`declared` is the design agent's *predicted* `files_to_touch`; `cumulativeTouched` is the **actual** ticket git diff. The gate false-flags "under-delivered" whenever the correct work lands at a path design did not predict **character-for-character** — even though the work was done. Two observed manifestations, both from repeated bench runs against a correct fix:
+`declared` is the design agent's *predicted* `files_to_touch`; `cumulativeTouched` is the **actual** ticket git diff. The gate false-flags "under-delivered" whenever correct work lands at a path design did not predict **character-for-character** — even though the work was done. Two observed manifestations, both against a correct fix:
 
-- **astropy-12907 (fatal).** Design declared the changelog fragment as `docs/changes/modeling/<id>.bugfix.rst` — an unresolved **placeholder**, because astropy's towncrier fragments are named by PR number, which does not exist at implement time. Implement correctly wrote `docs/changes/modeling/12907.bugfix.rst`. `"<id>…" ≠ "12907…"` → false under-delivered → the placeholder path is uncreatable → loopback can never satisfy it → **escalate → blocked**. (Verified: implement *did* write the file, correctly named; the gate simply could not recognize it.)
+- **astropy-12907 (fatal).** Design declared the changelog fragment as `docs/changes/modeling/<id>.bugfix.rst` — an unresolved **placeholder** (towncrier fragments are named by PR number, which does not exist at implement time). Implement correctly wrote `docs/changes/modeling/12907.bugfix.rst`. `"<id>…" ≠ "12907…"` → false under-delivered → the placeholder path is uncreatable → loopback can never satisfy it → **escalate → blocked**. (Verified: implement *did* write the file, correctly named.)
 
-- **darkreader-7241 (churn).** Design declared a regression-test file `tests/generators/utils/parse.tests.ts` (an **existing** file — the idiomatic co-location choice). But `checks:dispatch` is architecturally required to author its RED-first test into a **brand-new, integrity-frozen** file (`ENG-288_ac1.tests.ts`; `check-integrity.ts` freezes the check file byte-for-byte between authoring and verify, and the added-only rule closes the "hide a false-green inside an existing test" vector). So the declared test path and the real test path **can never align**. `under = [parse.tests.ts]` → wasted loopback (recovered late; died downstream on the unrelated `merge:push` blocker).
+- **darkreader-7241 (churn).** Design declared a regression-test file `tests/generators/utils/parse.tests.ts` (an **existing** file — the idiomatic co-location choice). But `checks:dispatch` is architecturally required to author its RED-first test into a **brand-new, integrity-frozen** file (`ENG-288_ac1.tests.ts`; `check-integrity.ts` freezes the check file byte-for-byte between authoring and verify, and the added-only rule closes the "hide a false-green inside an existing test" vector). So the declared test path and the real test path **can never align** → false `under-delivered` → wasted loopback (recovered late; died downstream on the unrelated `merge:push` blocker), plus a duplicate implement-authored test.
 
 Both are one disease: **completeness exact-matches design's *predicted* filenames against the *actual* produced files, and false-flags when correct work lands at an unpredicted path** — via a placeholder (astropy) or because a different subsystem owns and names the file (darkreader).
 
 ### Why "a different reason every time"
 
-Across nine analysed astropy runs, the design decomposition and the one-line `separable.py` fix were **byte-identical every run** — styre *solves* the bug every time. Failures migrated between gates (env/tox → merge:push → completeness) as outer bugs were fixed; the completeness wedge is the innermost layer, exposed only once provisioning and push were repaired. It is not a family of bugs; it is one gate applying the wrong matcher.
+Across nine analysed astropy runs the decomposition and the one-line `separable.py` fix were **byte-identical every run** — styre *solves* the bug every time. Failures migrated between gates (env/tox → merge:push → completeness) as outer bugs were fixed; the completeness wedge is the innermost layer. It is not a family of bugs; it is one gate applying the wrong matcher.
 
 ---
 
-## 2. Principle
+## 2. Principle — the authorship split
 
-Completeness is an **existence** gate: "was the declared artifact actually produced?" It is the right tool when *existence is the whole requirement* (code files, docs/changelog) and it must stay. The bug is not the gate — it is that the gate demands design **predict an exact filename it cannot know**, for artifacts whose final name is determined later (by a PR number) or by another subsystem (`checks:dispatch`).
+Completeness is an **existence** gate: "was the declared artifact actually produced?" It is the right tool for artifacts whose requirement is existence, and it must stay. The bug is that the gate demands design **predict an exact filename it cannot know** — for an artifact named later (by a PR number) or by another subsystem (`checks:dispatch`).
 
-**The fix keeps every gate and removes no capability. Two coordinated changes:**
+The resolution is to declare in `files_to_touch` **exactly what the unit's `implement` dispatch produces, and nothing else**:
 
-1. **Design's *naming stance* loosens.** Design may declare a **placeholder/pattern** for artifacts it cannot name exactly, instead of pinning a fake exact path. Design still declares the artifact is needed, still declares tests/checks are needed, still accounts for the checks→AC mapping. Only the *naming* becomes honest about what design can and cannot know.
+- **Implement-authored artifacts** — code, docs (e.g. changelog), and **product tests** (the *deliverable* of a coverage / test-infrastructure ticket). These belong in `files_to_touch`; completeness gates their existence.
+- **The verification test** — the RED-first proof of a behavioral acceptance criterion — is authored and named by `checks:dispatch`. It is **not** an implement output and is **not** declared in `files_to_touch`. Its need is carried by `verify_check_types` + the checks→AC accounting, and it is gated by the checks-postcondition + RED-first — which are stronger than any filename match.
 
-2. **Completeness's *matcher* becomes reality-aware.** Instead of pure exact-string matching, the runner resolves each declared entry against what was actually produced — using data it already holds. The gate still fires (a required artifact that is genuinely absent is still `under-delivered` → loopback); it just stops checking the *wrong* string.
+Two coordinated changes, removing no capability:
 
-This is the "design declares flexibly; completeness resolves the declaration against the artifact that was actually produced, by the appropriate authority" model.
+1. **Design's declaration stance.** Declare implement's outputs; use a **placeholder** for an implement artifact whose exact name is not knowable at design time (a changelog fragment). Do **not** declare the checks-owned verification test path. Design still declares tests are needed (`verify_check_types`) and still accounts checks→AC.
+2. **Completeness's matcher.** Resolve declared entries against reality (exact / wildcard), and carry a test-existence signal from the checks registry rather than from a phantom declared path.
 
 ---
 
 ## 3. Design
 
-`reconcileScope` gains a **typed, three-mode resolution** of each declared `files_to_touch` entry against the cumulative diff. The mode is inferred from the entry (no new schema field required — the entry stays a string):
+`reconcileScope` and its handler resolve each unit's requirement in three ways:
 
-| Declared entry | Resolution mode | Satisfied when |
+| Requirement | Source | Satisfied when |
 |---|---|---|
-| Ordinary code/docs path (no placeholder token, not a test file) | **exact** (unchanged) | the exact path is in `cumulativeTouched` |
-| Path containing a placeholder token (e.g. `…/<id>.bugfix.rst`) | **wildcard** | some file in `cumulativeTouched` matches the path with each `<token>` treated as a glob wildcard |
-| Test file (`isTestFile(path, profile.testFilePattern)`) | **checks-registry** | the checks system authored a live test — i.e. an active `ac_check.test_path` (from `listActiveByTicket`) is present in `cumulativeTouched` |
+| Ordinary declared path (code, docs, **product test**) | `files_to_touch` entry, no placeholder token | the exact path is in `cumulativeTouched` |
+| Placeholder declared path (e.g. `…/<id>.bugfix.rst`) | `files_to_touch` entry containing a `<token>` | some file in `cumulativeTouched` matches the path with each `<token>` expanded to a single-segment wildcard |
+| Test-existence (behavioral unit) | `unit.verify_check_types` includes `"test"` | an **active** `ac_check` row for the ticket has a **non-null** `test_path` (registry existence — `listActiveByTicket`) |
 
-`over` (advisory scope-diff) is computed as today, with **one addition**: `isTestFile()` paths are excluded from `over`, so a stray implement-authored test does not produce out-of-scope noise now that tests are resolved via the registry rather than by declared name. `over` remains advisory (non-blocking).
+**Wildcard grammar (pinned).** A placeholder token is `<...>` (angle brackets). Each token expands to `[^/]*` — a **single path segment**, non-slash — with all other characters matched literally and the whole path anchored. This resolves `docs/changes/modeling/<id>.bugfix.rst` ← `docs/changes/modeling/12907.bugfix.rst` while preventing a broad `*`-style token from vacuously satisfying a required file across directories.
+
+**`over` (advisory scope-diff)** is made resolution-aware: a wildcard-resolved path is not reported as over-delivery (otherwise `12907.bugfix.rst` would surface as spurious `over` against the declared `<id>.bugfix.rst`). `over` remains advisory (non-blocking).
+
+**Test-existence is C1-safe and detection-safe.** It is queried as **existence** in the `ac_check` registry, not membership in `cumulativeTouched` — because `checks:dispatch` commits its test in the **design stage** (`resolver.ts`), which is an ancestor of the cumulative diff base (`cumulativeBase = minSeqUnit.base_sha`, set lazily on first `implement:dispatch`), so the authored test is **never** in `cumulativeTouched`. Detection keys off `unit.verify_check_types`, **not** `isTestFile` on a path — so a required non-test artifact under a `tests/` directory (a fixture, golden data) is a normal declared entry, exact-matched, never vacuously satisfied. NULL `test_path` rows are skipped.
 
 ### Data grounding (verified in code, styre @ 52b5e02)
 
-- `ac_check.test_path` holds every checks-authored test file; `listActiveByTicket(db, ticketId)` returns the active (non-superseded) set. The completeness handler already has `ctx.db` + `ctx.ticket.id`, so it can read them.
-- `acceptance_criterion` and `ac_check` carry **no `work_unit_id`** — they are **ticket-level**. Resolution is therefore ticket-level: a test-typed declared entry on any unit is satisfied by the presence of the ticket's authored tests in the cumulative diff. This is deliberate — it avoids inventing a unit↔AC schema link (which would be a large, non-minimal change) and matches the existing data model.
-- `commit-scope.ts` already whitelists `checksAuthored[].test_file`, and checks' tests are authored in a separate dispatch, so they do not appear in an implement unit's own-diff — they were never flagged as `over` and are not double-counted.
+- `ac_check.test_path` holds every checks-authored test file; `listActiveByTicket(db, ticketId)` returns the active (non-superseded) set. The completeness handler has `ctx.db` + `ctx.ticket.id`.
+- `acceptance_criterion` and `ac_check` carry **no `work_unit_id`** — they are ticket-level, so the test-existence signal is ticket-level (an authored test exists for the ticket). This avoids inventing a unit↔AC schema link and matches the existing data model.
+- `checks:dispatch` runs in the design stage before `advance design→implement` (`resolver.ts`); a unit's `base_sha` is set lazily on first implement dispatch (`handlers.ts`). Hence the timing argument above.
+- `commit-scope.ts` already whitelists `checksAuthored[].test_file`, and checks' tests are authored in a separate dispatch, so they never appear in an implement unit's own-diff and are not double-counted in `over`.
 
 ### Design-prompt change (`prompts/design-extract.md`)
 
-State the naming stance explicitly: when a file's exact name cannot be known at design time (a changelog fragment named by an unborn PR number; a test file authored and named by `checks:dispatch`), declare it with a placeholder token rather than a guessed exact name. Keep the existing instruction that the changelog is soft-gated ("consider whether a significant change warrants a doc note") and that behavioral units must carry `verify_check_types: ["test"]` — those are unchanged; only the *naming* guidance is added.
+State the declaration stance: `files_to_touch` lists what the unit's implement step will write — code, docs, and product tests when tests are the deliverable. When an implement artifact's exact name is not knowable at design time (a changelog fragment named by an unborn PR number), declare it with a `<token>` placeholder. Do **not** list the checks-owned verification test; the test requirement is carried by `verify_check_types` (unchanged) and authored by `checks:dispatch`. Keep the existing soft-gate changelog nudge and the behavioral/`verify_check_types` rules.
 
 ---
 
 ## 4. Scoped outcomes
 
-- **astropy (changelog = existence-artifact):** design declares `…/<id>.bugfix.rst`; completeness wildcard-matches it against the diff → `12907.bugfix.rst` satisfies it. The changelog is **still required, still gated, still shipped**. The gate stops demanding a name design could not know. (PR-quality nicety, not load-bearing: the prompt may steer toward towncrier's unnumbered `+slug.bugfix.rst` form so the agent need not guess a number at all.)
-
-- **darkreader (test = behavioral-artifact):** completeness resolves the test-typed declared entry against `ac_check.test_path` (the real authored test), *using* the checks→AC accounting. The gate **still fires** (if checks authored no test, it flags); it just targets the artifact that actually gates behavior instead of design's guessed filename.
+- **astropy (changelog = implement-authored, un-nameable):** design declares `…/<id>.bugfix.rst`; completeness wildcard-matches `12907.bugfix.rst`. Changelog **still required, still gated, still shipped**; the gate stops demanding a name design could not know.
+- **darkreader (verification test = checks-owned):** design declares only `[parse.ts]` (+ any docs), **not** a test path. `parse.ts` exact-matches; the test-existence signal confirms `checks:dispatch` authored a live test (`ENG-288_ac1.tests.ts`); RED-first gates its behavior. No false under-delivered, and the duplicate implement-authored test is gone.
+- **coverage ticket (product tests = implement-authored deliverable):** design declares the new test files in `files_to_touch`; implement writes them at the declared paths → exact match. The tests are gated by completeness (existence) + verify (suite green). *(The coverage acceptance-criterion itself has no red→green behavior; that mismatch is ENG-290, not this change.)*
 
 ---
 
 ## 5. Blast radius — what stays intact
 
-Completeness remains load-bearing for the file kinds where it is the meaningful gate:
-
-| Declared file | Gated by | Completeness role after change |
+| Requirement | Gated by | Completeness role after change |
 |---|---|---|
 | Code (behavioral) | completeness (early, precise loopback) **+** verify RED-first | **kept** — exact match, unchanged |
-| Changelog / docs (non-behavioral) | completeness **only** (no behavioral test) | **kept** — wildcard-resolved, still required |
-| Test | checks-postcondition + RED-first + component suite | resolved via checks registry — still fires, targets the real test |
+| Changelog / docs (non-behavioral) | completeness **only** | **kept** — wildcard-resolved, still required |
+| Product test (coverage deliverable) | completeness (existence) + verify (suite) | **kept** — exact match (implement writes it at the declared path) |
+| Verification test (behavioral proof) | checks-postcondition + RED-first + component suite | test-existence signal from the registry; not name-gated (it never was — C1) |
 
-Design keeps its full job (declare artifacts, tests, checks→AC). `checks:dispatch`, `verify:check`, and RED-first are **untouched**. No gate is removed; the test-completeness check is corrected to check reality rather than a phantom path.
+Design keeps its full job (declare implement's artifacts, declare tests-needed via `verify_check_types`, account checks→AC). `checks:dispatch`, `verify:check`, and RED-first are **untouched**. No gate is removed.
 
-**Honest nuance:** because the checks-postcondition already guarantees a test per AC, the test-typed completeness check will usually pass on its own — it leans redundant with checks/RED-first. It is retained (not carved out) to keep the gate structure whole and because it is **not weaker than today** (today it checks a phantom path and wedges). Removing it would leave the system in a lesser state, which is explicitly out of scope.
+**Honest nuance (per review I2):** the registry test-existence signal is largely **redundant** with the checks-postcondition (which already guarantees a test per AC). It is retained to keep completeness's gate structure whole; it is **not weaker than today** (today's name-match is an always-fail landmine that wedges). Removing it would leave the system in a lesser state, which is out of scope.
 
 ---
 
 ## 6. Non-goals (explicitly out of scope)
 
-- **Not** removing completeness's gating of tests (an earlier proposal; rejected — it removes a gate and leaves the system weaker).
-- **Not** the over-decomposition / duplicate-test question (design spinning a trivial fix into 3 units, or implement writing a second test alongside checks'). The duplicate is a pre-existing quality wart, unchanged by this fix (not made worse). It can be addressed separately.
-- **Not** the `merge:push` / no-PR blocker (a separate root cause — forge push not landing; `IDLE_CAP=3 < OUTBOX_RETRY_BUDGET=5`).
-- **Not** a design→checks filename-hint mechanism for idiomatic test naming (architecture "A"; a possible later PR-quality improvement, deliberately excluded from the MVC because it adds coupling for no correctness gain).
+- **Not** removing completeness's gating of tests. Product tests stay gated by existence; the verification-test signal is retained.
+- **Not** the over-decomposition question (design splitting a trivial fix into 3 units). The authorship split happens to remove darkreader's duplicate test as a side effect, but general decomposition sizing is separate.
+- **Not** the `merge:push` / no-PR blocker (separate root cause: forge push not landing; `IDLE_CAP=3 < OUTBOX_RETRY_BUDGET=5`).
+- **Not** non-behavioral acceptance-criterion handling (refactor/coverage/docs AC that has no red→green) — the `not-expressible` adjudication path and any ticket-kind verification taxonomy are **ENG-290**.
+- **Not** metric/benchmark verification (perf) — declined (ENG-290, DNC).
 - **No schema change.**
 
 ---
 
-## 7. Open questions / risks
+## 7. Open questions / residual risks
 
-1. **Placeholder token grammar.** What exactly marks a placeholder in a declared path — an angle-bracket token (`<id>`), a literal glob (`*`), or both? Needs a precise, testable rule so the wildcard matcher is deterministic and a broad `*` cannot over-match (e.g. scope the wildcard to a single path segment).
-2. **Test-typed detection.** `isTestFile` uses the profile's test pattern (or a built-in heuristic). A declared non-test file that happens to match the heuristic would be mis-resolved. Confirm the heuristic's precision against the target repos, or require design to mark test entries explicitly.
-3. **Empty checks-registry edge.** If a ticket legitimately has a behavioral unit but the checks registry is empty (checks:dispatch produced nothing), a test-typed entry resolves to unsatisfied → loopback. Confirm this is the desired signal (it should be — no authored test is a real gap the checks-postcondition already escalates).
-4. **Over-exclusion of tests.** Excluding `isTestFile()` from `over` means an implement unit that wrongly rewrites an unrelated existing test would not be flagged by scope-diff. `over` is advisory only, and check-integrity independently freezes active check files, so the exposure is limited — but note it.
+1. **Placeholder token grammar edge cases.** The pinned rule (`<...>` → `[^/]*`, single segment, literal-anchored) needs unit tests for: multiple tokens in one path, a token spanning a would-be directory boundary (must not match across `/`), and a literal `<`/`>` in a real path (unlikely; document as unsupported).
+2. **A declared placeholder that matches nothing** must still fail as `under-delivered` (a required-but-absent changelog is a real gap) — confirm the wildcard resolver returns "no match" → under, not a vacuous pass.
+3. **Product-test vs verification-test at design time.** The rule relies on design correctly *not* declaring the checks-owned verification test while *declaring* product tests. For a bug-fix ticket design should declare no test path; for a coverage ticket it declares the test files. If design wrongly declares a bug-fix regression test as a product path, it degrades to the pre-change behavior for that entry (exact-match; implement must create it) — a soft failure, not a wedge. Note for the design-prompt wording.
