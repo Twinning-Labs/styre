@@ -24,7 +24,7 @@ For each work unit decide:
   carry a behavioral test. Be deliberate: a unit marked behavioral MUST have a `test_plan` and
   MUST include `"test"` in its `verify_check_types`.
 - **test_plan**: how the unit is tested (required when behavioral; use `null` otherwise).
-- **files_to_touch**: the files this unit is expected to change.
+- **files_to_touch**: the files this unit's implement step will create or change — production code, docs, and, when the ticket's deliverable *is* tests (e.g. a test-coverage ticket), the product test files. Do NOT list the behavioral regression/verification test that proves an acceptance criterion — `checks:dispatch` authors and names that test; you declare the need for it via `verify_check_types: ["test"]`, not as a file here. When an artifact's exact filename is not knowable at design time (e.g. a changelog fragment named by the not-yet-existing PR number), declare it with an angle-bracket placeholder for the unknown segment — e.g. `docs/changes/modeling/<id>.bugfix.rst` — the build system matches the placeholder against the file actually produced.
 - **verify_check_types**: the ground-truth checks that gate this unit, e.g. `["test"]`,
   `["lint"]`, `["build"]`. Behavioral units must include `"test"`.
 - **depends_on**: seqs of earlier units that must be verified before this one.
@@ -48,6 +48,8 @@ Documentation is soft-gated: even when it is flagged `absent`, still consider wh
 significant change warrants a doc note (README/changelog), and if so set
 `cdotImpact.documentation.applies: true` with a short `analysis`. This is a nudge, not a
 requirement — a trivial change legitimately leaves it `false`.
+
+When you add a changelog/doc-fragment work unit whose filename encodes a value you cannot know yet (a PR or issue number), put an angle-bracket placeholder in its `files_to_touch` path (e.g. `docs/changes/<area>/<id>.bugfix.rst`) rather than guessing a literal number.
 
 Emit your answer as a single fenced block, exactly:
 
