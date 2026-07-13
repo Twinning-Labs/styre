@@ -9,6 +9,20 @@ export interface ScopeReconciliation {
   over: string[]; // ownTouched − declared
 }
 
+/** Does a declared `files_to_touch` entry match an actual produced path?
+ *  A declared entry may contain `<token>` placeholders (angle brackets, any inner text) for an
+ *  artifact whose exact name is not known at design time — e.g. a changelog fragment named by an
+ *  unborn PR number: `docs/changes/modeling/<id>.bugfix.rst`. Each `<token>` matches exactly one
+ *  path segment (`[^/]*`); every other character matches literally. A declared entry with no valid
+ *  `<...>` token is matched by exact string equality (the pre-existing behavior). */
+export function declaredMatches(declared: string, actual: string): boolean {
+  if (!/<[^>]*>/.test(declared)) return declared === actual;
+  const literals = declared.split(/<[^>]*>/g);
+  const escaped = literals.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const pattern = `^${escaped.join("[^/]*")}$`;
+  return new RegExp(pattern).test(actual);
+}
+
 /** Deterministic scope reconciliation. `under` asks "did ANYONE touch the declared file?"
  *  (cumulative, so a redundant unit whose sibling did the work is not flagged — the darkreader
  *  fix); `over` asks "did THIS unit touch a file it didn't declare?" (own diff — a cumulative
@@ -18,11 +32,9 @@ export function reconcileScope(
   cumulativeTouched: string[],
   ownTouched: string[],
 ): ScopeReconciliation {
-  const cum = new Set(cumulativeTouched);
-  const decl = new Set(declared);
   return {
-    under: declared.filter((f) => !cum.has(f)),
-    over: ownTouched.filter((f) => !decl.has(f)),
+    under: declared.filter((d) => !cumulativeTouched.some((t) => declaredMatches(d, t))),
+    over: ownTouched.filter((t) => !declared.some((d) => declaredMatches(d, t))),
   };
 }
 
