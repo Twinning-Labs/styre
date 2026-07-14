@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.8.1] - 2026-07-14
+
+### Bug Fixes
+
+- **Completeness check no longer false-flags correctly delivered work as "under-delivered."** Previously, if the design agent couldn't name an output's exact path ahead of time — for example, a changelog file named after a not-yet-created PR number — styre would wrongly conclude the work was incomplete and escalate, even when the correct file existed. Declared file paths can now include `<token>` placeholders that match the actual produced filename, so this class of false positive no longer blocks a run.
+- **Verification tests no longer trigger false completeness failures or get duplicated.** Design no longer declares the checks-owned verification test by name, since that test is authored separately and its filename can never be predicted in advance; verification is instead confirmed by the existing checks-postcondition and RED-first gates, which are the real source of truth for it.
+
 ## [0.8.0] - 2026-07-11
 
 ### Features
