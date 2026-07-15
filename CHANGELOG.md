@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.9.0] - 2026-07-15
+
+### Features
+
+- **Setup enrichment now reads dependency manifests across seven ecosystems** (Node, Rust/Cargo, Python, Go, Ruby, PHP, and JVM) and passes the list of dependency names into the enrichment prompt as extra context, helping styre correctly recognize capabilities like data storage, caching, observability, and config/secrets handling in non-Node repos instead of marking them as absent just because they weren't found by scanning the codebase alone.
+
 ## [0.8.2] - 2026-07-15
 
 ### Bug Fixes
