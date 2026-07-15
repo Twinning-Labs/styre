@@ -1,3 +1,4 @@
+import { isCanonicalCheckPath } from "./check-path.ts";
 import { ChecksOutputSchema } from "./checks-schema.ts";
 import { isDocPath, isPlanPath } from "./docs-paths.ts";
 import { ImplementOutputSchema } from "./implement-schema.ts";
@@ -18,18 +19,23 @@ export const implementScope: CommitScope = (output) => {
   return (path, isNew) => !isNew || declared.has(norm(path));
 };
 
-/** checks: tracked edits in scope; a new file must be an authored test_file OR a declared helper.
- *  On an UNPARSEABLE sidecar the scope DEFERS (allows everything) so the two checks call sites keep
- *  their existing post-commit failure semantics (transport-failure / clean "rejected"). */
-export const checksScope: CommitScope = (output) => {
-  const parsed = extractSidecar(output, ChecksOutputSchema);
-  if (!parsed.ok) return () => true;
-  const declared = new Set<string>([
-    ...parsed.value.checksAuthored.map((c) => norm(c.test_file)),
-    ...parsed.value.new_files.map(norm),
-  ]);
-  return (path, isNew) => !isNew || declared.has(norm(path));
-};
+/** checks: tracked edits in scope; a NEW file must be an authored test_file, a declared helper, OR a
+ *  canonically-named RED-first test (`{ident}_ac{acId}_test.*`) for an in-scope AC — the last clause
+ *  admits the file the agent actually wrote even when it declared a different path (ENG-296). Scratch
+ *  files stay out of scope (reject-and-retry). On an UNPARSEABLE sidecar the scope DEFERS (allows
+ *  everything) so the two call sites keep their existing post-commit failure semantics. */
+export function checksScopeFor(ident: string, acIds: number[]): CommitScope {
+  return (output) => {
+    const parsed = extractSidecar(output, ChecksOutputSchema);
+    if (!parsed.ok) return () => true;
+    const declared = new Set<string>([
+      ...parsed.value.checksAuthored.map((c) => norm(c.test_file)),
+      ...parsed.value.new_files.map(norm),
+    ]);
+    return (path, isNew) =>
+      !isNew || declared.has(norm(path)) || isCanonicalCheckPath(norm(path), ident, acIds);
+  };
+}
 
 /** design:dispatch: everything (edit or new) must be under docs/plans/. */
 export const planScope: CommitScope = () => (path) => isPlanPath(path);

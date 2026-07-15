@@ -64,7 +64,7 @@ import { checksFeedback } from "./checks-feedback.ts";
 import { runCheckForRed } from "./checks-run.ts";
 import { ChecksOutputSchema } from "./checks-schema.ts";
 import { classifyPrior } from "./classify-prior.ts";
-import { checksScope, docScope, implementScope, planScope } from "./commit-scope.ts";
+import { checksScopeFor, docScope, implementScope, planScope } from "./commit-scope.ts";
 import { classifyDisposition, reconcileScope } from "./completeness.ts";
 import { ComplexityGradeSchema } from "./complexity-schema.ts";
 import {
@@ -247,7 +247,7 @@ async function reauthorCheckWrong(
       handlerKey: "checks:dispatch",
       template: CHECKS_TEMPLATE,
       vars: checksVars(ctx.ticket, deps.profile, [{ id: ac.id, text: ac.text }], ""),
-      commitScope: checksScope,
+      commitScope: checksScopeFor(ctx.ticket.ident, [ac.id]),
       postcondition: () => {},
     },
   );
@@ -563,7 +563,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       template: CHECKS_TEMPLATE,
       vars: checksVars(ctx.ticket, deps.profile, acs, checksFeedback(ctx.db, ctx.ticket.id)),
       runnerCommands: realRunnerCommands(deps.profile.components),
-      commitScope: checksScope,
+      commitScope: checksScopeFor(ctx.ticket.ident, [...acIds]),
       // Identity + coverage are verified below against the committed diff, not on the raw diff here.
       postcondition: () => {},
     });
