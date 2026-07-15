@@ -245,6 +245,6 @@ test("implement prompt instructs new_files declaration + scratch prevention", ()
   expect(IMPLEMENT_TEMPLATE).toContain("new_files");
   expect(IMPLEMENT_TEMPLATE.toLowerCase()).toContain("do not leave");
   expect(IMPLEMENT_TEMPLATE).toContain("```styre-sidecar");
-  // scratch is redirected to an explicit out-of-tree location (not merely "deleted later")
-  expect(IMPLEMENT_TEMPLATE.toLowerCase()).toMatch(/\$tmpdir|\/tmp/);
+  // scratch goes in the swept styre_scratch/ drawer (ENG-300), not /tmp
+  expect(IMPLEMENT_TEMPLATE).toContain("styre_scratch/");
 });

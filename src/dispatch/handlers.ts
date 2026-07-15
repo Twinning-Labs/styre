@@ -134,6 +134,7 @@ import {
   fileContentAt,
   removeWorktree,
   resetWorktreeHard,
+  sweepScratch,
   worktreeHead,
 } from "./worktree.ts";
 
@@ -1135,6 +1136,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     }
     const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
     ensureWorktree(repoPath, branch, worktreePath);
+    sweepScratch(worktreePath); // defense-in-depth: no styre_scratch/ reaches the broad verify run (ENG-300)
 
     const unit = getUnit(ctx.db, ctx.workUnitId);
     if (!unit) throw new Error(`verify:check: work_unit ${ctx.workUnitId} not found`);

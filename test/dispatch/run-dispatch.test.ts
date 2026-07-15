@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
@@ -365,6 +365,53 @@ test("scope reject: an undeclared new file → dispatch-failed at preHead, workt
   expect(rows[0]?.outcome).toBe("dispatch-failed");
   expect(rows[0]?.branch_head_sha).toBe(preHead);
   expect(existsSync(join(wt, "fix.ts"))).toBe(false); // undoAttempt cleaned the whole attempt
+  db.close();
+});
+
+test("scratch drawer: styre_scratch/ is swept before judging → not an offender, not committed, note emitted", async () => {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-scratch-${Date.now()}`);
+  const runner = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "fix.ts"), "export const x = 1;\n"); // declared deliverable
+    mkdirSync(join(input.cwd, "pkg", "styre_scratch"), { recursive: true });
+    writeFileSync(join(input.cwd, "pkg", "styre_scratch", "repro.py"), "scratch\n"); // undeclared drawer
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: '```styre-sidecar\n{"new_files":["fix.ts"]}\n```',
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const res = await runAgentDispatch(
+    ctxFor(db, ticketId),
+    { runner, ...depsFor(repo, wt) },
+    {
+      handlerKey: "implement:dispatch",
+      template: "implement {{ident}}",
+      vars: { ident: "ENG-1" },
+      commitScope: implementScope,
+      postcondition: () => {},
+    },
+  );
+
+  expect(listByTicket(db, ticketId)[0]?.outcome).toBe("clean-success"); // swept, so NOT rejected
+  expect(existsSync(join(wt, "pkg", "styre_scratch"))).toBe(false); // drawer gone
+  expect(res.changed).toBe(true);
+  const committed = Bun.spawnSync(["git", "show", "--name-only", "--format=", "HEAD"], {
+    cwd: wt,
+  }).stdout.toString();
+  expect(committed).toContain("fix.ts");
+  expect(committed).not.toContain("repro.py");
+  const notes = listEvents(db, ticketId).filter(
+    (e) => e.kind === "note" && e.reason?.startsWith("scratch-swept"),
+  );
+  expect(notes.length).toBe(1);
+  expect(JSON.parse(notes[0]?.payload_json ?? "{}").swept).toContain("pkg/styre_scratch");
   db.close();
 });
 

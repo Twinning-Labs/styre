@@ -37,12 +37,15 @@ Rules — follow them exactly:
 - **For a numeric, data-shape, or algorithmic criterion, assert the SPECIFIC correct value the fixed code
   must produce** (the one that differs from the current wrong output) — never a property that holds
   regardless of the fix. If you cannot state the exact expected value, read the code/docs until you can.
-- **Keep scratch OUT of the work tree.** Do any bug-reproduction, debugging, or throwaway scripting
-  outside the repository — under `$TMPDIR` or `/tmp` — or do not create it at all. Never write repro/
-  debug/scratch files into the work tree "to delete later," and never park them in `new_files`. The
-  commit is REJECTED if it contains any NEW file you did not declare — your check files (listed in
-  `checksAuthored` via `test_file`) plus any genuine non-test helper (listed in `new_files`, below) — so
-  the only correct outcome is: check files declared, real helpers declared, and nothing else added.
+- **Put scratch in a `styre_scratch/` folder — never loose in the work tree.** For any bug-reproduction,
+  debugging, or throwaway scripting, create a `styre_scratch/` directory next to the code you are
+  exercising and put those files there. styre ignores and wipes every `styre_scratch/` folder, so
+  nothing in it is committed, reviewed, or run as part of the suite — it is the throwaway sibling of the
+  `styre_checks/` folder your real check goes in. Do NOT scatter throwaway files anywhere else, and do
+  NOT park them in `new_files`. The commit is REJECTED if it contains any NEW file you did not declare —
+  your check files (listed in `checksAuthored` via `test_file`) plus any genuine non-test helper (listed
+  in `new_files`, below) — so the only correct outcome is: check files declared, real helpers declared,
+  scratch in `styre_scratch/`, and nothing else added.
 
 ## Acceptance criteria (author one check file per `ac_id`)
 
