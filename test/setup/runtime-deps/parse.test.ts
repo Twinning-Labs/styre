@@ -1,0 +1,193 @@
+import { expect, test } from "bun:test";
+import {
+  parseBuildGradle,
+  parseCargoToml,
+  parseComposerJson,
+  parseGemfile,
+  parseGoMod,
+  parseGradleCatalog,
+  parsePackageJson,
+  parsePomXml,
+  parsePyproject,
+  parseRequirementsTxt,
+} from "../../../src/setup/runtime-deps/parse.ts";
+
+test("parseCargoToml: normal, inline-table, sub-table, target, dev deps", () => {
+  const toml = [
+    "[dependencies]",
+    'serde = "1.0"',
+    'tokio = { version = "1", features = ["full"] }',
+    "[dependencies.diesel]",
+    'version = "2"',
+    "[build-dependencies]",
+    'cc = "1"',
+    "[dev-dependencies]",
+    'mockall = "0.11"',
+    "[target.'cfg(unix)'.dependencies]",
+    'nix = "0.27"',
+  ].join("\n");
+  expect(parseCargoToml(toml).sort()).toEqual(
+    ["cc", "diesel", "mockall", "nix", "serde", "tokio"].sort(),
+  );
+});
+
+test("parseCargoToml: [features] is not mistaken for deps", () => {
+  const toml = '[dependencies]\nserde = "1"\n[features]\ndefault = ["serde"]\nextra = []\n';
+  expect(parseCargoToml(toml)).toEqual(["serde"]);
+});
+
+test("parseCargoToml: malformed → []", () => {
+  expect(parseCargoToml("this is not [ valid toml =")).toEqual([]);
+});
+
+test("parsePyproject: PEP 621 deps with extras/markers, optional, poetry, groups; python filtered", () => {
+  const toml = [
+    "[project]",
+    'dependencies = ["sqlalchemy[asyncio]>=2.0", "django ; python_version<\'3.9\'"]',
+    "[project.optional-dependencies]",
+    'dev = ["pytest>=7"]',
+    "[tool.poetry.dependencies]",
+    'python = "^3.11"',
+    'fastapi = "^0.110"',
+    "[tool.poetry.group.test.dependencies]",
+    'httpx = "*"',
+  ].join("\n");
+  expect(parsePyproject(toml).sort()).toEqual(
+    ["django", "fastapi", "httpx", "pytest", "sqlalchemy"].sort(),
+  );
+});
+
+test("parsePyproject: malformed → []", () => {
+  expect(parsePyproject("[project\nbad")).toEqual([]);
+});
+
+test("parseRequirementsTxt: directives/URLs skipped; extras/markers/direct-ref/VCS-egg handled", () => {
+  const txt = [
+    "# comment",
+    "-r base.txt",
+    "-e .",
+    "--hash=sha256:abc",
+    "https://example.com/pkg.whl",
+    "uvicorn[standard]==0.20  # inline",
+    "flask>=2.0 ; python_version<'3.9'",
+    "requests",
+    "pkg @ https://example.com/pkg.tar.gz",
+    "git+https://github.com/psf/requests.git", // no #egg → unnameable, dropped (no junk)
+    "-e git+https://github.com/foo/bar.git#egg=bar",
+    "git+https://github.com/django/django.git@stable/4.2.x#egg=Django",
+  ].join("\n");
+  expect(parseRequirementsTxt(txt).sort()).toEqual(
+    ["bar", "django", "flask", "pkg", "requests", "uvicorn"].sort(),
+  );
+});
+
+test("parseGoMod: block + single-line requires, // indirect stripped", () => {
+  const mod = [
+    "module example.com/app",
+    "go 1.22",
+    "require github.com/jmoiron/sqlx v1.3.5",
+    "require (",
+    "\tgorm.io/gorm v1.25.0",
+    "\tgo.uber.org/zap v1.26.0 // indirect",
+    ")",
+  ].join("\n");
+  expect(parseGoMod(mod).sort()).toEqual(
+    ["github.com/jmoiron/sqlx", "go.uber.org/zap", "gorm.io/gorm"].sort(),
+  );
+});
+
+test("parseGemfile: gem lines only, comments ignored", () => {
+  const gf = [
+    "source 'https://rubygems.org'",
+    "gem 'rails', '~> 7.0'",
+    'gem "pg"',
+    "# gem 'commented'",
+    "group :test do",
+    "  gem 'rspec'",
+    "end",
+  ].join("\n");
+  expect(parseGemfile(gf).sort()).toEqual(["pg", "rails", "rspec"].sort());
+});
+
+test("parsePackageJson: deps + devDeps, malformed → []", () => {
+  const pkg = JSON.stringify({
+    dependencies: { prisma: "^5", react: "^18" },
+    devDependencies: { vitest: "^1" },
+  });
+  expect(parsePackageJson(pkg).sort()).toEqual(["prisma", "react", "vitest"].sort());
+  expect(parsePackageJson("{not json")).toEqual([]);
+});
+
+test("parseComposerJson: require + require-dev, php/ext-* platform reqs filtered", () => {
+  const composer = JSON.stringify({
+    require: { php: ">=8.1", "ext-json": "*", "doctrine/orm": "^2", "laravel/framework": "^10" },
+    "require-dev": { "phpunit/phpunit": "^10" },
+  });
+  expect(parseComposerJson(composer).sort()).toEqual(
+    ["doctrine/orm", "laravel/framework", "phpunit/phpunit"].sort(),
+  );
+});
+
+test("parsePomXml: <dependency> only — excludes <plugin> and <parent>", () => {
+  const pom = `<project>
+    <parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId></parent>
+    <dependencies>
+      <dependency><groupId>org.hibernate</groupId><artifactId>hibernate-core</artifactId></dependency>
+      <dependency><groupId>com.zaxxer</groupId><artifactId>HikariCP</artifactId></dependency>
+    </dependencies>
+    <build><plugins>
+      <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId></plugin>
+    </plugins></build>
+  </project>`;
+  expect(parsePomXml(pom).sort()).toEqual(
+    ["com.zaxxer:HikariCP", "org.hibernate:hibernate-core"].sort(),
+  );
+});
+
+test("parseBuildGradle: single/double quotes, kotlin-dsl parens, multiple configs", () => {
+  const gradle = [
+    'implementation "org.springframework:spring-web:6.0"',
+    "api('com.google.guava:guava:32.0')",
+    'testImplementation("org.junit.jupiter:junit-jupiter:5.10")',
+    'implementation "org.slf4j:slf4j-api"',
+  ].join("\n");
+  expect(parseBuildGradle(gradle).sort()).toEqual(
+    [
+      "com.google.guava:guava",
+      "org.junit.jupiter:junit-jupiter",
+      "org.slf4j:slf4j-api",
+      "org.springframework:spring-web",
+    ].sort(),
+  );
+});
+
+test("parseBuildGradle: android build-type/flavor configs + ksp; accessor/project forms ignored", () => {
+  const gradle = [
+    'debugImplementation "com.squareup.leakcanary:leakcanary-android:2.12"',
+    'androidTestImplementation "androidx.test:runner:1.5.2"',
+    'ksp "com.google.dagger:dagger-compiler:2.48"',
+    "implementation project(':core')", // no string coordinate → ignored
+    "implementation(libs.spring.web)", // catalog accessor → ignored (coord comes from catalog)
+  ].join("\n");
+  expect(parseBuildGradle(gradle).sort()).toEqual(
+    [
+      "androidx.test:runner",
+      "com.google.dagger:dagger-compiler",
+      "com.squareup.leakcanary:leakcanary-android",
+    ].sort(),
+  );
+});
+
+test("parseGradleCatalog: module string, group/name table, version-ref forms", () => {
+  const toml = [
+    "[libraries]",
+    'gorm = { module = "io.gorm:gorm", version = "1" }',
+    'guava = { group = "com.google.guava", name = "guava", version.ref = "g" }',
+    'shorthand = "org.slf4j:slf4j-api:2.0"',
+    "[versions]",
+    'g = "32.0"',
+  ].join("\n");
+  expect(parseGradleCatalog(toml).sort()).toEqual(
+    ["com.google.guava:guava", "io.gorm:gorm", "org.slf4j:slf4j-api"].sort(),
+  );
+});

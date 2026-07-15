@@ -10,6 +10,12 @@ Deterministic scan results (treat the flags as ground truth — do not contradic
 - Documentation: {{scan_documentation}} — {{scan_documentation_detail}}
 - Release/packaging: {{scan_release}} — {{scan_release_detail}}
 
+Dependencies found in the repo's manifests (parsers cover common forms only — this list may be incomplete):
+
+{{scan_manifest_deps}}
+
+Treat this as positive evidence only: a capability's libraries appearing above supports marking that section `present` with grounded `detail`. Their ABSENCE from this list is NOT evidence a capability is missing — investigate the repo as usual, and if you still cannot tell, leave `presence` `unknown` (never guess `absent` from this list alone).
+
 For EACH section, write a `detail` string: concrete, specific prose grounded in the actual files (e.g. "Postgres via Prisma; migrations in prisma/migrations; soft-delete columns on users"). Never read secret values — you may note that a `.env.example` exists, but do not open `.env` files.
 
 For any section the scan marked `unknown`, investigate the repo and, if you can determine it, propose a value. For `presence` (data/caching/observability/configSecrets/documentation) use exactly `present` or `absent` — if you investigated but still cannot tell, leave `presence` out (it stays `unknown`); never guess and never use any other word. For `topology` set `type`; for release/packaging set `mechanism`. Each of `type` and `mechanism` must be exactly one of the allowed values listed below — never invent a value outside the list. If none of the allowed values fit, use `unknown` and explain what you found in `detail`. Do NOT set presence/type/mechanism for sections the scan already resolved — only enrich their `detail`.
