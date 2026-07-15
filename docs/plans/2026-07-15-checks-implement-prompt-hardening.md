@@ -147,7 +147,7 @@ Delete the local definition on line 11:
 const norm = (p: string): string => p.replace(/\\/g, "/").replace(/^\.\//, "");
 ```
 
-Rename every remaining call `norm(` → `normPath(` (5 occurrences: the `implementScope` predicate at lines 18-19, and the `checksScopeFor` block at lines 32-33 and 36). After the change those lines read:
+Replace **every remaining `norm` identifier with `normPath`** — all 6 usages, which include two bare callback references `.map(norm)` (lines 18 and 33) that are NOT written as `norm(` calls; if you rename only `norm(` calls you will leave `.map(norm)` dangling and `tsc` will error on an undefined `norm`. The usages are: the `implementScope` predicate at lines 18-19, and the `checksScopeFor` block at lines 32-33 and 36. After the change those lines read:
 
 ```ts
   const declared = new Set(parsed.ok ? parsed.value.new_files.map(normPath) : []);
