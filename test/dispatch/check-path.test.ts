@@ -11,10 +11,7 @@ test("canonicalCheckBase composes ident + acId", () => {
 });
 
 test("matchAuthoredTest finds the canonical file under any directory, extension-agnostic", () => {
-  const added = [
-    "astropy/modeling/tests/styre_checks/ENG-294_ac1_test.py",
-    "astropy/other.py",
-  ];
+  const added = ["astropy/modeling/tests/styre_checks/ENG-294_ac1_test.py", "astropy/other.py"];
   expect(matchAuthoredTest(added, "ENG-294", 1)).toBe(
     "astropy/modeling/tests/styre_checks/ENG-294_ac1_test.py",
   );
@@ -42,9 +39,9 @@ test("isCanonicalCheckPath matches for any acId in the set, else false", () => {
 
 test("resolveAuthoredTestPath: (a) canonical override wins over a wrong declared path", () => {
   const added = ["tests/styre_checks/ENG-294_ac1_test.py"];
-  expect(
-    resolveAuthoredTestPath(added, "ENG-294", 1, "tests/ENG-294_ac1_test.py"),
-  ).toBe("tests/styre_checks/ENG-294_ac1_test.py");
+  expect(resolveAuthoredTestPath(added, "ENG-294", 1, "tests/ENG-294_ac1_test.py")).toBe(
+    "tests/styre_checks/ENG-294_ac1_test.py",
+  );
 });
 
 test("resolveAuthoredTestPath: (b) falls back to a correctly-declared non-canonical file", () => {

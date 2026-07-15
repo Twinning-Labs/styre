@@ -531,18 +531,25 @@ test("checks:dispatch reconciles a divergent path: written under styre_checks/, 
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
-  db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] bug no longer reproduces\n", ticketId);
+  db.query("UPDATE ticket SET description = ? WHERE id = ?").run(
+    "- [ ] bug no longer reproduces\n",
+    ticketId,
+  );
   await markDesignDone(db, ticketId);
   insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
   setTicketTrack(db, ticketId, "fast");
 
-  const ident = (db.query("SELECT ident FROM ticket WHERE id = ?").get(ticketId) as { ident: string }).ident;
+  const ident = (
+    db.query("SELECT ident FROM ticket WHERE id = ?").get(ticketId) as { ident: string }
+  ).ident;
   // ENG-296 discrepancy from the brief: deriveAndPersistAcs runs INSIDE the checks:dispatch handler
   // (not before), so the acceptance_criterion row doesn't exist yet at this point in the test — query
   // acId lazily inside the FakeAgentRunner callback, which only runs once the handler has dispatched.
   const runner = new FakeAgentRunner((input) => {
     const acId = (
-      db.query("SELECT id FROM acceptance_criterion WHERE ticket_id = ? ORDER BY seq LIMIT 1").get(ticketId) as {
+      db
+        .query("SELECT id FROM acceptance_criterion WHERE ticket_id = ? ORDER BY seq LIMIT 1")
+        .get(ticketId) as {
         id: number;
       }
     ).id;
@@ -553,10 +560,7 @@ test("checks:dispatch reconciles a divergent path: written under styre_checks/, 
     return {
       completed: true,
       exitCode: 0,
-      stdout:
-        '```styre-sidecar\n{"checksAuthored":[' +
-        `{"ac_id":${acId},"test_file":"tests/${ident}_ac${acId}_test.py","test_name":"test_bug"}` +
-        "]}\n```",
+      stdout: `\`\`\`styre-sidecar\n{"checksAuthored":[{"ac_id":${acId},"test_file":"tests/${ident}_ac${acId}_test.py","test_name":"test_bug"}]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -586,14 +590,17 @@ test("checks:dispatch reconciles a divergent path: written under styre_checks/, 
 
   const checks = listAcChecks(db, ticketId);
   expect(checks.length).toBe(1);
-  expect(checks[0]!.test_path).toBe(`tests/styre_checks/${ident}_ac${checks[0]!.ac_id}_test.py`); // REAL written path, not declared
+  expect(checks[0]?.test_path).toBe(`tests/styre_checks/${ident}_ac${checks[0]?.ac_id}_test.py`); // REAL written path, not declared
 });
 
 test("checks:dispatch backward-compat: non-canonical name declared correctly still works (no regression)", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
-  db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] bug no longer reproduces\n", ticketId);
+  db.query("UPDATE ticket SET description = ? WHERE id = ?").run(
+    "- [ ] bug no longer reproduces\n",
+    ticketId,
+  );
   await markDesignDone(db, ticketId);
   insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
   setTicketTrack(db, ticketId, "fast");
@@ -602,7 +609,9 @@ test("checks:dispatch backward-compat: non-canonical name declared correctly sti
   // inside the checks:dispatch handler, so query acId lazily inside the runner callback.
   const runner = new FakeAgentRunner((input) => {
     const acId = (
-      db.query("SELECT id FROM acceptance_criterion WHERE ticket_id = ? ORDER BY seq LIMIT 1").get(ticketId) as {
+      db
+        .query("SELECT id FROM acceptance_criterion WHERE ticket_id = ? ORDER BY seq LIMIT 1")
+        .get(ticketId) as {
         id: number;
       }
     ).id;
@@ -612,18 +621,21 @@ test("checks:dispatch backward-compat: non-canonical name declared correctly sti
     return {
       completed: true,
       exitCode: 0,
-      stdout:
-        '```styre-sidecar\n{"checksAuthored":[' +
-        `{"ac_id":${acId},"test_file":"tests/regression_x.py","test_name":"test_x"}` + // declared == written
-        "]}\n```",
-      stderr: "", timedOut: false, costUsd: null, tokensIn: null, tokensOut: null,
+      stdout: `\`\`\`styre-sidecar\n{"checksAuthored":[{"ac_id":${acId},"test_file":"tests/regression_x.py","test_name":"test_x"}]}\n\`\`\``,
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
     };
   });
 
   const registry = buildDispatchRegistry({
-    runner, agentConfig: DEFAULT_AGENT_CONFIG,
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
     profile: parseProfile({
-      slug: "demo", targetRepo: repo,
+      slug: "demo",
+      targetRepo: repo,
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
@@ -636,5 +648,5 @@ test("checks:dispatch backward-compat: non-canonical name declared correctly sti
 
   const checks = listAcChecks(db, ticketId);
   expect(checks.length).toBe(1);
-  expect(checks[0]!.test_path).toBe("tests/regression_x.py"); // fallback (b): declared path honored
+  expect(checks[0]?.test_path).toBe("tests/regression_x.py"); // fallback (b): declared path honored
 });

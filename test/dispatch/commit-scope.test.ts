@@ -23,7 +23,10 @@ test("implementScope: absent sidecar → any new file is out of scope (rejected,
 });
 
 test("checksScopeFor: authored test_file allowed; extra new_files helper allowed; undeclared rejected", () => {
-  const inScope = checksScopeFor("ENG-1", [1])(
+  const inScope = checksScopeFor(
+    "ENG-1",
+    [1],
+  )(
     sidecar({
       checksAuthored: [{ ac_id: 1, test_file: "tests/test_x.py", test_name: "test_x" }],
       new_files: ["tests/conftest.py"],
@@ -35,12 +38,13 @@ test("checksScopeFor: authored test_file allowed; extra new_files helper allowed
 });
 
 test("checksScopeFor: a canonically-named test at an UNDECLARED dir is in scope (divergence)", () => {
-  const inScope = checksScopeFor("ENG-294", [1])(
+  const inScope = checksScopeFor(
+    "ENG-294",
+    [1],
+  )(
     sidecar({
       // agent DECLARED a flat path but WROTE under styre_checks/ — the written file is undeclared
-      checksAuthored: [
-        { ac_id: 1, test_file: "tests/ENG-294_ac1_test.py", test_name: "test_bug" },
-      ],
+      checksAuthored: [{ ac_id: 1, test_file: "tests/ENG-294_ac1_test.py", test_name: "test_bug" }],
     }),
   );
   expect(inScope("tests/styre_checks/ENG-294_ac1_test.py", true)).toBe(true); // canonical name → admitted

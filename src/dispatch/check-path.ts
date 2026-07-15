@@ -37,7 +37,7 @@ export function matchAuthoredTest(
 ): string | null {
   const prefix = `${canonicalCheckBase(ident, acId)}.`;
   const hits = addedPaths.filter((p) => basename(p).startsWith(prefix));
-  return hits.length === 1 ? hits[0]! : null;
+  return hits.length === 1 ? (hits[0] ?? null) : null;
 }
 
 /** The authoritative test path for `acId`: (a) the canonically-named committed file (divergence-proof

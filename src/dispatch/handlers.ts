@@ -685,7 +685,9 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       const uncovered = acs.filter((a) => !covered.has(a.id));
       if (uncovered.length > 0) {
         const detail = uncovered
-          .map((a) => `AC ${a.seq}: ${missReason.get(a.id) ?? "no valid check authored for this AC"}`)
+          .map(
+            (a) => `AC ${a.seq}: ${missReason.get(a.id) ?? "no valid check authored for this AC"}`,
+          )
           .join("; ");
         throw new Error(`checks:dispatch postcondition: ${detail}`);
       }
