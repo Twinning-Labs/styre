@@ -92,9 +92,11 @@ Expected: FAIL — `sweepScratch` is not exported (import error).
 In `src/dispatch/worktree.ts`, extend the top imports. The file currently imports `{ existsSync } from "node:fs"` and `{ join } from "node:path"` (lines 1-2). Change them to:
 
 ```ts
-import { existsSync, readdirSync, rmSync } from "node:fs";
+import { type Dirent, existsSync, readdirSync, rmSync } from "node:fs";
 import { join, relative } from "node:path";
 ```
+
+(The `type Dirent` import is required — see the `let ents: Dirent[]` annotation below. Do NOT use `ReturnType<typeof readdirSync>`: that resolves to the buffer-named overload `Dirent<NonSharedBuffer>[]` and fails `tsc` with `NonSharedBuffer`/`string` mismatches on `ent.name`.)
 
 Append at the end of the file:
 
@@ -113,7 +115,7 @@ export function sweepScratch(worktreePath: string): string[] {
 }
 
 function sweepWalk(dir: string, root: string, removed: string[]): void {
-  let ents: ReturnType<typeof readdirSync>;
+  let ents: Dirent[];
   try {
     ents = readdirSync(dir, { withFileTypes: true });
   } catch {
@@ -265,7 +267,7 @@ Expected: PASS — the drawer is swept before enumeration, so `fix.ts` commits, 
 
 - [ ] **Step 5: Add the defense-in-depth sweep to `verify:check`**
 
-In `src/dispatch/handlers.ts`, add `sweepScratch` to its `worktree.ts` import (the file already imports helpers like `ensureWorktree`, `changedFilesBetween` from there). Then, in the `verify:check` handler, immediately after `ensureWorktree(repoPath, branch, worktreePath);` (line 1137), insert:
+In `src/dispatch/handlers.ts`, add `sweepScratch` to its `worktree.ts` import **alphabetically** (between `resetWorktreeHard` and `worktreeHead`, or wherever it sorts — `organizeImports` lint will flag a mis-ordered addition). The file already imports helpers like `ensureWorktree`, `changedFilesBetween` from there. Then, in the `verify:check` handler, immediately after `ensureWorktree(repoPath, branch, worktreePath);` (line 1137), insert:
 
 ```ts
     sweepScratch(worktreePath); // defense-in-depth: no styre_scratch/ reaches the broad verify run (ENG-300)
