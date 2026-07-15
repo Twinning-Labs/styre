@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { type Dirent, existsSync, readdirSync, rmSync } from "node:fs";
+import { join, relative } from "node:path";
 
 /** Run git in `cwd`, returning trimmed stdout; throws on failure. */
 function git(args: string[], cwd: string): string {
@@ -204,4 +204,41 @@ export function revertWorktree(worktreePath: string): void {
 export function resetWorktreeHard(worktreePath: string, sha: string): void {
   git(["reset", "--hard", sha], worktreePath);
   git(["clean", "-fd"], worktreePath);
+}
+
+const SWEEP_SKIP_DIRS = new Set([".git", "node_modules"]);
+
+/** Recursively delete every directory named `styre_scratch/` under `worktreePath` — the worker's
+ *  sanctioned throwaway drawer (ENG-300). Placed by the worker next to the code it exercises so its
+ *  imports resolve; styre wipes it so scratch never reaches the commit scope guard or a broad test
+ *  run. Skips `.git`/`node_modules`; never throws (best-effort). Returns the repo-relative POSIX
+ *  paths removed, for non-gating telemetry. */
+export function sweepScratch(worktreePath: string): string[] {
+  const removed: string[] = [];
+  sweepWalk(worktreePath, worktreePath, removed);
+  return removed;
+}
+
+function sweepWalk(dir: string, root: string, removed: string[]): void {
+  let ents: Dirent[];
+  try {
+    ents = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return; // unreadable dir — skip, never throw
+  }
+  for (const ent of ents) {
+    if (!ent.isDirectory()) continue;
+    const full = join(dir, ent.name);
+    if (ent.name === "styre_scratch") {
+      try {
+        rmSync(full, { recursive: true, force: true });
+        removed.push(relative(root, full));
+      } catch {
+        // best-effort: a failed remove is non-fatal — the guard and telemetry still proceed
+      }
+      continue; // removed — do not recurse into it
+    }
+    if (SWEEP_SKIP_DIRS.has(ent.name)) continue;
+    sweepWalk(full, root, removed);
+  }
 }

@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,6 +13,7 @@ import {
   pendingEntries,
   removeWorktree,
   stagedIndexEmpty,
+  sweepScratch,
   undoAttempt,
   worktreeHasChanges,
 } from "../../src/dispatch/worktree.ts";
@@ -286,4 +287,38 @@ test("undoAttempt: restores tracked, removes this attempt's new files, spares pr
   expect(
     Bun.spawnSync(["git", "status", "--porcelain"], { cwd: dir }).stdout.toString().trim(),
   ).toBe("?? cruft.egg-info"); // tracked restored, scratch.py gone, cruft spared
+});
+
+// --- sweepScratch (Task 1) ----------------------------------------------------------------------
+
+test("sweepScratch removes every styre_scratch/ dir at any depth and returns their repo-relative paths", () => {
+  const root = mkdtempSync(join(tmpdir(), "sweep-"));
+  mkdirSync(join(root, "a", "b", "styre_scratch"), { recursive: true });
+  writeFileSync(join(root, "a", "b", "styre_scratch", "repro.py"), "x");
+  mkdirSync(join(root, "pkg", "styre_scratch"), { recursive: true });
+  mkdirSync(join(root, "src", "styre_checks"), { recursive: true }); // sibling convention — must be spared
+  writeFileSync(join(root, "keep.ts"), "x");
+
+  const removed = sweepScratch(root).sort();
+
+  expect(removed).toEqual(["a/b/styre_scratch", "pkg/styre_scratch"]);
+  expect(existsSync(join(root, "a", "b", "styre_scratch"))).toBe(false);
+  expect(existsSync(join(root, "pkg", "styre_scratch"))).toBe(false);
+  expect(existsSync(join(root, "src", "styre_checks"))).toBe(true); // spared
+  expect(existsSync(join(root, "keep.ts"))).toBe(true);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("sweepScratch is a no-op (returns []) with no drawer, and skips .git and node_modules", () => {
+  const root = mkdtempSync(join(tmpdir(), "sweep-"));
+  mkdirSync(join(root, "src"), { recursive: true });
+  mkdirSync(join(root, ".git", "styre_scratch"), { recursive: true }); // inside .git → skipped
+  mkdirSync(join(root, "node_modules", "dep", "styre_scratch"), { recursive: true }); // skipped
+
+  const removed = sweepScratch(root);
+
+  expect(removed).toEqual([]);
+  expect(existsSync(join(root, ".git", "styre_scratch"))).toBe(true); // never descended into
+  expect(existsSync(join(root, "node_modules", "dep", "styre_scratch"))).toBe(true);
+  rmSync(root, { recursive: true, force: true });
 });
