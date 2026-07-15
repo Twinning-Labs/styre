@@ -148,3 +148,28 @@ export function parseGemfile(content: string): string[] {
   }
   return [...names];
 }
+
+function jsonDepKeys(content: string, keys: string[]): string[] {
+  try {
+    const obj = rec(JSON.parse(content));
+    if (!obj) return [];
+    const names: string[] = [];
+    for (const k of keys) {
+      const table = rec(obj[k]);
+      if (table) names.push(...Object.keys(table));
+    }
+    return names;
+  } catch {
+    return [];
+  }
+}
+
+export function parsePackageJson(content: string): string[] {
+  return jsonDepKeys(content, ["dependencies", "devDependencies"]).map((n) => n.toLowerCase());
+}
+
+export function parseComposerJson(content: string): string[] {
+  return jsonDepKeys(content, ["require", "require-dev"])
+    .filter((n) => n !== "php" && !n.startsWith("ext-"))
+    .map((n) => n.toLowerCase());
+}

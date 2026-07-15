@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import {
   parseCargoToml,
+  parseComposerJson,
   parseGemfile,
   parseGoMod,
+  parsePackageJson,
   parsePyproject,
   parseRequirementsTxt,
 } from "../../../src/setup/runtime-deps/parse.ts";
@@ -102,4 +104,23 @@ test("parseGemfile: gem lines only, comments ignored", () => {
     "end",
   ].join("\n");
   expect(parseGemfile(gf).sort()).toEqual(["pg", "rails", "rspec"].sort());
+});
+
+test("parsePackageJson: deps + devDeps, malformed → []", () => {
+  const pkg = JSON.stringify({
+    dependencies: { prisma: "^5", react: "^18" },
+    devDependencies: { vitest: "^1" },
+  });
+  expect(parsePackageJson(pkg).sort()).toEqual(["prisma", "react", "vitest"].sort());
+  expect(parsePackageJson("{not json")).toEqual([]);
+});
+
+test("parseComposerJson: require + require-dev, php/ext-* platform reqs filtered", () => {
+  const composer = JSON.stringify({
+    require: { php: ">=8.1", "ext-json": "*", "doctrine/orm": "^2", "laravel/framework": "^10" },
+    "require-dev": { "phpunit/phpunit": "^10" },
+  });
+  expect(parseComposerJson(composer).sort()).toEqual(
+    ["doctrine/orm", "laravel/framework", "phpunit/phpunit"].sort(),
+  );
 });
