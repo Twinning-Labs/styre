@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import type { AgentRunResult } from "../../src/agent/runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -101,4 +104,31 @@ test("enrich retries a non-completed result then succeeds on a later attempt", a
   });
   expect(out.topology.detail).toBe("a cli");
   expect(runner.inputs.length).toBe(2);
+});
+
+test("enrich injects manifest dependency names into the prompt", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "styre-enrich-deps-"));
+  writeFileSync(
+    join(repo, "package.json"),
+    JSON.stringify({ dependencies: { "drizzle-orm": "^0.30" } }),
+  );
+  const runner = new FakeAgentRunner(() => ok(sidecar(JSON.stringify(FULL))));
+  await enrichRuntimeContext(repo, scan({}), {
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    sleep: noSleep,
+  });
+  expect(runner.inputs[0]?.prompt).toContain("drizzle-orm");
+});
+
+test("enrich still renders when the repo has no manifests", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "styre-enrich-empty-"));
+  const runner = new FakeAgentRunner(() => ok(sidecar(JSON.stringify(FULL))));
+  const out = await enrichRuntimeContext(repo, scan({}), {
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    sleep: noSleep,
+  });
+  expect(out.topology.detail).toBe("a cli");
+  expect(runner.inputs[0]?.prompt).toContain("(no dependency manifests detected)");
 });

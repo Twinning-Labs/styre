@@ -8,6 +8,7 @@ import { extractSidecar } from "../dispatch/sidecar.ts";
 import { allowlistFor } from "../dispatch/tool-allowlists.ts";
 import { EnrichmentSchema } from "./enrichment-schema.ts";
 import { mergeScanAndEnrichment } from "./merge.ts";
+import { collectManifestDeps, renderManifestDeps } from "./runtime-deps/collect.ts";
 
 export type EnrichDeps = {
   runner: AgentRunner;
@@ -22,7 +23,7 @@ const BACKOFF_MS = [2_000, 8_000];
 const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** Seed the scan findings into the enrichment prompt. */
-function enrichVars(scan: RuntimeContext): Record<string, string> {
+function enrichVars(scan: RuntimeContext, manifestDeps: string): Record<string, string> {
   return {
     scan_topology: scan.topology.type,
     scan_topology_detail: scan.topology.detail,
@@ -39,6 +40,7 @@ function enrichVars(scan: RuntimeContext): Record<string, string> {
     scan_documentation_detail: scan.documentation.detail,
     scan_release: scan.releasePackaging.mechanism,
     scan_release_detail: scan.releasePackaging.detail,
+    scan_manifest_deps: manifestDeps,
   };
 }
 
@@ -53,7 +55,8 @@ export async function enrichRuntimeContext(
   const sleep = deps.sleep ?? realSleep;
   const model = modelForTier(deps.agentConfig, "standard");
   const allowedTools = allowlistFor("setup:enrich");
-  const prompt = renderPrompt(setupEnrichTemplate, enrichVars(scan));
+  const manifestDeps = renderManifestDeps(collectManifestDeps(repoDir));
+  const prompt = renderPrompt(setupEnrichTemplate, enrichVars(scan, manifestDeps));
 
   if (!prompt.ok) {
     throw new Error(`enrichRuntimeContext: unresolved prompt vars: ${prompt.missing.join(", ")}`);
