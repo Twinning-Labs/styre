@@ -15,11 +15,13 @@ test("checks prompt requires the author to run its check and confirm it fails RE
   expect(t).toContain("do not report a verdict"); // still no self-reported verdict — runner is ground truth
 });
 
-test("checks prompt forbids leftover scratch files and offers a new_files declaration escape hatch", () => {
+test("checks prompt pins the canonical written==declared path and keeps scratch out of the work tree", () => {
   const t = CHECKS_TEMPLATE.toLowerCase();
-  // Anti-scratch instruction (mirrors implement.md) — so a reject-and-retry can be resolved by deleting scratch.
-  expect(t).toMatch(/throwaway|reproduction|scratch/);
-  expect(t).toContain("reject"); // the commit is REJECTED if it contains an undeclared new file
-  // Declaration escape hatch for a genuine non-test helper.
-  expect(t).toContain("new_files");
+  // Canonical RED-first path is pinned (not a soft e.g.), and declared MUST equal written.
+  expect(t).toContain("styre_checks/");
+  expect(t).toMatch(/byte-identical|character for character/); // declared == written path
+  // Scratch is redirected OUT of the work tree, not parked in new_files.
+  expect(t).toMatch(/\$tmpdir|\/tmp|outside the repository/);
+  expect(t).toContain("reject"); // guard still rejects undeclared new files
+  expect(t).toContain("new_files"); // retained, now scoped to genuine helpers only
 });

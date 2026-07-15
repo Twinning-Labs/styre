@@ -3,6 +3,7 @@ import {
   canonicalCheckBase,
   isCanonicalCheckPath,
   matchAuthoredTest,
+  normPath,
   resolveAuthoredTestPath,
 } from "../../src/dispatch/check-path.ts";
 
@@ -54,4 +55,18 @@ test("resolveAuthoredTestPath: (b) falls back to a correctly-declared non-canoni
 test("resolveAuthoredTestPath: (c) null when neither canonical nor declared-added", () => {
   const added = ["pkg/unrelated.go"];
   expect(resolveAuthoredTestPath(added, "ENG-1", 1, "pkg/missing_test.go")).toBeNull();
+});
+
+test("normPath strips a leading ./ and normalizes backslashes", () => {
+  expect(normPath("./a/b.py")).toBe("a/b.py");
+  expect(normPath("a\\b\\c.py")).toBe("a/b/c.py");
+  expect(normPath("a/b.py")).toBe("a/b.py");
+});
+
+test("resolveAuthoredTestPath: (b') normalizes the declared path before the fallback and returns the git-form added path", () => {
+  const added = ["pkg/separable_test.go"];
+  // agent declared a leading ./ — git's added form has none; must still resolve, to the added form
+  expect(resolveAuthoredTestPath(added, "ENG-1", 1, "./pkg/separable_test.go")).toBe(
+    "pkg/separable_test.go",
+  );
 });
