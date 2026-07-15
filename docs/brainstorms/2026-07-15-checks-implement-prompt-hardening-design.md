@@ -9,7 +9,7 @@ Two nondeterministic checks-agent slips, observed in the 2026-07-13 SMOKE=2 astr
 
 1. **Path mis-declaration.** The agent *wrote* its RED-first test to `…/styre_checks/ENG-294_ac1_test.py` (the templated location) but *declared* `checksAuthored[].test_file` without the `styre_checks/` segment. ENG-296 made this non-fatal at the runner (trust what was committed), but the prompt still invites the slip: `prompts/checks.md:15` gives the canonical path only as a soft `e.g.` and never requires *declared == written*.
 
-2. **Scratch-file spree.** The agent created 8 throwaway repros (`test_bug.py`, `reproduce_bug.py`, `run_*.py`, `BUG_ANALYSIS.md`) and, to avoid the "commit REJECTED if it contains any NEW file you did not declare" rule, dumped them into `new_files` instead of deleting them. The current wording (`checks.md:32–36`, added PR #72) forbids leftover scratch but simultaneously offers `new_files` as a declaration escape hatch — so the perverse move is to declare the scratch. **`implement.md:20–23` carries the identical leak** (same "REJECTED if undeclared" phrasing, same loose `new_files` definition).
+2. **Scratch-file spree.** The agent created 8 throwaway repros (`test_bug.py`, `reproduce_bug.py`, `run_*.py`, `BUG_ANALYSIS.md`) and, to avoid the "commit REJECTED if it contains any NEW file you did not declare" rule, dumped them into `new_files` instead of deleting them. The current wording (`checks.md:32–36`, added PR #72) forbids leftover scratch but simultaneously offers `new_files` as a declaration escape hatch — so the perverse move is to declare the scratch. **`implement.md` carries the identical leak** — the "REJECTED if undeclared" phrasing at lines 20–23 and the loose `new_files` definition at lines 25–30.
 
 Separately, one **code Minor** was deferred from the ENG-296 PR #79 review: `resolveAuthoredTestPath`'s fallback compares `addedPaths.includes(declaredTestFile)` on raw strings, while the scope guard normalizes with `norm()`. A declared `./api/foo.py` vs git's `api/foo.py` misses the fallback and returns `null` (spurious "uncovered").
 
@@ -31,17 +31,19 @@ Separately, one **code Minor** was deferred from the ENG-296 PR #79 review: `res
 
 ### Part A — `prompts/checks.md` (wording)
 
-1. **Pin the path (currently line 15).** Replace the soft `e.g.` with a firm requirement:
-   - The RED-first test **MUST** be written at `…/styre_checks/{{ident}}_ac<id>_test.<ext>` under the component's test root (Go/Rust keep their own package/module dir).
+1. **Pin the path (currently line 15).** Replace the soft `e.g.` with a firm requirement, **without dropping the existing "put the file where this component's test command discovers it" constraint (line 14)** — that constraint is load-bearing for RED-first replay:
+   - The RED-first test **MUST** live at `styre_checks/{{ident}}_ac<id>_test.<ext>` as a subdirectory **of the test root the component's test command already discovers** (Go/Rust keep their own package/module dir). The `styre_checks/` pin selects *where under the discovered root*, it does not override discoverability.
    - The `test_file` you declare in `checksAuthored` **MUST be the byte-identical path you wrote** — the same string, with no dropped or added path segment and no `./` prefix.
-2. **Redirect scratch out of tree (currently lines 32–36).** Do all repro/debug/scratch work **outside the worktree** (`$TMPDIR` or `/tmp`), never in-tree — so there is nothing to delete and nothing for the guard to catch.
+   - Keep this coupled to the existing RED-first self-check: the check must fail *because the criterion is unmet*, not because of a collection/import/discovery error — so a mis-placed (non-discovered) `styre_checks/` file is caught by the agent before commit.
+2. **Redirect scratch out of tree (currently lines 32–36).** Keep all repro/debug/scratch work **outside the worktree** (write it under `$TMPDIR`/`/tmp`, or simply don't create it), never in-tree — so there is nothing to delete and nothing for the guard to catch. Frame this as "scratch stays out of the worktree," **not** as a promise of an executable scratch sandbox: the agent's Bash is scoped to the profile's runner commands (`tool-allowlists.ts`), so it may not be able to *execute* an arbitrary repro interpreter anywhere — the redirect governs file *placement*, and the "fewer stray files" outcome is validated by the SMOKE signal, not enforced by the prompt.
 3. **Narrow `new_files`.** Redefine it as *only* genuine test infrastructure a check needs to run (a fixture / `conftest.py`) — **explicitly not** repros, debug scripts, or reproduction files. This removes the "declare-your-scratch" incentive. The commit-rejection sentence stays (it is the guard's real enforcement), but `new_files` is no longer framed as the place to park scratch.
 
 ### Part B — `prompts/implement.md` (wording)
 
 Apply A2 + A3 only:
-- Redirect scratch/repro/debug work to `$TMPDIR`/`/tmp`, firming the existing "keep it outside the repository."
-- Narrow `new_files` to genuine parts of the fix, explicitly excluding repros/debug/scratch.
+- Keep scratch/repro/debug work outside the worktree (`$TMPDIR`/`/tmp`, or don't create it), firming the existing "keep it outside the repository" (lines 20–23) — same "governs file placement, not an executable sandbox" framing as A2.
+- Narrow `new_files` (defined at lines 25–30) to genuine parts of the fix, explicitly excluding repros/debug/scratch.
+- Retain the literal substrings the assertion test depends on — `do not leave`, `new_files`, and the ` ```styre-sidecar ` block (`prompt-vars.test.ts:244`).
 - **No path-pinning clause** — implement has no canonical-path convention (`new_files` paths are wherever the fix legitimately lands).
 
 ### Part C — `src/dispatch/check-path.ts` (the Minor)
