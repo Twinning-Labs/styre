@@ -16,6 +16,7 @@ import {
   commitWorktree,
   ensureWorktree,
   pendingEntries,
+  sweepScratch,
   undoAttempt,
   worktreeHead,
 } from "./worktree.ts";
@@ -164,6 +165,19 @@ export async function runAgentDispatch(
     throw new Error(
       `dispatch ${did} transport failure (exit ${result.exitCode}, timedOut=${result.timedOut})`,
     );
+  }
+
+  // The worker's sanctioned throwaway drawer(s): delete every styre_scratch/ before judging/committing
+  // so scratch is never an offender and never survives into a later broad test run (ENG-300). Runs on
+  // the success path — which undoAttempt never touches — for both write and read-only dispatches.
+  const swept = sweepScratch(deps.worktreePath);
+  if (swept.length > 0) {
+    appendEvent(ctx.db, {
+      ticketId: ctx.ticket.id,
+      kind: "note",
+      reason: `scratch-swept:${spec.handlerKey}`,
+      payload: { swept },
+    });
   }
 
   const preHead = worktreeHead(deps.worktreePath);
