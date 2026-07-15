@@ -257,9 +257,17 @@ async function reauthorCheckWrong(
   const authored = parsed.value.checksAuthored.find((c) => c.ac_id === acId);
   if (!authored) return "rejected";
 
-  // 2) Identity: added file + the test name present in the committed content.
-  if (!new Set(addedFilesAt(reauthorSha, worktreePath)).has(authored.test_file)) return "rejected";
-  const content = fileContentAt(reauthorSha, authored.test_file, worktreePath);
+  // 2) Identity: resolve the real committed test path (ENG-296: trust what was written, not declared),
+  //    then require the test name present in that file. Unresolvable/name-absent stays fail-closed
+  //    ("rejected" is a designed disposition feeding the escalate counter — never a throw here).
+  const testPath = resolveAuthoredTestPath(
+    addedFilesAt(reauthorSha, worktreePath),
+    ctx.ticket.ident,
+    acId,
+    authored.test_file,
+  );
+  if (testPath === null) return "rejected";
+  const content = fileContentAt(reauthorSha, testPath, worktreePath);
   if (content === null || !content.includes(authored.test_name)) return "rejected";
 
   // 3) Clean-HEAD replay — the RED-first oracle. coarse == red installs; everything else rejects.
@@ -267,7 +275,7 @@ async function reauthorCheckWrong(
     repoPath,
     baselineSha,
     components: deps.profile.components,
-    testFile: authored.test_file,
+    testFile: testPath,
     testName: authored.test_name,
     content,
     timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
@@ -279,7 +287,7 @@ async function reauthorCheckWrong(
   const cls = await adjudicateOne(ctx, deps, {
     acCheckId: supersedeTargetId,
     acText: ac.text,
-    testPath: authored.test_file,
+    testPath: testPath,
     testName: authored.test_name,
     coarse: "red",
     rawOutput: "", // the replay trace is red-shaped; the prior/adjudicator judge absence vs assertion
@@ -289,11 +297,11 @@ async function reauthorCheckWrong(
   // 5) Install: supersede the old generation + insert the new active + red-first at the re-author sha.
   // (The replay above already resolved a component+framework for this same test_file — coarse would
   // have been "error" otherwise, rejecting before this point — but fail closed here too, no assertion.)
-  const installComp = impactedComponents(deps.profile.components, [authored.test_file])[0];
+  const installComp = impactedComponents(deps.profile.components, [testPath])[0];
   const installFw = installComp ? frameworkFor(installComp) : null;
   if (!installComp || !installFw) return "rejected";
   const sel = buildCheckSelector(installFw, {
-    testFile: authored.test_file,
+    testFile: testPath,
     testName: authored.test_name,
   }).runArgs;
   ctx.db.transaction(() => {
@@ -302,7 +310,7 @@ async function reauthorCheckWrong(
       ticketId: ctx.ticket.id,
       acId,
       selector: sel,
-      testPath: authored.test_file,
+      testPath: testPath,
       redFirstResult: "red",
     });
     classifyAcCheck(ctx.db, { acCheckId: row.id, redClass: cls });
