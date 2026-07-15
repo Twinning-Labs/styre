@@ -14,6 +14,12 @@ function basename(path: string): string {
   return parts[parts.length - 1] ?? path;
 }
 
+/** Normalize a path for comparison: backslashes → forward slashes, strip a leading `./`.
+ *  The single source of this rule — the commit scope guard imports it so guard and resolver agree. */
+export function normPath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
 /** True iff `path`'s basename is the canonical check filename for SOME acId in `acIds`. Matches any
  *  extension (single or multi-dot) by requiring the basename to start with `${base}.`. */
 export function isCanonicalCheckPath(
@@ -41,8 +47,8 @@ export function matchAuthoredTest(
 }
 
 /** The authoritative test path for `acId`: (a) the canonically-named committed file (divergence-proof
- *  override); else (b) the declared path if it was itself committed (backward-compat for non-canonical
- *  names, e.g. Go/Rust module files); else (c) `null` (uncovered). */
+ *  override); else (b) the declared path if it was itself committed — compared after `normPath` so a
+ *  `./`-prefixed or backslashed declaration still matches, returning git's added form; else (c) `null`. */
 export function resolveAuthoredTestPath(
   addedPaths: string[],
   ident: string,
@@ -51,6 +57,6 @@ export function resolveAuthoredTestPath(
 ): string | null {
   const canonical = matchAuthoredTest(addedPaths, ident, acId);
   if (canonical !== null) return canonical;
-  if (addedPaths.includes(declaredTestFile)) return declaredTestFile;
-  return null;
+  const target = normPath(declaredTestFile);
+  return addedPaths.find((p) => normPath(p) === target) ?? null;
 }
