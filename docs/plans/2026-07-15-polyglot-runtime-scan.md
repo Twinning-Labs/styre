@@ -14,7 +14,7 @@
 - **Never modify `src/setup/detect-runtime.ts`, `src/dispatch/profile.ts`, `src/dispatch/extract-schema.ts`, or `src/setup/merge.ts`.** This design touches only the new module, `src/setup/enrich.ts`, and `prompts/setup-enrich.md`.
 - **Every parser is fail-soft and pure** (`(content: string) => string[]`): any malformed input returns `[]`, never throws. IO lives only in `collect.ts`.
 - **Never assert `absent` from parsed deps.** The prompt frames the list as incomplete positive evidence only (absence ≠ missing capability).
-- **Lint is CI-enforced.** Run `bun run lint` before every commit. No non-null assertions (`!`), no `any`, use template literals. Write index accesses defensively (guard `undefined`).
+- **Lint + format are CI-enforced (Biome).** `biome check .` includes the formatter and exits non-zero on any reformat diff (100-col `lineWidth`). Before every commit run **`bunx biome check --write .`** (auto-formats + fixes) and then **`bun run lint`** to verify clean. The `bun run lint` step in each task assumes the `--write` pass already ran. No non-null assertions (`!`), no `any`, use template literals. Write index accesses defensively (guard `undefined`). Keep code lines ≤ 100 cols.
 - **Identifiers are lowercased where the ecosystem is case-insensitive** (npm, PyPI, composer, gems). Go module paths and JVM `group:artifact` coordinates are kept verbatim (case-sensitive).
 
 ---
@@ -112,7 +112,8 @@ Create `src/setup/runtime-deps/parse.ts`:
 ```ts
 /** Narrow an unknown to a plain object (not array). Used to walk parsed TOML/JSON safely. */
 export function rec(v: unknown): Record<string, unknown> | undefined {
-  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
+  return v as Record<string, unknown>;
 }
 
 /** Leading distribution name from a PEP 508 requirement string, lowercased; null if none. */
@@ -235,9 +236,13 @@ git commit -m "feat(setup): cargo + pyproject dependency-name parsers"
 Append to `test/setup/runtime-deps/parse.test.ts`:
 
 ```ts
-import { parseGemfile, parseGoMod, parseRequirementsTxt } from "../../../src/setup/runtime-deps/parse.ts";
+import {
+  parseGemfile,
+  parseGoMod,
+  parseRequirementsTxt,
+} from "../../../src/setup/runtime-deps/parse.ts";
 
-test("parseRequirementsTxt: skips directives/URLs, handles extras/markers/direct-ref", () => {
+test("parseRequirementsTxt: directives/URLs skipped; extras/markers/direct-ref/VCS-egg handled", () => {
   const txt = [
     "# comment",
     "-r base.txt",
@@ -248,8 +253,13 @@ test("parseRequirementsTxt: skips directives/URLs, handles extras/markers/direct
     "flask>=2.0 ; python_version<'3.9'",
     "requests",
     "pkg @ https://example.com/pkg.tar.gz",
+    "git+https://github.com/psf/requests.git", // no #egg → unnameable, dropped (no junk)
+    "-e git+https://github.com/foo/bar.git#egg=bar",
+    "git+https://github.com/django/django.git@stable/4.2.x#egg=Django",
   ].join("\n");
-  expect(parseRequirementsTxt(txt).sort()).toEqual(["flask", "pkg", "requests", "uvicorn"].sort());
+  expect(parseRequirementsTxt(txt).sort()).toEqual(
+    ["bar", "django", "flask", "pkg", "requests", "uvicorn"].sort(),
+  );
 });
 
 test("parseGoMod: block + single-line requires, // indirect stripped", () => {
@@ -293,10 +303,24 @@ Append to `src/setup/runtime-deps/parse.ts`:
 ```ts
 export function parseRequirementsTxt(content: string): string[] {
   const names = new Set<string>();
+  // A VCS/URL install is only nameable via its #egg=<name> fragment; otherwise skip it
+  // (never emit the URL scheme like "git" as a dependency name).
+  const addEgg = (line: string): void => {
+    const egg = line.match(/[#&]egg=([A-Za-z0-9][A-Za-z0-9._-]*)/);
+    if (egg?.[1]) names.add(egg[1].toLowerCase());
+  };
   for (const raw of content.split(/\r?\n/)) {
     const line = raw.replace(/\s+#.*$/, "").trim();
-    if (line === "" || line.startsWith("#") || line.startsWith("-")) continue;
-    if (/^(https?|git\+|file):/.test(line)) continue;
+    if (line === "" || line.startsWith("#")) continue;
+    // Options/includes (-r/-c/--hash) and editable installs (-e): only -e VCS with #egg names anything.
+    if (line.startsWith("-")) {
+      addEgg(line);
+      continue;
+    }
+    if (/^(https?:|git\+|hg\+|svn\+|bzr\+|file:)/.test(line)) {
+      addEgg(line);
+      continue;
+    }
     const head = (line.split("@")[0] ?? line).trim();
     const m = head.match(/^[A-Za-z0-9][A-Za-z0-9._-]*/);
     if (m) names.add(m[0].toLowerCase());
@@ -462,7 +486,11 @@ git commit -m "feat(setup): package.json + composer.json dependency parsers"
 Append to `test/setup/runtime-deps/parse.test.ts`:
 
 ```ts
-import { parseBuildGradle, parseGradleCatalog, parsePomXml } from "../../../src/setup/runtime-deps/parse.ts";
+import {
+  parseBuildGradle,
+  parseGradleCatalog,
+  parsePomXml,
+} from "../../../src/setup/runtime-deps/parse.ts";
 
 test("parsePomXml: <dependency> only — excludes <plugin> and <parent>", () => {
   const pom = `<project>
@@ -493,6 +521,23 @@ test("parseBuildGradle: single/double quotes, kotlin-dsl parens, multiple config
       "org.junit.jupiter:junit-jupiter",
       "org.slf4j:slf4j-api",
       "org.springframework:spring-web",
+    ].sort(),
+  );
+});
+
+test("parseBuildGradle: android build-type/flavor configs + ksp; accessor/project forms ignored", () => {
+  const gradle = [
+    'debugImplementation "com.squareup.leakcanary:leakcanary-android:2.12"',
+    'androidTestImplementation "androidx.test:runner:1.5.2"',
+    'ksp "com.google.dagger:dagger-compiler:2.48"',
+    "implementation project(':core')", // no string coordinate → ignored
+    "implementation(libs.spring.web)", // catalog accessor → ignored (coord comes from catalog)
+  ].join("\n");
+  expect(parseBuildGradle(gradle).sort()).toEqual(
+    [
+      "androidx.test:runner",
+      "com.google.dagger:dagger-compiler",
+      "com.squareup.leakcanary:leakcanary-android",
     ].sort(),
   );
 });
@@ -533,8 +578,12 @@ export function parsePomXml(content: string): string[] {
   return [...names];
 }
 
+// Matches string-coordinate dependency configs, including Android build-type/flavor variants
+// (debugImplementation, androidTestImplementation, releaseApi, …) and ksp/kapt. Map-notation
+// (`group: 'g', name: 'a'`) and version-catalog accessors (`libs.x`) are intentionally NOT matched
+// here — catalog coordinates are recovered by parseGradleCatalog from gradle/libs.versions.toml.
 const GRADLE_CONFIGS =
-  "implementation|api|compileOnly|runtimeOnly|testImplementation|testRuntimeOnly|testCompileOnly|annotationProcessor|kapt|classpath|developmentOnly";
+  "\\w*[Ii]mplementation|\\w*[Aa]pi|\\w*RuntimeOnly|\\w*CompileOnly|annotationProcessor|kapt|ksp|classpath|developmentOnly";
 
 export function parseBuildGradle(content: string): string[] {
   const names = new Set<string>();
@@ -581,7 +630,7 @@ export function parseGradleCatalog(content: string): string[] {
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `bun test test/setup/runtime-deps/parse.test.ts`
-Expected: PASS (13 tests total).
+Expected: PASS (14 tests total).
 
 - [ ] **Step 5: Lint**
 
@@ -616,7 +665,10 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { collectManifestDeps, renderManifestDeps } from "../../../src/setup/runtime-deps/collect.ts";
+import {
+  collectManifestDeps,
+  renderManifestDeps,
+} from "../../../src/setup/runtime-deps/collect.ts";
 
 function fixture(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "styre-rtdeps-"));
@@ -894,6 +946,18 @@ git commit -m "feat(setup): feed manifest dependency lists into enrichment promp
 ```
 
 ---
+
+## Known Limitations (accepted — the enrichment LLM backstops these)
+
+These manifest forms are not parsed; the names are recovered by the LLM reading the repo (the design's explicit fallback). Documented so they aren't mistaken for bugs during review:
+
+- **Split requirements** — `collect.ts` globs the exact basename `requirements.txt`; a `requirements/base.txt` / `requirements-dev.txt` layout (top-level file just does `-r requirements/base.txt`) yields a near-empty Python list. The `-r` include target is deliberately not followed.
+- **pyproject dynamic / non-core groups** — `[project] dynamic = ["dependencies"]` (deps in a referenced file), PDM/hatch env tables, and PEP 735 `[dependency-groups]` are not read. Runtime `[project].dependencies`, optional-deps, and all Poetry forms (incl. group tables) are.
+- **Gradle map-notation** — `implementation group: 'g', name: 'a'` (legacy) is not matched; string-coordinate and version-catalog forms are.
+- **Gemfile `gemspec` directive** — deps declared in a sibling `.gemspec` (rather than as `gem` lines) are not read.
+- **package.json `peer`/`optionalDependencies`** — excluded; only `dependencies` + `devDependencies` are read.
+
+None of these emit junk identifiers — they under-report, which is the safe direction for LLM context.
 
 ## Self-Review
 
