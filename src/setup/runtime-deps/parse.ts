@@ -88,3 +88,63 @@ export function parsePyproject(content: string): string[] {
     return [];
   }
 }
+
+export function parseRequirementsTxt(content: string): string[] {
+  const names = new Set<string>();
+  // A VCS/URL install is only nameable via its #egg=<name> fragment; otherwise skip it
+  // (never emit the URL scheme like "git" as a dependency name).
+  const addEgg = (line: string): void => {
+    const egg = line.match(/[#&]egg=([A-Za-z0-9][A-Za-z0-9._-]*)/);
+    if (egg?.[1]) names.add(egg[1].toLowerCase());
+  };
+  for (const raw of content.split(/\r?\n/)) {
+    const line = raw.replace(/\s+#.*$/, "").trim();
+    if (line === "" || line.startsWith("#")) continue;
+    // Options/includes (-r/-c/--hash) and editable installs (-e): only -e VCS with #egg names anything.
+    if (line.startsWith("-")) {
+      addEgg(line);
+      continue;
+    }
+    if (/^(https?:|git\+|hg\+|svn\+|bzr\+|file:)/.test(line)) {
+      addEgg(line);
+      continue;
+    }
+    const head = (line.split("@")[0] ?? line).trim();
+    const m = head.match(/^[A-Za-z0-9][A-Za-z0-9._-]*/);
+    if (m) names.add(m[0].toLowerCase());
+  }
+  return [...names];
+}
+
+export function parseGoMod(content: string): string[] {
+  const names = new Set<string>();
+  let inBlock = false;
+  for (const raw of content.split(/\r?\n/)) {
+    const line = raw.replace(/\/\/.*$/, "").trim();
+    if (line === "") continue;
+    if (inBlock) {
+      if (line.startsWith(")")) {
+        inBlock = false;
+        continue;
+      }
+      const path = line.split(/\s+/)[0];
+      if (path) names.add(path);
+    } else if (line.startsWith("require (")) {
+      inBlock = true;
+    } else if (line.startsWith("require ")) {
+      const path = line.slice("require ".length).trim().split(/\s+/)[0];
+      if (path) names.add(path);
+    }
+  }
+  return [...names];
+}
+
+export function parseGemfile(content: string): string[] {
+  const names = new Set<string>();
+  for (const raw of content.split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, "").trim();
+    const m = line.match(/^gem\s+['"]([^'"]+)['"]/);
+    if (m?.[1]) names.add(m[1].toLowerCase());
+  }
+  return [...names];
+}

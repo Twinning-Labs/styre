@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test";
-import { parseCargoToml, parsePyproject } from "../../../src/setup/runtime-deps/parse.ts";
+import {
+  parseCargoToml,
+  parseGemfile,
+  parseGoMod,
+  parsePyproject,
+  parseRequirementsTxt,
+} from "../../../src/setup/runtime-deps/parse.ts";
 
 test("parseCargoToml: normal, inline-table, sub-table, target, dev deps", () => {
   const toml = [
@@ -48,4 +54,52 @@ test("parsePyproject: PEP 621 deps with extras/markers, optional, poetry, groups
 
 test("parsePyproject: malformed → []", () => {
   expect(parsePyproject("[project\nbad")).toEqual([]);
+});
+
+test("parseRequirementsTxt: directives/URLs skipped; extras/markers/direct-ref/VCS-egg handled", () => {
+  const txt = [
+    "# comment",
+    "-r base.txt",
+    "-e .",
+    "--hash=sha256:abc",
+    "https://example.com/pkg.whl",
+    "uvicorn[standard]==0.20  # inline",
+    "flask>=2.0 ; python_version<'3.9'",
+    "requests",
+    "pkg @ https://example.com/pkg.tar.gz",
+    "git+https://github.com/psf/requests.git", // no #egg → unnameable, dropped (no junk)
+    "-e git+https://github.com/foo/bar.git#egg=bar",
+    "git+https://github.com/django/django.git@stable/4.2.x#egg=Django",
+  ].join("\n");
+  expect(parseRequirementsTxt(txt).sort()).toEqual(
+    ["bar", "django", "flask", "pkg", "requests", "uvicorn"].sort(),
+  );
+});
+
+test("parseGoMod: block + single-line requires, // indirect stripped", () => {
+  const mod = [
+    "module example.com/app",
+    "go 1.22",
+    "require github.com/jmoiron/sqlx v1.3.5",
+    "require (",
+    "\tgorm.io/gorm v1.25.0",
+    "\tgo.uber.org/zap v1.26.0 // indirect",
+    ")",
+  ].join("\n");
+  expect(parseGoMod(mod).sort()).toEqual(
+    ["github.com/jmoiron/sqlx", "go.uber.org/zap", "gorm.io/gorm"].sort(),
+  );
+});
+
+test("parseGemfile: gem lines only, comments ignored", () => {
+  const gf = [
+    "source 'https://rubygems.org'",
+    "gem 'rails', '~> 7.0'",
+    'gem "pg"',
+    "# gem 'commented'",
+    "group :test do",
+    "  gem 'rspec'",
+    "end",
+  ].join("\n");
+  expect(parseGemfile(gf).sort()).toEqual(["pg", "rails", "rspec"].sort());
 });
