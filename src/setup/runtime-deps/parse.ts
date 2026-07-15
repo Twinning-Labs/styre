@@ -1,5 +1,5 @@
 /** Narrow an unknown to a plain object (not array). Used to walk parsed TOML/JSON safely. */
-export function rec(v: unknown): Record<string, unknown> | undefined {
+function rec(v: unknown): Record<string, unknown> | undefined {
   if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
   return v as Record<string, unknown>;
 }
@@ -192,13 +192,14 @@ export function parsePomXml(content: string): string[] {
 const GRADLE_CONFIGS =
   "\\w*[Ii]mplementation|\\w*[Aa]pi|\\w*RuntimeOnly|\\w*CompileOnly|annotationProcessor|kapt|ksp|classpath|developmentOnly";
 
+const GRADLE_DEP_RE = new RegExp(
+  `(?:^|[^\\w.])(?:${GRADLE_CONFIGS})\\s*\\(?\\s*['"]([^'":\\s]+):([^'":\\s]+)(?::[^'"]*)?['"]`,
+  "g",
+);
+
 export function parseBuildGradle(content: string): string[] {
   const names = new Set<string>();
-  const re = new RegExp(
-    `(?:^|[^\\w.])(?:${GRADLE_CONFIGS})\\s*\\(?\\s*['"]([^'":\\s]+):([^'":\\s]+)(?::[^'"]*)?['"]`,
-    "g",
-  );
-  for (const m of content.matchAll(re)) {
+  for (const m of content.matchAll(GRADLE_DEP_RE)) {
     const g = m[1];
     const a = m[2];
     if (g && a) names.add(`${g}:${a}`);
