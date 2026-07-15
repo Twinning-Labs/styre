@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.8.2] - 2026-07-15
+
+### Bug Fixes
+- Reconcile checks:dispatch RED-first test path to the file actually written (ENG-296) (#79)
+- Harden checks/implement prompts + normalize resolver fallback (ENG-297) (#80)
+- Sweep a sanctioned styre_scratch/ drawer so scratch never blocks checks/implement (ENG-300) (#81)
+
 ## [0.8.1] - 2026-07-14
 
 ### Bug Fixes
