@@ -52,6 +52,7 @@ import { type AdjClass, ChecksClassifyOutputSchema } from "./adjudicate-schema.t
 import { ChecksArbitrateOutputSchema } from "./arbitrate-schema.ts";
 import { carryVerifiedVerdictForward } from "./carry-forward.ts";
 import { checkIntegrityViolations } from "./check-integrity.ts";
+import { resolveAuthoredTestPath } from "./check-path.ts";
 import {
   type CheckFramework,
   type CoarseResult,
@@ -64,7 +65,7 @@ import { checksFeedback } from "./checks-feedback.ts";
 import { runCheckForRed } from "./checks-run.ts";
 import { ChecksOutputSchema } from "./checks-schema.ts";
 import { classifyPrior } from "./classify-prior.ts";
-import { checksScope, docScope, implementScope, planScope } from "./commit-scope.ts";
+import { checksScopeFor, docScope, implementScope, planScope } from "./commit-scope.ts";
 import { classifyDisposition, reconcileScope } from "./completeness.ts";
 import { ComplexityGradeSchema } from "./complexity-schema.ts";
 import {
@@ -247,7 +248,7 @@ async function reauthorCheckWrong(
       handlerKey: "checks:dispatch",
       template: CHECKS_TEMPLATE,
       vars: checksVars(ctx.ticket, deps.profile, [{ id: ac.id, text: ac.text }], ""),
-      commitScope: checksScope,
+      commitScope: checksScopeFor(ctx.ticket.ident, [ac.id]),
       postcondition: () => {},
     },
   );
@@ -256,9 +257,17 @@ async function reauthorCheckWrong(
   const authored = parsed.value.checksAuthored.find((c) => c.ac_id === acId);
   if (!authored) return "rejected";
 
-  // 2) Identity: added file + the test name present in the committed content.
-  if (!new Set(addedFilesAt(reauthorSha, worktreePath)).has(authored.test_file)) return "rejected";
-  const content = fileContentAt(reauthorSha, authored.test_file, worktreePath);
+  // 2) Identity: resolve the real committed test path (ENG-296: trust what was written, not declared),
+  //    then require the test name present in that file. Unresolvable/name-absent stays fail-closed
+  //    ("rejected" is a designed disposition feeding the escalate counter — never a throw here).
+  const testPath = resolveAuthoredTestPath(
+    addedFilesAt(reauthorSha, worktreePath),
+    ctx.ticket.ident,
+    acId,
+    authored.test_file,
+  );
+  if (testPath === null) return "rejected";
+  const content = fileContentAt(reauthorSha, testPath, worktreePath);
   if (content === null || !content.includes(authored.test_name)) return "rejected";
 
   // 3) Clean-HEAD replay — the RED-first oracle. coarse == red installs; everything else rejects.
@@ -266,7 +275,7 @@ async function reauthorCheckWrong(
     repoPath,
     baselineSha,
     components: deps.profile.components,
-    testFile: authored.test_file,
+    testFile: testPath,
     testName: authored.test_name,
     content,
     timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
@@ -278,7 +287,7 @@ async function reauthorCheckWrong(
   const cls = await adjudicateOne(ctx, deps, {
     acCheckId: supersedeTargetId,
     acText: ac.text,
-    testPath: authored.test_file,
+    testPath: testPath,
     testName: authored.test_name,
     coarse: "red",
     rawOutput: "", // the replay trace is red-shaped; the prior/adjudicator judge absence vs assertion
@@ -288,11 +297,11 @@ async function reauthorCheckWrong(
   // 5) Install: supersede the old generation + insert the new active + red-first at the re-author sha.
   // (The replay above already resolved a component+framework for this same test_file — coarse would
   // have been "error" otherwise, rejecting before this point — but fail closed here too, no assertion.)
-  const installComp = impactedComponents(deps.profile.components, [authored.test_file])[0];
+  const installComp = impactedComponents(deps.profile.components, [testPath])[0];
   const installFw = installComp ? frameworkFor(installComp) : null;
   if (!installComp || !installFw) return "rejected";
   const sel = buildCheckSelector(installFw, {
-    testFile: authored.test_file,
+    testFile: testPath,
     testName: authored.test_name,
   }).runArgs;
   ctx.db.transaction(() => {
@@ -301,7 +310,7 @@ async function reauthorCheckWrong(
       ticketId: ctx.ticket.id,
       acId,
       selector: sel,
-      testPath: authored.test_file,
+      testPath: testPath,
       redFirstResult: "red",
     });
     classifyAcCheck(ctx.db, { acCheckId: row.id, redClass: cls });
@@ -563,7 +572,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       template: CHECKS_TEMPLATE,
       vars: checksVars(ctx.ticket, deps.profile, acs, checksFeedback(ctx.db, ctx.ticket.id)),
       runnerCommands: realRunnerCommands(deps.profile.components),
-      commitScope: checksScope,
+      commitScope: checksScopeFor(ctx.ticket.ident, [...acIds]),
       // Identity + coverage are verified below against the committed diff, not on the raw diff here.
       postcondition: () => {},
     });
@@ -575,7 +584,9 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         throw new Error(`checks:dispatch sidecar ${parsed.reason}: ${parsed.detail}`);
       }
 
-      const added = new Set(addedFilesAt(sha, worktreePath));
+      const addedArr = addedFilesAt(sha, worktreePath);
+      const ident = ctx.ticket.ident;
+      const missReason = new Map<number, string>(); // ac.id → why it was uncovered (specific retry msg)
       const components = deps.profile.components;
       const run = deps.runCheckCommand;
 
@@ -594,15 +605,30 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
 
       for (const c of parsed.value.checksAuthored) {
         if (!acIds.has(c.ac_id)) continue; // unknown AC id → reject (decision 5)
-        if (!added.has(c.test_file)) continue; // not git-status A → reject (§5.1 added-only)
-        const content = fileContentAt(sha, c.test_file, worktreePath);
-        if (content === null || !content.includes(c.test_name)) continue; // name absent → reject
+        // ENG-296: trust the file actually committed (canonical basename), not the declared path;
+        // fall back to the declared path when it was itself committed (non-canonical-but-correct).
+        const testPath = resolveAuthoredTestPath(addedArr, ident, c.ac_id, c.test_file);
+        if (testPath === null) {
+          missReason.set(
+            c.ac_id,
+            `no check test named \`${ident}_ac${c.ac_id}_test.*\` was committed, and your declared test_file \`${c.test_file}\` wasn't created either — save the RED-first test with exactly that filename`,
+          );
+          continue;
+        }
+        const content = fileContentAt(sha, testPath, worktreePath);
+        if (content === null || !content.includes(c.test_name)) {
+          missReason.set(
+            c.ac_id,
+            `\`${testPath}\` does not contain a test named \`${c.test_name}\``,
+          );
+          continue; // name absent → reject
+        }
 
-        const comp = impactedComponents(components, [c.test_file])[0]; // decision 2
+        const comp = impactedComponents(components, [testPath])[0]; // decision 2
         const fw = comp ? frameworkFor(comp) : null;
 
         let coarse: CoarseResult;
-        let selector = c.test_file; // NOT-NULL fallback when no framework (decision 2)
+        let selector = testPath; // NOT-NULL fallback when no framework (decision 2)
         let rawOutput = "";
         let exitCode: number | null = null;
         let command: string | null = null;
@@ -621,7 +647,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           if (fw === "pytest" && interp === undefined) {
             coarse = "error"; // no interpreter → can't attempt
           } else {
-            const sel = buildCheckSelector(fw, { testFile: c.test_file, testName: c.test_name });
+            const sel = buildCheckSelector(fw, { testFile: testPath, testName: c.test_name });
             selector = sel.runArgs;
             const res = await runCheckForRed({
               framework: fw,
@@ -634,14 +660,17 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
             rawOutput = res.rawOutput;
             exitCode = res.exitCode;
             command = res.command;
-            if (res.coarse === "selected-none") continue; // selects 0 → identity reject (§5.1)
+            if (res.coarse === "selected-none") {
+              missReason.set(c.ac_id, `the selector for \`${testPath}\` matched no test`);
+              continue; // selects 0 → identity reject (§5.1)
+            }
             coarse = res.coarse;
           }
         }
         records.push({
           acId: c.ac_id,
           selector,
-          testPath: c.test_file,
+          testPath: testPath,
           coarse,
           rawOutput,
           exitCode,
@@ -652,11 +681,15 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       }
 
       // Postcondition (§8): ≥1 identity-verified check per AC, else fail (bounded retry / escalate).
+      // ENG-296: name the specific reason per uncovered AC so the retry-prefix informs the re-dispatch.
       const uncovered = acs.filter((a) => !covered.has(a.id));
       if (uncovered.length > 0) {
-        throw new Error(
-          `checks:dispatch postcondition: no valid check for AC seq ${uncovered.map((a) => a.seq).join(", ")}`,
-        );
+        const detail = uncovered
+          .map(
+            (a) => `AC ${a.seq}: ${missReason.get(a.id) ?? "no valid check authored for this AC"}`,
+          )
+          .join("; ");
+        throw new Error(`checks:dispatch postcondition: ${detail}`);
       }
 
       // Persist (§9): delete-then-insert in ONE transaction (resume-dedup, decision 1) + the signal row

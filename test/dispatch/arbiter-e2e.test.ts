@@ -467,6 +467,118 @@ test("checks:reauthor: a re-author that GREENS at the baseline replay is rejecte
   expect(dispositions).toEqual([{ acId: ac.id, acCheckId: oldCheck.id, disposition: "rejected" }]);
 });
 
+test("checks:reauthor (ENG-296): a re-author that WRITES the canonical file under a divergent directory while DECLARING a flat, never-written path installs against the real committed path — not rejected", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const { root: repo, initSha } = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET ident = ? WHERE id = ?").run("ENG-1", ticketId);
+
+  const ac = insertAc(db, { ticketId, seq: 1, text: "persists a pref", source: "checklist" });
+  const oldCheck = insertAcCheck(db, {
+    ticketId,
+    acId: ac.id,
+    selector: "checks/old_test.py::test_old",
+    testPath: "checks/old_test.py",
+    redFirstResult: "red",
+  });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-red-first",
+    result: "fail",
+    branchHeadSha: initSha, // §5.2: the frozen clean-HEAD baseline
+    detail: {
+      rawOutput: "",
+      exitCode: 1,
+      framework: "pytest",
+      command: null,
+      acCheckId: oldCheck.id,
+    },
+  });
+
+  const roundSha = "ROUND-SHA-1";
+  appendEvent(db, {
+    ticketId,
+    kind: "loopback",
+    loop: "reauthor",
+    routeTo: "checks:reauthor",
+    signature: `arbiter:${ac.id}`,
+    payload: { acIds: [ac.id], sha: roundSha },
+  });
+
+  const declaredFlatPath = "tests/ENG-1_ac1_test.py"; // declared — NEVER actually written/committed
+  const realCanonicalPath = "tests/styre_checks/ENG-1_ac1_test.py"; // written — the divergence
+
+  const runner = new FakeAgentRunner((input) => {
+    if (isClassifyPrompt(input.prompt)) {
+      return classifyResponse("assertion", "real behavioral assert")(input);
+    }
+    // The re-author agent writes the canonical file under a divergent directory but declares a flat,
+    // different path — the exact write-vs-declare divergence ENG-296 resolves structurally.
+    const dir = join(input.cwd, "tests", "styre_checks");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "ENG-1_ac1_test.py"), "def test_re():\n    assert False\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: `\`\`\`styre-sidecar\n${JSON.stringify({
+        checksAuthored: [{ ac_id: ac.id, test_file: declaredFlatPath, test_name: "test_re" }],
+      })}\n\`\`\``,
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+
+  // RED at the baseline replay (pytest exit 1) — the RED-first oracle installs.
+  const registry = registryWith(repo, runner, async () => ({
+    exitCode: 1,
+    stdout: "1 failed",
+    stderr: "",
+    timedOut: false,
+  }));
+
+  const handler = registry.resolve("checks:reauthor");
+  if (!handler) throw new Error("checks:reauthor handler not registered");
+  await runStep(db, {
+    ticketId,
+    stepKey: "checks:reauthor",
+    stepType: "dispatch",
+    effectful: true,
+    execute: (step) =>
+      handler({
+        db,
+        ticket: {
+          id: ticketId,
+          ident: "ENG-1",
+          title: null,
+          project_id: projectId,
+          stage: "implement",
+        } as never,
+        step,
+        workUnitId: null,
+        config: undefined as never,
+      }),
+  });
+
+  const allChecks = listAcCheckRows(db, ticketId);
+  const oldRow = allChecks.find((c) => c.id === oldCheck.id);
+  const active = listActiveAcChecks(db, ticketId);
+  const dispositions = latestReauthorAtSha(db, ticketId, roundSha);
+  db.close();
+
+  // Installed — not rejected — despite the divergence: the fail-closed contract only trips on a
+  // genuinely-unresolvable path, and this one resolves via the canonical committed basename.
+  expect(oldRow?.superseded_at).not.toBeNull();
+  expect(active.length).toBe(1);
+  expect(active[0]?.id).not.toBe(oldCheck.id);
+  expect(active[0]?.red_class).toBe("assertion");
+  // The installed row's test_path is the REAL committed path, never the declared flat path.
+  expect(active[0]?.test_path).toBe(realCanonicalPath);
+  expect(dispositions).toEqual([{ acId: ac.id, acCheckId: oldCheck.id, disposition: "installed" }]);
+});
+
 // ─── Task 8: the whole arbiter loop, driven through the REAL resolver/registry (gate → arbitrate →
 // reauthor across multiple advanceOneStep calls, exactly as the daemon would run it) ───────────────
 

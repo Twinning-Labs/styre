@@ -526,3 +526,127 @@ test("checks:dispatch scoped re-author is insert-only (deleteActiveByAc): a cras
   expect(ac2AfterResume?.id).toBe(ac2Round1?.id);
   expect(ac2AfterResume?.test_path).toBe(ac2Round1?.test_path);
 });
+
+test("checks:dispatch reconciles a divergent path: written under styre_checks/, declared flat → ac_check.test_path is the REAL written path", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET description = ? WHERE id = ?").run(
+    "- [ ] bug no longer reproduces\n",
+    ticketId,
+  );
+  await markDesignDone(db, ticketId);
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
+  setTicketTrack(db, ticketId, "fast");
+
+  const ident = (
+    db.query("SELECT ident FROM ticket WHERE id = ?").get(ticketId) as { ident: string }
+  ).ident;
+  // ENG-296 discrepancy from the brief: deriveAndPersistAcs runs INSIDE the checks:dispatch handler
+  // (not before), so the acceptance_criterion row doesn't exist yet at this point in the test — query
+  // acId lazily inside the FakeAgentRunner callback, which only runs once the handler has dispatched.
+  const runner = new FakeAgentRunner((input) => {
+    const acId = (
+      db
+        .query("SELECT id FROM acceptance_criterion WHERE ticket_id = ? ORDER BY seq LIMIT 1")
+        .get(ticketId) as {
+        id: number;
+      }
+    ).id;
+    const dir = join(input.cwd, "tests", "styre_checks");
+    mkdirSync(dir, { recursive: true });
+    // WROTE the canonical name under styre_checks/, but DECLARE a flat, different path.
+    writeFileSync(join(dir, `${ident}_ac${acId}_test.py`), "def test_bug():\n    assert False\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: `\`\`\`styre-sidecar\n{"checksAuthored":[{"ac_id":${acId},"test_file":"tests/${ident}_ac${acId}_test.py","test_name":"test_bug"}]}\n\`\`\``,
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+    }),
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
+    runCheckCommand: async () => ({ exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false }),
+  });
+
+  // Drive until checks:dispatch resolves (correct arg order: db, ticketId, registry). Stop on its
+  // status so we don't over-advance into checks:classify/implement.
+  for (let i = 0; i < 12; i++) {
+    await advanceOneStep(db, ticketId, registry);
+    if (getByKey(db, ticketId, "checks:dispatch")?.status === "succeeded") break;
+  }
+
+  const checks = listAcChecks(db, ticketId);
+  expect(checks.length).toBe(1);
+  expect(checks[0]?.test_path).toBe(`tests/styre_checks/${ident}_ac${checks[0]?.ac_id}_test.py`); // REAL written path, not declared
+});
+
+test("checks:dispatch backward-compat: non-canonical name declared correctly still works (no regression)", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET description = ? WHERE id = ?").run(
+    "- [ ] bug no longer reproduces\n",
+    ticketId,
+  );
+  await markDesignDone(db, ticketId);
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
+  setTicketTrack(db, ticketId, "fast");
+
+  // ENG-296 discrepancy from the brief: same as the divergence test above — deriveAndPersistAcs runs
+  // inside the checks:dispatch handler, so query acId lazily inside the runner callback.
+  const runner = new FakeAgentRunner((input) => {
+    const acId = (
+      db
+        .query("SELECT id FROM acceptance_criterion WHERE ticket_id = ? ORDER BY seq LIMIT 1")
+        .get(ticketId) as {
+        id: number;
+      }
+    ).id;
+    const dir = join(input.cwd, "tests");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "regression_x.py"), "def test_x():\n    assert False\n"); // NON-canonical name
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: `\`\`\`styre-sidecar\n{"checksAuthored":[{"ac_id":${acId},"test_file":"tests/regression_x.py","test_name":"test_x"}]}\n\`\`\``,
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+    }),
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
+    runCheckCommand: async () => ({ exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false }),
+  });
+  for (let i = 0; i < 12; i++) {
+    await advanceOneStep(db, ticketId, registry);
+    if (getByKey(db, ticketId, "checks:dispatch")?.status === "succeeded") break;
+  }
+
+  const checks = listAcChecks(db, ticketId);
+  expect(checks.length).toBe(1);
+  expect(checks[0]?.test_path).toBe("tests/regression_x.py"); // fallback (b): declared path honored
+});
