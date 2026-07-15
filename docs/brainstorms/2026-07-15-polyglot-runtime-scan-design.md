@@ -1,181 +1,196 @@
-# Per-language runtime-context scan
+# Manifest dependency lists as enrichment context
 
 **Date:** 2026-07-15
-**Status:** Design approved; plan next
+**Status:** Design approved (v2, post independent review); plan next
 **Branch:** `feat/polyglot-runtime-scan`
+
+> **v2 note.** The original design (a per-language *deterministic* runtime scan with curated
+> dep→dimension tables) was rejected by an independent adversarial review panel. This document
+> now specifies the approach that survived. The rejected approach and *why* it was rejected are
+> preserved at the end ("Superseded approach") so the decision trail stays legible.
 
 ## Problem
 
-`detectRuntimeContext` (`src/setup/detect-runtime.ts`) is Node-biased by construction.
-Its primary input is `readPkgDeps`, which reads **only** `package.json`, and nearly every
-capability signal (`data` / `caching` / `observability` / `configSecrets`, plus the
-dep-derived slice of `releasePackaging`) is an npm-package-name lookup against that dep map
-(`has(deps, [...])`). Non-Node stacks get only a handful of language-agnostic file-marker
-checks (`alembic.ini`, `Cargo.toml`, Tauri config, generic `migrations/` dirs, `mkdocs.yml`,
-`docs/`) and otherwise fall through to `unknown`.
+`detectRuntimeContext` (`src/setup/detect-runtime.ts`) is Node-biased by construction. Its only
+input is `readPkgDeps`, which reads **only** `package.json`; every capability signal
+(`data`/`caching`/`observability`/`configSecrets`) is an npm-package-name lookup against that
+map. Non-Node stacks get only a few file-marker checks and otherwise fall through to `unknown`.
 
 Styre has first-class **component** detectors for 7 languages (Rust, Node, Python, Go,
 JVM-Maven/Gradle, Ruby, PHP), but the **runtime-context** scan only understands one of them.
 
-## Why it still (mostly) works today, and what the scan is actually for
+## What the runtime scan is actually for (verified against code)
 
-The runtime scan is **not** control-flow. Its output (`profile.runtimeContext`) does exactly
-two things downstream:
+The runtime scan is **not** control-flow. `profile.runtimeContext` is read in exactly these
+places:
 
-1. **Seeds prose context** into the design/extract agent prompts, via `runtimeVars`
-   (`src/dispatch/prompt-vars.ts`) → `runtime_*` template vars.
-2. **Drives a coverage gate**: `validateCdotImpact` (`src/dispatch/extract-schema.ts`)
-   requires the extract agent to write `cdotImpact.<section>.analysis` for any of
-   `data / caching / observability / configSecrets / documentation` whose `presence` is
-   `present` **or** `unknown`. (`releasePackaging` and `topology` are not gated.)
+1. `runtimeVars` (`src/dispatch/prompt-vars.ts:38`) → `runtime_*` prompt prose for design/extract.
+2. `validateCdotImpact` (`src/dispatch/extract-schema.ts:60`) → coverage gate. It forces the
+   extract agent to write `cdotImpact.<section>.analysis` for any of
+   `data/caching/observability/configSecrets/documentation` whose `presence` is `present`
+   **or** `unknown`. Only `absent` relaxes the gate.
+3. `unknownRuntimeSections` (`src/cli/setup.ts:26`) → the operator NEEDS-INPUT nudge (reads the
+   presences, `topology.type`, and `releasePackaging.mechanism`).
+4. `enrichVars` (`src/setup/enrich.ts:25`) → seeds the mandatory enrichment LLM prompt.
 
-Because the gate treats `present` and `unknown` identically, a *missed* dimension degrades
-to "unknown → agent still forced to look", not silent omission. And the deterministic scan
-**never emits `absent`** — `flag()` returns only `present` or `unknown`. Finally, a mandatory
-LLM **enrichment** pass (`src/setup/enrich.ts`) reads the actual repo and fills every
-dimension the scan left `unknown` (merge rule in `mergeScanAndEnrichment`: scan wins unless
-scan is `unknown`, then the agent proposal is used).
+Two facts drive this design:
 
-**Consequence:** the Node bias is already partially compensated by enrichment. So the goal of
-this work is **not** correctness — it is to provide **deterministic ground-truth flags the
-enrichment LLM cannot override** for the other 6 languages, reducing reliance on a
-nondeterministic, cost-bearing, failure-prone LLM pass for facts we can read straight from a
-manifest.
+- **`present` and `unknown` are treated identically by the only gate.** The deterministic scan
+  can never emit `absent` (`flag()`, `detect-runtime.ts:24`). So a *missed* dimension degrades to
+  "unknown → agent still forced to look", never a silent omission.
+- **There is already a mandatory, language-agnostic LLM backstop.** `enrich.ts` runs on every
+  setup, is given Read/Grep/Glob over the repo, and fills every dimension the scan left
+  `unknown` (`mergeScanAndEnrichment`, `merge.ts:43`: scan wins unless `unknown`, then the agent
+  proposal is used).
 
-## Decisions (locked during brainstorming)
+**Consequence:** the enrichment LLM already resolves non-Node repos. The residual gap is narrow:
+the LLM occasionally **false-`absent`s** a capability that is genuinely present, because it had
+to *discover* dependencies by globbing the repo rather than being handed them. That single
+failure — a false-absent on a gated dimension for a non-Node language — is the only thing worth
+closing, and it is closed by giving the LLM better input, not by second-guessing it
+deterministically.
 
-| Decision | Choice |
-| --- | --- |
-| **Goal** | Deterministic ground truth (LLM-unoverridable flags), not cheaper setup or richer prompts per se |
-| **Language scope** | All 7 component-supported languages: Node (existing) + Rust, Python, Go, JVM, Ruby, PHP |
-| **Architecture** | Split mechanism / knowledge / orchestration (Approach C) |
-| **Dimension scope** | Dep-table tri-state dims (`data`, `caching`, `observability`, `configSecrets`) for all 7 langs, **plus** deterministic `releasePackaging.mechanism` from manifest type. `topology` and `documentation` left as-is. |
+## Decision
 
-Approaches considered and rejected:
-- **A — parallel per-language registry** (mirror the `LangDef` component registry with a
-  `RuntimeSignalDef` per language). Consistent with the existing pattern, but adds a second
-  language list to keep in sync with the component registry.
-- **B — fold runtime signals into the component detectors.** One manifest walk, but couples
-  command-detection and capability-sensing into one unit, bloats `ComponentDraft`, and forces
-  repo-level signals into a per-manifest shape. Rejected.
+**Feed the raw manifest dependency lists into the existing enrichment prompt as context.** Parse
+each manifest for its dependency *names only* (no curated dimension tables, no identifier-form
+normalization, no presence classification) and hand that list to the enrichment agent as
+additional context. The LLM then matches dependencies to capability dimensions semantically —
+which is exactly what suppresses false-absent.
 
-## Invariants to preserve (load-bearing)
+This was chosen over a deterministic per-language scan (the original v1 design) because
+determinism buys almost nothing here (the gate treats `present`==`unknown`; the LLM overwrites
+prompt `detail` anyway) while a *wrong* deterministic `present` is unrecoverable (it beats the
+LLM via `merge.ts:43`, beats an operator hand-edit on re-probe via `mergeTri`, and destroys the
+gate's only `absent` relief valve). See "Superseded approach".
 
-- **Never guess `absent`.** Keep `flag()` present/unknown-only semantics. An unrecognized dep
-  might be a library the tables don't know yet; leaving it `unknown` keeps enrichment as the
-  backstop. Only a false-`absent` would be genuinely lossy — so we never emit it.
-- **No schema change.** `TriStateSchema` / `DataStateSchema` / `RuntimeContext` in
-  `src/dispatch/profile.ts` are unchanged. We fill existing fields better; we do not add
-  fields. (Avoids the dual-`schema.sql` edit requirement entirely — no SQL touched.)
-- **No downstream pipeline change.** `enrich.ts`, `mergeScanAndEnrichment`, and
-  `validateCdotImpact` are untouched. The scan simply returns more `present` values, which win
-  over LLM proposals via the existing merge precedence.
-- **Runtime scan does not depend on component-detection internals.** It does its own manifest
-  walk (reusing the shared `findManifests` helper), so the two subsystems stay decoupled.
+### What this design explicitly does NOT do
 
-## Architecture (Approach C: mechanism / knowledge / orchestration)
+- **No curated dep→dimension tables** (no rot, no per-ecosystem maintenance surface).
+- **No `releasePackaging.mechanism` inference** (dropped per decision — near-zero value at any
+  consumer, and manifest-type inference produces outright-wrong labels: e.g. `Gemfile`→`gem` for
+  every Rails app, `pyproject [build-system]`→`pypi` for every PEP-518 app).
+- **No change to `detectRuntimeContext`.** The existing Node deterministic scan stays exactly as
+  is. This design is **purely additive**: a new context input to the enrichment prompt.
+- **No schema change, no gate change, no merge-precedence change.** The dependency list is
+  ephemeral prompt input; it is not persisted as a `runtimeContext` field.
 
-New directory `src/setup/runtime/`, replacing the monolithic `detect-runtime.ts`.
+## Invariants preserved
 
-### 1. `deps/` — mechanical dep parsers (one per manifest format)
+- **Never assert `absent` from parsed deps.** The dep list is framed to the LLM as *incomplete
+  evidence*: presence of a library is a signal; **absence from the list is NOT evidence a
+  capability is missing** (the parser may not cover that manifest form). This keeps the
+  enrichment prompt's existing "if unsure, leave `unknown`, never guess" discipline intact.
+- **No new unrecoverable state.** Because nothing here emits a deterministic `present`, there is
+  no false-`present` that the LLM or operator cannot override. The list only *informs* the LLM,
+  which remains free to disagree with it.
 
-Each parser is fail-soft (parse error → empty set, matching `readPkgDeps`) and adds **no new
-heavy dependencies** — it uses regex/section parsing consistent with the existing code
-(`rust.ts`/`python.ts` already regex TOML; `php.ts` uses `JSON.parse`).
+## Architecture
 
-| Parser | Reads | Extracts |
+New directory `src/setup/runtime-deps/` (additive; `detect-runtime.ts` untouched).
+
+### 1. `deps/` — dependency-name parsers (names only, fail-soft)
+
+Each parser returns a list of raw dependency identifiers for one manifest format; on any parse
+error it returns `[]` (matching `readPkgDeps`'s fail-soft style). Because the **LLM** consumes
+these (not an exact-string table match), the correctness bar is low: a junk identifier is cheap
+(the model ignores it) and a missed one falls back to today's behavior (the model globs the
+repo). This is the key simplification the pivot unlocks.
+
+| Parser | Reads | How |
 | --- | --- | --- |
-| `node` | `package.json` | reuse existing `readPkgDeps` (`dependencies` + `devDependencies`) |
-| `cargo` | `Cargo.toml` | `[dependencies]` / `[dev-dependencies]` / `[build-dependencies]` keys |
-| `python` | `pyproject.toml`, `requirements.txt` | `[project].dependencies` + `[project.optional-dependencies]` + `[tool.poetry.dependencies]`; requirements lines with version specifiers stripped |
-| `go` | `go.mod` | `require (...)` block + single-line `require`s (module paths) |
+| `node` | `package.json` | keys of `dependencies` + `devDependencies` (reuse `readPkgDeps`) |
+| `cargo` | `Cargo.toml` | **`Bun.TOML.parse`**, keys of `[dependencies]`/`[dev-dependencies]`/`[build-dependencies]` |
+| `python` | `pyproject.toml`, `requirements.txt` | **`Bun.TOML.parse`** for `[project].dependencies` (PEP 508 → leading name token) + `[tool.poetry.dependencies]` keys (filter `python`); requirements.txt: skip `-`/URL/`@` lines, take leading `[A-Za-z0-9._-]+` token |
+| `go` | `go.mod` | `require` block + single-line requires (module paths) |
 | `ruby` | `Gemfile` | `gem "…"` lines |
-| `php` | `composer.json` | `require` / `require-dev` keys |
-| `jvm` | `pom.xml`, `build.gradle[.kts]` | pom `<groupId>`/`<artifactId>`; gradle `implementation "g:a:v"` lines |
+| `php` | `composer.json` | `JSON.parse`, keys of `require`/`require-dev` |
+| `jvm` | `pom.xml`, `build.gradle[.kts]`, `gradle/libs.versions.toml` | pom: slice `<dependencies>` then per-`<dependency>` `groupId:artifactId`; gradle: `implementation`/`api` coordinate lines; `libs.versions.toml` via `Bun.TOML.parse` |
 
-A `parseManifestDeps(path)` dispatcher, keyed by filename, returns a **normalized
-dep-identifier set**.
+**Use `Bun.TOML.parse` (Bun 1.3.5, built-in, zero-dep) for all TOML** — do NOT hand-roll TOML
+regex. (The v1 design wrongly cited `rust.ts`/`python.ts` as precedent for regex-parsing dep
+tables; they only parse a single scalar / test section presence.)
 
-> **Correctness trap — identifier form differs per ecosystem.** npm name (`prisma`) vs. crate
-> name (`diesel`) vs. go module path (`gorm.io/gorm`) vs. maven coordinate
-> (`org.hibernate:hibernate-core`) vs. composer vendor/package (`doctrine/orm`). The signal
-> tables MUST store the same form the corresponding parser emits. This is documented per
-> language and covered by parser tests.
+A `parseManifestDeps(path)` dispatcher keyed by filename returns the name list. Parser fidelity
+is best-effort: cover the common forms, don't chase every edge case — the LLM backstops misses.
 
-### 2. `tables.ts` — the curated knowledge (data-driven)
+### 2. `collectManifestDeps(repoDir)` — orchestrator
 
-The existing Node tables move here alongside the new ones. Shape:
+`findManifests` (reuse `src/setup/manifests.ts`, already skips vendored dirs, depth ≤ 3) → parse
+each → return a per-language-labeled, deduped map, e.g.
+`{ python: ["sqlalchemy", "alembic", …], node: ["prisma", …] }`. Deduplicate across manifests;
+cap total size to bound prompt growth on large monorepos (see Risks).
 
-```ts
-SIGNAL_TABLES: { [dimension]: { [language]: string[] } }
-```
+### 3. Enrichment-prompt integration (the only touched pipeline surface)
 
-Illustrative (not exhaustive) entries:
+- `enrichVars` (`src/setup/enrich.ts:25`) gains one field carrying the rendered dependency list.
+- `prompts/setup-enrich.md` gains a section that presents the list with explicit framing:
+  *"Dependencies found in the repo's manifests (may be incomplete). Use them to inform your
+  capability assessment. A capability's libraries appearing here is positive evidence; their
+  **absence from this list is not evidence the capability is missing** — investigate the repo as
+  usual and leave `unknown` if you cannot tell."*
 
-- `data.python = ["sqlalchemy", "django", "alembic", "psycopg2", "asyncpg", "peewee", "tortoise-orm"]`
-- `data.go = ["gorm.io/gorm", "github.com/jmoiron/sqlx", "entgo.io/ent"]`
-- `data.rust = ["diesel", "sqlx", "sea-orm"]`
-- `data.ruby = ["activerecord", "sequel"]`
-- `data.php = ["doctrine/orm", "illuminate/database"]`
-- `data.jvm = ["org.hibernate:*", "org.springframework.data:*"]`
-- `observability.go = ["go.uber.org/zap", "github.com/sirupsen/logrus", "go.opentelemetry.io/otel"]`
-
-Matching is exact by default, with **prefix/glob** support for JVM group wildcards
-(`org.springframework.data:*`). This one file is the real maintenance surface; extending to an
-8th language later is a table edit, not a new module.
-
-### 3. `markers.ts`, `release.ts`, and the orchestrator
-
-- **`markers.ts`** — generalize the language-agnostic file-marker checks beyond Node:
-  migration dirs per ecosystem (`prisma/migrations`, alembic `versions/`, rails `db/migrate`,
-  django/go `migrations/`), `.env.example`, docs markers, `mkdocs.yml`. (These largely exist
-  already; this broadens them.)
-- **`release.ts`** — `releasePackaging.mechanism` precedence:
-  1. explicit release config first — `semantic-release` (dep/`.releaserc`), Tauri → `installer`;
-  2. else, if **exactly one** language manifest type is present, infer from it: `Cargo.toml`→`cargo`,
-     `go.mod`→`go-module`, `Gemfile`→`gem`, `composer.json`→`composer`, `pom.xml`→`maven`,
-     `pyproject.toml` with a `[build-system]` → `pypi`;
-  3. else (polyglot / ambiguous) → `unknown` (never guess).
-- **Orchestrator (`index.ts`)** — `findManifests` (reuse `src/setup/manifests.ts`) → parse each
-  manifest → match its deps against the tables per dimension → run marker checks → infer release
-  → merge into one `RuntimeContext`.
-
-### Merge / polyglot semantics
-
-A repo can be polyglot (e.g. Node frontend + Python backend), so contributions from **all**
-manifests are aggregated, never one-language-wins:
-
-- Each dimension is `present` if **any** language table match **or** marker hit; else `unknown`.
-  Never `absent`.
-- `detail` = deduped list of matched library identifiers across languages.
-- `data.migrationTool` derivation (currently prisma/alembic/drizzle/knex) is extended
-  per language, best-effort (free-text field); if multiple, the most specific recognized tool
-  wins.
-- `topology` and `documentation` keep their existing logic.
+Nothing else in the pipeline changes: `validateCdotImpact`, `runtimeVars`,
+`unknownRuntimeSections`, and `mergeScanAndEnrichment` are all untouched.
 
 ## Testing
 
-- **Per parser** — fixture manifests → assert extracted dep sets, including identifier-form
-  edge cases (go module paths, maven coordinates, requirements version specifiers).
-- **Per matching** — small fixture repos → assert expected `present` dims + details.
-- **Polyglot fixture** — Node + Python repo → both contribute; merged detail.
-- **Invariant test** — a repo whose deps are all unrecognized → dims stay `unknown`, never
-  `absent`.
-- **Release inference** — single-language repo → correct mechanism; polyglot/ambiguous →
-  `unknown`.
+- **Per parser** — fixture manifests → assert extracted name lists, incl. the known-tricky forms
+  (`Bun.TOML` inline/sub-tables; PEP 508 strings; poetry `python` filtered out; requirements
+  `-r`/`-e`/URL lines skipped; go module paths; pom `<plugin>`/`<parent>` excluded by
+  `<dependencies>`-scoping; gradle version-catalog aliases resolved). Fail-soft: malformed
+  manifest → `[]`.
+- **Orchestrator** — polyglot fixture (node + python) → both languages present, deduped.
+- **`enrichVars`** — includes the dependency-list field; empty repo → empty/omitted, prompt still
+  renders.
+- No gate/merge/schema tests needed (those surfaces are unchanged).
 
 ## Risks
 
-- **Curated tables lag real ecosystems.** Acceptable: enrichment backstops anything the tables
-  miss; the tables only need to cover common libraries. They are versioned in one file for easy
-  extension.
-- **Identifier-form mismatch (go/maven/composer).** The main bug class; mitigated by
-  co-designing each parser with its table and by explicit per-language parser tests.
+- **Prompt bloat on large monorepos.** Many manifests × many deps could enlarge the enrichment
+  prompt. Mitigate by deduping across manifests and capping total identifiers (a simple cap is
+  fine; the list is a hint, not an exhaustive contract).
+- **Parser junk / misses.** Low cost by construction: the LLM tolerates noise and falls back to
+  repo investigation for anything missing. This is the whole point of the pivot — parser
+  correctness is no longer load-bearing.
 
 ## Downstream references (unchanged, for context)
 
-- `src/dispatch/profile.ts` — `RuntimeContext` schema (7 dims; tri-state + enums).
-- `src/dispatch/prompt-vars.ts` — `runtimeVars` → prompt injection.
-- `src/dispatch/extract-schema.ts` — `validateCdotImpact` coverage gate.
-- `src/setup/enrich.ts`, `src/setup/enrichment-schema.ts`, `src/setup/merge.ts` — LLM
-  enrichment + merge precedence (the backstop this design leans on).
+- `src/dispatch/profile.ts` — `RuntimeContext` schema (unchanged; nothing new persisted).
+- `src/dispatch/extract-schema.ts` — `validateCdotImpact` gate (unchanged).
+- `src/setup/merge.ts` — enrichment merge precedence (unchanged).
+- `src/setup/enrich.ts`, `prompts/setup-enrich.md` — the only surfaces this design touches.
+
+---
+
+## Superseded approach (v1 — rejected by independent review)
+
+**v1 proposed:** a deterministic per-language runtime scan — one dep parser per manifest **plus**
+curated `dimension → { language → [library names] }` tables, matching parsed deps against the
+tables to emit `present` flags for all 7 languages, plus `releasePackaging.mechanism` inferred
+from manifest type. Architecture: mechanism/knowledge/orchestration split ("Approach C").
+
+**Why it was rejected (independent adversarial panel, all findings code-grounded):**
+
+1. **Optimized against the wrong failure.** v1's risk analysis only considered false-*absent*
+   (backstopped by enrichment). But its new glob/module-path/coordinate matching across 6
+   ecosystems raises the false-*present* rate — and a false-`present` is **unrecoverable**: it
+   beats the LLM (`merge.ts:43`), beats an operator hand-edit on re-probe (`mergeTri`,
+   `merge.ts:7`), and destroys the gate's only `absent` relief valve (`extract-schema.ts:74`),
+   permanently forcing analysis for a capability the repo lacks.
+2. **Weak premise.** Given the two consumers, a deterministic `present` buys ~nothing over
+   `unknown` (gate treats them identically; LLM overwrites prompt detail). The curated tables are
+   strongest exactly where the LLM is already reliable (common libs) and empty where it is weak
+   (obscure libs) — a maintenance surface defending the cases that least need it.
+3. **Two release rules outright wrong** for the common case: `Gemfile`→`gem` (every Rails app),
+   `pyproject [build-system]`→`pypi` (every PEP-518 app). `releasePackaging` inference dropped.
+4. **Factual errors in the doc:** "only two downstream consumers" (missed `unknownRuntimeSections`
+   in `src/cli/setup.ts`, so "no pipeline change" was false); "rust.ts/python.ts already
+   regex-parse TOML deps" (they parse a scalar / section presence, not dep tables).
+5. **Self-inflicted mechanism.** "Regex TOML, no heavy deps" ignored that Bun 1.3.5 ships
+   `Bun.TOML.parse`; and per-ecosystem identifier matching (Go `/v2` + sub-modules, Maven
+   plugin/parent/BOM over-report, Gradle version catalogs in `libs.versions.toml`) was under-
+   specified and would have silently under/over-fired.
+
+The v2 approach above keeps the *goal that survived* — reduce LLM false-absent on non-Node repos
+— while discarding the deterministic machinery that carried all the risk.
