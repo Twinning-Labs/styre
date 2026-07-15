@@ -1,10 +1,13 @@
 import { expect, test } from "bun:test";
 import {
+  parseBuildGradle,
   parseCargoToml,
   parseComposerJson,
   parseGemfile,
   parseGoMod,
+  parseGradleCatalog,
   parsePackageJson,
+  parsePomXml,
   parsePyproject,
   parseRequirementsTxt,
 } from "../../../src/setup/runtime-deps/parse.ts";
@@ -122,5 +125,69 @@ test("parseComposerJson: require + require-dev, php/ext-* platform reqs filtered
   });
   expect(parseComposerJson(composer).sort()).toEqual(
     ["doctrine/orm", "laravel/framework", "phpunit/phpunit"].sort(),
+  );
+});
+
+test("parsePomXml: <dependency> only — excludes <plugin> and <parent>", () => {
+  const pom = `<project>
+    <parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId></parent>
+    <dependencies>
+      <dependency><groupId>org.hibernate</groupId><artifactId>hibernate-core</artifactId></dependency>
+      <dependency><groupId>com.zaxxer</groupId><artifactId>HikariCP</artifactId></dependency>
+    </dependencies>
+    <build><plugins>
+      <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId></plugin>
+    </plugins></build>
+  </project>`;
+  expect(parsePomXml(pom).sort()).toEqual(
+    ["com.zaxxer:HikariCP", "org.hibernate:hibernate-core"].sort(),
+  );
+});
+
+test("parseBuildGradle: single/double quotes, kotlin-dsl parens, multiple configs", () => {
+  const gradle = [
+    'implementation "org.springframework:spring-web:6.0"',
+    "api('com.google.guava:guava:32.0')",
+    'testImplementation("org.junit.jupiter:junit-jupiter:5.10")',
+    'implementation "org.slf4j:slf4j-api"',
+  ].join("\n");
+  expect(parseBuildGradle(gradle).sort()).toEqual(
+    [
+      "com.google.guava:guava",
+      "org.junit.jupiter:junit-jupiter",
+      "org.slf4j:slf4j-api",
+      "org.springframework:spring-web",
+    ].sort(),
+  );
+});
+
+test("parseBuildGradle: android build-type/flavor configs + ksp; accessor/project forms ignored", () => {
+  const gradle = [
+    'debugImplementation "com.squareup.leakcanary:leakcanary-android:2.12"',
+    'androidTestImplementation "androidx.test:runner:1.5.2"',
+    'ksp "com.google.dagger:dagger-compiler:2.48"',
+    "implementation project(':core')", // no string coordinate → ignored
+    "implementation(libs.spring.web)", // catalog accessor → ignored (coord comes from catalog)
+  ].join("\n");
+  expect(parseBuildGradle(gradle).sort()).toEqual(
+    [
+      "androidx.test:runner",
+      "com.google.dagger:dagger-compiler",
+      "com.squareup.leakcanary:leakcanary-android",
+    ].sort(),
+  );
+});
+
+test("parseGradleCatalog: module string, group/name table, version-ref forms", () => {
+  const toml = [
+    "[libraries]",
+    'gorm = { module = "io.gorm:gorm", version = "1" }',
+    'guava = { group = "com.google.guava", name = "guava", version.ref = "g" }',
+    'shorthand = "org.slf4j:slf4j-api:2.0"',
+    "[versions]",
+    'g = "32.0"',
+  ].join("\n");
+  expect(parseGradleCatalog(toml).sort()).toEqual(
+    ["com.google.guava:guava", "io.gorm:gorm", "org.slf4j:slf4j-api"].sort(),
   );
 });

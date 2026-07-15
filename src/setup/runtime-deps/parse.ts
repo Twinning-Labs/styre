@@ -173,3 +173,62 @@ export function parseComposerJson(content: string): string[] {
     .filter((n) => n !== "php" && !n.startsWith("ext-"))
     .map((n) => n.toLowerCase());
 }
+
+export function parsePomXml(content: string): string[] {
+  const names = new Set<string>();
+  const deps = content.match(/<dependency>[\s\S]*?<\/dependency>/g) ?? [];
+  for (const d of deps) {
+    const g = d.match(/<groupId>\s*([^<]+?)\s*<\/groupId>/)?.[1];
+    const a = d.match(/<artifactId>\s*([^<]+?)\s*<\/artifactId>/)?.[1];
+    if (g && a) names.add(`${g}:${a}`);
+  }
+  return [...names];
+}
+
+// Matches string-coordinate dependency configs, including Android build-type/flavor variants
+// (debugImplementation, androidTestImplementation, releaseApi, …) and ksp/kapt. Map-notation
+// (`group: 'g', name: 'a'`) and version-catalog accessors (`libs.x`) are intentionally NOT matched
+// here — catalog coordinates are recovered by parseGradleCatalog from gradle/libs.versions.toml.
+const GRADLE_CONFIGS =
+  "\\w*[Ii]mplementation|\\w*[Aa]pi|\\w*RuntimeOnly|\\w*CompileOnly|annotationProcessor|kapt|ksp|classpath|developmentOnly";
+
+export function parseBuildGradle(content: string): string[] {
+  const names = new Set<string>();
+  const re = new RegExp(
+    `(?:^|[^\\w.])(?:${GRADLE_CONFIGS})\\s*\\(?\\s*['"]([^'":\\s]+):([^'":\\s]+)(?::[^'"]*)?['"]`,
+    "g",
+  );
+  for (const m of content.matchAll(re)) {
+    const g = m[1];
+    const a = m[2];
+    if (g && a) names.add(`${g}:${a}`);
+  }
+  return [...names];
+}
+
+export function parseGradleCatalog(content: string): string[] {
+  try {
+    const root = rec(Bun.TOML.parse(content) as unknown);
+    const libs = rec(root?.libraries);
+    if (!libs) return [];
+    const names = new Set<string>();
+    for (const v of Object.values(libs)) {
+      if (typeof v === "string") {
+        const [g, a] = v.split(":");
+        if (g && a) names.add(`${g}:${a}`);
+        continue;
+      }
+      const o = rec(v);
+      if (!o) continue;
+      if (typeof o.module === "string") {
+        const [g, a] = o.module.split(":");
+        if (g && a) names.add(`${g}:${a}`);
+      } else if (typeof o.group === "string" && typeof o.name === "string") {
+        names.add(`${o.group}:${o.name}`);
+      }
+    }
+    return [...names];
+  } catch {
+    return [];
+  }
+}
