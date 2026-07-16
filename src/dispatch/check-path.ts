@@ -60,3 +60,51 @@ export function resolveAuthoredTestPath(
   const target = normPath(declaredTestFile);
   return addedPaths.find((p) => normPath(p) === target) ?? null;
 }
+
+/** Everything before the last `/`; "" for a bare basename. */
+function dirname(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i === -1 ? "" : path.slice(0, i);
+}
+
+/** The final extension segment of a path's basename (after its last `.`), or "" if none.
+ *  `__init__.py` → "py", `x.tests.ts` → "ts", `.gitignore`/`Makefile` → "" (dotfiles/no-dot = no ext). */
+function finalExt(path: string): string {
+  const b = basename(path);
+  const i = b.lastIndexOf(".");
+  return i <= 0 ? "" : b.slice(i + 1);
+}
+
+/** Per-directory cap on auto-admitted support files (covers Python's `__init__.py` + `conftest.py`). */
+const CHECK_SUPPORT_CAP = 2;
+
+/** True iff `path` is a legitimate support file to auto-admit into a `styre_checks/` directory
+ *  (ENG-323): (1) its immediate parent dir is named `styre_checks`; (2) that same dir holds a
+ *  canonical `{ident}_ac<id>_test.*` file in `addedNewPaths` (this dispatch's new files); (3) it shares
+ *  the final extension of SOME co-located canonical check; (4) it is within `CHECK_SUPPORT_CAP` of the
+ *  same-dir, same-ext, non-canonical new files (lexicographic tie-break → deterministic + retry-stable).
+ *  Does NOT re-admit a canonical test (that is `isCanonicalCheckPath`'s job). Inputs are assumed
+ *  normalized (forward-slash, no `./`). Pure; no I/O. */
+export function isCheckSupportFile(
+  path: string,
+  addedNewPaths: string[],
+  ident: string,
+  acIds: Iterable<number>,
+): boolean {
+  const dir = dirname(path);
+  if (basename(dir) !== "styre_checks") return false;
+  const ids = [...acIds];
+  const ext = finalExt(path);
+  if (ext === "") return false;
+  const canonicalSiblings = addedNewPaths.filter(
+    (p) => dirname(p) === dir && isCanonicalCheckPath(p, ident, ids),
+  );
+  if (!canonicalSiblings.some((p) => finalExt(p) === ext)) return false;
+  const supportCandidates = addedNewPaths
+    .filter(
+      (p) => dirname(p) === dir && finalExt(p) === ext && !isCanonicalCheckPath(p, ident, ids),
+    )
+    .sort();
+  const rank = supportCandidates.indexOf(path);
+  return rank !== -1 && rank < CHECK_SUPPORT_CAP;
+}
