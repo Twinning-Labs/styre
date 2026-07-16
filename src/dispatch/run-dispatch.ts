@@ -189,7 +189,8 @@ export async function runAgentDispatch(
   let changed: boolean;
   if (spec.commitScope) {
     const inScope = spec.commitScope(result.stdout);
-    const offenders = judged.filter((e) => !inScope(e.path, e.isNew));
+    const newPaths = judged.filter((e) => e.isNew).map((e) => e.path);
+    const offenders = judged.filter((e) => !inScope(e.path, e.isNew, newPaths));
     if (offenders.length > 0) {
       undoAttempt(deps.worktreePath, untrackedBefore);
       completeDispatch(ctx.db, inserted.id, {
@@ -203,11 +204,7 @@ export async function runAgentDispatch(
           .join(", ")}`,
       );
     }
-    ({ sha, changed } = commitWorktree(
-      deps.worktreePath,
-      `${did} ${spec.handlerKey}`,
-      judged.filter((e) => e.isNew).map((e) => e.path),
-    ));
+    ({ sha, changed } = commitWorktree(deps.worktreePath, `${did} ${spec.handlerKey}`, newPaths));
   } else {
     const stray = judged.filter((e) => e.isNew).map((e) => e.path);
     if (stray.length > 0) {

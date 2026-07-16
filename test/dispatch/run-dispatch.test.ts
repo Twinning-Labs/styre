@@ -10,7 +10,7 @@ import { listByTicket } from "../../src/db/repos/dispatch.ts";
 import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
 import { getById, insertPending, markFailed } from "../../src/db/repos/workflow-step.ts";
-import { implementScope } from "../../src/dispatch/commit-scope.ts";
+import { checksScopeFor, implementScope } from "../../src/dispatch/commit-scope.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runAgentDispatch } from "../../src/dispatch/run-dispatch.ts";
 import { makeTestDb } from "../helpers/db.ts";
@@ -514,5 +514,50 @@ test("no-drop across a transport-failure retry: a re-created declared file commi
   );
   expect(out.changed).toBe(true);
   expect(Bun.spawnSync(["git", "show", "HEAD:helper.ts"], { cwd: wt }).success).toBe(true); // committed, not dropped
+  db.close();
+});
+
+test("checks support file: an undeclared styre_checks/__init__.py co-located with the canonical check is admitted (ENG-323)", async () => {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-support-${Date.now()}`);
+  const runner = new FakeAgentRunner((input) => {
+    mkdirSync(join(input.cwd, "tests", "styre_checks"), { recursive: true });
+    writeFileSync(
+      join(input.cwd, "tests", "styre_checks", "ENG-1_ac1_test.py"),
+      "def test_x():\n    assert False\n",
+    );
+    writeFileSync(join(input.cwd, "tests", "styre_checks", "__init__.py"), ""); // undeclared marker
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout:
+        '```styre-sidecar\n{"checksAuthored":[{"ac_id":1,"test_file":"tests/styre_checks/ENG-1_ac1_test.py","test_name":"test_x"}],"new_files":[]}\n```',
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const res = await runAgentDispatch(
+    ctxFor(db, ticketId),
+    { runner, ...depsFor(repo, wt) },
+    {
+      handlerKey: "checks:dispatch",
+      template: "checks {{ident}}",
+      vars: { ident: "ENG-1" },
+      commitScope: checksScopeFor("ENG-1", [1]),
+      postcondition: () => {},
+    },
+  );
+
+  expect(listByTicket(db, ticketId)[0]?.outcome).toBe("clean-success"); // NOT rejected
+  expect(res.changed).toBe(true);
+  const committed = Bun.spawnSync(["git", "show", "--name-only", "--format=", "HEAD"], {
+    cwd: wt,
+  }).stdout.toString();
+  expect(committed).toContain("tests/styre_checks/ENG-1_ac1_test.py");
+  expect(committed).toContain("tests/styre_checks/__init__.py");
   db.close();
 });

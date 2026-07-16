@@ -57,6 +57,28 @@ test("checksScopeFor: unparseable sidecar → DEFERS (allows everything) so the 
   expect(inScope("tests/test_x.py", true)).toBe(true);
 });
 
+test("checksScopeFor: admits a co-located styre_checks/__init__.py support file (ENG-323)", () => {
+  const testPath = "astropy/modeling/tests/styre_checks/ENG-294_ac1_test.py";
+  const initPath = "astropy/modeling/tests/styre_checks/__init__.py";
+  const newPaths = [testPath, initPath];
+  const inScope = checksScopeFor(
+    "ENG-294",
+    [1],
+  )(
+    // agent declared a FLAT path (ENG-296 divergence) and did NOT declare __init__.py:
+    sidecar({
+      checksAuthored: [
+        { ac_id: 1, test_file: "astropy/modeling/tests/ENG-294_ac1_test.py", test_name: "t" },
+      ],
+    }),
+  );
+  // the written canonical test is admitted (canonical name), and the undeclared __init__.py too:
+  expect(inScope(testPath, true, newPaths)).toBe(true);
+  expect(inScope(initPath, true, newPaths)).toBe(true);
+  // a non-styre_checks/ undeclared file is still rejected:
+  expect(inScope("astropy/modeling/tests/reproduce_bug.py", true, newPaths)).toBe(false);
+});
+
 test("planScope / docScope: only their doc trees, edit or new", () => {
   const plan = planScope("");
   expect(plan("docs/plans/ENG-1.md", true)).toBe(true);
