@@ -1,12 +1,17 @@
-import { isCanonicalCheckPath, normPath } from "./check-path.ts";
+import { isCanonicalCheckPath, isCheckSupportFile, normPath } from "./check-path.ts";
 import { ChecksOutputSchema } from "./checks-schema.ts";
 import { isDocPath, isPlanPath } from "./docs-paths.ts";
 import { ImplementOutputSchema } from "./implement-schema.ts";
 import { extractSidecar } from "./sidecar.ts";
 
 /** Given the agent's stdout, a predicate over each pending path: true ⇒ in scope (deliverable).
- *  `isNew` is true only for a brand-new untracked file. */
-export type CommitScope = (output: string) => (path: string, isNew: boolean) => boolean;
+ *  `isNew` is true only for a brand-new untracked file. `newPaths` (OPTIONAL — omit for the 2-arg
+ *  callers) is every brand-new file this dispatch created, so a scope can reason about siblings
+ *  (checks support-file admission, ENG-323). Optional so the 2-arg scope definitions and every
+ *  existing 2-arg call site keep compiling; only checksScopeFor reads it. */
+export type CommitScope = (
+  output: string,
+) => (path: string, isNew: boolean, newPaths?: string[]) => boolean;
 
 /** implement: tracked edits always in scope; a new file must be declared in `new_files`. An absent/
  *  malformed sidecar ⇒ no declaration ⇒ any new file is out of scope (→ reject-and-retry, never a
@@ -30,8 +35,16 @@ export function checksScopeFor(ident: string, acIds: number[]): CommitScope {
       ...parsed.value.checksAuthored.map((c) => normPath(c.test_file)),
       ...parsed.value.new_files.map(normPath),
     ]);
-    return (path, isNew) =>
-      !isNew || declared.has(normPath(path)) || isCanonicalCheckPath(normPath(path), ident, acIds);
+    return (path, isNew, newPaths) => {
+      const p = normPath(path);
+      const news = (newPaths ?? []).map(normPath);
+      return (
+        !isNew ||
+        declared.has(p) ||
+        isCanonicalCheckPath(p, ident, acIds) ||
+        isCheckSupportFile(p, news, ident, acIds)
+      );
+    };
   };
 }
 
