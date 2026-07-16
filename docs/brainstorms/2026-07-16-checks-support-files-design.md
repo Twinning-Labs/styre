@@ -23,16 +23,24 @@ This is a **deterministic styre bug** (a correct file rejected), and one of astr
 - **Per-stack marker allowlist** (`__init__.py`, `conftest.py` for Python; `mod.rs` for Rust; …) — rejected: **incomplete by construction.** Python surely needs markers, Rust likely does, and several stacks have analogous needs; enumerating them means getting the known ones right and silently re-rejecting whatever the next stack needs. That is the exact "keep missing cases" trap generating this flakiness.
 - **Prompt-only** ("declare your `__init__.py` in `new_files`") — the guard already admits declared files, so this *could* work, but the variance data shows agent output-compliance is precisely the flaky part (run 5's missing sidecar is the same class). A narrow deterministic code-side admission is the robust backstop; the prompt is reinforcement, not the guarantee.
 
-## 2. The rule (deterministic, language-agnostic)
+## 2. The rule (deterministic; language-agnostic for *co-located* support files)
+
+**Scope note (decided):** this admits support files the agent writes **in the same directory as** its canonical test — which in practice today is the Python case (`__init__.py`, `conftest.py`), the actual astropy failure. Stacks whose convention places a marker *outside* the test's immediate directory (Rust/Go give the test its own module/package subdir, so a `mod.rs` sits one level up) are **not** covered by this clause and are an explicit follow-up if/when a Rust/Go instance is benched. The extension-scoping is still language-agnostic *for co-located files* — no per-stack enumeration — it just does not reach markers the stack places elsewhere.
+
 
 A brand-new file `P` that is **not** otherwise admitted (not declared, not a canonical `{ident}_ac<id>_test.*` name) is admitted as a **check support file** iff **all** hold:
 
 1. **`P` sits in a `styre_checks/` directory** — the name of `P`'s immediate parent directory is exactly `styre_checks`. *This is the load-bearing safety bound:* auto-admission happens only inside the dedicated, freshly-created checks folder — never into an existing source/package directory where a stray `__init__.py` could alter real behavior.
 2. **That directory holds a canonical check this dispatch is adding** — some `{ident}_ac<id>_test.*` (for an in-scope `acId`) appears in the dispatch's new-file set, in `P`'s exact directory. So the folder genuinely hosts a real check right now, not an empty loophole.
-3. **`P`'s extension matches that co-located check's extension** — comparing the final dot-segment of the basename (`__init__.py` → `py` == `…_test.py` → `py`; `mod.rs` → `rs` == `…_test.rs` → `rs`; multi-dot `…_test.tests.ts` → `ts`). Blocks `.md`/`.txt`/`.log` clutter, **with zero per-stack knowledge** — a support file for a `.py` test is a `.py` file, whatever the stack.
+3. **`P`'s extension matches that of SOME co-located canonical check** — comparing the final dot-segment of the basename (`__init__.py` → `py` == `…_test.py` → `py`; multi-dot `…_test.tests.ts` → `ts`; a no-extension file like `Makefile` yields no segment → never matches → rejected). Quantifier is explicit ("some": if one `styre_checks/` dir holds both a `.py` and a `.ts` canonical check, a `.py` support file matches via the `.py` check) so the rule stays deterministic. Blocks `.md`/`.txt`/`.log` clutter, **with zero per-stack knowledge** — a support file for a `.py` test is a `.py` file, whatever the stack. **Honesty note:** a same-extension admit is not necessarily inert — e.g. `conftest.py` is executable code pytest auto-loads at collection. The residual is bounded (the agent could already commit `conftest.py` by declaring it in `new_files`, so this grants no new capability), but the extension gate admits *runnable* code, not merely clutter-free filenames.
 4. **Within a per-directory cap of 2** non-canonical same-extension support files, with a deterministic tie-break (lexicographic sort of the candidates in that directory; admit the first 2). Covers Python's realistic maximum (`__init__.py` + `conftest.py`) while stopping the `styre_checks/` folder from becoming a new scratch loophole.
 
 **Non-code fixtures** (a `.json`/`.csv` data file a check needs) do not match (3) → they keep flowing through the existing **declared-`new_files`** path, which the guard already admits. Nothing legitimate is lost; this clause only *auto-admits* the same-language structural files the agent routinely forgets to declare.
+
+### Known boundaries (deliberate)
+
+- **Support admission is directory-locked to `styre_checks/`, but canonical-test admission is not** (`isCanonicalCheckPath` is directory-agnostic and admits a flat `tests/…_test.py`). So if the agent writes the canonical test *flat* (outside a `styre_checks/` dir — the ENG-296 write-vs-declare divergence shows the agent's placement is not perfectly reliable), a co-located marker is **not** auto-admitted and would fall back to reject-or-declare. This is low-probability (a flat test lands in an existing package where the marker usually already exists, and `prompts/checks.md` pins `styre_checks/`), and the directory lock is the deliberate safety property (§1 rule 1). It bounds — rather than fully closes — the "missing case."
+- **Markers a stack places OUTSIDE the test's immediate dir are not covered** — e.g. Rust/Go, where `prompts/checks.md` tells the agent to give the test its own module/package *sub*directory, so a registering `mod.rs` would sit one level up from the test and fail the same-immediate-dir requirement (rule 2). **Decided: out of scope for this change** (YAGNI — no Rust/Go instance is benched today; astropy is Python). A follow-up would extend rule 2 to an immediate-child subtree if/when needed.
 
 ## 3. Design — components
 
@@ -45,19 +53,25 @@ Implements rules 1–4 over normalized forward-slash paths. Needs two tiny local
 
 ### 3.2 `src/dispatch/commit-scope.ts` — widen the predicate, add the clause
 
-The scope predicate is currently `(path, isNew) => boolean` and cannot see sibling files. Widen the `CommitScope` inner predicate type to `(path, isNew, newPaths) => boolean`, where `newPaths` is every brand-new file this dispatch created.
+The scope predicate is currently `(path, isNew) => boolean` and cannot see sibling files. Widen the `CommitScope` inner predicate type to add an **optional** third parameter:
 
-**TypeScript structural typing makes this cheap:** a function taking only `(path, isNew)` is assignable where `(path, isNew, newPaths)` is expected, so `implementScope`, `planScope`, and `docScope` compile **unchanged** — only `checksScopeFor` reads the third argument. Its predicate gains one clause:
-
-```
-(path, isNew, newPaths) =>
-  !isNew
-  || declared.has(normPath(path))
-  || isCanonicalCheckPath(normPath(path), ident, acIds)
-  || isCheckSupportFile(normPath(path), newPaths.map(normPath), ident, acIds)   // NEW
+```ts
+export type CommitScope = (output: string) => (path: string, isNew: boolean, newPaths?: string[]) => boolean;
 ```
 
-The unparseable-sidecar deferral (`if (!parsed.ok) return () => true`) and every existing clause are untouched.
+`newPaths` is every brand-new file this dispatch created. **The param must be OPTIONAL, not required.** A required 3rd param would keep the three 2-arg scope *definitions* (`implementScope`/`planScope`/`docScope`) compiling (a 2-arg fn is assignable to a 3-arg type), but it would break the ~20 two-argument *call sites* in `test/dispatch/commit-scope.test.ts` (e.g. `inScope("pkg/existing.py", false)`) with TS2554 — and `tsconfig.json` has no `exclude`, so `tsc --noEmit` compiles `test/`. With the param optional, those definitions AND every existing 2-arg call compile unchanged; only `checksScopeFor` reads the third argument, defaulting it. Its predicate gains one clause:
+
+```
+(path, isNew, newPaths) => {
+  const news = (newPaths ?? []).map(normPath);
+  return !isNew
+    || declared.has(normPath(path))
+    || isCanonicalCheckPath(normPath(path), ident, acIds)
+    || isCheckSupportFile(normPath(path), news, ident, acIds);   // NEW
+}
+```
+
+The unparseable-sidecar deferral (`if (!parsed.ok) return () => true`) and every existing clause are untouched. run-dispatch is the **only** runtime caller of the predicate; no other production call site needs touching.
 
 ### 3.3 `src/dispatch/run-dispatch.ts` — the one shared call site
 
@@ -94,7 +108,7 @@ Both checks call sites (the main register and `reauthorCheckWrong`) funnel throu
 ## 7. Scope
 
 **IN:** `check-path.ts` (`isCheckSupportFile` + helpers), `commit-scope.ts` (widen predicate + clause), `run-dispatch.ts` (pass `newPaths`), and the tests above.
-**OUT:** the missing-sidecar failure mode (agent-compliance / loop-not-halt — separate), any prompt change, any per-stack marker knowledge, non-checks scopes.
+**OUT:** the missing-sidecar failure mode (agent-compliance / loop-not-halt — separate), Rust/Go own-module-dir markers that land outside the test's immediate dir (follow-up), any prompt change, any per-stack marker knowledge, non-checks scopes.
 
 ## 8. Acceptance criteria
 
