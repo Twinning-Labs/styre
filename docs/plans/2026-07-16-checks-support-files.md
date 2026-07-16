@@ -14,7 +14,7 @@
 - **Only an ADDITIONAL admission clause for checks.** The guard's reject-not-drop behavior, the unparseable-sidecar deferral, canonical-name admission (ENG-296), and `implementScope`/`planScope`/`docScope` are unchanged. A non-`styre_checks/` undeclared new file is still rejected.
 - **Deterministic + retry-stable:** the cap uses a lexicographic sort; admission keys off the *physical* new-file set (not the sidecar), so it works even under ENG-296 write-vs-declare divergence.
 - **Per-dir support cap = 2** (covers Python's `__init__.py` + `conftest.py`).
-- **Verify before every commit:** `bunx tsc --noEmit`, the named `bun test` file(s), AND `bun run lint` (Biome — `noNonNullAssertion`, `useTemplate`, `organizeImports`, formatting). No `!`, no string `+`.
+- **Verify before every commit:** `bunx tsc --noEmit`, the named `bun test` file(s), AND `bun run lint` (Biome — `noNonNullAssertion`, `useTemplate`, `organizeImports`, 100-col formatting). No `!`, no string `+`. The code blocks below show *intent*; before the lint step, run **`bun run format`** (biome format --write) to normalize whitespace/line-wraps/import order — biome's formatting is deterministic and auto-fixable, so let it reflow rather than hand-matching every column.
 - **Every commit message ends with:**
   ```
   Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
@@ -45,7 +45,7 @@
 
 - [ ] **Step 1: Write the failing tests**
 
-Add `isCheckSupportFile` to the existing import block at the top of `test/dispatch/check-path.test.ts`, then append these tests:
+Add `isCheckSupportFile` to the existing import block at the top of `test/dispatch/check-path.test.ts` — in sorted position, between `isCanonicalCheckPath` and `matchAuthoredTest` (biome `organizeImports` enforces alphabetical order). Then append these tests:
 
 ```ts
 test("isCheckSupportFile: admits a co-located same-ext marker in a styre_checks/ dir (Python __init__.py)", () => {
@@ -146,7 +146,9 @@ export function isCheckSupportFile(
   );
   if (!canonicalSiblings.some((p) => finalExt(p) === ext)) return false;
   const supportCandidates = addedNewPaths
-    .filter((p) => dirname(p) === dir && finalExt(p) === ext && !isCanonicalCheckPath(p, ident, ids))
+    .filter(
+      (p) => dirname(p) === dir && finalExt(p) === ext && !isCanonicalCheckPath(p, ident, ids),
+    )
     .sort();
   const rank = supportCandidates.indexOf(path);
   return rank !== -1 && rank < CHECK_SUPPORT_CAP;
@@ -191,10 +193,9 @@ Append to `test/dispatch/commit-scope.test.ts` (the `sidecar` helper at line 9 i
 
 ```ts
 test("checksScopeFor: admits a co-located styre_checks/__init__.py support file (ENG-323)", () => {
-  const newPaths = [
-    "astropy/modeling/tests/styre_checks/ENG-294_ac1_test.py",
-    "astropy/modeling/tests/styre_checks/__init__.py",
-  ];
+  const testPath = "astropy/modeling/tests/styre_checks/ENG-294_ac1_test.py";
+  const initPath = "astropy/modeling/tests/styre_checks/__init__.py";
+  const newPaths = [testPath, initPath];
   const inScope = checksScopeFor(
     "ENG-294",
     [1],
@@ -207,8 +208,8 @@ test("checksScopeFor: admits a co-located styre_checks/__init__.py support file 
     }),
   );
   // the written canonical test is admitted (canonical name), and the undeclared __init__.py too:
-  expect(inScope("astropy/modeling/tests/styre_checks/ENG-294_ac1_test.py", true, newPaths)).toBe(true);
-  expect(inScope("astropy/modeling/tests/styre_checks/__init__.py", true, newPaths)).toBe(true);
+  expect(inScope(testPath, true, newPaths)).toBe(true);
+  expect(inScope(initPath, true, newPaths)).toBe(true);
   // a non-styre_checks/ undeclared file is still rejected:
   expect(inScope("astropy/modeling/tests/reproduce_bug.py", true, newPaths)).toBe(false);
 });
@@ -313,7 +314,7 @@ git commit -m "feat(dispatch): checksScopeFor admits co-located support files (E
 
 - [ ] **Step 1: Write the failing wiring test**
 
-Add `mkdirSync` to the existing `node:fs` import in `test/dispatch/run-dispatch.test.ts` if absent, and add `checksScopeFor` to the `../../src/dispatch/commit-scope.ts` import (the file already imports `implementScope` from there). Then append:
+Add `mkdirSync` to the existing `node:fs` import in `test/dispatch/run-dispatch.test.ts` if absent, and add `checksScopeFor` to the `../../src/dispatch/commit-scope.ts` import in sorted position — before `implementScope` (biome `organizeImports` enforces alphabetical order). Then append:
 
 ```ts
 test("checks support file: an undeclared styre_checks/__init__.py co-located with the canonical check is admitted (ENG-323)", async () => {
