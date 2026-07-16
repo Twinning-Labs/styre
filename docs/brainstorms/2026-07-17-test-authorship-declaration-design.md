@@ -123,7 +123,7 @@ Under this rule WU2 declares `tests/Unit/IcsTest.php`, `validateExtraction` pass
 
 ## 4. Fix B — implement is blind to Channel A, and told only about Channel B
 
-The approved intent was "tell implement its declared test files are its own to write." Investigating the wording surfaced a larger, load-bearing gap that the fix depends on. **This expands the approved scope and needs sign-off (§8.1).**
+The intent first approved was "tell implement its declared test files are its own to write." Investigating the wording surfaced a larger, load-bearing gap that the fix depends on — a prompt-var addition rather than a wording edit. That expanded scope was raised separately and **approved as §8.1 option (i)**; the change below is specified accordingly.
 
 `implementVars` (`prompt-vars.ts:102-136`) returns: `ident, slug, unit_seq, unit_kind, unit_title, test_command, stack, feedback, authored_checks, gate_feedback, review_feedback`.
 
