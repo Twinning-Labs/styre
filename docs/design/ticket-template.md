@@ -87,12 +87,15 @@ re-deriving a rejected option.>
 **IN**
 
 * <bullet — no checkbox! see §4.1>
-* <each IN bullet should be nameable as a file or a function>
+* <Only to the precision your evidence supports. Investigated it? Name files and symbols.
+  Haven't? Describe the outcome and let design find the files — a plausible wrong guess
+  is worse than saying nothing. See §4.2.>
 
 **OUT**
 
 * <what this ticket explicitly does not do, and why — a sibling ticket, a rejected design,
-  a conscious deferral. Name the sibling ticket if there is one.>
+  a conscious deferral. Always writable: it's a decision, not a discovery.
+  Name the sibling ticket if there is one.>
 
 ## Acceptance criteria
 
@@ -212,16 +215,61 @@ Related parser behaviours:
   still read by `design` — it just contributes no ACs.)
 - A bare `- [ ]` with no text doesn't match, and silently drops you to whole-description mode.
 
-### 4.2 Design must be able to name real files
+### 4.2 What "scope" means — and how much of it you're expected to know
 
-`validateExtraction` (`src/dispatch/extract-schema.ts:100-140`) is a deterministic hard gate: **every
-work unit must name ≥1 `files_to_touch`** (*"every planned unit must name ≥1 file"*). Prose too vague
-for the design agent to name a file path fails extraction outright — not as a judgement call, as a
-validation error.
+"Scope" names four different things in styre. Only one is authored by you, and it is the only one
+with no enforcement:
 
-Name the files you already know. You aren't constraining the design: `files_to_touch` is advisory
-input, reviewer-judged, **not a hard scope lock** (`build-operations.md:204-205`). You're derisking a
-gate.
+| "Scope" | Derived from | Enforced? |
+|---|---|---|
+| **Ticket Scope IN/OUT** (this template's section) | you, as prose | ❌ no parser exists |
+| **Commit scope guard** (`commit-scope.ts`) | the agent's own sidecar declaration + path rules | ✅ hard — reject-and-retry |
+| **Scope reconciliation** (`completeness.ts`) | the *plan's* `files_to_touch` | ✅ deterministic under/over |
+| **Reviewer `scope` finding** (`review.md:10-13`) | LLM judgement against the *plan* | ⚠️ soft |
+
+Your Scope section has exactly one causal path:
+
+> design reads your Scope prose → design writes `files_to_touch` → *that* becomes enforceable.
+
+It is upstream persuasion that only becomes machine-enforced once design launders it into the plan.
+**Nothing ever checks your Scope block against the delivered diff.** OSS has no ticket-declared scope
+lock — the SaaS's candidate context-files were specified as *advisory input to design*, *"not a hard
+scope lock"* (`build-operations.md:204-205`), and even that isn't built.
+
+#### You are not expected to know the files in advance
+
+`design:dispatch` holds `Read, Grep, Glob, WebSearch, WebFetch` (`tool-allowlists.ts:11`) and is told
+(`prompts/design.md:8-10`):
+
+> Before planning, read the files, tests, config, and docs this ticket will touch. **Do not guess
+> file paths**, APIs, command names, or test strategy the repo can answer — ground the plan in what
+> you actually find.
+
+**Naming files is design's job, not yours.** The hard gate — `validateExtraction`
+(`extract-schema.ts:100-140`), *"every planned unit must name ≥1 file"* — applies to the **plan**
+design produces after reading the repo, **not to your ticket**. A ticket that names no file paths at
+all can pass extraction cleanly.
+
+#### Guessing is worse than silence
+
+`design-review.md:29` is explicit that a named path is barely checked:
+
+> Named file paths are specific and plausible (the gate only checks that ≥1 file is named, **not that
+> it exists or is the right one**).
+
+So a confidently wrong file path in your ticket pollutes design's grounding and survives into the
+plan unchallenged. Write file paths **only to the precision your evidence supports.**
+
+#### The practical split
+
+- **Scope OUT — always write it.** It is a *decision*, not a discovery. You can say "don't touch the
+  daemon" or "don't add an `rm` capability" without knowing anything about the code. It costs nothing,
+  needs no investigation, and is your only defence against scope creep. Name the sibling ticket that
+  owns the excluded work.
+- **Scope IN — write it only to the precision you've earned.** If you've investigated (a bench run, an
+  audit, a transcript), name the files and quote the lines: ENG-341 and ENG-332 are precise *because*
+  they were written after that work. If you haven't, describe the **outcome you want** and let design
+  find the files. An honest "I don't know which files" beats a plausible wrong guess.
 
 Don't list the *test* that proves an AC — `checks:dispatch` authors and names that file itself
 (`prompts/design-extract.md:27`).
@@ -275,21 +323,44 @@ agent will re-derive rejected options unless you kill them explicitly. ENG-332's
 it names the one candidate defence for the current ordering and proves it dead from code, so the plan
 can't relitigate it.
 
-**Scope OUT** is your only defence against scope creep, since OSS has no ticket-declared scope lock.
-It works by persuasion (design reads it), not enforcement.
-
 `prompts/design.md:21-25` demands **requirements traceability**:
 
 > List each acceptance criterion / explicit requirement from the ticket, and name the work unit(s)
 > that satisfy it. If a requirement is intentionally out of scope, say so and why. **An unmapped
 > requirement is a completeness gap the reviewer will catch.**
 
-`design:review` then cross-checks that block against the ticket — *"nothing extra, nothing missing"*
-(`prompts/design-review.md:25`).
-
 Note "acceptance criterion **/ explicit requirement**": a requirement stated only in prose is still
-traceable and still reviewed. Prose requirements are real — they're just not *tested*, because only
-checklist items become ACs. **If it must be verified, it goes in the checklist.**
+traceable. Prose requirements are real — they're just not *tested*, because only checklist items
+become ACs. **If it must be verified, it goes in the checklist.**
+
+But be precise about how much that traceability block buys you, because the reviewer that checks it
+is working blind — see §5.1.
+
+### 5.1 The design reviewer cannot see your ticket
+
+`design-review.md:5` tells the plan reviewer to read *"the plan, the ticket requirements, and the
+codebase"*, and `:25` asks it to *"cross-check the plan's Requirements-traceability block against the
+ticket (nothing extra, nothing missing)"*.
+
+It cannot. `designReviewVars` (`prompt-vars.ts:180-190`) passes only `ident`, `title`, and `slug` —
+**not `description`**. Its tools are `[Read, Grep, Glob]` (`tool-allowlists.ts:19`), worktree-only,
+with no issue-tracker access by design (capability isolation, move 4). The ticket description is
+never written into the worktree. The reviewer has no path to your ticket text.
+
+What it actually reads is the plan's traceability block — which is *design's own transcription* of
+your requirements. So it can verify the block is **internally consistent** (every requirement listed
+maps to a unit), but it cannot verify **fidelity** (that the list is complete). If design silently
+drops a requirement, the block won't mention it, and the reviewer cannot know.
+
+**Consequence for you:** "the reviewer will catch an unmapped requirement" holds only for
+requirements design already noticed. A requirement design misses is missed silently by both. The
+defence is not the reviewer — it's the checklist: an AC becomes a `acceptance_criterion` row and an
+authored check that must go red, entirely independently of whether design ever mentioned it. **That
+is the only mechanism that survives design forgetting about it.**
+
+(This looks like a genuine defect rather than an intended design — the prompt asks for a check the
+substrate makes impossible, and it sits under a "ground truth over self-report" invariant. Worth a
+ticket; not one this document can fix.)
 
 ---
 
@@ -306,9 +377,10 @@ Before handing a ticket to `styre run`:
 - [ ] No AC would be satisfied by a trivial stub (that's `weak` → re-author).
 - [ ] Every AC would fail on today's code.
 - [ ] The gate line (`bun test`, `tsc --noEmit`, `bun run lint`) is the last AC.
-- [ ] At least one concrete file path appears somewhere in the description.
+- [ ] Any file path you named, you have actually verified. (Naming none is fine — design reads the
+      repo. A wrong path is worse than no path.)
+- [ ] Scope OUT is present and names the sibling ticket for anything excluded.
 - [ ] Why cites ground truth, and kills the obvious rejected alternatives.
-- [ ] Scope OUT names the sibling tickets.
 - [ ] One concern.
 
 ---
