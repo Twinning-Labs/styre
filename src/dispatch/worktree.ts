@@ -125,6 +125,10 @@ export function worktreeHead(worktreePath: string): string {
 export interface PendingEntry {
   path: string;
   isNew: boolean;
+  /** True iff this entry deletes a tracked file (porcelain status contains `D`). The discard
+   *  disposition's rename-safety guard uses it: an undeclared new file coinciding with a tracked
+   *  deletion may be a move git did not pair, so it must not be silently discarded. */
+  isDeleted: boolean;
 }
 
 /** Every path in the uncommitted working-tree delta vs HEAD, with an `isNew` flag. Uses
@@ -148,10 +152,12 @@ export function pendingEntries(worktreePath: string): PendingEntry[] {
   for (let i = 0; i < tokens.length; i++) {
     const entry = tokens[i];
     const status = entry.slice(0, 2); // XY
-    entries.push({ path: entry.slice(3), isNew: status === "??" });
+    entries.push({ path: entry.slice(3), isNew: status === "??", isDeleted: status.includes("D") });
     if (status.includes("R") || status.includes("C")) {
       i++;
-      if (i < tokens.length) entries.push({ path: tokens[i], isNew: false }); // original path of the rename/copy
+      // original path of a git-DETECTED rename/copy: a tracked move, not a new file and not a bare
+      // deletion (git paired it) → isNew=false, isDeleted=false.
+      if (i < tokens.length) entries.push({ path: tokens[i], isNew: false, isDeleted: false });
     }
   }
   return entries;
@@ -186,6 +192,15 @@ export function undoAttempt(worktreePath: string, untrackedBefore: Set<string>):
     .filter((e) => e.isNew && !untrackedBefore.has(e.path))
     .map((e) => e.path);
   if (strays.length > 0) git(["clean", "-fd", "--", ...strays], worktreePath);
+}
+
+/** Delete the named untracked files from the worktree — the discard disposition (checks): each path
+ *  is a brand-new untracked file this dispatch created and did not declare. Mirrors undoAttempt's
+ *  `git clean -fd` idiom (removes the files + any now-empty untracked dirs they created), scoped to
+ *  exactly these pathspecs so pre-existing cruft is spared. No-op / never throws on empty input. */
+export function discardPaths(worktreePath: string, paths: string[]): void {
+  if (paths.length === 0) return;
+  git(["clean", "-fd", "--", ...paths], worktreePath);
 }
 
 /** Discard every uncommitted change (tracked restore + untracked removal), restoring HEAD.
