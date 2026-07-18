@@ -956,14 +956,20 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       const absentButDiscarded =
         !parsed.ok && parsed.reason === "absent" && result.discarded.length > 0;
       if (malformed || absentButDiscarded) {
-        resetWorktreeHard(implWorktreePath, implPreHead);
-        const row = getByDispatchId(ctx.db, ctx.ticket.id, result.dispatchId);
-        if (row) {
-          completeDispatch(ctx.db, row.id, {
-            outcome: "reverted",
-            branchHeadSha: implPreHead,
-            endedAt: nowUtc(),
-          });
+        // Guarded on sha !== implPreHead (mirrors checks:dispatch's catch block, ~:748): a no-op
+        // dispatch (nothing committed) leaves HEAD already at implPreHead, so `git clean -fd` would
+        // wipe pre-existing untracked cruft — including the *.egg-info undoAttempt deliberately
+        // spares — for no reason. Only reset + re-mark when a commit was actually produced.
+        if (result.sha !== implPreHead) {
+          resetWorktreeHard(implWorktreePath, implPreHead);
+          const row = getByDispatchId(ctx.db, ctx.ticket.id, result.dispatchId);
+          if (row) {
+            completeDispatch(ctx.db, row.id, {
+              outcome: "reverted",
+              branchHeadSha: implPreHead,
+              endedAt: nowUtc(),
+            });
+          }
         }
         throw new Error(
           `implement:dispatch sidecar transport failure (${parsed.ok ? "ok" : parsed.reason}); ` +

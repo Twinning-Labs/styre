@@ -389,11 +389,20 @@ test("implement discard + absent sidecar WITH undeclared new files re-dispatches
   const step = getByKey(db, ticketId, "implement:wu1:dispatch");
   const dispatches = listByTicket(db, ticketId);
   const worktreePath = join(worktreeRoot, "ENG-1");
+  const headSha = Bun.spawnSync(["git", "-C", worktreePath, "rev-parse", "HEAD"])
+    .stdout.toString()
+    .trim();
   db.close();
 
   expect(["retry", "escalated"]).toContain(outcome.kind); // re-dispatched, not silently accepted
   expect(step?.status).toBe("pending");
-  expect(dispatches.every((d) => d.outcome !== "clean-success")).toBe(true);
-  expect(dispatches.some((d) => d.outcome === "reverted")).toBe(true);
+  // The undeclared new file (x.ts) was discarded pre-commit (discardPaths, scoped to just that
+  // path) — nothing was ever committed, so HEAD never moved and there is nothing to revert. The
+  // guard (mirrors checks:dispatch's catch block, ~:748) skips resetWorktreeHard + the re-mark in
+  // this case — an unconditional `git clean -fd` here would wipe pre-existing untracked cruft
+  // (e.g. the *.egg-info undoAttempt deliberately spares) for no reason. The row legitimately
+  // stays `clean-success`; the sidecar transport failure is what drives the re-dispatch.
+  expect(dispatches.every((d) => d.outcome === "clean-success")).toBe(true);
+  expect(dispatches.every((d) => d.branch_head_sha === headSha)).toBe(true);
   expect(existsSync(join(worktreePath, "x.ts"))).toBe(false); // never left in the worktree
 });
