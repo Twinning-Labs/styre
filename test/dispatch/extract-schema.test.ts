@@ -91,6 +91,23 @@ test("validateExtraction rejects a unit with no files_to_touch", () => {
   expect(errors.some((e) => e.includes("no files_to_touch"))).toBe(true);
 });
 
+// STYRE-7: a unit whose ONLY deliverable is an implement-authored test that also covers an
+// acceptance criterion is a valid third shape (neither a code unit nor a "tests are the deliverable"
+// coverage ticket). Fix A restates the design-extract rule by authorship so the agent declares it;
+// this pins the schema side so no future change re-introduces a rule that rejects the shape.
+test("validateExtraction accepts a unit declaring only a product test (STYRE-7 third shape)", () => {
+  expect(
+    validateExtraction([
+      unit({
+        behavioral: true,
+        test_plan: "assert exact iCal properties on fixed timestamps",
+        files_to_touch: ["tests/Unit/IcsTest.php"],
+        verify_check_types: ["test"],
+      }),
+    ]),
+  ).toEqual([]);
+});
+
 // ─── cdotImpact schema + profile-consistency gate ────────────────────────────
 
 const baseUnits = [

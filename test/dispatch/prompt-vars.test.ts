@@ -77,6 +77,37 @@ test("implementVars threads reviewFeedbackText into the review_feedback var", ()
   expect(vars.review_feedback).toBe("REVIEWMARKER");
 });
 
+// STYRE-7 Fix B: implement is shown its declared Channel-A scope (was gated against a list it never saw).
+test("implementVars surfaces files_to_touch as a floor, not a cage", () => {
+  const behavioral = {
+    seq: 1,
+    kind: "backend",
+    title: "iCal serializer",
+    test_plan: "assert exact calendar properties",
+    files_to_touch: JSON.stringify(["src/ical.php", "tests/Unit/IcsTest.php"]),
+  } as unknown as WorkUnitRow;
+  const vars = implementVars(ticket, behavioral, profile);
+  expect(vars.files_to_touch).toContain("src/ical.php");
+  expect(vars.files_to_touch).toContain("tests/Unit/IcsTest.php");
+  // Floor-not-cage wording — must NOT read as an allowlist (guards against re-importing the A3 hard gate).
+  expect(vars.files_to_touch).toContain("at least");
+  expect(vars.files_to_touch.toLowerCase()).toContain("may touch other files");
+  expect(vars.test_plan).toContain("assert exact calendar properties");
+});
+
+test("implementVars omits the test_plan section for a unit without one", () => {
+  const nonBehavioral = {
+    seq: 1,
+    kind: "docs",
+    title: "readme",
+    test_plan: null,
+    files_to_touch: JSON.stringify(["README.md"]),
+  } as unknown as WorkUnitRow;
+  const vars = implementVars(ticket, nonBehavioral, profile);
+  expect(vars.test_plan).toBe("");
+  expect(vars.files_to_touch).toContain("README.md");
+});
+
 test("implementVars review_feedback defaults to empty", () => {
   expect(implementVars(ticket, unit, profile).review_feedback).toBe("");
 });

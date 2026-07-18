@@ -118,7 +118,19 @@ export function implementVars(
   const authored_checks =
     paths.length === 0
       ? ""
-      : `## Acceptance checks (make these pass — do NOT edit the check files)\n\nThese test files encode this ticket's acceptance criteria. Read them and write code so they pass. You MUST NOT edit, weaken, or delete them (the runner freezes them and fails the gate on any change):\n${paths.map((p) => `- ${p}`).join("\n")}`;
+      : `## Acceptance checks (make these pass — do NOT edit the check files)\n\nThese test files encode this ticket's acceptance criteria. Read them and write code so they pass. You MUST NOT edit, weaken, or delete them (the runner freezes them and fails the gate on any change):\n${paths.map((p) => `- ${p}`).join("\n")}\n\nThese checks are authored separately and will read **red** when you run your project test command until you build the feature — that red is expected and is not a bug you introduced. Turn them green by implementing the work, never by touching the check files. They are **not** the tests listed under "Files this unit produces" — those are yours to write.`;
+  // Channel A — the unit's declared scope, surfaced so completeness never grades implement against a
+  // list it was never shown (STYRE-7 Fix B). Presented as a FLOOR, not a cage: completeness hard-gates
+  // only under-delivery; over-delivery is advisory/reviewer-judged (brainstorm A3), so implement may
+  // touch other files the work needs. Self-contained section (empty ⇒ no orphan header in implement.md).
+  const files_to_touch =
+    files.length === 0
+      ? ""
+      : `## Files this unit produces (your obligation)\n\nCreate or change **at least** these files — this is what "done" is checked against. Any product or regression tests listed here are **yours to write** (distinct from the frozen \`styre_checks/\` acceptance checks). You may touch other files if the work genuinely needs it — scope is reviewed, not enforced here.\n\n${files.map((f) => `- ${f}`).join("\n")}`;
+  const test_plan =
+    unit.test_plan && unit.test_plan.trim() !== ""
+      ? `## How this unit is tested\n\n${unit.test_plan}`
+      : "";
   return {
     ident: ticket.ident,
     slug: profile.slug,
@@ -129,6 +141,8 @@ export function implementVars(
     stack: "",
     feedback,
     authored_checks,
+    files_to_touch,
+    test_plan,
     gate_feedback: gateFeedbackText,
     review_feedback: reviewFeedbackText,
     ...profile.promptVars,
