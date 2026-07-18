@@ -129,13 +129,15 @@ In `runAgentDispatch` (`run-dispatch.ts:190-207`), replace "any offender → `un
    Return the discarded list in the dispatch result so the handler can surface it (§6, blocker 3).
 5. **In-scope files** → commit by name, exactly as today.
 
-**Sweeps (blocker: read-only regression).** Discard lives only in the write-step branch; **read-only**
-dispatches (`checks:classify`, `checks:arbitrate`, `design:review`/`size`/`extract`) still leave strays,
-and gitignored byproducts (`__pycache__`) are invisible to discard. So we **keep the defense-in-depth
-pre-verify sweep** (`handlers.ts:1139`) — the scratch-drawer design itself said "cheap; keep it." We
-remove only the **primary** per-dispatch sweep (`run-dispatch.ts:173`): for `discard` write dispatches
-it is subsumed; for everything else the pre-verify sweep is the backstop. `sweepScratch` itself
-(`worktree.ts:209-244`) stays (the pre-verify call still uses it).
+**Sweeps — keep BOTH (revised during planning).** The pre-review draft proposed removing the primary
+per-dispatch sweep (`run-dispatch.ts:173`) as subsumed by discard. Planning proved that wrong:
+`implement` defaults to **reject** and still routes throwaway to `styre_scratch/` (`implement.md`), and
+the primary sweep is what deletes those dirs *before* the commit-scope gate. The pre-verify sweep
+(`handlers.ts:1139`) sits *after* the gate, so if the primary sweep were removed an implement agent's
+`styre_scratch/` files would reach `implementScope`, become undeclared-new offenders, and **reject**.
+So **both sweeps stay.** Discard additionally deletes *loose* undeclared files (the live bug); the
+primary sweep keeps handling `styre_scratch/` for the reject steps; the pre-verify sweep remains the
+backstop for read-only-dispatch strays and gitignored byproducts (`__pycache__`).
 
 ## 6. INV-A / INV-B
 
@@ -182,9 +184,12 @@ option is preserved, but it is off until there is a reason and until its guards 
   (`src/config/runtime-config.ts`, threaded via `HandlerContext.config` — not the probed
   `ProfileSchema`, per the config-layering rule).
 - When set to `"discard"`, implement's discard path carries the **rename-safety guard (§5.2)** and a
-  **malformed-sidecar guard**: an absent/malformed `implement` sidecar must re-dispatch (transport
-  failure), never discard-all-and-succeed. (The simplicity reviewer flagged the flag as YAGNI; the
-  operator chose to keep the option. Noted, not silently dropped.)
+  **sidecar guard**: a **malformed** sidecar always re-dispatches (transport failure, §3a); an
+  **absent** sidecar re-dispatches **only when it caused a discard** (undeclared new files with no
+  declaration — the "no-silent-drop" case). A valid sidecar that declares some files and leaves others
+  as throwaway discards the throwaway (the intended behavior). This closes the correctness reviewer's
+  transport-failure + silent-drop findings without turning discard back into reject. (The simplicity
+  reviewer flagged the flag as YAGNI; the operator chose to keep the option. Noted, not silently dropped.)
 
 ## 9. What does NOT change
 
@@ -228,10 +233,10 @@ option is preserved, but it is off until there is a reason and until its guards 
 - `plan`/`docs`: unchanged — out-of-scope file still rejected.
 - Read-only dispatch leaves a `styre_scratch/` stray → pre-verify sweep removes it before the suite run.
 
-**Removals / reconciliations:** remove the primary sweep call (`run-dispatch.ts:173`) + its wiring test;
-keep `sweepScratch` + the pre-verify call + their tests. Update `checks.md` prompt-assertion tests to the
-new guidance; leave `implement.md` assertions intact. Update stale `commit-scope.ts` docstrings
-("reject-and-retry, never a silent drop") for the checks path.
+**Removals / reconciliations:** keep `sweepScratch` and BOTH call sites (no sweep removal). Update
+`checks.md` prompt-assertion tests to the new guidance; leave `implement.md` assertions intact. Update
+stale `commit-scope.ts` docstrings ("reject-and-retry, never a silent drop") to note the disposition
+now decides reject-vs-discard.
 
 **End-to-end (confirmation, not the primary loop):** one SMOKE bench run showing the astropy
 throwaway-loose failure is gone.
@@ -246,8 +251,9 @@ throwaway-loose failure is gone.
 - [ ] Rename-safety: a dispatch with a tracked deletion never discards an undeclared new file (rejects).
 - [ ] Blocker-3: a checks collection failure after a discard names the discarded files in the feedback.
 - [ ] `implement` default path unchanged (reject + re-dispatch on malformed sidecar); the flag's
-      `discard` path carries rename + malformed-sidecar guards; both paths tested.
-- [ ] Primary sweep removed; pre-verify sweep kept; a read-only stray does not reach the verify run.
+      `discard` path re-dispatches on a malformed sidecar (always) and on an absent sidecar that caused
+      a discard, and applies rename-safety; all these paths tested.
+- [ ] Both sweeps kept (removing the primary would make implement's `styre_scratch/` files reject); no undeclared file reaches the verify run.
 - [ ] `checks.md` drops the `styre_scratch/` paragraph (new declare-or-discard line); `implement.md`
       keeps its guidance.
 - [ ] ENG-323 support admission unchanged (staged to ENG-342).
