@@ -31,10 +31,11 @@ test("recordDelivered inserts a delivered signal idempotently (OR IGNORE on key)
 
 test("listPendingByType returns pending signals of a type across tickets", () => {
   const { db, ticketId } = makeTestDb();
+  // signal_type is a free-form TEXT column; any value exercises the generic repo function.
   db.query(
-    "INSERT INTO signal (ticket_id, signal_type, status, requested_at) VALUES (?, 'external_checks', 'pending', '2026-01-01T00:00:00Z')",
+    "INSERT INTO signal (ticket_id, signal_type, status, requested_at) VALUES (?, 'human_resume', 'pending', '2026-01-01T00:00:00Z')",
   ).run(ticketId);
-  const pending = listPendingByType(db, "external_checks");
+  const pending = listPendingByType(db, "human_resume");
   expect(pending.length).toBe(1);
   expect(pending[0].ticket_id).toBe(ticketId);
   db.close();

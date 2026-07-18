@@ -48,7 +48,7 @@ function seedMergeTicket(db: ReturnType<typeof makeTestDb>["db"], ticketId: numb
   completeDispatch(db, d.id, { outcome: "clean-success", branchHeadSha: "headsha123" });
 }
 
-test("merge-write flow: push + PR opened, ticket parks awaiting external_checks", async () => {
+test("merge-write flow: push + PR opened, ticket parks awaiting human_merge_approval", async () => {
   const { db, ticketId } = makeTestDb();
   seedMergeTicket(db, ticketId);
 
@@ -57,10 +57,11 @@ test("merge-write flow: push + PR opened, ticket parks awaiting external_checks"
   const issueTracker = fakeIssueTracker();
   const ports = { issueTracker, forge };
 
-  // Drive ticks until the ticket parks on external_checks (status='waiting').
+  // Drive ticks until the ticket parks on human_merge_approval (status='waiting').
   // merge:push runs in tick 1 → enqueues forge/push → drain applies it.
   // merge:pr-ensure runs in tick 2 → enqueues forge/pr_create → drain applies it.
-  // tick 3: resolver sees external_checks not delivered → wait → ticket parks.
+  // tick 3: resolver sees human_merge_approval not delivered → wait → ticket parks
+  //   (checks are report-not-gate: no external_checks signal is ever created).
   let t = getTicket(db, ticketId);
   let iterations = 0;
   const MAX = 10;
@@ -98,9 +99,11 @@ test("merge-write flow: push + PR opened, ticket parks awaiting external_checks"
   expect(sentPrRow?.response_ref).not.toBeNull();
   expect(typeof sentPrRow?.response_ref).toBe("string");
 
-  // A pending external_checks signal exists — the wait the ticket is parked on.
+  // A pending human_merge_approval signal exists — the wait the ticket is parked on.
+  // No external_checks signal is ever created (checks are report-not-gate).
   const pendingSignals = listSignals(db, ticketId);
-  expect(pendingSignals.some((s) => s.signal_type === "external_checks")).toBe(true);
+  expect(pendingSignals.some((s) => s.signal_type === "human_merge_approval")).toBe(true);
+  expect(pendingSignals.some((s) => s.signal_type === "external_checks")).toBe(false);
 
   db.close();
 });

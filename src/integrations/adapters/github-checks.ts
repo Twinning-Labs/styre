@@ -4,8 +4,9 @@
  * `@octokit/*` import) — this file MUST NOT import `@octokit` directly (zero-lock-in firewall).
  *
  * This file is a NOT-unit-tested SDK edge — it needs a live token + repo; the `githubForge`
- * precedent. It is verified by typecheck + build + the operator smoke test below. The core poll
- * logic (`pollChecks`) is exercised with `fakeChecks`.
+ * precedent. It is verified by typecheck + build + the operator smoke test below. `status()` is
+ * called by `readCiState` in the run driver for the one-shot, best-effort t+0 CI read; it's
+ * exercised in tests with `fakeChecks`.
  *
  * The AGGREGATION is deliberately NOT here (ENG-340): it lives in `./github-checks-verdict.ts` as a
  * pure function and is fully unit-tested. "Needs a live token" was only ever true of the two HTTP

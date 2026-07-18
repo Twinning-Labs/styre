@@ -235,9 +235,6 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
       if (!done(db, ticketId, "merge:pr-ensure")) {
         return step("merge:pr-ensure", "project", "merge:pr-ensure", null);
       }
-      if (!hasDelivered(db, ticketId, "external_checks")) {
-        return { kind: "wait", signalType: "external_checks" };
-      }
       if (!hasDelivered(db, ticketId, "human_merge_approval")) {
         return { kind: "wait", signalType: "human_merge_approval" };
       }

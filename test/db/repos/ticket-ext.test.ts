@@ -36,10 +36,10 @@ test("setTicketStage / setTicketTrack / setNeedsDocs update the row", () => {
 
 test("hasDelivered is false until a signal is delivered, then true", () => {
   const { db, ticketId } = makeTestDb();
-  const sig = insertPending(db, { ticketId, signalType: "external_checks" });
-  const before = hasDelivered(db, ticketId, "external_checks");
+  const sig = insertPending(db, { ticketId, signalType: "human_resume" });
+  const before = hasDelivered(db, ticketId, "human_resume");
   markDelivered(db, sig.id);
-  const after = hasDelivered(db, ticketId, "external_checks");
+  const after = hasDelivered(db, ticketId, "human_resume");
   db.close();
   expect(before).toBe(false);
   expect(after).toBe(true);

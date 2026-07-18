@@ -47,7 +47,8 @@
 3. **Single-writer simplicity (B2).** One runner writes one SQLite file.
 4. **Trivial to install (`GOAL-INSTALL`).** A new operator brings up the whole system with one
    command, no servers, no runtime dance (§10). A hard constraint that shapes real choices below
-   (e.g. polling over webhooks in S8).
+   (e.g. a bounded reach-out read rather than an inbound webhook in S8; polling-not-webhooks for the
+   commercial plane's merge-watch, S9).
 
 ---
 
@@ -82,12 +83,12 @@ on_start():
 loop():                           # (commercial Control Plane: the multi-ticket scheduler)
   while running:
     drain_outbox()                # §5 execute pending external effects idempotently
-    poll_external_signals()       # §7.3 checks-system status, PR-merged -> deliver signals
+    poll_external_signals()       # §7.3 PR-merged (and human-action) -> deliver signals
     ready = SELECT * FROM v_ready_tickets ORDER BY <stage_index DESC, priority DESC, created_at ASC>
     for ticket in ready:
       if inflight_count() >= K: break       # K = orchestrator.max_concurrent_features (2–3)
       spawn_async(advance_one_step, ticket)
-    await_any_completion_or(timeout=POLL_INTERVAL)
+    await_any_completion_or(timeout=<poll interval>)
 ```
 `v_ready_tickets` already excludes paused projects and tickets parked on a pending signal. Workers
 run concurrently; the runner journals each result as it returns. **No worker touches SQLite.**
@@ -443,29 +444,39 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 - **Idempotency:** **probe** — `gh pr view <branch>` → use the existing PR if present.
 - **Failure → route:** transient → retry.
 
-**S8 · `merge:await-checks`** — wait for the project's checks system (generic) `[CL-CHECKS]`
-- **Guard:** PR exists.
+**S8 · checks are reported, not gated** — a t+0 CI read on the merge path `[CL-CHECKS]`
+> **Report-not-gate (2026-07-18).** OSS `styre run` does not wait for, poll, or loop back on CI.
+> Immediately after S7 opens the PR, the run takes **one** best-effort read of the project's
+> checks-system state (bounded by an ~8s timeout: `CI_READ_TIMEOUT_MS`) and emits it as the
+> `ci_handoff` telemetry event, then exits PR-ready. This read lives on the merge path to the
+> PR-ready terminal, not as a separately dispatched/journaled `workflow_step` — there is no
+> `merge:await-checks` step, no `external_checks` signal, and nothing loops back on a checks
+> verdict in OSS. **CI-watch + reconcile beyond t+0 is the commercial Control Plane's outer loop**
+> (fenced, undesigned — like S9 below).
+- **Guard:** PR exists (S7).
 - **Generic by design:** each project has a **checks system** (GitHub's built-in checks, a *separate*
-  CI system, or none), discovered or asked at setup and saved in the project's settings. The step
+  CI system, or none), discovered or asked at setup and saved in the project's settings. The read
   asks one **standard question** — *"for this change, are the checks passing, failing, or still
-  running?"* — answered by a small **per-system translator**. Build the GitHub translator + the
-  "none" case now; other systems are added later as new translators, **this step unchanged.**
-- **Delivery = polling, not webhooks (`[CL-POLL]`):** the runner *reaches out* to the checks system
-  periodically. This serves GOAL-INSTALL — works behind any firewall, no public endpoint. The
-  checks/merge facts enter as **delivered signals** (§7.3), never a control-flow read.
-- **Output:** green → in OSS the run exits here (PR-ready); in the commercial Control Plane, proceed to S9. failing → loop back through the normal coding-and-review steps
-  (P1); flaky/infra → re-run the checks (P2); **none configured → skip** (human merge stays the gate).
-- **Timeout:** bounded wait; stuck/unreachable → escalate to the human.
+  running?"* — answered by a small **per-system translator** (`ChecksPort.status()`). Build the
+  GitHub translator + the "none" case now; other systems are added later as new translators.
+- **Fail-safe by construction:** the read never throws and never blocks the terminal — any error,
+  timeout, unsupported system, or missing SHA reports `not-reported`; `checksSystem === "none"`
+  reports `skipped`. The read racing its own timeout guarantees PR-ready is always reached.
+- **Output:** `ci_handoff` (`passing` | `failing` | `pending` | `not-reported` | `skipped`) is
+  emitted as telemetry; **OSS `styre run` exits PR-ready immediately after, regardless of the
+  reported value** — a `failing` read still exits PR-ready (D1). Nothing in OSS re-runs, escalates,
+  or waits on this result.
 
 **S9 · `merge:await-human`** — the single human gate (D2)
-> **OSS boundary.** The OSS `styre run` is **PR-ready terminal**: once the PR exists with checks
-> green (S7/S8), the run has done its job and exits — it does **not** wait indefinitely for a human
-> merge, does not maintain a persistent needs-you inbox, and does not keep the branch current across a
-> slow human approval. Everything in this S9 step — the indefinite park in the **needs-you inbox**,
-> polling GitHub for the merge, and the `[CL-STALE]` keep-branch-current-while-waiting behavior — is
-> the **commercial Control Plane**'s outer loop. It is the design record for that plane; it is fenced,
+> **OSS boundary.** The OSS `styre run` is **PR-ready terminal**: once the PR exists (S7), the run
+> has done its job and exits — it does **not** wait for CI (S8 is a one-shot report, not a gate),
+> does **not** wait indefinitely for a human merge, does not maintain a persistent needs-you inbox,
+> and does not keep the branch current across a slow human approval. Everything in this S9 step — the
+> indefinite park in the **needs-you inbox**, polling GitHub for the merge, and the `[CL-STALE]`
+> keep-branch-current-while-waiting behavior — is the **commercial Control Plane**'s outer loop
+> (which still owns CI-watch, per S8 above). It is the design record for that plane; it is fenced,
 > not deleted.
-- **Guard:** checks green (or none).
+- **Guard:** PR exists (S7). CI status is no longer a precondition — it is reported, not gated.
 - **Behavior *(commercial Control Plane)*:** parks the work in the operator's **needs-you inbox** with
   full context (what changed, test/check results, review outcome). **No deadline** — waits indefinitely
   (optional gentle reminder). Detected by polling GitHub for the merge.
@@ -557,14 +568,15 @@ await step then succeeds.
 |---|---|
 | `human_merge_approval` (D2) | operator, via the needs-you inbox (D3) *(commercial Control Plane)* |
 | `human_resume` (escalation, §8) | operator |
-| `external_checks` | §7.3 poll of the project's checks system (CL-CHECKS/CL-POLL) |
 | `external_pr_result` | the outbox drainer completing `pr_create` (delivers `response_ref`) |
 
-**7.3 External delivery = polling.** Checks-system status and PR-merged are obtained by the runner
-*reaching out* on an interval (no inbound endpoint → GOAL-INSTALL). Budget fields (`attempts`,
-`max_attempts`, `first_attempt_at`) bound the wait; exhaustion → `human_resume` escalation. *(The
-indefinite human-merge wait and PR-merged polling are the commercial Control Plane's outer loop, §9;
-in OSS, `styre run` exits at PR-ready. The OSS escalation/park semantics — exit nonzero, or park at
+**7.3 External delivery = polling** *(commercial Control Plane, PR-merged only)*. There is no
+`external_checks` signal — that signal type is never created (§8.3 removed the checks-atlas rows;
+CI is a one-shot t+0 read reported as `ci_handoff` telemetry on the merge path, §4 S8, never a
+delivered signal, never a wait). PR-merged remains obtained by the runner *reaching out* on an
+interval (no inbound endpoint → GOAL-INSTALL), but that polling — and its indefinite wait —
+is entirely the commercial Control Plane's outer loop, §9; in OSS, `styre run` exits at PR-ready
+before any merge-watch begins. *(The OSS escalation/park semantics — exit nonzero, or park at
 exit 75 on a session interruption, resumable with `styre run --resume` — are in execution-model.md.)*
 
 ---
@@ -654,10 +666,10 @@ exit 75 on a session interruption, resumable with `styre run --resume` — are i
 > separately from a real failure.
 
 | V6 | across reviews | same finding (`finding_class_key`) persists N cold rounds | escalate (agent can't fix it) | — | fast |
-| **Checks (CI)** ||||||
-| P1 | S8 | checks red — real failure | → ticket-scoped reconcile (then verify+review+re-push) | ticket | K_distinct → escalate |
-| P2 | S8 | checks flaky / infra | re-run the checks | — | K_retry → escalate |
-| P3 | S8 | checks system unreachable / wait-budget exhausted | escalate | — | — |
+> **Checks (CI) rows removed (2026-07-18, report-not-gate).** The former P1/P2/P3 rows (checks red /
+> flaky / unreachable-or-wait-budget-exhausted, all detected at S8) are deleted: S8 no longer gates,
+> waits, or loops back on CI in OSS — see the S8 rewrite above. There is nothing left to route on;
+> the commercial plane's CI-watch/reconcile loop is undesigned and unfenced by this atlas.
 | **Human merge** ||||||
 | H1 | S9 | operator requests changes | → S2b or S1 per feedback | operator | human-driven |
 | **External effects & infra** ||||||
@@ -691,7 +703,8 @@ is a deferred follow-up folded into S5 review, not this row.
 **→ implement** (unit or ticket scope — the code is wrong; most failures — including CM1's
 under-delivery, where the code is *missing* rather than wrong). **→ design / re-design**
 (plan scope — the plan is wrong; caught early at DV1, or late at V3). **→ escalate** (a resumable
-park — budget exhausted, or an inherently human case: R3/R4, V-def, V6, P3, H1, X1/X2; **or an
+park — budget exhausted, or an inherently human case: R3/R4, V-def, V6, H1, X1/X2 (P3 removed with
+the Checks (CI) rows, §8.3); **or an
 environment error, E1** — provision, always immediate, never bounded by attempt-count; in OSS the run
 exits with the trace, in the commercial Control Plane it surfaces in the needs-you inbox).
 
@@ -760,8 +773,9 @@ One command, no server setup. Implications the runner owns *(OSS-core unless mar
   install targets; see build-operations §3.1. The OSS `setup` does not install a host service.)*
 - **Minimal host contract** — the binary + `claude` + `git` + `gh`; one config file + one secrets
   file; no ambient `LINEAR_API_KEY`.
-- **Reach-out-only networking** — polling (not webhooks) for checks/merge → works behind any
-  firewall, no public endpoint.
+- **Reach-out-only networking** — OSS makes one bounded, best-effort outbound CI read at PR-open
+  (§4 S8), never an inbound webhook. *(Commercial Control Plane: additionally polls, not webhooks,
+  for the outer merge-watch loop.)* Works behind any firewall, no public endpoint.
 - **Built-in `status` (local-tz, DS-1)** — no extra dashboards. *(Commercial Control Plane: the
   persistent **needs-you inbox** surface.)*
 
@@ -783,15 +797,15 @@ One command, no server setup. Implications the runner owns *(OSS-core unless mar
 | 10 | `docs:revise` | Haiku | docs updated (needs_docs was set); runner commits |
 | 11 | `review` | Opus | files findings via tools; 0 blocking → ship-ready; `stage=merge` |
 | 12 | `merge:push` | runner/outbox | branch pushed (probe on SHA) |
-| 13 | `merge:pr-ensure` | runner/outbox + Haiku | PR opened (probe), cheap-AI description |
-| 14 | `merge:await-checks` | runner (poll) | checks green — **OSS `styre run` exits PR-ready here** |
-| 15 | `merge:await-human` | operator | *(commercial)* merges (branch kept current meanwhile); `stage=released` |
-| 16 | `released:project` | runner/outbox | *(commercial)* tracker → Done; worktree cleaned; `status=done` |
+| 13 | `merge:pr-ensure` | runner/outbox + Haiku | PR opened (probe), cheap-AI description; a t+0 CI read fires + `ci_handoff` emitted — **OSS `styre run` exits PR-ready right here** |
+| 14 | `merge:await-human` | operator | *(commercial)* merges (branch kept current meanwhile); `stage=released` |
+| 15 | `released:project` | runner/outbox | *(commercial)* tracker → Done; worktree cleaned; `status=done` |
 
-The OSS `styre run` drives steps 1–14 (through PR-ready + checks-green) and exits; steps 15–16
-(indefinite human-merge wait, released-stage projection) are the **commercial Control Plane**'s outer
-loop. A **fast-track** ticket skips step 3 (plan-review); a backend-only ticket drops 7–8 and (no doc
-impact) 10; **1 work-unit = 1 implement dispatch.**
+The OSS `styre run` drives steps 1–13 (through PR-ready, with a best-effort CI snapshot reported —
+not gated — on the way out) and exits; steps 14–15 (indefinite human-merge wait, released-stage
+projection) are the **commercial Control Plane**'s outer loop. A **fast-track** ticket skips step 3
+(plan-review); a backend-only ticket drops 7–8 and (no doc impact) 10; **1 work-unit = 1 implement
+dispatch.**
 
 ---
 
@@ -804,7 +818,8 @@ mid-step resumes (§6.1).
 the commercial outer loop, §2.1) · CL-COMMIT (runner-commits) · CL-ORCH (runner-orchestrates, no
 master agent) · validated-interface for structured output (§3a) · review
 redesign (findings via tool calls; verdict from state) · CL-NODEFER (no deferral dictionary;
-record-now-learn-later) · CL-CHECKS/CL-POLL (generic checks system, polling) · CL-STALE
+record-now-learn-later) · CL-CHECKS/CL-POLL (generic checks system, polling) (OSS: superseded by
+report-not-gate — see §8 S8) · CL-STALE
 (stale-branch handling) · **S1c plan-review** (shift-left semantic plan gate, full-track) ·
 CL-POSTCOND (per-step postconditions) · CL-PROFILE (pre-dispatch profile-completeness gate) ·
 **§8 rewritten from first principles** — P3 cost/time auto-calibrated budget governs every loop;

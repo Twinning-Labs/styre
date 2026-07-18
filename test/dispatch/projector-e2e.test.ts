@@ -12,7 +12,7 @@ test("a stage advance projects to the issue tracker via the drainer in tick", as
   db.query("UPDATE ticket SET stage = 'review' WHERE id = ?").run(ticketId);
   const reg = new StepRegistry();
   reg.register("review", () => ({ findings: 0 }));
-  // The merge stage tries merge:push + merge:pr-ensure before parking on external_checks wait.
+  // The merge stage tries merge:push + merge:pr-ensure before parking on human_merge_approval wait.
   reg.register("merge:push", () => ({}));
   reg.register("merge:pr-ensure", () => ({}));
   const fake = fakeIssueTracker();

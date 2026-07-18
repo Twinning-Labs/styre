@@ -1,8 +1,9 @@
 import type { Database } from "bun:sqlite";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
+import { getLatestForTicket } from "../db/repos/dispatch.ts";
 import { listByTicket } from "../db/repos/event-log.ts";
 import { insertProject } from "../db/repos/project.ts";
-import { listPending } from "../db/repos/signal.ts";
+import { getDeliveredPayload, listPending } from "../db/repos/signal.ts";
 import { getTicket, insertTicket } from "../db/repos/ticket.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
@@ -26,9 +27,42 @@ export interface RunResult {
 const DEFAULT_CAP = 200; // overall iteration budget for one ticket
 const IDLE_CAP = 3; // consecutive zero-advance ticks → stalled
 
+type CiRead = "passing" | "failing" | "pending" | "not-reported" | "skipped";
+
+const CI_READ_TIMEOUT_MS = 8_000; // best-effort; never let the t+0 read block the terminal
+
+/** Best-effort t+0 read of remote CI state. NEVER throws and NEVER blocks: any error, TIMEOUT,
+ *  unsupported system, or missing sha → "not-reported"; checksSystem "none" → "skipped".
+ *  The timeout is load-bearing: ChecksPort.status() (githubChecks) issues unbounded octokit
+ *  paginate calls that HANG rather than throw on a slow/unreachable API — a bare try/catch would
+ *  not save us, and a hang here would also block finish()'s outbox drain (the outbound PR/Linear
+ *  projection), reintroducing the exact idle-burn this design deletes. */
+async function readCiState(
+  ports: ProjectorPorts,
+  checksSystem: string,
+  sha: string | null,
+  timeoutMs: number = CI_READ_TIMEOUT_MS,
+): Promise<CiRead> {
+  if (checksSystem === "none") return "skipped";
+  if (checksSystem !== "github" || !ports.checks || !sha) return "not-reported";
+  const checks = ports.checks;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<CiRead>((resolve) => {
+    timer = setTimeout(() => resolve("not-reported"), timeoutMs);
+  });
+  try {
+    return await Promise.race([checks.status({ ref: sha }), timeout]);
+  } catch {
+    return "not-reported";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Drive ONE ticket through repeated ticks until a terminal state. `run` exits at PR-ready (the
  *  ticket parked at merge on human_merge_approval — the PR is open, awaiting the human merge gate
- *  which `run` never delivers). Passes `profile` so pollChecks delivers external_checks. */
+ *  which `run` never delivers). Emits a best-effort `ci_handoff` telemetry snapshot on the
+ *  PR-ready path (checks are reported, never gated). */
 export async function driveToTerminal(
   db: Database,
   registry: StepRegistry,
@@ -39,9 +73,11 @@ export async function driveToTerminal(
     profile: { checksSystem: string };
     cap?: number;
     emit?: TelemetrySink;
+    ciReadTimeoutMs?: number;
   },
 ): Promise<RunResult> {
   const cap = opts.cap ?? DEFAULT_CAP;
+  const ciReadTimeoutMs = opts.ciReadTimeoutMs ?? CI_READ_TIMEOUT_MS;
   const emitter = createTelemetryEmitter(opts.emit ?? noopSink);
   const notifier = createNotifier(opts.config);
   const finish = async (result: RunResult): Promise<RunResult> => {
@@ -58,7 +94,6 @@ export async function driveToTerminal(
     const r = await tick(db, registry, {
       config: opts.config,
       ports: opts.ports,
-      profile: opts.profile,
     });
     emitter.flushNew(db, opts.ticketId);
     notifier.sweepNew(db, opts.ticketId);
@@ -72,8 +107,19 @@ export async function driveToTerminal(
     if (t.status === "done") return await finish({ outcome: "done", iterations: i, ...last });
     if (pending.some((s) => s.signal_type === "human_resume"))
       return await finish({ outcome: "blocked", iterations: i, ...last });
-    if (t.stage === "merge" && pending.some((s) => s.signal_type === "human_merge_approval"))
+    if (t.stage === "merge" && pending.some((s) => s.signal_type === "human_merge_approval")) {
+      const pr = getDeliveredPayload(db, opts.ticketId, "external_pr_result");
+      const sha = getLatestForTicket(db, opts.ticketId)?.branch_head_sha ?? null;
+      const read = await readCiState(opts.ports, opts.profile.checksSystem, sha, ciReadTimeoutMs);
+      emitter.emitCiHandoff(db, opts.ticketId, {
+        prRef: typeof pr?.ref === "string" ? pr.ref : null,
+        prUrl: typeof pr?.url === "string" ? pr.url : null,
+        sha,
+        checksSystem: opts.profile.checksSystem,
+        read,
+      });
       return await finish({ outcome: "pr-ready", iterations: i, ...last });
+    }
     // A resolver dead-end ('blocked': no actionable unit and not all verified) is terminal, not a
     // stall to grind on — surface it immediately rather than spinning to the iteration cap.
     if (r.blocked) return await finish({ outcome: "blocked", iterations: i, ...last });
