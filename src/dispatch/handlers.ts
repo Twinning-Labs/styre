@@ -570,6 +570,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       sha,
       output,
       dispatchId: did,
+      discarded,
     } = await runAgentDispatch(ctx, depsFor(ctx, deps, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS), {
       handlerKey: "checks:dispatch",
       template: CHECKS_TEMPLATE,
@@ -693,7 +694,13 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
             (a) => `AC ${a.seq}: ${missReason.get(a.id) ?? "no valid check authored for this AC"}`,
           )
           .join("; ");
-        throw new Error(`checks:dispatch postcondition: ${detail}`);
+        // Diagnosis-only (INV-B): name what was discarded this attempt so a discarded-but-needed
+        // helper is recoverable instead of an opaque wedge — no instruction, just the fact.
+        const discardNote =
+          discarded.length > 0
+            ? ` — undeclared files discarded this attempt: ${discarded.join(", ")}`
+            : "";
+        throw new Error(`checks:dispatch postcondition: ${detail}${discardNote}`);
       }
 
       // Persist (§9): delete-then-insert in ONE transaction (resume-dedup, decision 1) + the signal row
