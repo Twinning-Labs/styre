@@ -82,11 +82,27 @@ const SummaryEvent = z.object({
   escalation_reasons: z.array(z.string()),
 });
 
+/** A one-shot best-effort snapshot of remote CI state at PR-open, handed off to whoever owns the
+ *  outer loop (the plane, or a human on GitHub). CI is reported, never gated (report-not-gate). */
+const CiHandoffEvent = z.object({
+  schema_version: version,
+  type: z.literal("ci_handoff"),
+  ticket_id: z.number(),
+  ident: z.string(),
+  pr_ref: z.string().nullable(),
+  pr_url: z.string().nullable(),
+  branch_head_sha: z.string().nullable(),
+  checks_system: z.string(),
+  read: z.enum(["passing", "failing", "pending", "not-reported", "skipped"]),
+  measured_at: z.string(),
+});
+
 export const TelemetryEventSchema = z.discriminatedUnion("type", [
   EventEvent,
   DispatchEvent,
   SignalEvent,
   SummaryEvent,
+  CiHandoffEvent,
 ]);
 
 export type TelemetryEvent = z.infer<typeof TelemetryEventSchema>;
