@@ -80,24 +80,3 @@ test("reports blocked when a human_resume escalation is pending", async () => {
   expect(r.outcome).toBe("blocked");
   db.close();
 });
-
-test("reports no-progress when nothing advances and no terminal is reached", async () => {
-  const { db, ticketId } = makeTestDb();
-  // Park on external_checks but drive WITHOUT a profile-less tick path: pass an unsupported
-  // checksSystem so pollChecks never delivers → the ticket stalls.
-  const stalledProfile = parseProfile({
-    slug: "demo",
-    targetRepo: "/tmp/x",
-    checksSystem: "external",
-  });
-  seedAtMerge(db, ticketId);
-  const r = await driveToTerminal(db, reg(), {
-    ticketId,
-    config: DEFAULT_RUNTIME_CONFIG,
-    ports: ports(),
-    profile: stalledProfile,
-    cap: 12,
-  });
-  expect(r.outcome).toBe("no-progress");
-  db.close();
-});

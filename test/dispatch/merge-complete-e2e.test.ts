@@ -6,7 +6,7 @@ import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { tick } from "../../src/daemon/loop.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
-import { hasDelivered, listPending } from "../../src/db/repos/signal.ts";
+import { listPending } from "../../src/db/repos/signal.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
@@ -68,15 +68,14 @@ test("merge → released completes: checksSystem none auto-passes, operator appr
   const reg = registryFor(profile);
   const ports = { issueTracker: fakeIssueTracker(), forge: fakeForge() };
 
-  // Poll auto-delivers external_checks; ticket then parks on human_merge_approval.
+  // The merge resolver parks directly on human_merge_approval (checks are report-not-gate).
   await driveUntil(
     db,
     reg,
-    { ports, profile },
+    { ports },
     () => listPending(db, ticketId).some((s) => s.signal_type === "human_merge_approval"),
     "human_merge_approval pending",
   );
-  expect(hasDelivered(db, ticketId, "external_checks")).toBe(true);
 
   // Operator approves the merge (the one human gate, delivered via the inbox in production).
   const approval = listPending(db, ticketId).find((s) => s.signal_type === "human_merge_approval");
@@ -86,7 +85,7 @@ test("merge → released completes: checksSystem none auto-passes, operator appr
   await driveUntil(
     db,
     reg,
-    { ports, profile },
+    { ports },
     () => getTicket(db, ticketId)?.status === "done",
     "ticket done",
   );
@@ -111,6 +110,8 @@ test("merge → released completes: checksSystem github with passing checks", as
     checksSystem: "github",
   });
   const reg = registryFor(profile);
+  // The checks port is no longer consulted to reach human_merge_approval (nothing polls it);
+  // kept here to document that its presence doesn't change the flow.
   const ports = {
     issueTracker: fakeIssueTracker(),
     forge: fakeForge(),
@@ -120,11 +121,10 @@ test("merge → released completes: checksSystem github with passing checks", as
   await driveUntil(
     db,
     reg,
-    { ports, profile },
+    { ports },
     () => listPending(db, ticketId).some((s) => s.signal_type === "human_merge_approval"),
     "human_merge_approval pending",
   );
-  expect(hasDelivered(db, ticketId, "external_checks")).toBe(true);
 
   const approval = listPending(db, ticketId).find((s) => s.signal_type === "human_merge_approval");
   if (!approval) throw new Error("expected a pending human_merge_approval signal");
@@ -132,7 +132,7 @@ test("merge → released completes: checksSystem github with passing checks", as
   await driveUntil(
     db,
     reg,
-    { ports, profile },
+    { ports },
     () => getTicket(db, ticketId)?.status === "done",
     "ticket done",
   );

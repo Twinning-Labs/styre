@@ -2,7 +2,6 @@ import type { Database } from "bun:sqlite";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { advanceOneStep } from "./advance.ts";
-import { pollChecks } from "./poll-checks.ts";
 import { type ProjectorPorts, drainOutbox } from "./projector.ts";
 import type { StepRegistry } from "./step-registry.ts";
 
@@ -27,7 +26,6 @@ export async function tick(
     maxConcurrent?: number;
     config?: RuntimeConfig;
     ports?: ProjectorPorts;
-    profile?: { checksSystem: string };
   },
 ): Promise<{ advanced: number; blocked: boolean; parked?: ParkInfo }> {
   const max = opts?.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
@@ -47,9 +45,6 @@ export async function tick(
   }
   if (opts?.ports) {
     await drainOutbox(db, opts.ports);
-  }
-  if (opts?.profile) {
-    await pollChecks(db, opts.profile, opts.ports?.checks);
   }
   return { advanced, blocked, parked };
 }

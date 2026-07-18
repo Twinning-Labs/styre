@@ -19,8 +19,8 @@ test("awaitSignal parks the ticket on a pending signal", () => {
 
 test("awaitSignal is idempotent for the same signal type (no duplicate park)", () => {
   const { db, ticketId } = makeTestDb();
-  const a = awaitSignal(db, { ticketId, signalType: "external_checks" });
-  const b = awaitSignal(db, { ticketId, signalType: "external_checks" });
+  const a = awaitSignal(db, { ticketId, signalType: "human_plan_approval" });
+  const b = awaitSignal(db, { ticketId, signalType: "human_plan_approval" });
   db.close();
   expect(b.id).toBe(a.id);
 });

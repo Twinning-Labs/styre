@@ -204,7 +204,7 @@ CREATE TABLE signal (
     id              INTEGER PRIMARY KEY,
     ticket_id       INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
     signal_type     TEXT    NOT NULL,                  -- 'human_merge_approval'/'human_plan_approval'
-                                                       -- /'human_resume'/'external_checks'/'external_pr_result'
+                                                       -- /'human_resume'/'external_pr_result'
     status          TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN (
                         'pending','delivered','consumed')),
     reason          TEXT,                              -- 'awaiting-approval'/'awaiting-checks'

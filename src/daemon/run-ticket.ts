@@ -28,7 +28,8 @@ const IDLE_CAP = 3; // consecutive zero-advance ticks → stalled
 
 /** Drive ONE ticket through repeated ticks until a terminal state. `run` exits at PR-ready (the
  *  ticket parked at merge on human_merge_approval — the PR is open, awaiting the human merge gate
- *  which `run` never delivers). Passes `profile` so pollChecks delivers external_checks. */
+ *  which `run` never delivers). Emits a best-effort `ci_handoff` telemetry snapshot on the
+ *  PR-ready path (checks are reported, never gated). */
 export async function driveToTerminal(
   db: Database,
   registry: StepRegistry,
@@ -58,7 +59,6 @@ export async function driveToTerminal(
     const r = await tick(db, registry, {
       config: opts.config,
       ports: opts.ports,
-      profile: opts.profile,
     });
     emitter.flushNew(db, opts.ticketId);
     notifier.sweepNew(db, opts.ticketId);

@@ -67,7 +67,7 @@ test("advancing through advanceOneStep enqueues the projection (integration with
   // clean, so the next advanceOneStep collapses the resolver's { kind: "advance", review→merge }.
   const reg = new StepRegistry();
   reg.register("review", () => ({ findings: 0 }));
-  // The merge stage runs these before parking on the external_checks wait; register them so the
+  // The merge stage runs these before parking on the human_merge_approval wait; register them so the
   // second advanceOneStep (which collapses the advance, then walks into merge) parks cleanly.
   reg.register("merge:push", () => ({}));
   reg.register("merge:pr-ensure", () => ({}));
