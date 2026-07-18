@@ -95,6 +95,17 @@ test("implementVars surfaces files_to_touch as a floor, not a cage", () => {
   expect(vars.test_plan).toContain("assert exact calendar properties");
 });
 
+test("implementVars tells implement the authored checks read red until satisfied", () => {
+  const withChecks = implementVars(ticket, unit, profile, "", [
+    { test_path: "tests/styre_checks/ENG-9_ac1_test.ts" },
+  ]);
+  expect(withChecks.authored_checks).toContain("tests/styre_checks/ENG-9_ac1_test.ts");
+  expect(withChecks.authored_checks).toContain("red");
+  expect(withChecks.authored_checks).toContain("expected and is not a bug");
+  // No authored checks ⇒ no section at all (no orphan expected-red note).
+  expect(implementVars(ticket, unit, profile).authored_checks).toBe("");
+});
+
 test("implementVars omits the test_plan section for a unit without one", () => {
   const nonBehavioral = {
     seq: 1,

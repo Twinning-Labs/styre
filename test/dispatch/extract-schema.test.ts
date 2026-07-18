@@ -93,8 +93,11 @@ test("validateExtraction rejects a unit with no files_to_touch", () => {
 
 // STYRE-7: a unit whose ONLY deliverable is an implement-authored test that also covers an
 // acceptance criterion is a valid third shape (neither a code unit nor a "tests are the deliverable"
-// coverage ticket). Fix A restates the design-extract rule by authorship so the agent declares it;
-// this pins the schema side so no future change re-introduces a rule that rejects the shape.
+// coverage ticket). The actual STYRE-7 erasure was a PROMPT-level misclassification (design-extract
+// nulled the file), which no unit test can cover; Fix A corrects the prompt. This test is
+// defense-in-depth on the SCHEMA side only — it would catch a future purpose-based rule wrongly added
+// to validateExtraction. validateExtraction never checked purpose, so it accepted this shape before
+// Fix A too; the value here is pinning that it must continue to.
 test("validateExtraction accepts a unit declaring only a product test (STYRE-7 third shape)", () => {
   expect(
     validateExtraction([
