@@ -1,8 +1,8 @@
-# Scope-guard file disposition — declare-or-discard
+# Scope-guard file disposition — declare-or-discard (checks)
 
-**Status:** design, pending independent review
+**Status:** design, revised after independent panel review (see §14)
 **Date:** 2026-07-19
-**Type:** bug fix / reliability + altitude correction (unblocks the astropy bench; ends the scope-guard accretion treadmill)
+**Type:** bug fix / reliability (unblocks the astropy bench; ends the *reject-driven* accretion on the checks step)
 **Companion:** the current-state map is `docs/brainstorms/2026-07-19-checks-file-disposition-model.md` — read it first.
 **Follow-up filed:** ENG-342 (drop the ENG-323 support heuristic, staged — see §7).
 
@@ -21,211 +21,235 @@ ignored it. `__init__.py` support files, by contrast, now pass (ENG-323 works); 
 
 **The treadmill.** The rule that produced that rejection is a whitelist that has needed one new clause
 per legitimate file shape: ENG-296 (canonical check name) → ENG-297 (`styre_checks/` pin) → ENG-300
-(`styre_scratch/` sweep) → ENG-323 (co-located support files). Every clause shipped because a real run
-hit a shape the whitelist didn't cover. The operator's words: *"we seem to be discovering scenarios
-every run… the whole thing has become so complex that I cannot keep it in my head."*
+(`styre_scratch/` sweep) → ENG-323 (co-located support files). The operator's words: *"we seem to be
+discovering scenarios every run… the whole thing has become so complex that I cannot keep it in my
+head."*
 
 The root of both is one mechanism: **the guard rejects any undeclared brand-new file**, which forces the
-agent to pre-sort every file into three buckets (declare / `styre_scratch/` / `styre_checks/`) and
-punishes misclassification with reject → loopback → escalate.
+agent to pre-sort every file into three buckets and punishes misclassification with reject → loopback →
+escalate.
 
-## 2. The insight
+## 2. The insight (and its honest limits)
 
-A stray **new untracked** file is, by construction, never an edit to tracked source. It can always be
-safely deleted: it is not committed history, and if it was genuinely needed, the **ground-truth run**
-(RED-first check / verify) fails loudly and says so. So there is nothing to protect by *rejecting* it —
-we can **discard** it and let the test run be the arbiter of whether it was needed.
+A stray **new untracked** file is, by construction, never an edit to tracked source. For a *tests-only*
+step like `checks`, discarding it is safe *when it is genuinely throwaway* — and for a genuinely-needed
+file, the RED-first re-run fails and the agent recovers **provided the failure names what was dropped**
+(§6, blocker-3 fix). An out-of-scope **edit to tracked source** is different — it cannot be silently
+reverted and is a real "this step touched something it must not" signal — so it stays loud.
 
-An out-of-scope **edit to tracked source** is different: it cannot be silently reverted the same way,
-and it is a real "this step touched something it must not" signal. That stays loud.
+**Where the insight does NOT reach (established by the review, §14):**
 
-## 3. Why we are overturning a settled decision (the July-11 reversal)
+- It is **proven only for `checks`**, where the discarded artifact is a test helper and the RED-first
+  run is a real arbiter. For `implement`, a discarded needed module can pass verify silently (no check
+  exercises it); for `plan`/`docs` there is no observed failure at all. So discard ships **for checks
+  only**; `implement`/`plan`/`docs` keep today's reject (§4).
+- Discard is only *loud enough to recover from* if the ground-truth failure is **legible**. It is not
+  today (a missing helper yields an opaque `selected-none`), so we add the legible feedback (§6) rather
+  than assume it.
+- The telemetry `note` a discard emits is **observable, not a safety net** — OSS `styre run` has no
+  inbox/supervisor to consume it (those are commercial-plane). It is provenance, nothing more.
+
+## 3. Why we are overturning a settled decision (the July-11 reversal, scoped to checks)
 
 Reject-not-drop was an **operator-made governing decision** on 2026-07-11
 (`docs/brainstorms/2026-07-11-scoped-commit-design.md` §2): steps that commit real work reject-and-retry
 on any undeclared new file, because *"a brand-new file the step produces might be genuine deliverable
-work; silently excluding it could drop part of a real fix… this never silently drops a legitimate
-file."* The 2026-07-15 scratch-drawer brainstorm inherited this and treated it as settled; when the
-operator floated discard again there, it was closed by **citation** to §2, not re-argued. That was the
-misstep — a second raising was a signal to reopen on the merits.
+work; silently excluding it could drop part of a real fix."* The 2026-07-15 scratch-drawer brainstorm
+inherited this and treated it as settled; when the operator floated discard again there, it was closed
+by **citation**, not re-argued. That was the misstep — a second raising was a signal to reopen.
 
 Re-examined on the merits, §2 gave two reasons to reject discard:
 
 1. *"A genuine unplanned new file would be lost, and verify would only catch it after a wasted loop (or
-   wedge)."* This already **concedes ground truth catches it** — the only objection is that catching it
-   at commit-time is earlier/louder. That is a cost-benefit claim, and the SMOKE data **inverts** it:
-   the case reject protects (a dropped *needed* file) is rare and recoverable one loop later; the case
-   reject *causes* (a throwaway file wedging the ticket) is common and terminal. We optimized against
-   the rare recoverable failure and bought the common terminal one.
-2. *"A negative list lets an un-flagged scratch file slip to review."* This targeted a **different**
+   wedge)."* This concedes ground truth catches it; the objection is only that commit-time is
+   earlier/louder. The SMOKE data **inverts the cost-benefit for checks**: the case reject protects (a
+   dropped *needed* helper) is rare, and the case reject *causes* (a throwaway file wedging the ticket)
+   is common and terminal. **But the inversion is checks-specific** — for `implement`, the review showed
+   the protected case (a needed module verify never exercises) is *not* recoverable by ground truth, so
+   the original reasoning still holds there. That is why the reversal is scoped to checks.
+2. *"A negative list lets an un-flagged scratch file slip to review."* This targeted a different
    alternative (commit everything except declared scratch). Declare-or-discard is the opposite — commit
-   only what's declared/recognized, discard the rest — so nothing un-flagged slips through. The
-   objection does not apply.
+   only what's declared/recognized, discard the rest — so nothing un-flagged slips through. Does not
+   apply.
 
-What changed since July 11: (a) it was a-priori then; we now have **evidence** that reject + three
-prevention layers still wedges; (b) declare-or-discard **defeats the word doing all the work in §2 —
-"silently"**: every discard emits a telemetry `note`, and a dropped *needed* file becomes a loud
-ground-truth failure, so "never *silently* drop a legit file" is still honored; (c) letting the test run
-decide what was needed is **ground-truth-over-self-report** (a core CLAUDE.md invariant), which the
-declaration heuristic arguably violates.
+What changed since July 11: it was a-priori then; we now have **evidence** that reject + three
+prevention layers still wedges *on checks*. We are not claiming a universal principle — we are fixing the
+step where the evidence is.
 
-## 4. The design: one uniform disposition rule
+## 4. The design: disposition per step
 
-For every write dispatch, over each change **this dispatch produced** (pre-existing untracked cruft is
-already excluded via `untrackedBefore`, `run-dispatch.ts:117-123`):
+Each write dispatch carries a **disposition** — `reject` (today's behavior) or `discard`. For each
+change this dispatch produced (pre-existing untracked cruft is already excluded via `untrackedBefore`,
+`run-dispatch.ts:117-123`):
 
-| Change | Outcome | vs today |
+| Change | `reject` disposition (today) | `discard` disposition (new) |
 |---|---|---|
-| **In-scope** — a declared new file (`new_files` / `checksAuthored`), a canonically-named check (ENG-296), a tracked edit the step allows, or a path under the step's own dir | **commit** (by name) | same |
-| **Out-of-scope NEW file** — undeclared stray/throwaway | **discard** — delete from the worktree, do not stage, emit a `note` | **was: reject whole attempt → loopback → wedge** |
-| **Out-of-scope TRACKED edit** — a step modifying tracked source it must not (only `plan`/`docs` gate this today) | **reject** (loud, diagnosis-only) | same |
+| In-scope (declared / canonical / allowed tracked edit / in-dir path) | commit | commit |
+| Out-of-scope NEW file | reject whole attempt | **discard** — delete from worktree, emit `note`, continue |
+| Out-of-scope TRACKED edit | reject | reject (unchanged — never silently reverted) |
+| **Undeclared new file that pairs with a tracked deletion (a rename/move)** | reject (as today) | **reject** — never discard (would be silent data loss; blocker 1, §5) |
 
-Consequence, per step (blast radius = **all five** scope-gated write steps; operator-approved):
+Disposition per step (**operator-approved after review**):
 
-| Step | Scope | Under A |
+| Step | Disposition | Notes |
 |---|---|---|
-| `implement` | tracked edits in scope; new file in scope iff in `new_files` | undeclared new → **discard**; never rejects (subject to §8 flag) |
-| `checks:dispatch` + re-author | tracked edits in scope; new file in scope iff declared / canonical / ENG-323 support | undeclared new → **discard**; never rejects |
-| `plan` (design) | only paths under `docs/plans/` | out-of-scope new → discard; out-of-scope tracked edit → **reject** |
-| `docs:revise` | only paths under `docs/` | out-of-scope new → discard; out-of-scope tracked edit → **reject** |
+| `checks:dispatch` + re-author | **`discard`** | the fix; the live throwaway-loose failure |
+| `implement` | **`reject`** (default) | flag `implementDisposition` can set `discard` (§8); default keeps today's proven behavior |
+| `plan` (design) | **`reject`** (unchanged) | no observed failure; not changed |
+| `docs:revise` | **`reject`** (unchanged) | no observed failure; not changed |
 
-Net: `implement` and `checks` **stop rejecting on scope grounds** (their only scope offenders were
-undeclared new files); the scope-guard rejection survives only for the genuine `plan`/`docs`
-tracked-edit violation. (Other throws — transport failure, unresolved prompt vars, RED-first / coverage
-postconditions — are unchanged; this design touches only the scope-guard disposition.)
+So the behavior change lands on **checks only**. `implement` is unchanged by default (with an opt-in
+escape); `plan`/`docs` are untouched.
 
 ## 5. Mechanism
 
-In `runAgentDispatch` (`src/dispatch/run-dispatch.ts:190-207`), replace the current "any offender →
-`undoAttempt` + throw" block with a three-way split of the judged set. **Order matters — the reject
-check runs first so we never commit a partial result and then revert it:**
+Add an optional `disposition: "reject" | "discard"` to `DispatchSpec` (default `reject` — so `plan`,
+`docs`, and today's `implement`/`checks` call sites are unaffected until set). The `checks:dispatch`
+handler sets `discard`; the `implement` handler sets it from `ctx.config.implementDisposition`
+(runtime-config, default `reject`). This closes the plumbing gap the review found — config reaches the
+handler, the handler sets the spec, `runAgentDispatch` reads the spec.
 
-1. **Out-of-scope TRACKED edits** → if any exist, `undoAttempt` + `dispatch-failed` + throw a
-   diagnosis-only message (INV-B), committing nothing. This is the only remaining scope-guard throw.
-2. Otherwise **out-of-scope NEW files** → delete from the worktree (they are untracked → `git clean -f
-   <paths>` / `rmSync` per path) and emit one `appendEvent` `kind:"note"`,
-   `reason:"scope-discarded:<handlerKey>"`, `payload:{ discarded }`. Non-gating; mirrors the existing
-   `scratch-swept` / `scratch-ignored` note pattern.
-3. **In-scope files** → commit by name, exactly as today (`commitWorktree(worktreePath, msg,
-   inScopeNewPaths)`; tracked edits stage as before). (Deleting the out-of-scope new files in step 2
-   before this commit guarantees they are neither staged nor left on disk.)
+In `runAgentDispatch` (`run-dispatch.ts:190-207`), replace "any offender → `undoAttempt` + throw" with,
+**in this order** (reject-first, so we never commit a partial and then revert):
 
-Deleting the out-of-scope new files from disk (step 2) is what lets us **remove the `styre_scratch/`
-sweep entirely**: nothing undeclared survives the dispatch, so nothing undeclared can reach the broad
-verify run — the exact hole `sweepScratch` was built to close (scratch-drawer §2.1). Remove
-`sweepScratch` (`src/dispatch/worktree.ts:209-244`) and both call sites (`run-dispatch.ts:173`,
-`handlers.ts:1139`). (Pre-existing untracked cruft reaching verify is a separate, pre-existing concern
-the sweep never addressed — it only matched `styre_scratch/` — so removing it regresses nothing.)
+1. **Out-of-scope TRACKED edits** → `undoAttempt` + `dispatch-failed` + throw a diagnosis-only message
+   (INV-B), committing nothing. (For `implement`/`checks` this branch is unreachable — every tracked
+   edit is in scope — but it is live for `plan`/`docs`.)
+2. **Rename-safety guard** (blocker 1): if the dispatch contains any tracked **deletion** (` D ` entry),
+   an undeclared new file may be the moved content — `commitWorktree`'s `git add -u` (`worktree.ts:45`)
+   would commit the deletion while discard removes the new file → silent data loss. So when a tracked
+   deletion is present, **reject** (do not discard) the undeclared new files. (Refinement for the plan:
+   pair deletion↔new via `git diff -M --name-status` and reject only the paired file; the conservative
+   "any deletion present → reject the new files" rule is the safe floor.)
+3. **`disposition === "reject"`** → any out-of-scope new file → `undoAttempt` + throw (today's behavior,
+   unchanged). This is what `implement`(default)/`plan`/`docs` keep.
+4. **`disposition === "discard"`** → out-of-scope NEW files → delete from the worktree
+   (`rmSync(path, { force: true })` per path; then prune a now-empty parent dir) and emit one
+   `appendEvent` `kind:"note"`, `reason:"scope-discarded:<handlerKey>"`, `payload:{ discarded }`.
+   Return the discarded list in the dispatch result so the handler can surface it (§6, blocker 3).
+5. **In-scope files** → commit by name, exactly as today.
+
+**Sweeps (blocker: read-only regression).** Discard lives only in the write-step branch; **read-only**
+dispatches (`checks:classify`, `checks:arbitrate`, `design:review`/`size`/`extract`) still leave strays,
+and gitignored byproducts (`__pycache__`) are invisible to discard. So we **keep the defense-in-depth
+pre-verify sweep** (`handlers.ts:1139`) — the scratch-drawer design itself said "cheap; keep it." We
+remove only the **primary** per-dispatch sweep (`run-dispatch.ts:173`): for `discard` write dispatches
+it is subsumed; for everything else the pre-verify sweep is the backstop. `sweepScratch` itself
+(`worktree.ts:209-244`) stays (the pre-verify call still uses it).
 
 ## 6. INV-A / INV-B
 
-- **INV-A — uniform forward guidance.** Delete the `styre_scratch/` paragraph from `checks.md:40-48`
-  and `implement.md:24-28`. Replace with one line every write prompt carries: *"Declare every new file
-  that is part of your deliverable in `new_files` (checks: via `checksAuthored`/`new_files`). Any new
-  file you don't declare is treated as throwaway and won't be committed — you don't need a special
-  folder for scratch."* Simpler than today and honest about what happens. (The agent may still create
-  and use scratch files freely *during* the run; they are cleaned up after.)
-- **INV-B — diagnosis-only feedback.** The surviving rejection (out-of-scope tracked edit) carries a
-  pure diagnosis: *"this step may only modify files under `<dir>`; you edited tracked files outside that
-  scope: <paths>."* No instructions, no scratch lore, no "declare or delete." Discards do **not** feed
-  back to the agent as an instruction — they are a telemetry `note` only; a discarded-but-needed file is
-  recovered via the next step's ground-truth failure, which is itself diagnosis-only.
+- **INV-A (forward guidance).** `checks` no longer needs the `styre_scratch/` convention (discard makes
+  loose scratch a non-event), so **remove that paragraph from `checks.md`**, replaced by: *"Declare
+  every new file that is part of your check in `checksAuthored`/`new_files`. Any new file you don't
+  declare is treated as throwaway and won't be committed — no special folder needed."* **`implement.md`
+  keeps its `styre_scratch/` guidance** (implement still rejects by default, so the drawer is still its
+  escape). This asymmetry is honest: only checks changes behavior.
+- **INV-B (diagnosis-only feedback).** The surviving rejections (plan/docs tracked-edit; implement
+  default) carry a pure diagnosis, no instructions. **Blocker-3 fix:** when a `checks` RED-first run
+  returns `selected-none` / a collection error *and* the dispatch discarded files, the thrown
+  postcondition message (which becomes the retry feedback verbatim, `run-dispatch.ts:106-109`) appends a
+  diagnosis-only line: *"the check could not be collected; these undeclared files were discarded this
+  attempt: <paths>."* This restores the recovery reject used to give ("declare them") without
+  reintroducing reject — the agent learns a file it relied on was dropped, and it is a *why-it-failed*
+  fact, not an instruction.
 
 ## 7. ENG-323 — staged, not dropped now
 
-Declare-or-discard implies support files (`__init__.py`, `conftest.py`) should be declared like any
-other new file, which would let us delete the ENG-323 co-located admission heuristic
-(`check-path.ts:88-110`) and end the treadmill's *support* axis too. We are **not** doing that here:
+Declare-or-discard implies support files (`__init__.py`, `conftest.py`) should be declared, which would
+let us delete the ENG-323 co-located admission heuristic (`check-path.ts:88-110`) and end the *support*
+axis of the treadmill too. We are **not** doing that here: the discard core alone fixes the live
+failure, ENG-323 just shipped and works, and dropping it depends on the RED-first failure message being
+legible (the same legibility §6 now partially delivers). ENG-323 **stays**; the removal is **ENG-342**
+(Styre, Backlog), gated on that legibility.
 
-- The discard core alone fixes the live throwaway-loose failure; ENG-323 just shipped and works.
-- Dropping it depends on the **RED-first failure message being legible** ("couldn't collect: missing
-  `__init__.py`") rather than an opaque `selected-none` — currently unproven.
+## 8. `implement` — reject by default, discard behind a flag (the recorded discussion)
 
-So in this change **ENG-323 stays**: a co-located support file remains in-scope (committed), everything
-else undeclared is discarded. The removal is filed as **ENG-342** (Styre, Backlog) with the legibility
-precondition as a gate.
+**The risk (recorded per operator request).** Under discard, an `implement` agent that creates a
+genuinely-needed new file but forgets to declare it has it **discarded**; if no check/test exercises it,
+verify goes green and the feature is **silently missing** — and reject-not-drop *does* recover this
+(reject → "declare it" → committed). The review added two more discard hazards specific to implement: a
+malformed sidecar (a transport failure) would become a silent partial-commit + false `clean-success`
+instead of a re-dispatch (CLAUDE.md §3a); and an undeclared rename would lose data (blocker 1).
+Critically, **every observed throwaway-wedge was in checks, not implement** — implement's reject has no
+observed failure.
 
-## 8. `implement` discard-vs-recovery — the risk, the decision, the flag
+**The decision (operator-made, revised after review).** `implement` **defaults to `reject`** — the
+proven behavior stays the default. Discard is available as an opt-in via a runtime-config flag so the
+option is preserved, but it is off until there is a reason and until its guards are in place:
 
-**The risk (recorded per operator request).** Today under reject-not-drop, an `implement` agent that
-creates a genuinely-needed new file but forgets to declare it is **rejected → retried → and recovers by
-declaring it**. Under declare-or-discard it is **discarded**, and if no check/test exercises that file,
-verify goes green and the feature is **silently missing**. So A gives up a recovery path that reject
-*does* provide for implement. Notably, the throwaway-wedge we actually observed was in
-**checks/astropy, not implement** — implement's reject behavior has no observed failure.
-
-**Why we still put implement under A.** Coherence (one rule), and the structural net: implement is
-downstream of the AC checks, which should fail if a needed module is absent — the net exists, bounded by
-check quality. Every discard is observable via the `note`.
-
-**The decision + the flag (operator-made).** Keep implement under A by **default**, but put it behind a
-runtime-config flag so we can revert *implement specifically* to reject-not-drop if the residual bites
-in the wild — without reverting checks (checks-under-A *is* the fix; reverting it restores the astropy
-wedge) or plan/docs (barely changed). The flag is implement-scoped:
-
-- `implementDisposition: "discard" | "reject"`, default `"discard"`, in the **runtime-config layer**
-  (not the probed `ProfileSchema`, per the config-layering rule — runtime operator policy). `"reject"`
-  restores today's reject-and-retry for `implement` only.
+- `implementDisposition: "reject" | "discard"`, default `"reject"`, in the **runtime-config layer**
+  (`src/config/runtime-config.ts`, threaded via `HandlerContext.config` — not the probed
+  `ProfileSchema`, per the config-layering rule).
+- When set to `"discard"`, implement's discard path carries the **rename-safety guard (§5.2)** and a
+  **malformed-sidecar guard**: an absent/malformed `implement` sidecar must re-dispatch (transport
+  failure), never discard-all-and-succeed. (The simplicity reviewer flagged the flag as YAGNI; the
+  operator chose to keep the option. Noted, not silently dropped.)
 
 ## 9. What does NOT change
 
-- Canonical-check recognition (ENG-296, `check-path.ts`) — it identifies the deliverable, not support.
-- RED-first / coverage postconditions, verify gate, review taxonomy, projector, MERGE gate.
-- The read-only steps' existing log-and-continue behavior (already a form of discard).
-- `checksScopeFor`'s malformed-sidecar defer, and `implementScope`'s malformed-sidecar behavior — out of
-  scope for this change (noted as an existing inconsistency in the model doc; not fixed here).
+- `implement` (default), `plan`, `docs` disposition behavior — reject-not-drop, exactly as today.
+- The `implement` transport-failure semantics on the **default** path (reject → re-dispatch) — preserved
+  (the guard in §8 only matters if someone opts into discard).
+- Canonical-check recognition (ENG-296); RED-first / coverage postconditions; verify gate; review
+  taxonomy; projector; MERGE gate.
+- The pre-verify defense-in-depth sweep (kept, §5).
+- `checksScopeFor`'s malformed-sidecar defer (`commit-scope.ts:33`) — unchanged; a malformed checks
+  sidecar still defers-then-rolls-back at the handler (`handlers.ts:583-586`), so discard never runs on
+  an unparseable checks sidecar.
 
 ## 10. Alternatives considered
 
-- **B — discard core but keep chasing the support axis separately.** Effectively what §7 stages; folded
-  in, not rejected.
-- **C — keep reject, only fix prompts (INV-A) + feedback (INV-B), no mechanism change.** Rejected: the
-  SMOKE data shows the convention was already in the prompt and ignored, so this bets on prompting to
-  fix a compliance problem prompting already failed to fix, and keeps the whole treadmill. Its INV-A /
-  INV-B improvements are absorbed into A regardless.
-- **Reject only tracked-source edits AND add a new tracked-edit gate for checks/implement.** Rejected as
-  scope creep / YAGNI: the current guard does not gate tracked edits for implement/checks and there is
-  no observed smuggle-via-tracked-edit failure; adding that gate would also break legitimate cases (a
-  checks step editing an existing `conftest.py`).
+- **Uniform discard across all 5 write steps** (the pre-review shape). Narrowed to checks after the
+  panel showed implement's discard is unproven and introduces blockers, and plan/docs have no observed
+  failure. "Uniform" was aesthetic; evidence favors minimal.
+- **Discard implement by default with guards.** Rejected: ships unproven behavior as default for a step
+  with zero observed failures; the guards make it safe but the default should be the proven path.
+- **Keep reject, only fix prompts + feedback (no mechanism change).** Rejected: the convention was
+  already in the prompt and ignored (§1).
+- **Reject only tracked-source edits + add a tracked-edit gate for checks/implement.** Rejected as YAGNI
+  / would break legitimate `conftest.py` edits.
 
 ## 11. Testing
 
-**Deterministic mechanism tests (no bench, no flakiness):**
+**Deterministic mechanism tests (no bench):**
 
-- A dispatch producing {a declared new file, an undeclared new file, a loose scratch file, a tracked
-  edit} → declared + edit committed; undeclared + scratch **deleted from the worktree and absent from
-  the commit**; a `scope-discarded` `note` recorded; **no throw**.
-- `checks:dispatch`: canonical check committed; undeclared new discarded; ENG-323 co-located support
-  still committed (staying, §7).
-- `plan` / `docs`: out-of-scope **new** file → discarded (not rejected); out-of-scope **tracked edit** →
-  throws (diagnosis-only message asserted).
-- The flag: `implementDisposition:"reject"` restores today's throw on an undeclared new file;
-  `"discard"` (default) discards it. Both states tested.
-- No undeclared file survives a dispatch (assert the worktree state a verify run would see).
+- `checks:dispatch` (`discard`): a dispatch producing {declared new, undeclared new, loose scratch,
+  tracked edit} → declared+edit committed; undeclared+scratch deleted and absent from the commit;
+  `scope-discarded` note recorded; **no throw**. Canonical check committed; ENG-323 co-located support
+  still committed.
+- **Rename-safety:** a dispatch with a tracked deletion + an undeclared new file → **rejected** (not
+  discarded); assert no data loss.
+- **Blocker-3 feedback:** a `checks` dispatch that discards a helper the test imports → RED-first
+  `selected-none` → the thrown/retry message names the discarded file.
+- `implement` default (`reject`): undeclared new file → throws (today's behavior); malformed sidecar →
+  re-dispatch, not `clean-success`. Flag `implementDisposition:"discard"` → discards, with the
+  rename + malformed-sidecar guards asserted.
+- `plan`/`docs`: unchanged — out-of-scope file still rejected.
+- Read-only dispatch leaves a `styre_scratch/` stray → pre-verify sweep removes it before the suite run.
 
-**Removals / reconciliations:**
-
-- Delete `sweepScratch` + its two call sites + its tests (`worktree.test.ts` sweep cases,
-  `run-dispatch.test.ts` sweep wiring).
-- Delete the `styre_scratch/` prompt-assertion cases (`checks-prompt.test.ts`, `prompt-vars.test.ts`);
-  add assertions for the new uniform declare-or-discard guidance.
-- Reconcile the reject-not-drop tests for implement/checks in `run-dispatch.test.ts` /
-  `commit-scope.test.ts` to the discard outcome.
+**Removals / reconciliations:** remove the primary sweep call (`run-dispatch.ts:173`) + its wiring test;
+keep `sweepScratch` + the pre-verify call + their tests. Update `checks.md` prompt-assertion tests to the
+new guidance; leave `implement.md` assertions intact. Update stale `commit-scope.ts` docstrings
+("reject-and-retry, never a silent drop") for the checks path.
 
 **End-to-end (confirmation, not the primary loop):** one SMOKE bench run showing the astropy
 throwaway-loose failure is gone.
 
 ## 12. Acceptance criteria
 
-- [ ] `runAgentDispatch` splits judged changes into commit / discard / reject per §4; undeclared new
-      files are deleted from the worktree and not committed; a `scope-discarded` note is emitted.
-- [ ] `implement` and `checks:dispatch` no longer reject on undeclared new files (flag at default).
-- [ ] Out-of-scope tracked edits on `plan` / `docs` still reject, with a diagnosis-only message.
-- [ ] `sweepScratch` and both call sites removed; no undeclared file reaches the verify run.
-- [ ] `checks.md` + `implement.md` (and the plan/docs prompts) carry the uniform declare-or-discard
-      line; the `styre_scratch/` paragraph is gone.
-- [ ] `implementDisposition` runtime-config flag exists (default `discard`); `reject` restores today's
-      implement behavior; both paths tested.
+- [ ] `DispatchSpec` carries an optional `disposition` (default `reject`); `checks:dispatch`/re-author
+      set `discard`; `implement` sets it from `ctx.config.implementDisposition` (default `reject`);
+      `plan`/`docs` unchanged.
+- [ ] Under `discard`, undeclared new files are deleted from the worktree, not committed, and a
+      `scope-discarded` note is emitted; `checks` no longer rejects on throwaway-loose files.
+- [ ] Rename-safety: a dispatch with a tracked deletion never discards an undeclared new file (rejects).
+- [ ] Blocker-3: a checks collection failure after a discard names the discarded files in the feedback.
+- [ ] `implement` default path unchanged (reject + re-dispatch on malformed sidecar); the flag's
+      `discard` path carries rename + malformed-sidecar guards; both paths tested.
+- [ ] Primary sweep removed; pre-verify sweep kept; a read-only stray does not reach the verify run.
+- [ ] `checks.md` drops the `styre_scratch/` paragraph (new declare-or-discard line); `implement.md`
+      keeps its guidance.
 - [ ] ENG-323 support admission unchanged (staged to ENG-342).
 - [ ] Full suite green; tsc + biome clean.
 - [ ] SMOKE run: astropy no longer wedges on throwaway-loose files.
@@ -233,7 +257,30 @@ throwaway-loose failure is gone.
 ## 13. Refs
 
 - Model / current state: `docs/brainstorms/2026-07-19-checks-file-disposition-model.md`
-- Root decision reversed: `docs/brainstorms/2026-07-11-scoped-commit-design.md` §2 (reject-not-drop, operator-made)
+- Root decision reversed (for checks): `docs/brainstorms/2026-07-11-scoped-commit-design.md` §2
 - Lineage: ENG-296/297 (`docs/brainstorms/2026-07-15-checks-implement-prompt-hardening-design.md`), ENG-300 (`docs/brainstorms/2026-07-15-scratch-drawer-design.md`), ENG-323 (`docs/brainstorms/2026-07-16-checks-support-files-design.md`)
-- Follow-up: ENG-342 (drop ENG-323 support heuristic, staged)
-- Code: `src/dispatch/commit-scope.ts`, `src/dispatch/check-path.ts`, `src/dispatch/run-dispatch.ts:170-220`, `src/dispatch/worktree.ts:209-244`, `src/dispatch/handlers.ts` (252/395/534/576/930/1139), `prompts/checks.md`, `prompts/implement.md`
+- Follow-up: ENG-342
+- Code: `src/dispatch/commit-scope.ts`, `check-path.ts`, `run-dispatch.ts:170-220`, `worktree.ts:45,209-244`, `handlers.ts` (252/395/534/576/930/1139), `src/config/runtime-config.ts`, `prompts/checks.md`, `prompts/implement.md`
+
+## 14. Independent review — findings folded
+
+A 3-reviewer code-grounded panel (correctness / altitude / simplicity, 2026-07-19) reviewed the
+pre-review draft. Verdicts: HAS-BLOCKERS / NEEDS-REFRAMING / TRIM-NEEDED. What changed as a result:
+
+- **Blocker — silent data loss on undeclared rename** (`git add -u` commits the deletion, discard drops
+  the new content). → §5.2 rename-safety guard; §4 rename row.
+- **Blocker — malformed `implement` sidecar → silent partial-commit + false success** under discard,
+  violating the transport-failure invariant. → implement defaults to reject (§8); discard path requires
+  a malformed-sidecar re-dispatch guard.
+- **Blocker — checks discard reintroduces the wedge for a needed helper outside ENG-323, worse (opaque
+  `selected-none`, no recovery).** → §6 legible discard feedback (blocker-3 fix).
+- **Regression — removing both sweeps leaves read-only strays + gitignored byproducts for verify.** →
+  keep the pre-verify sweep (§5).
+- **Reframing — implement discard is unproven; plan/docs have no observed failure.** → scope the change
+  to checks; implement defaults to reject with an opt-in flag; plan/docs unchanged (§4).
+- **Over-claims corrected** — the safety net is checks-proven not universal (§2); the telemetry note is
+  provenance, not a safety net, and discard removes a wired escalation gate where it applies (§2, §8);
+  the treadmill dies only on the reject axis for checks (title/§1); dropped the strained
+  ground-truth-over-self-report appeal.
+- **Minor** — `rmSync -f` + prune empty dir (§5); clarified the unreachable tracked-edit-reject branch
+  for implement/checks (§5.1); stale `commit-scope.ts` docstrings in scope (§11).
