@@ -15,7 +15,9 @@
 - **The t+0 CI read is best-effort and must NEVER throw, block, or affect control flow or the exit disposition.** On any error / unsupported system / missing sha it yields `not-reported`; `checksSystem:"none"` yields `skipped`.
 - **Nothing is posted to the PR.** The handoff is telemetry-only (D3).
 - **Telemetry event fields are `snake_case`** to match the existing `EventEvent`/`SignalEvent`/`SummaryEvent` members (the brainstorm's illustrative JSON used camelCase — the code follows the repo convention).
-- **Adding a telemetry union member is additive — do NOT bump `SCHEMA_VERSION`** (consumers ignore unknown `type`s).
+- **Adding a telemetry union member is additive — do NOT bump `SCHEMA_VERSION`** (a producer change; nothing in this repo consumes the stream). Caveat (design-sanctioned, no action here): `TelemetryEventSchema` is a zod `discriminatedUnion`, so a *consumer* validating against a pinned older union would reject an unknown `ci_handoff` rather than ignore it — "consumers ignore unknown types" is a convention of the §5.3 seam, not enforced by the schema.
+- **Behavior change to state, not hide (D1):** after this change a repo whose CI is or goes **red** exits `pr-ready` / exit 0 — the run never loops back or escalates on CI. The `read:"failing"` value reaches only telemetry (and GitHub natively); the exit disposition is now fully decoupled from the CI verdict. This is intended per D1/§2 and MUST be covered by a test (Task 3) so it can't silently regress.
+- **Out-of-band git hygiene (D4, not carried by this PR):** the design §4.3 also names abandoning the `feat/eng-337-checks-wait-budget` branch (local + origin) and the untracked `docs/brainstorms/2026-07-17-checks-quiescence-design.md` (which lives in `main`'s tree, not this worktree). These are **not** file edits in this plan and won't ride this PR; flagged here so the omission is explicit, not silent. The operator closes/deletes them separately.
 - **Schema is self-bootstrapping from `schema.sql`** (`migrate.ts` embeds it as text; ephemeral per-run DBs) — column removals are edits to the `CREATE TABLE`, no ALTER/migration. **Edit BOTH copies** — `src/db/schema.sql` (authoritative, loaded) and `docs/architecture/schema.sql` (doc mirror).
 - **Historical docs are append-only** — `docs/plans/*.md` and dated `docs/brainstorms/*.md` that mention `external_checks` are history; do NOT rewrite them. Only the live design docs (control-loop / minimal-loop / glossary / execution-model / README / `brainstorm.md` changelog) change.
 - **Run after each task:** `bun test` (full suite), `bunx biome check`, `bunx tsc --noEmit` (or the repo's `bun run typecheck`). Commit only on green.
@@ -37,20 +39,16 @@ Deleting the park makes the resolver return the `human_merge_approval` wait one 
 
 - [ ] **Step 1: Update the resolver test to the new sequence (write the failing test)**
 
-In `test/daemon/resolver.test.ts`, replace the assertion block at ~466-470 that expects `external_checks` then `human_merge_approval`. After push + pr-ensure are recorded done, the next descriptor must be the `human_merge_approval` wait:
+Edit the **existing** test in `test/daemon/resolver.test.ts` — "merge: push → pr-ensure → wait checks → wait human → advance to released" (~460-478). It uses the file's real helpers `setTicketStage(db, ticketId, "merge")` and `await succeed(db, ticketId, <stepKey>)` (defined at ~line 14) — do NOT invent `seedAtMerge`/`markStepDone` (those don't exist in this file). Delete the three `external_checks` lines (~466-468): the `expect(...).toEqual({ kind: "wait", signalType: "external_checks" })` assertion **and** the `insertPending`/`markDelivered` that then satisfy it. The test must flow straight from pr-ensure to the human-merge wait. The relevant assertions become:
 
 ```ts
-test("merge resolver parks on human_merge_approval right after pr-ensure (no external_checks gate)", () => {
-  const { db, ticketId } = makeTestDb();
-  seedAtMerge(db, ticketId); // stage=merge, one completed dispatch (see existing helper)
-  markStepDone(db, ticketId, "merge:push");
-  markStepDone(db, ticketId, "merge:pr-ensure");
-  const d = nextStepKey(db, ticketId);
-  expect(d).toEqual({ kind: "wait", signalType: "human_merge_approval" });
-});
+  await succeed(db, ticketId, "merge:push");
+  await succeed(db, ticketId, "merge:pr-ensure");
+  // (deleted the external_checks wait assertion + its insertPending/markDelivered)
+  expect(nextStepKey(db, ticketId)).toEqual({ kind: "wait", signalType: "human_merge_approval" });
 ```
 
-(Reuse the file's existing seed/mark helpers and `nextStepKey` import. If a test asserting the `external_checks` wait still exists, delete it — that path is gone.)
+Also rename the test (drop "wait checks") to e.g. "merge: push → pr-ensure → wait human → advance to released". If any other test in the file asserts the `external_checks` wait, delete it — that path is gone.
 
 - [ ] **Step 2: Run it to verify it fails**
 
@@ -170,12 +168,18 @@ In `src/daemon/run-ticket.ts`, the `tick` call (58-62) becomes:
 
 Also update the stale comment on `driveToTerminal` (line 29-31) — remove "Passes `profile` so pollChecks delivers external_checks." and replace with: "Emits a best-effort `ci_handoff` telemetry snapshot on the PR-ready path (checks are reported, never gated)."
 
-- [ ] **Step 4: Run typecheck + the daemon tests to verify nothing references the poller**
+- [ ] **Step 4: Delete the now-dead "no-progress via external stall" test (Task 2's own collateral)**
+
+Deleting the poller kills the premise of `test/daemon/run-ticket.test.ts`'s third test — "reports no-progress when nothing advances…" (~84-103), which drives `checksSystem:"external"` to stall on `external_checks`. That signal is never created now, so the ticket reaches pr-ready and the test can never see `no-progress`. Delete this test **in this task** so the commit stays green (do not defer it — a knowingly-red commit violates the Global Constraint "commit only on green"). Leave the other two run-ticket tests untouched here; Task 3 extends them.
+
+Note (no action): `poll-checks.ts:42,50` were the only production callers of `deliverSignal` (`src/engine/signals.ts`). After this task `deliverSignal` is production-dead but still used by tests (e.g. `merge-complete-e2e.test.ts`), so it stays exported — no compile/lint break. This is expected: OSS no longer *delivers* a checks signal.
+
+- [ ] **Step 5: Run typecheck + the daemon tests — all green**
 
 Run: `bunx tsc --noEmit && bun test test/daemon/loop.test.ts test/daemon/run-ticket.test.ts`
-Expected: typecheck PASS; `loop.test.ts` PASS. `run-ticket.test.ts` may FAIL on its third "no-progress via external stall" test — that is expected and is fixed in Task 3 (that stall path no longer exists). If it fails only there, proceed; Task 3 rewrites it.
+Expected: typecheck PASS; both suites PASS (the dead test is gone).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add -A
@@ -329,6 +333,11 @@ export function createTelemetryEmitter(sink: TelemetrySink): {
 and inside the returned object (after `emitSummary`):
 
 ```ts
+    // The ONE deliberate push-style emit (the other members are derived from SoT rows by flushNew).
+    // Justified: the handoff is an external network fact captured at the terminal, not a SoT row —
+    // it feeds no control flow (CL-INV-6 safe) and writes nothing to the DB (CL-INV-7 safe), so the
+    // derived-from-row pattern buys nothing and would cost a row-write + a derive fn. Best-effort,
+    // lossy, dup-on-resume — squarely inside the §5.3 telemetry contract.
     emitCiHandoff(db, ticketId, h) {
       const ticket = getTicket(db, ticketId);
       sink({
@@ -351,20 +360,26 @@ and inside the returned object (after `emitSummary`):
 Run: `bun test test/telemetry/emitter.test.ts`
 Expected: PASS.
 
-- [ ] **Step 9: Write the failing run-ticket handoff test**
+- [ ] **Step 8b: Commit the telemetry unit (commit 3a — independently reviewable)**
 
-In `test/daemon/run-ticket.test.ts`: add imports for a capturing sink and rewrite the tests. First, extend the "drives to pr-ready" test to assert the handoff, and **replace** the third "no-progress via external stall" test (its premise — an `external_checks` stall — no longer exists):
+The event schema + emitter method are a self-contained unit with passing tests; commit them before the driver wiring so a bug in the read logic can't force a re-review of the schema.
+
+```bash
+git add src/telemetry/events.ts src/telemetry/emitter.ts test/telemetry/events.test.ts test/telemetry/emitter.test.ts
+git commit -m "feat(telemetry): add the ci_handoff event + emitCiHandoff"
+```
+
+- [ ] **Step 9: Write the failing run-ticket handoff tests**
+
+In `test/daemon/run-ticket.test.ts` add `import type { TelemetryEvent } from "../../src/telemetry/events.ts";` and a capturing sink. `seedAtMerge` and `ports()` already exist in THIS file (private helpers, ~37/50) — reuse them. Add four tests (the dead "no-progress via external stall" test was already removed in Task 2):
 
 ```ts
-test("emits a ci_handoff on the pr-ready path", async () => {
+test("emits exactly one ci_handoff on the pr-ready path", async () => {
   const { db, ticketId } = makeTestDb();
   seedAtMerge(db, ticketId);
   const seen: TelemetryEvent[] = [];
   const r = await driveToTerminal(db, reg(), {
-    ticketId,
-    config: DEFAULT_RUNTIME_CONFIG,
-    ports: ports(),        // fakeChecks("passing"), checksSystem "none" on `profile`
-    profile,
+    ticketId, config: DEFAULT_RUNTIME_CONFIG, ports: ports(), profile, // checksSystem "none"
     emit: (e) => seen.push(e),
   });
   expect(r.outcome).toBe("pr-ready");
@@ -373,9 +388,28 @@ test("emits a ci_handoff on the pr-ready path", async () => {
   const h = handoffs[0];
   if (h.type === "ci_handoff") {
     expect(h.checks_system).toBe("none");
-    expect(h.read).toBe("skipped"); // checksSystem none → skipped
-    expect(h.pr_url).toContain("pull"); // fakeForge PR url captured from external_pr_result
+    expect(h.read).toBe("skipped"); // checksSystem none → skipped, no port touched
+    expect(h.pr_url).toContain("/pr/"); // fakeForge emits https://fake/pr/N (NOT "pull")
+    expect(h.pr_ref).not.toBeNull(); // external_pr_result delivered before pr-ready fires
   }
+  db.close();
+});
+
+test("D1: a failing CI read still exits pr-ready (exit disposition decoupled from CI)", async () => {
+  const { db, ticketId } = makeTestDb();
+  seedAtMerge(db, ticketId);
+  const ghProfile = parseProfile({
+    slug: "demo", targetRepo: "/tmp/x", defaultBranch: "main", checksSystem: "github",
+  });
+  const seen: TelemetryEvent[] = [];
+  const r = await driveToTerminal(db, reg(), {
+    ticketId, config: DEFAULT_RUNTIME_CONFIG,
+    ports: { issueTracker: fakeIssueTracker(), forge: fakeForge(), checks: fakeChecks("failing") },
+    profile: ghProfile, emit: (e) => seen.push(e),
+  });
+  expect(r.outcome).toBe("pr-ready"); // red CI never blocks or loops back
+  const h = seen.find((e) => e.type === "ci_handoff");
+  expect(h && h.type === "ci_handoff" && h.read).toBe("failing"); // reported, not gated
   db.close();
 });
 
@@ -385,23 +419,37 @@ test("the ci_handoff read is fail-safe: a throwing checks port yields not-report
   const ghProfile = parseProfile({
     slug: "demo", targetRepo: "/tmp/x", defaultBranch: "main", checksSystem: "github",
   });
-  const throwingChecks = { status: async () => { throw new Error("boom"); } };
+  let calls = 0;
+  const throwingChecks = { status: async () => { calls++; throw new Error("boom"); } };
   const seen: TelemetryEvent[] = [];
   const r = await driveToTerminal(db, reg(), {
-    ticketId,
-    config: DEFAULT_RUNTIME_CONFIG,
+    ticketId, config: DEFAULT_RUNTIME_CONFIG,
     ports: { issueTracker: fakeIssueTracker(), forge: fakeForge(), checks: throwingChecks },
-    profile: ghProfile,
-    emit: (e) => seen.push(e),
+    profile: ghProfile, emit: (e) => seen.push(e),
   });
   expect(r.outcome).toBe("pr-ready"); // read failure never blocks the terminal
+  expect(calls).toBe(1); // the throwing port WAS reached (test isn't vacuous)
   const h = seen.find((e) => e.type === "ci_handoff");
   expect(h && h.type === "ci_handoff" && h.read).toBe("not-reported");
   db.close();
 });
+
+test("a non-merge terminal emits zero ci_handoffs", async () => {
+  const { db, ticketId } = makeTestDb();
+  seedAtMerge(db, ticketId);
+  insertPending(db, { ticketId, signalType: "human_resume", reason: "stuck" });
+  const seen: TelemetryEvent[] = [];
+  const r = await driveToTerminal(db, reg(), {
+    ticketId, config: DEFAULT_RUNTIME_CONFIG, ports: ports(), profile,
+    emit: (e) => seen.push(e),
+  });
+  expect(r.outcome).toBe("blocked");
+  expect(seen.filter((e) => e.type === "ci_handoff")).toHaveLength(0);
+  db.close();
+});
 ```
 
-Delete the old third test ("reports no-progress when nothing advances…") that relied on `checksSystem:"external"` stalling on external_checks. Keep the "blocked when human_resume pending" test unchanged. Add the needed imports: `TelemetryEvent` from `../../src/telemetry/events.ts`.
+Keep the existing "drives to pr-ready" and "blocked when human_resume pending" tests, or fold them into the above (the last test supersedes the plain "blocked" one). Ensure `insertPending` and `fakeChecks` are imported (both already are in this file).
 
 - [ ] **Step 10: Run it to verify it fails**
 
@@ -422,8 +470,14 @@ import { getDeliveredPayload, listPending } from "../db/repos/signal.ts";
 ```ts
 type CiRead = "passing" | "failing" | "pending" | "not-reported" | "skipped";
 
-/** Best-effort t+0 read of remote CI state. NEVER throws and NEVER blocks control flow: any error,
- *  unsupported system, or missing sha → "not-reported"; checksSystem "none" → "skipped". */
+const CI_READ_TIMEOUT_MS = 8_000; // best-effort; never let the t+0 read block the terminal
+
+/** Best-effort t+0 read of remote CI state. NEVER throws and NEVER blocks: any error, TIMEOUT,
+ *  unsupported system, or missing sha → "not-reported"; checksSystem "none" → "skipped".
+ *  The timeout is load-bearing: ChecksPort.status() (githubChecks) issues unbounded octokit
+ *  paginate calls that HANG rather than throw on a slow/unreachable API — a bare try/catch would
+ *  not save us, and a hang here would also block finish()'s outbox drain (the outbound PR/Linear
+ *  projection), reintroducing the exact idle-burn this design deletes. */
 async function readCiState(
   ports: ProjectorPorts,
   checksSystem: string,
@@ -431,10 +485,17 @@ async function readCiState(
 ): Promise<CiRead> {
   if (checksSystem === "none") return "skipped";
   if (checksSystem !== "github" || !ports.checks || !sha) return "not-reported";
+  const checks = ports.checks;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<CiRead>((resolve) => {
+    timer = setTimeout(() => resolve("not-reported"), CI_READ_TIMEOUT_MS);
+  });
   try {
-    return await ports.checks.status({ ref: sha });
+    return await Promise.race([checks.status({ ref: sha }), timeout]);
   } catch {
     return "not-reported";
+  } finally {
+    clearTimeout(timer);
   }
 }
 ```
@@ -462,12 +523,11 @@ Then replace the PR-ready branch (currently 75-76):
 Run: `bun test test/daemon/run-ticket.test.ts`
 Expected: PASS (pr-ready + one handoff; fail-safe read → not-reported).
 
-- [ ] **Step 13: Commit**
+- [ ] **Step 13: Commit (commit 3b — driver wiring)**
 
 ```bash
-git add src/telemetry/events.ts src/telemetry/emitter.ts src/daemon/run-ticket.ts \
-        test/telemetry/events.test.ts test/telemetry/emitter.test.ts test/daemon/run-ticket.test.ts
-git commit -m "feat(telemetry): emit a best-effort ci_handoff snapshot at PR-ready"
+git add src/daemon/run-ticket.ts test/daemon/run-ticket.test.ts
+git commit -m "feat(run): emit the best-effort ci_handoff snapshot at PR-ready"
 ```
 
 ---
@@ -542,7 +602,9 @@ git commit -m "test(merge): reconcile e2e tests to the report-not-gate flow"
 - [ ] **Step 1: Confirm the columns are dead**
 
 Run: `grep -rn "max_attempts\|first_attempt_at\|last_attempt_at" src/ test/`
-Expected: hits ONLY in `src/db/schema.sql` (and possibly `docs/architecture/schema.sql`). If any `.ts` reads/writes them, STOP — the assumption is wrong; report it rather than deleting.
+Expected: hits ONLY in `src/db/schema.sql` (and `docs/architecture/schema.sql`). If any `.ts` reads/writes them, STOP — the assumption is wrong; report it rather than deleting.
+
+**WARNING — the bare `attempts` column is trickier.** The `signal` table's `attempts` (schema ~212) is also dead and to be deleted, but a bare `grep attempts` is noisy: `workflow_step.attempts` (schema ~482, read/written by `decrementAttempt`) and `projection_outbox.attempts` (heavily used by `projector.ts`/`projection-outbox.ts`) are **live and MUST NOT be touched**. Confirm `signal.attempts` is dead specifically: it appears in neither `signal.ts`'s `COLS` list (~17-19) nor any `.ts` query. Delete **only** the four-column block inside the `signal` `CREATE TABLE` (Step 2); never the `workflow_step`/`projection_outbox` columns.
 
 - [ ] **Step 2: Delete the wait-budget columns in both schema files**
 
@@ -556,7 +618,7 @@ In `src/db/schema.sql`, remove the four wait-budget columns and their comment (l
     last_attempt_at TEXT,
 ```
 
-(Confirm exact column list/defaults in the file before deleting; remove only the wait-budget block, leaving the rest of the `signal` table intact and the trailing comma on the preceding column correct.) Also update the signal-type comment at line ~207 to drop `external_checks` from the enumerated list. Apply the **identical** edit to `docs/architecture/schema.sql`.
+(Confirm exact column list/defaults in the file before deleting; remove only the wait-budget block, leaving the rest of the `signal` table intact and the trailing comma on the preceding column correct.) Also clean up the now-stale `signal`-table comments: line ~207 (drop `external_checks` from the signal-type list), line ~208 (drop `'awaiting-checks'` from the `reason` list), and line ~202 (the "checks-system poll" mention). Apply the **identical** edits to `docs/architecture/schema.sql`.
 
 - [ ] **Step 3: Verify the schema still loads and invariants hold**
 
@@ -574,38 +636,62 @@ git commit -m "chore(schema): drop the dead external-signal wait-budget columns"
 
 ### Task 6: Update the design docs to report-not-gate
 
+> The design's §4.5 doc list was incomplete (three independent reviewers found stale gate-claims it missed). This task covers the **full** set so the authoritative docs are internally consistent — several are the canonical "read first" docs in CLAUDE.md, so a contradiction here is high-impact. Verify with the grep sweep in the final step.
+
 **Files:**
-- Modify: `docs/architecture/control-loop.md` (S8 rewrite; delete atlas P1/P2/P3; §11 worked example; OSS boundary note)
-- Modify: `docs/architecture/minimal-loop.md` (remove the `POLL_INTERVAL` note)
-- Modify: `docs/architecture/glossary.md` (the "signal" example: checks are observed once & reported, not awaited)
-- Modify: `docs/architecture/execution-model.md` and `docs/architecture/README.md` (reconcile "checks green arrive as signals" wording for OSS)
-- Modify: `docs/architecture/brainstorm.md` (append a §11 changelog entry; correct A1's "CI green (required check = merge arbiter)" to scope it to the commercial plane)
+- `docs/architecture/control-loop.md` — S8 rewrite (446-458); delete atlas rows P1/P2/P3 (657-660); §11 worked example (770-794); §7.3 signal-vocab table (560) + wait-budget prose (563-565); S9 OSS-boundary note (461-463) + guard (468); residual mentions (50, 85, 763).
+- `docs/architecture/minimal-loop.md` — remove `POLL_INTERVAL`; fix the `next_step_key` pseudocode (~61) and the flow diagram (~206) that still route through `merge:await-checks`.
+- `docs/architecture/execution-model.md` — the signal wording (~132) **and** the explicit OSS gate at ~166-169 ("waits for the project's checks system to go green… once checks pass, `styre run` exits").
+- `docs/architecture/projector.md` — line 29 ("facts the runner *does* need (checks green? merged?) enter as delivered signals").
+- `docs/architecture/glossary.md` — the `signal` entry example.
+- `docs/architecture/README.md` — line 49 ("CI green … arrive only as signals").
+- `docs/architecture/brainstorm.md` — append a §11 changelog entry; annotate A1.
 
-**Interfaces:** none (docs).
+**Interfaces:** none (docs). **Do not rewrite history** — for `brainstorm.md`, append/annotate only.
 
-- [ ] **Step 1: Rewrite control-loop.md S8**
+- [ ] **Step 1: control-loop.md — rewrite S8 (446-458)**
 
-Replace the `S8 · merge:await-checks` section (~446-458) with a report-not-gate description: after the PR is opened, `styre run` takes **one** best-effort read of CI state, emits it as the `ci_handoff` telemetry event, and exits PR-ready — it does not wait for, re-poll, or loop back on CI. Note the read lives on the merge path to the PR-ready terminal, not as a dispatched step. State that CI-watch + reconcile is the commercial plane's outer loop (fenced, undesigned — like S9).
+Replace the `S8 · merge:await-checks` section with a report-not-gate description: after the PR opens, `styre run` takes **one** best-effort t+0 read of CI state (bounded by an ~8s timeout), emits it as the `ci_handoff` telemetry event, and exits PR-ready — it does not wait for, re-poll, or loop back on CI. Note the read lives on the merge path to the PR-ready terminal, not as a dispatched step. State that CI-watch + reconcile is the commercial plane's outer loop (fenced, undesigned — like S9).
 
-- [ ] **Step 2: Delete the atlas checks rows**
+- [ ] **Step 2: control-loop.md — delete the atlas checks rows (657-660)**
 
-In the §8 Loopback Atlas, delete the "Checks (CI)" rows **P1, P2, P3** (~657-660) and any prose that references them (e.g. §8.4's "P3" in the escalate list). Add one line noting these were removed when CI stopped gating the OSS run (report-not-gate, 2026-07-18).
+Delete the "Checks (CI)" atlas rows **P1, P2, P3** at ~657-660 and the §8.4 escalate-list "P3" reference. Add one line noting they were removed when CI stopped gating the OSS run.
 
-- [ ] **Step 3: Update the §11 worked example**
+  **⚠️ WARNING — two different `P1/P2/P3` namespaces.** The §8.1 *first-principles invariants* **P1–P7** (~576-591: "P1 Recover-don't-halt", "P2 Ground-truth-triggers", "P3 Cost-and-time budget") and the cost-principle refs at ~256/584/669 are **load-bearing and MUST survive**. Delete only the **atlas rows** at 657-660 by their line anchor. Do **not** run a loose `grep P3` and delete matches — you will gut the invariants.
 
-Collapse steps 14–16: the OSS `styre run` exits PR-ready right after the PR is opened (step 13), emitting the `ci_handoff`. Remove the "checks green — OSS exits PR-ready here" step 14. Steps 15–16 (human merge, released projection) remain fenced as commercial-plane. Update the trailing prose ("The OSS `styre run` drives steps 1–14…") accordingly.
+- [ ] **Step 3: control-loop.md — §11 worked example (770-794)**
 
-- [ ] **Step 4: minimal-loop.md + glossary.md + execution-model.md + README.md**
+Collapse steps 14–16: OSS `styre run` exits PR-ready right after the PR opens (step 13), emitting the `ci_handoff`. Remove the "checks green — OSS exits PR-ready here" step 14. Steps 15–16 (human merge, released projection) remain fenced as commercial-plane. Update the trailing prose ("The OSS `styre run` drives steps 1–14…").
 
-- `minimal-loop.md`: remove the `POLL_INTERVAL = 60s` line/note (nothing polls).
-- `glossary.md`: adjust the `signal` entry so "checks green" is not listed as an awaited control signal in OSS (checks are observed once and reported).
-- `execution-model.md` (~132) and `README.md` (~49, ~54): reword "checks green … arrive only as signals" so CI is a reported fact in OSS, not an awaited gate. Keep "merged / human action" as the plane's signals.
+- [ ] **Step 4: control-loop.md — §7.3 + S9 boundary + residuals**
 
-- [ ] **Step 5: brainstorm.md changelog + A1 correction**
+- **§7.3 signal-vocabulary table (~560):** delete the `| external_checks | … |` row (that signal is never created again).
+- **§7.3 prose (~563-565):** delete/replace the sentence "Budget fields (`attempts`, `max_attempts`, `first_attempt_at`) bound the wait; exhaustion → `human_resume`…" — it describes the columns Task 5 deletes.
+- **S9 OSS-boundary note (~461-463):** it says OSS exits "once the PR exists with checks green (S7/S8)" — change to "once the PR exists (S7)"; CI is no longer part of the OSS exit.
+- **S9 guard (~468):** "checks green (or none)" → drop the checks precondition.
+- **Residual mentions:** reconcile line ~50 ("polling over webhooks in S8"), line ~85 (`poll_external_signals()` checks-system status — if inside fenced *plane* pseudocode, leave but confirm it's clearly plane-scoped), line ~763. Change only OSS-scoped claims; leave genuinely plane-fenced text.
 
-Append a dated entry to the §11 changelog summarizing the report-not-gate decision (link the brainstorm + this plan). Correct the A1 row's "CI green (required check = merge arbiter = required check)" clause to scope CI-as-arbiter to the commercial plane; in OSS, CI is reported, not gated. **Do not rewrite existing history** — append/annotate only.
+- [ ] **Step 5: minimal-loop.md — pseudocode + diagram + POLL_INTERVAL**
 
-- [ ] **Step 6: Commit**
+- Remove the `POLL_INTERVAL = 60s` line/note (nothing polls).
+- **`next_step_key` pseudocode (~61):** delete the `if not delivered('external_checks'): return 'merge:await-checks'` branch so merge flows push → pr-ensure → `merge:await-human`.
+- **Flow diagram (~206):** remove the `→ merge:await-checks(poll)` node so it reads `… → merge:pr-ensure → merge:await-human`.
+
+- [ ] **Step 6: execution-model.md + projector.md + glossary.md + README.md**
+
+- `execution-model.md` (~132): reword so CI is a reported fact in OSS, not an awaited signal (keep "merged / human action" as signals). **Also (~166-169):** rewrite "waits for the project's checks system to go green. Once checks pass, `styre run` exits" → exits at PR-open; CI is snapshotted to telemetry, not awaited.
+- `projector.md` (~29): "facts the runner *does* need (checks green? merged?) enter as delivered signals" → drop checks-green from the OSS list (merged/human action stay plane signals).
+- `glossary.md`: adjust the `signal` entry so "checks green" is not an awaited OSS control signal (observed once and reported).
+- `README.md` (~49): reword "CI green … arrive only as signals" to match.
+
+- [ ] **Step 7: brainstorm.md — changelog + A1 annotation**
+
+Append a dated §11 changelog entry summarizing report-not-gate (link this brainstorm + plan). Annotate the A1 row (~393) — its actual text is "…(required check = merge arbiter; PR #184 hermeticity is a prereq)" — to scope CI-as-arbiter to the commercial plane; in OSS, CI is reported, not gated. Append/annotate only; do not rewrite the entry.
+
+- [ ] **Step 8: Sweep for residual stale claims, then commit**
+
+Run: `grep -rniE "await-checks|external_checks|POLL_INTERVAL|checks (green|pass).*(exit|gate|wait)" docs/architecture/`
+Expected: no live OSS-gating claims remain (only genuinely plane-fenced pseudocode, if any, and historical entries). Reconcile any straggler, then:
 
 ```bash
 git add docs/architecture/
@@ -624,10 +710,12 @@ git commit -m "docs(control-loop): checks are reported, not gated (report-not-ga
 - §4.3 atlas P1/P2/P3 → **Task 6**.
 - §4.4 plane inherits (fenced) → **Task 6** (docs note; no code).
 - §4.5 doc changes → **Task 6**.
-- §7 acceptance criteria → covered by tests in Tasks 1/3/4 (pr-ready-on-PR-opened; no external_checks signal; one ci_handoff; fail-safe read; none≡skipped) and greps in Tasks 4/5 (poller gone; no live external_checks).
+- §7 acceptance criteria → covered by tests in Tasks 1/3/4 (pr-ready-on-PR-opened; no external_checks signal; exactly-one ci_handoff on pr-ready + **zero** on a non-merge terminal; fail-safe read via throw **and** timeout → not-reported; `read:"failing"` still exits pr-ready [D1]; none≡skipped) and greps in Tasks 4/5/6 (poller gone; no live external_checks; no stale gate-claims in docs). The "timed-out → not-reported" AC is met by `CI_READ_TIMEOUT_MS` + `Promise.race` in `readCiState` (Task 3 Step 11).
 
 **2. Placeholder scan:** The Task-4 Step-3 sweep and Task-5 Step-1 confirm are verification steps with exact grep commands and explicit expected end-states, not "handle edge cases" placeholders. No "TBD"/"TODO" remain.
 
 **3. Type consistency:** `readCiState` returns `CiRead` (superset of `CheckVerdict "passing"|"failing"|"pending"`, so `ports.checks.status()`'s result is assignable). `emitCiHandoff`'s `read` param and the `CiHandoffEvent.read` zod enum share the same five values. `external_pr_result` payload is `{ ref: string, url: string }` (`projector.ts:149`), read via `getDeliveredPayload` and guarded with `typeof … === "string"`. `pr_ref`/`pr_url` are `string | null`.
 
-**Known follow-through:** removing `profile` from `tick` (Task 2) forces the `merge-complete-e2e` tick-opts edit (Task 4 Step 1) — sequence Task 2 before Task 4. Task 3 fixes the `run-ticket.test.ts` failure that Task 2 Step 4 flags.
+**Known follow-through:** removing `profile` from `tick` (Task 2) forces the `merge-complete-e2e` tick-opts edit (Task 4 Step 1) — sequence Task 2 before Task 4. Task 2 deletes the now-dead "no-progress via external stall" run-ticket test as its own collateral (so every commit stays green); Task 3 then only *adds* run-ticket tests. Task 3 commits in two independently-reviewable halves (3a event+emitter, 3b read+wiring).
+
+**Post-revision note:** this plan was revised after a 3-reviewer independent panel. Folded in: the read timeout (blocker), the two broken test snippets (`pr_url` `/pr/` and the real `resolver.test.ts` helpers), the green-commit ordering, the D1 `failing`-read + zero-handoff tests, the Task-5 `attempts`-column guard, and the substantially expanded Task 6 doc set (state-machine pseudocode, §7.3, S9 note, `projector.md`, with a guard against deleting the §8.1 invariants). The direct-emit design was endorsed and kept.
