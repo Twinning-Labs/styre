@@ -132,6 +132,33 @@ test("the ci_handoff read is fail-safe: a throwing checks port yields not-report
   db.close();
 });
 
+test("the ci_handoff read times out on a hung checks port: yields not-reported, still pr-ready", async () => {
+  const { db, ticketId } = makeTestDb();
+  seedAtMerge(db, ticketId);
+  const ghProfile = parseProfile({
+    slug: "demo",
+    targetRepo: "/tmp/x",
+    defaultBranch: "main",
+    checksSystem: "github",
+  });
+  const hangingChecks = {
+    status: () => new Promise<never>(() => {}), // never resolves — a slow/unreachable CI API
+  };
+  const seen: TelemetryEvent[] = [];
+  const r = await driveToTerminal(db, reg(), {
+    ticketId,
+    config: DEFAULT_RUNTIME_CONFIG,
+    ports: { issueTracker: fakeIssueTracker(), forge: fakeForge(), checks: hangingChecks },
+    profile: ghProfile,
+    emit: (e) => seen.push(e),
+    ciReadTimeoutMs: 20, // drive the load-bearing Promise.race timeout fast
+  });
+  expect(r.outcome).toBe("pr-ready"); // a hung read never blocks the terminal
+  const h = seen.find((e) => e.type === "ci_handoff");
+  expect(h && h.type === "ci_handoff" && h.read).toBe("not-reported");
+  db.close();
+});
+
 test("a non-merge terminal emits zero ci_handoffs", async () => {
   const { db, ticketId } = makeTestDb();
   seedAtMerge(db, ticketId);

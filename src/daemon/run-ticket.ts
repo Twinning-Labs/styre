@@ -41,13 +41,14 @@ async function readCiState(
   ports: ProjectorPorts,
   checksSystem: string,
   sha: string | null,
+  timeoutMs: number = CI_READ_TIMEOUT_MS,
 ): Promise<CiRead> {
   if (checksSystem === "none") return "skipped";
   if (checksSystem !== "github" || !ports.checks || !sha) return "not-reported";
   const checks = ports.checks;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<CiRead>((resolve) => {
-    timer = setTimeout(() => resolve("not-reported"), CI_READ_TIMEOUT_MS);
+    timer = setTimeout(() => resolve("not-reported"), timeoutMs);
   });
   try {
     return await Promise.race([checks.status({ ref: sha }), timeout]);
@@ -72,9 +73,11 @@ export async function driveToTerminal(
     profile: { checksSystem: string };
     cap?: number;
     emit?: TelemetrySink;
+    ciReadTimeoutMs?: number;
   },
 ): Promise<RunResult> {
   const cap = opts.cap ?? DEFAULT_CAP;
+  const ciReadTimeoutMs = opts.ciReadTimeoutMs ?? CI_READ_TIMEOUT_MS;
   const emitter = createTelemetryEmitter(opts.emit ?? noopSink);
   const notifier = createNotifier(opts.config);
   const finish = async (result: RunResult): Promise<RunResult> => {
@@ -107,7 +110,7 @@ export async function driveToTerminal(
     if (t.stage === "merge" && pending.some((s) => s.signal_type === "human_merge_approval")) {
       const pr = getDeliveredPayload(db, opts.ticketId, "external_pr_result");
       const sha = getLatestForTicket(db, opts.ticketId)?.branch_head_sha ?? null;
-      const read = await readCiState(opts.ports, opts.profile.checksSystem, sha);
+      const read = await readCiState(opts.ports, opts.profile.checksSystem, sha, ciReadTimeoutMs);
       emitter.emitCiHandoff(db, opts.ticketId, {
         prRef: typeof pr?.ref === "string" ? pr.ref : null,
         prUrl: typeof pr?.url === "string" ? pr.url : null,
