@@ -5,8 +5,9 @@
  *
  * The aggregation (check-runs + legacy commit statuses → passing/failing/pending) is a documented,
  * NOT-unit-tested SDK edge — it needs a live token + repo; the `githubForge` precedent. It is
- * verified by typecheck + build + the operator smoke test below. The core poll logic
- * (`pollChecks`) is exercised with `fakeChecks`.
+ * verified by typecheck + build + the operator smoke test below. `status()` is called by
+ * `readCiState` in the run driver for the one-shot, best-effort t+0 CI read; it's exercised in
+ * tests with `fakeChecks`.
  *
  * SMOKE TEST (operator-run): point at a real clone with a pushed branch + a commit that has CI:
  *   GITHUB_TOKEN=ghp_xxx bun run -e '

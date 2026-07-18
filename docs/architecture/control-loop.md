@@ -83,12 +83,12 @@ on_start():
 loop():                           # (commercial Control Plane: the multi-ticket scheduler)
   while running:
     drain_outbox()                # §5 execute pending external effects idempotently
-    poll_external_signals()       # §7.3 checks-system status, PR-merged -> deliver signals
+    poll_external_signals()       # §7.3 PR-merged (and human-action) -> deliver signals
     ready = SELECT * FROM v_ready_tickets ORDER BY <stage_index DESC, priority DESC, created_at ASC>
     for ticket in ready:
       if inflight_count() >= K: break       # K = orchestrator.max_concurrent_features (2–3)
       spawn_async(advance_one_step, ticket)
-    await_any_completion_or(timeout=POLL_INTERVAL)
+    await_any_completion_or(timeout=<poll interval>)
 ```
 `v_ready_tickets` already excludes paused projects and tickets parked on a pending signal. Workers
 run concurrently; the runner journals each result as it returns. **No worker touches SQLite.**
@@ -818,7 +818,8 @@ mid-step resumes (§6.1).
 the commercial outer loop, §2.1) · CL-COMMIT (runner-commits) · CL-ORCH (runner-orchestrates, no
 master agent) · validated-interface for structured output (§3a) · review
 redesign (findings via tool calls; verdict from state) · CL-NODEFER (no deferral dictionary;
-record-now-learn-later) · CL-CHECKS/CL-POLL (generic checks system, polling) · CL-STALE
+record-now-learn-later) · CL-CHECKS/CL-POLL (generic checks system, polling) (OSS: superseded by
+report-not-gate — see §8 S8) · CL-STALE
 (stale-branch handling) · **S1c plan-review** (shift-left semantic plan gate, full-track) ·
 CL-POSTCOND (per-step postconditions) · CL-PROFILE (pre-dispatch profile-completeness gate) ·
 **§8 rewritten from first principles** — P3 cost/time auto-calibrated budget governs every loop;
