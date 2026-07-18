@@ -2,6 +2,10 @@ You are implementing work-unit {{unit_seq}} ({{unit_kind}}) of ticket {{ident}} 
 
 Work-unit: {{unit_title}}
 
+{{files_to_touch}}
+
+{{test_plan}}
+
 Write the code AND its tests in the worktree. Do not commit — the daemon commits.
 Run the project's build/test as you go: {{test_command}}
 
