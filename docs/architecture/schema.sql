@@ -199,7 +199,7 @@ CREATE INDEX idx_step_runnable ON workflow_step (ticket_id, status, seq);
 
 -- signal — durable signals / human-waits (B1). Replaces wait-<stage>.json +
 -- soft-pending + the build approval gate. Delivered out-of-band (operator action,
--- checks-system poll, the outbox drainer completing pr_create); replay resumes.
+-- the outbox drainer completing pr_create); replay resumes.
 CREATE TABLE signal (
     id              INTEGER PRIMARY KEY,
     ticket_id       INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
@@ -207,12 +207,7 @@ CREATE TABLE signal (
                                                        -- /'human_resume'/'external_pr_result'
     status          TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN (
                         'pending','delivered','consumed')),
-    reason          TEXT,                              -- 'awaiting-approval'/'awaiting-checks'
-    -- Wait-budget fields (external_signal_budget).
-    attempts        INTEGER NOT NULL DEFAULT 0,
-    max_attempts    INTEGER,
-    first_attempt_at TEXT,
-    last_attempt_at  TEXT,
+    reason          TEXT,                              -- 'awaiting-approval'
 
     payload_json    TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
     idempotency_key TEXT,                              -- dedup duplicate deliveries (globally unique by construction)
