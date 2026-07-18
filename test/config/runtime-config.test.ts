@@ -25,3 +25,13 @@ test("parses an optional jira block (statusMap + bugTypeNames)", () => {
 test("jira block is optional (absent -> undefined)", () => {
   expect(RuntimeConfigSchema.parse({}).jira).toBeUndefined();
 });
+
+test("implementDisposition defaults to reject", () => {
+  expect(DEFAULT_RUNTIME_CONFIG.implementDisposition).toBe("reject");
+});
+
+test("implementDisposition accepts discard", () => {
+  expect(RuntimeConfigSchema.parse({ implementDisposition: "discard" }).implementDisposition).toBe(
+    "discard",
+  );
+});

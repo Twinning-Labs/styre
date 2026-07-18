@@ -81,6 +81,7 @@ import { deriveAndPersistAcs } from "./derive-acs.ts";
 import { designFeedback } from "./design-feedback.ts";
 import { ExtractOutputSchema, validateCdotImpact, validateExtraction } from "./extract-schema.ts";
 import { gateFeedback, implementFeedback } from "./feedback.ts";
+import { ImplementOutputSchema } from "./implement-schema.ts";
 import { hasTicketPlan } from "./plan-frontmatter.ts";
 import { rerunAcChecks } from "./post-implement-rerun.ts";
 import type { Profile } from "./profile.ts";
@@ -250,6 +251,7 @@ async function reauthorCheckWrong(
       template: CHECKS_TEMPLATE,
       vars: checksVars(ctx.ticket, deps.profile, [{ id: ac.id, text: ac.text }], ""),
       commitScope: checksScopeFor(ctx.ticket.ident, [ac.id]),
+      disposition: "discard",
       postcondition: () => {},
     },
   );
@@ -574,6 +576,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       vars: checksVars(ctx.ticket, deps.profile, acs, checksFeedback(ctx.db, ctx.ticket.id)),
       runnerCommands: realRunnerCommands(deps.profile.components),
       commitScope: checksScopeFor(ctx.ticket.ident, [...acIds]),
+      disposition: "discard",
       // Identity + coverage are verified below against the committed diff, not on the raw diff here.
       postcondition: () => {},
     });
@@ -910,6 +913,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     const filesToTouch = parseFilesToTouch(unit);
     const scoped = scopedRunnersForFiles(deps.profile.components, filesToTouch);
     const runnerCommands = scoped.length > 0 ? scoped : realRunnerCommands(deps.profile.components);
+    const implPreHead = worktreeHead(implWorktreePath);
     const result = await runAgentDispatch(
       ctx,
       depsFor(ctx, deps, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS),
@@ -928,11 +932,38 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         loopback: isUnitLoopback(ctx, unit.seq),
         runnerCommands,
         commitScope: implementScope,
+        disposition: ctx.config.implementDisposition,
         // Empty-diff is no longer a dispatch-level failure: the plan gate guarantees non-empty
         // declared files, and the completeness step (under-delivery) is what gates on it now.
         postcondition: () => {},
       },
     );
+    if (ctx.config.implementDisposition === "discard") {
+      // Discard-mode sidecar guard: a transport failure must never become a silent partial-commit.
+      // A MALFORMED sidecar always re-dispatches (we cannot trust ANY declaration it might contain).
+      // An ABSENT sidecar re-dispatches ONLY when it actually caused a discard (undeclared new files
+      // with no declaration to admit them) — a valid ticket with no new files and no sidecar is fine.
+      // A valid sidecar that leaves an undeclared throwaway out is the intended discard path.
+      const parsed = extractSidecar(result.output, ImplementOutputSchema);
+      const malformed = !parsed.ok && parsed.reason === "malformed";
+      const absentButDiscarded =
+        !parsed.ok && parsed.reason === "absent" && result.discarded.length > 0;
+      if (malformed || absentButDiscarded) {
+        resetWorktreeHard(implWorktreePath, implPreHead);
+        const row = getByDispatchId(ctx.db, ctx.ticket.id, result.dispatchId);
+        if (row) {
+          completeDispatch(ctx.db, row.id, {
+            outcome: "reverted",
+            branchHeadSha: implPreHead,
+            endedAt: nowUtc(),
+          });
+        }
+        throw new Error(
+          `implement:dispatch sidecar transport failure (${parsed.ok ? "ok" : parsed.reason}); ` +
+            `discarded=[${result.discarded.join(", ")}] — re-dispatching`,
+        );
+      }
+    }
     setUnitStatus(ctx.db, unit.id, "verifying");
     // Review F-2: if this dispatch's committed diff touched a dependency manifest, a once-gated
     // `provision` (already `done`) would otherwise be silently stale — re-arm it so the resolver
