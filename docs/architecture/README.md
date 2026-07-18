@@ -46,7 +46,9 @@ These are the load-bearing NOTs. Code that violates them is wrong even if it wor
   results; they never persist.
 
 - Linear and GitHub are never read for control flow — they are one-way projections. Inbound facts
-  (CI green, merged, human action) arrive only as signals.
+  the loop waits on (merged, human action) arrive only as signals. CI is reported, not gated: OSS
+  `styre run` takes one best-effort snapshot of CI state at PR-open and moves on regardless — it
+  never waits on, polls, or loops back on a checks verdict.
 
 - A succeeded `workflow_step` is **never re-run** — the resolver returns its recorded result
   on replay (exactly-once semantics; crash-resume re-enters at the interrupted step, not before it).
