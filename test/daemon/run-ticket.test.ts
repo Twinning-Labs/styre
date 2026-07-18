@@ -14,6 +14,7 @@ import { parseProfile } from "../../src/dispatch/profile.ts";
 import { fakeChecks } from "../../src/integrations/adapters/fake-checks.ts";
 import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
+import type { TelemetryEvent } from "../../src/telemetry/events.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 const profile = parseProfile({
@@ -53,30 +54,97 @@ const ports = () => ({
   checks: fakeChecks("passing"),
 });
 
-test("drives a merge-stage ticket to pr-ready (parked on human_merge_approval)", async () => {
+test("emits exactly one ci_handoff on the pr-ready path", async () => {
   const { db, ticketId } = makeTestDb();
   seedAtMerge(db, ticketId);
+  const seen: TelemetryEvent[] = [];
   const r = await driveToTerminal(db, reg(), {
     ticketId,
     config: DEFAULT_RUNTIME_CONFIG,
     ports: ports(),
-    profile,
+    profile, // checksSystem "none"
+    emit: (e) => seen.push(e),
   });
   expect(r.outcome).toBe("pr-ready");
-  expect(r.stage).toBe("merge");
+  const handoffs = seen.filter((e) => e.type === "ci_handoff");
+  expect(handoffs).toHaveLength(1);
+  const h = handoffs[0];
+  if (h.type === "ci_handoff") {
+    expect(h.checks_system).toBe("none");
+    expect(h.read).toBe("skipped"); // checksSystem none → skipped, no port touched
+    expect(h.pr_url).toContain("/pr/"); // fakeForge emits https://fake/pr/N (NOT "pull")
+    expect(h.pr_ref).not.toBeNull(); // external_pr_result delivered before pr-ready fires
+  }
   db.close();
 });
 
-test("reports blocked when a human_resume escalation is pending", async () => {
+test("D1: a failing CI read still exits pr-ready (exit disposition decoupled from CI)", async () => {
+  const { db, ticketId } = makeTestDb();
+  seedAtMerge(db, ticketId);
+  const ghProfile = parseProfile({
+    slug: "demo",
+    targetRepo: "/tmp/x",
+    defaultBranch: "main",
+    checksSystem: "github",
+  });
+  const seen: TelemetryEvent[] = [];
+  const r = await driveToTerminal(db, reg(), {
+    ticketId,
+    config: DEFAULT_RUNTIME_CONFIG,
+    ports: { issueTracker: fakeIssueTracker(), forge: fakeForge(), checks: fakeChecks("failing") },
+    profile: ghProfile,
+    emit: (e) => seen.push(e),
+  });
+  expect(r.outcome).toBe("pr-ready"); // red CI never blocks or loops back
+  const h = seen.find((e) => e.type === "ci_handoff");
+  expect(h && h.type === "ci_handoff" && h.read).toBe("failing"); // reported, not gated
+  db.close();
+});
+
+test("the ci_handoff read is fail-safe: a throwing checks port yields not-reported", async () => {
+  const { db, ticketId } = makeTestDb();
+  seedAtMerge(db, ticketId);
+  const ghProfile = parseProfile({
+    slug: "demo",
+    targetRepo: "/tmp/x",
+    defaultBranch: "main",
+    checksSystem: "github",
+  });
+  let calls = 0;
+  const throwingChecks = {
+    status: async () => {
+      calls++;
+      throw new Error("boom");
+    },
+  };
+  const seen: TelemetryEvent[] = [];
+  const r = await driveToTerminal(db, reg(), {
+    ticketId,
+    config: DEFAULT_RUNTIME_CONFIG,
+    ports: { issueTracker: fakeIssueTracker(), forge: fakeForge(), checks: throwingChecks },
+    profile: ghProfile,
+    emit: (e) => seen.push(e),
+  });
+  expect(r.outcome).toBe("pr-ready"); // read failure never blocks the terminal
+  expect(calls).toBe(1); // the throwing port WAS reached (test isn't vacuous)
+  const h = seen.find((e) => e.type === "ci_handoff");
+  expect(h && h.type === "ci_handoff" && h.read).toBe("not-reported");
+  db.close();
+});
+
+test("a non-merge terminal emits zero ci_handoffs", async () => {
   const { db, ticketId } = makeTestDb();
   seedAtMerge(db, ticketId);
   insertPending(db, { ticketId, signalType: "human_resume", reason: "stuck" });
+  const seen: TelemetryEvent[] = [];
   const r = await driveToTerminal(db, reg(), {
     ticketId,
     config: DEFAULT_RUNTIME_CONFIG,
     ports: ports(),
     profile,
+    emit: (e) => seen.push(e),
   });
   expect(r.outcome).toBe("blocked");
+  expect(seen.filter((e) => e.type === "ci_handoff")).toHaveLength(0);
   db.close();
 });
