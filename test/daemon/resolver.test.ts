@@ -456,16 +456,13 @@ test("review: asks for review then advances to merge", async () => {
   expect(after).toEqual({ kind: "advance", from: "review", to: "merge" });
 });
 
-test("merge: push → pr-ensure → wait checks → wait human → advance to released", async () => {
+test("merge: push → pr-ensure → wait human → advance to released", async () => {
   const { db, ticketId } = makeTestDb();
   setTicketStage(db, ticketId, "merge");
   expect((nextStepKey(db, ticketId) as { handlerKey: string }).handlerKey).toBe("merge:push");
   await succeed(db, ticketId, "merge:push");
   expect((nextStepKey(db, ticketId) as { handlerKey: string }).handlerKey).toBe("merge:pr-ensure");
   await succeed(db, ticketId, "merge:pr-ensure");
-  expect(nextStepKey(db, ticketId)).toEqual({ kind: "wait", signalType: "external_checks" });
-  const checks = insertPending(db, { ticketId, signalType: "external_checks" });
-  markDelivered(db, checks.id);
   expect(nextStepKey(db, ticketId)).toEqual({ kind: "wait", signalType: "human_merge_approval" });
   const human = insertPending(db, { ticketId, signalType: "human_merge_approval" });
   markDelivered(db, human.id);
