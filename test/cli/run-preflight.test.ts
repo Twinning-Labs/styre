@@ -65,3 +65,25 @@ test("run: a missing toolchain program exits 69 before any dispatch, and writes 
   // AC2: no SoT dump — parkDir would write under <XDG_STATE_HOME>/styre/…; nothing was created.
   expect(existsSync(join(state, "styre"))).toBe(false);
 });
+
+test("run --resume / --inspect are NOT gated by the toolchain preflight (ungated even with a missing tool)", async () => {
+  const xdg = mkdtempSync(join(tmpdir(), "styre-xdg-"));
+  const state = mkdtempSync(join(tmpdir(), "styre-state-"));
+  const profile = writeProfile("styre-definitely-absent-xyz build"); // the build tool is missing
+
+  // AC7: --resume must enter resumeRun (which errors on the absent dump) BEFORE the preflight, so a
+  // missing tool must NOT produce exit 69. If the preflight were ever placed ahead of the resume
+  // early-return, this would exit 69 and never reach the "no parked run" error — so this pins the
+  // placement, not just the current behavior.
+  await expect(invokeRun({ resume: "ENG-1", profile }, xdg, state)).rejects.toThrow(
+    /no parked run/,
+  );
+  expect(process.exitCode).not.toBe(69);
+
+  // --inspect (a resume modifier) likewise bypasses the preflight — an inspect on a tool-less
+  // machine must never be blocked by the toolchain check.
+  await expect(invokeRun({ resume: "ENG-1", inspect: true, profile }, xdg, state)).rejects.toThrow(
+    /no parked run/,
+  );
+  expect(process.exitCode).not.toBe(69);
+});
