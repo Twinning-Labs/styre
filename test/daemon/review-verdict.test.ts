@@ -504,3 +504,34 @@ test("plan review: repeated identical blocking round escalates (no-progress)", (
   expect(r.decision).toBe("escalated");
   expect(ticket?.status).toBe("waiting");
 });
+
+test("redesign loopback gives the design steps their attempt budget back (STYRE-7)", () => {
+  const { db, ticketId } = makeTestDb();
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", filesToTouch: ["a.ts"] });
+  const did = insertDesignReviewDispatch(db, ticketId);
+
+  // design:extract stumbled twice in cycle 1 before the retry-feedback loop fixed it — the
+  // spent budget must not carry into cycle 2.
+  const extract = insertPending(db, { ticketId, stepKey: "design:extract", stepType: "dispatch" });
+  markRunning(db, extract.id, {});
+  markRunning(db, extract.id, {});
+  expect(getByKey(db, ticketId, "design:extract")?.attempt).toBe(2);
+
+  insertFinding(db, {
+    ticketId,
+    dispatchId: did,
+    reviewKind: "plan",
+    severity: "major",
+    category: "completeness",
+    location: "plan.md:2",
+    rationale: "PLAN-WIDE-ISSUE",
+    blocksShip: 1,
+  });
+
+  const r = applyReviewVerdict(db, ticketId, DEFAULT_RUNTIME_CONFIG, { stepKey: "design:review" });
+  const after = getByKey(db, ticketId, "design:extract");
+  db.close();
+  expect(r.decision).toBe("loopback");
+  expect(after?.status).toBe("pending");
+  expect(after?.attempt).toBe(0);
+});

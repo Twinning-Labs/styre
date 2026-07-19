@@ -142,10 +142,17 @@ function redesignLoopback(
     const ticket = getTicket(db, ticketId);
     const from = ticket?.stage ?? "review";
     deleteByTicket(db, ticketId);
+    // §6, as resetTicketVerifySteps does for the gate: a redesign is a fresh round, not a
+    // continuation, so these steps get their attempt budget back. Without the reset a cycle-1
+    // failure (e.g. an extract the retry-feedback loop then fixed) leaves cycle 2 pre-spent, and
+    // the next stumble escalates a healthy ticket instead of re-dispatching. The design loop stays
+    // bounded by isRepeatedReviewLoopback (same findings signature twice → escalate), not by this
+    // counter.
     for (const key of ["design:dispatch", "design:extract", "design:review", "review"]) {
       const step = getByKey(db, ticketId, key);
       if (step) {
         resetToPending(db, step.id);
+        resetAttempt(db, step.id);
       }
     }
     resetTicketVerifySteps(db, ticketId);
