@@ -15,8 +15,17 @@ import {
 import { StepInFlightError } from "../../src/engine/step-journal.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
+// A fresh design ticket now resolves `provision` first (hoisted). Tests that drive design steps
+// with a hand-built registry must seed provision as already-done, or the resolver returns it and
+// advanceOneStep throws `no handler registered for 'provision'`.
+function seedProvisionDone(db: Parameters<typeof advanceOneStep>[0], ticketId: number): void {
+  const s = insertPending(db, { ticketId, stepKey: "provision", stepType: "provision" });
+  markSucceeded(db, s.id, {});
+}
+
 test("a step descriptor runs the registered handler and journals success", async () => {
   const { db, ticketId } = makeTestDb();
+  seedProvisionDone(db, ticketId);
   const registry = new StepRegistry();
   let ran = false;
   registry.register("design:dispatch", () => {
@@ -146,6 +155,7 @@ test("a done descriptor marks the ticket done", async () => {
 
 test("a failing handler routes through failure-policy (retry)", async () => {
   const { db, ticketId } = makeTestDb();
+  seedProvisionDone(db, ticketId);
   const registry = new StepRegistry();
   registry.register("design:dispatch", () => {
     throw new Error("agent died");
@@ -159,6 +169,7 @@ test("a failing handler routes through failure-policy (retry)", async () => {
 
 test("a running step propagates StepInFlightError instead of routing through failure-policy", async () => {
   const { db, ticketId } = makeTestDb();
+  seedProvisionDone(db, ticketId);
   // Insert the design:dispatch step as pending, then mark it running (simulates crash-interrupted run).
   const pending = insertPending(db, {
     ticketId,
@@ -223,6 +234,7 @@ test("review step with blocking finding → outcome loopback and stage implement
 
 test("design:review step with blocking plan finding → outcome loopback and stage design", async () => {
   const { db, ticketId } = makeTestDb();
+  seedProvisionDone(db, ticketId);
   // Seed a ticket in design stage: prior steps succeeded, at least one work unit inserted (so
   // the resolver skips design:extract), track=full so resolver returns design:review.
   setTicketStage(db, ticketId, "design");

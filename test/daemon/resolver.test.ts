@@ -15,8 +15,10 @@ async function succeed(db: Parameters<typeof runStep>[0], ticketId: number, step
   await runStep(db, { ticketId, stepKey, stepType: "dispatch", execute: () => ({ ok: true }) });
 }
 
-test("design: first asks for design:dispatch", () => {
+test("design: first asks for provision (hoisted before the design dispatches)", async () => {
   const { db, ticketId } = makeTestDb();
+  expect(nextStepKey(db, ticketId)).toMatchObject({ stepKey: "provision" });
+  await succeed(db, ticketId, "provision");
   const d = nextStepKey(db, ticketId);
   db.close();
   expect(d).toEqual({
@@ -28,19 +30,20 @@ test("design: first asks for design:dispatch", () => {
   });
 });
 
-test("design: after dispatch with no work units, asks for design:extract", async () => {
+test("design: after provision + dispatch with no work units, asks for design:extract", async () => {
   const { db, ticketId } = makeTestDb();
+  await succeed(db, ticketId, "provision");
   await succeed(db, ticketId, "design:dispatch");
   const d = nextStepKey(db, ticketId);
   db.close();
   expect(d.kind === "step" && d.handlerKey).toBe("design:extract");
 });
 
-test("design: units present + track unset → routes to design:size", async () => {
+test("design: provision + units present + track unset → routes to design:size", async () => {
   const { db, ticketId } = makeTestDb();
+  await succeed(db, ticketId, "provision");
   await succeed(db, ticketId, "design:dispatch");
   insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", verifyCheckTypes: ["test"] });
-  // track is null (extract no longer sizes)
   const d = nextStepKey(db, ticketId);
   db.close();
   expect(d).toEqual({
@@ -83,8 +86,9 @@ test("design full-track: after design:review, still routes through provision →
   db.close();
 });
 
-test("design full-track: with units + track=full, asks for design:review before advancing", async () => {
+test("design full-track: provision + units + track=full, asks for design:review before advancing", async () => {
   const { db, ticketId } = makeTestDb();
+  await succeed(db, ticketId, "provision");
   await succeed(db, ticketId, "design:dispatch");
   setTicketTrack(db, ticketId, "full");
   insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", verifyCheckTypes: ["test"] });
@@ -479,6 +483,23 @@ test("released: runs released:project then reports done", async () => {
   const d = nextStepKey(db, ticketId);
   db.close();
   expect(d).toEqual({ kind: "done" });
+});
+
+test("provision succeeded in design is reused in implement (gate finds it done, no re-provision)", async () => {
+  const { db, ticketId } = makeTestDb();
+  await succeed(db, ticketId, "provision"); // as if provision ran at design-HEAD
+  setTicketStage(db, ticketId, "implement");
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verifying",
+  });
+  const d = nextStepKey(db, ticketId);
+  db.close();
+  // provision is already done → the implement gate skips it and asks completeness next
+  expect(d).toMatchObject({ stepKey: "completeness:wu1" });
 });
 
 test("provision runs once before the first unit verify", async () => {

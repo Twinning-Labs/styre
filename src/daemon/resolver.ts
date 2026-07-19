@@ -95,6 +95,14 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
 
   switch (ticket.stage) {
     case "design": {
+      // Provision runs FIRST — before the design dispatches — so a missing-tool / broken-install
+      // environment fault fails before any design spend. It depends on nothing design produces:
+      // design commits only under docs/plans/ (planScope), so it cannot touch a dependency
+      // manifest. Reused by implement (whose provision gates find it done and skip;
+      // resetProvisionIfManifestTouched still re-arms it, §2).
+      if (!done(db, ticketId, "provision")) {
+        return step("provision", "provision", "provision", null);
+      }
       if (!done(db, ticketId, "design:dispatch")) {
         return step("design:dispatch", "dispatch", "design:dispatch", null);
       }
@@ -106,11 +114,6 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
       }
       if (ticket.track === "full" && !done(db, ticketId, "design:review")) {
         return step("design:review", "dispatch", "design:review", null);
-      }
-      // Hoist: provision runs ONCE at design-HEAD (reused by implement — whose provision gates stay,
-      // finding it done and skipping; resetProvisionIfManifestTouched still re-arms it, §2).
-      if (!done(db, ticketId, "provision")) {
-        return step("provision", "provision", "provision", null);
       }
       if (!done(db, ticketId, "checks:dispatch")) {
         return step("checks:dispatch", "dispatch", "checks:dispatch", null);

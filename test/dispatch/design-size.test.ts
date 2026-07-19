@@ -38,12 +38,15 @@ function registryFor(repo: string, runner: FakeAgentRunner) {
   });
 }
 
-// design:dispatch succeeded + units present + track null → resolver routes to design:size.
+// provision (hoisted to the top of case "design") + design:dispatch succeeded + units present +
+// track null → resolver routes to design:size.
 function readyForSize(
   db: ReturnType<typeof makeTestDb>["db"],
   ticketId: number,
   unitCount: number,
 ) {
+  const p = insertPending(db, { ticketId, stepKey: "provision", stepType: "provision" });
+  db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(p.id);
   const s = insertPending(db, { ticketId, stepKey: "design:dispatch", stepType: "dispatch" });
   db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
   for (let i = 1; i <= unitCount; i++) {
