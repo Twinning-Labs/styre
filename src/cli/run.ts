@@ -20,6 +20,13 @@ import { stdoutSink } from "../telemetry/emit.ts";
 import { buildSummary } from "../telemetry/emitter.ts";
 import type { TelemetryEvent } from "../telemetry/events.ts";
 import { finishRunResult, parkDir } from "./park.ts";
+import { formatMissingTools, preflightToolchain } from "./preflight.ts";
+
+/** Exit code when a required repo toolchain program is not installed on this machine
+ *  (sysexits `EX_UNAVAILABLE`). Non-retry, distinct from the other run exit codes:
+ *  0 success · 1 crash · 2 notifier-config · 65 resume-refused · 75 parked. Final
+ *  cross-command reconciliation of the code space is ENG-338's job. */
+const EX_TOOLCHAIN_MISSING = 69;
 
 const MUST_HAVE = ["build", "test", "check"] as const;
 
@@ -124,6 +131,16 @@ export const runCommand = defineCommand({
 
       if (!args.ticket || args.ticket.length === 0) {
         throw new Error("run: --ticket is required when not using --resume");
+      }
+
+      // Fail fast before any spend if a program the components' commands need isn't installed on
+      // this machine. Fresh-run path only — `--resume`/`--inspect` returned above (their re-running
+      // ground-truth steps are the check, and `--inspect` must stay exit-0 on a tool-less machine).
+      const missingTools = preflightToolchain(profile);
+      if (missingTools.length > 0) {
+        console.error(formatMissingTools(missingTools)); // human/diagnostic output → stderr
+        process.exitCode = EX_TOOLCHAIN_MISSING;
+        return;
       }
 
       const dbPath =
