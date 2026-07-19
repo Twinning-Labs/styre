@@ -533,6 +533,131 @@ test("A13 ⚔ a fail-first RED naming the FEATURE (not the discarded throwaway) 
   expect(checks[0]?.red_first_result).toBe("red"); // installed as RED (classify judges absence later)
 });
 
+// --- A14 ⚔ (ENG-342: a discarded __init__.py whose absence names the PACKAGE, not the file →
+//            shape-matched → uncovered → SURFACE) -------------------------------------------------
+// The canonical test imports package `pkg`; the agent wrote pkg/__init__.py but did NOT declare it →
+// discarded. pytest can't import the package → exit 2, "No module named 'pkg'" — which names the
+// PACKAGE, never the file `__init__.py`. The general name/basename tiers miss it; the package-init
+// shape tier ties `pkg/__init__.py` to `No module named 'pkg'` → uncovered, file surfaced. Non-vacuous:
+// without the shape tier this import-error RED marks the AC covered and a broken check persists (the
+// exact masquerade ENG-342 closes). Contrast: A15 (a bare interior name must NOT match).
+test("A14 ⚔ a discarded __init__.py named only via its package (No module named 'pkg') → AC uncovered, file surfaced", async () => {
+  const h = await setupChecks("- [ ] one thing\n");
+  const runner = checksRunner(
+    h,
+    (cwd, acId, ident) => {
+      const dir = join(cwd, "checks");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `${ident}_ac${acId}_test.py`),
+        "import pkg\n\ndef test_x():\n    assert pkg.x\n",
+      );
+      const pkgDir = join(cwd, "pkg");
+      mkdirSync(pkgDir, { recursive: true });
+      writeFileSync(join(pkgDir, "__init__.py"), "x = 1\n"); // undeclared package marker → discarded
+    },
+    (acId, ident) => canonicalDeclared(acId, ident),
+  );
+  const { outcome, step, wt, message } = await driveChecks(h, runner, {
+    runCheck: async () => ({
+      exitCode: 2,
+      stdout:
+        "ImportError while importing test module\nE   ModuleNotFoundError: No module named 'pkg'",
+      stderr: "",
+      timedOut: false,
+    }),
+  });
+  const checks = listAcChecks(h.db, h.ticketId);
+  h.db.close();
+  expect(["retry", "escalated"]).toContain(outcome.kind);
+  expect(step?.status).toBe("pending");
+  expect(existsSync(join(wt, "pkg", "__init__.py"))).toBe(false); // discarded
+  expect(headHas(wt, "checks/ENG-1_ac1_test.py")).toBe(false); // no poisoned check committed
+  expect(checks).toHaveLength(0); // NO covered check persisted
+  expect(message).toMatch(/import or collection error/);
+  expect(message).toContain("pkg/__init__.py"); // shape-matched file surfaced (error named only 'pkg')
+});
+
+// --- A15 ⚔ (ENG-342 true-negative, CONTRAST for A14: a discarded __init__.py must NOT be blamed when
+//            the error names an unrelated bare module) --------------------------------------------
+// The check legitimately fails first because feature module `b` is absent (RED-first) — "No module
+// named 'b'". The agent also left an UNDECLARED a/b/__init__.py (discarded). The package-init shape
+// rule must NOT match: `b` is a bare interior segment of dir `a/b`, not the package `a.b`. So the guard
+// does NOT fire → the AC stays COVERED and the RED is installed (the no-false-reject guarantee).
+test("A15 ⚔ a discarded a/b/__init__.py + a fail-first 'No module named b' (unrelated) stays COVERED", async () => {
+  const h = await setupChecks("- [ ] one thing\n");
+  const runner = checksRunner(
+    h,
+    (cwd, acId, ident) => {
+      const dir = join(cwd, "checks");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `${ident}_ac${acId}_test.py`),
+        "from b import go\n\ndef test_x():\n    assert go()\n",
+      );
+      const abDir = join(cwd, "a", "b");
+      mkdirSync(abDir, { recursive: true });
+      writeFileSync(join(abDir, "__init__.py"), "y = 1\n"); // undeclared, discarded — must NOT be blamed
+    },
+    (acId, ident) => canonicalDeclared(acId, ident),
+  );
+  const { outcome, step, wt } = await driveChecks(h, runner, {
+    runCheck: async () => ({
+      exitCode: 2,
+      stdout:
+        "ImportError while importing test module\nE   ModuleNotFoundError: No module named 'b'",
+      stderr: "",
+      timedOut: false,
+    }),
+  });
+  const checks = listAcChecks(h.db, h.ticketId);
+  h.db.close();
+  expect(outcome.kind).toBe("stepped"); // NOT rejected
+  expect(step?.status).toBe("succeeded");
+  expect(existsSync(join(wt, "a", "b", "__init__.py"))).toBe(false); // still discarded
+  expect(committedAtHead(wt)).toContain("_ac1_test.py"); // the RED check IS committed
+  expect(checks).toHaveLength(1);
+  expect(checks[0]?.red_first_result).toBe("red"); // installed as RED (classify judges absence later)
+});
+
+// --- A16 ⚔ (ENG-342: a discarded conftest.py whose absence names a FIXTURE, not the file →
+//            shape-matched → uncovered → SURFACE) -------------------------------------------------
+// The test uses a fixture that a discarded (undeclared) conftest.py provided → "fixture 'db' not found",
+// which names the FIXTURE, never conftest.py. The conftest shape tier implicates the discarded
+// conftest.py on the fixture/collection error → uncovered, file surfaced.
+test("A16 ⚔ a discarded conftest.py named only via a missing fixture → AC uncovered, file surfaced", async () => {
+  const h = await setupChecks("- [ ] one thing\n");
+  const runner = checksRunner(
+    h,
+    (cwd, acId, ident) => {
+      const dir = join(cwd, "checks");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, `${ident}_ac${acId}_test.py`), "def test_x(db):\n    assert db\n");
+      writeFileSync(
+        join(dir, "conftest.py"),
+        "import pytest\n\n@pytest.fixture\ndef db():\n    return 1\n",
+      ); // undeclared → discarded
+    },
+    (acId, ident) => canonicalDeclared(acId, ident),
+  );
+  const { outcome, step, wt, message } = await driveChecks(h, runner, {
+    runCheck: async () => ({
+      exitCode: 1,
+      stdout: "E       fixture 'db' not found",
+      stderr: "",
+      timedOut: false,
+    }),
+  });
+  const checks = listAcChecks(h.db, h.ticketId);
+  h.db.close();
+  expect(["retry", "escalated"]).toContain(outcome.kind);
+  expect(step?.status).toBe("pending");
+  expect(existsSync(join(wt, "checks", "conftest.py"))).toBe(false); // discarded
+  expect(checks).toHaveLength(0);
+  expect(message).toMatch(/import or collection error/);
+  expect(message).toContain("conftest.py"); // shape-matched file surfaced (error named only the fixture)
+});
+
 // --- A12 ⚔ (an undeclared source smuggle cannot fake a green) — CONTRAST PAIR --------------------
 // With discard, an undeclared NEW source file can never smuggle a green: the guard discards it, so the
 // `import smuggle` becomes an import-error RED naming the discarded file → the discard-poison guard
