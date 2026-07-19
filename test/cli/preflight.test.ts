@@ -12,7 +12,11 @@ import {
 import type { Profile } from "../../src/dispatch/profile.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 
-function makeProfile(components: Profile["components"], targetRepo = "/repo"): Profile {
+// Fixtures may omit `extensions` (ComponentSchema defaults it to []); parseProfile fills it. The
+// inferred `Profile["components"]` type requires it, so accept the pre-default shape here.
+type ComponentInput = Omit<Profile["components"][number], "extensions"> & { extensions?: string[] };
+
+function makeProfile(components: ComponentInput[], targetRepo = "/repo"): Profile {
   return parseProfile({ slug: "test", targetRepo, components });
 }
 
