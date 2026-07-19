@@ -61,8 +61,11 @@ const sidecar = (json: string) =>
   `Here is the breakdown.\n\n\`\`\`styre-sidecar\n${json}\n\`\`\`\n`;
 
 // Reused from test/dispatch/design-extract.test.ts: design:dispatch must be 'succeeded' and stage
-// 'design' so the resolver routes to design:extract.
+// 'design' so the resolver routes to design:extract. provision (hoisted to the top of case
+// "design") must also be seeded done, or the resolver serves it first.
 function readyForExtract(db: ReturnType<typeof makeTestDb>["db"], ticketId: number) {
+  const p = insertPending(db, { ticketId, stepKey: "provision", stepType: "provision" });
+  db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(p.id);
   const s = insertPending(db, { ticketId, stepKey: "design:dispatch", stepType: "dispatch" });
   db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
 }

@@ -52,8 +52,11 @@ function registryFor(repo: string, runner: FakeAgentRunner, rc: unknown = ABSENT
 const sidecar = (json: string) =>
   `Here is the breakdown.\n\n\`\`\`styre-sidecar\n${json}\n\`\`\`\n`;
 
-// design:dispatch must be 'succeeded' and stage 'design' so the resolver routes to design:extract.
+// provision (hoisted) + design:dispatch must be 'succeeded' and stage 'design' so the resolver
+// routes to design:extract.
 function readyForExtract(db: ReturnType<typeof makeTestDb>["db"], ticketId: number) {
+  const p = insertPending(db, { ticketId, stepKey: "provision", stepType: "provision" });
+  db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(p.id);
   const s = insertPending(db, { ticketId, stepKey: "design:dispatch", stepType: "dispatch" });
   db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
 }

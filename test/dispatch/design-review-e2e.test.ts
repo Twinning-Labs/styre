@@ -71,9 +71,16 @@ const blockingPlanFinding = sidecar(
   }),
 );
 
-/** Seed the ticket at stage='design', track='full', with design:dispatch+extract already
- *  succeeded and 2 work units, so the resolver routes to design:review. */
+/** Seed the ticket at stage='design', track='full', with provision + design:dispatch+extract
+ *  already succeeded and 2 work units, so the resolver routes to design:review. */
 function readyForDesignReview(db: ReturnType<typeof makeTestDb>["db"], ticketId: number) {
+  const provision = insertPending(db, {
+    ticketId,
+    stepKey: "provision",
+    stepType: "provision",
+  });
+  db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(provision.id);
+
   const dispatch = insertPending(db, {
     ticketId,
     stepKey: "design:dispatch",

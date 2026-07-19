@@ -40,8 +40,11 @@ function registryFor(repo: string, runner: FakeAgentRunner) {
 
 const sidecar = (json: string) => `Reviewed the plan.\n\n\`\`\`styre-sidecar\n${json}\n\`\`\`\n`;
 
-// design:dispatch succeeded + units present + track=full → resolver routes to design:review.
+// provision (hoisted) + design:dispatch succeeded + units present + track=full → resolver routes
+// to design:review.
 function readyForDesignReview(db: ReturnType<typeof makeTestDb>["db"], ticketId: number) {
+  const p = insertPending(db, { ticketId, stepKey: "provision", stepType: "provision" });
+  db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(p.id);
   const s = insertPending(db, { ticketId, stepKey: "design:dispatch", stepType: "dispatch" });
   db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
   insertWorkUnit(db, {

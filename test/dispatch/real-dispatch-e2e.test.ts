@@ -47,6 +47,10 @@ test("real design:dispatch handler (fake agent) commits a plan and the step succ
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-e2ewt-")),
   });
 
+  // provision is hoisted to the top of case "design" — it runs first (a no-op here: the profile
+  // has no components, so planProvision installs nothing). design:dispatch runs next.
+  const provisionOutcome = await advanceOneStep(db, ticketId, registry);
+  expect(provisionOutcome).toEqual({ kind: "stepped", stepKey: "provision" });
   const outcome = await advanceOneStep(db, ticketId, registry);
   db.close();
   expect(outcome).toEqual({ kind: "stepped", stepKey: "design:dispatch" });

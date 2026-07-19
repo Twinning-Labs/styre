@@ -9,6 +9,7 @@ import { makeTestDb } from "../helpers/db.ts";
 
 function registry(): StepRegistry {
   const r = new StepRegistry();
+  r.register("provision", () => ({}));
   r.register("design:dispatch", () => ({}));
   return r;
 }
@@ -16,7 +17,7 @@ function registry(): StepRegistry {
 test("tick advances a ready ticket by one step", async () => {
   const { db, ticketId } = makeTestDb();
   const summary = await tick(db, registry());
-  const step = getByKey(db, ticketId, "design:dispatch");
+  const step = getByKey(db, ticketId, "provision");
   db.close();
   expect(summary.advanced).toBe(1);
   expect(step?.status).toBe("succeeded");

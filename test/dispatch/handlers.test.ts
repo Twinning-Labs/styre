@@ -181,7 +181,11 @@ test("design:dispatch passes when the agent writes this ticket's plan", async ()
       tokensOut: null,
     };
   });
-  await advanceOneStep(db, ticketId, registryFor(repo, runner));
+  const registry = registryFor(repo, runner);
+  // provision is hoisted to the top of case "design" — it runs first (a no-op: the "app" component
+  // has no prepare command, so planProvision installs nothing and writes no dispatch row).
+  await advanceOneStep(db, ticketId, registry);
+  await advanceOneStep(db, ticketId, registry);
   const d = listByTicket(db, ticketId);
   db.close();
   expect(d.at(-1)?.outcome).toBe("clean-success");
@@ -205,7 +209,11 @@ test("design:dispatch fails the postcondition when no plan for this ticket exist
       tokensOut: null,
     }),
   );
-  await advanceOneStep(db, ticketId, registryFor(repo, runner));
+  const registry = registryFor(repo, runner);
+  // provision is hoisted to the top of case "design" — it runs first (a no-op: the "app" component
+  // has no prepare command, so planProvision installs nothing and writes no dispatch row).
+  await advanceOneStep(db, ticketId, registry);
+  await advanceOneStep(db, ticketId, registry);
   const d = listByTicket(db, ticketId);
   db.close();
   expect(d.at(-1)?.outcome).toBe("postcondition-failed");
