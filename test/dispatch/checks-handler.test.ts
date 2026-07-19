@@ -799,3 +799,69 @@ test("checks:dispatch names a discarded-but-needed helper in the uncovered-AC fa
   // The failure feedback names the discarded helper — recoverable, not an opaque wedge.
   expect(message).toMatch(/discarded this attempt: .*util\.py/);
 });
+
+test("checks:dispatch — a discarded __init__.py yields a legible, non-persisted collection failure", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] returns ok\n", ticketId);
+  await markDesignDone(db, ticketId);
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
+  setTicketTrack(db, ticketId, "fast");
+
+  // Agent writes the declared canonical test AND an UNDECLARED pkg/__init__.py (→ discarded).
+  const runner = new FakeAgentRunner((input) => {
+    const checksDir = join(input.cwd, "checks");
+    mkdirSync(checksDir, { recursive: true });
+    writeFileSync(join(checksDir, "ac1.py"), "import pkg\n\ndef test_ac1():\n    assert pkg.x\n");
+    const pkgDir = join(input.cwd, "pkg");
+    mkdirSync(pkgDir, { recursive: true });
+    writeFileSync(join(pkgDir, "__init__.py"), "x = 1\n"); // undeclared → discarded
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout:
+        '```styre-sidecar\n{"checksAuthored":[' +
+        '{"ac_id":1,"test_file":"checks/ac1.py","test_name":"test_ac1"}]}\n```',
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+    }),
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
+    // RED-first run: a collection error naming the package whose __init__.py was discarded.
+    runCheckCommand: async () => ({
+      exitCode: 2,
+      stdout:
+        "E   ModuleNotFoundError: No module named 'pkg'\n" +
+        "ERROR checks/ac1.py - ModuleNotFoundError: No module named 'pkg'",
+      stderr: "",
+      timedOut: false,
+    }),
+  });
+
+  await advanceOneStep(db, ticketId, registry); // provision (no-op)
+  await advanceOneStep(db, ticketId, registry); // checks:dispatch → postcondition throws
+  const checks = listAcChecks(db, ticketId);
+  const step = getByKey(db, ticketId, "checks:dispatch");
+  const message: string = JSON.parse(step?.error_json ?? "{}").message ?? "";
+  db.close();
+
+  // (a) the poisoned collection-error red is NOT installed as a covered check:
+  expect(checks.length).toBe(0);
+  // (b) the failure names the cause, the discarded file, and the real pytest line:
+  expect(message).toContain("import or collection error");
+  expect(message).toContain("pkg/__init__.py");
+  expect(message).toContain("No module named 'pkg'");
+});

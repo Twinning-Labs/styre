@@ -58,6 +58,7 @@ import {
   type CoarseResult,
   binaryFor,
   buildCheckSelector,
+  collectionErrorExcerpt,
   frameworkFor,
   importErrorImplicatesDiscarded,
   signalResultForCoarse,
@@ -683,10 +684,9 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         if (discarded.length > 0 && coarse !== "green") {
           const implicated = importErrorImplicatesDiscarded(rawOutput, discarded);
           if (implicated.length > 0) {
-            missReason.set(
-              c.ac_id,
-              `the check for this AC could not run because it references files styre discarded this attempt (undeclared): ${implicated.join(", ")}`,
-            );
+            const excerpt = collectionErrorExcerpt(rawOutput);
+            const base = `the check could not be collected (import or collection error) — this attempt discarded ${implicated.join(", ")} (undeclared)`;
+            missReason.set(c.ac_id, excerpt ? `${base}. Framework said: ${excerpt}` : `${base}.`);
             continue; // uncovered → loud retry path, no poisoned check persisted
           }
         }

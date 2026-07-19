@@ -518,7 +518,7 @@ test("no-drop across a transport-failure retry: a re-created declared file commi
   db.close();
 });
 
-test("checks support file: an undeclared styre_checks/__init__.py co-located with the canonical check is admitted (ENG-323)", async () => {
+test("checks support file: an UNDECLARED styre_checks/__init__.py co-located with the canonical check is discarded, not auto-admitted (ENG-323 deleted)", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
   const wt = join(repo, "..", `wt-support-${Date.now()}`);
@@ -549,17 +549,18 @@ test("checks support file: an undeclared styre_checks/__init__.py co-located wit
       template: "checks {{ident}}",
       vars: { ident: "ENG-1" },
       commitScope: checksScopeFor("ENG-1", [1]),
+      disposition: "discard", // mirrors the real checks:dispatch wiring (handlers.ts)
       postcondition: () => {},
     },
   );
 
-  expect(listByTicket(db, ticketId)[0]?.outcome).toBe("clean-success"); // NOT rejected
+  expect(listByTicket(db, ticketId)[0]?.outcome).toBe("clean-success"); // discard, not reject
   expect(res.changed).toBe(true);
   const committed = Bun.spawnSync(["git", "show", "--name-only", "--format=", "HEAD"], {
     cwd: wt,
   }).stdout.toString();
   expect(committed).toContain("tests/styre_checks/ENG-1_ac1_test.py");
-  expect(committed).toContain("tests/styre_checks/__init__.py");
+  expect(committed).not.toContain("__init__.py"); // undeclared → discarded, no longer auto-admitted
   db.close();
 });
 
