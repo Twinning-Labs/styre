@@ -11,10 +11,12 @@ export interface ToolProbe {
   cwd: string;
 }
 
-/** Enumerate every command whose leading program the run must be able to invoke: each
- *  component's `prepare` (if any) plus its resolved `build`/`test`/`check`. `cwd` is the
- *  component's module root (`targetRepo` + `dir`) so an `npm run <script>` probe reads the
- *  right `package.json`. Pure — no filesystem or probe side effects. */
+/** Enumerate every command whose leading program the run must be able to invoke. For a component
+ *  WITH a `prepare` (install step), that is only the `prepare` tool — its `build`/`test`/`check`
+ *  tools are install-provided, so provision supplies them (probing them pre-provision false-fails
+ *  on a clean checkout). For a component WITHOUT a `prepare` (go/jvm), it is `build`/`test`/`check`
+ *  — those are the true preconditions. `cwd` is the component's module root (`targetRepo` + `dir`)
+ *  so an `npm run <script>` probe reads the right `package.json`. Pure — no side effects. */
 export function collectToolProbes(profile: Profile): ToolProbe[] {
   const probes: ToolProbe[] = [];
   for (const c of profile.components) {
