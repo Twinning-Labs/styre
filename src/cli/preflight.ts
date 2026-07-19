@@ -20,8 +20,15 @@ export function collectToolProbes(profile: Profile): ToolProbe[] {
   for (const c of profile.components) {
     const cwd = join(profile.targetRepo, c.dir ?? "");
     if (c.prepare) {
+      // A component WITH a prepare installs its own build/test/check tools (php's
+      // ./vendor/bin/phpunit, python's pytest/tox, node's local bins). Probing those before
+      // provision runs would false-fail on a clean checkout — so probe only the prepare tool
+      // itself, the one precondition provision cannot provide.
       probes.push({ component: c.name, label: "prepare", command: c.prepare, cwd });
+      continue;
     }
+    // No prepare (go/jvm): provision installs nothing, so the build/test/check tools ARE the
+    // preconditions — this is the coverage the provision-first reorder structurally can't give.
     for (const label of ["build", "test", "check"] as const) {
       const command = commandFor(c, label);
       if (command) probes.push({ component: c.name, label, command, cwd });

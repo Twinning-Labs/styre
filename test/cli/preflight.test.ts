@@ -22,21 +22,34 @@ function fakeProbe(present: string[]): (repoDir: string, command: string) => boo
   return (_repoDir, command) => set.has(command.trim().split(/\s+/)[0]);
 }
 
-test("collectToolProbes: prepare + build/test/check, honors dir, skips unavailable", () => {
+test("collectToolProbes: prepare-bearing probes only prepare; prepare-less probes build/test/check (honors dir, skips unavailable)", () => {
   const profile = makeProfile([
     {
       name: "api",
       kind: "php",
       paths: ["api/**"],
       dir: "api",
-      commands: { build: "composer build", test: "phpunit", check: { unavailable: true } },
+      commands: {
+        build: "composer build",
+        test: "./vendor/bin/phpunit",
+        check: { unavailable: true },
+      },
       prepare: "composer install",
+    },
+    {
+      name: "svc",
+      kind: "go",
+      paths: ["svc/**"],
+      dir: "svc",
+      commands: { build: "go build ./...", test: "go test ./...", check: { unavailable: true } },
     },
   ]);
   expect(collectToolProbes(profile)).toEqual([
+    // prepare-bearing php: only the prepare tool (build/test are composer-provided)
     { component: "api", label: "prepare", command: "composer install", cwd: "/repo/api" },
-    { component: "api", label: "build", command: "composer build", cwd: "/repo/api" },
-    { component: "api", label: "test", command: "phpunit", cwd: "/repo/api" },
+    // prepare-less go: build/test (check unavailable → skipped), cwd honors dir
+    { component: "svc", label: "build", command: "go build ./...", cwd: "/repo/svc" },
+    { component: "svc", label: "test", command: "go test ./...", cwd: "/repo/svc" },
   ]);
 });
 
@@ -68,7 +81,7 @@ test("preflightToolchain: a missing program is reported with component/label/com
   ]);
 });
 
-test("preflightToolchain: aggregates every missing tool across components (incl. go/jvm, no prepare)", () => {
+test("preflightToolchain: aggregates missing tools (prepare-less build/test + prepare-bearing prepare)", () => {
   const profile = makeProfile([
     {
       name: "go",
@@ -90,9 +103,23 @@ test("preflightToolchain: aggregates every missing tool across components (incl.
     "go/build:go",
     "go/test:go",
     "web/prepare:pnpm",
-    'web/build:npm script "build"',
-    'web/test:npm script "test"',
   ]);
+});
+
+test("preflightToolchain: a prepare-provided test tool is NOT probed (php clean checkout)", () => {
+  // php's ./vendor/bin/phpunit is created by `composer install` and absent on a clean checkout.
+  // The preflight must probe only `composer` (present) and NOT the not-yet-installed test tool —
+  // otherwise it false-fails the exact clean-checkout/CI case it exists for.
+  const profile = makeProfile([
+    {
+      name: "php",
+      kind: "php",
+      paths: ["**"],
+      commands: { build: "true", test: "./vendor/bin/phpunit", check: { unavailable: true } },
+      prepare: "composer install",
+    },
+  ]);
+  expect(preflightToolchain(profile, fakeProbe(["composer"]))).toEqual([]);
 });
 
 test("missingHint: npm run → the script; otherwise the leading program", () => {
