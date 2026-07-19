@@ -30,8 +30,9 @@ reverted, the test must fail. The builder demonstrates this for the ⚔ rows (mu
 | A8 | `styre_scratch/probe.py` (+ valid declared test) | valid | scratch **SWEEP**, test **COMMIT** | primary sweep still runs before the guard |
 | A9 | nothing new; pre-existing `*.egg-info` present | valid | egg-info **SPARE** | untrackedBefore excluded from judgment/discard |
 | A10 ⚔ | malformed sidecar block | malformed | **RE-DISPATCH**, rollback to preHead, no commit | `checksScopeFor` defers → handler re-parses → throws |
-| A11 ⚔ | canonical test that imports an undeclared loose helper (helper outside `styre_checks/`) | valid | helper **DISCARD** → `selected-none` → uncovered → **SURFACE** helper in feedback | blocker-3 recovery path |
-| A12 ⚔ | a test that is not genuinely RED (source-smuggle makes it pass) | valid | **REJECT** (identity, not-RED) | checks cannot smuggle a green |
+| A11 ⚔ | canonical test that imports an undeclared loose helper (helper outside `styre_checks/`) | valid | helper **DISCARD** → import-error **RED** (pytest exit 2) → discard-poison guard → uncovered → **SURFACE** helper in feedback, no covered check persisted | a whole-missing-module RED buckets coarse-`red`, not `selected-none`; `importErrorImplicatesDiscarded` routes it to the uncovered path so no permanently-broken check installs (silent-bad-merge fix) |
+| A12 ⚔ | undeclared NEW source file that would fake a green (`import smuggle`) | valid | source **DISCARD** → `import` becomes import-error **RED** naming the discarded file → discard-poison guard → uncovered → **REJECT** + **SURFACE** | a green smuggled via an undeclared new file can't happen — discard makes it RED; contrast: **declaring** the file keeps it → real green → **COMMIT** (classify judges it). An in-scope tracked-edit green is out of scope here, handled by classify |
+| A13 ⚔ | canonical test whose fail-first RED names the FEATURE module (`newfeature` absent) + an UNRELATED throwaway discarded | valid | throwaway **DISCARD**, RED check **COMMIT**, AC **COVERED** | true-negative: the discard-poison guard must NOT reject a legitimate fail-first test just because unrelated throwaway was discarded (import error names the feature, not a discarded file) |
 
 ## B. `checks` re-author (`reauthorCheckWrong`, disposition = discard)
 

@@ -448,8 +448,14 @@ test("A10 ⚔ a malformed sidecar rolls back to preHead and re-dispatches (no co
   expect(dispatches.some((d) => d.outcome === "reverted")).toBe(true);
 });
 
-// --- A11 ⚔ (discarded helper → selected-none → uncovered → SURFACE in feedback) ------------------
-test("A11 ⚔ a discarded loose helper leaves the AC uncovered and is NAMED in the failure feedback", async () => {
+// --- A11 ⚔ (discarded helper → import-error RED → uncovered → SURFACE in feedback) ---------------
+// A canonical test that IMPORTS an undeclared helper placed outside styre_checks/: the helper is
+// discarded, so the test can't import it → pytest exit 2 (collection/import error), coarse RED — NOT
+// selected-none. The discard-poison guard (importErrorImplicatesDiscarded) routes this RED to the same
+// uncovered path selected-none uses, so no permanently-broken check is installed and the discarded
+// helper is NAMED in the feedback. Non-vacuous: without the guard the import-error RED marks the AC
+// covered and a broken check is persisted.
+test("A11 ⚔ a canonical test importing a discarded helper → import-error RED → AC uncovered, helper NAMED", async () => {
   const h = await setupChecks("- [ ] one thing\n");
   const runner = checksRunner(
     h,
@@ -464,29 +470,85 @@ test("A11 ⚔ a discarded loose helper leaves the AC uncovered and is NAMED in t
     },
     (acId, ident) => canonicalDeclared(acId, ident),
   );
-  // Without the discarded helper, pytest collects zero tests → selected-none.
+  // The discarded helper is gone at run time → pytest can't collect the test module → exit 2, import
+  // error naming the discarded module `util`.
   const { outcome, step, wt, message } = await driveChecks(h, runner, {
     runCheck: async () => ({
-      exitCode: 5,
-      stdout: "collected 0 items",
+      exitCode: 2,
+      stdout:
+        "ImportError while importing test module\nE   ModuleNotFoundError: No module named 'util'",
       stderr: "",
       timedOut: false,
     }),
   });
+  const checks = listAcChecks(h.db, h.ticketId);
   h.db.close();
   expect(["retry", "escalated"]).toContain(outcome.kind);
   expect(step?.status).toBe("pending");
   expect(existsSync(join(wt, "checks", "util.py"))).toBe(false); // discarded
-  expect(message).toMatch(/discarded this attempt: .*util\.py/); // surfaced, recoverable
+  expect(headHas(wt, "checks/ENG-1_ac1_test.py")).toBe(false); // reverted, no poisoned check committed
+  expect(checks).toHaveLength(0); // NO covered check persisted for the AC
+  expect(message).toMatch(/could not run because it references files styre discarded/);
+  expect(message).toContain("util.py"); // surfaced, recoverable
 });
 
-// --- A12 ⚔ (a smuggled green cannot survive the guard) — CONTRAST PAIR ---------------------------
-test("A12 ⚔ an UNDECLARED source file that would fake a green is discarded → AC uncovered → REJECT", async () => {
-  // green iff smuggle.py is present at run time; the guard discards it first → selected-none → reject.
+// --- A13 ⚔ (true-negative: a legit fail-first RED must NOT be rejected just because throwaway was
+//            discarded) — CONTRAST for A11 -------------------------------------------------------
+// The check legitimately fails because the FEATURE under test is absent (RED-first): the import error
+// names the feature module `newfeature`, not the discarded file. An UNRELATED throwaway is discarded.
+// The guard must NOT fire → the AC stays COVERED and the RED check is installed (classify judges it).
+test("A13 ⚔ a fail-first RED naming the FEATURE (not the discarded throwaway) stays COVERED", async () => {
+  const h = await setupChecks("- [ ] one thing\n");
+  const runner = checksRunner(
+    h,
+    (cwd, acId, ident) => {
+      const dir = join(cwd, "checks");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `${ident}_ac${acId}_test.py`),
+        "from newfeature import go\n\ndef test_x():\n    assert go()\n",
+      );
+      writeFileSync(join(cwd, "scratch.py"), "# unrelated throwaway probe\n"); // undeclared, discarded
+    },
+    (acId, ident) => canonicalDeclared(acId, ident),
+  );
+  // RED because the not-yet-built feature module is absent — import error names `newfeature`, NOT the
+  // discarded `scratch.py`.
+  const { outcome, step, wt } = await driveChecks(h, runner, {
+    runCheck: async () => ({
+      exitCode: 2,
+      stdout:
+        "ImportError while importing test module\nE   ModuleNotFoundError: No module named 'newfeature'",
+      stderr: "",
+      timedOut: false,
+    }),
+  });
+  const checks = listAcChecks(h.db, h.ticketId);
+  h.db.close();
+  expect(outcome.kind).toBe("stepped"); // NOT rejected
+  expect(step?.status).toBe("succeeded");
+  expect(existsSync(join(wt, "scratch.py"))).toBe(false); // throwaway still discarded
+  expect(committedAtHead(wt)).toContain("_ac1_test.py"); // the RED check IS committed
+  expect(checks).toHaveLength(1);
+  expect(checks[0]?.red_first_result).toBe("red"); // installed as RED (classify judges absence later)
+});
+
+// --- A12 ⚔ (an undeclared source smuggle cannot fake a green) — CONTRAST PAIR --------------------
+// With discard, an undeclared NEW source file can never smuggle a green: the guard discards it, so the
+// `import smuggle` becomes an import-error RED naming the discarded file → the discard-poison guard
+// routes it to uncovered → reject. Declaring the same file keeps it → the green is real → COMMIT.
+test("A12 ⚔ an UNDECLARED source file that would fake a green is discarded → import-error RED → REJECT", async () => {
+  // present → real green; absent (discarded before the run) → import-error RED naming `smuggle`.
   const greenIfSmuggle: Cmd = async (_cmd, opts) =>
     existsSync(join(opts.cwd, "smuggle.py"))
       ? { exitCode: 0, stdout: "1 passed", stderr: "", timedOut: false }
-      : { exitCode: 5, stdout: "collected 0 items", stderr: "", timedOut: false };
+      : {
+          exitCode: 2,
+          stdout:
+            "ImportError while importing test module\nE   ModuleNotFoundError: No module named 'smuggle'",
+          stderr: "",
+          timedOut: false,
+        };
 
   const h = await setupChecks("- [ ] one thing\n");
   const runner = checksRunner(
@@ -497,19 +559,26 @@ test("A12 ⚔ an UNDECLARED source file that would fake a green is discarded →
     },
     (acId, ident) => canonicalDeclared(acId, ident), // declares only the test
   );
-  const { outcome, step, wt } = await driveChecks(h, runner, { runCheck: greenIfSmuggle });
+  const { outcome, step, wt, message } = await driveChecks(h, runner, { runCheck: greenIfSmuggle });
   h.db.close();
   expect(["retry", "escalated"]).toContain(outcome.kind); // green defeated → uncovered → reject
   expect(step?.status).toBe("pending");
   expect(existsSync(join(wt, "smuggle.py"))).toBe(false); // stripped by the guard
   expect(headHas(wt, "smuggle.py")).toBe(false);
+  expect(message).toContain("smuggle.py"); // the discarded smuggle is surfaced
 });
 
 test("A12 contrast: DECLARING that same source file keeps it → the green is now real → COMMIT", async () => {
   const greenIfSmuggle: Cmd = async (_cmd, opts) =>
     existsSync(join(opts.cwd, "smuggle.py"))
       ? { exitCode: 0, stdout: "1 passed", stderr: "", timedOut: false }
-      : { exitCode: 5, stdout: "collected 0 items", stderr: "", timedOut: false };
+      : {
+          exitCode: 2,
+          stdout:
+            "ImportError while importing test module\nE   ModuleNotFoundError: No module named 'smuggle'",
+          stderr: "",
+          timedOut: false,
+        };
 
   const h = await setupChecks("- [ ] one thing\n");
   const runner = checksRunner(

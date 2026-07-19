@@ -225,6 +225,100 @@ export function interpretRunOutput(fw: CheckFramework, run: RunOutcome): CoarseO
   }
 }
 
+/** Source-file extensions we strip when reducing a path/module reference to its leaf module name. A
+ *  reference whose final dotted segment is one of these is a filename (extension), not a dotted-module
+ *  leaf. */
+const SOURCE_EXTS = new Set([
+  "py",
+  "pyi",
+  "js",
+  "jsx",
+  "ts",
+  "tsx",
+  "mjs",
+  "cjs",
+  "go",
+  "rs",
+  "rb",
+  "php",
+  "java",
+  "kt",
+  "scala",
+]);
+
+/** The leaf module identifier for a path OR a dotted/slashed module reference, lower-cased for
+ *  case-insensitive comparison. Takes the last path segment, drops a trailing source extension, then
+ *  takes the last remaining dotted segment: `checks/helper.py`→`helper`, `pkg.helper`→`helper`,
+ *  `./a/helper.js`→`helper`, `util`→`util`. Pure. */
+function moduleLeaf(ref: string): string {
+  const seg = ref.split(/[\\/]/).pop() ?? ref; // last path segment
+  const parts = seg.split(".").filter((s) => s.length > 0);
+  if (parts.length === 0) return seg.toLowerCase();
+  if (parts.length >= 2 && SOURCE_EXTS.has((parts[parts.length - 1] ?? "").toLowerCase())) {
+    parts.pop(); // strip a file extension (a real dotted module leaf is never a known ext)
+  }
+  return (parts[parts.length - 1] ?? seg).toLowerCase();
+}
+
+/** Import/collection/module-error indicator phrases (lower-cased substrings). Their PRESENCE gates the
+ *  filename-in-traceback rule; the leaf-name rule additionally requires the module identifier to sit
+ *  adjacent to one of the naming phrases below. */
+const IMPORT_ERROR_INDICATORS = [
+  "modulenotfounderror",
+  "importerror",
+  "no module named",
+  "cannot find module",
+  "cannot import name",
+  "error collecting",
+  "errors during collection",
+];
+
+/** An import/module-error phrase followed by the module identifier it names. The capture group is the
+ *  identifier (a bare `helper`, a dotted `pkg.helper`, or a `./path/helper` for Node). Global +
+ *  case-insensitive; a fresh instance is constructed per call so lastIndex never leaks. */
+const IMPORT_ERROR_NAMING = String.raw`(?:no module named|cannot find module|could not import|unable to resolve|cannot import name\s+[^\n]*?\bfrom)\s+['"]?([\w./-]+)['"]?`;
+
+/** CONSERVATIVE discard-poison matcher (silent-bad-merge guard). Given a framework's raw run output and
+ *  the files THIS dispatch discarded (undeclared new files stripped before commit), return the subset of
+ *  discarded files that the output implicates in an import/collection/module error — i.e. the check could
+ *  not run *because* a file it references was discarded. Never fires on a bare basename appearing
+ *  incidentally: a discarded file is implicated only when (1) an import/module-error phrase NAMES its
+ *  module leaf, or (2) an import-error indicator is present AND the file's exact basename-with-extension
+ *  appears as a bounded token (a traceback/collection line). A red whose import error names some OTHER
+ *  (e.g. feature) module is left untouched, so a legitimate fail-first test is never rejected. Pure. */
+export function importErrorImplicatesDiscarded(rawOutput: string, discarded: string[]): string[] {
+  if (discarded.length === 0 || rawOutput.trim() === "") return [];
+  const hay = rawOutput.toLowerCase();
+  const hasIndicator = IMPORT_ERROR_INDICATORS.some((k) => hay.includes(k));
+
+  // (1) module identifiers named DIRECTLY by an import/module-error phrase → their leaf module names.
+  const named = new Set<string>();
+  const re = new RegExp(IMPORT_ERROR_NAMING, "gi");
+  let m: RegExpExecArray | null;
+  // biome-ignore lint/suspicious/noAssignInExpressions: canonical exec-loop over a /g regex.
+  while ((m = re.exec(rawOutput)) !== null) {
+    if (m[1]) named.add(moduleLeaf(m[1]));
+  }
+
+  const matched: string[] = [];
+  for (const d of discarded) {
+    const leaf = moduleLeaf(d);
+    if (leaf !== "" && named.has(leaf)) {
+      matched.push(d);
+      continue;
+    }
+    // (2) fallback: the discarded file's exact basename-with-extension shown as a bounded token while an
+    // import-error indicator is present (its path in a traceback / collection line). Boundary-anchored so
+    // `util.py` never matches `myutil.py`.
+    const file = d.split(/[\\/]/).pop() ?? d;
+    if (hasIndicator && file.includes(".")) {
+      const bounded = new RegExp(`(?:^|[\\s"'\`/(])${escapeRegex(file)}(?:[\\s"'\`:)]|$)`, "im");
+      if (bounded.test(rawOutput)) matched.push(d);
+    }
+  }
+  return matched;
+}
+
 /** Map a coarse `ac_check.red_first_result` bucket to the `ground_truth_signal.result` vocabulary
  *  (§9): the two tables' CHECK constraints differ (`ac_check` allows `red`; `ground_truth_signal`
  *  does not), so `green→pass, red→fail, error→error`. This is the ONLY place the map lives. */

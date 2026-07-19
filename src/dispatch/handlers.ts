@@ -59,6 +59,7 @@ import {
   binaryFor,
   buildCheckSelector,
   frameworkFor,
+  importErrorImplicatesDiscarded,
   signalResultForCoarse,
 } from "./check-selector.ts";
 import { checksFeedback } from "./checks-feedback.ts";
@@ -672,6 +673,24 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
             coarse = res.coarse;
           }
         }
+
+        // Discard-poison guard (silent-bad-merge): a check that did NOT go green while this dispatch
+        // discarded undeclared files, whose output shows an import/collection/module error naming a
+        // discarded file, could not actually run — the referenced helper was stripped before commit.
+        // Route it to the SAME uncovered path `selected-none` uses so no permanently-broken check is
+        // installed and the discard is surfaced in the retry feedback. Conservative: fires only when
+        // the import error NAMES a discarded file (never a bare basename). Diagnosis-only (INV-B).
+        if (discarded.length > 0 && coarse !== "green") {
+          const implicated = importErrorImplicatesDiscarded(rawOutput, discarded);
+          if (implicated.length > 0) {
+            missReason.set(
+              c.ac_id,
+              `the check for this AC could not run because it references files styre discarded this attempt (undeclared): ${implicated.join(", ")}`,
+            );
+            continue; // uncovered → loud retry path, no poisoned check persisted
+          }
+        }
+
         records.push({
           acId: c.ac_id,
           selector,
