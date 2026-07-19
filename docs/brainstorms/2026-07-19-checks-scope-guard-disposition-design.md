@@ -148,13 +148,25 @@ backstop for read-only-dispatch strays and gitignored byproducts (`__pycache__`)
   keeps its `styre_scratch/` guidance** (implement still rejects by default, so the drawer is still its
   escape). This asymmetry is honest: only checks changes behavior.
 - **INV-B (diagnosis-only feedback).** The surviving rejections (plan/docs tracked-edit; implement
-  default) carry a pure diagnosis, no instructions. **Blocker-3 fix:** when a `checks` RED-first run
-  returns `selected-none` / a collection error *and* the dispatch discarded files, the thrown
-  postcondition message (which becomes the retry feedback verbatim, `run-dispatch.ts:106-109`) appends a
-  diagnosis-only line: *"the check could not be collected; these undeclared files were discarded this
-  attempt: <paths>."* This restores the recovery reject used to give ("declare them") without
-  reintroducing reject — the agent learns a file it relied on was dropped, and it is a *why-it-failed*
-  fact, not an instruction.
+  default) carry a pure diagnosis, no instructions. **Blocker-3 fix:** a `checks` dispatch that discards
+  files surfaces them in the retry feedback (`run-dispatch.ts:106-109` carries the thrown message
+  verbatim) as a diagnosis-only line naming the discarded paths — no "declare them" imperative — so the
+  agent learns a file it relied on was dropped.
+
+  **Poisoned-red guard (found by the adversarial smoke matrix; the load-bearing correctness fix).**
+  Blocker-3's *selected-none* premise was incomplete. A test that **imports** a discarded helper does not
+  select-none — it fails to import → pytest exit 2 → coarse **"red"** (`check-selector.ts:184`, an
+  "absence" red). The per-check loop marked only `selected-none` uncovered, so this red made the AC
+  **covered** → a permanently-broken check installed → downstream a whole-missing-module red can be
+  classified `environmental` and downgraded to a **non-gating advisory**
+  (`post-implement-rerun.ts:84-86`) → the AC ships **unverified (silent bad merge)** — a path the old
+  reject behavior kept shut. Fix: in `checks:dispatch`, a red whose import/module error **names a file
+  this dispatch discarded** (`importErrorImplicatesDiscarded`, conservative — never a bare basename) is
+  routed to the *uncovered* path (like `selected-none`) and the helper is surfaced; no poisoned check is
+  installed. A legitimate fail-first red names the *feature* module, not a discarded file, so it stays
+  covered (no false positive). **Framework boundary (documented residual — ENG-343):** the matcher
+  recognizes Python/Node import-error phrasings only; the same silent-bad-merge is still reachable on
+  Go/Rust/JVM/Ruby/PHP until the matcher is extended.
 
 ## 7. ENG-323 — staged, not dropped now
 

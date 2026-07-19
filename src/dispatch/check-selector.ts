@@ -262,7 +262,14 @@ function moduleLeaf(ref: string): string {
 
 /** Import/collection/module-error indicator phrases (lower-cased substrings). Their PRESENCE gates the
  *  filename-in-traceback rule; the leaf-name rule additionally requires the module identifier to sit
- *  adjacent to one of the naming phrases below. */
+ *  adjacent to one of the naming phrases below.
+ *
+ *  FRAMEWORK BOUNDARY (documented residual — ENG-343): this vocabulary covers Python
+ *  (ModuleNotFoundError/ImportError/No module named) and Node (Cannot find module) only. On Go/Rust/JVM/
+ *  Ruby/PHP a discarded imported file produces a compile/collection error whose phrasing is NOT listed
+ *  here, so the discard-poison guard does not fire and the same silent-bad-merge (poisoned red →
+ *  environmental → non-gating advisory) remains open on those stacks. Extending this list to the other
+ *  supported frameworks is tracked in ENG-343. */
 const IMPORT_ERROR_INDICATORS = [
   "modulenotfounderror",
   "importerror",

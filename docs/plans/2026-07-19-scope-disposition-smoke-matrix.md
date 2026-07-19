@@ -34,6 +34,13 @@ reverted, the test must fail. The builder demonstrates this for the ⚔ rows (mu
 | A12 ⚔ | undeclared NEW source file that would fake a green (`import smuggle`) | valid | source **DISCARD** → `import` becomes import-error **RED** naming the discarded file → discard-poison guard → uncovered → **REJECT** + **SURFACE** | a green smuggled via an undeclared new file can't happen — discard makes it RED; contrast: **declaring** the file keeps it → real green → **COMMIT** (classify judges it). An in-scope tracked-edit green is out of scope here, handled by classify |
 | A13 ⚔ | canonical test whose fail-first RED names the FEATURE module (`newfeature` absent) + an UNRELATED throwaway discarded | valid | throwaway **DISCARD**, RED check **COMMIT**, AC **COVERED** | true-negative: the discard-poison guard must NOT reject a legitimate fail-first test just because unrelated throwaway was discarded (import error names the feature, not a discarded file) |
 
+> **Coverage boundary for A11–A13 (documented residual — ENG-343).** The discard-poison guard
+> (`importErrorImplicatesDiscarded`) recognizes **Python and Node** import-error phrasings only. On
+> Go/Rust/JVM/Ruby/PHP a discarded imported helper produces a compile/collection error the matcher does
+> not recognize, so on those stacks the poisoned-red → environmental → non-gating-advisory silent bad
+> merge **is still reachable**. A11–A13 are pytest cases; the guard is not yet general. Extension tracked
+> in ENG-343.
+
 ## B. `checks` re-author (`reauthorCheckWrong`, disposition = discard)
 
 | # | Agent produces | Expected | Notes |
