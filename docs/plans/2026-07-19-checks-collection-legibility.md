@@ -43,10 +43,11 @@
   - `importErrorImplicatesDiscarded(rawOutput: string, discarded: string[]): string[]` — unchanged signature; now also implicates a discarded `__init__.py`/`conftest.py` by shape.
   - `collectionErrorExcerpt(rawOutput: string): string | undefined` — the one-line cause, original casing, ≤200 chars.
 
-- [ ] **Step 1: Write the failing tests** — append to `test/dispatch/check-selector.test.ts`. (Import `importErrorImplicatesDiscarded` and `collectionErrorExcerpt` from `../../src/dispatch/check-selector.ts` — extend the existing import if one is present.)
+- [ ] **Step 1: Write the failing tests** — append to `test/dispatch/check-selector.test.ts`. **Do NOT add a new import line** — `importErrorImplicatesDiscarded` is already imported at `check-selector.test.ts:278`; add only `collectionErrorExcerpt` to that existing import (a second `import { importErrorImplicatesDiscarded }` is a duplicate-identifier compile error). Then append the test cases below into that file's existing describe/test area:
 
 ```ts
-import { collectionErrorExcerpt, importErrorImplicatesDiscarded } from "../../src/dispatch/check-selector.ts";
+// (Add `collectionErrorExcerpt` to the existing check-selector import at line ~278. Do not re-import
+// importErrorImplicatesDiscarded.)
 
 // --- package-init (__init__.py) shape matching ---
 test("implicates a discarded __init__.py when the missing module IS its package (shallow)", () => {
@@ -257,8 +258,10 @@ export function importErrorImplicatesDiscarded(rawOutput: string, discarded: str
 ```ts
 /** The one line that states a collection/import/fixture cause, in original casing, ≤200 chars. Prefers
  *  pytest's short-test-summary line (`ERROR path - Cause`, printed last and authoritative); else the
- *  LAST matching line (the first is often a re-raised error deep in a third-party traceback).
- *  `undefined` when the output carries no collection/import/fixture indicator. Pure. */
+ *  LAST matching line (the first is often a re-raised error deep in a third-party traceback). Strips a
+ *  leading pytest error gutter (`E   `) so the cause reads cleanly — `^E\s+` requires whitespace right
+ *  after `E`, so it never eats an `ERROR …` summary line (whose next char is `R`). `undefined` when the
+ *  output carries no collection/import/fixture indicator. Pure. */
 export function collectionErrorExcerpt(rawOutput: string): string | undefined {
   let summary: string | undefined;
   let lastMatch: string | undefined;
@@ -269,7 +272,7 @@ export function collectionErrorExcerpt(rawOutput: string): string | undefined {
     lastMatch = line;
     if (/^\s*ERROR\b/.test(line)) summary = line;
   }
-  const chosen = (summary ?? lastMatch)?.trim();
+  const chosen = (summary ?? lastMatch)?.trim().replace(/^E\s+/, "");
   if (chosen === undefined || chosen === "") return undefined;
   return chosen.length > 200 ? `${chosen.slice(0, 197)}...` : chosen;
 }
@@ -415,7 +418,7 @@ git commit -m "feat(checks): name the collection cause in the discard retry mess
 ## Task 3: Delete the ENG-323 heuristic + name `__init__.py` in checks.md
 
 **Files:**
-- Modify: `src/dispatch/check-path.ts` (delete `isCheckSupportFile` :88-110, `CHECK_SUPPORT_CAP` :78-79, `dirname` :64-68, `finalExt` :70-76)
+- Modify: `src/dispatch/check-path.ts` (delete `isCheckSupportFile` :81-110 incl. its doc comment, `CHECK_SUPPORT_CAP` :78-79, `dirname` :64-68, `finalExt` :70-76)
 - Modify: `src/dispatch/commit-scope.ts` (drop the `isCheckSupportFile` import + clause + `news` + `newPaths` + the type's third arg)
 - Modify: `src/dispatch/run-dispatch.ts` (:206 — stop passing the third arg)
 - Modify: `prompts/checks.md` (~:40-43)
@@ -424,7 +427,42 @@ git commit -m "feat(checks): name the collection cause in the discard retry mess
 **Interfaces:**
 - Produces: `CommitScope = (output: string) => (path: string, isNew: boolean) => boolean` (two-arg predicate — the `newPaths?` third arg is removed).
 
-- [ ] **Step 1: Update the two affected tests first (they encode the OLD behavior)** — in `test/dispatch/check-path.test.ts`, remove `isCheckSupportFile` from the import (line ~5) and delete every `isCheckSupportFile` test (the block ~:75-119). In `test/dispatch/commit-scope.test.ts`, replace the `"admits a co-located styre_checks/__init__.py support file (ENG-323)"` test (~:60-79) with the new declare-or-discard behavior:
+> **Note — this is a deletion/refactor task, not feature TDD.** There is no "write a failing test first"; the forcing function is the typecheck. Deleting `isCheckSupportFile` makes `commit-scope.ts` (which imports it) fail to compile — that is the red that drives Steps 3-4. The `commit-scope.test.ts` edits (Step 5) encode the final behavior and are written after the predicate becomes two-arg.
+
+- [ ] **Step 1: Delete the heuristic from `check-path.ts` and its dedicated tests** — in `src/dispatch/check-path.ts` remove `CHECK_SUPPORT_CAP` (:78-79), `isCheckSupportFile` (:81-110 incl. its doc comment), and the two helpers used ONLY by it: `dirname` (:64-68) and `finalExt` (:70-76). Keep `basename`, `normPath`, `isCanonicalCheckPath`, `matchAuthoredTest`, `resolveAuthoredTestPath`, `canonicalCheckBase` (all used elsewhere). In `test/dispatch/check-path.test.ts` remove `isCheckSupportFile` from the import (line ~5) and delete every `isCheckSupportFile` test (the block ~:75-120).
+
+- [ ] **Step 2: Run the typecheck to see the forcing break**
+
+Run: `bun run typecheck`
+Expected: FAIL — `src/dispatch/commit-scope.ts` still imports and calls `isCheckSupportFile`, which no longer exists. (This break is the red; `test/dispatch/check-path.test.ts` compiles and passes now that its `isCheckSupportFile` tests are gone.)
+
+- [ ] **Step 3: Delete the clause + plumbing from `commit-scope.ts`** — remove `isCheckSupportFile` from the import (line 1), and change `checksScopeFor`'s returned predicate + the `CommitScope` type:
+
+```ts
+// import line 1 — drop isCheckSupportFile:
+import { isCanonicalCheckPath, normPath } from "./check-path.ts";
+
+// type (:12-14) — drop the third arg + rewrite the doc comment:
+/** Given the agent's stdout, a predicate over each pending path: true ⇒ in scope (deliverable).
+ *  `isNew` is true only for a brand-new untracked file. */
+export type CommitScope = (output: string) => (path: string, isNew: boolean) => boolean;
+
+// checksScopeFor returned predicate (:43-52) — drop newPaths + news + the isCheckSupportFile clause:
+    return (path, isNew) => {
+      const p = normPath(path);
+      return !isNew || declared.has(p) || isCanonicalCheckPath(p, ident, acIds);
+    };
+```
+
+- [ ] **Step 4: Update the one call site in `run-dispatch.ts`** — at `:206`, drop the retired third argument:
+
+```ts
+    const offenders = judged.filter((e) => !inScope(e.path, e.isNew));
+```
+
+(Leave `newPaths` at `:205` — it is still used at `:250`.)
+
+- [ ] **Step 5: Update `commit-scope.test.ts` to the new two-arg behavior** — replace the `"admits a co-located styre_checks/__init__.py support file (ENG-323)"` test (~:60-79) with these two tests. They encode the final behavior (the predicate is now two-arg after Step 3):
 
 ```ts
 test("checksScopeFor: an UNDECLARED co-located __init__.py is now out of scope (discarded, not auto-admitted)", () => {
@@ -454,40 +492,7 @@ test("checksScopeFor: a DECLARED __init__.py (in new_files) is in scope", () => 
 });
 ```
 
-(If any other test in `commit-scope.test.ts` calls `inScope(path, isNew, newPaths)` with a third arg, drop the third arg — the predicate is now two-arg. Check the `sidecar` helper accepts a `new_files` field; it should, since `checksAuthored` and `new_files` are the sidecar shape.)
-
-- [ ] **Step 2: Run the tests to confirm they fail**
-
-Run: `bun test test/dispatch/check-path.test.ts test/dispatch/commit-scope.test.ts`
-Expected: FAIL — the new commit-scope test expects `false` for an undeclared `__init__.py`, but the old `isCheckSupportFile` still admits it.
-
-- [ ] **Step 3: Delete the heuristic from `check-path.ts`** — remove `CHECK_SUPPORT_CAP` (:78-79), `isCheckSupportFile` (:81-110 incl. its doc comment), and the two helpers used ONLY by it: `dirname` (:64-68) and `finalExt` (:70-76). Keep `basename`, `normPath`, `isCanonicalCheckPath`, `matchAuthoredTest`, `resolveAuthoredTestPath`, `canonicalCheckBase` (all used elsewhere).
-
-- [ ] **Step 4: Delete the clause + plumbing from `commit-scope.ts`** — remove `isCheckSupportFile` from the import (line 1), and change `checksScopeFor`'s returned predicate + the `CommitScope` type:
-
-```ts
-// import line 1 — drop isCheckSupportFile:
-import { isCanonicalCheckPath, normPath } from "./check-path.ts";
-
-// type (:12-14) — drop the third arg + rewrite the doc comment:
-/** Given the agent's stdout, a predicate over each pending path: true ⇒ in scope (deliverable).
- *  `isNew` is true only for a brand-new untracked file. */
-export type CommitScope = (output: string) => (path: string, isNew: boolean) => boolean;
-
-// checksScopeFor returned predicate (:43-52) — drop newPaths + news + the isCheckSupportFile clause:
-    return (path, isNew) => {
-      const p = normPath(path);
-      return !isNew || declared.has(p) || isCanonicalCheckPath(p, ident, acIds);
-    };
-```
-
-- [ ] **Step 5: Update the one call site in `run-dispatch.ts`** — at `:206`, drop the retired third argument:
-
-```ts
-    const offenders = judged.filter((e) => !inScope(e.path, e.isNew));
-```
-
-(Leave `newPaths` at `:205` — it is still used at `:250`.)
+(The `sidecar` helper JSON-stringifies its arg and `ChecksOutputSchema` declares `new_files`, so the declared-`__init__.py` test parses fine. The only other 3-arg predicate caller was the ENG-323 test just replaced — no other `inScope(…, newPaths)` stragglers remain.)
 
 - [ ] **Step 6: Name `__init__.py` in `checks.md`** — in `prompts/checks.md` (~:40-43), extend the existing declare instruction so a package marker is named as a helper:
 
@@ -502,7 +507,7 @@ export type CommitScope = (output: string) => (path: string, isNew: boolean) => 
 - [ ] **Step 7: Run the full gate**
 
 Run: `bun run typecheck && bun run lint && bun test`
-Expected: PASS — no orphaned `dirname`/`finalExt`/`news`/`newPaths` (typecheck clean), and every suite green. `test/dispatch/checks-prompt.test.ts` only asserts the prompt `.toContain("new_files")`, so the wording change is safe.
+Expected: PASS — no orphaned `dirname`/`finalExt`/`news`/`newPaths` (typecheck clean), and every suite green. `test/dispatch/checks-prompt.test.ts` asserts `.toContain("new_files")`, `.toContain("styre_checks/")`, `.not.toContain("styre_scratch")`, and `.toContain("reject")` (:21-27); the edited "Declare every new file" bullet keeps `new_files` and touches none of those other tokens, so the wording change is safe.
 
 - [ ] **Step 8: Commit**
 
