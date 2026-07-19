@@ -38,9 +38,10 @@ Rules — follow them exactly:
   must produce** (the one that differs from the current wrong output) — never a property that holds
   regardless of the fix. If you cannot state the exact expected value, read the code/docs until you can.
 - **Declare every new file that is part of your check** — the RED-first test via `checksAuthored`
-  (`test_file`) and any genuine test helper (fixture, `conftest.py`) via `new_files`. Any undeclared new
-  file you create is treated as throwaway and won't be committed; you don't need a special folder for
-  scratch, and you must not park throwaway files in `new_files`.
+  (`test_file`) and any genuine test helper (a fixture, `conftest.py`, or a package marker such as
+  `__init__.py`) via `new_files`. Any undeclared new file you create is treated as throwaway and won't be
+  committed; you don't need a special folder for scratch, and you must not park throwaway files in
+  `new_files`.
 
 ## Acceptance criteria (author one check file per `ac_id`)
 

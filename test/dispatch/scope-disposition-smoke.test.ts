@@ -250,8 +250,8 @@ test("A2 canonical basename at a path != declared is committed (ENG-296)", async
   expect(checks[0]?.test_path).toContain("styre_checks/");
 });
 
-// --- A3 (ENG-323 support admission) -------------------------------------------------------------
-test("A3 an undeclared styre_checks/__init__.py co-located with the canonical test is committed (ENG-323)", async () => {
+// --- A3 (ENG-323 heuristic deleted — an undeclared support file is discarded like any other) -----
+test("A3 an UNDECLARED styre_checks/__init__.py co-located with the canonical test is discarded, not auto-admitted (ENG-323 deleted)", async () => {
   const h = await setupChecks("- [ ] one thing\n");
   const runner = checksRunner(
     h,
@@ -275,10 +275,10 @@ test("A3 an undeclared styre_checks/__init__.py co-located with the canonical te
   );
   const { outcome, wt } = await driveChecks(h, runner);
   h.db.close();
-  expect(outcome.kind).toBe("stepped");
+  expect(outcome.kind).toBe("stepped"); // discard, not reject
   const committed = committedAtHead(wt);
-  expect(committed).toContain("styre_checks/__init__.py");
-  expect(committed).toContain("_ac1_test.py");
+  expect(committed).not.toContain("__init__.py"); // undeclared → discarded, no longer auto-admitted
+  expect(committed).toContain("_ac1_test.py"); // the declared canonical test still commits
 });
 
 // --- A4 ⚔ (the live-bug fix: discard, not reject) -----------------------------------------------

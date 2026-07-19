@@ -203,7 +203,7 @@ export async function runAgentDispatch(
   if (spec.commitScope) {
     const inScope = spec.commitScope(result.stdout);
     const newPaths = judged.filter((e) => e.isNew).map((e) => e.path);
-    const offenders = judged.filter((e) => !inScope(e.path, e.isNew, newPaths));
+    const offenders = judged.filter((e) => !inScope(e.path, e.isNew));
     const offendingEdits = offenders.filter((e) => !e.isNew).map((e) => e.path);
     const offendingNew = offenders.filter((e) => e.isNew).map((e) => e.path);
     const disposition = spec.disposition ?? "reject";
