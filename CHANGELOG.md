@@ -1,6 +1,20 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.10.0] - 2026-07-19
+
+### Features
+
+- Remote CI status is now reported, not gated on: `styre run` exits as soon as local ground truth (verify-green, review-clean, PR open) is met, takes one best-effort snapshot of CI status, and records it as a `ci_handoff` telemetry event instead of waiting or looping on a red check.
+- `checks:dispatch` now handles undeclared throwaway files more gracefully: instead of rejecting and stalling the ticket, it discards undeclared new files and continues, while out-of-scope edits to tracked files still get rejected as before.
+- The checks scope guard now recognizes legitimate support files (like Python `__init__.py` package markers) written alongside a check file in `styre_checks/`, instead of wrongly treating them as out-of-scope and escalating the ticket.
+
+### Bug Fixes
+
+- Fixed a bug where redesigning a ticket didn't reset the design steps' retry budget, which could cause a healthy ticket to be wrongly escalated after a redesign loopback.
+- Fixed several GitHub CI verdict bugs: cancelled check runs (including ones triggered by styre's own push-then-PR sequence) are no longer misread as failures, unrecognized check conclusions now fail safe instead of silently passing, and repos whose workflows never run on pull requests are no longer misdetected as having a usable checks system.
+- Fixed a wedge where the design stage could delete an implement-authored test that also satisfied an acceptance criterion, emptying the work unit and causing the ticket to get stuck; test files are now classified by who writes them, and the implement step is now shown the scope it's expected to cover.
+
 ## [0.9.0] - 2026-07-15
 
 ### Features
