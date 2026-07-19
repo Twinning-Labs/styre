@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
@@ -13,7 +13,7 @@ import {
   supersedeByAc,
 } from "../../src/db/repos/ac-check.ts";
 import { listByTicket as listDispatches } from "../../src/db/repos/dispatch.ts";
-import { appendEvent } from "../../src/db/repos/event-log.ts";
+import { appendEvent, listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import { listByTicket as listSignals } from "../../src/db/repos/ground-truth-signal.ts";
 import { setTicketTrack } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
@@ -649,4 +649,153 @@ test("checks:dispatch backward-compat: non-canonical name declared correctly sti
   const checks = listAcChecks(db, ticketId);
   expect(checks.length).toBe(1);
   expect(checks[0]?.test_path).toBe("tests/regression_x.py"); // fallback (b): declared path honored
+});
+
+test("checks:dispatch discards an undeclared loose file instead of rejecting", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] one thing\n", ticketId);
+  await markDesignDone(db, ticketId);
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
+  setTicketTrack(db, ticketId, "fast");
+
+  const ident = (
+    db.query("SELECT ident FROM ticket WHERE id = ?").get(ticketId) as { ident: string }
+  ).ident;
+
+  // The agent authors the canonical (declared) RED-first test AND drops an undeclared loose
+  // scratch file at the worktree root — not under styre_checks/, not declared, not canonical for
+  // any other AC. checks:dispatch sets disposition:"discard" (Task 2), so this must be silently
+  // discarded rather than rejecting the whole dispatch.
+  const runner = new FakeAgentRunner((input) => {
+    const acId = (
+      db
+        .query("SELECT id FROM acceptance_criterion WHERE ticket_id = ? ORDER BY seq LIMIT 1")
+        .get(ticketId) as { id: number }
+    ).id;
+    const dir = join(input.cwd, "checks");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${ident}_ac${acId}_test.py`), "def test_x():\n    assert False\n");
+    writeFileSync(join(input.cwd, "scratch.py"), "# undeclared loose throwaway\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout:
+        `\`\`\`styre-sidecar\n{"checksAuthored":[{"ac_id":${acId},` +
+        `"test_file":"checks/${ident}_ac${acId}_test.py","test_name":"test_x"}]}\n\`\`\``,
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-chwt-discard-"));
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+    }),
+    worktreeRoot,
+    runCheckCommand: async () => ({ exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false }),
+  });
+  await advanceOneStep(db, ticketId, registry); // provision
+  const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
+
+  const step = getByKey(db, ticketId, "checks:dispatch");
+  const events = listEvents(db, ticketId);
+  const worktreePath = join(worktreeRoot, ident);
+  db.close();
+
+  expect(outcome.kind).toBe("stepped"); // succeeded, not a retry/escalation
+  expect(step?.status).toBe("succeeded");
+  expect(existsSync(join(worktreePath, "scratch.py"))).toBe(false); // never committed, swept from disk
+  const notes = events.filter((e) => e.reason?.startsWith("scope-discarded"));
+  expect(notes.length).toBeGreaterThan(0);
+});
+
+test("checks:dispatch names a discarded-but-needed helper in the uncovered-AC failure message", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] one thing\n", ticketId);
+  await markDesignDone(db, ticketId);
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
+  setTicketTrack(db, ticketId, "fast");
+
+  const ident = (
+    db.query("SELECT ident FROM ticket WHERE id = ?").get(ticketId) as { ident: string }
+  ).ident;
+
+  // The agent authors the canonical RED-first test (importing a `util` helper it also writes), but
+  // leaves `util.py` undeclared and out of the canonical-support naming (dir is `checks/`, not
+  // `styre_checks/`) — the scope guard discards it (disposition:"discard"). Without `util`, the
+  // RED-first run can't collect the test → selected-none → the AC goes uncovered.
+  const runner = new FakeAgentRunner((input) => {
+    const acId = (
+      db
+        .query("SELECT id FROM acceptance_criterion WHERE ticket_id = ? ORDER BY seq LIMIT 1")
+        .get(ticketId) as { id: number }
+    ).id;
+    const dir = join(input.cwd, "checks");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `${ident}_ac${acId}_test.py`),
+      "from util import helper\n\ndef test_x():\n    assert helper()\n",
+    );
+    writeFileSync(join(dir, "util.py"), "def helper():\n    return False\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout:
+        `\`\`\`styre-sidecar\n{"checksAuthored":[{"ac_id":${acId},` +
+        `"test_file":"checks/${ident}_ac${acId}_test.py","test_name":"test_x"}]}\n\`\`\``,
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-chwt-discard-needed-"));
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+    }),
+    worktreeRoot,
+    // Simulate pytest collection finding zero tests (exit 5) because `util` is missing — the coarse
+    // classifier's `selected-none` bucket (§5.1), regardless of the fake's literal test content.
+    runCheckCommand: async () => ({
+      exitCode: 5,
+      stdout: "collected 0 items",
+      stderr: "",
+      timedOut: false,
+    }),
+  });
+  await advanceOneStep(db, ticketId, registry); // provision
+  const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch → uncovered → throws
+
+  const step = getByKey(db, ticketId, "checks:dispatch");
+  const worktreePath = join(worktreeRoot, ident);
+  const message =
+    step?.error_json !== null && step?.error_json !== undefined
+      ? (JSON.parse(step.error_json).message ?? "")
+      : "";
+  db.close();
+
+  expect(["retry", "escalated"]).toContain(outcome.kind);
+  expect(step?.status).toBe("pending"); // reset for the bounded retry (generic dispatch step)
+  expect(existsSync(join(worktreePath, "checks", "util.py"))).toBe(false); // discarded, swept from disk
+  // The failure feedback names the discarded helper — recoverable, not an opaque wedge.
+  expect(message).toMatch(/discarded this attempt: .*util\.py/);
 });

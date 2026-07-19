@@ -33,6 +33,10 @@ export const RuntimeConfigSchema = z.object({
   slack: z.object({ channel: z.string() }).optional(),
   // DEC-CX-5: the agent provider + per-tier models. Absent → the binary Claude preset.
   agent: AgentConfigSchema.optional(),
+  // Checks-disposition arc: how implement handles undeclared new files. Default "reject" (proven,
+  // today's behavior). "discard" opts implement into the checks-style discard path (guarded by
+  // rename-safety + a sidecar re-dispatch guard). Off by default — the escape hatch, not the norm.
+  implementDisposition: z.enum(["reject", "discard"]).default("reject"),
 });
 
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;

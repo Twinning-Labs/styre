@@ -14,8 +14,11 @@ export type CommitScope = (
 ) => (path: string, isNew: boolean, newPaths?: string[]) => boolean;
 
 /** implement: tracked edits always in scope; a new file must be declared in `new_files`. An absent/
- *  malformed sidecar ⇒ no declaration ⇒ any new file is out of scope (→ reject-and-retry, never a
- *  silent drop; the retry-feedback nudges the agent to declare it or delete it). */
+ *  malformed sidecar ⇒ no declaration ⇒ any new file is out of scope. This predicate only classifies
+ *  in/out of scope — `run-dispatch.ts` decides the disposition (reject-and-retry vs. silent discard)
+ *  for an out-of-scope new file; for implement that disposition is read from runtime-config
+ *  (`implementDisposition`, default reject-and-retry — the retry-feedback nudges the agent to declare
+ *  it or delete it). */
 export const implementScope: CommitScope = (output) => {
   const parsed = extractSidecar(output, ImplementOutputSchema);
   const declared = new Set(parsed.ok ? parsed.value.new_files.map(normPath) : []);
@@ -25,8 +28,10 @@ export const implementScope: CommitScope = (output) => {
 /** checks: tracked edits in scope; a NEW file must be an authored test_file, a declared helper, OR a
  *  canonically-named RED-first test (`{ident}_ac{acId}_test.*`) for an in-scope AC — the last clause
  *  admits the file the agent actually wrote even when it declared a different path (ENG-296). Scratch
- *  files stay out of scope (reject-and-retry). On an UNPARSEABLE sidecar the scope DEFERS (allows
- *  everything) so the two call sites keep their existing post-commit failure semantics. */
+ *  files stay out of scope; this predicate only classifies in/out of scope — `run-dispatch.ts` decides
+ *  the disposition for an out-of-scope new file, and for checks that is now a silent discard (INV-A),
+ *  not reject-and-retry. On an UNPARSEABLE sidecar the scope DEFERS (allows everything) so the two call
+ *  sites keep their existing post-commit failure semantics. */
 export function checksScopeFor(ident: string, acIds: number[]): CommitScope {
   return (output) => {
     const parsed = extractSidecar(output, ChecksOutputSchema);

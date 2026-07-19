@@ -7,6 +7,7 @@ import {
   changedFilesAt,
   changedFilesBetween,
   commitWorktree,
+  discardPaths,
   ensureWorktree,
   fileContentAt,
   pendingChanges,
@@ -253,6 +254,9 @@ test("pendingEntries: new file → isNew, tracked edit → not isNew, deletion �
   expect(entries.find((e) => e.path === "brand_new.py")?.isNew).toBe(true);
   expect(entries.find((e) => e.path === "tracked.txt")?.isNew).toBe(false);
   expect(entries.find((e) => e.path === "deleteme.txt")?.isNew).toBe(false); // deletion → not isNew
+  expect(entries.find((e) => e.path === "deleteme.txt")?.isDeleted).toBe(true);
+  expect(entries.find((e) => e.path === "brand_new.py")?.isDeleted).toBe(false);
+  expect(entries.find((e) => e.path === "tracked.txt")?.isDeleted).toBe(false);
   expect(pendingChanges(dir).sort()).toEqual(["brand_new.py", "deleteme.txt", "tracked.txt"]);
 });
 
@@ -287,6 +291,24 @@ test("undoAttempt: restores tracked, removes this attempt's new files, spares pr
   expect(
     Bun.spawnSync(["git", "status", "--porcelain"], { cwd: dir }).stdout.toString().trim(),
   ).toBe("?? cruft.egg-info"); // tracked restored, scratch.py gone, cruft spared
+});
+
+// --- discardPaths (Task 1) ----------------------------------------------------------------------
+
+test("discardPaths removes only the named untracked files, spares the rest", () => {
+  const dir = repo();
+  writeFileSync(join(dir, "keep.py"), "1\n");
+  mkdirSync(join(dir, "sub"), { recursive: true });
+  writeFileSync(join(dir, "sub", "junk.py"), "2\n");
+  discardPaths(dir, ["sub/junk.py"]);
+  expect(existsSync(join(dir, "sub", "junk.py"))).toBe(false);
+  expect(existsSync(join(dir, "keep.py"))).toBe(true);
+});
+
+test("discardPaths is a no-op on empty input and never throws on a missing path", () => {
+  const dir = repo();
+  expect(() => discardPaths(dir, [])).not.toThrow();
+  expect(() => discardPaths(dir, ["does/not/exist.py"])).not.toThrow();
 });
 
 // --- sweepScratch (Task 1) ----------------------------------------------------------------------

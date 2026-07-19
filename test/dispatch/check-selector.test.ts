@@ -275,6 +275,80 @@ describe("signalResultForCoarse", () => {
   });
 });
 
+import { importErrorImplicatesDiscarded } from "../../src/dispatch/check-selector.ts";
+
+describe("importErrorImplicatesDiscarded (discard-poison guard: conservative import-error → discarded-file matcher)", () => {
+  test("fires on `No module named '<discarded-mod>'` (pytest exit-2 collection error)", () => {
+    expect(
+      importErrorImplicatesDiscarded("ModuleNotFoundError: No module named 'helper'", [
+        "checks/helper.py",
+      ]),
+    ).toEqual(["checks/helper.py"]);
+    // bare `No module named 'util'` with the discarded file at a nested path (basename → module leaf)
+    expect(
+      importErrorImplicatesDiscarded("E   ModuleNotFoundError: No module named 'util'", [
+        "tests/support/util.py",
+      ]),
+    ).toEqual(["tests/support/util.py"]);
+  });
+
+  test("fires on a dotted python module whose LEAF is a discarded file", () => {
+    expect(
+      importErrorImplicatesDiscarded("No module named 'pkg.helper'", ["pkg/helper.py"]),
+    ).toEqual(["pkg/helper.py"]);
+  });
+
+  test("fires on Node `Cannot find module './helper'` and on `cannot import name X from '<mod>'`", () => {
+    expect(
+      importErrorImplicatesDiscarded("Error: Cannot find module './helper'", ["src/helper.js"]),
+    ).toEqual(["src/helper.js"]);
+    expect(
+      importErrorImplicatesDiscarded("ImportError: cannot import name 'foo' from 'helper'", [
+        "helper.py",
+      ]),
+    ).toEqual(["helper.py"]);
+  });
+
+  test("does NOT fire when the import error names the FEATURE module, not the discarded file", () => {
+    // true-negative core: the test legitimately fails because `newfeature` is absent; an UNRELATED
+    // throwaway was discarded. The feature-absence red must remain a real, installable red.
+    expect(
+      importErrorImplicatesDiscarded("ModuleNotFoundError: No module named 'newfeature'", [
+        "throwaway.py",
+      ]),
+    ).toEqual([]);
+  });
+
+  test("does NOT fire on a bare basename appearing incidentally (no import-error association)", () => {
+    // discarded `test.py`; the word "test" is everywhere, but never inside an import/module error.
+    expect(
+      importErrorImplicatesDiscarded(
+        "1 failed, 3 passed\nassert result == expected  # test the widget\nFAILED test_widget.py::test_x",
+        ["test.py"],
+      ),
+    ).toEqual([]);
+    // a genuine assertion-failure red (exit 1) that mentions the discarded basename in prose but has
+    // no import/module error at all.
+    expect(
+      importErrorImplicatesDiscarded("AssertionError: helper returned False", ["helper.py"]),
+    ).toEqual([]);
+  });
+
+  test("no discarded files, or empty output → never fires", () => {
+    expect(importErrorImplicatesDiscarded("No module named 'helper'", [])).toEqual([]);
+    expect(importErrorImplicatesDiscarded("", ["helper.py"])).toEqual([]);
+  });
+
+  test("returns only the implicated subset when several files were discarded", () => {
+    expect(
+      importErrorImplicatesDiscarded("ModuleNotFoundError: No module named 'helper'", [
+        "helper.py",
+        "unrelated_scratch.py",
+      ]),
+    ).toEqual(["helper.py"]);
+  });
+});
+
 import { binaryFor } from "../../src/dispatch/check-selector.ts";
 
 describe("binaryFor (M2a decision 3: go/cargo carry the subcommand; maven/gradle/vitest carry it in runArgs)", () => {
