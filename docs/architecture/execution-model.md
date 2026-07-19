@@ -129,11 +129,11 @@ idempotently to Linear or GitHub (declarative label/state updates, comment dedup
 blocks the control loop — the runner keeps advancing the ticket; the outbox rows wait until the
 service returns.
 
-Inbound facts — checks green, PR merged, human action — arrive as [signals](glossary.md#signal): the runner
-polls the checks system and GitHub on an interval and delivers the results as structured rows in the
-`signal` table. The loop waits on a signal by parking the ticket (`status='waiting'`); when the
-awaited signal arrives, the resolver advances the ticket and the loop continues from where it
-parked.
+Inbound facts — PR merged, human action — arrive as [signals](glossary.md#signal): the runner
+polls GitHub on an interval and delivers the results as structured rows in the `signal` table. The
+loop waits on a signal by parking the ticket (`status='waiting'`); when the awaited signal arrives,
+the resolver advances the ticket and the loop continues from where it parked. CI status is not a
+signal: it is a fact the runner *reports*, not one it waits on — see "The merge gate" below.
 
 ---
 
@@ -163,10 +163,12 @@ profile's declared command. Frontend work is a work-unit kind, not a separate st
 
 The operator interacts with Styre in two places:
 
-**The merge gate.** After review passes, the runner pushes the branch, opens a pull request, and
-waits for the project's checks system to go green. Once checks pass, `styre run` exits — the PR
-is open and ready. The operator reviews the pull request and merges it manually. Auto-merge is off
-at the substrate level.
+**The merge gate.** After review passes, the runner pushes the branch and opens a pull request.
+`styre run` does not wait for the project's checks system to go green: it takes one best-effort
+snapshot of CI state at PR-open (bounded by an ~8s timeout), reports it as a `ci_handoff` telemetry
+event, and exits immediately — the PR is open and ready, regardless of what that snapshot said.
+The operator reviews the pull request (including its live, current CI status on GitHub) and merges
+it manually. Auto-merge is off at the substrate level.
 
 > **Commercial Control Plane only.** Waiting for the human merge, polling GitHub until the branch
 > lands, and advancing the ticket to `released` are features of the commercial Control Plane. The

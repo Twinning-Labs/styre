@@ -8,9 +8,10 @@
 > **Artifact for §9.4 checklist #4** of [`brainstorm.md`](brainstorm.md). The component that makes
 > "Linear/GitHub are one-way projections" (move 2) real: the **single outward write path** from the
 > SQLite SoT to Linear + GitHub. It **drains [`schema.sql`](schema.sql)'s `projection_outbox`** and
-> applies each row idempotently. It **never reads Linear/GitHub to decide control flow** — the only
-> inbound external facts (checks status, merge, human action) arrive as **signals** (control-loop §7),
-> not through the projector.
+> applies each row idempotently. It **never reads Linear/GitHub to decide control flow** — the
+> inbound external facts the loop waits on (merge, human action) arrive as **signals**
+> (control-loop §7), not through the projector. Checks status is reported, not awaited: OSS takes
+> one best-effort t+0 read on the merge path (control-loop §4 S8), never a signal.
 >
 > Builds on the outbox mechanics in [`control-loop.md`](control-loop.md) §5 (CL-2 / CL-3). Status:
 > draft 2026-06-19.
@@ -26,7 +27,9 @@
   (control-loop §2.2).
 - **No control-flow reads (CL-INV-5).** The projector only *writes* outward. The runner never reads
   Linear/GitHub to decide what to do next — that's the bug class move 2 deletes. The closed-loop
-  facts the runner *does* need (checks green? merged?) enter as **delivered signals** (control-loop §7.3).
+  facts the runner *does* need (merged? human action?) enter as **delivered signals** (control-loop
+  §7.3). Checks status is not one of them: OSS takes a single best-effort t+0 read on the merge path
+  and reports it as `ci_handoff` telemetry — it is never awaited, never a signal, never re-read.
 - **Idempotent (B3 / CL-3).** Two layers: the outbox row's `idempotency_key` (globally unique by
   construction → enqueue-twice is a no-op insert) **and** a per-adapter **probe** of external state
   before applying (§5).

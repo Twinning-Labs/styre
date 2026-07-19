@@ -13,6 +13,7 @@ import type { EventLogRow } from "../db/repos/event-log.ts";
 import { listByTicketSince as listSignalsSince } from "../db/repos/ground-truth-signal.ts";
 import type { GroundTruthSignalRow } from "../db/repos/ground-truth-signal.ts";
 import { getTicket } from "../db/repos/ticket.ts";
+import { nowUtc } from "../util/time.ts";
 import type { TelemetrySink } from "./emit.ts";
 import { SCHEMA_VERSION, type TelemetryEvent } from "./events.ts";
 
@@ -112,6 +113,17 @@ export function buildSummary(db: Database, ticketId: number, result: RunResult):
 export function createTelemetryEmitter(sink: TelemetrySink): {
   flushNew(db: Database, ticketId: number): void;
   emitSummary(db: Database, ticketId: number, result: RunResult): void;
+  emitCiHandoff(
+    db: Database,
+    ticketId: number,
+    h: {
+      prRef: string | null;
+      prUrl: string | null;
+      sha: string | null;
+      checksSystem: string;
+      read: "passing" | "failing" | "pending" | "not-reported" | "skipped";
+    },
+  ): void;
 } {
   // Monotonic watermarks instead of growing seen-sets: each tick scans only rows newer than the
   // last, so total work is ~O(rows) over a run rather than O(ticks × rows).
@@ -138,6 +150,26 @@ export function createTelemetryEmitter(sink: TelemetrySink): {
     },
     emitSummary(db, ticketId, result) {
       sink(buildSummary(db, ticketId, result));
+    },
+    // The ONE deliberate push-style emit (the other members are derived from SoT rows by flushNew).
+    // Justified: the handoff is an external network fact captured at the terminal, not a SoT row —
+    // it feeds no control flow (CL-INV-6 safe) and writes nothing to the DB (CL-INV-7 safe), so the
+    // derived-from-row pattern buys nothing and would cost a row-write + a derive fn. Best-effort,
+    // lossy, dup-on-resume — squarely inside the §5.3 telemetry contract.
+    emitCiHandoff(db, ticketId, h) {
+      const ticket = getTicket(db, ticketId);
+      sink({
+        schema_version: SCHEMA_VERSION,
+        type: "ci_handoff",
+        ticket_id: ticketId,
+        ident: ticket?.ident ?? "",
+        pr_ref: h.prRef,
+        pr_url: h.prUrl,
+        branch_head_sha: h.sha,
+        checks_system: h.checksSystem,
+        read: h.read,
+        measured_at: nowUtc(),
+      });
     },
   };
 }

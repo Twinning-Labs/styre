@@ -59,6 +59,7 @@ import {
   binaryFor,
   buildCheckSelector,
   frameworkFor,
+  importErrorImplicatesDiscarded,
   signalResultForCoarse,
 } from "./check-selector.ts";
 import { checksFeedback } from "./checks-feedback.ts";
@@ -81,6 +82,7 @@ import { deriveAndPersistAcs } from "./derive-acs.ts";
 import { designFeedback } from "./design-feedback.ts";
 import { ExtractOutputSchema, validateCdotImpact, validateExtraction } from "./extract-schema.ts";
 import { gateFeedback, implementFeedback } from "./feedback.ts";
+import { ImplementOutputSchema } from "./implement-schema.ts";
 import { hasTicketPlan } from "./plan-frontmatter.ts";
 import { rerunAcChecks } from "./post-implement-rerun.ts";
 import type { Profile } from "./profile.ts";
@@ -250,6 +252,7 @@ async function reauthorCheckWrong(
       template: CHECKS_TEMPLATE,
       vars: checksVars(ctx.ticket, deps.profile, [{ id: ac.id, text: ac.text }], ""),
       commitScope: checksScopeFor(ctx.ticket.ident, [ac.id]),
+      disposition: "discard",
       postcondition: () => {},
     },
   );
@@ -568,12 +571,14 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       sha,
       output,
       dispatchId: did,
+      discarded,
     } = await runAgentDispatch(ctx, depsFor(ctx, deps, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS), {
       handlerKey: "checks:dispatch",
       template: CHECKS_TEMPLATE,
       vars: checksVars(ctx.ticket, deps.profile, acs, checksFeedback(ctx.db, ctx.ticket.id)),
       runnerCommands: realRunnerCommands(deps.profile.components),
       commitScope: checksScopeFor(ctx.ticket.ident, [...acIds]),
+      disposition: "discard",
       // Identity + coverage are verified below against the committed diff, not on the raw diff here.
       postcondition: () => {},
     });
@@ -668,6 +673,24 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
             coarse = res.coarse;
           }
         }
+
+        // Discard-poison guard (silent-bad-merge): a check that did NOT go green while this dispatch
+        // discarded undeclared files, whose output shows an import/collection/module error naming a
+        // discarded file, could not actually run — the referenced helper was stripped before commit.
+        // Route it to the SAME uncovered path `selected-none` uses so no permanently-broken check is
+        // installed and the discard is surfaced in the retry feedback. Conservative: fires only when
+        // the import error NAMES a discarded file (never a bare basename). Diagnosis-only (INV-B).
+        if (discarded.length > 0 && coarse !== "green") {
+          const implicated = importErrorImplicatesDiscarded(rawOutput, discarded);
+          if (implicated.length > 0) {
+            missReason.set(
+              c.ac_id,
+              `the check for this AC could not run because it references files styre discarded this attempt (undeclared): ${implicated.join(", ")}`,
+            );
+            continue; // uncovered → loud retry path, no poisoned check persisted
+          }
+        }
+
         records.push({
           acId: c.ac_id,
           selector,
@@ -690,7 +713,13 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
             (a) => `AC ${a.seq}: ${missReason.get(a.id) ?? "no valid check authored for this AC"}`,
           )
           .join("; ");
-        throw new Error(`checks:dispatch postcondition: ${detail}`);
+        // Diagnosis-only (INV-B): name what was discarded this attempt so a discarded-but-needed
+        // helper is recoverable instead of an opaque wedge — no instruction, just the fact.
+        const discardNote =
+          discarded.length > 0
+            ? ` — undeclared files discarded this attempt: ${discarded.join(", ")}`
+            : "";
+        throw new Error(`checks:dispatch postcondition: ${detail}${discardNote}`);
       }
 
       // Persist (§9): delete-then-insert in ONE transaction (resume-dedup, decision 1) + the signal row
@@ -910,6 +939,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     const filesToTouch = parseFilesToTouch(unit);
     const scoped = scopedRunnersForFiles(deps.profile.components, filesToTouch);
     const runnerCommands = scoped.length > 0 ? scoped : realRunnerCommands(deps.profile.components);
+    const implPreHead = worktreeHead(implWorktreePath);
     const result = await runAgentDispatch(
       ctx,
       depsFor(ctx, deps, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS),
@@ -928,11 +958,44 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         loopback: isUnitLoopback(ctx, unit.seq),
         runnerCommands,
         commitScope: implementScope,
+        disposition: ctx.config.implementDisposition,
         // Empty-diff is no longer a dispatch-level failure: the plan gate guarantees non-empty
         // declared files, and the completeness step (under-delivery) is what gates on it now.
         postcondition: () => {},
       },
     );
+    if (ctx.config.implementDisposition === "discard") {
+      // Discard-mode sidecar guard: a transport failure must never become a silent partial-commit.
+      // A MALFORMED sidecar always re-dispatches (we cannot trust ANY declaration it might contain).
+      // An ABSENT sidecar re-dispatches ONLY when it actually caused a discard (undeclared new files
+      // with no declaration to admit them) — a valid ticket with no new files and no sidecar is fine.
+      // A valid sidecar that leaves an undeclared throwaway out is the intended discard path.
+      const parsed = extractSidecar(result.output, ImplementOutputSchema);
+      const malformed = !parsed.ok && parsed.reason === "malformed";
+      const absentButDiscarded =
+        !parsed.ok && parsed.reason === "absent" && result.discarded.length > 0;
+      if (malformed || absentButDiscarded) {
+        // Guarded on sha !== implPreHead (mirrors checks:dispatch's catch block, ~:748): a no-op
+        // dispatch (nothing committed) leaves HEAD already at implPreHead, so `git clean -fd` would
+        // wipe pre-existing untracked cruft — including the *.egg-info undoAttempt deliberately
+        // spares — for no reason. Only reset + re-mark when a commit was actually produced.
+        if (result.sha !== implPreHead) {
+          resetWorktreeHard(implWorktreePath, implPreHead);
+          const row = getByDispatchId(ctx.db, ctx.ticket.id, result.dispatchId);
+          if (row) {
+            completeDispatch(ctx.db, row.id, {
+              outcome: "reverted",
+              branchHeadSha: implPreHead,
+              endedAt: nowUtc(),
+            });
+          }
+        }
+        throw new Error(
+          `implement:dispatch sidecar transport failure (${parsed.ok ? "ok" : parsed.reason}); ` +
+            `discarded=[${result.discarded.join(", ")}] — re-dispatching`,
+        );
+      }
+    }
     setUnitStatus(ctx.db, unit.id, "verifying");
     // Review F-2: if this dispatch's committed diff touched a dependency manifest, a once-gated
     // `provision` (already `done`) would otherwise be silently stale — re-arm it so the resolver

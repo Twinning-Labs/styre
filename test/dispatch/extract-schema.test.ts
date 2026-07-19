@@ -91,6 +91,26 @@ test("validateExtraction rejects a unit with no files_to_touch", () => {
   expect(errors.some((e) => e.includes("no files_to_touch"))).toBe(true);
 });
 
+// STYRE-7: a unit whose ONLY deliverable is an implement-authored test that also covers an
+// acceptance criterion is a valid third shape (neither a code unit nor a "tests are the deliverable"
+// coverage ticket). The actual STYRE-7 erasure was a PROMPT-level misclassification (design-extract
+// nulled the file), which no unit test can cover; Fix A corrects the prompt. This test is
+// defense-in-depth on the SCHEMA side only — it would catch a future purpose-based rule wrongly added
+// to validateExtraction. validateExtraction never checked purpose, so it accepted this shape before
+// Fix A too; the value here is pinning that it must continue to.
+test("validateExtraction accepts a unit declaring only a product test (STYRE-7 third shape)", () => {
+  expect(
+    validateExtraction([
+      unit({
+        behavioral: true,
+        test_plan: "assert exact iCal properties on fixed timestamps",
+        files_to_touch: ["tests/Unit/IcsTest.php"],
+        verify_check_types: ["test"],
+      }),
+    ]),
+  ).toEqual([]);
+});
+
 // ─── cdotImpact schema + profile-consistency gate ────────────────────────────
 
 const baseUnits = [

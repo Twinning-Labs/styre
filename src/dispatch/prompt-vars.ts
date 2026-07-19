@@ -10,7 +10,7 @@ import designTemplate from "../../prompts/design.md" with { type: "text" };
 import docsReviseTemplate from "../../prompts/docs-revise.md" with { type: "text" };
 import implementTemplate from "../../prompts/implement.md" with { type: "text" };
 import reviewTemplate from "../../prompts/review.md" with { type: "text" };
-import type { WorkUnitRow } from "../db/repos/work-unit.ts";
+import { type WorkUnitRow, parseFilesToTouch } from "../db/repos/work-unit.ts";
 import { commandFor, impactedComponents } from "./components.ts";
 import { DOC_PATHS_HINT } from "./docs-paths.ts";
 import type { Component, Profile } from "./profile.ts";
@@ -108,7 +108,7 @@ export function implementVars(
   gateFeedbackText = "",
   reviewFeedbackText = "",
 ): Record<string, string> {
-  const files: string[] = unit.files_to_touch ? JSON.parse(unit.files_to_touch) : [];
+  const files = parseFilesToTouch(unit);
   const impacted = impactedComponents(profile.components, files);
   const source = impacted.length > 0 ? impacted : profile.components;
   const testCommands = source
@@ -118,7 +118,19 @@ export function implementVars(
   const authored_checks =
     paths.length === 0
       ? ""
-      : `## Acceptance checks (make these pass — do NOT edit the check files)\n\nThese test files encode this ticket's acceptance criteria. Read them and write code so they pass. You MUST NOT edit, weaken, or delete them (the runner freezes them and fails the gate on any change):\n${paths.map((p) => `- ${p}`).join("\n")}`;
+      : `## Acceptance checks (make these pass — do NOT edit the check files)\n\nThese test files encode this ticket's acceptance criteria. Read them and write code so they pass. You MUST NOT edit, weaken, or delete them (the runner freezes them and fails the gate on any change):\n${paths.map((p) => `- ${p}`).join("\n")}\n\nThese checks are authored separately. Any that your work has not satisfied yet will read **red** when you run your project test command — that red is expected and is not a bug you introduced. Turn them green by implementing the work, never by touching the check files. They are **not** the tests listed under "Files this unit produces" — those are yours to write.`;
+  // Channel A — the unit's declared scope, surfaced so completeness never grades implement against a
+  // list it was never shown (STYRE-7 Fix B). Presented as a FLOOR, not a cage: completeness hard-gates
+  // only under-delivery; over-delivery is advisory/reviewer-judged (brainstorm A3), so implement may
+  // touch other files the work needs. Self-contained section (empty ⇒ no orphan header in implement.md).
+  const files_to_touch =
+    files.length === 0
+      ? ""
+      : `## Files this unit produces (your obligation)\n\nCreate or change **at least** these files — this is what "done" is checked against. Any product or regression tests listed here are **yours to write** (distinct from the frozen \`styre_checks/\` acceptance checks). You may touch other files if the work genuinely needs it — scope is reviewed, not enforced here.\n\n${files.map((f) => `- ${f}`).join("\n")}`;
+  const test_plan =
+    unit.test_plan && unit.test_plan.trim() !== ""
+      ? `## How this unit is tested\n\n${unit.test_plan}`
+      : "";
   return {
     ident: ticket.ident,
     slug: profile.slug,
@@ -129,8 +141,14 @@ export function implementVars(
     stack: "",
     feedback,
     authored_checks,
+    files_to_touch,
+    test_plan,
     gate_feedback: gateFeedbackText,
     review_feedback: reviewFeedbackText,
+    // profile.promptVars is spread LAST intentionally — it is how the profile injects `stack`
+    // (and other project-specific slots) over the placeholder default set here. A profile therefore
+    // must not define a promptVar named after a computed section (`authored_checks`, `files_to_touch`,
+    // `test_plan`, `feedback`, …) or it would silently shadow it; those names are reserved to the runner.
     ...profile.promptVars,
   };
 }

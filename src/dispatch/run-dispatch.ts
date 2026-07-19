@@ -14,6 +14,7 @@ import { renderPrompt } from "./render-prompt.ts";
 import { allowlistFor } from "./tool-allowlists.ts";
 import {
   commitWorktree,
+  discardPaths,
   ensureWorktree,
   pendingEntries,
   sweepScratch,
@@ -48,6 +49,11 @@ export interface DispatchSpec {
    *  dispatch created is rejected (revert + dispatch-failed + retry). ABSENT ⇒ read-only step: a
    *  brand-new file is logged (event_log note) and left uncommitted; never gates. */
   commitScope?: CommitScope;
+  /** How out-of-scope NEW files are handled: "reject" (default — revert + throw, today's behavior) or
+   *  "discard" (delete the undeclared new files + emit a note + continue). Out-of-scope tracked EDITS
+   *  always reject regardless. checks:dispatch/re-author set "discard"; implement reads it from
+   *  runtime-config; plan/docs/omitted callers get "reject". */
+  disposition?: "reject" | "discard";
 }
 
 const CARRYOVER_PREFIX =
@@ -94,7 +100,13 @@ export async function runAgentDispatch(
   ctx: HandlerContext,
   deps: DispatchDeps,
   spec: DispatchSpec,
-): Promise<{ dispatchId: string; sha: string; changed: boolean; output: string }> {
+): Promise<{
+  dispatchId: string;
+  sha: string;
+  changed: boolean;
+  output: string;
+  discarded: string[];
+}> {
   const rendered = renderPrompt(spec.template, spec.vars);
   if (!rendered.ok) {
     throw new Error(`CL-PROFILE: unresolved prompt vars: ${rendered.missing.join(", ")}`);
@@ -187,24 +199,56 @@ export async function runAgentDispatch(
 
   let sha: string;
   let changed: boolean;
+  let discarded: string[] = [];
   if (spec.commitScope) {
     const inScope = spec.commitScope(result.stdout);
     const newPaths = judged.filter((e) => e.isNew).map((e) => e.path);
     const offenders = judged.filter((e) => !inScope(e.path, e.isNew, newPaths));
-    if (offenders.length > 0) {
+    const offendingEdits = offenders.filter((e) => !e.isNew).map((e) => e.path);
+    const offendingNew = offenders.filter((e) => e.isNew).map((e) => e.path);
+    const disposition = spec.disposition ?? "reject";
+    const hasTrackedDeletion = judged.some((e) => e.isDeleted);
+
+    // INV-B: every reason is a diagnosis (the fact), never an instruction. Keep the scope-neutral
+    // "out-of-scope files" prefix (existing tests + all steps assert it).
+    const reasons: string[] = [];
+    if (offendingEdits.length > 0) {
+      reasons.push(`tracked edits outside this step's scope: ${offendingEdits.join(", ")}`);
+    }
+    if (offendingNew.length > 0) {
+      if (disposition === "reject") {
+        reasons.push(`undeclared new files: ${offendingNew.join(", ")}`);
+      } else if (hasTrackedDeletion) {
+        // rename-safety: git did not pair these; discarding the new half while committing the
+        // deletion would be silent data loss on a move.
+        reasons.push(
+          `undeclared new files alongside a tracked deletion (possible move): ${offendingNew.join(", ")}`,
+        );
+      }
+    }
+    if (reasons.length > 0) {
       undoAttempt(deps.worktreePath, untrackedBefore);
       completeDispatch(ctx.db, inserted.id, {
         outcome: "dispatch-failed",
         branchHeadSha: preHead,
         endedAt: nowUtc(),
       });
-      throw new Error(
-        `dispatch ${did} out-of-scope files (declare them as part of the change, or delete them if they are throwaway/debug files): ${offenders
-          .map((e) => e.path)
-          .join(", ")}`,
-      );
+      throw new Error(`dispatch ${did} out-of-scope files — ${reasons.join("; ")}`);
     }
-    ({ sha, changed } = commitWorktree(deps.worktreePath, `${did} ${spec.handlerKey}`, newPaths));
+
+    if (disposition === "discard" && offendingNew.length > 0) {
+      discardPaths(deps.worktreePath, offendingNew);
+      discarded = offendingNew;
+      appendEvent(ctx.db, {
+        ticketId: ctx.ticket.id,
+        kind: "note",
+        reason: `scope-discarded:${spec.handlerKey}`,
+        payload: { discarded },
+      });
+    }
+
+    const inScopeNew = newPaths.filter((p) => !offendingNew.includes(p));
+    ({ sha, changed } = commitWorktree(deps.worktreePath, `${did} ${spec.handlerKey}`, inScopeNew));
   } else {
     const stray = judged.filter((e) => e.isNew).map((e) => e.path);
     if (stray.length > 0) {
@@ -235,5 +279,5 @@ export async function runAgentDispatch(
     throw err;
   }
   completeDispatch(ctx.db, inserted.id, { outcome: "clean-success", ...completion });
-  return { dispatchId: did, sha, changed, output: result.stdout };
+  return { dispatchId: did, sha, changed, output: result.stdout, discarded };
 }

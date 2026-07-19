@@ -58,7 +58,10 @@ next_step_key(t):
   'merge':
     if not done('merge:push'):                       return 'merge:push'
     if not done('merge:pr-ensure'):                  return 'merge:pr-ensure'
-    if not delivered('external_checks'):             return 'merge:await-checks'
+    # checks are reported, not gated (2026-07-18): merge:pr-ensure's success delivers the parked
+    # human_merge_approval wait; a best-effort t+0 CI read + `ci_handoff` telemetry event fire on
+    # this same path and `styre run` exits PR-ready — there is no 'merge:await-checks' branch, no
+    # `external_checks` signal, and nothing here ever loops back on CI (control-loop.md §4 S8).
     if not delivered('human_merge_approval'):        return 'merge:await-human'
     advance('merge' -> 'released'); recurse
 
@@ -155,7 +158,7 @@ All operator-tunable in `config.json`; these are the cutover defaults.
 | `B3` wall-clock ceiling (P3) | **3× median clean-ticket wall-clock** | bootstrap floor **4h** |
 | per-stage dispatch timeout | design/review **60m**, others **30m** | ports ENG-65; under `gtimeout` |
 | `OUTBOX_RETRY_BUDGET` | **~10 attempts / ~30m backoff** | then escalate X1 (service down) |
-| `POLL_INTERVAL` | **60s** | loop idle + checks-system poll cadence |
+| `CI_READ_TIMEOUT_MS` | **8s** | bounds the one-shot t+0 checks read at merge (§1 above); never a poll cadence — nothing in OSS polls |
 | `K` concurrency | **2** | `CLAUDE_MAX_CONCURRENT` → `orchestrator.max_concurrent_features` → 2 *(commercial Control Plane)* |
 
 Spend/wall-clock per ticket are **derived**: `SUM(dispatch.cost_usd)` and `now − ticket.created_at`
@@ -202,8 +205,9 @@ design:dispatch(Opus,plan) → design:extract(Haiku,work_units)            # fas
  → provision(runner,installs each component's prepare; once per ticket, gates verify)
  → completeness:wu1(runner,plan-vs-diff reconciliation; once per unit)
  → verify:wu1:build,test(runner,ground-truth) → verify:integration(runner)
- → review(Opus,findings via interface → 0 blocking) → merge:push → merge:pr-ensure(cheap-AI body)
- → merge:await-checks(poll) → merge:await-human(operator merges) → released:project(→ Done)
+ → review(Opus,findings via interface → 0 blocking) → merge:push
+ → merge:pr-ensure(cheap-AI body; t+0 CI read → `ci_handoff` — OSS `styre run` exits PR-ready here)
+ → merge:await-human(operator merges) → released:project(→ Done)   # commercial Control Plane
 ```
 …with every step journaled (`workflow_step`), every transition mirrored (`event_log` + projector →
 Linear), and a crash at any point resuming from the journal. Green = flip; misbehaves in week 1 =

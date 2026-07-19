@@ -124,10 +124,10 @@ test("a wait descriptor parks the ticket on a signal", async () => {
   registry.register("merge:pr-ensure", () => ({ pr: 1 }));
   await advanceOneStep(db, ticketId, registry); // merge:push
   await advanceOneStep(db, ticketId, registry); // merge:pr-ensure
-  const outcome = await advanceOneStep(db, ticketId, registry); // wait external_checks
+  const outcome = await advanceOneStep(db, ticketId, registry); // wait human_merge_approval
   const ticket = getTicket(db, ticketId);
   db.close();
-  expect(outcome).toEqual({ kind: "waiting", signalType: "external_checks" });
+  expect(outcome).toEqual({ kind: "waiting", signalType: "human_merge_approval" });
   expect(ticket?.status).toBe("waiting");
 });
 

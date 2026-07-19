@@ -74,10 +74,13 @@ decide control flow. Implemented as `drain_outbox()` inside the runner (not a se
 
 ### signal
 
-an inbound ground-truth fact delivered to the loop: e.g. checks green
-(`external_checks`), PR merged (`external_pr_result`), or a human action (`human_merge_approval`,
-`human_resume`). Signals are the *only* channel through which external facts reach the control loop;
-the runner never reads Linear or GitHub directly for control-flow decisions. (control-loop §7)
+an inbound ground-truth fact delivered to the loop: e.g. PR merged
+(`external_pr_result`), or a human action (`human_merge_approval`, `human_resume`). Signals are the
+channel through which external facts the loop *waits on* reach the control loop; the runner never
+reads Linear or GitHub directly for control-flow decisions. Checks status is **not** a signal: OSS
+`styre run` takes one best-effort t+0 read of CI state on the merge path and reports it as
+`ci_handoff` telemetry — it is observed once, never awaited, never delivered through the `signal`
+table. (control-loop §7, §4 S8)
 
 ### SoT (Source of Truth)
 

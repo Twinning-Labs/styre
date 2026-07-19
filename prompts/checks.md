@@ -37,15 +37,10 @@ Rules — follow them exactly:
 - **For a numeric, data-shape, or algorithmic criterion, assert the SPECIFIC correct value the fixed code
   must produce** (the one that differs from the current wrong output) — never a property that holds
   regardless of the fix. If you cannot state the exact expected value, read the code/docs until you can.
-- **Put scratch in a `styre_scratch/` folder — never loose in the work tree.** For any bug-reproduction,
-  debugging, or throwaway scripting, create a `styre_scratch/` directory next to the code you are
-  exercising and put those files there. styre ignores and wipes every `styre_scratch/` folder, so
-  nothing in it is committed, reviewed, or run as part of the suite — it is the throwaway sibling of the
-  `styre_checks/` folder your real check goes in. Do NOT scatter throwaway files anywhere else, and do
-  NOT park them in `new_files`. The commit is REJECTED if it contains any NEW file you did not declare —
-  your check files (listed in `checksAuthored` via `test_file`) plus any genuine non-test helper (listed
-  in `new_files`, below) — so the only correct outcome is: check files declared, real helpers declared,
-  scratch in `styre_scratch/`, and nothing else added.
+- **Declare every new file that is part of your check** — the RED-first test via `checksAuthored`
+  (`test_file`) and any genuine test helper (fixture, `conftest.py`) via `new_files`. Any undeclared new
+  file you create is treated as throwaway and won't be committed; you don't need a special folder for
+  scratch, and you must not park throwaway files in `new_files`.
 
 ## Acceptance criteria (author one check file per `ac_id`)
 

@@ -71,3 +71,29 @@ test("flushNew emits each row once (dedup) across calls; summary sums cost + cou
   expect(summary.outcome).toBe("pr-ready");
   db.close();
 });
+
+test("emitCiHandoff sinks a well-formed ci_handoff event", () => {
+  const { db, ticketId } = makeTestDb(); // seed a ticket with an ident
+  db.query("UPDATE ticket SET ident = 'STYRE-9' WHERE id = ?").run(ticketId);
+  const seen: TelemetryEvent[] = [];
+  const emitter = createTelemetryEmitter((e) => seen.push(e));
+  emitter.emitCiHandoff(db, ticketId, {
+    prRef: "7",
+    prUrl: "https://x/pull/7",
+    sha: "deadbeef",
+    checksSystem: "github",
+    read: "pending",
+  });
+  expect(seen).toHaveLength(1);
+  const ev = seen[0];
+  expect(ev.type).toBe("ci_handoff");
+  if (ev.type === "ci_handoff") {
+    expect(ev.ident).toBe("STYRE-9");
+    expect(ev.pr_ref).toBe("7");
+    expect(ev.branch_head_sha).toBe("deadbeef");
+    expect(ev.checks_system).toBe("github");
+    expect(ev.read).toBe("pending");
+    expect(typeof ev.measured_at).toBe("string");
+  }
+  db.close();
+});

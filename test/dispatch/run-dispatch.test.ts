@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
@@ -10,6 +10,7 @@ import { listByTicket } from "../../src/db/repos/dispatch.ts";
 import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
 import { getById, insertPending, markFailed } from "../../src/db/repos/workflow-step.ts";
+import type { CommitScope } from "../../src/dispatch/commit-scope.ts";
 import { checksScopeFor, implementScope } from "../../src/dispatch/commit-scope.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runAgentDispatch } from "../../src/dispatch/run-dispatch.ts";
@@ -559,5 +560,115 @@ test("checks support file: an undeclared styre_checks/__init__.py co-located wit
   }).stdout.toString();
   expect(committed).toContain("tests/styre_checks/ENG-1_ac1_test.py");
   expect(committed).toContain("tests/styre_checks/__init__.py");
+  db.close();
+});
+
+// --- disposition: discard vs reject (Task 1) ----------------------------------------------------
+
+// A checks-style scope: a NEW file is in scope iff declared; tracked edits are always in scope.
+const declaredScope =
+  (declared: string[]): CommitScope =>
+  () =>
+  (path, isNew) =>
+    !isNew || declared.includes(path);
+
+// Run one dispatch: the fake agent applies `apply(cwd)` then returns `stdout`. Returns the db +
+// ticketId + worktree so the test can inspect the commit and the event log.
+async function runWith(opts: {
+  disposition?: "reject" | "discard";
+  commitScope: CommitScope;
+  apply: (cwd: string) => void;
+  stdout: string;
+}) {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-${Math.random().toString(36).slice(2)}`);
+  const runner = new FakeAgentRunner((input) => {
+    opts.apply(input.cwd);
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: opts.stdout,
+      stderr: "",
+      timedOut: false,
+      costUsd: 0,
+      tokensIn: 1,
+      tokensOut: 1,
+    };
+  });
+  const promise = runAgentDispatch(
+    ctxFor(db, ticketId),
+    { runner, ...depsFor(repo, wt) },
+    {
+      handlerKey: "checks:dispatch",
+      template: "t {{ident}}",
+      vars: { ident: "ENG-1" },
+      commitScope: opts.commitScope,
+      disposition: opts.disposition,
+      postcondition: () => {},
+    },
+  );
+  return { db, ticketId, wt, promise };
+}
+const sidecar = (obj: unknown) => `x\n\`\`\`styre-sidecar\n${JSON.stringify(obj)}\n\`\`\``;
+
+test("discard: undeclared new file is deleted + noted, declared file + tracked edit committed, no throw", async () => {
+  const { db, ticketId, wt, promise } = await runWith({
+    disposition: "discard",
+    commitScope: declaredScope(["b.ts"]),
+    apply: (cwd) => {
+      writeFileSync(join(cwd, "README.md"), "edited\n"); // tracked edit (README is committed by gitRepo)
+      writeFileSync(join(cwd, "b.ts"), "declared\n"); // declared new
+      writeFileSync(join(cwd, "scratch.py"), "junk\n"); // undeclared new
+    },
+    stdout: sidecar({ new_files: ["b.ts"] }),
+  });
+  const out = await promise;
+  expect(out.discarded).toEqual(["scratch.py"]);
+  expect(existsSync(join(wt, "scratch.py"))).toBe(false); // discarded from worktree
+  const committed = Bun.spawnSync(["git", "show", "--name-only", "--format=", "HEAD"], {
+    cwd: wt,
+  }).stdout.toString();
+  expect(committed).toContain("b.ts");
+  expect(committed).toContain("README.md");
+  expect(committed).not.toContain("scratch.py");
+  const notes = listEvents(db, ticketId).filter((e) => e.reason?.startsWith("scope-discarded"));
+  expect(notes.length).toBe(1);
+  db.close();
+});
+
+test("discard + tracked deletion: undeclared new file is REJECTED (rename-safety), not discarded", async () => {
+  const { db, promise } = await runWith({
+    disposition: "discard",
+    commitScope: declaredScope([]),
+    apply: (cwd) => {
+      rmSync(join(cwd, "README.md")); // delete the one tracked file → a bare deletion
+      writeFileSync(join(cwd, "moved.ts"), "content\n"); // undeclared new
+    },
+    stdout: sidecar({ new_files: [] }),
+  });
+  await expect(promise).rejects.toThrow(/out-of-scope files.*deletion|possible move/);
+  db.close();
+});
+
+test("reject disposition: undeclared new file throws with out-of-scope files", async () => {
+  const { db, promise } = await runWith({
+    disposition: "reject",
+    commitScope: declaredScope([]),
+    apply: (cwd) => writeFileSync(join(cwd, "scratch.py"), "junk\n"),
+    stdout: sidecar({ new_files: [] }),
+  });
+  await expect(promise).rejects.toThrow(/out-of-scope files/);
+  db.close();
+});
+
+test("default disposition is reject", async () => {
+  const { db, promise } = await runWith({
+    // disposition omitted
+    commitScope: declaredScope([]),
+    apply: (cwd) => writeFileSync(join(cwd, "scratch.py"), "junk\n"),
+    stdout: sidecar({ new_files: [] }),
+  });
+  await expect(promise).rejects.toThrow(/out-of-scope files/);
   db.close();
 });

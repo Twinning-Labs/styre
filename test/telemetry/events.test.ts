@@ -55,6 +55,38 @@ test("the schema rejects an unknown type and a wrong version", () => {
   expect(() => TelemetryEventSchema.parse({ schema_version: 2, type: "summary" })).toThrow();
 });
 
+test("TelemetryEventSchema accepts a ci_handoff event", () => {
+  const ev = {
+    schema_version: SCHEMA_VERSION,
+    type: "ci_handoff",
+    ticket_id: 1,
+    ident: "STYRE-1",
+    pr_ref: "42",
+    pr_url: "https://github.com/o/r/pull/42",
+    branch_head_sha: "abc123",
+    checks_system: "github",
+    read: "not-reported",
+    measured_at: "2026-07-18T12:00:00Z",
+  };
+  expect(TelemetryEventSchema.safeParse(ev).success).toBe(true);
+});
+
+test("TelemetryEventSchema rejects a ci_handoff with an unknown read value", () => {
+  const ev = {
+    schema_version: SCHEMA_VERSION,
+    type: "ci_handoff",
+    ticket_id: 1,
+    ident: "STYRE-1",
+    pr_ref: null,
+    pr_url: null,
+    branch_head_sha: null,
+    checks_system: "none",
+    read: "green",
+    measured_at: "2026-07-18T12:00:00Z",
+  };
+  expect(TelemetryEventSchema.safeParse(ev).success).toBe(false);
+});
+
 test("stdoutSink writes one JSON line; noopSink writes nothing", () => {
   const written: string[] = [];
   const orig = process.stdout.write.bind(process.stdout);

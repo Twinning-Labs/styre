@@ -3,10 +3,15 @@
  * `ChecksPort`. It imports the shared `githubClient` from `./github.ts` (which owns the single
  * `@octokit/*` import) — this file MUST NOT import `@octokit` directly (zero-lock-in firewall).
  *
- * The aggregation (check-runs + legacy commit statuses → passing/failing/pending) is a documented,
- * NOT-unit-tested SDK edge — it needs a live token + repo; the `githubForge` precedent. It is
- * verified by typecheck + build + the operator smoke test below. The core poll logic
- * (`pollChecks`) is exercised with `fakeChecks`.
+ * This file is a NOT-unit-tested SDK edge — it needs a live token + repo; the `githubForge`
+ * precedent. It is verified by typecheck + build + the operator smoke test below. `status()` is
+ * called by `readCiState` in the run driver for the one-shot, best-effort t+0 CI read; it's
+ * exercised in tests with `fakeChecks`.
+ *
+ * The AGGREGATION is deliberately NOT here (ENG-340): it lives in `./github-checks-verdict.ts` as a
+ * pure function and is fully unit-tested. "Needs a live token" was only ever true of the two HTTP
+ * calls below — so the verdict rules moved somewhere they can be tested, and this edge is now just
+ * fetch-two-lists-and-hand-them-over.
  *
  * SMOKE TEST (operator-run): point at a real clone with a pushed branch + a commit that has CI:
  *   GITHUB_TOKEN=ghp_xxx bun run -e '
@@ -17,6 +22,7 @@
  * Expect: "passing" when all checks are green, "failing" on a red check, "pending" while running.
  */
 import type { CheckVerdict, ChecksPort } from "../checks.ts";
+import { aggregateChecksVerdict } from "./github-checks-verdict.ts";
 import { githubClient } from "./github.ts";
 
 /** GitHub checks adapter. Aggregates the modern Checks API (check-runs) and the legacy
@@ -40,32 +46,7 @@ export function githubChecks(opts: { repoPath: string; token?: string }): Checks
         ref,
       });
 
-      const FAIL_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "action_required"]);
-      let anyFailing = false;
-      let anyPending = false;
-      let anyReported = false;
-
-      for (const run of runs) {
-        anyReported = true;
-        if (run.status !== "completed") anyPending = true;
-        else if (run.conclusion && FAIL_CONCLUSIONS.has(run.conclusion)) anyFailing = true;
-      }
-      // Collapse legacy statuses to the latest state per context (the API returns newest first).
-      const seen = new Set<string>();
-      for (const s of statuses) {
-        if (seen.has(s.context)) continue;
-        seen.add(s.context);
-        anyReported = true;
-        if (s.state === "failure" || s.state === "error") anyFailing = true;
-        else if (s.state === "pending") anyPending = true;
-      }
-
-      if (anyFailing) return "failing";
-      if (anyPending) return "pending";
-      if (anyReported) return "passing";
-      // No checks reported yet for this commit — treat as still pending (re-poll). A repo with
-      // genuinely no checks should be configured checksSystem="none", not "github".
-      return "pending";
+      return aggregateChecksVerdict(runs, statuses);
     },
   };
 }
