@@ -16,6 +16,64 @@ reverted, the test must fail. The builder demonstrates this for the ⚔ rows (mu
 
 ---
 
+## Plain-language summary — what these tests check
+
+"Junk" = a file the agent left behind without declaring it. "Kept" = saved into the change.
+
+**Writing the tests** (styre now deletes junk here instead of getting stuck):
+- Agent writes a proper test and declares it → kept
+- Test's filename differs slightly from what was declared → still recognized, kept
+- Small required support file next to the test → kept
+- Agent leaves loose junk → junk deleted, test kept, no getting stuck *(the original bug)*
+- Agent edits an existing file → kept
+- Agent adds a new file **and** deletes one (looks like a move) → styre refuses to delete, to avoid losing a moved file
+- Agent properly renames a file → both sides kept safely
+- Agent uses the official scratch folder → wiped, test kept
+- Pre-existing files styre didn't create → left untouched
+- Agent's file-list note comes back garbled → styre undoes everything and re-runs (no half-save)
+- Test needs a helper the agent forgot to declare (so it got deleted) → styre notices the test can't run, stops, and names the deleted file *(the silent-bad-merge fix)*
+- Agent tries to sneak a passing test via an undeclared file → file deleted so it can't cheat; declaring it properly keeps it
+- Test legitimately fails because the feature isn't built yet, with unrelated junk deleted → styre correctly keeps it (doesn't confuse "feature missing" with "I deleted your helper")
+
+**Rewriting a test that was wrong:**
+- Agent rewrites and declares it → kept
+- Agent leaves junk during the rewrite → deleted, no getting stuck
+
+**Writing the code** (default: styre still rejects junk here — unchanged):
+- New code file, declared → kept
+- Undeclared junk → rejected (old safe behavior)
+- Edit to existing code → kept
+- Only edits, no file-list note → fine, kept
+- New file but no file-list note → rejected
+- File-list note garbled → rejected / re-run
+- Uses the scratch folder → wiped, fix kept
+
+**Writing the code with the optional "delete junk" switch turned ON:**
+- Declares its real file, leaves junk → real file kept, junk deleted
+- Adds an undeclared file with no note → styre re-runs (won't silently delete it), pre-existing files untouched
+- Note garbled → undo and re-run
+- New file + a deletion (a move) → refused, no data loss
+- Only edits, no note → fine, kept
+
+**Writing the plan** (only plan files allowed):
+- Plan file → kept
+- File somewhere it shouldn't be → rejected
+- Editing source code from the plan step → rejected
+
+**Editing docs** (only doc files allowed):
+- Doc file → kept
+- File outside docs → rejected
+- Editing source from the docs step → rejected
+
+**General safety checks:**
+- Any step that didn't opt into "delete junk" → still rejects junk (safe default)
+- A look-only step that leaves a stray file → noted, not deleted, not blocked
+- When styre deletes junk, its record lists exactly which files it deleted
+- Leftover scratch is swept away before the full test run
+- The "files out of scope" message states facts only — no bossy instructions
+
+---
+
 ## A. `checks:dispatch` (disposition = discard)
 
 | # | Agent produces | Sidecar | Expected | Notes |
