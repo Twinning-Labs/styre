@@ -488,7 +488,7 @@ test("A11 ⚔ a canonical test importing a discarded helper → import-error RED
   expect(existsSync(join(wt, "checks", "util.py"))).toBe(false); // discarded
   expect(headHas(wt, "checks/ENG-1_ac1_test.py")).toBe(false); // reverted, no poisoned check committed
   expect(checks).toHaveLength(0); // NO covered check persisted for the AC
-  expect(message).toMatch(/could not run because it references files styre discarded/);
+  expect(message).toMatch(/import or collection error/);
   expect(message).toContain("util.py"); // surfaced, recoverable
 });
 
