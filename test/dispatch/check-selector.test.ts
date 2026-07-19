@@ -275,7 +275,10 @@ describe("signalResultForCoarse", () => {
   });
 });
 
-import { importErrorImplicatesDiscarded } from "../../src/dispatch/check-selector.ts";
+import {
+  collectionErrorExcerpt,
+  importErrorImplicatesDiscarded,
+} from "../../src/dispatch/check-selector.ts";
 
 describe("importErrorImplicatesDiscarded (discard-poison guard: conservative import-error → discarded-file matcher)", () => {
   test("fires on `No module named '<discarded-mod>'` (pytest exit-2 collection error)", () => {
@@ -346,6 +349,86 @@ describe("importErrorImplicatesDiscarded (discard-poison guard: conservative imp
         "unrelated_scratch.py",
       ]),
     ).toEqual(["helper.py"]);
+  });
+
+  // --- package-init (__init__.py) shape matching ---
+  test("implicates a discarded __init__.py when the missing module IS its package (shallow)", () => {
+    const out = "E   ModuleNotFoundError: No module named 'pkg'";
+    expect(importErrorImplicatesDiscarded(out, ["pkg/__init__.py"])).toEqual(["pkg/__init__.py"]);
+  });
+
+  test("implicates a discarded nested __init__.py by its full dotted package", () => {
+    const out = "ModuleNotFoundError: No module named 'a.b'";
+    expect(importErrorImplicatesDiscarded(out, ["a/b/__init__.py"])).toEqual(["a/b/__init__.py"]);
+  });
+
+  test("implicates a discarded __init__.py when a SUBMODULE of its package is imported", () => {
+    const out = "ModuleNotFoundError: No module named 'pkg.sub'";
+    expect(importErrorImplicatesDiscarded(out, ["pkg/__init__.py"])).toEqual(["pkg/__init__.py"]);
+  });
+
+  test("implicates a discarded __init__.py under a src/ prefix via a >=2-seg suffix", () => {
+    const out = "ModuleNotFoundError: No module named 'mypkg.sub'";
+    expect(importErrorImplicatesDiscarded(out, ["src/mypkg/sub/__init__.py"])).toEqual([
+      "src/mypkg/sub/__init__.py",
+    ]);
+  });
+
+  test("does NOT implicate a discarded nested __init__.py for an unrelated top-level import (no false reject)", () => {
+    // a/b/__init__.py discarded, but the test legitimately fails importing an unrelated top-level `b`.
+    const out = "ModuleNotFoundError: No module named 'b'";
+    expect(importErrorImplicatesDiscarded(out, ["a/b/__init__.py"])).toEqual([]);
+  });
+
+  test("does NOT implicate a discarded __init__.py for an unrelated feature module", () => {
+    const out = "ModuleNotFoundError: No module named 'unrelated_feature'";
+    expect(importErrorImplicatesDiscarded(out, ["pkg/__init__.py"])).toEqual([]);
+  });
+
+  // --- conftest.py shape matching ---
+  test("implicates a discarded conftest.py on a fixture-not-found error", () => {
+    const out = "E       fixture 'db' not found";
+    expect(importErrorImplicatesDiscarded(out, ["tests/conftest.py"])).toEqual([
+      "tests/conftest.py",
+    ]);
+  });
+
+  test("does NOT implicate a discarded conftest.py on a plain assertion failure (no collection/fixture error)", () => {
+    const out = "E       assert 1 == 2";
+    expect(importErrorImplicatesDiscarded(out, ["tests/conftest.py"])).toEqual([]);
+  });
+
+  // --- existing general tier still works (regression) ---
+  test("still implicates a directly-named discarded helper", () => {
+    const out = "ModuleNotFoundError: No module named 'helper'";
+    expect(importErrorImplicatesDiscarded(out, ["tests/helper.py"])).toEqual(["tests/helper.py"]);
+  });
+});
+
+describe("collectionErrorExcerpt", () => {
+  test("collectionErrorExcerpt prefers the pytest ERROR summary line and preserves casing", () => {
+    const out = [
+      "    import pkg",
+      "E   ModuleNotFoundError: No module named 'pkg'",
+      "=== short test summary info ===",
+      "ERROR tests/x_test.py - ModuleNotFoundError: No module named 'pkg'",
+    ].join("\n");
+    expect(collectionErrorExcerpt(out)).toBe(
+      "ERROR tests/x_test.py - ModuleNotFoundError: No module named 'pkg'",
+    );
+  });
+
+  test("collectionErrorExcerpt falls back to the last indicator line when no summary line exists", () => {
+    const out = "line one\nE   ModuleNotFoundError: No module named 'pkg'\ntrailing noise";
+    expect(collectionErrorExcerpt(out)).toBe("ModuleNotFoundError: No module named 'pkg'");
+  });
+
+  test("collectionErrorExcerpt surfaces a fixture-not-found line", () => {
+    expect(collectionErrorExcerpt("E       fixture 'db' not found")).toBe("fixture 'db' not found");
+  });
+
+  test("collectionErrorExcerpt returns undefined when no collection/import indicator is present", () => {
+    expect(collectionErrorExcerpt("E   assert 1 == 2")).toBeUndefined();
   });
 });
 
