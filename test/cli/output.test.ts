@@ -8,7 +8,10 @@ test("formatMessage prefixes styre <cmd>: and indents detail", () => {
 });
 
 test("renderError renders a StyreError's headline/detail/recovery", () => {
-  const s = renderError("run", configError({ file: "/c.json", field: "notifier", detail: "got 'x'" }));
+  const s = renderError(
+    "run",
+    configError({ file: "/c.json", field: "notifier", detail: "got 'x'" }),
+  );
   expect(s).toContain("styre run: invalid config");
   expect(s).toContain("/c.json");
   expect(s).toContain("got 'x'");

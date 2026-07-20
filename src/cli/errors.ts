@@ -39,7 +39,9 @@ export function configError(a: {
   detail?: string;
   recovery?: string;
 }): StyreError {
-  const headline = a.field ? `invalid config — ${a.field} (${a.file})` : `invalid config — ${a.file}`;
+  const headline = a.field
+    ? `invalid config — ${a.field} (${a.file})`
+    : `invalid config — ${a.file}`;
   return new StyreError({
     code: EXIT.CONFIG,
     headline,
