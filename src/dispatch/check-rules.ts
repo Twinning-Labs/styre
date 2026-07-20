@@ -125,9 +125,15 @@ function packageInitImplicated(initPath: string, ctx: MatchContext): boolean {
 
 /** A Go package IS a directory, and the module prefix is NOT on disk — so the discarded file's
  *  directory segments must be a trailing SUFFIX of the package path's segments.
- *  `example.com/m/helper` implicates `helper/helper.go` and `helper/util.go` (dir `helper`), but a
- *  missing DEPENDENCY implicates nothing: `github.com/stretchr/testify/assert` against
- *  `internal/assert/helper.go` compares `[internal, assert]` to `[testify, assert]` and fails. Pure. */
+ *  `example.com/m/helper` implicates `helper/helper.go` and `helper/util.go` (dir `helper`), while a
+ *  missing DEPENDENCY at depth implicates nothing: `github.com/stretchr/testify/assert` against
+ *  `internal/assert/helper.go` compares `[internal, assert]` to `[testify, assert]` and fails.
+ *
+ *  RESIDUAL: when the discarded file's directory is a SINGLE segment, the rule degenerates to a leaf
+ *  comparison, so a top-level `assert/`, `cmp/` or `util/` directory IS implicated by a missing
+ *  dependency whose package leaf matches. Unlike JVM this cannot take a >=2-segment floor without
+ *  killing the ordinary `helper/helper.go` positive. Consequence is a spurious retry, never a wrong
+ *  verdict. Pure. */
 function goPackageImplicated(path: string, ctx: MatchContext): boolean {
   const dirSegs = dirSegments(path);
   if (dirSegs.length === 0) return false;
@@ -163,7 +169,7 @@ const LEGACY_INDICATORS = [
 ];
 
 const LEGACY_NAMING =
-  /(?:no module named|cannot find module|could not import|unable to resolve|cannot import name\s+[^\n]*?\bfrom)\s+['"]?([\w./-]+)['"]?/gi;
+  /(?:no module named|cannot find module|could not import|unable to resolve|cannot import name[^\S\r\n]+[^\n]*?\bfrom)[^\S\r\n]+['"]?([\w./-]+)['"]?/gi;
 
 const pythonRules: LanguageRules = {
   indicators: [...LEGACY_INDICATORS],
@@ -205,12 +211,12 @@ const GO_INDICATORS = [
 ];
 
 const goRules: LanguageRules = {
-  indicators: GO_INDICATORS,
-  basenameGates: GO_INDICATORS,
+  indicators: [...GO_INDICATORS],
+  basenameGates: [...GO_INDICATORS],
   naming: [
-    /no required module provides package\s+([\w./-]+)/gi,
-    /cannot find module providing package\s+([\w./-]+)/gi,
-    /cannot find package\s+["']?([\w./-]+)["']?/gi,
+    /no required module provides package[^\S\r\n]+([\w./-]+)/gi,
+    /cannot find module providing package[^\S\r\n]+([\w./-]+)/gi,
+    /cannot find package[^\S\r\n]+["']?([\w./-]+)["']?/gi,
   ],
   tiesByLeaf: false,
   shapes: [{ match: goPackageImplicated }],
@@ -220,11 +226,15 @@ const jvmRules: LanguageRules = {
   // Excerpt only. `cannot find symbol` is a documented residual: it names the symbol, never the file,
   // which is already deleted. It appears here so the retry message carries a real compiler line, and
   // it cannot cause a match because basenameGates is empty and no naming pattern consumes it.
-  // `error: package` rather than a bare `does not exist`, which would let an unrelated later line win
-  // the excerpt's last-match rule.
-  indicators: ["error: package", "cannot find symbol"],
+  // `error: package` / `] package ` rather than a bare `does not exist`, which would let an unrelated
+  // later line win the excerpt's last-match rule. `] package ` covers maven-compiler-plugin's
+  // reformatted `[ERROR] …:[3,26] package … does not exist`, which drops javac's `error:` token.
+  indicators: ["error: package", "] package ", "cannot find symbol"],
   basenameGates: [],
-  naming: [/error:\s+package\s+([\w.]+)\s+does not exist/gi],
+  naming: [
+    /error:[^\S\r\n]+package[^\S\r\n]+([\w.]+)[^\S\r\n]+does not exist/gi,
+    /:\[\d+,\d+\][^\S\r\n]+package[^\S\r\n]+([\w.]+)[^\S\r\n]+does not exist/gi,
+  ],
   tiesByLeaf: false,
   shapes: [{ match: jvmPackageImplicated }],
 };

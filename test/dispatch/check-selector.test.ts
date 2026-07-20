@@ -626,6 +626,39 @@ describe("discard-poison: Go (ties by package/directory segment alignment)", () 
       importErrorImplicatesDiscarded("app/y_test.go:5:30: undefined: Help", ["helper.go"], "go"),
     ).toEqual([]);
   });
+
+  test("a capture never spans a line break (the naming patterns are horizontal-whitespace only)", () => {
+    // NOTE: deliberately not the literal `go/scratch.go` fixture from the review — that fixture's
+    // discarded file also collides with the (separately documented, accepted) bounded-basename tier,
+    // since its own basename is textually present on the output's second line regardless of the
+    // naming-capture fix. This fixture isolates the naming/shape-tier defect alone: `helper/other.go`
+    // does not appear as a basename anywhere in the output, so only the (fixed) naming capture can
+    // affect the result. Confirmed by direct probe: with the old `\s+` naming regex this fixture
+    // reproduces the false positive (`["helper/other.go"]`); with the fixed `[^\S\r\n]+` regex it
+    // correctly returns `[]`.
+    const twoLine =
+      "app/x_test.go:1:1: no required module provides package\nscratch/helper:2:2: something";
+    expect(importErrorImplicatesDiscarded(twoLine, ["helper/other.go"], "go")).toEqual([]);
+  });
+
+  // DOCUMENTATION PINS (not guards): accepted residuals, recorded so they cannot drift unnoticed.
+  test("residual: a single-segment directory still collides with a dependency's package leaf", () => {
+    const missingDep =
+      "app/x_test.go:6:2: no required module provides package github.com/stretchr/testify/assert; to add it:";
+    expect(importErrorImplicatesDiscarded(missingDep, ["assert/helper.go"], "go")).toEqual([
+      "assert/helper.go",
+    ]);
+  });
+
+  test("residual: the basename tier can implicate a file merely named in the build output", () => {
+    // Go prints the IMPORTING file's path on every build error line, so an unrelated discarded file
+    // whose basename appears there is implicated by the bounded-basename tier.
+    const out =
+      "app/x_test.go:6:2: no required module provides package example.com/m/helper; to add it:";
+    expect(importErrorImplicatesDiscarded(out, ["deep/nested/x_test.go"], "go")).toEqual([
+      "deep/nested/x_test.go",
+    ]);
+  });
 });
 
 describe("discard-poison: JVM (ties by package/directory segment alignment)", () => {
@@ -668,6 +701,15 @@ describe("discard-poison: JVM (ties by package/directory segment alignment)", ()
 
   test("surfaces the compiler's own line as the excerpt (the reason naming patterns feed it)", () => {
     expect(collectionErrorExcerpt(missingPkg, "junit-maven")).toBe(missingPkg);
+  });
+
+  test("Maven's reformatted javac diagnostic ties too (mvn drops the `error:` token)", () => {
+    const mvn =
+      "[ERROR] /repo/src/test/java/com/x/ATest.java:[3,26] package com.helper does not exist";
+    expect(
+      importErrorImplicatesDiscarded(mvn, ["src/test/java/com/helper/Helper.java"], "junit-maven"),
+    ).toEqual(["src/test/java/com/helper/Helper.java"]);
+    expect(collectionErrorExcerpt(mvn, "junit-maven")).toBe(mvn);
   });
 
   // DOCUMENTATION PIN (not a guard): records an accepted residual.
