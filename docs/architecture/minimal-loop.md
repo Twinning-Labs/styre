@@ -4,14 +4,14 @@
 > **needs-you inbox** and multi-ticket orchestration are the **commercial Control Plane**, fenced
 > below.
 
-> **Artifact for §9.4 checklist #5** of [`brainstorm.md`](brainstorm.md). Wires the pieces into the
-> first end-to-end `design → released` run on the new substrate: the concrete **`next_step_key`
-> state machine**, the **dispatch shell-out** to the kept leaves, the **budget numbers** (the
-> deferred loose ends), and the **needs-you inbox** (D3). **NOT the autonomy layer** — deterministic
-> routing only; supervisor/memory are post-cutover increments.
+> The concrete per-ticket routing spec: the **`next_step_key`** state machine (§1), what each
+> loopback **resets** (§2), the **dispatch** mechanism (§3), the **budget numbers as implemented**
+> (§4), and the (commercial) needs-you inbox (§5). This is **deterministic routing only** — no LLM
+> supervisor, no memory/RAG; those are explicitly out of scope.
 >
 > Builds on [`control-loop.md`](control-loop.md) (resolver shape §2.3, step catalog §4, atlas §8,
-> signals §7), [`projector.md`](projector.md), and [`schema.sql`](schema.sql). Status: draft 2026-06-19.
+> signals §7), [`projector.md`](projector.md), and [`schema.sql`](schema.sql). Mirrors
+> `src/daemon/resolver.ts`; keep them in sync.
 
 ---
 
@@ -23,51 +23,59 @@ inline: the resolver advances `ticket.stage`, the runner enqueues the projection
 (projector §2), writes an `event_log` transition row, and recurses.
 
 ```
-next_step_key(t):
+next_step_key(t):        # mirrors src/daemon/resolver.ts nextStepKey
   switch t.stage:
 
   'design':
-    if not done('design:dispatch'):                 return 'design:dispatch'
-    if t.work_units == ∅:                            return 'design:extract'
-    if completeness_failed:                          return 'design:dispatch'     # D2 (re-design)
-    if t.track == 'full' and not done('design:review'): return 'design:review'
+    if not done('provision'):                          return 'provision'         # runs FIRST (env fault before any spend)
+    if not done('design:dispatch'):                    return 'design:dispatch'
+    if t.work_units == ∅:                              return 'design:extract'
+    if t.track == null:                                return 'design:size'       # sets fast/full
+    if t.track == 'full' and not done('design:review'):return 'design:review'
+    if not done('checks:dispatch'):                    return 'checks:dispatch'   # author RED-first AC checks
+    if not done('checks:classify'):                    return 'checks:classify'
     advance('design' -> 'implement'); recurse
 
   'implement':
     u = next_actionable_unit(t)        # first 'pending' unit whose depends_on are all 'verified'
     if u:
-      if branch_behind_origin(t):                    return f'{u}:rebase'
-      if u.status == 'pending':                      return f'{u}:dispatch'
+      if u.status == 'pending':                        return f'implement:wu{u.seq}:dispatch'
       if u.status == 'verifying':
-        if not done('provision'):                     return 'provision'          # S2c, once per ticket
-        if not done(f'completeness:{u}'):             return f'completeness:{u}'  # S2d, once per unit
-        c = next_unrun_check(u)        # a check-type in u.verify_check_types with no pass/fail signal
-        if c:                                        return f'verify:{u}:{c}'
-        # all checks ran clean → the verify step marks u 'verified' on its success commit
+        if not done('provision'):                      return 'provision'         # once per ticket
+        if not done(f'completeness:wu{u.seq}'):        return f'completeness:wu{u.seq}'
+        c = next_unrun_check(u)        # check-type with no verdict at u's current sha
+        if c:                                          return f'verify:wu{u.seq}:{c}'   # ADVISORY
+        return mark-verified(u)        # any verdict (pass OR fail) at the sha satisfies; only 'error' re-arms
     if all_units_verified(t):
-      if not done('provision'):                       return 'provision'          # gates integration too
-      if not done('verify:integration'):             return 'verify:integration'
-      if t.needs_docs and not done('docs:revise'):   return 'docs:revise'
+      if gate_has_active_ac_checks(t) and gate not passed at branch HEAD:
+        if behavioral_still_red(HEAD) and not blamed(HEAD): return 'checks:arbitrate'
+        if blamed(HEAD) and not done('checks:reauthor'):    return 'checks:reauthor'
+        if blamed(HEAD) and done('verify:checks-gate'):     escalate   # stuck HEAD, no further movement
+        if not done('provision'):                           return 'provision'
+        return 'verify:checks-gate'                                    # re-run the behavioral AC gate
+      if integration not ran at branch HEAD:
+        if not done('provision'):                      return 'provision'
+        return 'verify:integration'                                    # ADVISORY (ran-at-sha)
+      if t.needs_docs and not done('docs:revise'):     return 'docs:revise'
       advance('implement' -> 'review'); recurse
-    # else: no actionable unit and not all verified → a unit is failed/blocked → §8 owns it
+    else: blocked            # no actionable unit and not all verified → §8 owns it
 
   'review':
-    if not done('review'):                           return 'review'
+    if not done('review'):                             return 'review'
     advance('review' -> 'merge'); recurse
 
   'merge':
-    if not done('merge:push'):                       return 'merge:push'
-    if not done('merge:pr-ensure'):                  return 'merge:pr-ensure'
-    # checks are reported, not gated (2026-07-18): merge:pr-ensure's success delivers the parked
-    # human_merge_approval wait; a best-effort t+0 CI read + `ci_handoff` telemetry event fire on
-    # this same path and `styre run` exits PR-ready — there is no 'merge:await-checks' branch, no
-    # `external_checks` signal, and nothing here ever loops back on CI (control-loop.md §4 S8).
-    if not delivered('human_merge_approval'):        return 'merge:await-human'
-    advance('merge' -> 'released'); recurse
+    if not done('merge:push'):                         return 'merge:push'
+    if not done('merge:pr-ensure'):                    return 'merge:pr-ensure'
+    # CI is reported, not gated (2026-07-18): merge:pr-ensure fires a best-effort t+0 CI read +
+    # `ci_handoff` telemetry, then OSS `styre run` exits PR-ready. There is no merge:await-checks
+    # branch, no `external_checks` signal, and nothing loops back on CI.
+    if not delivered('human_merge_approval'):          return WAIT(human_merge_approval)   # OSS run exits here
+    advance('merge' -> 'released'); recurse            # human merge + released = commercial plane
 
   'released':
-    if not done('released:project'):                 return 'released:project'
-    t.status = 'done';                               return DONE
+    if not done('released:project'):                   return 'released:project'
+    return DONE
 ```
 
 `done(key)` = a `workflow_step` row with `status='succeeded'`. The resolver never re-runs a succeeded
@@ -95,23 +103,47 @@ a non-empty own-diff → `completed-by-self` (advance). Over-delivery (`ownTouch
 advisory — emitted as `scope_diff`, an input to review, never a gate. This step is **recomputable**
 (like `provision`): no exactly-once effect, safe to re-run on replay.
 
+**The AC checks-gate is the real ship-gate of the implement stage.** The per-unit `verify:{u}:{c}`
+build/test checks are **advisory** — a recorded verdict (pass *or* fail) at the unit's current sha
+marks it `verified` and lets routing proceed; only a could-not-run `error` re-arms the check. What
+actually blocks the ticket is the behavioral acceptance-criterion gate authored back in the design
+stage: `checks:dispatch` derives acceptance criteria and writes RED-first `ac_check` tests (the
+author is plan-blind — it sees only the AC text), and `checks:classify` triages the red-first traces.
+Once all units are verified, if the ticket has active `ac_check`s and the gate has not passed at the
+branch HEAD, the loop runs `verify:checks-gate` (integrity + a re-run of the AC checks). A still-red
+gate is not simply a loopback — a red check is ambiguous, so `checks:arbitrate` assigns two-way
+blame: `code-wrong` loops back to re-implement the blamed unit(s); `check-wrong` loops to
+`checks:reauthor`, which rewrites the check. The gate is round-capped (`GATE_ROUND_CAP = 3`); a
+pure-code-wrong round that commits nothing new leaves HEAD frozen and escalates as *stuck* rather
+than spinning to the tick cap. Only after the gate passes does the (advisory) `verify:integration`
+run, then the optional `docs:revise`, and the ticket advances to `review`.
+
 ## 2. Loopback effects — what a route *resets* (so §1 re-picks it)
 
 The atlas (control-loop §8) says *where* a failure routes; the loop must set the state that makes
 `next_step_key` go there. Per route:
 
-| Route | Runner resets | `event_log` |
-|---|---|---|
-| → implement, unit-scope (I3/I4/I5, V1) | the named unit(s) → `status='pending'`; `stage='implement'` | `loopback{loop, route_to, signature}` |
-| → implement, under-delivered (CM1) | the unit → `status='pending'`; all its steps reset to `pending` (so previously-passed checks re-run against the new commit) | `loopback{loop='implement', route_to, signature}` |
-| → implement, ticket-scope (N1, P1) | spawn a ticket-scoped reconcile unit (kind=`reconcile`); `stage='implement'` | `loopback` |
-| → design / pivot (D2/D3, DV1, V3) | clear `work_units`; reset the design steps; `stage='design'` | `loopback{loop='plan'}` |
-| retry (I1, I6, V4, P2, C1) | the step → `status='pending'`, `attempt+=1` (no state rewind) | — (retry, not loopback) |
-| escalate (any exhaustion, R3/R4, V-def, X1/X2) | `t.status='waiting'`; raise a `human_resume` signal | `escalated{reason}` |
-| escalate, provision (E1) | same as above, but **immediate on first failure** — no attempt-count exhaustion, and never a unit/ticket/plan reset (an env error can't be fixed by re-implementing) | `escalated{reason}` |
+The `event_log.loop` value is one of `implement`, `design`, `integration`, `checks`, `reauthor`
+(there is no `plan` or `rebase` loop value in code). `resetToPending` does **not** touch `attempt`
+(it increments at `markRunning`); several paths deliberately *zero* the attempt.
 
-Only **distinct** loopbacks (signature changed) bump the per-loop counter (§3); a retry of the same
-signature trips the consecutive-identical cap faster (control-loop §8.2).
+| Route | Runner resets | `event_log.loop` |
+|---|---|---|
+| verify/completeness fail, unit-scope | the unit → `pending` **and all its steps** → `pending` (previously-passed checks re-run at the new commit) | `implement` |
+| integration throw | insert a `kind='reconcile'` unit depending on all others; reset the integration step, `verify:checks-gate` (attempt zeroed), `checks:arbitrate`, `checks:reauthor` | `integration` |
+| code-review blocking finding (non-plan-defect) | blamed unit(s) (or all, if a finding has no unit) + their steps; the `review` step; the ticket verify/gate steps (gate attempt zeroed); `stage='implement'` | `implement` |
+| plan-review blocking, or code-review `plan-defect` with `onPlanDefect='redesign'` | **delete all work_units**; reset+zero `design:dispatch`/`design:extract`/`design:review`/`review`; reset ticket verify steps; `stage='design'` | `design` |
+| `checks:classify` leaves unresolved checks | supersede flagged `ac_check`s; reset `checks:dispatch` + `checks:classify`; **no stage flip** | `checks` |
+| AC gate integrity-only still-red | all units → `pending` + their steps; the gate/arbiter/reauthor steps → `pending` (gate **attempt preserved** — it is the round counter) | `implement` |
+| arbiter `check-wrong` | reset `checks:reauthor` + `checks:arbitrate` | `reauthor` |
+| arbiter/reauthor `code-wrong` (or rejected) | gate-origin reset (units → pending) | `implement` |
+| reauthor pure `check-wrong`, all installed | reset `verify:checks-gate` + `checks:arbitrate` only (units stay verified) | `checks` |
+| escalate (attempt exhaustion, stuck gate, unresolved review) | `t.status='waiting'`; raise a `human_resume` signal | `escalated{reason}` |
+| escalate, provision | **immediate on first failure** — no attempt exhaustion, no unit/ticket/plan reset (an env fault can't be fixed by re-implementing) | `escalated{reason}` |
+
+A retry (no state rewind) — a could-not-run verify `error`, a completeness with no `fail` signal, or
+the catch-all `resetToPending` — re-runs the same step; a repeated *identical* failure signature vs
+the immediately-previous one escalates fast (the consecutive-identical guard, §4).
 
 **CM1's loopback assumes no vacuous unit ever reaches implement:** `design:extract` (S1b) requires
 every planned unit to declare ≥1 `files_to_touch`, so `completeness` never has to bounce a unit that
@@ -122,17 +154,19 @@ re-dispatches, still bounded, just not by a single cap. The semantic **AC-comple
 dropped acceptance criterion, or a file declared by multiple units where the real work landed on none
 of them — is **out of scope for CM1**; it is a deferred follow-up folded into S5 review.
 
-## 3. Dispatch shell-out — keeping the leaves (§9.1)
+## 3. Dispatch — the agent step
 
-> **Provider-agnostic (2026-06-21):** the `claude -p` invocation below is the *default Claude
-> adapter*, not a core assumption. The agent runs behind a generic `AgentRunner` selected from
-> config; see `docs/brainstorms/2026-06-21-provider-agnostic-agent-design.md`.
+> **Provider-agnostic:** the agent runs behind a generic `AgentRunner` selected from config (the
+> default is the Claude adapter; Codex is also registered). Model ids are per-tier config, not core
+> assumptions.
 
-The runner owns control; the agent *work* runs through the kept bash leaves. For an agent step the
-runner: resolves model (F1) + the step's tool allowlist (§4 catalog) + timeout (§4 below), renders
-the prompt (`render-prompt.sh` + project-profile), invokes `dispatch.sh` (`claude -p --allowed-tools
-… --model …` under `gtimeout`), **journals the spawned pid** (recover() orphan-kill), awaits, and
-writes the result into SQLite (B2 — the worker never writes the DB).
+The dispatch leaves were **ported into native TypeScript** — there is no shell-out to bash scripts
+(`render-prompt.sh` / `dispatch.sh` / `gtimeout` are gone; the logic lives in
+`src/dispatch/run-dispatch.ts` + `src/agent/runner.ts`). For an agent step the runner resolves the
+model (via the step's tier), the step's tool allowlist (§4 catalog), and the timeout (§4), renders
+the prompt from the compiled template + project profile (`render-prompt.ts`), spawns the agent CLI
+with a scrubbed environment, **journals the spawned pid** (`recover()` orphan-kill), awaits, and
+writes the result into SQLite (the worker never writes the DB).
 
 **Two dispatch modes:**
 - **Worktree agent (CLI leaf).** Steps that read/write the worktree — `design:dispatch` (plan doc),
@@ -145,24 +179,29 @@ writes the result into SQLite (B2 — the worker never writes the DB).
   optimization) is **increment I-A** (§9.5: orchestrator-owns-artifact-envelope), which moves these
   steps to the forced-schema API. *Disambiguation now; cheaper self-correction at I-A.*
 
-## 4. Budget numbers (the deferred loose ends, pinned)
+## 4. Budget numbers (as implemented)
 
-All operator-tunable in `config.json`; these are the cutover defaults.
+The caps and timeouts actually enforced today, with their source constants. This table was once a
+set of design targets; it is now reconciled to code.
 
-| Knob | Default | Notes |
-|---|---|---|
-| `K_DISTINCT` (distinct corrective attempts / loop) | **3** | per-loop counter; resets on the loop passing |
-| consecutive-identical cap | **2** | same failure signature back-to-back → escalate fast |
-| `B2` escalation budget | **3 consecutive / 20 total** | per ticket-life; the cross-loop thrash catcher |
-| `B3` spend ceiling (P3) | **3× rolling-median clean-ticket $** | auto-calibrated per project; bootstrap floor **$25** until ≥N clean tickets exist |
-| `B3` wall-clock ceiling (P3) | **3× median clean-ticket wall-clock** | bootstrap floor **4h** |
-| per-stage dispatch timeout | design/review **60m**, others **30m** | ports ENG-65; under `gtimeout` |
-| `OUTBOX_RETRY_BUDGET` | **~10 attempts / ~30m backoff** | then escalate X1 (service down) |
-| `CI_READ_TIMEOUT_MS` | **8s** | bounds the one-shot t+0 checks read at merge (§1 above); never a poll cadence — nothing in OSS polls |
-| `K` concurrency | **2** | `CLAUDE_MAX_CONCURRENT` → `orchestrator.max_concurrent_features` → 2 *(commercial Control Plane)* |
+| Knob | Value | Source | Notes |
+|---|---|---|---|
+| per-step attempt cap | **3** | `DEFAULT_MAX_ATTEMPTS`, failure-policy.ts | `attempt >= 3` on a step row → escalate. The primary budget. |
+| consecutive-identical guard | **2** | failure-policy.ts | the same failure signature vs the immediately-previous loopback → escalate fast. |
+| provision failure | **immediate** | failure-policy.ts | any `provision`/env failure escalates on the first occurrence (no attempt exhaustion). |
+| AC-gate round cap | **3** | `GATE_ROUND_CAP`, arbiter-verdict.ts | keyed to `verify:checks-gate.attempt`; also caps re-author rounds. |
+| re-author cap per AC | **2** | `REAUTHOR_ESCALATE_CAP`, checks-verdict.ts | an AC still flagged after 2 re-authors → no-progress escalation. |
+| dispatch timeouts | design/review **60m**, default **30m**, verify **10m**, provision **15m** | handlers.ts | per step-type. |
+| `OUTBOX_RETRY_BUDGET` | **5** | projector.ts | retried on the **next drain** (no backoff), then escalate (service down). |
+| `CI_READ_TIMEOUT_MS` | **8s** | run-ticket.ts | bounds the one-shot t+0 checks read at merge; never a poll cadence — nothing in OSS polls. |
+| `MAX_TRANSITIONS` | **100** | advance.ts | pure transitions per `advanceOneStep`. |
+| per-ticket tick cap / idle cap | **200** / **3** | run-ticket.ts | overall iteration budget; 3 consecutive zero-advance ticks → `no-progress`. |
+| `K` concurrency | **2** | `DEFAULT_MAX_CONCURRENT`, loop.ts | the multi-ticket cap — *commercial Control Plane*; OSS `styre run` is single-ticket. |
 
-Spend/wall-clock per ticket are **derived**: `SUM(dispatch.cost_usd)` and `now − ticket.created_at`
-(or summed dispatch durations). The median is a rolling window over `done` tickets per project.
+**Not implemented (deferred, despite earlier design notes):** the per-loop `K_DISTINCT` distinct-
+attempt counter, the `B2` cross-loop escalation budget (3-consecutive / 20-total), and the `B3`
+spend / wall-clock ceilings. No code reads `dispatch.cost_usd` for control. Do not describe these as
+live behavior.
 
 ## 5. The needs-you inbox (D3)
 
@@ -181,37 +220,34 @@ The actionable surface for escalations — **SQLite-backed, not Linear** (Linear
 - **Surface:** `styre inbox` / `styre status` (reads SQLite; renders **local tz**, DS-1). Each
   entry shows the reason, the failure history (the loopback signatures, the ground-truth signals,
   the failed dispatch), and the available actions.
-- **Notify:** Slack on each new escalation (the kept `slack.sh` leaf).
+- **Notify:** the *outbound* Slack notifier ships in the OSS core (a `NotifierPort` drained through
+  `projection_outbox`, configured via `notifier`/`notify`/`slack`); the persistent *inbox* around it
+  is commercial.
 - **Actions (CLI, deliver the `human_resume` signal):**
   - `styre resume <ticket>` — re-enter the parked step; reset per-loop + B2 counters; fresh B3 allowance.
   - `styre resume <ticket> --after-fix` — operator edited plan/code/config by hand; the runner
     picks up the changed worktree/SoT state.
   - `styre abandon <ticket>` — terminal (`status='abandoned'`; projector → Canceled).
 
-## 6. End-to-end — the cutover acceptance run
+## 6. End-to-end — a clean run
 
-> **[Commercial Control Plane — partial]** The flip criterion referencing **launchd** (repointing the
-> host service) and the persistent daemon supervision apply to the commercial plane. The acceptance
-> run itself — watching one full ticket `design → released` — is valid for the OSS `styre run` as
-> a one-shot headless run.
-
-The flip criterion (§9.4): repoint launchd → **watch one full ticket `design → released` on the new
-loop** → if green, decommission the old write paths. A clean fast-track backend ticket exercises the
-whole spine:
+A clean fast-track backend ticket exercises the whole spine:
 
 ```
-design:dispatch(Opus,plan) → design:extract(Haiku,work_units)            # fast-track: skip design:review
- → implement:wu1:rebase(runner) → implement:wu1:dispatch(Sonnet,code+tests; runner commits)
- → provision(runner,installs each component's prepare; once per ticket, gates verify)
+provision(runner; installs each component's prepare — runs FIRST)
+ → design:dispatch(deep,plan) → design:extract(cheap,work_units) → design:size(cheap → fast track)
+ → checks:dispatch(standard; author RED-first AC checks) → checks:classify(standard)   # fast track: skip design:review
+ → implement:wu1:dispatch(standard,code+tests; runner commits)
  → completeness:wu1(runner,plan-vs-diff reconciliation; once per unit)
- → verify:wu1:build,test(runner,ground-truth) → verify:integration(runner)
- → review(Opus,findings via interface → 0 blocking) → merge:push
- → merge:pr-ensure(cheap-AI body; t+0 CI read → `ci_handoff` — OSS `styre run` exits PR-ready here)
- → merge:await-human(operator merges) → released:project(→ Done)   # commercial Control Plane
+ → verify:wu1:build,test(runner,ground-truth; ADVISORY) → mark wu1 verified
+ → verify:checks-gate(runner; behavioral AC checks green at HEAD)     # the real gate; arbiter/reauthor on red
+ → verify:integration(runner; ADVISORY)
+ → review(deep,findings via interface → 0 blocking) → merge:push
+ → merge:pr-ensure(cheap body; t+0 CI read → `ci_handoff` — OSS `styre run` exits PR-ready here)
+ → [commercial plane] human merge → released:project(→ Done)
 ```
-…with every step journaled (`workflow_step`), every transition mirrored (`event_log` + projector →
-Linear), and a crash at any point resuming from the journal. Green = flip; misbehaves in week 1 =
-flip back (§9.4 #7).
+…with every step journaled (`workflow_step`), every transition mirrored (`event_log` + the
+projector), and a crash at any point resuming from the journal.
 
 ## 7. Scope — what's deliberately minimal
 
@@ -219,21 +255,9 @@ flip back (§9.4 #7).
   supervisor, no memory/RAG, no learned deferral — those are post-cutover (§9.5 I-C/I-D).
 - **The KEEP↻ gates** are the four irreducible ground-truth gates (builds / tests / diff-⊆-scope via
   the reviewer / independent reviewer) looping with feedback — nothing more.
-- **Human gates wired = MERGE only** (`human_merge_approval`) + escalations (`human_resume`). The
-  schema also defines `human_plan_approval` (the *optional large-ticket plan-approval* gate, D1 /
-  control-loop §7) — **defined but not wired at cutover**; the minimal loop's design phase ends at
-  the agent plan-review (S1c), and human plan-approval is added later for large tickets if wanted.
-- **Increments after the flip** (§9.5): I-A forced-schema structured steps · I-B ground-truth
-  deepening · I-C the UGL · I-D supervisor + memory on the clean trace.
-
-## 8. Mapping to §9.4 #5
-
-- ✅ **drives the deterministic state machine** — `next_step_key` (§1) + loopback resets (§2),
-  the new C1 machine `design → implement[units] → verify → review → merge → released`.
-- ✅ **+ the Deliverable-1 KEEP↻ gates** — §7.
-- ✅ **shells out to `dispatch.sh`** for the agent step — §3, keeping the knowledge-dense leaves.
-- ✅ **NOT the autonomy layer** — §7 scope boundary.
-
-**This completes the substrate spec** (§9.4 #1 schema, #2 control-loop, #3 dropped, #4 projector,
-#5 this). Remaining before a flip are operational, not design: #6 track-1 fixes (can ship on the old
-substrate first), #7 the rollback path, and building + verifying the above in the downtime window.
+- **Human gates wired = MERGE only** (`human_merge_approval`, the point OSS `styre run` exits) +
+  escalations (`human_resume`). The schema comment also names `human_plan_approval` (an optional
+  large-ticket plan-approval gate) — **defined but not wired**: no code inserts or awaits it; the
+  design phase ends at the agent plan-review (`design:review`).
+- **Post-cutover increments** (out of scope here): forced-schema structured steps, ground-truth
+  deepening, the Unified Gate Layer, and a supervisor + memory on the clean trace.

@@ -61,7 +61,7 @@ to `implement` with the error in hand and retries against [ground truth](glossar
 red, the loop hands the failing test names to the agent and tries again. The default response to
 any correctable failure is "absorb and loop," bounded by a per-step attempt cap (3) plus a
 consecutive-identical-failure guard and per-gate round caps — the concrete numbers are in
-[minimal-loop.md §4](minimal-loop.md#4-budget-numbers).
+[minimal-loop.md §4](minimal-loop.md#4-budget-numbers-as-implemented).
 
 **Human gates are narrow by design.** The only wired human gate is MERGE approval: `styre run`
 exits at PR-ready and the operator reviews the pull request and merges it personally. The second
