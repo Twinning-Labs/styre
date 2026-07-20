@@ -102,7 +102,22 @@ styre migrate
 
 A fourth command, `styre notify --test`, sends a one-off test notification through the configured notifier (Slack) to verify your setup — a diagnostic, not part of the run loop.
 
-`styre run` exits `0` when a PR is open. On a session-limit or out-of-credits interrupt it exits `75` (`EX_TEMPFAIL`) and parks state under `$XDG_STATE_HOME/styre/` (default `~/.local/state/styre/`); resume with `styre run --resume <TICKET-ID>`. Other exit codes: `65` (resume refused — branch HEAD moved), `69` (`EX_TOOLCHAIN_MISSING` — a required repo toolchain program is absent), `2` (`notify` misuse), `1` (any other error). The full flag, exit-code, and environment-variable surface is documented in [`docs/architecture/runtime-parameters.md`](docs/architecture/runtime-parameters.md).
+The full flag and environment-variable surface is documented in [`docs/architecture/runtime-parameters.md`](docs/architecture/runtime-parameters.md).
+
+### Exit codes
+
+The process exit code is the machine-readable error code (codes above `2` follow `sysexits.h`):
+
+| Code | Meaning | Retryable? |
+|---|---|---|
+| `0` | success — for `run`, a PR is open and ready | — |
+| `1` | generic error (any uncaught throw; also an escalation the loop can't resolve) | no — fix the cause |
+| `2` | usage / notifier-config (`styre notify` without `--test`) | no |
+| `65` | resume refused — the branch HEAD moved since the run parked | yes — `--accept-head` or `--inspect` |
+| `69` | a required repo toolchain program isn't installed on this machine | yes — install it, re-run |
+| `75` | parked — session limit / out of credits; state dumped, no attempt consumed | yes — `styre run --resume <ticket>` |
+
+Full meanings, `sysexits` names, and caller guidance: [runtime-parameters.md → Exit codes](docs/architecture/runtime-parameters.md#exit-codes-error-codes-and-their-meaning).
 
 ---
 
@@ -131,6 +146,43 @@ independent — passing only `--profile` still discovers the runtime config from
 a CI/fleet caller that wants full hermeticity must pass **both** `--profile` and `--config`. A custom
 `styre setup --slug <name>` stores under that slug — pass `--slug <name>` (or `--profile`) to
 `styre run` for such a project.
+
+---
+
+## Configuration
+
+Runtime policy lives in `config.json` (operator settings) — separate from `profile.json` (the probed project shape). Precedence: `--config <path>` is **hermetic** (sole source), otherwise per-project `config.json` shallow-overrides the global one, then binary defaults fill the rest. There is **no** per-ticket config layer in the OSS core.
+
+The main knobs:
+
+| Key | Default | What it does |
+|---|---|---|
+| `issueTracker` | `linear` | tracker adapter — `linear` or `jira` |
+| `forge` | `github` | code-host adapter (GitHub only today) |
+| `agent` | Claude preset | provider + per-tier models (`deep`/`standard`/`cheap`) |
+| `notifier` / `notify` | `none` / `escalations` | Slack notifications and their verbosity |
+| `onPlanDefect` | `escalate` | on a plan-level review defect: `escalate` or `redesign` |
+| `telemetry` | `true` | anonymous PostHog analytics (also opt out via env) |
+
+Every `config.json` and `profile.json` key, with the exact precedence rules, is in [`docs/architecture/configuration.md`](docs/architecture/configuration.md).
+
+---
+
+## Files & paths
+
+Styre follows the XDG Base Directory spec (macOS and Linux alike) and honors `XDG_CONFIG_HOME` and `XDG_STATE_HOME`:
+
+- `$XDG_CONFIG_HOME/styre/` (default `~/.config/styre/`) — `config.json` and per-project `profile.json`.
+- `$XDG_STATE_HOME/styre/` (default `~/.local/state/styre/`) — the SQLite DB, the telemetry id, and park dumps (`<slug>/<ticket-ident>/`).
+- Per-run worktrees and scratch live under the OS temp dir and are cleaned up; the agent's worktree is its only writable surface.
+
+The full path layout, the `.styre-disposable` marker, `AGENTS.md` ingestion, and the `styre_scratch/` drawer are in [`docs/architecture/conventions.md`](docs/architecture/conventions.md).
+
+---
+
+## Prompts
+
+The agent instructions for every step are editable Markdown templates in [`prompts/`](prompts/), compiled into the binary. They are the highest-leverage behavioral surface in the repo — see [`docs/architecture/prompts.md`](docs/architecture/prompts.md) for the catalog (which template drives which step, and on which model tier).
 
 ---
 
