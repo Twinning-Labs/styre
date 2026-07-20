@@ -8,8 +8,6 @@ The free, open-source execution core that drives a structured ticket `design →
 
 ---
 
-<!-- demo cast injected by Task 9: docs/assets/demo.svg -->
-
 ```
   Linear ticket
        │
@@ -55,14 +53,14 @@ When the run completes, a PR is open and ready. You merge it.
 ## Is this for you?
 
 **For you if:**
-- You work out of Linear and GitHub.
+- You track work in Linear or Jira and host code on GitHub.
 - You want a ticket executor that runs locally, under your own API key, with no cloud dependency.
 - You are comfortable owning the merge decision — Styre opens the PR, you land it.
 - You want the execution logic as auditable, forkable open-source code.
 
 **Not for you if:**
 - You want a hosted, zero-setup product. That is the commercial Control Plane — continuous pickup, scheduling, an inbox, and a dashboard — built on top of this core.
-- Your team uses Jira, GitLab, or another ticket/VCS system. Styre is Linear + GitHub only.
+- Your code lives on GitLab, Bitbucket, or another code host. The forge is GitHub only (the issue tracker is pluggable — Linear and Jira ship today; the forge is not yet).
 - You expect auto-merge. The operator merges every PR personally; Styre will never push directly to your main branch.
 
 ---
@@ -87,10 +85,11 @@ See [`docs/architecture/execution-model.md`](docs/architecture/execution-model.m
 
 ## Commands
 
-The OSS surface has three commands:
+The three commands you use day to day:
 
 ```sh
-styre setup <repo>    # Probe the repo and write its Styre profile (profile.json) — the project-shape artifact runs use
+# Probe the repo and write its Styre profile (profile.json) — the project-shape artifact runs use
+styre setup <repo>
 
 # Run one ticket end-to-end, exit when a PR is ready
 styre run <TICKET-ID>
@@ -99,7 +98,9 @@ styre run <TICKET-ID>
 styre migrate
 ```
 
-`styre run` exits `0` when a PR is open. On a session-limit or out-of-credits interrupt it exits `75` (EX_TEMPFAIL) and parks state to `~/.local/state/styre/`; resume with `styre run --resume <TICKET-ID>`.
+A fourth command, `styre notify --test`, sends a one-off test notification through the configured notifier (Slack) to verify your setup — a diagnostic, not part of the run loop.
+
+`styre run` exits `0` when a PR is open. On a session-limit or out-of-credits interrupt it exits `75` (`EX_TEMPFAIL`) and parks state under `$XDG_STATE_HOME/styre/` (default `~/.local/state/styre/`); resume with `styre run --resume <TICKET-ID>`. Other exit codes: `65` (resume refused — branch HEAD moved), `69` (`EX_TOOLCHAIN_MISSING` — a required repo toolchain program is absent), `2` (`notify` misuse), `1` (any other error). The full flag, exit-code, and environment-variable surface is documented in [`docs/architecture/runtime-parameters.md`](docs/architecture/runtime-parameters.md).
 
 ---
 
@@ -147,10 +148,14 @@ Upgrade with `brew upgrade styre`; remove with `brew uninstall styre` (and `brew
 
 - [Architecture index](docs/architecture/README.md) — start here for the full substrate overview
 - [Execution model](docs/architecture/execution-model.md) — step catalog, state machine, loopback atlas
+- [Runtime parameters](docs/architecture/runtime-parameters.md) — every command, flag, exit code, and environment variable
+- [Configuration](docs/architecture/configuration.md) — every `config.json` and `profile.json` key, and how they resolve
+- [Conventions](docs/architecture/conventions.md) — XDG paths, temp/worktree layout, and the on-disk files Styre reads and writes
+- [Prompts](docs/architecture/prompts.md) — the agent prompt templates compiled into the binary
 - [Ticket template](docs/architecture/ticket-template.md) — how to write a ticket styre can actually deliver
 - [Security policy](SECURITY.md) — capability model, threat surface, reporting vulnerabilities
 - [Contributing](CONTRIBUTING.md) — how to contribute, branch conventions, PR process
-- [Plans](docs/plans/) — milestone implementation plans
+- [Plans](docs/plans/) — milestone implementation plans (append-only history)
 
 ---
 
