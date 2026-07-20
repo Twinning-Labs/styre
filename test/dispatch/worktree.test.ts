@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,6 +12,7 @@ import {
   fileContentAt,
   pendingChanges,
   pendingEntries,
+  readDiscardedSources,
   removeWorktree,
   stagedIndexEmpty,
   sweepScratch,
@@ -309,6 +310,40 @@ test("discardPaths is a no-op on empty input and never throws on a missing path"
   const dir = repo();
   expect(() => discardPaths(dir, [])).not.toThrow();
   expect(() => discardPaths(dir, ["does/not/exist.py"])).not.toThrow();
+});
+
+test("readDiscardedSources reads sources, skips oversized and missing paths, never throws", () => {
+  const root = mkdtempSync(join(tmpdir(), "styre-rds-"));
+  writeFileSync(join(root, "small.go"), "package a\n\nfunc Help() int { return 1 }\n");
+  writeFileSync(join(root, "big.go"), "x".repeat(256 * 1024 + 1));
+  const out = readDiscardedSources(root, ["small.go", "big.go", "absent.go"]);
+  expect([...out.keys()]).toEqual(["small.go"]);
+  expect(out.get("small.go")).toContain("func Help()");
+  expect(readDiscardedSources(root, []).size).toBe(0);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("readDiscardedSources stops at the total budget", () => {
+  const root = mkdtempSync(join(tmpdir(), "styre-rds-budget-"));
+  const paths: string[] = [];
+  for (let i = 0; i < 40; i++) {
+    const p = `f${i}.go`;
+    writeFileSync(join(root, p), "x".repeat(200 * 1024));
+    paths.push(p);
+  }
+  const out = readDiscardedSources(root, paths);
+  // 4 MB budget / 200 KB per file = 20 files kept, the rest skipped.
+  expect(out.size).toBe(20);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("readDiscardedSources skips symlinks rather than reading through them", () => {
+  const root = mkdtempSync(join(tmpdir(), "styre-rds-link-"));
+  writeFileSync(join(root, "target.txt"), "secret contents\n");
+  symlinkSync(join(root, "target.txt"), join(root, "link.go"));
+  const out = readDiscardedSources(root, ["link.go"]);
+  expect(out.size).toBe(0);
+  rmSync(root, { recursive: true, force: true });
 });
 
 // --- sweepScratch (Task 1) ----------------------------------------------------------------------

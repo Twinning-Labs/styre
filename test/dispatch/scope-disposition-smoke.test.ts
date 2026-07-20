@@ -94,6 +94,23 @@ const nodeProfile = (repo: string) =>
     components: [{ name: "web", kind: "node", paths: ["**"], commands: { test: "vitest run" } }],
   });
 
+const goProfile = (repo: string) =>
+  parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "svc", kind: "go", paths: ["**"], commands: { test: "go test ./..." } }],
+  });
+
+const rubyProfile = (repo: string) =>
+  parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    // `commands.test` MUST name rspec or minitest — frameworkFor returns null otherwise.
+    components: [
+      { name: "app", kind: "ruby", paths: ["**"], commands: { test: "bundle exec rspec" } },
+    ],
+  });
+
 type Cmd = (
   cmd: string,
   opts: { cwd: string; timeoutMs: number },
@@ -156,12 +173,16 @@ async function setupChecks(desc: string): Promise<ChecksHarness> {
 async function driveChecks(
   h: ChecksHarness,
   runner: FakeAgentRunner,
-  opts?: { runCheck?: Cmd; beforeChecks?: (wt: string) => void },
+  opts?: {
+    runCheck?: Cmd;
+    beforeChecks?: (wt: string) => void;
+    profile?: ReturnType<typeof parseProfile>;
+  },
 ) {
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: pythonProfile(h.repo),
+    profile: opts?.profile ?? pythonProfile(h.repo),
     worktreeRoot: h.worktreeRoot,
     runCheckCommand: opts?.runCheck ?? redRun,
   });
@@ -1322,4 +1343,201 @@ test("G5 reject feedback is a diagnosis: 'out-of-scope files', no delete/new_fil
   }
   expect(implMsg).not.toBe("");
   expect(planMsg).not.toBe("");
+});
+
+// --- A17 ⚔ (ENG-343: a discarded Go helper package → guard fires through the REAL dispatch path) ---
+// The canonical check imports package `example.com/m/helper`; the agent wrote helper/helper.go but did
+// NOT declare it → discarded → `go test` cannot resolve the package. Proves the guard is reached, the
+// file surfaced, AND the compiler's own line carried into the message, on a stack that is not Python.
+test("A17 ⚔ a discarded Go helper package → AC uncovered, file surfaced", async () => {
+  const h = await setupChecks("- [ ] one thing\n");
+  const runner = checksRunner(
+    h,
+    (cwd, acId, ident) => {
+      const dir = join(cwd, "checks");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `${ident}_ac${acId}_test.go`),
+        'package checks\n\nimport "example.com/m/helper"\n\nfunc TestX(t *testing.T) { _ = helper.X }\n',
+      );
+      const pkgDir = join(cwd, "helper");
+      mkdirSync(pkgDir, { recursive: true });
+      writeFileSync(join(pkgDir, "helper.go"), "package helper\n\nvar X = 1\n"); // undeclared → discarded
+    },
+    (acId, ident) =>
+      `\`\`\`styre-sidecar\n${JSON.stringify({
+        checksAuthored: [
+          { ac_id: acId, test_file: `checks/${ident}_ac${acId}_test.go`, test_name: "TestX" },
+        ],
+      })}\n\`\`\``,
+  );
+  const { outcome, step, wt, message } = await driveChecks(h, runner, {
+    profile: goProfile(h.repo),
+    // exit 1 with no "no tests to run" ⇒ interpretRunOutput → red ⇒ the guard runs.
+    runCheck: async () => ({
+      exitCode: 1,
+      stdout: "",
+      stderr: `checks/${h.ident}_ac1_test.go:3:8: no required module provides package example.com/m/helper; to add it:`,
+      timedOut: false,
+    }),
+  });
+  const checks = listAcChecks(h.db, h.ticketId);
+  h.db.close();
+  expect(["retry", "escalated"]).toContain(outcome.kind);
+  expect(step?.status).toBe("pending");
+  expect(existsSync(join(wt, "helper", "helper.go"))).toBe(false); // discarded
+  expect(headHas(wt, "checks/ENG-1_ac1_test.go")).toBe(false); // no poisoned check committed
+  expect(checks).toHaveLength(0);
+  expect(message).toMatch(/import or collection error/);
+  expect(message).toContain("helper/helper.go");
+  // The framework-aware excerpt (design 4.6) carried a real Go compiler line into the feedback.
+  expect(message).toContain("no required module provides package");
+});
+
+// --- A18 ⚔ (ENG-343 contrast for A17: a Go red that names a FEATURE package must stay covered) -----
+// The check legitimately fails first because the feature package is absent. An UNRELATED throwaway was
+// discarded. The guard must NOT fire: the AC stays covered and the RED is installed.
+test("A18 ⚔ a Go red naming a FEATURE package + an unrelated discarded file stays COVERED", async () => {
+  const h = await setupChecks("- [ ] one thing\n");
+  const runner = checksRunner(
+    h,
+    (cwd, acId, ident) => {
+      const dir = join(cwd, "checks");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `${ident}_ac${acId}_test.go`),
+        'package checks\n\nimport "example.com/m/newfeature"\n\nfunc TestX(t *testing.T) { _ = newfeature.X }\n',
+      );
+      const scratch = join(cwd, "scratch");
+      mkdirSync(scratch, { recursive: true });
+      writeFileSync(join(scratch, "scratch.go"), "package scratch\n"); // undeclared, unrelated
+    },
+    (acId, ident) =>
+      `\`\`\`styre-sidecar\n${JSON.stringify({
+        checksAuthored: [
+          { ac_id: acId, test_file: `checks/${ident}_ac${acId}_test.go`, test_name: "TestX" },
+        ],
+      })}\n\`\`\``,
+  );
+  const { outcome, step, wt } = await driveChecks(h, runner, {
+    profile: goProfile(h.repo),
+    runCheck: async () => ({
+      exitCode: 1,
+      stdout: "",
+      stderr: `checks/${h.ident}_ac1_test.go:3:8: no required module provides package example.com/m/newfeature; to add it:`,
+      timedOut: false,
+    }),
+  });
+  const checks = listAcChecks(h.db, h.ticketId);
+  h.db.close();
+  expect(outcome.kind).toBe("stepped"); // NOT rejected
+  expect(step?.status).toBe("succeeded");
+  expect(existsSync(join(wt, "scratch", "scratch.go"))).toBe(false); // still discarded
+  expect(committedAtHead(wt)).toContain("_ac1_test.go"); // the RED check IS committed
+  expect(checks).toHaveLength(1);
+  expect(checks[0]?.red_first_result).toBe("red");
+});
+
+// --- A19 (ENG-343 residual pin: rspec load errors never reach the guard) ------------------------
+// RSpec does NOT abort on a spec-file load error — it reports it and still prints `0 examples`,
+// exiting 1. interpretRunOutput's `case "rspec"` tests `\b0 examples` BEFORE the exit code, so the run
+// is bucketed `selected-none` and handlers.ts `continue`s the per-AC loop ABOVE the discard-poison
+// guard — the guard is never consulted.
+// This is SAFE (the AC still goes uncovered and discardNote still names the file) but the specific
+// "could not be collected" message is never produced.
+//
+// IF THIS TEST GOES RED: someone changed the rspec branch of interpretRunOutput so load errors now
+// bucket as `red`. That is an IMPROVEMENT, not a regression — update this cell and design section 6
+// to the new behaviour. Do NOT revert the interpretRunOutput change to get green.
+test("A19 an rspec load error is bucketed selected-none, bypassing the discard-poison guard", async () => {
+  const h = await setupChecks("- [ ] one thing\n");
+  const runner = checksRunner(
+    h,
+    (cwd, acId, ident) => {
+      const dir = join(cwd, "spec");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `${ident}_ac${acId}_test.rb`),
+        "require 'support/helper'\n\nRSpec.describe 'x' do\n  it 'works' do\n    expect(Helper.x).to be true\n  end\nend\n",
+      );
+      const sup = join(cwd, "spec", "support");
+      mkdirSync(sup, { recursive: true });
+      writeFileSync(join(sup, "helper.rb"), "module Helper; def self.x; true; end; end\n");
+    },
+    (acId, ident) =>
+      `\`\`\`styre-sidecar\n${JSON.stringify({
+        checksAuthored: [
+          { ac_id: acId, test_file: `spec/${ident}_ac${acId}_test.rb`, test_name: "works" },
+        ],
+      })}\n\`\`\``,
+  );
+  const { outcome, step, message } = await driveChecks(h, runner, {
+    profile: rubyProfile(h.repo),
+    // REAL rspec output for a load error — including the `0 examples` summary it always prints.
+    runCheck: async () => ({
+      exitCode: 1,
+      stdout:
+        "An error occurred while loading ./spec/ENG-1_ac1_test.rb.\n" +
+        "Failure/Error: require 'support/helper'\n\n" +
+        "LoadError:\n  cannot load such file -- support/helper\n\n" +
+        "0 examples, 0 failures, 1 error occurred outside of examples",
+      stderr: "",
+      timedOut: false,
+    }),
+  });
+  const checks = listAcChecks(h.db, h.ticketId);
+  h.db.close();
+  expect(["retry", "escalated"]).toContain(outcome.kind);
+  expect(step?.status).toBe("pending");
+  expect(checks).toHaveLength(0); // still safe: no poisoned check installed
+  expect(message).toMatch(/matched no test/); // the selected-none reason, NOT the guard's message
+  expect(message).not.toMatch(/import or collection error/); // the guard did not run
+  expect(message).toContain("spec/support/helper.rb"); // discardNote still names the file
+});
+
+// --- A20 ⚔ (ENG-343 design 4.5: a Go helper in the SAME package, tied by symbol evidence) --------
+// The compiler reports `undefined: Help` — it names the FUNCTION, never the file, which is already
+// deleted. No phrase can tie this. The guard implicates the discarded file because that file's
+// captured contents DEFINED `Help`. This cell is the only proof that the contents survive from
+// discardPaths' call site all the way to the guard.
+test("A20 ⚔ a discarded same-package Go helper is tied by the symbol it defined", async () => {
+  const h = await setupChecks("- [ ] one thing\n");
+  const runner = checksRunner(
+    h,
+    (cwd, acId, ident) => {
+      const dir = join(cwd, "checks");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `${ident}_ac${acId}_test.go`),
+        "package checks\n\nfunc TestX(t *testing.T) { _ = Help() }\n",
+      );
+      // Same package, undeclared → discarded. Its NAME never appears in the compiler output.
+      writeFileSync(join(dir, "helper.go"), "package checks\n\nfunc Help() int { return 1 }\n");
+    },
+    (acId, ident) =>
+      `\`\`\`styre-sidecar\n${JSON.stringify({
+        checksAuthored: [
+          { ac_id: acId, test_file: `checks/${ident}_ac${acId}_test.go`, test_name: "TestX" },
+        ],
+      })}\n\`\`\``,
+  );
+  const { outcome, step, wt, message } = await driveChecks(h, runner, {
+    profile: goProfile(h.repo),
+    runCheck: async () => ({
+      exitCode: 1,
+      stdout: "",
+      // Note: names the SYMBOL only. `helper.go` appears nowhere.
+      stderr: "checks/ENG-1_ac1_test.go:3:30: undefined: Help",
+      timedOut: false,
+    }),
+  });
+  const checks = listAcChecks(h.db, h.ticketId);
+  h.db.close();
+  expect(["retry", "escalated"]).toContain(outcome.kind);
+  expect(step?.status).toBe("pending");
+  expect(existsSync(join(wt, "checks", "helper.go"))).toBe(false); // discarded
+  expect(checks).toHaveLength(0); // no poisoned check installed
+  expect(message).toMatch(/import or collection error/);
+  expect(message).toContain("checks/helper.go"); // tied by evidence, not by name
+  expect(message).toContain("undefined: Help"); // the excerpt carried the compiler's own line
 });

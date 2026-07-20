@@ -17,6 +17,7 @@ import {
   discardPaths,
   ensureWorktree,
   pendingEntries,
+  readDiscardedSources,
   sweepScratch,
   undoAttempt,
   worktreeHead,
@@ -106,6 +107,7 @@ export async function runAgentDispatch(
   changed: boolean;
   output: string;
   discarded: string[];
+  discardedSources: Map<string, string>;
 }> {
   const rendered = renderPrompt(spec.template, spec.vars);
   if (!rendered.ok) {
@@ -200,6 +202,7 @@ export async function runAgentDispatch(
   let sha: string;
   let changed: boolean;
   let discarded: string[] = [];
+  let discardedSources = new Map<string, string>();
   if (spec.commitScope) {
     const inScope = spec.commitScope(result.stdout);
     const newPaths = judged.filter((e) => e.isNew).map((e) => e.path);
@@ -237,6 +240,7 @@ export async function runAgentDispatch(
     }
 
     if (disposition === "discard" && offendingNew.length > 0) {
+      discardedSources = readDiscardedSources(deps.worktreePath, offendingNew);
       discardPaths(deps.worktreePath, offendingNew);
       discarded = offendingNew;
       appendEvent(ctx.db, {
@@ -279,5 +283,5 @@ export async function runAgentDispatch(
     throw err;
   }
   completeDispatch(ctx.db, inserted.id, { outcome: "clean-success", ...completion });
-  return { dispatchId: did, sha, changed, output: result.stdout, discarded };
+  return { dispatchId: did, sha, changed, output: result.stdout, discarded, discardedSources };
 }

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { CHECK_RULES } from "../../src/dispatch/check-rules.ts";
 import { frameworkFor } from "../../src/dispatch/check-selector.ts";
 
 const comp = (kind: string, test?: string) => ({
@@ -283,32 +284,42 @@ import {
 describe("importErrorImplicatesDiscarded (discard-poison guard: conservative import-error → discarded-file matcher)", () => {
   test("fires on `No module named '<discarded-mod>'` (pytest exit-2 collection error)", () => {
     expect(
-      importErrorImplicatesDiscarded("ModuleNotFoundError: No module named 'helper'", [
-        "checks/helper.py",
-      ]),
+      importErrorImplicatesDiscarded(
+        "ModuleNotFoundError: No module named 'helper'",
+        ["checks/helper.py"],
+        "pytest",
+      ),
     ).toEqual(["checks/helper.py"]);
     // bare `No module named 'util'` with the discarded file at a nested path (basename → module leaf)
     expect(
-      importErrorImplicatesDiscarded("E   ModuleNotFoundError: No module named 'util'", [
-        "tests/support/util.py",
-      ]),
+      importErrorImplicatesDiscarded(
+        "E   ModuleNotFoundError: No module named 'util'",
+        ["tests/support/util.py"],
+        "pytest",
+      ),
     ).toEqual(["tests/support/util.py"]);
   });
 
   test("fires on a dotted python module whose LEAF is a discarded file", () => {
     expect(
-      importErrorImplicatesDiscarded("No module named 'pkg.helper'", ["pkg/helper.py"]),
+      importErrorImplicatesDiscarded("No module named 'pkg.helper'", ["pkg/helper.py"], "pytest"),
     ).toEqual(["pkg/helper.py"]);
   });
 
   test("fires on Node `Cannot find module './helper'` and on `cannot import name X from '<mod>'`", () => {
     expect(
-      importErrorImplicatesDiscarded("Error: Cannot find module './helper'", ["src/helper.js"]),
+      importErrorImplicatesDiscarded(
+        "Error: Cannot find module './helper'",
+        ["src/helper.js"],
+        "jest",
+      ),
     ).toEqual(["src/helper.js"]);
     expect(
-      importErrorImplicatesDiscarded("ImportError: cannot import name 'foo' from 'helper'", [
-        "helper.py",
-      ]),
+      importErrorImplicatesDiscarded(
+        "ImportError: cannot import name 'foo' from 'helper'",
+        ["helper.py"],
+        "pytest",
+      ),
     ).toEqual(["helper.py"]);
   });
 
@@ -316,9 +327,11 @@ describe("importErrorImplicatesDiscarded (discard-poison guard: conservative imp
     // true-negative core: the test legitimately fails because `newfeature` is absent; an UNRELATED
     // throwaway was discarded. The feature-absence red must remain a real, installable red.
     expect(
-      importErrorImplicatesDiscarded("ModuleNotFoundError: No module named 'newfeature'", [
-        "throwaway.py",
-      ]),
+      importErrorImplicatesDiscarded(
+        "ModuleNotFoundError: No module named 'newfeature'",
+        ["throwaway.py"],
+        "pytest",
+      ),
     ).toEqual([]);
   });
 
@@ -328,48 +341,60 @@ describe("importErrorImplicatesDiscarded (discard-poison guard: conservative imp
       importErrorImplicatesDiscarded(
         "1 failed, 3 passed\nassert result == expected  # test the widget\nFAILED test_widget.py::test_x",
         ["test.py"],
+        "pytest",
       ),
     ).toEqual([]);
     // a genuine assertion-failure red (exit 1) that mentions the discarded basename in prose but has
     // no import/module error at all.
     expect(
-      importErrorImplicatesDiscarded("AssertionError: helper returned False", ["helper.py"]),
+      importErrorImplicatesDiscarded(
+        "AssertionError: helper returned False",
+        ["helper.py"],
+        "pytest",
+      ),
     ).toEqual([]);
   });
 
   test("no discarded files, or empty output → never fires", () => {
-    expect(importErrorImplicatesDiscarded("No module named 'helper'", [])).toEqual([]);
-    expect(importErrorImplicatesDiscarded("", ["helper.py"])).toEqual([]);
+    expect(importErrorImplicatesDiscarded("No module named 'helper'", [], "pytest")).toEqual([]);
+    expect(importErrorImplicatesDiscarded("", ["helper.py"], "pytest")).toEqual([]);
   });
 
   test("returns only the implicated subset when several files were discarded", () => {
     expect(
-      importErrorImplicatesDiscarded("ModuleNotFoundError: No module named 'helper'", [
-        "helper.py",
-        "unrelated_scratch.py",
-      ]),
+      importErrorImplicatesDiscarded(
+        "ModuleNotFoundError: No module named 'helper'",
+        ["helper.py", "unrelated_scratch.py"],
+        "pytest",
+      ),
     ).toEqual(["helper.py"]);
   });
 
   // --- package-init (__init__.py) shape matching ---
   test("implicates a discarded __init__.py when the missing module IS its package (shallow)", () => {
     const out = "E   ModuleNotFoundError: No module named 'pkg'";
-    expect(importErrorImplicatesDiscarded(out, ["pkg/__init__.py"])).toEqual(["pkg/__init__.py"]);
+    expect(importErrorImplicatesDiscarded(out, ["pkg/__init__.py"], "pytest")).toEqual([
+      "pkg/__init__.py",
+    ]);
   });
 
   test("implicates a discarded nested __init__.py by its full dotted package", () => {
     const out = "ModuleNotFoundError: No module named 'a.b'";
-    expect(importErrorImplicatesDiscarded(out, ["a/b/__init__.py"])).toEqual(["a/b/__init__.py"]);
+    expect(importErrorImplicatesDiscarded(out, ["a/b/__init__.py"], "pytest")).toEqual([
+      "a/b/__init__.py",
+    ]);
   });
 
   test("implicates a discarded __init__.py when a SUBMODULE of its package is imported", () => {
     const out = "ModuleNotFoundError: No module named 'pkg.sub'";
-    expect(importErrorImplicatesDiscarded(out, ["pkg/__init__.py"])).toEqual(["pkg/__init__.py"]);
+    expect(importErrorImplicatesDiscarded(out, ["pkg/__init__.py"], "pytest")).toEqual([
+      "pkg/__init__.py",
+    ]);
   });
 
   test("implicates a discarded __init__.py under a src/ prefix via a >=2-seg suffix", () => {
     const out = "ModuleNotFoundError: No module named 'mypkg.sub'";
-    expect(importErrorImplicatesDiscarded(out, ["src/mypkg/sub/__init__.py"])).toEqual([
+    expect(importErrorImplicatesDiscarded(out, ["src/mypkg/sub/__init__.py"], "pytest")).toEqual([
       "src/mypkg/sub/__init__.py",
     ]);
   });
@@ -377,31 +402,76 @@ describe("importErrorImplicatesDiscarded (discard-poison guard: conservative imp
   test("does NOT implicate a discarded nested __init__.py for an unrelated top-level import (no false reject)", () => {
     // a/b/__init__.py discarded, but the test legitimately fails importing an unrelated top-level `b`.
     const out = "ModuleNotFoundError: No module named 'b'";
-    expect(importErrorImplicatesDiscarded(out, ["a/b/__init__.py"])).toEqual([]);
+    expect(importErrorImplicatesDiscarded(out, ["a/b/__init__.py"], "pytest")).toEqual([]);
   });
 
   test("does NOT implicate a discarded __init__.py for an unrelated feature module", () => {
     const out = "ModuleNotFoundError: No module named 'unrelated_feature'";
-    expect(importErrorImplicatesDiscarded(out, ["pkg/__init__.py"])).toEqual([]);
+    expect(importErrorImplicatesDiscarded(out, ["pkg/__init__.py"], "pytest")).toEqual([]);
   });
 
   // --- conftest.py shape matching ---
   test("implicates a discarded conftest.py on a fixture-not-found error", () => {
     const out = "E       fixture 'db' not found";
-    expect(importErrorImplicatesDiscarded(out, ["tests/conftest.py"])).toEqual([
+    expect(importErrorImplicatesDiscarded(out, ["tests/conftest.py"], "pytest")).toEqual([
       "tests/conftest.py",
     ]);
   });
 
   test("does NOT implicate a discarded conftest.py on a plain assertion failure (no collection/fixture error)", () => {
     const out = "E       assert 1 == 2";
-    expect(importErrorImplicatesDiscarded(out, ["tests/conftest.py"])).toEqual([]);
+    expect(importErrorImplicatesDiscarded(out, ["tests/conftest.py"], "pytest")).toEqual([]);
   });
 
   // --- existing general tier still works (regression) ---
   test("still implicates a directly-named discarded helper", () => {
     const out = "ModuleNotFoundError: No module named 'helper'";
-    expect(importErrorImplicatesDiscarded(out, ["tests/helper.py"])).toEqual(["tests/helper.py"]);
+    expect(importErrorImplicatesDiscarded(out, ["tests/helper.py"], "pytest")).toEqual([
+      "tests/helper.py",
+    ]);
+  });
+
+  test("a null framework never implicates", () => {
+    expect(
+      importErrorImplicatesDiscarded(
+        "ModuleNotFoundError: No module named 'helper'",
+        ["helper.py"],
+        null,
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("CHECK_RULES registry", () => {
+  test("aliased frameworks share one rule set (forward pin; bites once Tasks 2-3 give them distinct objects)", () => {
+    expect(CHECK_RULES.vitest).toBe(CHECK_RULES.jest);
+    expect(CHECK_RULES.minitest).toBe(CHECK_RULES.rspec);
+    expect(CHECK_RULES["junit-gradle"]).toBe(CHECK_RULES["junit-maven"]);
+  });
+
+  test("python and node share the legacy vocabulary verbatim (design 4.1: behaviour unchanged)", () => {
+    expect(CHECK_RULES.jest.indicators).toEqual(CHECK_RULES.pytest.indicators);
+    // The Python marker shapes stay Python-only: an __init__.py in a jest run is not a thing.
+    expect(CHECK_RULES.jest.shapes).toHaveLength(0);
+    expect(CHECK_RULES.pytest.shapes).toHaveLength(2);
+  });
+
+  test("only python carries a fixture pattern and the ERROR-summary preference", () => {
+    expect(CHECK_RULES.pytest.fixturePattern).toBeDefined();
+    expect(CHECK_RULES.rspec.fixturePattern).toBeUndefined();
+    expect(CHECK_RULES.pytest.prefersErrorSummary).toBe(true);
+    expect(CHECK_RULES["junit-maven"].prefersErrorSummary).toBeUndefined();
+  });
+
+  test("no rule set shares one array object between indicators and basenameGates", () => {
+    // A shared array lets a later `push` on one field leak into the other — and, via an aliased rule
+    // set, across a language boundary. Note several frameworks deliberately SHARE a rule set object
+    // (jest/vitest, junit-maven/junit-gradle, rspec/minitest); this asserts the arrays, not the objects.
+    for (const [name, rules] of Object.entries(CHECK_RULES)) {
+      if (rules.indicators.length > 0 && rules.basenameGates.length > 0) {
+        expect(`${name}:${rules.indicators === rules.basenameGates}`).toBe(`${name}:false`);
+      }
+    }
   });
 });
 
@@ -413,22 +483,64 @@ describe("collectionErrorExcerpt", () => {
       "=== short test summary info ===",
       "ERROR tests/x_test.py - ModuleNotFoundError: No module named 'pkg'",
     ].join("\n");
-    expect(collectionErrorExcerpt(out)).toBe(
+    expect(collectionErrorExcerpt(out, "pytest")).toBe(
       "ERROR tests/x_test.py - ModuleNotFoundError: No module named 'pkg'",
     );
   });
 
   test("collectionErrorExcerpt falls back to the last indicator line when no summary line exists", () => {
     const out = "line one\nE   ModuleNotFoundError: No module named 'pkg'\ntrailing noise";
-    expect(collectionErrorExcerpt(out)).toBe("ModuleNotFoundError: No module named 'pkg'");
+    expect(collectionErrorExcerpt(out, "pytest")).toBe(
+      "ModuleNotFoundError: No module named 'pkg'",
+    );
   });
 
   test("collectionErrorExcerpt surfaces a fixture-not-found line", () => {
-    expect(collectionErrorExcerpt("E       fixture 'db' not found")).toBe("fixture 'db' not found");
+    expect(collectionErrorExcerpt("E       fixture 'db' not found", "pytest")).toBe(
+      "fixture 'db' not found",
+    );
   });
 
   test("collectionErrorExcerpt returns undefined when no collection/import indicator is present", () => {
-    expect(collectionErrorExcerpt("E   assert 1 == 2")).toBeUndefined();
+    expect(collectionErrorExcerpt("E   assert 1 == 2", "pytest")).toBeUndefined();
+  });
+});
+
+describe("collectionErrorExcerpt (framework-aware)", () => {
+  test("returns undefined for a null framework", () => {
+    expect(
+      collectionErrorExcerpt("ModuleNotFoundError: No module named 'x'", null),
+    ).toBeUndefined();
+  });
+
+  test("a Ruby fixture error does NOT produce an excerpt (fixture patterns are python-only)", () => {
+    // Rails fixtures emit this phrase; under a global pattern it leaked across languages.
+    expect(
+      collectionErrorExcerpt("ActiveRecord::FixtureError: fixture 'users' not found", "minitest"),
+    ).toBeUndefined();
+  });
+
+  test("naming patterns trigger the excerpt (drift pin, design 4.5)", () => {
+    // `unable to resolve` is a naming alternative that was never an indicator: before this change the
+    // excerpt was undefined for such a line. Pinned so the drift is deliberate, not accidental.
+    expect(collectionErrorExcerpt("npm ERR! unable to resolve dependency tree", "jest")).toBe(
+      "npm ERR! unable to resolve dependency tree",
+    );
+  });
+
+  test("a naming-only ERROR line cannot displace an indicator line via the summary path", () => {
+    // pytest sets prefersErrorSummary, so an `ERROR ...` line is preferred — but only when that line
+    // matched by INDICATOR. A naming-only ERROR line must not bypass the fallback ordering.
+    const out = "ImportError: cannot import name 'X' from 'pkg'\nERROR unable to resolve foo";
+    expect(collectionErrorExcerpt(out, "pytest")).toBe(
+      "ImportError: cannot import name 'X' from 'pkg'",
+    );
+  });
+
+  test("an indicator line beats a trailing naming-only line (no displacement)", () => {
+    const out =
+      "Error: Cannot find module './helper'\n  at Object.<anonymous>\nnpm ERR! unable to resolve dependency tree";
+    expect(collectionErrorExcerpt(out, "jest")).toBe("Error: Cannot find module './helper'");
   });
 });
 
@@ -453,5 +565,718 @@ describe("binaryFor (M2a decision 3: go/cargo carry the subcommand; maven/gradle
     expect(binaryFor("rspec")).toBe("rspec");
     expect(binaryFor("phpunit")).toBe("phpunit");
     expect(binaryFor("minitest")).toBe("ruby -Itest");
+  });
+});
+
+describe("discard-poison: Go (ties by package/directory segment alignment)", () => {
+  // Real go1.24 module-mode text. GOPATH-era `cannot find package "…"` is kept in the vocabulary as a
+  // legacy phrase but is NOT what a modern toolchain emits.
+  const missingHelper =
+    "app/x_test.go:6:2: no required module provides package example.com/m/helper; to add it:";
+  const missingDep =
+    "app/x_test.go:6:2: no required module provides package github.com/stretchr/testify/assert; to add it:";
+
+  test("implicates a discarded file in the missing package's directory", () => {
+    expect(importErrorImplicatesDiscarded(missingHelper, ["helper/helper.go"], "go")).toEqual([
+      "helper/helper.go",
+    ]);
+  });
+
+  test("implicates any file in that directory, not only one named after the package", () => {
+    expect(importErrorImplicatesDiscarded(missingHelper, ["helper/util.go"], "go")).toEqual([
+      "helper/util.go",
+    ]);
+  });
+
+  test("contrast: same output, unrelated discarded file ⇒ no match", () => {
+    expect(importErrorImplicatesDiscarded(missingHelper, ["scratch/scratch.go"], "go")).toEqual([]);
+  });
+
+  test("colliding LEAF: a missing dependency must not implicate a throwaway sharing its leaf", () => {
+    expect(
+      importErrorImplicatesDiscarded(missingDep, ["internal/scratch/assert.go"], "go"),
+    ).toEqual([]);
+  });
+
+  test("colliding DIRECTORY: a missing dependency must not implicate a throwaway in a like-named dir", () => {
+    // The measured false positive that leaf-to-directory matching alone would produce: dir `assert`
+    // equals the package leaf. Segment alignment rejects it — [internal, assert] ≠ [testify, assert].
+    expect(importErrorImplicatesDiscarded(missingDep, ["internal/assert/helper.go"], "go")).toEqual(
+      [],
+    );
+    const missingCmp =
+      "app/x_test.go:6:2: no required module provides package github.com/google/go-cmp/cmp; to add it:";
+    expect(importErrorImplicatesDiscarded(missingCmp, ["testutil/cmp/x.go"], "go")).toEqual([]);
+  });
+
+  test("returns only the implicated subset when several files were discarded", () => {
+    expect(
+      importErrorImplicatesDiscarded(missingHelper, ["helper/helper.go", "scratch/s.go"], "go"),
+    ).toEqual(["helper/helper.go"]);
+  });
+
+  test("surfaces the compiler's own line as the excerpt", () => {
+    expect(collectionErrorExcerpt(missingHelper, "go")).toBe(missingHelper);
+  });
+
+  test("a capture never spans a line break (the naming patterns are horizontal-whitespace only)", () => {
+    // NOTE: deliberately not the literal `go/scratch.go` fixture from the review — that fixture's
+    // discarded file also collides with the (separately documented, accepted) bounded-basename tier,
+    // since its own basename is textually present on the output's second line regardless of the
+    // naming-capture fix. This fixture isolates the naming/shape-tier defect alone: `helper/other.go`
+    // does not appear as a basename anywhere in the output, so only the (fixed) naming capture can
+    // affect the result. Confirmed by direct probe: with the old `\s+` naming regex this fixture
+    // reproduces the false positive (`["helper/other.go"]`); with the fixed `[^\S\r\n]+` regex it
+    // correctly returns `[]`.
+    const twoLine =
+      "app/x_test.go:1:1: no required module provides package\nscratch/helper:2:2: something";
+    expect(importErrorImplicatesDiscarded(twoLine, ["helper/other.go"], "go")).toEqual([]);
+  });
+
+  test("the excerpt is not displaced by a trailing deprecation warning (no `] package ` indicator)", () => {
+    const out =
+      "[ERROR] /repo/src/test/java/com/x/ATest.java:[3,26] package com.helper does not exist\n" +
+      "[INFO] --- jar:3.3.0:jar (default-jar) @ demo ---\n" +
+      "[WARNING] [deprecation] package com.old does not exist anymore";
+    expect(collectionErrorExcerpt(out, "junit-maven")).toBe(
+      "[ERROR] /repo/src/test/java/com/x/ATest.java:[3,26] package com.helper does not exist",
+    );
+  });
+
+  // DOCUMENTATION PINS (not guards): accepted residuals, recorded so they cannot drift unnoticed.
+  test("residual: a single-segment directory still collides with a dependency's package leaf", () => {
+    const missingDep =
+      "app/x_test.go:6:2: no required module provides package github.com/stretchr/testify/assert; to add it:";
+    expect(importErrorImplicatesDiscarded(missingDep, ["assert/helper.go"], "go")).toEqual([
+      "assert/helper.go",
+    ]);
+  });
+
+  test("residual: the basename tier can implicate a file merely named in the build output", () => {
+    // Go prints the IMPORTING file's path on every build error line, so an unrelated discarded file
+    // whose basename appears there is implicated by the bounded-basename tier.
+    const out =
+      "app/x_test.go:6:2: no required module provides package example.com/m/helper; to add it:";
+    expect(importErrorImplicatesDiscarded(out, ["deep/nested/x_test.go"], "go")).toEqual([
+      "deep/nested/x_test.go",
+    ]);
+  });
+});
+
+describe("discard-poison: JVM (ties by package/directory segment alignment)", () => {
+  const missingPkg =
+    "src/test/java/com/helper/ATest.java:3: error: package com.helper does not exist";
+
+  test("implicates a discarded class in the missing package's directory", () => {
+    expect(
+      importErrorImplicatesDiscarded(
+        missingPkg,
+        ["src/test/java/com/helper/Helper.java"],
+        "junit-maven",
+      ),
+    ).toEqual(["src/test/java/com/helper/Helper.java"]);
+  });
+
+  test("contrast: same output, a class outside that package ⇒ no match", () => {
+    expect(
+      importErrorImplicatesDiscarded(
+        missingPkg,
+        ["src/test/java/com/other/Helper.java"],
+        "junit-maven",
+      ),
+    ).toEqual([]);
+  });
+
+  test("colliding leaf: a missing dependency must not implicate a throwaway sharing its leaf", () => {
+    const out = "Foo.java:3: error: package org.junit.jupiter.api does not exist";
+    expect(importErrorImplicatesDiscarded(out, ["src/test/java/api.java"], "junit-gradle")).toEqual(
+      [],
+    );
+  });
+
+  test("a single-segment package never matches (the generic-noun collision floor)", () => {
+    const out = "Foo.java:3: error: package util does not exist";
+    expect(
+      importErrorImplicatesDiscarded(out, ["src/test/java/util/Scratch.java"], "junit-maven"),
+    ).toEqual([]);
+  });
+
+  test("surfaces the compiler's own line as the excerpt (the reason naming patterns feed it)", () => {
+    expect(collectionErrorExcerpt(missingPkg, "junit-maven")).toBe(missingPkg);
+  });
+
+  test("Maven's reformatted javac diagnostic ties too (mvn drops the `error:` token)", () => {
+    const mvn =
+      "[ERROR] /repo/src/test/java/com/x/ATest.java:[3,26] package com.helper does not exist";
+    expect(
+      importErrorImplicatesDiscarded(mvn, ["src/test/java/com/helper/Helper.java"], "junit-maven"),
+    ).toEqual(["src/test/java/com/helper/Helper.java"]);
+    expect(collectionErrorExcerpt(mvn, "junit-maven")).toBe(mvn);
+  });
+
+  // Fallback behaviour (not an accepted gap): without file contents, the name-based tiers alone
+  // cannot tie this. The symbol tier closes it when sources are supplied — see the symbol-tier
+  // describe block below.
+  test("degrades to no tie without file contents (JVM `cannot find symbol` names no file; the symbol tier closes this when sources are supplied)", () => {
+    const out =
+      "ATest.java:12: error: cannot find symbol\n  symbol:   class Helper\n  location: class ATest";
+    expect(
+      importErrorImplicatesDiscarded(out, ["src/test/java/com/helper/Helper.java"], "junit-maven"),
+    ).toEqual([]);
+  });
+});
+
+describe("discard-poison: the framework gate (ENG-343 design section 2)", () => {
+  // These EXACT inputs implicated wrongly under a shared vocabulary. `package X does not exist` is
+  // ordinary English; gating on the framework is what makes them safe.
+  test("JVM wording in a Ruby run implicates nothing", () => {
+    const out = 'Failure: expected "package tracking does not exist" but got "ok"';
+    expect(importErrorImplicatesDiscarded(out, ["spec/tracking.rb"], "minitest")).toEqual([]);
+  });
+
+  test("JVM wording in a pytest run implicates nothing", () => {
+    const out = "AssertionError: assert 'package acme.widget does not exist' in msg";
+    expect(importErrorImplicatesDiscarded(out, ["tools/widget.py"], "pytest")).toEqual([]);
+  });
+
+  test("JVM wording in a pytest run does not reach the __init__.py shape tier either", () => {
+    const out = "AssertionError: assert 'package foo does not exist' in msg";
+    expect(importErrorImplicatesDiscarded(out, ["foo/__init__.py"], "pytest")).toEqual([]);
+  });
+
+  test("legacy python/node vocabulary does not leak into the new stacks", () => {
+    const out = "ImportError: boom in tests/scratch/mod.rs";
+    expect(importErrorImplicatesDiscarded(out, ["tests/scratch/mod.rs"], "cargo")).toEqual([]);
+    expect(importErrorImplicatesDiscarded(out, ["spec/scratch.rb"], "rspec")).toEqual([]);
+  });
+});
+
+describe("single-line capture guards (a capture must never span a line break)", () => {
+  // Task 2's review found only the Go site was guarded; these cover the other two, and LEGACY_NAMING
+  // is the higher-blast-radius one because python and node both depend on it.
+  test("LEGACY_NAMING (python/node) does not lift a capture off the next line", () => {
+    const out = "ModuleNotFoundError: No module named\nsupport/helper:2: something";
+    expect(importErrorImplicatesDiscarded(out, ["support/helper.py"], "pytest")).toEqual([]);
+  });
+
+  test("the JVM patterns do not lift a capture off the next line", () => {
+    const out = "[ERROR] /r/ATest.java:[3,26] package\ncom.helper does not exist";
+    expect(
+      importErrorImplicatesDiscarded(out, ["src/test/java/com/helper/Helper.java"], "junit-maven"),
+    ).toEqual([]);
+  });
+
+  test("cargo's naming pattern does not lift a capture off the next line", () => {
+    const out = "error[E0583]: file not found for module\nhelper";
+    expect(importErrorImplicatesDiscarded(out, ["src/helper.rs"], "cargo")).toEqual([]);
+  });
+
+  test("rspec's naming pattern does not lift a capture off the next line", () => {
+    const out = "cannot load such file --\nsupport/helper (LoadError)";
+    expect(importErrorImplicatesDiscarded(out, ["spec/support/helper.rb"], "rspec")).toEqual([]);
+  });
+
+  test("phpunit's naming pattern does not lift a capture off the next line", () => {
+    // The bounded-basename tier would match this fixture regardless of the naming pattern, so
+    // neutralise that tier for the probe — otherwise the test passes for the wrong reason.
+    const out =
+      "PHP Fatal error:  Uncaught Error: Failed opening required\nsrc/helper.php, giving up";
+    const orig = CHECK_RULES.phpunit.basenameGates;
+    try {
+      (CHECK_RULES.phpunit as { basenameGates: string[] }).basenameGates = [];
+      expect(importErrorImplicatesDiscarded(out, ["src/helper.php"], "phpunit")).toEqual([]);
+    } finally {
+      (CHECK_RULES.phpunit as { basenameGates: string[] }).basenameGates = orig;
+    }
+  });
+});
+
+describe("discard-poison: Rust", () => {
+  // Real rustc 1.94 output. The help line names BOTH candidate paths — which is exactly why cargo's
+  // basenameGates is empty.
+  const e0583 =
+    "error[E0583]: file not found for module `helper`\n" +
+    '  = help: to create the module `helper`, create file "src/helper.rs" or "src/helper/mod.rs"';
+
+  test("implicates a discarded module file named by E0583", () => {
+    expect(importErrorImplicatesDiscarded(e0583, ["src/helper.rs"], "cargo")).toEqual([
+      "src/helper.rs",
+    ]);
+  });
+
+  test("implicates a discarded mod.rs via its directory (its leaf would be `mod`)", () => {
+    const out = "error[E0583]: file not found for module `common`";
+    expect(importErrorImplicatesDiscarded(out, ["tests/common/mod.rs"], "cargo")).toEqual([
+      "tests/common/mod.rs",
+    ]);
+  });
+
+  // residual/documentation: this fixture cannot discriminate between shape and tier — with
+  // basenameGates empty there is no mechanism by which an unrelated discarded file could match. It
+  // records that the negative holds, not that anything specifically guards it.
+  test("residual/documentation: contrast: same output, unrelated discarded module ⇒ no match", () => {
+    expect(importErrorImplicatesDiscarded(e0583, ["src/scratch.rs"], "cargo")).toEqual([]);
+  });
+
+  test("the mod.rs shape applies ONLY to mod.rs, not to any file in a matching directory", () => {
+    const out = "error[E0583]: file not found for module `common`";
+    expect(importErrorImplicatesDiscarded(out, ["tests/common/other.rs"], "cargo")).toEqual([]);
+  });
+
+  test("E0583's help note must NOT implicate an unrelated discarded mod.rs", () => {
+    // The help line contains the literal token `src/newfeature/mod.rs`. If error[e0583] gated the
+    // bounded-basename tier, ANY discarded mod.rs would match ANY E0583.
+    const out =
+      "error[E0583]: file not found for module `newfeature`\n" +
+      '  = help: to create the module `newfeature`, create file "src/newfeature.rs" or "src/newfeature/mod.rs"';
+    expect(importErrorImplicatesDiscarded(out, ["tests/scratch/mod.rs"], "cargo")).toEqual([]);
+  });
+
+  test("surfaces the rustc error line, not the help note", () => {
+    expect(collectionErrorExcerpt(e0583, "cargo")).toBe(
+      "error[E0583]: file not found for module `helper`",
+    );
+  });
+
+  // DOCUMENTATION PIN (not a guard): records an accepted residual.
+  test("residual: E0432 unresolved imports name no file ⇒ not tied", () => {
+    const out = "error[E0432]: unresolved import `crate::helper`\n --> tests/x.rs:3:5";
+    expect(importErrorImplicatesDiscarded(out, ["src/helper.rs"], "cargo")).toEqual([]);
+  });
+});
+
+describe("discard-poison: Ruby", () => {
+  const loadErr =
+    "spec/a_spec.rb:2:in `require': cannot load such file -- support/helper (LoadError)";
+
+  test("implicates a discarded helper named by a LoadError", () => {
+    expect(importErrorImplicatesDiscarded(loadErr, ["spec/support/helper.rb"], "minitest")).toEqual(
+      ["spec/support/helper.rb"],
+    );
+  });
+
+  test("ties on rspec too, for the boot-time require failure design section 5 credits it with", () => {
+    const boot = "cannot load such file -- ./spec/support/helper (LoadError)";
+    expect(importErrorImplicatesDiscarded(boot, ["spec/support/helper.rb"], "rspec")).toEqual([
+      "spec/support/helper.rb",
+    ]);
+  });
+
+  test("contrast: same output, unrelated discarded file ⇒ no match", () => {
+    expect(
+      importErrorImplicatesDiscarded(loadErr, ["spec/support/scratch.rb"], "minitest"),
+    ).toEqual([]);
+  });
+
+  test("near-miss leaf: `helpers.rb` is not `helper` ⇒ no match", () => {
+    expect(
+      importErrorImplicatesDiscarded(loadErr, ["spec/support/helpers.rb"], "minitest"),
+    ).toEqual([]);
+  });
+
+  // Fallback behaviour (not an accepted gap): without file contents, the name-based tiers alone
+  // cannot tie this. The symbol tier closes it when sources are supplied — see the symbol-tier
+  // describe block below.
+  test("degrades to no tie without file contents (Ruby's Dir[].each autoload shape raises NameError, naming no file; the symbol tier closes this when sources are supplied)", () => {
+    const out = "spec/c_spec.rb:2:in `<main>': uninitialized constant Helper (NameError)";
+    expect(importErrorImplicatesDiscarded(out, ["spec/support/helper.rb"], "rspec")).toEqual([]);
+  });
+});
+
+describe("discard-poison: PHP", () => {
+  const failedOpen =
+    "PHP Fatal error:  Uncaught Error: Failed opening required 'helper.php' (include_path='.:/usr/share/php')";
+  // The realistic shape: a `require` warning. It has NO naming pattern, so it can only tie through
+  // the bounded-basename tier — the path most likely to over-fire, and untested otherwise.
+  const failedStream =
+    "PHP Warning:  require(/app/src/helper.php): Failed to open stream: No such file or directory in /app/tests/ATest.php on line 3";
+
+  test("implicates a discarded file whose basename appears in a failed require (basename tier)", () => {
+    expect(importErrorImplicatesDiscarded(failedOpen, ["src/helper.php"], "phpunit")).toEqual([
+      "src/helper.php",
+    ]);
+  });
+
+  test("implicates a discarded file named by a failed require (naming tier, not basename)", () => {
+    // Trailing `,` keeps `helper.php` OUT of the bounded-basename tier, so only the naming pattern +
+    // leaf tier can produce this match. Verified: deleting phpRules.naming turns this red.
+    const namingOnly =
+      "PHP Fatal error:  Uncaught Error: Failed opening required helper.php, giving up";
+    expect(importErrorImplicatesDiscarded(namingOnly, ["src/helper.php"], "phpunit")).toEqual([
+      "src/helper.php",
+    ]);
+  });
+
+  test("implicates via the bounded-basename tier on the `Failed to open stream` shape", () => {
+    expect(importErrorImplicatesDiscarded(failedStream, ["src/helper.php"], "phpunit")).toEqual([
+      "src/helper.php",
+    ]);
+  });
+
+  test("contrast: same stream output, unrelated discarded file ⇒ no match", () => {
+    expect(importErrorImplicatesDiscarded(failedStream, ["src/scratch.php"], "phpunit")).toEqual(
+      [],
+    );
+  });
+
+  test("contrast: same output, unrelated discarded file ⇒ no match", () => {
+    expect(importErrorImplicatesDiscarded(failedOpen, ["src/scratch.php"], "phpunit")).toEqual([]);
+  });
+
+  // Fallback behaviour (not an accepted gap): without file contents, the name-based tiers alone
+  // cannot tie this. The symbol tier closes it when sources are supplied — see the symbol-tier
+  // describe block below.
+  test("degrades to no tie without file contents (PHP's PSR-4 autoload reports a missing class, naming no file; the symbol tier closes this when sources are supplied)", () => {
+    const out =
+      'PHP Fatal error:  Uncaught Error: Class "Helper" not found in /app/tests/ATest.php:9';
+    expect(importErrorImplicatesDiscarded(out, ["src/Helper.php"], "phpunit")).toEqual([]);
+  });
+});
+
+describe("mutation guard: the Rust help-note negative must discriminate", () => {
+  test("gating the basename tier on E0583 would implicate any discarded mod.rs", () => {
+    const out =
+      "error[E0583]: file not found for module `newfeature`\n" +
+      '  = help: to create the module `newfeature`, create file "src/newfeature.rs" or "src/newfeature/mod.rs"';
+    const orig = CHECK_RULES.cargo.basenameGates;
+    try {
+      (CHECK_RULES.cargo as { basenameGates: string[] }).basenameGates = ["error[e0583]"];
+      expect(importErrorImplicatesDiscarded(out, ["tests/scratch/mod.rs"], "cargo")).toEqual([
+        "tests/scratch/mod.rs",
+      ]);
+    } finally {
+      (CHECK_RULES.cargo as { basenameGates: string[] }).basenameGates = orig;
+    }
+    expect(importErrorImplicatesDiscarded(out, ["tests/scratch/mod.rs"], "cargo")).toEqual([]);
+  });
+});
+
+describe("mutation guards: the Go/JVM negatives above must discriminate", () => {
+  // A negative that would pass under the WRONG implementation proves nothing. These mutate the real
+  // rule object and assert the collision reappears — committed evidence, not a manual ritual.
+  const missingDep =
+    "app/x_test.go:6:2: no required module provides package github.com/stretchr/testify/assert; to add it:";
+
+  test("leaf tying would re-introduce the Go collision", () => {
+    const orig = CHECK_RULES.go.tiesByLeaf;
+    try {
+      (CHECK_RULES.go as { tiesByLeaf: boolean }).tiesByLeaf = true;
+      expect(
+        importErrorImplicatesDiscarded(missingDep, ["internal/scratch/assert.go"], "go"),
+      ).toEqual(["internal/scratch/assert.go"]);
+    } finally {
+      (CHECK_RULES.go as { tiesByLeaf: boolean }).tiesByLeaf = orig;
+    }
+    expect(
+      importErrorImplicatesDiscarded(missingDep, ["internal/scratch/assert.go"], "go"),
+    ).toEqual([]);
+  });
+
+  test("leaf tying would re-introduce the JVM collision", () => {
+    const out = "Foo.java:3: error: package org.junit.jupiter.api does not exist";
+    const orig = CHECK_RULES["junit-maven"].tiesByLeaf;
+    try {
+      (CHECK_RULES["junit-maven"] as { tiesByLeaf: boolean }).tiesByLeaf = true;
+      expect(
+        importErrorImplicatesDiscarded(out, ["src/test/java/api.java"], "junit-maven"),
+      ).toEqual(["src/test/java/api.java"]);
+    } finally {
+      (CHECK_RULES["junit-maven"] as { tiesByLeaf: boolean }).tiesByLeaf = orig;
+    }
+    expect(importErrorImplicatesDiscarded(out, ["src/test/java/api.java"], "junit-maven")).toEqual(
+      [],
+    );
+  });
+});
+
+describe("discard-poison: the symbol definition tier (design 4.5)", () => {
+  const src = (path: string, content: string) => new Map([[path, content]]);
+
+  test("Go: a same-package helper is tied when the discarded file defined the symbol", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["helper.go"],
+        "go",
+        src("helper.go", "package app\n\nfunc Help() int { return 1 }\n"),
+      ),
+    ).toEqual(["helper.go"]);
+  });
+
+  test("Go contrast: same error, a discarded file that does NOT define the symbol", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["scratch.go"],
+        "go",
+        src("scratch.go", "package app\n\nfunc Other() int { return 2 }\n"),
+      ),
+    ).toEqual([]);
+  });
+
+  test("JVM: `cannot find symbol` is tied when the discarded class defined it", () => {
+    const out =
+      "ATest.java:12: error: cannot find symbol\n  symbol:   class Helper\n  location: class ATest";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/test/java/com/x/Helper.java"],
+        "junit-maven",
+        src("src/test/java/com/x/Helper.java", "package com.x;\n\npublic class Helper {}\n"),
+      ),
+    ).toEqual(["src/test/java/com/x/Helper.java"]);
+  });
+
+  test("Ruby: rspec's autoload NameError is tied when the discarded file defined the constant", () => {
+    const out = "spec/c_spec.rb:2:in `<main>': uninitialized constant Helper (NameError)";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["spec/support/helper.rb"],
+        "rspec",
+        src("spec/support/helper.rb", "module Helper\n  def self.x; true; end\nend\n"),
+      ),
+    ).toEqual(["spec/support/helper.rb"]);
+  });
+
+  test("Ruby contrast: same error, a discarded file that does NOT define the constant", () => {
+    const out = "spec/c_spec.rb:2:in `<main>': uninitialized constant Helper (NameError)";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["spec/support/other.rb"],
+        "rspec",
+        src("spec/support/other.rb", "module Other\n  def self.x; true; end\nend\n"),
+      ),
+    ).toEqual([]);
+  });
+
+  test("PHP: a Composer autoload miss is tied, and the namespace is reduced to the class name", () => {
+    const out =
+      'PHP Fatal error:  Uncaught Error: Class "App\\Helper" not found in /app/tests/ATest.php:9';
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/Helper.php"],
+        "phpunit",
+        src("src/Helper.php", "<?php\nnamespace App;\nclass Helper {}\n"),
+      ),
+    ).toEqual(["src/Helper.php"]);
+  });
+
+  test("PHP contrast: same error, a discarded file that does NOT define the class", () => {
+    const out =
+      'PHP Fatal error:  Uncaught Error: Class "App\\Helper" not found in /app/tests/ATest.php:9';
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/Other.php"],
+        "phpunit",
+        src("src/Other.php", "<?php\nnamespace App;\nclass Other {}\n"),
+      ),
+    ).toEqual([]);
+  });
+
+  test("PHP class names are case-insensitive, so a lowercase declaration still ties", () => {
+    const out =
+      'PHP Fatal error:  Uncaught Error: Class "Helper" not found in /app/tests/ATest.php:9';
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/helper.php"],
+        "phpunit",
+        src("src/helper.php", "<?php\nclass helper {}\n"),
+      ),
+    ).toEqual(["src/helper.php"]);
+  });
+
+  test("Rust: a missing item is tied when the discarded module defined it", () => {
+    const out = "error[E0425]: cannot find function `help` in this scope";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/helper.rs"],
+        "cargo",
+        src("src/helper.rs", "pub fn help() -> u8 { 1 }\n"),
+      ),
+    ).toEqual(["src/helper.rs"]);
+  });
+
+  test("Rust contrast: same error, a discarded file that does NOT define the symbol", () => {
+    const out = "error[E0425]: cannot find function `help` in this scope";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/other.rs"],
+        "cargo",
+        src("src/other.rs", "pub fn other() -> u8 { 2 }\n"),
+      ),
+    ).toEqual([]);
+  });
+
+  test("the tier is inert when no contents are supplied (degrades to the other tiers)", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    expect(importErrorImplicatesDiscarded(out, ["helper.go"], "go")).toEqual([]);
+    expect(importErrorImplicatesDiscarded(out, ["helper.go"], "go", new Map())).toEqual([]);
+  });
+
+  test("a symbol named by the error but defined by NO discarded file implicates nothing", () => {
+    const out = "ATest.java:12: error: cannot find symbol\n  symbol:   class Missing";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/test/java/com/x/Helper.java"],
+        "junit-maven",
+        src("src/test/java/com/x/Helper.java", "package com.x;\n\npublic class Helper {}\n"),
+      ),
+    ).toEqual([]);
+  });
+
+  test("Rust: rustc's compound kinds and E0433 are captured", () => {
+    // Real rustc wording. `Helper::new()` produces E0433, the most common way a test reaches a helper.
+    const compound =
+      "error[E0422]: cannot find struct, variant or union type `Config` in this scope";
+    expect(
+      importErrorImplicatesDiscarded(
+        compound,
+        ["src/c.rs"],
+        "cargo",
+        src("src/c.rs", "pub struct Config {}\n"),
+      ),
+    ).toEqual(["src/c.rs"]);
+    const e0433 = "error[E0433]: failed to resolve: use of undeclared type `Helper`";
+    expect(
+      importErrorImplicatesDiscarded(
+        e0433,
+        ["src/h.rs"],
+        "cargo",
+        src("src/h.rs", "pub struct Helper;\n"),
+      ),
+    ).toEqual(["src/h.rs"]);
+  });
+
+  test("Go: a method on a receiver ties, not just a bare func", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["h.go"],
+        "go",
+        src("h.go", "package app\n\nfunc (r T) Help() int { return 1 }\n"),
+      ),
+    ).toEqual(["h.go"]);
+  });
+
+  test("Go: a missing METHOD ties too (`has no field or method`, not just `undefined:`)", () => {
+    const out = "./y_test.go:7:4: x.Help undefined (type T has no field or method Help)";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["helper.go"],
+        "go",
+        src("helper.go", "package app\n\nfunc (r T) Help() int { return 1 }\n"),
+      ),
+    ).toEqual(["helper.go"]);
+  });
+
+  test("Go: `undefined:` inside a test's own assertion message must NOT fire (no compiler gutter)", () => {
+    // Ordinary program text masquerading as a diagnostic — the section 2 failure class, within one
+    // language. The gutter anchor is what rejects it.
+    const out = 'x_test.go:12: want no error, got "undefined: Config"';
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["scratch/dump.go"],
+        "go",
+        src("scratch/dump.go", "package scratch\n\ntype Config struct{}\n"),
+      ),
+    ).toEqual([]);
+  });
+
+  test("JVM: a `symbol: method` capture cannot cross-match a type declaration", () => {
+    const out = "ATest.java:12: error: cannot find symbol\n  symbol:   method helper(int)";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["Helper.java"],
+        "junit-maven",
+        src("Helper.java", "class helper {}\n"),
+      ),
+    ).toEqual([]);
+  });
+
+  // DOCUMENTATION PINS (design section 5, residual 4): the tier is a text search, so a discarded file
+  // that merely MENTIONS a definition is implicated. Recorded so the residual cannot drift unnoticed.
+  test("residual: a comment mentioning the definition implicates the file", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["n.go"],
+        "go",
+        src("n.go", "package app\n// TODO: func Help should live here one day\n"),
+      ),
+    ).toEqual(["n.go"]);
+  });
+
+  test("residual: a compile stub the agent wrote for its own test is implicated", () => {
+    // The realistic case: the agent stubs `type Config struct{}` so its RED-first test builds, does not
+    // declare it, and the stub is discarded. Costs one retry; self-heals next attempt (no stub to
+    // discard). Never a bad merge.
+    const out = "checks/x_test.go:3:10: undefined: Config";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["checks/stub.go"],
+        "go",
+        src("checks/stub.go", "package checks\n\ntype Config struct{}\n"),
+      ),
+    ).toEqual(["checks/stub.go"]);
+  });
+
+  test("symbolLeaf reduces qualified names; a Go package qualifier is deliberately dropped too", () => {
+    // `helper.Help` means package `helper` lacks `Help`. We reduce to `Help`, so an unrelated
+    // discarded package defining `Help` is implicated. Accepted: the consequence is a retry.
+    const out = "app/y_test.go:5:30: undefined: helper.Help";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["other/thing.go"],
+        "go",
+        src("other/thing.go", "package other\n\nfunc Help() int { return 1 }\n"),
+      ),
+    ).toEqual(["other/thing.go"]);
+  });
+
+  test("a symbol-tier hit yields a real compiler line in the excerpt", () => {
+    expect(collectionErrorExcerpt("app/y_test.go:5:30: undefined: Help", "go")).toBe(
+      "app/y_test.go:5:30: undefined: Help",
+    );
+    expect(
+      collectionErrorExcerpt(
+        "spec/c_spec.rb:2:in `<main>': uninitialized constant Helper (NameError)",
+        "rspec",
+      ),
+    ).toContain("uninitialized constant Helper");
+  });
+});
+
+describe("mutation guard: the symbol tier's contrast must discriminate", () => {
+  test("a symbol-blind definition pattern would implicate an unrelated discarded file", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    const sources = new Map([["scratch.go", "package app\n\nfunc Other() int { return 2 }\n"]]);
+    const orig = CHECK_RULES.go.definesSymbol;
+    try {
+      (CHECK_RULES.go as { definesSymbol?: (s: string) => RegExp }).definesSymbol = () =>
+        /\bfunc\s+\w+/;
+      expect(importErrorImplicatesDiscarded(out, ["scratch.go"], "go", sources)).toEqual([
+        "scratch.go",
+      ]);
+    } finally {
+      (CHECK_RULES.go as { definesSymbol?: (s: string) => RegExp }).definesSymbol = orig;
+    }
+    expect(importErrorImplicatesDiscarded(out, ["scratch.go"], "go", sources)).toEqual([]);
   });
 });
