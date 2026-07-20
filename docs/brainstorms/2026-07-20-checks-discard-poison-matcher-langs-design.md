@@ -77,19 +77,37 @@ interface LanguageRules {
   /** Lower-cased substrings that mark this run as an import/collection failure. Used for the excerpt. */
   indicators: string[];
   /** The subset of indicators allowed to gate the bounded-basename tier. Often the same; empty where
-   *  the compiler prints candidate paths that would poison it (Rust — see 4.4). */
+   *  the toolchain prints candidate paths that would poison it (cargo, JVM — see 4.4). */
   basenameGates: string[];
   /** Patterns whose capture group 1 is the named module, package or file path. */
   naming: RegExp[];
+  /** When true, a discarded file whose module leaf equals a named reference is implicated. FALSE for
+   *  package-oriented languages (go, jvm), where leaf matching collides on generic nouns (4.3). */
+  tiesByLeaf: boolean;
   /** Shape rules for marker files that carry no name of their own (`__init__.py`, `mod.rs`) and for
    *  package paths that must tie by directory (Go, JVM). */
   shapes: ShapeRule[];
+  /** Patterns whose capture is a SYMBOL the toolchain names without naming its defining file (4.5). */
+  symbolNaming?: RegExp[];
+  /** Given a symbol, a pattern matching its definition in source. Paired with `symbolNaming`. */
+  definesSymbol?: (symbol: string) => RegExp;
+  /** This language's "fixture not found" pattern, if it has one. Per-language: a global pattern leaked
+   *  across languages (Rails emits `fixture 'users' not found`). Must not carry the `g` flag. */
+  fixturePattern?: RegExp;
+  /** When true, a line beginning `ERROR` is preferred as the excerpt (pytest's summary line). */
+  prefersErrorSummary?: boolean;
 }
 ```
 
-The signature becomes `importErrorImplicatesDiscarded(rawOutput, discarded, framework)`. A `null` framework
-returns `[]` — when no framework is detected the runner already produces empty output (`handlers.ts:643`),
-so there is nothing to match anyway.
+The signature becomes `importErrorImplicatesDiscarded(rawOutput, discarded, framework, sources?)` — the
+fourth argument carries the discarded files' captured contents for the symbol tier (§4.5) and is optional,
+so every name-based caller and test is unaffected. A `null` framework returns `[]`; when no framework is
+detected the runner already produces empty output, so there is nothing to match anyway.
+
+Note that `fixturePattern` and `prefersErrorSummary` are per-language **fields rather than globals**. Both
+began as module-level constants and leaked: a global fixture pattern fired on Rails' `fixture 'users' not
+found`, and a global `ERROR`-summary preference let an unrelated Maven line win the excerpt. Anything that
+influences matching or the excerpt belongs in the registry — that is what "sole extension point" means.
 
 **This registry is the extension point.** New languages, new phrasings and per-language exceptions are added
 here rather than by growing shared lists. Every rule sits beside the language it belongs to, which is what
@@ -276,10 +294,26 @@ no stub left to discard. The feedback is also arguably right: discarding that st
 check, and naming it tells the agent to declare it. A persistently stubbing agent would burn the budget
 toward an escalation — that is the accepted downside.
 
-Two mitigations are applied rather than relying on the conjunction: Go's symbol patterns are anchored to
-the compiler's `file.go:LINE:COL:` gutter, so `undefined: Config` appearing inside a test's own assertion
-message does not fire the tier; and JVM captures only type-kind symbols, so a `symbol: method` line
-cannot cross-match a type declaration.
+Two mitigations are applied rather than relying on the conjunction, **and they cover only two of the five
+stacks**: Go's symbol patterns are anchored to the compiler's `file.go:LINE:COL:` gutter, so
+`undefined: Config` appearing inside a test's own assertion message does not fire the tier; and JVM
+captures only type-kind symbols, so a `symbol: method` line cannot cross-match a type declaration.
+
+**Rust, Ruby and PHP symbol patterns are unanchored, and the failure class is reproducible on all three.**
+Each of these implicates, verified by execution:
+
+| output | discarded file's contents | result |
+|---|---|---|
+| `assertion failed: cannot find "widget" in the registry` (cargo) | `pub fn widget()` | implicated |
+| `expect { boom }.to raise_error("uninitialized constant Helper")` (rspec) | `class Helper` | implicated |
+| `Failed asserting that 'Class "Helper" not found' equals 'ok'` (phpunit) | `class Helper` | implicated |
+
+In each case a test's own assertion text is mistaken for a diagnostic — the §2 failure class reappearing
+*within* a single language, where the registry cannot help. Rust's kind class is the loosest of the three,
+since `cannot find "x"` is ordinary English. The cost is the same as every other over-fire here: a spurious
+retry on an already-failing check, never a bad merge. Anchoring Rust to `error[E0` (and requiring a rustc
+kind word) would close most of it and is the obvious follow-up; it is not done here because it is a
+behaviour change arriving after the branch's final review, and the safe direction is already held.
 
 ### 4.6 Excerpt
 
@@ -298,9 +332,9 @@ Verified against real toolchains. **The shapes that tie are, in several ecosyste
 |---|---|---|
 | **Go** | helper in a *separate* package (`no required module provides package`); helper in the *same* package via the symbol tier (§4.5) | a symbol whose definition the discarded file does not textually contain |
 | **Rust** | `mod`-style modules (E0583), including `tests/common/mod.rs` via the marker shape; `cannot find <kind> \`x\`` and E0433 `use of undeclared …` via the symbol tier | plain `use`-style imports (E0432), which name neither a file nor a symbol in scope |
-| **Ruby, minitest** | explicit `require` of the discarded helper | — |
+| **Ruby, minitest** | explicit `require` of the discarded helper; a missing constant via the symbol tier | a symbol whose definition the discarded file does not textually contain |
 | **Ruby, rspec** | the standard `Dir[…].each { require f }` support loader, via the symbol tier (`uninitialized constant Helper` arrives as a normal red); boot-time require failure | a spec-file `LoadError`, which is intercepted as `selected-none` before the guard runs (§6) |
-| **PHP** | explicit `require`/`require_once`; composer PSR-4 autoload via the symbol tier (`Class "Helper" not found`) | — |
+| **PHP** | explicit `require`/`require_once`; composer PSR-4 autoload via the symbol tier (`Class "Helper" not found`) | `Call to undefined function`, and `Interface`/`Trait "X" not found` — neither is captured |
 | **JVM** | the package directory suffix (4.3); the common single-class discard via the symbol tier (`cannot find symbol`) | a package missing for reasons other than the discard |
 
 **What this means:** with the symbol tier, ENG-343 delivers real coverage on all five stacks. The Go
@@ -323,6 +357,20 @@ merge unverified.
    literal, a generator fixture, or an agent's own compile stub (§4.5, where the cost is spelled out).
 5. Toolchain wording outside the listed phrases (other versions, other locales).
 6. The `error` bucket with empty output — ENG-347, out of scope here (§8).
+7. **Unanchored symbol patterns on Rust, Ruby and PHP** (§4.5): a test's own assertion text mentioning
+   the symbol is mistaken for a diagnostic. Reproduced on all three.
+8. **Go's single-segment directory collision** (§4.3), and Go's missed ties: a repo-root package, a
+   nested-module layout, and a directory name containing a dot.
+9. **The bounded-basename tier fires on a delimiter-bounded basename**, so a file merely named in the
+   build output can be implicated — Go prints the *importing* file's path on every error line. Disabled
+   for `cargo` and JVM, live for the rest.
+10. **Windows-rendered paths never tie.** The bounded tier's leading-delimiter class omits a backslash,
+    so `require(C:\app\src\helper.php)` matches nothing. Left as-is deliberately: macOS and Linux are
+    styre's first-class targets, and widening the class would loosen the tier that already over-fires
+    most, newly matching inside escaped and JSON-rendered paths on platforms styre *does* support.
+11. **The tiers are language-blind on the file side.** A rule set applies to every discarded path
+    regardless of extension, so in a polyglot repo an rspec run can implicate a discarded `.py` file that
+    happens to define the named constant. Cost is a spurious retry naming the wrong file.
 
 **Honest cost statement.** The first draft claimed this change "does not introduce a new way to fail." That
 was false. Every rule widens the surface on which a legitimately red check can be wrongly declared uncovered,
@@ -333,13 +381,13 @@ cost against preventing a criterion from shipping unverified.
 
 ## 6. The rspec wiring residual
 
-`interpretRunOutput` (`check-selector.ts:216-218`) tests rspec output for `\b0 examples` **before** consulting
+`interpretRunOutput`'s `case "rspec"` tests its output for `\b0 examples` **before** consulting
 the exit code. RSpec does not abort on a spec-file load error — it reports the error and still prints
-`0 examples, 0 failures`, exiting 1. So the run is bucketed `selected-none`, and `handlers.ts:670-673`
-returns *above* the guard at line 684. The guard never executes and the new vocabulary is never consulted.
+`0 examples, 0 failures`, exiting 1. So the run is bucketed `selected-none`, and `checks:dispatch`
+`continue`s the per-AC loop *above* the guard. The guard never executes and the new vocabulary is never consulted.
 
 **This is not a safety hole.** The `selected-none` branch also declines to mark the criterion covered, so the
-postcondition throws and `discardNote` (`handlers.ts:718-721`) still names the discarded files. The failure
+postcondition throws and `discardNote` still names the discarded files. The failure
 mode is prevented — by a different door, with a less specific message.
 
 It is, however, a **coverage claim** that must not be overstated, and the reason §5 rates rspec as it does.
@@ -391,7 +439,7 @@ Ruby cells; both were infeasible (§6), so the mix is now:
   `/matched no test/`, and the helper **not** named. Commented as the §6 residual.
 
 **Harness work.** Smaller than the first draft claimed, and in a different place. The framework is derived
-from the profile component owning the committed test path (`handlers.ts:634-635`), **not** from the work-unit
+from the profile component owning the committed test path (the `impactedComponents`/`frameworkFor` pair in `checks:dispatch`), **not** from the work-unit
 kind — so `setupChecks`'s `kind: "python"` needs no change at all. What is needed: a `goProfile`/`rubyProfile`
 helper, a `profile` option on `driveChecks`, and extension parameters on `canonicalTest`/`canonicalDeclared`.
 No production code changes. `isCanonicalCheckPath`, `checksScopeFor` and the discard sweep are all already
@@ -423,8 +471,12 @@ absence.
 - **INV-B** (failure feedback is diagnosis only): the message states the cause, the discarded file and the
   framework's own line. It carries no instruction.
 - **Conservative matching**: every rule ties to a named file, module or package *directory*, or — in the
-  symbol tier (§4.5) — to a discarded file's own *contents*. Nothing fires on a bare basename, and no rule
-  crosses a language boundary.
+  symbol tier (§4.5) — to a discarded file's own *contents*. No rule crosses a language boundary.
+  The bounded-basename tier *does* fire on a basename, but only as a **delimiter-bounded token** and only
+  while that language's indicator is present; it is deliberately disabled for `cargo` and JVM, where the
+  toolchain prints candidate paths that would poison it. An earlier draft of this line claimed "nothing
+  fires on a bare basename" — two tests shipping in this branch falsify that, and the claim is withdrawn
+  rather than softened.
 - **Single-line matching**: a naming pattern occupies one source line *and* uses horizontal-whitespace
   classes (`[^\S\r\n]+`). `\s` matches newlines, which would let a capture be lifted from the following
   output line and implicate an unrelated file.
@@ -454,6 +506,8 @@ toolchain output through it. Findings adopted:
 | All five proposed negatives were vacuous | Replaced with one-variable contrasts plus colliding-leaf cases (7.1) |
 | Harness plan named the wrong lever (work-unit kind) | Corrected — framework comes from the profile component (7.2) |
 | The `error` bucket is a guard-proof route to the same bad merge | §8, filed as ENG-347 |
+| "Does not introduce a new way to fail" was false | Replaced with an explicit cost statement (§5) |
+| Excerpt change affects more than JVM | Stated and pinned (4.6, 7.1) |
 
 **Amendment (2026-07-20, after the plan review).** The operator asked whether the symbol-only cases could
 be resolved by searching for the helper rather than accepting them as residuals. Searching the worktree
@@ -462,5 +516,13 @@ equally consistent with "we discarded it" and "the feature is not built yet", wh
 cases the guard must separate. Capturing the file's contents *before* discarding does work, and is
 stronger than any name matching. Added as D6 / §4.5, closing the Go same-package, JVM single-class, rspec
 autoload and PHP Composer gaps that §5 previously recorded as residuals.
-| "Does not introduce a new way to fail" was false | Replaced with an explicit cost statement (§5) |
-| Excerpt change affects more than JVM | Stated and pinned (4.5, 7.1) |
+
+**Amendment (2026-07-20, after the whole-branch review).** Three claims in this document were still
+false when the branch was otherwise complete, and are corrected above rather than softened: §9's "nothing
+fires on a bare basename" (the bounded tier does, by design, on a delimiter-bounded token); §4.5's
+mitigation paragraph, which covered only Go and JVM while presenting the failure class as handled; and
+§4.1's interface block, which omitted five shipped fields and understated the signature. Four unit tests
+named `residual: … ⇒ not tied` were renamed, because the symbol tier closes exactly those cases and the
+names asserted the opposite of what shipped. The recurring lesson across this ticket is recorded plainly:
+every one of these was a document or a test describing behaviour it did not have, and each was found by
+executing or mutating the code rather than by reading it.
