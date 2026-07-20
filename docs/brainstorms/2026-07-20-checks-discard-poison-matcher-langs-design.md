@@ -97,31 +97,72 @@ makes the exceptions in 4.3 and 4.4 legible rather than special cases scattered 
 
 ### 4.2 How each language ties
 
+Every gap between a phrase and its capture is written `[^\S\r\n]+` — horizontal whitespace only. `\s+`
+would match a newline, letting a capture be lifted off the *following* line and implicate an unrelated
+file; that was a measured defect, not a hypothetical. "Single-line regex" therefore means two things: the
+pattern occupies one source line, **and** it cannot span an output line.
+
 | Framework | Naming pattern (capture group 1) | Ties by |
 |---|---|---|
-| `rspec`, `minitest` | `cannot load such file --\s+([\w./-]+)` | file leaf |
-| `phpunit` | `failed opening required\s+['"]?([\w./-]+)` | file leaf |
-| `cargo` | ``file not found for module\s+['"`]?(\w+)`` | file leaf, plus the `mod.rs` shape (4.4) |
-| `go` | `no required module provides package\s+([\w./-]+)`, `cannot find module providing package\s+…`, `cannot find package\s+["']?…` | **directory** (4.3) |
-| `junit-maven`, `junit-gradle` | `error:\s+package\s+([\w.]+)\s+does not exist` | **directory** (4.3) |
+| `rspec`, `minitest` | `cannot load such file --[^\S\r\n]+([\w./-]+)` | file leaf |
+| `phpunit` | `failed opening required[^\S\r\n]+['"]?([\w./-]+)['"]?` | file leaf |
+| `cargo` | ``file not found for module[^\S\r\n]+['"`]?(\w+)`` | file leaf, plus the `mod.rs` shape (4.4) |
+| `go` | `no required module provides package[^\S\r\n]+([\w./-]+)`, `cannot find module providing package…`, `cannot find package…` | **directory** (4.3) |
+| `junit-maven`, `junit-gradle` | `error:[^\S\r\n]+package[^\S\r\n]+([\w.]+)[^\S\r\n]+does not exist` **and** `:\[\d+,\d+\][^\S\r\n]+package[^\S\r\n]+([\w.]+)[^\S\r\n]+does not exist` | **directory** (4.3) |
 
 The Rust pattern needs a backtick in its quote class — rustc writes `` `helper` `` and without it the capture
-fails outright. The JVM pattern is anchored to javac's own `error:` gutter rather than left as bare English.
+fails outright.
+
+**JVM needs two patterns, because anchoring must follow the build tool's rendering, not the compiler's.**
+The first draft anchored to javac's own `error:` gutter. That is correct for Gradle, which passes javac
+through verbatim — but `mvn` runs javac via maven-compiler-plugin, which reformats the diagnostic and drops
+the `error:` token entirely:
+
+```
+[ERROR] /repo/src/test/java/com/x/ATest.java:[3,26] package com.helper does not exist
+```
+
+With only the javac form, `junit-maven` — the framework every Maven project uses — would never tie and would
+produce no excerpt either. The second pattern anchors on the `:[line,col]` bracket form instead, which is
+structural rather than bare English. Note the Maven form is deliberately **not** given a matching indicator:
+a `] package ` indicator let a trailing `[WARNING] [deprecation] package … does not exist anymore` line win
+the excerpt's last-match rule and displace the real error.
 
 ### 4.3 Packages tie by directory
 
 A Go or JVM package is a directory, so matching a package path against a *file* leaf is a category error —
 the source of both collisions in §2. Instead:
 
-- **Go:** implicate a discarded file only when the package path's last segment equals the name of the
-  directory containing that file. `example.com/m/helper` with `helper/helper.go` ties (directory `helper`);
-  `github.com/stretchr/testify/assert` with `internal/scratch/assert.go` does not (directory `scratch`).
-- **JVM:** implicate only when the dotted package's segments are a trailing suffix of the file's directory
-  segments — the rule `packageInitImplicated` already implements for `__init__.py`, via `isSegSuffix`.
-  `com.helper` with `src/test/java/com/helper/Helper.java` ties; `org.junit.jupiter.api` with
-  `src/test/java/api.java` does not.
+The two rules are **mirror images**, because the two ecosystems put different halves of the path on disk:
 
-This also fixes an error in the first draft, which claimed `package com.foo does not exist` ties to
+- **Go:** the module prefix is *not* on disk, so the discarded file's **directory segments must be a trailing
+  suffix of the package path's segments**. `example.com/m/helper` ties `helper/helper.go` *and*
+  `helper/util.go` (directory `[helper]` is a suffix of `[example, com, m, helper]`), while
+  `github.com/stretchr/testify/assert` does not tie `internal/assert/helper.go` — `[internal, assert]` is
+  compared against `[testify, assert]` and fails.
+- **JVM:** the source root (`src/test/java`) *is* on disk, so the relationship inverts — the **package's
+  segments must be a trailing suffix of the file's directory segments**, the rule `packageInitImplicated`
+  already implements for `__init__.py` via `isSegSuffix`. `com.helper` ties
+  `src/test/java/com/helper/Helper.java`; `org.junit.jupiter.api` does not tie `src/test/java/api.java`.
+  JVM additionally requires **≥2 package segments**, so a single generic name (`package util does not exist`)
+  cannot implicate `src/test/java/util/Scratch.java`.
+
+An earlier draft of this section described Go as comparing only the package's *last* segment to the
+directory name. That is weaker than what shipped, and measurably so: it still implicated
+`internal/assert/helper.go` for a missing `testify/assert`, merely relocating the collision from the file
+leaf to the directory leaf.
+
+**Residual — Go, single-segment directories.** When the discarded file's directory has exactly one segment
+the suffix comparison degenerates to a leaf comparison, so a top-level `assert/`, `cmp/` or `util/` directory
+*is* implicated by a missing dependency whose package leaf matches. Go cannot take JVM's ≥2-segment floor
+without killing the ordinary `helper/helper.go` positive. The consequence is a spurious retry, never a wrong
+verdict. Pinned by test.
+
+**Residual — Go, missed ties.** A package at the repo root (no directory segments), a nested-module layout
+where the on-disk path carries segments the import path lacks, and a directory name containing a dot all
+fail to tie. All fail in the safe direction.
+
+This section also fixes an error in the first draft, which claimed `package com.foo does not exist` ties to
 `com/foo.java`. That layout is impossible — a file at `com/foo.java` is a class in package `com`, and javac
 would emit `cannot find symbol` instead.
 
@@ -345,8 +386,15 @@ absence.
 - **INV-A** (conventions live in forward prompts): untouched, no prompt change.
 - **INV-B** (failure feedback is diagnosis only): the message states the cause, the discarded file and the
   framework's own line. It carries no instruction.
-- **Conservative matching**: every rule ties to a named file, module or package *directory*. Nothing fires on
-  a bare basename, and no rule crosses a language boundary.
+- **Conservative matching**: every rule ties to a named file, module or package *directory*, or — in the
+  symbol tier (§4.5) — to a discarded file's own *contents*. Nothing fires on a bare basename, and no rule
+  crosses a language boundary.
+- **Single-line matching**: a naming pattern occupies one source line *and* uses horizontal-whitespace
+  classes (`[^\S\r\n]+`). `\s` matches newlines, which would let a capture be lifted from the following
+  output line and implicate an unrelated file.
+- **Per-language ownership**: every matching rule lives in `CHECK_RULES`, including fixture patterns and
+  excerpt preferences, and each rule set owns its own arrays — sharing one array object between two fields
+  lets a later append leak across a language boundary.
 - **Ground truth over self-report**: the guard reads the framework's real output, never an agent's claim.
 
 ## 10. Review trail
