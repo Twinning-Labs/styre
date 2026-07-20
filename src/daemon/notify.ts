@@ -41,7 +41,7 @@ function terminalDecision(outcome: string): { severity: NotifySeverity; event: s
     case "done":
       return { severity: "success", event: "released" };
     case "no-progress":
-      return { severity: "high", event: "gave up (no progress)" };
+      return { severity: "high", event: "Stopped — couldn't make progress." };
     default:
       return null; // blocked, parked
   }
@@ -107,7 +107,7 @@ export function createNotifier(config: RuntimeConfig): {
           db,
           ticketId,
           `notify:${ticketId}:term:blocked`,
-          buildMsg(db, ticketId, "gave up (blocked)", "high"),
+          buildMsg(db, ticketId, "Stopped — no actionable work remains.", "high"),
         );
         return;
       }

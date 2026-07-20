@@ -7,7 +7,7 @@ import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tra
 import { fakeNotifier } from "../../src/integrations/adapters/fake-notifier.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
-test("a drive that idles to no-progress delivers the terminal 'gave up' notification (post-loop drain)", async () => {
+test("a drive that idles to no-progress delivers the terminal 'Stopped' notification (post-loop drain)", async () => {
   const { db, ticketId } = makeTestDb();
   // Park the ticket OUT of v_ready_tickets (status 'waiting', no pending signal) so no ready ticket
   // exists → `tick` returns {advanced:0} without ever calling advanceOneStep → the (empty) registry
@@ -32,7 +32,9 @@ test("a drive that idles to no-progress delivers the terminal 'gave up' notifica
   expect(result.outcome).toBe("no-progress");
   // The centerpiece guard: the terminal notify was DELIVERED (post-loop drain), not left pending.
   expect(
-    notifier.calls.some((c) => c.event === "gave up (no progress)" && c.severity === "high"),
+    notifier.calls.some(
+      (c) => c.event === "Stopped — couldn't make progress." && c.severity === "high",
+    ),
   ).toBe(true);
 });
 
