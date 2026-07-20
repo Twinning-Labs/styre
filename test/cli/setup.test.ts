@@ -179,10 +179,13 @@ test("interactive confirm block prints prepare line for components that carry it
 
   const out = join(mkdtempSync(join(tmpdir(), "styre-out-ruby-")), "profile.json");
 
-  // Capture console.log output
+  // Capture stderr output (setup's human output moved from console.log to process.stderr.write)
   const logs: string[] = [];
-  const origLog = console.log;
-  console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+  const origStderrWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string) => {
+    logs.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
 
   // Mock globalThis.prompt: return "" for missing-command prompts (→ unavailable),
   // return "y" for the approval prompt.
@@ -208,7 +211,7 @@ test("interactive confirm block prints prepare line for components that carry it
       ),
     ).toBe(true);
   } finally {
-    console.log = origLog;
+    process.stderr.write = origStderrWrite;
     (globalThis as Record<string, unknown>).prompt = origPrompt;
     if (origDescriptor !== undefined) {
       Object.defineProperty(process.stdin, "isTTY", origDescriptor);

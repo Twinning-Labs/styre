@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runCommand } from "../../src/cli/run.ts";
+import { runImpl } from "../../src/cli/run.ts";
 
 function realRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "styre-conv-repo-"));
@@ -18,11 +18,7 @@ async function invoke(args: Record<string, unknown>, cwd: string, xdg: string): 
   process.env.XDG_CONFIG_HOME = xdg;
   process.chdir(cwd);
   try {
-    return await runCommand.run?.({
-      rawArgs: [],
-      cmd: runCommand,
-      args: { _: [], ...args } as never,
-    });
+    return await runImpl({ args: { _: [], ...args } as never });
   } finally {
     if (prev.t === undefined)
       // biome-ignore lint/performance/noDelete: restoring an unset env var requires delete

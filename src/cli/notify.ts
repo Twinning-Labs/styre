@@ -7,6 +7,8 @@ import {
   assertSlackConfigured,
   selectNotifier,
 } from "../integrations/notifier.ts";
+import { configError, usageError } from "./errors.ts";
+import { guard } from "./output.ts";
 
 /** Testable core: send one test notification. Throws (fail-loud) if the notifier is misconfigured. */
 export async function runNotifyTest(
@@ -29,7 +31,14 @@ export async function runNotifyTest(
       },
     );
   }
-  if (!notifier) throw new Error('notify --test: no notifier configured (set notifier: "slack")');
+  if (!notifier) {
+    throw configError({
+      file: "config.json",
+      field: "notifier",
+      detail: 'notifier is "none" — nothing to test.',
+      recovery: 'Set notifier: "slack" in config.json and re-run.',
+    });
+  }
   const { ref } = await notifier.notify({
     ticketIdent: "styre",
     event: "notifier test — hello from Styre",
@@ -48,19 +57,25 @@ export const notifyCommand = defineCommand({
       description: "Project slug for per-project config (default: derived from the cwd repo)",
     },
   },
-  async run({ args }) {
-    if (!args.test) {
-      process.stderr.write("usage: styre notify --test\n");
-      process.exitCode = 2;
-      return;
-    }
-    // Resolve config the same way `styre run` does, so per-project (per-slug) Slack config is
-    // picked up — otherwise `notify --test` could verify a different channel than a real run uses.
-    const slug = args.slug && args.slug.length > 0 ? args.slug : (slugForCwd() ?? undefined);
-    const rc = discoverRuntimeConfig({ explicitPath: args.config, slug });
-    const ref = await runNotifyTest(rc, {});
-    process.stderr.write(
-      `notifier: ${rc.notifier} → ${rc.slack?.channel}\n✓ sent test message (ts ${ref})\n`,
-    );
-  },
+  run: (ctx) => guard("notify", () => notifyImpl({ args: ctx.args as unknown as NotifyArgs })),
 });
+
+export interface NotifyArgs {
+  test?: boolean;
+  config?: string;
+  slug?: string;
+}
+
+export async function notifyImpl({ args }: { args: NotifyArgs }): Promise<void> {
+  if (!args.test) {
+    throw usageError("notify requires --test", "Run: styre notify --test");
+  }
+  // Resolve config the same way `styre run` does, so per-project (per-slug) Slack config is
+  // picked up — otherwise `notify --test` could verify a different channel than a real run uses.
+  const slug = args.slug && args.slug.length > 0 ? args.slug : (slugForCwd() ?? undefined);
+  const rc = discoverRuntimeConfig({ explicitPath: args.config, slug });
+  const ref = await runNotifyTest(rc, {});
+  process.stderr.write(
+    `notifier: ${rc.notifier} → ${rc.slack?.channel}\n✓ sent test message (ts ${ref})\n`,
+  );
+}

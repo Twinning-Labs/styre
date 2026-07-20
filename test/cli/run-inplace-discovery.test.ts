@@ -2,11 +2,12 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runCommand } from "../../src/cli/run.ts";
+import { type RunArgs, runImpl } from "../../src/cli/run.ts";
 import { assertInPlaceSafe } from "../../src/dispatch/in-place.ts";
 
-// This suite exercises the REAL `run.ts` entrypoint (`runCommand.run`) directly — not a
-// reimplementation of its preflight block — proving the actual production code path overrides
+// This suite exercises the REAL `run.ts` entrypoint (`runImpl`, the unwrapped body behind
+// `runCommand.run`'s `guard` wrapper) directly — not a reimplementation of its preflight block —
+// proving the actual production code path overrides
 // `profile.targetRepo` with the cwd-discovered repo root BEFORE the gate/ticket-required check,
 // and that discovery failure aborts (fail-closed) rather than falling through to the stale value.
 //
@@ -54,14 +55,11 @@ async function invokeRun(profilePath: string): Promise<void> {
   process.env.STYRE_TELEMETRY = "0"; // NOOP analytics — no network/file I/O from createAnalytics
   process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "styre-xdg-empty-")); // no convention files
   try {
-    await runCommand.run?.({
-      rawArgs: [],
-      cmd: runCommand,
+    await runImpl({
       args: {
-        _: [],
         profile: profilePath,
         "in-place": true,
-      } as unknown as Parameters<NonNullable<typeof runCommand.run>>[0]["args"],
+      } as RunArgs,
     });
   } finally {
     if (prevTelemetry === undefined) process.env.STYRE_TELEMETRY = undefined;

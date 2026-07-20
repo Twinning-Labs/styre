@@ -2,10 +2,12 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runCommand } from "../../src/cli/run.ts";
+import { runImpl } from "../../src/cli/run.ts";
 
-// Invoke the real `run` command with telemetry off and isolated XDG dirs. `state` is where a park
-// dump WOULD land (parkDir uses XDG_STATE_HOME) — the test asserts nothing gets written there.
+// Invoke the real `run` body (the unwrapped `runImpl` behind `runCommand.run`'s `guard` wrapper —
+// bypassing `guard` here so throws are observable) with telemetry off and isolated XDG dirs.
+// `state` is where a park dump WOULD land (parkDir uses XDG_STATE_HOME) — the test asserts nothing
+// gets written there.
 async function invokeRun(args: Record<string, unknown>, xdg: string, state: string): Promise<void> {
   const prev = {
     t: process.env.STYRE_TELEMETRY,
@@ -17,7 +19,7 @@ async function invokeRun(args: Record<string, unknown>, xdg: string, state: stri
   process.env.XDG_STATE_HOME = state;
   process.exitCode = 0;
   try {
-    await runCommand.run?.({ rawArgs: [], cmd: runCommand, args: { _: [], ...args } as never });
+    await runImpl({ args: { _: [], ...args } as never });
   } finally {
     // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
     if (prev.t === undefined) delete process.env.STYRE_TELEMETRY;
@@ -54,14 +56,14 @@ function writeProfile(build: string): string {
   return path;
 }
 
-test("run: a missing toolchain program exits 69 before any dispatch, and writes no dump", async () => {
+test("run: a missing toolchain program throws before any dispatch, and writes no dump", async () => {
   const xdg = mkdtempSync(join(tmpdir(), "styre-xdg-"));
   const state = mkdtempSync(join(tmpdir(), "styre-state-"));
   const profile = writeProfile("styre-definitely-absent-xyz build");
-  // Resolves: the preflight prints + `return`s (it does not throw). Reaching exit 69 proves the
-  // early return — dbPath/migrate/runTicket at run.ts:129+ were never reached.
-  await invokeRun({ ticket: "ENG-1", profile }, xdg, state);
-  expect(process.exitCode).toBe(69);
+  // The preflight throws a toolchainError (rendered/exit-coded by `guard` in production; here we
+  // call the unwrapped `runImpl`, so the throw itself is the observable proof of the early return
+  // — dbPath/migrate/runTicket at run.ts:129+ were never reached).
+  await expect(invokeRun({ ticket: "ENG-1", profile }, xdg, state)).rejects.toThrow(/cannot start/);
   // AC2: no SoT dump — parkDir would write under <XDG_STATE_HOME>/styre/…; nothing was created.
   expect(existsSync(join(state, "styre"))).toBe(false);
 });
