@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
+import { parseConfigOrThrow } from "./parse-config.ts";
 import { configDir } from "./paths.ts";
 import { type RuntimeConfig, RuntimeConfigSchema } from "./runtime-config.ts";
 import { type GitRun, deriveSlug, discoverRepoRoot } from "./slug.ts";
@@ -49,10 +50,15 @@ export function discoverRuntimeConfig(opts: {
   configHome?: string;
 }): RuntimeConfig {
   if (opts.explicitPath && opts.explicitPath.length > 0) {
-    return RuntimeConfigSchema.parse(JSON.parse(readFileSync(opts.explicitPath, "utf8")));
+    return parseConfigOrThrow(
+      RuntimeConfigSchema,
+      JSON.parse(readFileSync(opts.explicitPath, "utf8")),
+      opts.explicitPath,
+    );
   }
   const home = opts.configHome ?? configDir();
   const global = readJsonIfPresent(join(home, "config.json"));
   const perProject = opts.slug ? readJsonIfPresent(join(home, opts.slug, "config.json")) : {};
-  return RuntimeConfigSchema.parse({ ...global, ...perProject });
+  const file = opts.slug ? join(home, opts.slug, "config.json") : join(home, "config.json");
+  return parseConfigOrThrow(RuntimeConfigSchema, { ...global, ...perProject }, file);
 }

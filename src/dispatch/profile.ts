@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { z } from "zod";
+import { parseConfigOrThrow } from "../config/parse-config.ts";
 
 export const PresenceEnum = z.enum(["present", "absent", "unknown"]);
 export const TopologyTypeEnum = z.enum([
@@ -128,7 +129,7 @@ export const ProfileSchema = z.object({
 
 export type Profile = z.infer<typeof ProfileSchema>;
 
-export function parseProfile(raw: unknown): Profile {
+export function parseProfile(raw: unknown, file = "profile.json"): Profile {
   if (raw && typeof raw === "object" && "commands" in raw) {
     throw new Error(
       "profile: legacy flat `commands` field (schemaVersion 1) is no longer supported. " +
@@ -141,9 +142,9 @@ export function parseProfile(raw: unknown): Profile {
         "file-identity routing. Re-run `styre setup` to regenerate a schemaVersion-3 profile.",
     );
   }
-  return ProfileSchema.parse(raw);
+  return parseConfigOrThrow(ProfileSchema, raw, file);
 }
 
 export function loadProfile(path: string): Profile {
-  return parseProfile(JSON.parse(readFileSync(path, "utf8")));
+  return parseProfile(JSON.parse(readFileSync(path, "utf8")), path);
 }
