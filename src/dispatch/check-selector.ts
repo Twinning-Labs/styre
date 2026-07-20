@@ -317,7 +317,10 @@ export function collectionErrorExcerpt(
     if (!byIndicator && !byNaming) continue;
     if (byIndicator) lastIndicator = line;
     else lastNaming = line;
-    if (rules.prefersErrorSummary === true && /^\s*ERROR\b/.test(line)) summary = line;
+    // `byIndicator &&`: a naming-only line must never win via the summary path either, or it would
+    // bypass the fallback ordering established two lines above.
+    if (byIndicator && rules.prefersErrorSummary === true && /^\s*ERROR\b/.test(line))
+      summary = line;
   }
   const chosen = (summary ?? lastIndicator ?? lastNaming)?.trim().replace(/^E\s+/, "");
   if (chosen === undefined || chosen === "") return undefined;

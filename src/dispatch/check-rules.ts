@@ -162,7 +162,10 @@ const nodeRules: LanguageRules = {
   shapes: [],
 };
 
-/** No rules: behaviour identical to before ENG-343. Replaced per language in Tasks 2 and 3. */
+/** No rules — a deliberate, TEMPORARY narrowing, not parity with before ENG-343. The old matcher was
+ *  framework-blind, so the legacy Python/Node vocabulary incidentally fired on these stacks too
+ *  (`go: cannot find module providing package …` hit the legacy `cannot find module` indicator).
+ *  Replaced per language with real rules, which restore that coverage more precisely. */
 const noRules: LanguageRules = {
   indicators: [],
   basenameGates: [],

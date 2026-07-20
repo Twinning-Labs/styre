@@ -449,9 +449,11 @@ describe("importErrorImplicatesDiscarded (discard-poison guard: conservative imp
     const goOut =
       "go: cannot find module providing package example.com/m/helper\nhelper/helper.go:5:2: no required module provides package";
     expect(importErrorImplicatesDiscarded(goOut, ["helper/helper.go"], "go")).toEqual([]);
-    expect(
-      importErrorImplicatesDiscarded("cannot load such file -- helper", ["helper.rb"], "rspec"),
-    ).toEqual([]);
+    // Same shape for cargo: the legacy `importerror` indicator plus the bounded-basename tier used to
+    // implicate this; under noRules it does not.
+    const cargoOut =
+      "error[E0583]: file not found for module 'common'\nImportError: boom in tests/common/mod.rs";
+    expect(importErrorImplicatesDiscarded(cargoOut, ["tests/common/mod.rs"], "cargo")).toEqual([]);
   });
 });
 
@@ -527,6 +529,15 @@ describe("collectionErrorExcerpt (framework-aware)", () => {
     // excerpt was undefined for such a line. Pinned so the drift is deliberate, not accidental.
     expect(collectionErrorExcerpt("npm ERR! unable to resolve dependency tree", "jest")).toBe(
       "npm ERR! unable to resolve dependency tree",
+    );
+  });
+
+  test("a naming-only ERROR line cannot displace an indicator line via the summary path", () => {
+    // pytest sets prefersErrorSummary, so an `ERROR ...` line is preferred — but only when that line
+    // matched by INDICATOR. A naming-only ERROR line must not bypass the fallback ordering.
+    const out = "ImportError: cannot import name 'X' from 'pkg'\nERROR unable to resolve foo";
+    expect(collectionErrorExcerpt(out, "pytest")).toBe(
+      "ImportError: cannot import name 'X' from 'pkg'",
     );
   });
 
