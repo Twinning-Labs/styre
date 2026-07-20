@@ -34,7 +34,8 @@
 - Modify `src/cli/notify.ts`, `src/cli/setup.ts`, `src/cli/migrate.ts` — wrap in `guard`, export unwrapped impls, stderr rule, usage/config conversions.
 - Modify `src/daemon/run-ticket.ts` — rewrite `formatRunSummary`.
 - Modify `src/daemon/notify.ts` — align Slack `terminalDecision` wording.
-- Modify `src/config/discover.ts`, `src/dispatch/profile.ts` — wrap zod `.parse()` in `configError`.
+- Create `src/config/parse-config.ts` — `parseConfigOrThrow` (shared by discover + profile; standalone to avoid a `discover.ts`↔`profile.ts` import cycle).
+- Modify `src/config/discover.ts`, `src/dispatch/profile.ts` — wrap zod `.parse()` in `configError` via `parseConfigOrThrow`.
 - Create `src/config/adapter-keys.ts` — exported key lists; modify `src/config/discover.ts` to validate.
 - Modify `src/setup/enrich.ts` — thread agent stderr into the failure message.
 - Modify tests: `test/cli/run-preflight.test.ts` (assert against `runImpl`).
@@ -391,12 +392,13 @@ git commit -m "feat(cli): outcome sentences + per-outcome exit codes (ENG-338)" 
 ### Task 4: Wrap `config.json` / `profile.json` zod parse in `configError`
 
 **Files:**
+- Create: `src/config/parse-config.ts` (the shared helper — standalone to avoid a cycle: `discover.ts` already imports `loadProfile` from `profile.ts`, so `profile.ts` must NOT import back from `discover.ts`)
 - Modify: `src/config/discover.ts:51-57` (both `RuntimeConfigSchema.parse` calls), `src/dispatch/profile.ts:144` (`ProfileSchema.parse` in `parseProfile`)
 - Test: `test/cli/config-error.test.ts`
 
 **Interfaces:**
 - Consumes (Task 1): `configError`, `StyreError`.
-- Produces: a shared helper `parseConfigOrThrow<T>(schema, raw, file): T` in `src/config/discover.ts` (exported for reuse by profile). Signature: `parseConfigOrThrow<T>(schema: { parse(x: unknown): T }, raw: unknown, file: string): T`.
+- Produces: `parseConfigOrThrow<T>(schema: { parse(x: unknown): T }, raw: unknown, file: string): T` in `src/config/parse-config.ts`, imported by both `discover.ts` and `profile.ts`.
 
 - [ ] **Step 1: Write the failing test** — `test/cli/config-error.test.ts`:
 
@@ -427,14 +429,14 @@ test("a bad config value throws a StyreError naming the file + field, not a ZodE
 
 - [ ] **Step 2: Run to verify it fails** — `bun test test/cli/config-error.test.ts` → FAIL (a raw `ZodError` is thrown, not a `StyreError`).
 
-- [ ] **Step 3: Add the helper and use it.** In `src/config/discover.ts`, add imports at the top and the helper, and replace the two `RuntimeConfigSchema.parse(...)` calls:
+- [ ] **Step 3: Create the standalone helper** — `src/config/parse-config.ts` (zod is pinned 4.4.3; `ZodError`, `.issues`, `issue.path`, `issue.message` are the correct v4 API — verified):
 
 ```ts
-// add near the other imports
 import { ZodError } from "zod";
 import { configError } from "../cli/errors.ts";
 
-/** Parse `raw` with `schema`, converting a ZodError into a file-named ConfigError. */
+/** Parse `raw` with `schema`, converting a ZodError into a file-named ConfigError.
+ *  Standalone (imported by both discover.ts and profile.ts) to avoid an import cycle. */
 export function parseConfigOrThrow<T>(
   schema: { parse(x: unknown): T },
   raw: unknown,
@@ -456,7 +458,7 @@ export function parseConfigOrThrow<T>(
 }
 ```
 
-Then replace line 52:
+Then in `src/config/discover.ts` add `import { parseConfigOrThrow } from "./parse-config.ts";` and replace line 52:
 ```ts
     return parseConfigOrThrow(RuntimeConfigSchema, JSON.parse(readFileSync(opts.explicitPath, "utf8")), opts.explicitPath);
 ```
@@ -465,13 +467,11 @@ and the return at line 57 (compute the effective file path for the message — t
   const file = opts.slug ? join(home, opts.slug, "config.json") : join(home, "config.json");
   return parseConfigOrThrow(RuntimeConfigSchema, { ...global, ...perProject }, file);
 ```
+(Task 5 wraps these two returns further to call `validateAdapters` — land Task 5's edit on top.)
 
-- [ ] **Step 4: Wire `profile.ts`.** In `src/dispatch/profile.ts`, import the helper and replace the final `return ProfileSchema.parse(raw);` in `parseProfile`. Because `parseProfile` has no path, thread the file through `loadProfile`:
+- [ ] **Step 4: Wire `profile.ts`.** In `src/dispatch/profile.ts`, `import { parseConfigOrThrow } from "../config/parse-config.ts";` and replace the final `return ProfileSchema.parse(raw);` in `parseProfile`. Thread the file through `loadProfile`:
 
 ```ts
-// import
-import { parseConfigOrThrow } from "../config/discover.ts";
-
 // change parseProfile signature to accept an optional file label:
 export function parseProfile(raw: unknown, file = "profile.json"): Profile {
   // ... existing legacy-schema guards unchanged ...
@@ -483,14 +483,14 @@ export function loadProfile(path: string): Profile {
 }
 ```
 
-(Existing callers of `parseProfile(raw)` in tests still compile — `file` defaults.)
+(All ~120 existing `parseProfile(raw)` callers pass a single arg — `file` defaults, so they keep compiling. Verified.)
 
 - [ ] **Step 5: Run to verify + typecheck** — `bun test test/cli/config-error.test.ts` → PASS; `bun run typecheck` → clean.
 
 - [ ] **Step 6: Commit:**
 
 ```bash
-git add src/config/discover.ts src/dispatch/profile.ts test/cli/config-error.test.ts
+git add src/config/parse-config.ts src/config/discover.ts src/dispatch/profile.ts test/cli/config-error.test.ts
 git commit -m "fix(config): file-named ConfigError instead of a raw ZodError dump (ENG-350)" -m "$(printf 'Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01P8D9cinMbdQqwcBGQYv8H5')"
 ```
 
@@ -619,9 +619,10 @@ git commit -m "fix(config): validate adapter values early, naming valid options 
 
 - [ ] **Step 1: Read the current failure path.** `bun run` the read: open `src/setup/enrich.ts`, locate the loop that retries `MAX_ATTEMPTS` times and the final `throw new Error(\`enrichRuntimeContext: agent enrichment failed after ${MAX_ATTEMPTS} attempts: ${lastReason}\`)`. Confirm the block captures `result.stderr` but drops it (only `exit N` / `timed out` survive in `lastReason`).
 
-- [ ] **Step 2: Write the failing test** — `test/setup/enrich-error.test.ts` (inject a fake runner that returns a non-zero exit with stderr text; assert the thrown message contains that stderr). Use the module's existing injection seam (the `deps`/runner parameter `enrichRuntimeContext` already takes — mirror an existing enrich test's setup). Assert:
+- [ ] **Step 2: Write the failing test** — `test/setup/enrich-error.test.ts`. `enrichRuntimeContext(repoDir, scan, deps)` takes `deps.runner` and an optional `deps.sleep` (`enrich.ts:16-17,55`). Inject an always-failing runner returning `{ exitCode: 1, stderr: "boom-from-cli", ... }` **and `sleep: async () => {}`** — otherwise the retry loop waits `BACKOFF_MS = [2000, 8000]` (`enrich.ts:22,83`) ≈ 10s of real time. Assert:
 
 ```ts
+// deps = { runner: async () => ({ exitCode: 1, stdout: "", stderr: "boom-from-cli", timedOut: false }), sleep: async () => {} }
 expect(String(err)).toContain("boom-from-cli"); // the agent CLI's real stderr survives
 ```
 
@@ -658,15 +659,28 @@ git commit -m "fix(setup): surface the agent CLI's real error on enrichment fail
 - Produces: each subcommand exports its unwrapped body — `runImpl(ctx)`, `notifyImpl(ctx)`, `setupImpl(ctx)`, `migrateImpl(ctx)` — and its `defineCommand` `run` is `(ctx) => guard("<cmd>", () => <impl>(ctx))`.
 
 - [ ] **Step 1: `run.ts` — extract + wrap + fix cliError code + convert usage throws.**
-  - Move the current `async run({ args }) { ... }` body into `export async function runImpl({ args }: { args: ... }): Promise<void>` (keep the exact body). Change the command to:
+  - Define an explicit args interface (citty's inferred `args` type is not nameable outside the inline `args:` literal, and a `Parameters<typeof runCommand.run>` shortcut is circular — hand-write it):
+    ```ts
+    export interface RunArgs {
+      ticket?: string;
+      profile?: string;
+      slug?: string;
+      config?: string;
+      db?: string;
+      resume?: string;
+      "accept-head"?: boolean;
+      inspect?: boolean;
+      "in-place"?: boolean;
+    }
+    ```
+  - Move the current `async run({ args }) { ... }` body into `export async function runImpl({ args }: { args: RunArgs }): Promise<void>` (keep the exact body). Change the command to:
     ```ts
     export const runCommand = defineCommand({
       meta: { ... },
       args: { ... },
-      run: (ctx) => guard("run", () => runImpl(ctx as { args: RunArgs })),
+      run: (ctx) => guard("run", () => runImpl({ args: ctx.args as unknown as RunArgs })),
     });
     ```
-    (Define `type RunArgs = ...` or reuse citty's inferred arg type via `Parameters`.)
   - Convert the two usage throws to `usageError`:
     - line 86-88 → `throw usageError("no --profile given and the current directory is not a git repo", "cd into the target repo, or pass --profile / --slug.");`
     - line 133 → `throw usageError("--ticket is required when not using --resume", "Pass a ticket ref, e.g. styre run ENG-123.");`
@@ -706,15 +720,31 @@ git commit -m "fix(setup): surface the agent CLI's real error on enrichment fail
     // inside invokeRun:
     await runImpl({ args: { _: [], ...args } as never });
     ```
-    The two `await expect(invokeRun(...)).rejects.toThrow(/no parked run/)` assertions now pass because `runImpl` still throws (the guard is bypassed in the test). Keep the `expect(process.exitCode).not.toBe(69)` assertions.
+    - The two resume tests (`:78`, `:85`) `await expect(invokeRun(...)).rejects.toThrow(/no parked run/)` still pass — `runImpl` (guard-bypassed) throws, and `usageError("no parked run …")` keeps that substring.
+    - **The "exits 69" test (`:63-66`) now throws instead of setting `process.exitCode = 69`** (Task 7 Step 1 converts the toolchain branch to `throw toolchainError(...)`). Rewrite it:
+      ```ts
+      await expect(invokeRun({ ticket: "ENG-1", profile }, xdg, state)).rejects.toThrow(/cannot start/);
+      // keep the "no dump written" assertion at :66
+      ```
+      (`toolchainError`'s headline is "cannot start — required commands are not runnable on this machine".)
 
-- [ ] **Step 6: Run the affected suites + typecheck.**
-    Run: `bun test test/cli/run-preflight.test.ts test/cli/notify-test.test.ts test/cli/setup.test.ts test/cli.test.ts` → PASS. Run: `bun run typecheck` → clean. If `setup.test.ts` asserted on stdout content, switch those assertions to the captured stderr (the `--version` stdout test in `cli.test.ts` is unaffected — it stays on stdout via `index.ts:15`).
+- [ ] **Step 6: Fix `setup.test.ts`'s console.log capture.** `setup.test.ts:184-185` overrides `console.log` and `:204-209` asserts the interactive confirm lines (e.g. `"prepare: … stored, not run"`) land in the captured `logs`. Task 7 Step 4 moves those `setup.ts:147-161` writes to `process.stderr.write`, so switch the test's capture to a `process.stderr.write` spy:
+    ```ts
+    const logs: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((s: string) => { logs.push(String(s)); return true; }) as typeof process.stderr.write;
+    // ... run setup ...
+    process.stderr.write = orig;
+    ```
+    (The `unknownRuntimeSections` test at `:222-237` reads a pure return value — unaffected.)
 
-- [ ] **Step 7: Commit:**
+- [ ] **Step 7: Run the affected suites + typecheck.**
+    Run: `bun test test/cli/run-preflight.test.ts test/cli/notify-test.test.ts test/cli/setup.test.ts test/cli.test.ts` → PASS. Run: `bun run typecheck` → clean. (The `--version` stdout test in `cli.test.ts` is unaffected — it stays on stdout via `index.ts:15`.)
+
+- [ ] **Step 8: Commit:**
 
 ```bash
-git add src/cli/run.ts src/cli/notify.ts src/cli/setup.ts src/cli/migrate.ts test/cli/run-preflight.test.ts
+git add src/cli/run.ts src/cli/notify.ts src/cli/setup.ts src/cli/migrate.ts test/cli/run-preflight.test.ts test/cli/setup.test.ts
 git commit -m "feat(cli): route all four subcommands through the error boundary; stderr rule (ENG-350)" -m "$(printf 'Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01P8D9cinMbdQqwcBGQYv8H5')"
 ```
 
@@ -865,24 +895,15 @@ export function finishRunResult(
 
 (Import `formatMessage` from `./output.ts`; drop the `throw`. The summary was already printed at `park.ts:287`.)
 
-- [ ] **Step 5: Convert resume usage throws.** `park.ts:169` `no parked run` → `throw usageError(\`no parked run at ${dbPath}\`, "Check the ticket ident, or start fresh: styre run <ticket>.");`. Convert the HEAD-moved refusal at `park.ts:198-204` to use `resumeRefusedError(...)` **only if** you also route it through the boundary — but resume currently writes to stderr + sets exit 65 directly and returns (not a throw). Keep it as a direct write for now (it is already a good message) OR convert to `throw resumeRefusedError(detail, recovery)` and delete the manual `process.exitCode = 65`. Choose the throw form for consistency:
-    ```ts
-    if (moved && !args.acceptHead) {
-      db.close();
-      throw resumeRefusedError(
-        `recorded base: ${recorded}\ncurrent head:  ${current}\nwould re-dispatch: ${parkedStep?.step_key ?? "(none)"}`,
-        `Re-run with --accept-head to resume against the new HEAD (drops stale transcript), or 'styre run ${ticket.ident}' to start fresh.`,
-      );
-    }
-    ```
-    (Because `resumeRun` runs inside `runImpl` under `guard`, the thrown `resumeRefusedError` renders once and exits 65. Verify `run-preflight.test.ts` still asserts against `runImpl` — Task 7 — so the throw is observable.)
+- [ ] **Step 5: Convert the `no parked run` usage throw.** `park.ts:169` → `throw usageError(\`no parked run at ${dbPath}\`, "Check the ticket ident, or start fresh: styre run <ticket>.");` (still contains "no parked run", so the run-preflight resume tests keep matching).
+  - **Do NOT convert the HEAD-moved refusal (`park.ts:198-205`) to a throw.** It must stay a direct `process.stderr.write(...)` + `db.close()` + `process.exitCode = 65; return`. Reason (independent review, blocker): `test/helpers/run-harness.ts:243` calls `resumeRun` **directly** (not through `guard`) and reconstructs the outcome by reading `process.exitCode === 65` (`run-harness.ts:312-314`); a thrown `resumeRefusedError` would propagate past that read and fail `head-guard-e2e.test.ts:15-16`. Keep the existing direct-write form. (Optionally re-render its text through `formatMessage("run", …)` for house-style consistency, but keep it a direct stderr write + `exitCode = 65`, not a throw. `resumeRefusedError` is therefore unused by this plan — leave the factory in `errors.ts` for a future refactor, or drop it from Task 1; either is fine.)
 
-- [ ] **Step 6: Run the affected suites** — `bun test test/cli/park.test.ts test/cli/park-resume-e2e.test.ts test/cli/head-guard-e2e.test.ts` → PASS. `bun run typecheck` → clean. If `head-guard-e2e.test.ts` asserted on the old `resume refused:` string via stderr capture, update it to assert the new rendered `styre run: resume refused` text and `exitCode === 65`.
+- [ ] **Step 6: Run the affected suites** — `bun test test/cli/park.test.ts test/cli/park-resume-e2e.test.ts test/cli/head-guard-e2e.test.ts` → PASS. `bun run typecheck` → clean. (Keeping the HEAD-refusal as a direct `exitCode = 65` write with its existing text means `head-guard-e2e.test.ts` and the harness pass unchanged. Only if you reword that message must you update `head-guard-e2e.test.ts`'s stderr assertion.)
 
 - [ ] **Step 7: Commit:**
 
 ```bash
-git add src/cli/park.ts test/cli/park.test.ts test/cli/head-guard-e2e.test.ts
+git add src/cli/park.ts test/cli/park.test.ts
 git commit -m "fix(run): render operational stops instead of throwing a stack trace (ENG-338)" -m "$(printf 'Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01P8D9cinMbdQqwcBGQYv8H5')"
 ```
 
@@ -892,19 +913,12 @@ git commit -m "fix(run): render operational stops instead of throwing a stack tr
 
 **Files:**
 - Modify: `src/daemon/notify.ts:37-48` (`terminalDecision`), and the `blocked` terminal ping at `:106-111`
-- Test: `test/daemon/notify.test.ts` (or the existing notify test file) — assert no `gave up`.
+- Test: `test/daemon/notify-sweep.test.ts` (asserts `"gave up (no progress)"` at `:55` and `"gave up (blocked)"` at `:66`) and `test/daemon/run-ticket-notify.test.ts` (test title `:10`, assertion `:35`). Update both. (`run-ticket-notify.test.ts:67` asserts the unchanged `"PR ready to merge"` and survives.)
 
 **Interfaces:**
 - Consumes (Task 3): `outcomeSentence` (optional — or inline consistent strings).
 
-- [ ] **Step 1: Write the failing test** — assert `terminalDecision("no-progress")?.event` no longer contains "gave up" and reads consistently with the terminal (e.g. `"Stopped — couldn't make progress."`), and the `blocked` dead-end ping reads `"Stopped — no actionable work remains."` not `"gave up (blocked)"`.
-
-```ts
-import { expect, test } from "bun:test";
-// terminalDecision is module-private; test via createNotifier's enqueued payload, or export it.
-```
-
-If `terminalDecision` is private, export it for the test (small, acceptable) or assert via the enqueued outbox payload as the existing notify test does.
+- [ ] **Step 1: Update the failing assertions** — in `test/daemon/notify-sweep.test.ts` change the expected strings at `:55`/`:66` and in `test/daemon/run-ticket-notify.test.ts` at `:35` (+ the title at `:10`) from `"gave up …"` to the new wording (below). These are the two real files that assert the old text — verified by grep.
 
 - [ ] **Step 2: Run to verify it fails** — FAIL (current strings are `"gave up (no progress)"` / `"gave up (blocked)"`).
 
@@ -918,7 +932,7 @@ If `terminalDecision` is private, export it for the test (small, acceptable) or 
 - [ ] **Step 5: Commit:**
 
 ```bash
-git add src/daemon/notify.ts test/daemon/notify.test.ts
+git add src/daemon/notify.ts test/daemon/notify-sweep.test.ts test/daemon/run-ticket-notify.test.ts
 git commit -m "fix(notify): align Slack wording with the run vocabulary; drop 'gave up' (ENG-338)" -m "$(printf 'Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01P8D9cinMbdQqwcBGQYv8H5')"
 ```
 
@@ -962,7 +976,7 @@ git commit -m "refactor(cli): formatMissingTools body-only; toolchainError frame
 
 **Files:** none new — verification + delivery.
 
-- [ ] **Step 1: Run the whole suite** — `bun test` → all PASS. Fix any test that asserted an old string/exit code (search: `bun test 2>&1 | grep -i fail`). Likely touch points already enumerated: `run-preflight`, `park`, `head-guard-e2e`, `notify`, `preflight`, `setup`, `run-analytics`.
+- [ ] **Step 1: Run the whole suite** — `bun test` → all PASS. Fix any test that asserted an old string/exit code (search: `bun test 2>&1 | grep -i fail`). Enumerated touch points (each already owned by its task): `run-preflight` (Task 7), `setup` (Task 7), `park`/`park-resume-e2e` (Task 9), `notify-sweep`/`run-ticket-notify` (Task 10), `preflight` (Task 11). Verified unaffected: `run-analytics.test.ts` (tests `runCompletedProperties` only), `run-e2e.test.ts:58` (`toContain("merge")` survives — the pr-ready sentence contains "merge approval"), `notify-test.test.ts:21` (`.rejects.toThrow()` still holds after the `configError` conversion).
 
 - [ ] **Step 2: Lint + typecheck** — `bun run lint` and `bun run typecheck` → clean. Run `bun run format` if lint flags formatting.
 
@@ -1005,3 +1019,15 @@ BODY
 **Placeholder scan:** no TBD/TODO; every code step shows real code; test steps show real assertions. Task 6 references the enrich injection seam by pattern (mirror an existing enrich test) rather than quoting it — the file wasn't read line-for-line; the implementer must open `src/setup/enrich.ts` to place the `result.stderr` capture exactly. Flagged there explicitly.
 
 **Type consistency:** `StyreError`/`EXIT`/factory names are used identically across Tasks 1,2,4,5,7,9. `guard(cmd, body)` signature stable (Tasks 2,7). `finishRunResult` widened to `out.outcome: RunOutcome` (Task 9) matches `RunResult.outcome` passed by `run.ts`/`run-harness.ts`. `outcomeSentence`/`exitCodeForOutcome` take `RunOutcome` (Task 3) and receive `result.outcome: RunOutcome` (Tasks 8,9). `formatMissingTools` body-only (Task 11) consumed by `toolchainError` (Task 7) — ordering note: Task 7 references the trimmed form, so land Task 11 before/with Task 7 or keep the `toolchainError` wrap tolerant of the old string (it is — it just wraps whatever string it's given). No signature drift found.
+
+## Independent review (folded in, 2026-07-21)
+
+A fresh agent reviewed this plan against the codebase. Verdict: substrate sound, all cited symbols/signatures + the zod-4 `ZodError` API verified. Findings incorporated:
+- **BLOCKER** — the HEAD-refusal must stay a direct `exitCode = 65` write, not a throw (`run-harness.ts` calls `resumeRun` directly and reads `process.exitCode`; a throw breaks `head-guard-e2e`). Fixed in Task 9 Step 5.
+- **S1** — `run-preflight.test.ts`'s "exits 69" test now throws; rewritten to `.rejects.toThrow(/cannot start/)`. Task 7 Step 5.
+- **S2** — Slack-wording tests are `notify-sweep.test.ts` + `run-ticket-notify.test.ts` (not the named-nonexistent `notify.test.ts`). Task 10.
+- **S3** — `parseConfigOrThrow` moved to a standalone `src/config/parse-config.ts` to avoid a `discover.ts`↔`profile.ts` cycle. Task 4.
+- **S4** — `RunArgs` is an explicit hand-written interface (no `Parameters` shortcut). Task 7 Step 1.
+- **S5** — `setup.test.ts` overrides `console.log`; switch its capture to a `process.stderr.write` spy. Task 7 Step 6.
+- **S6** — the enrich test injects `sleep: async () => {}` to skip ~10s of real backoff. Task 6 Step 2.
+- Verified-safe (no change needed): `parseProfile` defaulted 2nd param (~120 single-arg callers compile); `outcome.ts`↔`run-ticket.ts` is type-only (no runtime cycle); de-throwing `finishRunResult` breaks no control flow; the toolchain `throw` still runs `analytics.shutdown` in `finally`; `firstSignature` splitting on `|` correctly summarizes review loopbacks and harmlessly passes through comma/colon signatures.
