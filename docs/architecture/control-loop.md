@@ -7,17 +7,18 @@
 > as such below (§2.1, §2.2, §10, and the human-merge/inbox passages). The OSS core has zero knowledge
 > of the plane; the plane integrates only through the versioned seam.
 
-> **Artifact for §9.4 checklist #2** of [`brainstorm.md`](brainstorm.md). The execution semantics of
-> the single-process control loop — **the runner** (decision **B1**) — that drives
+> The execution semantics of the single-process control loop — **the runner** — that drives
 > [`schema.sql`](schema.sql). Substrate only — NOT the autonomy layer (no LLM supervisor / memory;
 > those are post-cutover increments).
 >
-> **Acceptance (§9.4 #2), discharged in §6–§7:** (1) a step that already ran returns its recorded
-> result on replay; (2) external side-effects carry idempotency keys; (3) crash mid-step resumes
-> at that step.
+> **Maintained reference.** This mirrors `src/daemon/resolver.ts` (the routing function),
+> `src/daemon/advance.ts` (the descriptor interpreter), and `src/dispatch/handlers.ts` (the step
+> handlers). When a change alters routing, a step, a guard, or a loopback, update this doc in the same
+> PR. The concrete state machine also lives in [`minimal-loop.md`](minimal-loop.md) §1 — keep both in
+> sync. Historical decisions are tagged **CL-#**.
 >
-> Status: step catalog frozen 2026-06-19 after a full operator walkthrough (S1–S10). Decisions
-> tagged **CL-#**.
+> Guarantees (verified in §6–§7): (1) a step that already succeeded returns its recorded result on
+> replay; (2) external side-effects carry idempotency keys; (3) a crash mid-step resumes at that step.
 
 ---
 
@@ -32,10 +33,11 @@
 - **Step** — one durable unit of progress, a `workflow_step` row. Deterministic `step_key`; carries
   a recorded result; re-entrant via replay. `UNIQUE(ticket_id, step_key)` → one row per logical
   step; retries increment `attempt`.
-- **Worker / dispatch** — a `claude -p` agent run (the kept `dispatch.sh` leaf). Workers return
-  results; they never write SQLite (B2).
+- **Worker / dispatch** — an agent CLI run behind the generic `AgentRunner` (native TS —
+  `run-dispatch.ts` + the provider adapter; the default provider is Claude, Codex also registered).
+  Workers return results; they never write SQLite (B2).
 - **Effect** — a change outside SQLite. **Local** = on this host (spawn a worker, run a build, local
-  git). **External** = on a remote service (Linear, GitHub, git push) → always via the outbox (§5).
+  git). **External** = on a remote service (the tracker, the forge, git push) → always via the outbox (§5).
 
 ---
 
@@ -93,19 +95,27 @@ loop():                           # (commercial Control Plane: the multi-ticket 
 `v_ready_tickets` already excludes paused projects and tickets parked on a pending signal. Workers
 run concurrently; the runner journals each result as it returns. **No worker touches SQLite.**
 
-### 2.3 `advance_one_step(ticket)` — the resolver
-A pure resolver maps current state + journal to the next `step_key`; the workflow definition is code.
+### 2.3 the resolver + interpreter split (`src/daemon/`)
+Two pure halves. **`nextStepKey(ticket)`** (`resolver.ts`) is a *pure predicate function*: it reads
+the ticket's `stage`, its work-unit states, and the `workflow_step` journal, and returns a
+**descriptor** — it never mutates. **`advanceOneStep`** (`advance.ts`) interprets the descriptor.
 ```
-key  = next_step_key(ticket)              # deterministic (CL-INV-1); the state machine
-step = upsert_step(ticket, key)
-if step.status == 'succeeded': recurse    # already applied; move on (§6.2)
-if step.status == 'running':   return     # in-flight; recover() owns it
-if step.status == 'failed':    return apply_failure_policy(step)   # §8
-if not guard_holds(step):      return park_or_block(step)
-execute(step)                              # §3
+descriptor = nextStepKey(ticket)          # pure; the state machine (CL-INV-1)
+switch descriptor.kind:
+  'step'          → run it (unless its journal row already 'succeeded' → replay, §6.2;
+                    'running' → recover() owns it; 'failed' → apply_failure_policy, §8)
+  'advance'       → write the stage transition (+ enqueue its projection in the same tx), recurse
+  'mark-verified' → mark the work-unit verified, recurse
+  'wait'          → park on a signal (status='waiting'); the loop resumes on delivery (§7)
+  'escalate'      → status='waiting' + raise human_resume + an 'escalated' event
+  'blocked'       → a structural dead-end (no actionable unit and not all verified)
+  'done'          → the ticket is complete
 ```
-The lifecycle is the new C1 vocab (DS-2): `design → implement → verify → review → merge → released`,
-expanded by the step catalog (§4).
+Guards are **inline predicates inside `nextStepKey`**, not a separate `guard_holds`/`park_or_block`
+layer. The concrete machine — every guard, in order — is in [`minimal-loop.md`](minimal-loop.md) §1,
+which mirrors `resolver.ts`; this section is the shape, not a second copy. The lifecycle vocab
+(DS-2) is `design → implement → verify → review → merge → released`, expanded by the step catalog
+(§4).
 
 ---
 
@@ -188,7 +198,7 @@ agents only edit files; the runner commits each dispatch's worktree changes with
 message (incl. `dispatch_id`) and records the SHA — so agents need no git tool at all.
 
 > **Orchestration is the runner's, not a master agent's (`[CL-ORCH]`).** The implement phase is a
-> *sequence of focused steps the runner orchestrates* (rebase → implement → verify …), not one
+> *sequence of focused steps the runner orchestrates* (implement → completeness → verify …), not one
 > LLM "master agent" driving sub-agents. An LLM orchestrator would be non-deterministic, unjournaled,
 > and un-resumable mid-sequence, and would need broad spawn authority. The runner owns the
 > *between-step* orchestration; an agent owns only its *within-step* loop (e.g. implement's
@@ -211,11 +221,12 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 
 ### Design
 
-**S1a · `design:dispatch`** — fused brainstorm + plan (Opus 4.8)
-- **Guard:** `stage='design'`; worktree exists (else `worktree-ensure` runs first); no succeeded
-  `design:dispatch` unless a re-design loopback was requested.
+**S1a · `design:dispatch`** — fused brainstorm + plan (deep tier; default Opus 4.8)
+- **Guard:** `stage='design'`; `provision` already succeeded (it runs first, below); worktree exists;
+  no succeeded `design:dispatch` unless a re-design loopback was requested.
 - **Input:** ticket identity/title/`type_label` + description **injected by the runner** (the agent
-  does not read Linear); the design prompt (`render-prompt.sh`) + project-profile.
+  does not read the tracker); the design prompt (compiled template, rendered by `render-prompt.ts`) +
+  project-profile.
 - **Output:** a committed **plan artifact** (`docs/plans/<date>-<eng-n>-*.md`, `linear: ENG-N`
   frontmatter). The plan must *contain*, per work-unit, the facts S1b needs (kind, files, behavioral?
   + how tested, verify check-types, dependencies) — as prose, never as JSON. Sets `needs_docs`
@@ -224,21 +235,32 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   `WebFetch`, Context7 (read-only). ❌ no `Bash`, no outward tools.
 - **Failure → route:** D2/D3 in §8.
 
-**S1b · `design:extract`** — decomposition into `work_unit` rows (Haiku 4.5, forced structured output)
-- **Guard:** S1a succeeded (plan committed).
+**S1b · `design:extract`** — decomposition into `work_unit` rows (cheap tier; default Haiku 4.5, forced structured output)
+- **Guard:** S1a succeeded (plan committed); no `work_unit` rows yet.
 - **Input:** the committed plan doc + the `work_unit` schema.
 - **Output:** validated **`work_unit` rows** (kind / files_to_touch / behavioral / test_plan /
   verify_check_types / depends_on). The runner then runs the **mechanical completeness check** (zod
   shape + required fields present + behavioral⇒`test_plan` present + `depends_on` acyclic & valid) —
-  deterministic, no LLM. **Postcondition: ≥1 work_unit, completeness clean.** **Track** (fast/full,
-  C2) is set here from the sizing rubric: fast-track → `stage='implement'`; full-track → S1c first.
+  deterministic, no LLM. **Postcondition: ≥1 work_unit, completeness clean.** Track sizing is **no
+  longer done here** — it moved to its own step (`design:size`, S1b2 below).
 - **Mechanism:** mechanical formalization → cheap model, forced-schema tool calls (§3a). The
   extractor fills only what the plan supports and leaves unsupported fields empty — it never
   invents; an empty *required* field means the **plan** is missing that info (→ D2).
 - **Failure → route:** shape failure → cheap retry (D1); completeness gap, an empty required field
   the plan didn't supply → re-design (D2); no plan / no units (D3).
 
-**S1c · `design:review`** — semantic plan-quality gate (cold; Opus 4.8; **full-track only**, C2)
+**S1b2 · `design:size`** — set the review track (fast / full)
+- **Guard:** `ticket.track IS NULL` (runs once, after extract).
+- **Output:** `ticket.track ∈ {fast, full}`. `full` runs the S1c semantic plan-review gate; `fast`
+  skips it. This is a **routing heuristic, never a ship-gate verdict** — the grade only chooses how
+  much review ceremony, never whether to ship, and never overrides a ground-truth gate.
+- **Mechanism:** deterministic sprawl-only sizing (`sizeTrack(units)`) by default. When
+  `config.complexityGrading` is enabled, a **cold, read-only** complexity grader (cheap tier, prompt
+  `design-complexity-grade.md`) scores coupling / blast-radius / difficulty and `combineTrack` folds
+  it with sprawl (full iff overall ≥ 5 OR units ≥ 5). The grade is transient (no DB column).
+- **Tools:** none for the deterministic path; read-only for the optional grader. ❌ no `Write`/`Edit`.
+
+**S1c · `design:review`** — semantic plan-quality gate (cold; deep tier, default Opus 4.8; **full-track only**, C2)
 - **Guard:** S1b completeness clean; `track='full'`.
 - **Input — cold (anti-anchoring):** the plan + the ticket requirements + the codebase. **NOT** the
   designer's reasoning.
@@ -249,7 +271,7 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   (over/under, vs the sizing rubric) · conciseness/anti-slop · testability (a *meaningful* test_plan,
   not just present) · decomposition quality.
 - **Verdict (runner-derived):** any blocking plan-finding → loop back to **S1a re-design** with the
-  findings; else → `stage='implement'`.
+  findings; else → proceed to the checks-authoring steps (S1d/S1e), then advance to `implement`.
 - **Tools:** `Read`, `Grep`, `Glob` (+ read-only git); `file_finding`, `complete_review`. ❌ no
   `Write`/`Edit`, no execution, no outward tools.
 - **Why (shift-left):** one Opus read of the plan is an order of magnitude cheaper than catching the
@@ -257,31 +279,43 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   principle (§8 P3/P4).
 - **Failure → route:** DV1/DV2 in §8.
 
+### Checks authoring (still the design stage, before advancing to implement)
+
+Before the ticket leaves `design`, the runner authors the behavioral acceptance-criterion tests that
+will become the real ship-gate in implement. These run in the design stage (`resolver.ts`), not in
+implement.
+
+**S1d · `checks:dispatch`** — derive acceptance criteria + author RED-first checks (standard tier, prompt `checks.md`)
+- **Guard:** `!done('checks:dispatch')`.
+- **Output:** `acceptance_criterion` rows and their `ac_check` tests, authored to **fail on current
+  code for the right reason** (RED-first). The author is **plan-blind** — it is given the AC text, not
+  the implementation plan — so a check encodes the requirement, not the intended solution.
+- **Failure → route:** shape/retry within the step's attempt budget.
+
+**S1e · `checks:classify`** — triage the red-first traces (standard tier, prompt `checks-classify.md`)
+- **Guard:** `!done('checks:classify')`.
+- **Output:** each red-first check classified (red classes vs green-on-HEAD dispositions, plus the
+  transient `weak` flag). If classification leaves unresolved checks, it **loops back** — supersede
+  the flagged `ac_check` generation and reset `checks:dispatch` + `checks:classify`
+  (`event_log.loop='checks'`, **no stage flip**).
+- After S1e succeeds, the stage advances to `implement`.
+
 ### Implement (per work-unit; runner-orchestrated sequence)
 
-**S2a · `implement:wuN:rebase`** — keep the branch current (hybrid: runner-first, agent-on-conflict)
-- **Guard:** branch is behind `origin/<base>`.
-- **Runner path (common, no LLM):** `git rebase origin/<base>`; clean → done, journal new HEAD.
-- **Conflict → conflict-resolution agent (Sonnet 4.6; Opus on repeat):**
-  - **Input:** conflicted files (markers), the plan doc (intent), both sides, profile.
-  - **Output:** resolved files. The **runner** then `git add` + `rebase --continue` and re-runs verify.
-  - **Tools:** `Read`, `Grep`, `Glob`, `Write`, `Edit` (worktree); scoped `Bash` = read-only git +
-    profile test/build self-check. ❌ no git-write (runner drives `--continue`), no push/`gh`.
-- **Note:** during implement the branch is local-only (push is at merge), so rebase needs no
-  force-push. A rebase *after* push uses **force-push-with-lease to the feature branch only — never
-  `main`/protected** (`hard_deny`).
-- **Failure → route:** R1/R2 in §8.
+> **There is no rebase step.** The implement branch is local-only until the merge stage, so no rebase
+> is needed during implement (`grep rebase src` → no matches). An earlier design posited an
+> `implement:wuN:rebase` step; it was never built.
 
-**S2b · `implement:wuN:dispatch`** — write the code + its tests (Sonnet 4.6; Opus on loopback)
+**S2b · `implement:wuN:dispatch`** — write the code + its tests (standard tier; escalates to deep on loopback)
 - **Guard:** `stage='implement'`; `wuN.status='pending'`; every `wuN.depends_on` unit `verified`;
-  plan committed; rebase current.
+  plan committed.
 - **Input:** the `work_unit` spec; the plan doc; implement prompt + profile; worktree at branch HEAD.
 - **Output:** code **+ the unit's tests** edited in the worktree → **runner commits** → SHA recorded,
-  `dispatch` row, `wuN.status='verifying'`. **Postcondition: branch HEAD advanced** (the commit
-  happened) — there is no dispatch-level non-empty-diff check; that guarantee now comes from the plan
-  gate (every unit declares ≥1 file at `design:extract`) plus `completeness:wuN` (S2d) gating
-  under-delivery downstream. No schema-extraction step — implement's output is code, judged by
-  ground-truth verify, not a payload.
+  `dispatch` row, `wuN.status='verifying'`. **No "HEAD advanced" postcondition:** the handler passes
+  an empty postcondition, and an empty diff is *not* a dispatch-level failure — the guarantee that a
+  unit produces work comes from the plan gate (every unit declares ≥1 file at `design:extract`) plus
+  `completeness:wuN` (S2d) gating under-delivery downstream. No schema-extraction step — implement's
+  output is code, judged by ground-truth verify, not a payload.
 - **Tools:** `Read`, `Grep`, `Glob`; `Write`/`Edit` **full worktree** (`files_to_touch` is advisory,
   A3 — reviewer-judged, not tool-enforced); `Bash` = **profile's kind-appropriate build/test/lint
   runners only** (the within-step code↔test self-check loop). ❌ no git tools, no outward tools,
@@ -290,10 +324,12 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   no-file units and `completeness:wuN`/CM1 gates under-delivery; I2 is superseded by CM1).
 
 **S2c · `provision`** — ready the verify environment (runner-executed, no LLM)
-- **Guard:** `stage='implement'`; a work-unit is `verifying` (about to run its first unrun check) **or**
-  all units are verified and integration hasn't passed at the current SHA; `!done('provision')`. Fires
-  **once** per gate — before the first `verify:wuN:<check>` of the ticket **and** before
-  `verify:integration` — never re-runs while its step row stands `succeeded`.
+- **Guard / placement:** provision runs **FIRST — as the first step of the `design` stage**
+  (`resolver.ts`), *before* `design:dispatch`. It depends on nothing design produces (design commits
+  only under `docs/plans/`, so it cannot touch a dependency manifest), and running it up front means
+  a missing-tool / broken-install environment fault fails **before any design spend**. In the
+  `implement` stage its guards find the succeeded row and **skip** it; it is re-gated (and re-armed —
+  see below) rather than re-run. A single `succeeded` row satisfies every downstream provision guard.
 - **Input:** each profile `Component`'s `prepare` (the setup-recorded, `isCommandSafe`-validated
   install command, §3 flip — stored→executed); worktree at current HEAD.
 - **Output:** each not-yet-ready component installed; a `ground_truth_signal(signal_type='provision')`
@@ -359,8 +395,13 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   for it.
 - **Input:** the profile command for this check-type (F4); worktree at wuN's SHA.
 - **Output:** a **`ground_truth_signal`** row (`signal_type` = the declared check-type, `result ∈
-  pass|fail|error`, `detail_json` = counts / failing tests / changed paths). All of wuN's checks
-  pass → `wuN.status='verified'`.
+  pass|fail|error`, `detail_json` = counts / failing tests / changed paths).
+- **Advisory (M4 §8b), not a hard gate:** a recorded **verdict — pass *or* fail — at the unit's
+  current SHA satisfies routing** and lets the unit be marked `verified`; only a could-not-run
+  `error` (empty-diff / no-components / infra crash) re-arms the check for a bounded retry. A genuine
+  suite failure therefore does **not** wedge or loop back here — it is recorded and carried into the
+  real gate (the AC checks-gate) and into review. This is deliberate: the handler demotes the suite
+  verdict to advisory and never throws on a red suite.
 - **Commands/Capability:** **only** the profile's declared command for this check-type, run under a
   timeout — never arbitrary shell.
 - **Behavioral gate (A1), deterministic:** when `wuN.behavioral=1`, the test check requires *the
@@ -372,31 +413,72 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   command it chose; S3 is the **independent** re-run on the **committed SHA** with the **canonical**
   profile command, producing a **structured durable signal** the control loop trusts. It catches
   hallucinated/partial runs, weakened/deleted tests, dirty-env passes, and premature "done."
-- **Failure → route:** I3/I4/I5/I6 in §8.
+- **Failure → route:** a could-not-run `error` → I6 retry. The old suite-verdict loopbacks I3/I4/I5
+  are now **unreachable** — a red suite is advisory (see above), so it no longer routes back from here.
+
+#### The AC checks-gate (the real ship-gate)
+
+Once **all units are verified**, the behavioral acceptance-criterion tests authored in the design
+stage (S1d/S1e) become the gate that actually blocks the ticket. If the ticket has active `ac_check`s
+and the gate has not passed at the branch HEAD, the resolver serves this cluster before integration.
+
+**S3b · `verify:checks-gate`** — re-run the behavioral AC checks (runner-executed, no LLM)
+- **Guard:** all units verified; active `ac_check`s exist; the `ac-check-gate` has not passed at the
+  branch HEAD.
+- **Output:** an integrity check + a re-run of the AC checks against HEAD → an `ac-check-gate`
+  ground-truth signal. Green at HEAD → the gate is satisfied and the ticket proceeds to
+  `verify:integration`.
+- **Rounds:** the step's `attempt` is the **round counter**, capped at `GATE_ROUND_CAP = 3`. An
+  integrity-only still-red result loops back to implement (all units → pending), resetting the gate
+  but **preserving** the round attempt.
+
+**S3c · `checks:arbitrate`** — blame a still-red gate (deep tier, prompt `checks-arbitrate.md`)
+- **Guard:** all units verified; the gate is still red at HEAD with a **behavioral** failure that has
+  not yet been blamed this round.
+- **Why:** a red check is ambiguous — the *code* may be wrong, or the *check* may be. The arbiter
+  assigns **two-way blame**: `code-wrong` → loop back to re-implement the blamed unit(s)
+  (`event_log.loop='implement'`); `check-wrong` → loop to `checks:reauthor` (`loop='reauthor'`).
+- **Cap:** `GATE_ROUND_CAP = 3` arbitrated rounds, then escalate.
+
+**S3d · `checks:reauthor`** — rewrite a check the arbiter judged wrong (deep tier)
+- **Guard:** the gate is `blamed` at HEAD (a `check-wrong` round) and `checks:reauthor` is not done.
+- **Output:** the blamed `ac_check` rewritten. Its verdict then re-serves the gate (pure check-wrong,
+  all installed) or loops implement (mixed / rejected). `REAUTHOR_ESCALATE_CAP = 2` re-authors per AC,
+  then a no-progress escalation.
+- **Stuck-HEAD escalate:** a pure-code-wrong round that commits **nothing new** leaves HEAD frozen
+  and `blamed` permanently true at that SHA; with `verify:checks-gate` already succeeded this round,
+  nothing further can change the state, so the resolver escalates *now* (`kind: "escalate"`, "stuck")
+  rather than spin to the tick cap.
 
 **S4 · `verify:integration`** — ticket-level ground truth (C3); always run
-- **Guard:** every `work_unit` is `verified`.
+- **Guard:** every `work_unit` is `verified`, and the AC checks-gate (S3b above) has passed at HEAD.
 - **Input:** the profile's full build + full test suite (+ any integration/e2e); worktree at branch HEAD.
-- **Output:** `ground_truth_signal('integration')`; on pass → ready for `docs:revise` then review.
+- **Output:** `ground_truth_signal('integration')`. **Advisory (M4 §8c):** the resolver keys on
+  *ran-at-sha* (any recorded result at the branch HEAD satisfies routing), not on a pass — the
+  handler does not throw on a red integration run. On a genuine throw, N1 applies.
 - **Commands/Capability:** profile-declared full-suite commands only.
-- **Failure → route:** N1 in §8 — integration failure is cross-unit, so the loopback is a
-  **ticket-scoped reconcile** implement dispatch (may edit any unit's files), then re-run S4.
+- **Failure → route:** N1 in §8 — a genuine integration *throw* is cross-unit, so the loopback inserts
+  a **ticket-scoped `reconcile`** implement unit (may edit any unit's files) and resets the gate, then
+  re-runs. (An advisory red result, by contrast, does not loop back.)
 
 ### Docs
 
-**`docs:revise`** — ticket-level documentation sync (conditional; Haiku 4.5)
-- **Guard:** S4 passed **and** S1 set `needs_docs=true`. (Otherwise skipped.)
+**`docs:revise`** — ticket-level documentation sync (conditional; cheap tier, default Haiku 4.5)
+- **Guard:** the AC gate + integration passed **and** `needs_docs=1`. (Otherwise skipped.)
 - **Input:** the full ticket diff + plan + existing docs + profile (doc locations).
-- **Output:** updated `docs/**` → runner commits; a `dispatch` row. Output is content, not a payload.
-- **Tools:** `Read`, `Grep`, `Glob`; `Write`/`Edit` **`docs/**` only** (cannot touch source/tests, so
-  it can't invalidate S4's pass — no re-verify needed). ❌ no `Bash`, no outward tools.
+- **Output:** updated `docs/**` (and the docs allowlist — root `README*`/`CHANGELOG*`/`CONTRIBUTING*`,
+  `mkdocs.yml`; see `conventions.md`) → runner commits; a `dispatch` row. Output is content, not a payload.
+- **Tools:** `Read`, `Grep`, `Glob`; `Write`/`Edit` **docs allowlist only** (cannot touch
+  source/tests). Because the docs commit **moves HEAD**, the previously-recorded (content-keyed)
+  verify verdicts would no longer match; rather than re-verify, the runner **carries the verified
+  verdicts forward** to the new HEAD (`carryVerifiedVerdictForward`). ❌ no `Bash`, no outward tools.
 - **Doc quality:** judged by the reviewer at cutover (no separate `docs:verify`).
 - **Failure → route:** C1 in §8.
 
 ### Review (cold, independent; redesigned)
 
-**S5 · `review`** — independent cold-context reviewer (A2/A4; Opus 4.8)
-- **Guard:** S4 passed; `docs:revise` done if it ran.
+**S5 · `review`** — independent cold-context reviewer (A2/A4; deep tier, default Opus 4.8)
+- **Guard:** the AC gate + integration passed; `docs:revise` done if it ran.
 - **Input — artifacts only (anti-anchoring, A2):** the full diff + plan + ground-truth signals +
   `scope_diff`. **Explicitly NOT the implementer's transcript.**
 - **Mechanism (§3a):** the reviewer **files each finding via a forced-schema tool call**
@@ -408,9 +490,10 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   `factors{in_changed_code, is_regression, user_visible, reversible_post_ship, has_workaround}`,
   optional `deferral_candidate`. → written as **`review_finding`** rows.
 - **Verdict — runner-derived from the ledger, never a reviewer self-pass:**
-  - any open finding `severity ∈ {critical,major}` → **loopback**, routed by `category`:
-    `plan-defect` → **design (pivot, V3)**, else → **implement (V1)**. **Critical-floor: critical
-    always blocks** (non-deferrable).
+  - any open finding `severity ∈ {critical,major}` → **loopback**, routed by `category`: a
+    `plan-defect` is governed by the **`onPlanDefect` config knob** — default **`escalate`** (hand the
+    plan defect to a human), or **`redesign`** to loop back to **design** (V3). Every other blocking
+    category → **implement (V1)**. **Critical-floor: critical always blocks** (non-deferrable).
   - a `major` tagged `deferral_candidate` → **escalate that finding to the human** (V-defer).
   - else → **ship-ready**, transition `review → merge`.
 - **No deferral dictionary (`[CL-NODEFER]`).** At cutover the threshold is fixed (major+ blocks);
@@ -467,7 +550,11 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   reported value** — a `failing` read still exits PR-ready (D1). Nothing in OSS re-runs, escalates,
   or waits on this result.
 
-**S9 · `merge:await-human`** — the single human gate (D2)
+**S9 · await the human merge** — the single human gate (D2)
+> **Mechanically** this is not a dispatched step: after `merge:pr-ensure`, the resolver returns a
+> `wait` descriptor for the `human_merge_approval` signal. In OSS that wait is the PR-ready terminal —
+> `styre run` exits there. There is no `merge:await-human` step key.
+>
 > **OSS boundary.** The OSS `styre run` is **PR-ready terminal**: once the PR exists (S7), the run
 > has done its job and exits — it does **not** wait for CI (S8 is a one-shot report, not a gate),
 > does **not** wait indefinitely for a human merge, does not maintain a persistent needs-you inbox,
@@ -550,7 +637,7 @@ The resolver never re-executes a `succeeded` step — it reads `result_json`. Th
 table; with §5 idempotency every operation is at-least-once-attempted, exactly-once-effective.
 
 ### 6.3 Dispatch crash
-A `claude -p` dies mid-run: step `{running, pid}`, no `result_json` → restart → `kill_orphan` →
+An agent CLI dies mid-run: step `{running, pid}`, no `result_json` → restart → `kill_orphan` →
 re-dispatch as a fresh `dispatch_id`. Partial work committed to the branch is the next worker's
 start point — git is the durable substrate for code, the journal for control. *Dispatch retry =
 fresh attempt, not cached replay; only external effects get exactly-once keys.*
@@ -606,14 +693,17 @@ exit 75 on a session interruption, resumable with `styre run --resume` — are i
 
 - **Failure signature (what "distinct" means), computed deterministically:** tests red = the *set of
   failing test names*; build red = the *set of (file, error) pairs*; review/plan-review = the *set of
-  finding identities* (`finding_class_key`); claude death = the *death reason*; noop = constant. Two
-  counters off it: **consecutive-identical** (cap ~2 → escalate fast) and **total-distinct** (cap ~3
-  → escalate). Different-failure counts as a distinct attempt (no reset); counters reset **only on a
-  clean pass**.
-- **Counter hierarchy (first to trip wins):** ① a **per-loop** distinct counter (resets when that
-  loop passes) ② **B2**, the cross-loop escalation budget (3 consecutive / 20 total, per-ticket-life)
-  — the **thrash catcher** for stage ping-pong where each loop stays under its own cap ③ **B3**, the
-  P3 spend/time ceiling. B2/B3 reset only on operator resume.
+  finding identities* (`finding_class_key`); agent death = the *death reason*; noop = constant.
+- **What is actually enforced today:** the **per-step attempt cap** (`attempt >= 3`) is the primary
+  bound; a **consecutive-identical** guard escalates fast when a failure signature repeats vs the
+  immediately-previous loopback; the **AC-gate round caps** (`GATE_ROUND_CAP=3`,
+  `REAUTHOR_ESCALATE_CAP=2`) bound the gate; and the run-level **200-tick / 3-idle** caps stop a
+  stalled ticket. In the atlas's "Bound → exhaustion" column, the `K_*` labels denote "a bounded
+  budget applies, then escalate" — in the current implementation that budget is the per-step attempt
+  cap (or the named round cap), **not** a distinct-attempt counter.
+- **Deferred (specified, not built):** a per-loop distinct counter (`K_DISTINCT`), the cross-loop
+  **B2** escalation budget (3-consecutive / 20-total), and the **B3** spend/wall-clock ceiling. No
+  code reads `dispatch.cost_usd` for control.
 - **What "escalate" *does* (post-escalation lifecycle):** the ticket parks (`status='waiting'`) on a
   `human_resume` signal **with the full trace**. *In OSS*, `styre run` surfaces the escalation by
   exiting nonzero with the trace (a session-interruption parks at exit 75; resume with `styre run
@@ -633,30 +723,31 @@ exit 75 on a session interruption, resumable with `styre run --resume` — are i
 | D3 | post-design postcondition | no plan committed / zero work-units | → S1a re-design | plan | K_distinct → escalate |
 | DV1 | S1c plan-review | blocking plan-finding | → S1a re-design with findings | plan | K_distinct → escalate |
 | DV2 | S1c plan-review | reviewer death / transport | retry dispatch | — | K_retry → escalate |
-| **Rebase** (one primitive; aftermath = function of phase ¹) ||||||
-| R1 | rebase | clean | continue → re-validate by phase ¹ | unit/ticket | — |
-| R2 | rebase | conflict | → conflict-resolution agent → re-validate by phase ¹ | unit/ticket | — |
-| R3 | rebase | resolution fails / post-rebase verify red | pre-impl → escalate; post-review → S2b (behavior clash) | ticket | K → escalate |
-| R4 | rebase (post-review) | main outpaces keep-current (thrash) | stop; hand merge to the human | — | — |
 | **Implement + unit verify** ||||||
-| I1 | S2b | claude death / timeout | retry fresh dispatch (backoff) | unit | K_retry → escalate |
-| I2 | ~~S2b postcondition~~ | ~~noop — empty diff~~ — **superseded by CM1**: S2b no longer has a non-empty-diff postcondition (§ CL-POSTCOND); an empty dispatch diff for a real unit now surfaces as `under ≠ ∅` at `completeness:wuN` and routes via CM1 below | — | — | — |
-| I3 | S3 | build red | → S2b with build error | unit | K_distinct → escalate |
-| I4 | S3 | tests red | → S2b with failing tests | unit | K_distinct → escalate |
-| I5 | S3 | behavioral unit, no test in the diff | → S2b to add the test | unit | K_distinct → escalate |
-| I6 | S3 | toolchain/infra error | retry (transient) | — | K_retry → escalate(infra) |
+| I1 | S2b | agent death / timeout | retry fresh dispatch | unit | attempt cap → escalate |
+| I2 | ~~S2b postcondition~~ | ~~noop — empty diff~~ — **superseded by CM1**: S2b has no non-empty-diff postcondition; an empty dispatch diff for a real unit surfaces as `under ≠ ∅` at `completeness:wuN` and routes via CM1 below | — | — | — |
+| ~~I3/I4/I5~~ | ~~S3~~ | ~~build/tests red, or missing test~~ — **unreachable**: per-unit verify (S3) is now advisory; a recorded pass *or* fail satisfies routing and never loops back from here. A red suite is carried into the AC checks-gate + review instead. | — | — |
+| I6 | S3 | toolchain/infra `error` (could-not-run) | retry (transient) | attempt cap → escalate(infra) |
 | **Provision** ||||||
 | E1 | S2c `provision` | `prepare` install fails, or (Python editable) the worktree-source assertion fails after remediation | escalate immediately (env error, **not** a code loopback — never routed to S2b) | — | immediate, no retry |
 | **Completeness** ||||||
 | CM1 | S2d `completeness` | `under-delivered` — a declared file untouched by anyone (cumulative diff) ³ | → S2b, targeted (missing-files feedback) | unit | K_distinct (per-step `maxAttempts`) → escalate |
+| **AC checks-gate** (`event_log.loop ∈ {implement, reauthor, checks}`) ||||||
+| G1 | S3b gate | integrity-only still-red | → implement (all units → pending); gate reset, **round attempt preserved** | ticket | GATE_ROUND_CAP=3 → escalate |
+| G2 | S3c arbiter | `code-wrong` blame | → implement (gate-origin reset) | unit/ticket | GATE_ROUND_CAP → escalate |
+| G3 | S3c arbiter | `check-wrong` blame | → `checks:reauthor` | — | GATE_ROUND_CAP → escalate |
+| G4 | S3d reauthor | pure `check-wrong`, all installed | → `verify:checks-gate` (units stay verified) | — | REAUTHOR_ESCALATE_CAP=2 per AC → escalate |
+| G5 | S3d reauthor | `code-wrong` / rejected | → implement (gate-origin reset) | unit/ticket | — |
+| G6 | resolver | stuck HEAD — blamed & gate already succeeded, nothing new committed | escalate ("stuck") | — | immediate |
+| GC | S1e `checks:classify` | unresolved checks after classify | supersede flagged checks; reset `checks:dispatch`+`checks:classify` (**no stage flip**) | — | attempt cap → escalate |
 | **Integration** ||||||
-| N1 | S4 | cross-unit integration red | → ticket-scoped reconcile implement | ticket | K_distinct → escalate |
+| N1 | S4 | integration handler *throws* (genuine, not advisory-red) | insert ticket-scoped `reconcile` unit; reset the gate | ticket | attempt cap → escalate |
 | **Docs** ||||||
 | C1 | docs:revise | claude death | retry | — | K_retry → escalate |
 | **Code review** ||||||
 | V1 | S5 | blocking finding, **code** category (runner `blocks_ship`: critical-floor, or major-not-deferred) | → S2b, targeted | unit | K_distinct → escalate |
 | V2 | S5 | reviewer judges scope expansion **unjustified** → files a `scope` finding ² | = V1 (justify or revert) | unit | K_distinct → escalate |
-| V3 | S5 | blocking finding, **plan-defect** category (impl correct, plan wrong) | → S1a re-design | plan | K_distinct → escalate |
+| V3 | S5 | blocking finding, **plan-defect** category (impl correct, plan wrong) | per `onPlanDefect`: **`escalate`** (default) or **`redesign`** → S1a re-design | plan | attempt cap → escalate |
 | V-def | S5 | a `major` tagged `deferral_candidate` | escalate that finding to the human | — | — |
 | V4 | S5 | reviewer death / transport (dispatch didn't complete) | retry dispatch | — | K_retry → escalate |
 
@@ -674,16 +765,11 @@ exit 75 on a session interruption, resumable with `styre run --resume` — are i
 | H1 | S9 | operator requests changes | → S2b or S1 per feedback | operator | human-driven |
 | **External effects & infra** ||||||
 | X1 | outbox drainer | external effect fails past retry budget (GitHub/Linear outage) | escalate (infra); ticket parks | — | K_retry → escalate |
-| X2 | any | worktree/git corrupted (wedged rebase, disk) | escalate (infra) | — | — |
+| X2 | any | worktree/git corrupted (wedged index/merge, disk) | escalate (infra) | — | — |
 | **Cross-cutting terminators** ||||||
-| B1 | any loop | per-loop distinct cap reached | escalate (resumable wait) | — | — |
-| B2 | any | cross-loop budget (3 consecutive / 20 total) — thrash | escalate | — | — |
-| B3 | any | spend/wall-clock past ~3× clean-ticket median (P3) | escalate | — | — |
-
-¹ **Re-validate by phase** — *pre-implement* (branch local): re-verify the rebased unit. *Post-review
-while waiting* (CL-STALE): clean catch-up → re-verify integration + checks, **review stands**;
-reconciled-code catch-up → re-verify integration + checks **and re-review (S5)** + **flag the operator**
-("updated to keep up with main"). One rebase mechanism; the aftermath is the only thing that differs.
+| B0 | any step | `attempt >= 3` (`DEFAULT_MAX_ATTEMPTS`) | escalate (resumable wait) | — | **the implemented bound** |
+| B0′ | any loop | same failure signature vs the immediately-previous loopback | escalate fast | — | consecutive-identical guard |
+| ~~B1/B2/B3~~ | — | ~~per-loop distinct cap / cross-loop 3-of-20 / spend-wall-clock ceiling~~ — **not implemented** (deferred; no code reads `dispatch.cost_usd` for control). The live bounds are B0/B0′ plus the per-gate round caps (G-rows) and the 200-tick / 3-idle run caps. | — | — |
 
 ² **Scope is reviewer-judged (A3):** the reviewer first decides if an expansion is **benign/justified**
 (→ files *no* finding, nothing loops back) or **unjustified** (→ a `scope` finding, then exactly V1).
@@ -783,64 +869,55 @@ One command, no server setup. Implications the runner owns *(OSS-core unless mar
 
 ## 11. Worked example — ENG-9, full-track backend+frontend feature
 
-| # | `step_key` | executor | result |
+| # | `step_key` | tier / executor | result |
 |---|---|---|---|
-| 1 | `design:dispatch` | Opus | plan doc committed; `needs_docs=true`; `track=full` |
-| 2 | `design:extract` | Haiku | `work_unit` wu1(backend), wu2(frontend); completeness clean |
-| 3 | `design:review` | Opus | files plan-findings; 0 blocking → `stage=implement` |
-| 4 | `implement:wu1:rebase` | runner | clean (no-op if current) |
-| 5 | `implement:wu1:dispatch` | Sonnet | backend code + tests; runner commits (d-row) |
-| 6 | `verify:wu1:build` / `:test` | runner | ground-truth pass; wu1 verified |
-| 7 | `implement:wu2:dispatch` | Sonnet | frontend code + tests; runner commits |
-| 8 | `verify:wu2:visual` | runner | Playwright pass; wu2 verified |
-| 9 | `verify:integration` | runner | full suite pass |
-| 10 | `docs:revise` | Haiku | docs updated (needs_docs was set); runner commits |
-| 11 | `review` | Opus | files findings via tools; 0 blocking → ship-ready; `stage=merge` |
-| 12 | `merge:push` | runner/outbox | branch pushed (probe on SHA) |
-| 13 | `merge:pr-ensure` | runner/outbox + Haiku | PR opened (probe), cheap-AI description; a t+0 CI read fires + `ci_handoff` emitted — **OSS `styre run` exits PR-ready right here** |
-| 14 | `merge:await-human` | operator | *(commercial)* merges (branch kept current meanwhile); `stage=released` |
-| 15 | `released:project` | runner/outbox | *(commercial)* tracker → Done; worktree cleaned; `status=done` |
+| 1 | `provision` | runner | each component's `prepare` installs; env ready (runs first) |
+| 2 | `design:dispatch` | deep | plan doc committed; `needs_docs=1` |
+| 3 | `design:extract` | cheap | `work_unit` wu1(backend), wu2(frontend); completeness clean |
+| 4 | `design:size` | cheap | `track=full` |
+| 5 | `design:review` | deep | files plan-findings; 0 blocking |
+| 6 | `checks:dispatch` | standard | acceptance criteria + RED-first `ac_check`s authored |
+| 7 | `checks:classify` | standard | red-first traces triaged → `stage=implement` |
+| 8 | `implement:wu1:dispatch` | standard | backend code + tests; runner commits (d-row) |
+| 9 | `verify:wu1:build` / `:test` | runner | ground-truth recorded (advisory); wu1 verified |
+| 10 | `implement:wu2:dispatch` | standard | frontend code + tests; runner commits |
+| 11 | `verify:wu2:visual` | runner | visual check recorded; wu2 verified |
+| 12 | `verify:checks-gate` | runner | behavioral AC checks green at HEAD → gate passed |
+| 13 | `verify:integration` | runner | full suite ran at HEAD (advisory) |
+| 14 | `docs:revise` | cheap | docs updated (needs_docs); verdicts carried forward |
+| 15 | `review` | deep | files findings via tools; 0 blocking → `stage=merge` |
+| 16 | `merge:push` | runner/outbox | branch pushed (probe on SHA) |
+| 17 | `merge:pr-ensure` | runner/outbox + cheap | PR opened (probe), cheap-AI description; a t+0 CI read fires + `ci_handoff` emitted — **OSS `styre run` exits PR-ready right here** |
+| 18 | *(wait `human_merge_approval`)* | operator | *(commercial)* merges; `stage=released` |
+| 19 | `released:project` | runner/outbox | *(commercial)* tracker → Done; worktree cleaned; `status=done` |
 
-The OSS `styre run` drives steps 1–13 (through PR-ready, with a best-effort CI snapshot reported —
-not gated — on the way out) and exits; steps 14–15 (indefinite human-merge wait, released-stage
-projection) are the **commercial Control Plane**'s outer loop. A **fast-track** ticket skips step 3
-(plan-review); a backend-only ticket drops 7–8 and (no doc impact) 10; **1 work-unit = 1 implement
-dispatch.**
+The OSS `styre run` drives steps 1–17 (through PR-ready, with a best-effort CI snapshot reported —
+not gated — on the way out) and exits at the `human_merge_approval` wait; steps 18–19 (human-merge
+wait, released-stage projection) are the **commercial Control Plane**'s outer loop. A **fast-track**
+ticket skips step 5 (plan-review); a backend-only ticket drops 10–11 and (no doc impact) 14; a ticket
+with no acceptance criteria has no checks-gate (step 12); **1 work-unit = 1 implement dispatch.**
 
 ---
 
-## 12. Mapping to §9.4 #2 + open questions
+## 12. Load-bearing decisions (CL-#)
 
-**Discharged:** ✅ replay returns recorded result (§6.2) · ✅ external effects keyed (§5) · ✅ crash
-mid-step resumes (§6.1).
+The design decisions this loop rests on, tagged throughout the doc:
 
-**Decided in the walkthrough:** CL-1 (one process serves all projects — the multi-ticket variant is
-the commercial outer loop, §2.1) · CL-COMMIT (runner-commits) · CL-ORCH (runner-orchestrates, no
-master agent) · validated-interface for structured output (§3a) · review
-redesign (findings via tool calls; verdict from state) · CL-NODEFER (no deferral dictionary;
-record-now-learn-later) · CL-CHECKS/CL-POLL (generic checks system, polling) (OSS: superseded by
-report-not-gate — see §8 S8) · CL-STALE
-(stale-branch handling) · **S1c plan-review** (shift-left semantic plan gate, full-track) ·
-CL-POSTCOND (per-step postconditions) · CL-PROFILE (pre-dispatch profile-completeness gate) ·
-**§8 rewritten from first principles** — P3 cost/time auto-calibrated budget governs every loop;
-P5 loopback scope (unit/ticket/plan); failure-signature + counter-hierarchy + post-escalation
-lifecycle pinned; §8.5 records the ~35 reasons the substrate deletes (audited against the current
-harness).
+- **CL-1** — one process, one SoT (the multi-ticket variant is the commercial outer loop, §2.1).
+- **CL-COMMIT** — the runner commits; agents only edit worktree files.
+- **CL-ORCH** — the runner orchestrates the between-step sequence; no LLM "master agent."
+- **§3a** — structured agent output goes through a validated (zod) interface; the runner derives
+  decisions from state, never parses a free-form blob. An absent/malformed payload is a *transport*
+  failure (re-dispatch), not a "no."
+- **CL-CHECKS (report-not-gate, 2026-07-18)** — CI is read once at PR-open and reported, never gated
+  or looped on (§8 S8). The former checks-loopback rows are deleted.
+- **CL-NODEFER** — no deferral dictionary; the human decides the rare `deferral_candidate`, recorded
+  for the future learning layer.
+- **Ground truth over self-report** — verdicts come from build/test/AC-gate/scope-diff/reviewer,
+  never an agent self-score.
 
-**Coherence pass (2026-06-19) → schema v2.** Cross-referenced this doc against `schema.sql` and
-realigned the schema to the frozen loop model: dropped the ticket skip-policy block + `status=halted`
-(P1); `pipeline_event` → lean **`event_log`** (transition/loopback/escalated/resumed — verdicts are
-derived, not stored); **`review_finding` realigned** (single severity + category + factors +
-`deferral_candidate` + runner-computed `blocks_ship` + `review_kind` plan|code, with a critical-floor
-CHECK); added `ticket.needs_docs`, `project.checks_system`, `workflow_step.pid`; `ground_truth_signal.
-signal_type` = the open check-type; signal vocab (`external_checks`/`external_pr_result`). Idempotency
-keys stay globally-unique-by-construction (§3). Re-verified: loads clean, all invariants smoke-tested.
-
-**Resolved downstream:** the per-ticket budget numbers (K_DISTINCT, the P3 cost/time ceiling) and
-the needs-you inbox surface (D3, **commercial Control Plane**) are now pinned in
-[`minimal-loop.md`](minimal-loop.md) §4/§5.
-
-**Substrate spec status:** §9.4 #1 schema(v2) · #2 (this) · **#3 dropped** (no state-import mechanism
-— the in-flight tickets were obsolete and were abandoned) · #4 [`projector.md`](projector.md) ·
-#5 [`minimal-loop.md`](minimal-loop.md). All five drafted and mutually coherent; what remains is
-operational (build + verify in the downtime window).
+Cross-cutting budgets (`K_DISTINCT`, the `B2` 3-of-20 cross-loop budget, and the `B3` spend /
+wall-clock ceilings) were specified here but are **not implemented** — the live bounds are the
+per-step attempt cap, the consecutive-identical guard, the per-gate round caps, and the run tick/idle
+caps (§8, and [`minimal-loop.md`](minimal-loop.md) §4). The needs-you inbox (D3) is the commercial
+Control Plane.

@@ -8,10 +8,8 @@ The free, open-source execution core that drives a structured ticket `design →
 
 ---
 
-<!-- demo cast injected by Task 9: docs/assets/demo.svg -->
-
 ```
-  Linear ticket
+  ticket (Linear / Jira)
        │
        ▼
   ┌──────────────────────────────────────────────┐
@@ -22,9 +20,10 @@ The free, open-source execution core that drives a structured ticket `design →
         ┌────────┴────────┐
         ▼                 ▼
   agent (worktree)  agent (worktree)
-  isolated: no      isolated: no
-  creds / gh /      creds / gh /
-  Linear tools      Linear tools
+  no gh / tracker   no gh / tracker
+  tools; tracker    tools; tracker
+  + forge creds     + forge creds
+  stripped          stripped
         │                 │
         └────────┬────────┘
                  │  results returned to the runner
@@ -33,9 +32,10 @@ The free, open-source execution core that drives a structured ticket `design →
           │  projector  │  (one-way write path)
           └──────┬──────┘
                  │
-        ┌────────┴────────┐
-        ▼                 ▼
-     Linear            GitHub
+     ┌───────────┼───────────┐
+     ▼           ▼           ▼
+  tracker      GitHub      Slack
+ (Linear/Jira) (forge)   (notifier)
 ```
 
 ---
@@ -55,14 +55,14 @@ When the run completes, a PR is open and ready. You merge it.
 ## Is this for you?
 
 **For you if:**
-- You work out of Linear and GitHub.
+- You track work in Linear or Jira and host code on GitHub.
 - You want a ticket executor that runs locally, under your own API key, with no cloud dependency.
 - You are comfortable owning the merge decision — Styre opens the PR, you land it.
 - You want the execution logic as auditable, forkable open-source code.
 
 **Not for you if:**
 - You want a hosted, zero-setup product. That is the commercial Control Plane — continuous pickup, scheduling, an inbox, and a dashboard — built on top of this core.
-- Your team uses Jira, GitLab, or another ticket/VCS system. Styre is Linear + GitHub only.
+- Your code lives on GitLab, Bitbucket, or another code host. The forge is GitHub only (the issue tracker is pluggable — Linear and Jira ship today; the forge is not yet).
 - You expect auto-merge. The operator merges every PR personally; Styre will never push directly to your main branch.
 
 ---
@@ -77,9 +77,9 @@ License: GPLv3.
 
 ## How it works
 
-Styre's trust story starts with capability isolation: dispatched agents receive no credentials, no `gh` binary, no Linear API key, and no shell access outside their dedicated worktree. The worktree is the only writable surface. The runner (`styre run`) holds credentials, commits the results, and is the sole writer to the SQLite state-of-truth.
+Styre's trust story starts with capability isolation: dispatched agents get no `gh` or issue-tracker tools, and the runner strips the tracker/forge credentials (`LINEAR_API_KEY`, `JIRA_API_TOKEN`, `GITHUB_TOKEN`) from their environment — so an agent can't reach your tracker or code host. The agent CLI does keep the LLM provider key it needs to authenticate its own model calls; that key is additionally stripped from verify-time commands, which run agent-authored code. The worktree is the only writable surface. The runner (`styre run`) holds the outward credentials, commits the results, and is the sole writer to the SQLite state-of-truth. (Full model in [`SECURITY.md`](SECURITY.md).)
 
-Each step in the control loop is journaled before it runs. If a step has already succeeded, replay returns the recorded result — the step never re-executes. This gives you crash-resume for free. Verdicts (design sound? tests green? diff in scope?) come from build output, CI, and an independent reviewer step — never from the agent self-reporting success.
+Each step in the control loop is journaled before it runs. If a step has already succeeded, replay returns the recorded result — the step never re-executes. This gives you crash-resume for free. Verdicts (design sound? tests green? acceptance criteria met? diff in scope?) come from build output, the test and acceptance-criteria gates, and an independent reviewer step — never from the agent self-reporting success. (CI is *reported* at PR-open, not used as a gate.)
 
 See [`docs/architecture/execution-model.md`](docs/architecture/execution-model.md) for the full step catalog and state machine.
 
@@ -87,10 +87,11 @@ See [`docs/architecture/execution-model.md`](docs/architecture/execution-model.m
 
 ## Commands
 
-The OSS surface has three commands:
+The three commands you use day to day:
 
 ```sh
-styre setup <repo>    # Probe the repo and write its Styre profile (profile.json) — the project-shape artifact runs use
+# Probe the repo and write its Styre profile (profile.json) — the project-shape artifact a run reads
+styre setup <repo>
 
 # Run one ticket end-to-end, exit when a PR is ready
 styre run <TICKET-ID>
@@ -99,7 +100,24 @@ styre run <TICKET-ID>
 styre migrate
 ```
 
-`styre run` exits `0` when a PR is open. On a session-limit or out-of-credits interrupt it exits `75` (EX_TEMPFAIL) and parks state to `~/.local/state/styre/`; resume with `styre run --resume <TICKET-ID>`.
+A fourth command, `styre notify --test`, sends a one-off test notification through the configured notifier (Slack) to verify your setup — a diagnostic, not part of the run loop.
+
+The full flag and environment-variable surface is documented in [`docs/architecture/runtime-parameters.md`](docs/architecture/runtime-parameters.md).
+
+### Exit codes
+
+The process exit code is the machine-readable error code (codes above `2` follow `sysexits.h`):
+
+| Code | Meaning | Retryable? |
+|---|---|---|
+| `0` | success — for `run`, a PR is open and ready | — |
+| `1` | generic error (any uncaught throw; also an escalation the loop can't resolve) | no — fix the cause |
+| `2` | usage / notifier-config (`styre notify` without `--test`) | no |
+| `65` | resume refused — the branch HEAD moved since the run parked | yes — `--accept-head` or `--inspect` |
+| `69` | a required repo toolchain program isn't installed on this machine | yes — install it, re-run |
+| `75` | parked — session limit / out of credits; state dumped, no attempt consumed | yes — `styre run --resume <ticket>` |
+
+Full meanings, `sysexits` names, and caller guidance: [runtime-parameters.md → Exit codes](docs/architecture/runtime-parameters.md#exit-codes-error-codes-and-their-meaning).
 
 ---
 
@@ -131,6 +149,43 @@ a CI/fleet caller that wants full hermeticity must pass **both** `--profile` and
 
 ---
 
+## Configuration
+
+Runtime policy lives in `config.json` (operator settings) — separate from `profile.json` (the probed project shape). Precedence: `--config <path>` is **hermetic** (sole source), otherwise per-project `config.json` shallow-overrides the global one, then binary defaults fill the rest. There is **no** per-ticket config layer in the OSS core.
+
+The main knobs:
+
+| Key | Default | What it does |
+|---|---|---|
+| `issueTracker` | `linear` | tracker adapter — `linear` or `jira` |
+| `forge` | `github` | code-host adapter (GitHub only today) |
+| `agent` | Claude preset | provider + per-tier models (`deep`/`standard`/`cheap`) |
+| `notifier` / `notify` | `none` / `escalations` | Slack notifications and their verbosity |
+| `onPlanDefect` | `escalate` | on a plan-level review defect: `escalate` or `redesign` |
+| `telemetry` | `true` | anonymous PostHog analytics (also opt out via env) |
+
+Every `config.json` and `profile.json` key, with the exact precedence rules, is in [`docs/architecture/configuration.md`](docs/architecture/configuration.md).
+
+---
+
+## Files & paths
+
+Styre follows the XDG Base Directory spec (macOS and Linux alike) and honors `XDG_CONFIG_HOME` and `XDG_STATE_HOME`:
+
+- `$XDG_CONFIG_HOME/styre/` (default `~/.config/styre/`) — `config.json` and per-project `profile.json`.
+- `$XDG_STATE_HOME/styre/` (default `~/.local/state/styre/`) — the SQLite DB, the telemetry id, and park dumps (`<slug>/<ticket-ident>/`).
+- Per-run worktrees and scratch live under the OS temp dir and are cleaned up; the agent's worktree is its only writable surface.
+
+The full path layout, the `.styre-disposable` marker, `AGENTS.md` ingestion, and the `styre_scratch/` drawer are in [`docs/architecture/conventions.md`](docs/architecture/conventions.md).
+
+---
+
+## Prompts
+
+The agent instructions for every step are editable Markdown templates in [`prompts/`](prompts/), compiled into the binary. They are the highest-leverage behavioral surface in the repo — see [`docs/architecture/prompts.md`](docs/architecture/prompts.md) for the catalog (which template drives which step, and on which model tier).
+
+---
+
 ## Install
 
 Styre ships as a single self-contained binary via Homebrew (macOS & Linux):
@@ -147,10 +202,14 @@ Upgrade with `brew upgrade styre`; remove with `brew uninstall styre` (and `brew
 
 - [Architecture index](docs/architecture/README.md) — start here for the full substrate overview
 - [Execution model](docs/architecture/execution-model.md) — step catalog, state machine, loopback atlas
-- [Ticket template](docs/design/ticket-template.md) — how to write a ticket styre can actually deliver
+- [Runtime parameters](docs/architecture/runtime-parameters.md) — every command, flag, exit code, and environment variable
+- [Configuration](docs/architecture/configuration.md) — every `config.json` and `profile.json` key, and how they resolve
+- [Conventions](docs/architecture/conventions.md) — XDG paths, temp/worktree layout, and the on-disk files Styre reads and writes
+- [Prompts](docs/architecture/prompts.md) — the agent prompt templates compiled into the binary
+- [Ticket template](docs/architecture/ticket-template.md) — how to write a ticket styre can actually deliver
 - [Security policy](SECURITY.md) — capability model, threat surface, reporting vulnerabilities
 - [Contributing](CONTRIBUTING.md) — how to contribute, branch conventions, PR process
-- [Plans](docs/plans/) — milestone implementation plans
+- [Plans](docs/plans/) — milestone implementation plans (append-only history)
 
 ---
 
@@ -191,7 +250,7 @@ bun run build         # → dist/styre (single self-contained binary)
 
 ## How the commercial plane fits
 
-Styre's core is free, open source, and ends at PR-ready. A commercial **Control Plane** (a separate product in its own repository — not yet public) runs *on top of* this core: a persistent service that orchestrates many `styre run` invocations with multi-ticket scheduling, dependency-aware ticket selection, a needs-you inbox, and dashboards. It plugs in only through Styre's versioned seam — the Linear ticket contract, the project-profile artifact, and the NDJSON telemetry/state export — and never forks or imports the core. The core has no knowledge of the plane; you can run the OSS core on its own, forever.
+Styre's core is free, open source, and ends at PR-ready. A commercial **Control Plane** (a separate product in its own repository — not yet public) runs *on top of* this core: a persistent service that orchestrates many `styre run` invocations with multi-ticket scheduling, dependency-aware ticket selection, a needs-you inbox, and dashboards. It plugs in only through Styre's versioned seam — the ticket contract, the project-profile artifact, and the NDJSON telemetry/state export — and never forks or imports the core. The core has no knowledge of the plane; you can run the OSS core on its own, forever.
 
 ---
 

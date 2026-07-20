@@ -1,155 +1,136 @@
 # The One-Way Projector
 
 > **OSS core.** The projector is part of `styre run` — the one-way outward-write subsystem that
-> drains the `projection_outbox` to Linear and GitHub. It runs inside the OSS runner. The
-> **needs-you inbox** and **Slack notification** referenced below are the **commercial Control
-> Plane** and are fenced as such.
+> drains `projection_outbox` to three sinks: the **issue tracker** (Linear/Jira), the **forge**
+> (GitHub), and, when configured, the **notifier** (Slack). It runs inside the OSS runner, not as a
+> separate process. The persistent **needs-you inbox** (a SQLite-backed queue with `styre inbox` /
+> two-way Slack) remains the commercial Control Plane; the **outbound** Slack notifier documented
+> here ships in the OSS core.
 
-> **Artifact for §9.4 checklist #4** of [`brainstorm.md`](brainstorm.md). The component that makes
-> "Linear/GitHub are one-way projections" (move 2) real: the **single outward write path** from the
-> SQLite SoT to Linear + GitHub. It **drains [`schema.sql`](schema.sql)'s `projection_outbox`** and
-> applies each row idempotently. It **never reads Linear/GitHub to decide control flow** — the
-> inbound external facts the loop waits on (merge, human action) arrive as **signals**
-> (control-loop §7), not through the projector. Checks status is reported, not awaited: OSS takes
-> one best-effort t+0 read on the merge path (control-loop §4 S8), never a signal.
->
-> Builds on the outbox mechanics in [`control-loop.md`](control-loop.md) §5 (CL-2 / CL-3). Status:
-> draft 2026-06-19.
+The component that makes "the tracker and forge are one-way projections" (move 2) real: the single
+outward write path from the SQLite SoT. It drains [`schema.sql`](schema.sql)'s `projection_outbox`
+and applies each row idempotently. It **never reads the tracker or forge to decide control flow** —
+the inbound facts the loop waits on (merge, human action) arrive as **signals** (control-loop §7),
+not through the projector. CI status is reported, not awaited: OSS takes one best-effort t+0 read on
+the merge path (control-loop §4) and never a signal. Builds on the outbox mechanics in
+[`control-loop.md`](control-loop.md) §5.
 
 ---
 
 ## 1. Role + invariants
 
-- **Sole outward writer (move 2).** Every per-ticket write to Linear/GitHub goes through the
-  projector; nothing else holds write credentials. Agents have none (capability isolation, move 4);
-  the **runner holds the creds and the projector is its outward-write subsystem** — it is *not* a
-  separate process (GOAL-INSTALL: one binary). `drain_outbox()` is the projector, called each loop
-  (control-loop §2.2).
-- **No control-flow reads (CL-INV-5).** The projector only *writes* outward. The runner never reads
-  Linear/GitHub to decide what to do next — that's the bug class move 2 deletes. The closed-loop
-  facts the runner *does* need (merged? human action?) enter as **delivered signals** (control-loop
-  §7.3). Checks status is not one of them: OSS takes a single best-effort t+0 read on the merge path
-  and reports it as `ci_handoff` telemetry — it is never awaited, never a signal, never re-read.
-- **Idempotent (B3 / CL-3).** Two layers: the outbox row's `idempotency_key` (globally unique by
-  construction → enqueue-twice is a no-op insert) **and** a per-adapter **probe** of external state
-  before applying (§5).
-- **Closes the legacy bypasses.** In the old harness, `run-stage.sh` and `setup.sh` wrote Linear
-  directly. Here there is no bypass *by construction*: the only per-ticket write path is the outbox.
-  Setup's one-time bootstrap (create the `stage:*` labels, refresh the id cache) is the *only* other
-  Linear write, and it's not control flow.
+- **Sole outward writer (move 2).** Every per-ticket outward write goes through the projector;
+  nothing else holds write credentials. Agents have none (capability isolation, move 4); the
+  **runner holds the creds and the projector is its outward-write subsystem** — not a separate
+  process (one binary). `drainOutbox()` is the projector, called each loop (control-loop §2.2).
+- **No control-flow reads.** The projector only *writes* outward. The runner never reads the tracker
+  or forge to decide what to do next — that's the bug class move 2 deletes. The closed-loop facts the
+  runner *does* need (merged? human action?) enter as **delivered signals** (control-loop §7). CI
+  status is not one of them: OSS takes a single best-effort t+0 read on the merge path and reports it
+  as `ci_handoff` telemetry — never awaited, never a signal, never re-read.
+- **Idempotent.** Two layers: the outbox row's `idempotency_key` (globally unique by construction →
+  enqueue-twice is a no-op insert) **and** a per-adapter **probe** of external state before applying
+  (§5).
+- **No direct-write bypass.** The only per-ticket outward write path is the outbox — there is no
+  code path that writes the tracker or forge directly.
 
 ## 2. Enqueue (the runner, write-half) vs drain (projector, read-half)
 
 The split keeps the SoT and its projection atomic:
 
 - **Enqueue — the runner, in the SAME transaction as the state change.** When a step commits a state
-  change (stage transition, escalation, PR-ready, done), the runner computes the **projection delta**
-  vs `projection_state` (the last-projected snapshot) and inserts `projection_outbox` rows in that
-  same tx. State and the intent-to-project can never disagree → the ~30-ticket reconciliation class
-  is gone by construction. A delta that matches the snapshot enqueues nothing (no-op projections
-  suppressed).
+  change, the runner inserts `projection_outbox` rows in that same tx (`enqueueStageProjection` for
+  stage transitions; the merge handlers for `push`/`pr_create`; the notify watermark for `post`).
+  State and the intent-to-project can never disagree. Each row's `idempotency_key` includes a
+  **stage-change epoch** (`stageChangeEpoch`), so a loopback that re-enters a stage re-projects under
+  a new epoch, while a re-enqueue *within the same transaction* is a no-op insert against the unique
+  key. (There is no separate `projection_state` snapshot or computed delta — the epoch-keyed
+  idempotency key is the whole mechanism; the `projection_state` table exists in the schema but is
+  currently unwired.)
 - **Drain — the projector.** Reads pending rows and applies them. Decoupled from the runner's control
-  decisions; a Linear outage delays projection but never blocks the loop.
+  decisions; a tracker outage delays projection but never blocks the loop.
 
 ## 3. The projection mapping (SoT → external)
 
-What the runner enqueues for a given SoT change. Linear is the **human tracking mirror** (D3); the
-outward projection (comment/label/state) is OSS. The *actionable* persistent needs-you queue
-(SQLite inbox + Slack notifications) is the **commercial Control Plane** — not Linear, and not part
-of `styre run`.
+What the runner actually enqueues today. The tracker is the human tracking mirror; the outward
+projection (state/label/notification) is OSS.
 
-| SoT change | Linear (op) | GitHub (op) |
-|---|---|---|
-| ticket picked up (Todo → active, stage=design) | `set_state` In Progress; `set_labels` +`stage:design` | — |
-| stage transition X → Y | `set_labels` swap `stage:X`→`stage:Y` | — |
-| stage → `merge` (PR-ready) | `set_state` In Review | `push`; `pr_create` (→ `response_ref`=PR#) |
-| review produced findings (any) | `add_comment` review summary (on the PR) | `pr_comment` review summary |
-| escalation (a `human_resume` raised) | `add_comment` "needs you: <reason>" (mirror; OSS runner writes this comment — the persistent needs-you inbox is the **commercial Control Plane**) | — |
-| status → `done` (merged) | `set_state` Done | — (the human merged) |
-| status → `abandoned` | `set_state` Canceled + `add_comment` rationale | — |
+| SoT change | target | op | payload |
+|---|---|---|---|
+| stage transition X → Y | `issue_tracker` | `set_state` | neutral state for stage Y (adapter maps to the vendor's vocabulary) |
+| stage transition X → Y | `issue_tracker` | `set_labels` | add `stage:Y`, remove `stage:X` |
+| merge stage: push the branch | `forge` | `push` | branch → remote (with-lease, never `main`) |
+| merge stage: ensure the PR | `forge` | `pr_create` | create-or-reuse; returns `response_ref` = PR number/url, delivered as an `external_pr_result` signal |
+| notify policy fires (escalation / transition / loopback, per `notify`) | `notify` | `post` | the rendered `NotificationMessage` |
 
-- **`stage:*` labels are projection-only** (cosmetic human visibility into the fine stage); nothing
-  reads them back. They can be dropped if the coarse Linear *state* (In Progress / In Review / Done)
-  is enough — operator preference.
-- **`pr_merge` is NOT projected at cutover** — the human performs the merge (D2). Post-cutover
-  auto-merge (earned via the learning layer) would add it.
+The `add_comment` and `pr_comment` adapter operations exist in the projector (`applyRow`) but are
+**not currently enqueued by any step** — they are wired capability, not live projections. Comment
+projection of review findings and escalations is deferred. `pr_merge` is not projected: the human
+performs the merge (OSS `styre run` ends at PR-ready). `ticket.status = 'abandoned'` has a `set_state`
+mapping in principle but is never written by OSS code.
 
 ## 4. The drain loop
 
 ```
-drain_outbox():
-  for row in SELECT * FROM projection_outbox WHERE status='pending' ORDER BY created_at:
+drainOutbox(budget = OUTBOX_RETRY_BUDGET):        # OUTBOX_RETRY_BUDGET = 5
+  for row in pending rows, per-ticket FIFO by created_at:
     try:
-      ref = ADAPTER[row.target][row.op].apply(row)        # §5 — probe-idempotent
+      ref = ADAPTER[row.target][row.op].apply(row)    # §5 — probe-idempotent
       BEGIN
-        UPDATE projection_outbox SET status='sent', response_ref=ref, sent_at=now WHERE id=row.id
-        update_projection_state(row)                       # advance the last-projected snapshot
+        markSent(row.id, ref)                          # status='sent', response_ref, sent_at
+        # a structured telemetry note is committed WITH markSent so a crash-replay can't double-count
       COMMIT
-      if row delivers a result: deliver_signal(row, ref)   # e.g. pr_create → external_pr_result (§7)
+      if row delivers a result: deliverSignal(row, ref)   # pr_create → external_pr_result (§7)
     catch transient:
-      UPDATE projection_outbox SET attempts=attempts+1, error=… WHERE id=row.id   # retried next loop
-      if row.attempts >= OUTBOX_RETRY_BUDGET: escalate(row.ticket_id, X1)          # §7 — service down
+      attempts += 1                                   # retried on the NEXT drain (no backoff)
+      if attempts >= budget: escalate(row.ticket_id)  # §7 — external service down
 ```
 
 - **Ordering** is per-ticket FIFO by `created_at` (a `set_state` after a `set_labels` lands in order).
-- **Result-bearing rows** (`pr_create`) deliver their `response_ref` to the parked signal
-  (`external_pr_result`) so the workflow resumes with the PR number (control-loop §5.3).
+- **Retry is next-drain, not backed off** — a failed row stays pending and is re-attempted on the
+  following loop iteration until it succeeds or the budget (5) is exhausted.
+- **Result-bearing rows** (`pr_create`) deliver their `response_ref` to the awaiting signal
+  (`external_pr_result`) so the workflow resumes with the PR number (control-loop §5).
 
-## 5. Adapters (per target + op): apply + probe (CL-3)
+## 5. Adapters (per target + op): apply + probe
 
-Each adapter re-attempts and **probes external state** to absorb a duplicate (re-attempt + probe,
-not key-only — keys can't dedup a non-keyed external API).
+Each adapter re-attempts and **probes external state** to absorb a duplicate (probe, not key-only —
+keys can't dedup a non-keyed external API).
 
-**Linear** (UUIDs resolved via `linear_id_cache`, §6):
-- `set_labels` — **declarative**: read the issue's current labels, compute the target set
-  (swap `stage:*`, preserve human labels), `issueUpdate` to it. Idempotent by nature (set-to-desired).
-  **Label-safe** — never overwrites the full set blindly (the `save_issue`-clobbers-labels lesson).
-- `set_state` — **declarative**: `issueUpdate` state → target; no-op if already there.
-- `add_comment` — **probe**: the body carries a `<!-- proj-key: <idempotency_key> -->` tag; grep the
-  issue's recent comments for that tag and post only if absent (Linear has no native idempotency key).
+**Issue tracker (Linear/Jira):**
+- `set_labels` — **declarative**: read the issue's current labels, compute the target set (swap
+  `stage:*`, preserve human labels), update to it. Idempotent by nature; label-safe — never
+  overwrites the full set blindly.
+- `set_state` — **declarative**: update the issue's coarse state to the target; no-op if already
+  there. A workflow mismatch is a *skipped* projection (a `projection_skipped` note), not a transport
+  failure.
+- `add_comment` — **probe** (adapter capability; not currently enqueued): dedups on a
+  `<!-- proj-key: <idempotency_key> -->` tag in the issue's recent comments.
 
-**GitHub**:
+**Forge (GitHub):**
 - `push` — **probe**: if the remote ref is already at the local SHA → skip. Feature branch only;
   force is with-lease and never on `main`/protected.
-- `pr_create` — **probe**: `gh pr view <branch>` → if a PR exists, reuse it; else create. Returns
-  `response_ref` = PR number/url.
-- `pr_comment` — **probe**: like `add_comment`, dedup on the `proj-key` tag in PR comments.
+- `pr_create` — **probe**: look up a PR for the branch; reuse if present, else create. Returns
+  `response_ref`.
+- `pr_comment` — **probe** (adapter capability; not currently enqueued): dedups like `add_comment`.
 
-## 6. `linear_id_cache` — name → UUID resolution
+**Notifier (Slack):**
+- `post` — sends one message via `chat.postMessage`; idempotency-keyed on the event `seq` / terminal
+  outcome so a re-drain does not double-notify. A notify-row transport failure is retried but never
+  escalates the ticket.
 
-The Linear API takes UUIDs; the SoT speaks names (`stage:implement`, `In Review`, `Bug`). The
-projector resolves via `linear_id_cache` and **refreshes on a miss** (one network pull, re-query).
-**Setup seeds it** (and creates any missing `stage:*` labels) as part of the one-command install.
+## 6. Name → id resolution (`external_id_cache`)
+
+Some tracker APIs take internal UUIDs while the SoT speaks names (`stage:implement`, `In Review`,
+`Bug`). A vendor adapter resolves these as needed. The `external_id_cache` table is reserved for
+caching that resolution but is **currently unwired** — the Linear adapter resolves inline and the
+cache optimization is deferred.
 
 ## 7. Failure + escalation
 
-- **Transient** (network blip, rate-limit) → the row stays `pending`, retried next drain with backoff.
-- **Persistent** (outage past `OUTBOX_RETRY_BUDGET`) → **escalate the ticket (atlas X1)**: it parks,
-  and the operator is told the *external service* is down — never a silent infinite retry, never a
-  lost projection (the row is durable; it drains when the service returns).
+- **Transient** (network blip, rate-limit) → the row stays `pending`, retried on the next drain.
+- **Persistent** (past `OUTBOX_RETRY_BUDGET`) → **escalate the ticket**: it parks and the operator is
+  told the *external service* is down — never a silent infinite retry, never a lost projection (the
+  row is durable; it drains when the service returns). A `notify`-target failure is the exception: it
+  is retried but never escalates the ticket (a failed notification must not block a run).
 - A projection failure **never** blocks control flow — the runner's loop runs on the SoT regardless.
-
-## 8. Setup integration (GOAL-INSTALL)
-
-The one-command `setup`:
-1. refreshes `linear_id_cache` (team/project/states/labels → UUIDs),
-2. creates any missing `stage:*` projection labels,
-3. seeds `projection_state` for imported tickets (none, post-abandonment — §9.4 #3).
-
-This is the *only* Linear write outside the per-ticket projector path, and it's one-time bootstrap,
-not control flow.
-
-## 9. Mapping to §9.4 #4
-
-- ✅ **all Linear/GitHub writes go through one projector reading SQLite** — the outbox is the sole
-  per-ticket write path (§1/§2).
-- ✅ **no code path reads Linear to decide control flow** — the projector is write-only outward;
-  inbound facts are signals (§1, control-loop §7).
-- ✅ **the 2 direct-API bypasses are closed** — they don't exist in the greenfield design; setup's
-  one-time bootstrap is the only other write (§8).
-
-**Open (don't block #4):** `OUTBOX_RETRY_BUDGET` value; whether to keep `stage:*` labels or project
-coarse state only (§3); the per-target rate-limit/backoff constants.
-
-**Next artifact:** §9.4 #5 — the minimal loop wiring the resolver + step catalog + verify gates +
-this projector together (the first end-to-end `design → released` on the new substrate).

@@ -18,13 +18,13 @@ bun run build        # compile → dist/styre
 
 ## Before you change anything
 
-Read the architecture docs in order, starting at [`docs/architecture/README.md`](docs/architecture/README.md). That index lists the five files and the order to read them. The load-bearing invariants are non-negotiable:
+Read the architecture docs in order, starting at [`docs/architecture/README.md`](docs/architecture/README.md). That index lists the files and the order to read them. The load-bearing invariants are non-negotiable:
 
 - **Single writer.** Only the runner (`styre run`) writes SQLite; workers return results.
-- **One-way projection.** Linear and GitHub are never read for control flow — they are write-only projections.
+- **One-way projection.** The issue tracker (Linear/Jira) and forge (GitHub) are never read for control flow — they are write-only projections.
 - **Ground-truth verdicts.** Build/test/CI output decides outcomes; agent self-scoring is discarded.
 - **Clean-break stage vocab.** Stages are `design → implement → verify → review → merge → released`. No legacy gerund stages, no hardcoded `ui` stage.
-- **Capability isolation.** Agents get no `gh`/Linear/branch tools and no ambient API key; the worktree is their only writable surface.
+- **Capability isolation.** Agents get no `gh`/tracker/branch tools and no tracker/forge credentials in their environment; the worktree is their only writable surface. (See [`SECURITY.md`](SECURITY.md) for the exact env-scrub policy.)
 
 For the security and isolation model, see [`SECURITY.md`](SECURITY.md).
 
@@ -32,10 +32,11 @@ For the security and isolation model, see [`SECURITY.md`](SECURITY.md).
 
 | Artifact | Directory |
 |---|---|
-| Brainstorms (exploratory decision-shaping docs) | `docs/brainstorms/` |
-| Plans (implementation/scaffolding plans) | `docs/plans/` |
-| Durable design docs | `docs/design/` |
-| Frozen substrate spec (read-only) | `docs/architecture/` |
+| Maintained reference — the substrate spec, glossary, ticket template, and the runtime/config/conventions references | `docs/architecture/` |
+| Brainstorms (exploratory decision-shaping docs; append-only history) | `docs/brainstorms/` |
+| Plans (implementation/scaffolding plans; append-only history) | `docs/plans/` |
+
+These three are the only doc folders. `docs/architecture/` is kept current with the code — when a change alters a documented behavior, update the reference in the same PR. `docs/brainstorms/` and `docs/plans/` are append-only history: add new dated files, never rewrite old ones. Do not invent new top-level doc folders without maintainer sign-off.
 
 ## Workflow rules
 

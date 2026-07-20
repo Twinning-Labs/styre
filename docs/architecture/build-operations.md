@@ -60,11 +60,13 @@ the *service-install* edge. The same TS core compiles to per-platform binaries.
     emitting NDJSON telemetry to stdout. Ephemeral per-run SQLite — the journal gives in-run
     crash-resume; durable output = the git branch + telemetry stream.
     - **Park on session interruption (exit 75):** if the run is interrupted (credits/limit), it parks:
-      dumps the SoT + transcript to `~/.local/state/styre/<project-stub>/<ticket-ident>/` and exits
+      dumps the SoT + transcript to `$XDG_STATE_HOME/styre/<slug>/<ticket-ident>/` and exits
       `75` (EX_TEMPFAIL) without burning a retry. Resume with `styre run --resume <ticket> --profile <p>`
       (re-runs only the interrupted step; `--accept-head` accepts a moved HEAD; `--inspect` is
       diagnostics-only, exit `0`).
-  - **management CLI (OSS):** `status` · `config` · `logs`.
+  - **`styre notify --test`** — a diagnostic that sends one test notification through the configured
+    notifier (Slack). There is **no** OSS `status` / `config` / `logs` management CLI — the OSS binary
+    is exactly these four subcommands (`migrate` · `notify` · `run` · `setup`).
 
 - **Commercial Control Plane run modes** *(not part of the OSS binary — the persistent orchestration
   layer lives in the separate `control-plane` repo):*

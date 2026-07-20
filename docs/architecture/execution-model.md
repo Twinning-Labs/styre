@@ -8,35 +8,39 @@
 
 ## The shape of a run
 
-A ticket enters the system at `design` and the loop drives it through six stages to completion:
+A ticket enters the system at `design` and the loop drives it toward `released`:
 
 ```
            ┌──────────────────────────────────────────────┐
            │                                              │
-           ▼                                              │ re-design
+           ▼                                              │ plan defect → re-design
         design ──────────────────────────────────────────►│
-           │                                              │
+           │  (provision · plan · extract · size ·        │
+           │   plan-review · author+classify AC checks)   │
            ▼                                              │
-       implement ◄── loopback (build/test red) ──────────►│
-           │                 ▲                            │
-           │      re-implement (per work-unit)            │
-           ▼                                              │
-        verify  ──────────── (unit red → re-implement)   │
-           │                                              │
-           ▼                                              │
-        review  ──── (plan defect → re-design) ──────────►│
-           │                                              │
-           │         (code finding → re-implement) ───────┘
+       implement ◄─────── AC checks-gate red ────────────►│
+           │       ┌── per work-unit ──┐    │  arbiter → re-author checks
+           │       │ dispatch → verify  │    │  or → re-implement
+           │       │ → completeness →   │    │
+           │       │ AC checks-gate →   │    │
+           │       │ integration → docs │    │
+           ▼       └───────────────────┘    │
+        review  ──── code finding → re-implement ─────────┤
+           │         plan defect → re-design ─────────────┘
            ▼
-         merge  ──── (checks red → re-implement+review)
+         merge  ──── push → PR-ready  (OSS `styre run` exits here)
            │
-           ▼
+           ▼   (human merge, then released — commercial Control Plane)
         released
 ```
 
-These six values are the only valid values of `ticket.stage`. There is no stage for UI work: a
-frontend `work_unit` is a decomposition of `implement`, and its visual check runs during `verify`.
-The stage vocabulary is fixed; the legacy gerund names do not exist in this codebase.
+`ticket.stage` is one of six values — `design`, `implement`, `verify`, `review`, `merge`,
+`released` — and the legacy gerund names do not exist in this codebase. In the current loop, however,
+the runtime only ever assigns `design`, `implement`, `review`, `merge`, and `released`: **all verify
+work happens *inside* the implement stage** (per-unit build/test checks, the AC checks-gate,
+integration), so a ticket does not transit through a distinct `verify` stage. There is likewise no
+stage for UI work — a frontend `work_unit` is a decomposition of `implement`, and its visual check is
+one verify check-type among others.
 
 ---
 
@@ -55,8 +59,9 @@ journal — if a step succeeded, advance; if it failed, apply the failure policy
 This means **anomalies are absorbed rather than halted**. When a build fails, the loop routes back
 to `implement` with the error in hand and retries against [ground truth](glossary.md#ground-truth). When a test is
 red, the loop hands the failing test names to the agent and tries again. The default response to
-any correctable failure is "absorb and loop," bounded by per-ticket retry budgets (capped by spend,
-wall-clock, and distinct-failure counts — described in [minimal-loop.md §4](minimal-loop.md#4-budget-numbers-the-deferred-loose-ends-pinned)).
+any correctable failure is "absorb and loop," bounded by a per-step attempt cap (3) plus a
+consecutive-identical-failure guard and per-gate round caps — the concrete numbers are in
+[minimal-loop.md §4](minimal-loop.md#4-budget-numbers-as-implemented).
 
 **Human gates are narrow by design.** The only wired human gate is MERGE approval: `styre run`
 exits at PR-ready and the operator reviews the pull request and merges it personally. The second
@@ -76,9 +81,11 @@ Every unit of progress is a [`workflow_step`](glossary.md#workflow_step) row in 
 system's memo table.
 
 When `styre run` starts on a ticket, the resolver checks the journal first. If a step already
-succeeded, the resolver reads its recorded `result_json` and moves on — it never re-executes the
-step. This is what makes crash-resume work: `styre run --resume` runs the resolver, and the loop
-re-enters at exactly the interrupted step — nothing is re-executed.
+**succeeded**, the resolver reads its recorded `result_json` and moves on — it never re-executes a
+succeeded step. This is what makes crash-resume work: `styre run --resume` runs the resolver, which
+re-enters at the interrupted step. That interrupted step (which was left `running`, not `succeeded`)
+*is* re-executed as a fresh attempt — `recover()` resets it to pending first (see below); only the
+already-succeeded work before it is skipped.
 
 For steps with external effects (pushing a branch, opening a pull request, posting to Linear), the
 runner writes its *intent* to the journal before the effect and makes the effect idempotent:
@@ -114,20 +121,20 @@ branch is traceable to a journaled step.
 
 ## Outward writes through the projector
 
-Linear and GitHub are tracking surfaces, not control inputs. The loop never reads either service to
-decide what to do next — that is the bug class move 2 deletes. All control decisions are computed
-from SQLite alone.
+The issue tracker (Linear/Jira) and the forge (GitHub) are tracking surfaces, not control inputs.
+The loop never reads either service to decide what to do next — that is the bug class move 2 deletes.
+All control decisions are computed from SQLite alone.
 
 When a state change happens — a stage transition, a PR becoming ready, a ticket completing — the
-runner computes the projection delta and inserts rows into [`projection_outbox`](glossary.md#projection_outbox) in
-the **same transaction** as the state change. State and the intent-to-project can never disagree:
+runner enqueues the corresponding projection rows into [`projection_outbox`](glossary.md#projection_outbox)
+in the **same transaction** as the state change. State and the intent-to-project can never disagree:
 either both commit or neither does.
 
-The [projector](glossary.md#projector) drains the outbox on every loop iteration, applying each pending row
-idempotently to Linear or GitHub (declarative label/state updates, comment deduplication via a
-`proj-key` tag, push with-lease, PR create-or-reuse). A Linear outage delays projection but never
-blocks the control loop — the runner keeps advancing the ticket; the outbox rows wait until the
-service returns.
+The [projector](glossary.md#projector) drains the outbox on every loop iteration, applying each pending
+row idempotently to its target — the tracker, the forge, or (when configured) the Slack notifier —
+via declarative state/label updates, comment/notification dedup, push with-lease, and PR
+create-or-reuse. A tracker outage delays projection but never blocks the control loop — the runner
+keeps advancing the ticket; the outbox rows wait until the service returns.
 
 Inbound facts — PR merged, human action — arrive as [signals](glossary.md#signal): the runner
 polls GitHub on an interval and delivers the results as structured rows in the `signal` table. The
@@ -144,15 +151,23 @@ all the code. The `design:extract` step has already decomposed the plan into one
 row per kind (`backend`, `frontend`, `data`, `reconcile`, …). The implement stage is a
 runner-orchestrated sequence of focused dispatches, one per unit, respecting `depends_on` ordering.
 
-For each unit, the runner executes: rebase → implement dispatch → per-check verify. The agent that
-implements a unit edits only files; the runner commits each dispatch's changes with a `dispatch_id`
-in the message. Verify steps are runner-executed, not agent self-report: the runner runs the
-profile's declared build and test commands against the committed SHA and records a structured
-`ground_truth_signal` row. A unit's implement dispatch cannot silently declare itself done — the
-ground-truth check catches hallucinated runs, weakened tests, and dirty-environment passes.
+For each unit, the runner executes: implement dispatch → provision (once per ticket, re-gated) →
+completeness → per-check verify. (There is no rebase step.) The agent that implements a unit edits
+only files; the runner commits each dispatch's changes with a `dispatch_id` in the message. Verify
+steps are runner-executed, not agent self-report: the runner runs the profile's declared build and
+test commands against the committed SHA and records a structured `ground_truth_signal` row. A unit's
+implement dispatch cannot silently declare itself done.
 
-Once all units pass their per-unit checks, the runner executes integration verification across the
-whole branch (`verify:integration`). Only then does the ticket advance to `review`.
+The per-unit build/test checks are **advisory**: a recorded verdict — pass *or* fail — at the unit's
+current SHA marks the unit verified and lets routing proceed (only a could-not-run `error` re-arms
+the check for a bounded retry). The verdict that actually **gates** the ticket is the
+**AC checks-gate**: behavioral acceptance-criterion tests, authored RED-first back in the design
+stage, that must go green at the branch HEAD. When they stay red, an arbiter step assigns blame —
+`code-wrong` loops back to re-implement, `check-wrong` loops to re-author the check — and the ticket
+does not advance until the gate passes (or the round caps escalate). After the gate, the runner runs
+integration verification across the whole branch (`verify:integration`, also advisory) and the
+optional `docs:revise` step, then the ticket advances to `review`. The full step-by-step gate
+mechanics are in [`control-loop.md`](control-loop.md).
 
 A frontend unit's visual check runs during verify, as one check-type among others, driven by the
 profile's declared command. Frontend work is a work-unit kind, not a separate stage.
@@ -181,7 +196,7 @@ run terminates with an error describing the escalation and the point it reached.
 
 When a session is interrupted mid-flight (out of credits, session-limit hit), the runner
 **parks**: it dumps the SQLite SoT and transcript to
-`~/.local/state/styre/<project-stub>/<ticket-ident>/` and exits **75** (`EX_TEMPFAIL`) without
+`$XDG_STATE_HOME/styre/<slug>/<ticket-ident>/` and exits **75** (`EX_TEMPFAIL`) without
 burning a retry attempt. Resume with:
 
 ```
@@ -203,6 +218,6 @@ conflicts, docs that need updating — the loop handles itself.
 
 ## Read next
 
-[`control-loop.md`](control-loop.md) contains the full step catalog (S1–S10) with per-step guards,
+[`control-loop.md`](control-loop.md) contains the full step catalog with per-step guards,
 inputs, outputs, and tool constraints; the Loopback Atlas (§8) with every failure route; and the
 invariants every step author must hold (§9). Start there for the implementation specification.

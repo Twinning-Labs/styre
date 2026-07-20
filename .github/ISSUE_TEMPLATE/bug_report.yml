@@ -30,6 +30,7 @@ body:
         - run
         - setup
         - migrate
+        - notify
     validations:
       required: false
 
