@@ -738,6 +738,12 @@ describe("discard-poison: the framework gate (ENG-343 design section 2)", () => 
     const out = "AssertionError: assert 'package foo does not exist' in msg";
     expect(importErrorImplicatesDiscarded(out, ["foo/__init__.py"], "pytest")).toEqual([]);
   });
+
+  test("legacy python/node vocabulary does not leak into the new stacks", () => {
+    const out = "ImportError: boom in tests/scratch/mod.rs";
+    expect(importErrorImplicatesDiscarded(out, ["tests/scratch/mod.rs"], "cargo")).toEqual([]);
+    expect(importErrorImplicatesDiscarded(out, ["spec/scratch.rb"], "rspec")).toEqual([]);
+  });
 });
 
 describe("single-line capture guards (a capture must never span a line break)", () => {
@@ -753,6 +759,30 @@ describe("single-line capture guards (a capture must never span a line break)", 
     expect(
       importErrorImplicatesDiscarded(out, ["src/test/java/com/helper/Helper.java"], "junit-maven"),
     ).toEqual([]);
+  });
+
+  test("cargo's naming pattern does not lift a capture off the next line", () => {
+    const out = "error[E0583]: file not found for module\nhelper";
+    expect(importErrorImplicatesDiscarded(out, ["src/helper.rs"], "cargo")).toEqual([]);
+  });
+
+  test("rspec's naming pattern does not lift a capture off the next line", () => {
+    const out = "cannot load such file --\nsupport/helper (LoadError)";
+    expect(importErrorImplicatesDiscarded(out, ["spec/support/helper.rb"], "rspec")).toEqual([]);
+  });
+
+  test("phpunit's naming pattern does not lift a capture off the next line", () => {
+    // The bounded-basename tier would match this fixture regardless of the naming pattern, so
+    // neutralise that tier for the probe — otherwise the test passes for the wrong reason.
+    const out =
+      "PHP Fatal error:  Uncaught Error: Failed opening required\nsrc/helper.php, giving up";
+    const orig = CHECK_RULES.phpunit.basenameGates;
+    try {
+      (CHECK_RULES.phpunit as { basenameGates: string[] }).basenameGates = [];
+      expect(importErrorImplicatesDiscarded(out, ["src/helper.php"], "phpunit")).toEqual([]);
+    } finally {
+      (CHECK_RULES.phpunit as { basenameGates: string[] }).basenameGates = orig;
+    }
   });
 });
 
@@ -776,8 +806,16 @@ describe("discard-poison: Rust", () => {
     ]);
   });
 
-  test("contrast: same output, an unrelated discarded module ⇒ no match", () => {
+  // residual/documentation: this fixture cannot discriminate between shape and tier — with
+  // basenameGates empty there is no mechanism by which an unrelated discarded file could match. It
+  // records that the negative holds, not that anything specifically guards it.
+  test("residual/documentation: contrast: same output, unrelated discarded module ⇒ no match", () => {
     expect(importErrorImplicatesDiscarded(e0583, ["src/scratch.rs"], "cargo")).toEqual([]);
+  });
+
+  test("the mod.rs shape applies ONLY to mod.rs, not to any file in a matching directory", () => {
+    const out = "error[E0583]: file not found for module `common`";
+    expect(importErrorImplicatesDiscarded(out, ["tests/common/other.rs"], "cargo")).toEqual([]);
   });
 
   test("E0583's help note must NOT implicate an unrelated discarded mod.rs", () => {
@@ -846,8 +884,18 @@ describe("discard-poison: PHP", () => {
   const failedStream =
     "PHP Warning:  require(/app/src/helper.php): Failed to open stream: No such file or directory in /app/tests/ATest.php on line 3";
 
-  test("implicates a discarded file named by a failed require (naming tier)", () => {
+  test("implicates a discarded file whose basename appears in a failed require (basename tier)", () => {
     expect(importErrorImplicatesDiscarded(failedOpen, ["src/helper.php"], "phpunit")).toEqual([
+      "src/helper.php",
+    ]);
+  });
+
+  test("implicates a discarded file named by a failed require (naming tier, not basename)", () => {
+    // Trailing `,` keeps `helper.php` OUT of the bounded-basename tier, so only the naming pattern +
+    // leaf tier can produce this match. Verified: deleting phpRules.naming turns this red.
+    const namingOnly =
+      "PHP Fatal error:  Uncaught Error: Failed opening required helper.php, giving up";
+    expect(importErrorImplicatesDiscarded(namingOnly, ["src/helper.php"], "phpunit")).toEqual([
       "src/helper.php",
     ]);
   });

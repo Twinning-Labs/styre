@@ -250,6 +250,9 @@ const rustRules: LanguageRules = {
 
 const RUBY_INDICATORS = ["cannot load such file", "loaderror"];
 
+// RESIDUAL: `loaderror` is a broad basename gate — it appears in any rescued or logged LoadError, not
+// only the boot-time require failure the naming pattern targets. Consequence is a spurious retry,
+// never a wrong verdict.
 const rubyRules: LanguageRules = {
   indicators: [...RUBY_INDICATORS],
   basenameGates: [...RUBY_INDICATORS],
