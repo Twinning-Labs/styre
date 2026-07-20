@@ -147,7 +147,7 @@ Upgrade with `brew upgrade styre`; remove with `brew uninstall styre` (and `brew
 
 - [Architecture index](docs/architecture/README.md) — start here for the full substrate overview
 - [Execution model](docs/architecture/execution-model.md) — step catalog, state machine, loopback atlas
-- [Ticket template](docs/design/ticket-template.md) — how to write a ticket styre can actually deliver
+- [Ticket template](docs/architecture/ticket-template.md) — how to write a ticket styre can actually deliver
 - [Security policy](SECURITY.md) — capability model, threat surface, reporting vulnerabilities
 - [Contributing](CONTRIBUTING.md) — how to contribute, branch conventions, PR process
 - [Plans](docs/plans/) — milestone implementation plans

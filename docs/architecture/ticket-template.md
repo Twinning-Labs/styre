@@ -12,7 +12,7 @@ you when it reads something it can't use.
 
 Start here. Most ticket-writing instincts are wrong until you internalise this.
 
-The entire ticket contract is six fields (`src/integrations/ticket-source.ts:8-15`):
+The entire ticket contract is six fields (`src/integrations/ticket-source.ts:6-13`):
 
 ```ts
 export interface IngestedTicket {
@@ -32,7 +32,7 @@ There is **no `styre_config` block**. No context-files list, no structured scope
 Agent" trigger. Those appear in `build-operations.md` §4/§5 but were explicitly deferred to the
 commercial Control Plane and are **not built in OSS and not planned for it**
 (`docs/architecture/brainstorm.md:426`). If you write a `styre_config` block into a ticket, nothing
-reads it. Runtime policy lives in `--config`/RuntimeConfig (`src/config/runtime-config.ts:9-36`).
+reads it. Runtime policy lives in `--config`/RuntimeConfig (`src/config/runtime-config.ts:9-40`).
 
 The ticket is fetched **once**, at trigger. `fetchTicket` is ingestion-only and must never be called
 from the control loop (`src/integrations/issue-tracker.ts:17-19`) — the loop reads the SoT, never the
@@ -55,7 +55,7 @@ Mapped from `src/dispatch/prompt-vars.ts`. Two consequences drive this whole doc
 downstream step consumes the *plan*, not your ticket. Design is a one-way funnel: ambiguity that
 survives it is unrecoverable, because no later step can go back and re-read what you meant.
 
-**The checks author is plan-blind and sees only your AC text** (`checksVars`, prompt-vars.ts:196-210;
+**The checks author is plan-blind and sees only your AC text** (`checksVars`, prompt-vars.ts:213;
 `prompts/checks.md:5-7` — *"you are NOT given the implementation plan"*). It gets the AC string, the
 detected stacks, and nothing else. **Every AC must stand alone.** An AC reading "the message states
 the true post-state" is unverifiable — the author cannot see the prose defining "true post-state".
@@ -342,7 +342,7 @@ is working blind — see §5.1.
 codebase"*, and `:25` asks it to *"cross-check the plan's Requirements-traceability block against the
 ticket (nothing extra, nothing missing)"*.
 
-It cannot. `designReviewVars` (`prompt-vars.ts:180-190`) passes only `ident`, `title`, and `slug` —
+It cannot. `designReviewVars` (`prompt-vars.ts:198`) passes only `ident`, `title`, and `slug` —
 **not `description`**. Its tools are `[Read, Grep, Glob]` (`tool-allowlists.ts:19`), worktree-only,
 with no issue-tracker access by design (capability isolation, move 4). The ticket description is
 never written into the worktree. The reviewer has no path to your ticket text.

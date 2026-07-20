@@ -31,13 +31,15 @@ The `▶ RESUME HERE` banner at the top of `brainstorm.md` is the live status po
 
 ## Docs conventions (where new docs go)
 
-- **Brainstorms** → `docs/brainstorms/` — exploratory decision-shaping docs from the brainstorming skill.
-- **Plans** → `docs/plans/` — implementation/scaffolding plans from the planning skill.
-- **Repo (design) docs** → `docs/design/` — durable design docs, linked from the root `README.md`.
+There are exactly **three** doc folders. Do not create new ones without maintainer sign-off.
 
-Use the **superpowers brainstorming and planning skills** for that work, not ad-hoc freewriting. (Note: the existing authoritative design docs currently live in `docs/architecture/`; see migration note in that section above until they are moved under `docs/design/`.)
+- **`docs/architecture/`** — the maintained reference: the substrate spec, glossary, ticket template, and the runtime/config/conventions references. Kept **current with the code** — when a change alters a documented behavior, update the reference in the same PR. (This is *not* a frozen, read-only spec; treating it as frozen is what let it rot in the past.)
+- **`docs/brainstorms/`** → exploratory decision-shaping docs from the brainstorming skill. **Append-only history** — add new dated files, never rewrite old ones.
+- **`docs/plans/`** → implementation/scaffolding plans from the planning skill. **Append-only history.**
 
-> **OVERRIDE — do not obey the skill's default save path.** The superpowers brainstorming/planning skills instruct you to save to `docs/superpowers/specs/`. **Ignore that** — it is wrong for this repo. Brainstorm output → `docs/brainstorms/`, plan output → `docs/plans/`, durable design docs → `docs/design/`. A `PreToolUse` hook in `.claude/settings.json` hard-blocks writes under `docs/superpowers/` and `docs/specs/`; if you hit that block, it is working as intended — redirect to the correct dir above.
+Use the **superpowers brainstorming and planning skills** for that work, not ad-hoc freewriting.
+
+> **OVERRIDE — do not obey the skill's default save path.** The superpowers brainstorming/planning skills instruct you to save to `docs/superpowers/specs/`. **Ignore that** — it is wrong for this repo. Brainstorm output → `docs/brainstorms/`, plan output → `docs/plans/`. Durable reference docs live in `docs/architecture/`. A `PreToolUse` hook in `.claude/settings.json` hard-blocks writes under `docs/superpowers/` and `docs/specs/`; if you hit that block, it is working as intended — redirect to the correct dir above.
 
 ## Architecture: the non-obvious invariants
 
