@@ -979,3 +979,233 @@ describe("mutation guards: the Go/JVM negatives above must discriminate", () => 
     );
   });
 });
+
+describe("discard-poison: the symbol definition tier (design 4.5)", () => {
+  const src = (path: string, content: string) => new Map([[path, content]]);
+
+  test("Go: a same-package helper is tied when the discarded file defined the symbol", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["helper.go"],
+        "go",
+        src("helper.go", "package app\n\nfunc Help() int { return 1 }\n"),
+      ),
+    ).toEqual(["helper.go"]);
+  });
+
+  test("Go contrast: same error, a discarded file that does NOT define the symbol", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["scratch.go"],
+        "go",
+        src("scratch.go", "package app\n\nfunc Other() int { return 2 }\n"),
+      ),
+    ).toEqual([]);
+  });
+
+  test("JVM: `cannot find symbol` is tied when the discarded class defined it", () => {
+    const out =
+      "ATest.java:12: error: cannot find symbol\n  symbol:   class Helper\n  location: class ATest";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/test/java/com/x/Helper.java"],
+        "junit-maven",
+        src("src/test/java/com/x/Helper.java", "package com.x;\n\npublic class Helper {}\n"),
+      ),
+    ).toEqual(["src/test/java/com/x/Helper.java"]);
+  });
+
+  test("Ruby: rspec's autoload NameError is tied when the discarded file defined the constant", () => {
+    const out = "spec/c_spec.rb:2:in `<main>': uninitialized constant Helper (NameError)";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["spec/support/helper.rb"],
+        "rspec",
+        src("spec/support/helper.rb", "module Helper\n  def self.x; true; end\nend\n"),
+      ),
+    ).toEqual(["spec/support/helper.rb"]);
+  });
+
+  test("PHP: a Composer autoload miss is tied, and the namespace is reduced to the class name", () => {
+    const out =
+      'PHP Fatal error:  Uncaught Error: Class "App\\Helper" not found in /app/tests/ATest.php:9';
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/Helper.php"],
+        "phpunit",
+        src("src/Helper.php", "<?php\nnamespace App;\nclass Helper {}\n"),
+      ),
+    ).toEqual(["src/Helper.php"]);
+  });
+
+  test("Rust: a missing item is tied when the discarded module defined it", () => {
+    const out = "error[E0425]: cannot find function `help` in this scope";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/helper.rs"],
+        "cargo",
+        src("src/helper.rs", "pub fn help() -> u8 { 1 }\n"),
+      ),
+    ).toEqual(["src/helper.rs"]);
+  });
+
+  test("the tier is inert when no contents are supplied (degrades to the other tiers)", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    expect(importErrorImplicatesDiscarded(out, ["helper.go"], "go")).toEqual([]);
+    expect(importErrorImplicatesDiscarded(out, ["helper.go"], "go", new Map())).toEqual([]);
+  });
+
+  test("a symbol named by the error but defined by NO discarded file implicates nothing", () => {
+    const out = "ATest.java:12: error: cannot find symbol\n  symbol:   class Missing";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/test/java/com/x/Helper.java"],
+        "junit-maven",
+        src("src/test/java/com/x/Helper.java", "package com.x;\n\npublic class Helper {}\n"),
+      ),
+    ).toEqual([]);
+  });
+
+  test("Rust: rustc's compound kinds and E0433 are captured", () => {
+    // Real rustc wording. `Helper::new()` produces E0433, the most common way a test reaches a helper.
+    const compound =
+      "error[E0422]: cannot find struct, variant or union type `Config` in this scope";
+    expect(
+      importErrorImplicatesDiscarded(
+        compound,
+        ["src/c.rs"],
+        "cargo",
+        src("src/c.rs", "pub struct Config {}\n"),
+      ),
+    ).toEqual(["src/c.rs"]);
+    const e0433 = "error[E0433]: failed to resolve: use of undeclared type `Helper`";
+    expect(
+      importErrorImplicatesDiscarded(
+        e0433,
+        ["src/h.rs"],
+        "cargo",
+        src("src/h.rs", "pub struct Helper;\n"),
+      ),
+    ).toEqual(["src/h.rs"]);
+  });
+
+  test("Go: a method on a receiver ties, not just a bare func", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["h.go"],
+        "go",
+        src("h.go", "package app\n\nfunc (r T) Help() int { return 1 }\n"),
+      ),
+    ).toEqual(["h.go"]);
+  });
+
+  test("Go: `undefined:` inside a test's own assertion message must NOT fire (no compiler gutter)", () => {
+    // Ordinary program text masquerading as a diagnostic — the section 2 failure class, within one
+    // language. The gutter anchor is what rejects it.
+    const out = 'x_test.go:12: want no error, got "undefined: Config"';
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["scratch/dump.go"],
+        "go",
+        src("scratch/dump.go", "package scratch\n\ntype Config struct{}\n"),
+      ),
+    ).toEqual([]);
+  });
+
+  test("JVM: a `symbol: method` capture cannot cross-match a type declaration", () => {
+    const out = "ATest.java:12: error: cannot find symbol\n  symbol:   method helper(int)";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["Helper.java"],
+        "junit-maven",
+        src("Helper.java", "class helper {}\n"),
+      ),
+    ).toEqual([]);
+  });
+
+  // DOCUMENTATION PINS (design section 5, residual 4): the tier is a text search, so a discarded file
+  // that merely MENTIONS a definition is implicated. Recorded so the residual cannot drift unnoticed.
+  test("residual: a comment mentioning the definition implicates the file", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["n.go"],
+        "go",
+        src("n.go", "package app\n// TODO: func Help should live here one day\n"),
+      ),
+    ).toEqual(["n.go"]);
+  });
+
+  test("residual: a compile stub the agent wrote for its own test is implicated", () => {
+    // The realistic case: the agent stubs `type Config struct{}` so its RED-first test builds, does not
+    // declare it, and the stub is discarded. Costs one retry; self-heals next attempt (no stub to
+    // discard). Never a bad merge.
+    const out = "checks/x_test.go:3:10: undefined: Config";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["checks/stub.go"],
+        "go",
+        src("checks/stub.go", "package checks\n\ntype Config struct{}\n"),
+      ),
+    ).toEqual(["checks/stub.go"]);
+  });
+
+  test("symbolLeaf reduces qualified names; a Go package qualifier is deliberately dropped too", () => {
+    // `helper.Help` means package `helper` lacks `Help`. We reduce to `Help`, so an unrelated
+    // discarded package defining `Help` is implicated. Accepted: the consequence is a retry.
+    const out = "app/y_test.go:5:30: undefined: helper.Help";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["other/thing.go"],
+        "go",
+        src("other/thing.go", "package other\n\nfunc Help() int { return 1 }\n"),
+      ),
+    ).toEqual(["other/thing.go"]);
+  });
+
+  test("a symbol-tier hit yields a real compiler line in the excerpt", () => {
+    expect(collectionErrorExcerpt("app/y_test.go:5:30: undefined: Help", "go")).toBe(
+      "app/y_test.go:5:30: undefined: Help",
+    );
+    expect(
+      collectionErrorExcerpt(
+        "spec/c_spec.rb:2:in `<main>': uninitialized constant Helper (NameError)",
+        "rspec",
+      ),
+    ).toContain("uninitialized constant Helper");
+  });
+});
+
+describe("mutation guard: the symbol tier's contrast must discriminate", () => {
+  test("a symbol-blind definition pattern would implicate an unrelated discarded file", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    const sources = new Map([["scratch.go", "package app\n\nfunc Other() int { return 2 }\n"]]);
+    const orig = CHECK_RULES.go.definesSymbol;
+    try {
+      (CHECK_RULES.go as { definesSymbol?: (s: string) => RegExp }).definesSymbol = () =>
+        /\bfunc\s+\w+/;
+      expect(importErrorImplicatesDiscarded(out, ["scratch.go"], "go", sources)).toEqual([
+        "scratch.go",
+      ]);
+    } finally {
+      (CHECK_RULES.go as { definesSymbol?: (s: string) => RegExp }).definesSymbol = orig;
+    }
+    expect(importErrorImplicatesDiscarded(out, ["scratch.go"], "go", sources)).toEqual([]);
+  });
+});

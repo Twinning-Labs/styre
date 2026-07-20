@@ -635,6 +635,13 @@ test("discard: undeclared new file is deleted + noted, declared file + tracked e
   expect(committed).not.toContain("scratch.py");
   const notes = listEvents(db, ticketId).filter((e) => e.reason?.startsWith("scope-discarded"));
   expect(notes.length).toBe(1);
+  // The symbol tier looks contents up by the EXACT path string in `discarded`. If these two ever
+  // diverge (a `./` prefix, a separator, a normPath call slipped in between) the tier silently returns
+  // nothing and no other test notices.
+  expect([...out.discardedSources.keys()]).toEqual(out.discarded);
+  expect(out.discardedSources.get("scratch.py")).toContain("junk");
+  // File CONTENTS must never reach telemetry — the payload carries paths only.
+  expect(Object.keys(JSON.parse(notes[0]?.payload_json ?? "{}"))).toEqual(["discarded"]);
   db.close();
 });
 

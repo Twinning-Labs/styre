@@ -1494,3 +1494,50 @@ test("A19 an rspec load error is bucketed selected-none, bypassing the discard-p
   expect(message).not.toMatch(/import or collection error/); // the guard did not run
   expect(message).toContain("spec/support/helper.rb"); // discardNote still names the file
 });
+
+// --- A20 ⚔ (ENG-343 design 4.5: a Go helper in the SAME package, tied by symbol evidence) --------
+// The compiler reports `undefined: Help` — it names the FUNCTION, never the file, which is already
+// deleted. No phrase can tie this. The guard implicates the discarded file because that file's
+// captured contents DEFINED `Help`. This cell is the only proof that the contents survive from
+// discardPaths' call site all the way to the guard.
+test("A20 ⚔ a discarded same-package Go helper is tied by the symbol it defined", async () => {
+  const h = await setupChecks("- [ ] one thing\n");
+  const runner = checksRunner(
+    h,
+    (cwd, acId, ident) => {
+      const dir = join(cwd, "checks");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `${ident}_ac${acId}_test.go`),
+        "package checks\n\nfunc TestX(t *testing.T) { _ = Help() }\n",
+      );
+      // Same package, undeclared → discarded. Its NAME never appears in the compiler output.
+      writeFileSync(join(dir, "helper.go"), "package checks\n\nfunc Help() int { return 1 }\n");
+    },
+    (acId, ident) =>
+      `\`\`\`styre-sidecar\n${JSON.stringify({
+        checksAuthored: [
+          { ac_id: acId, test_file: `checks/${ident}_ac${acId}_test.go`, test_name: "TestX" },
+        ],
+      })}\n\`\`\``,
+  );
+  const { outcome, step, wt, message } = await driveChecks(h, runner, {
+    profile: goProfile(h.repo),
+    runCheck: async () => ({
+      exitCode: 1,
+      stdout: "",
+      // Note: names the SYMBOL only. `helper.go` appears nowhere.
+      stderr: "checks/ENG-1_ac1_test.go:3:30: undefined: Help",
+      timedOut: false,
+    }),
+  });
+  const checks = listAcChecks(h.db, h.ticketId);
+  h.db.close();
+  expect(["retry", "escalated"]).toContain(outcome.kind);
+  expect(step?.status).toBe("pending");
+  expect(existsSync(join(wt, "checks", "helper.go"))).toBe(false); // discarded
+  expect(checks).toHaveLength(0); // no poisoned check installed
+  expect(message).toMatch(/import or collection error/);
+  expect(message).toContain("checks/helper.go"); // tied by evidence, not by name
+  expect(message).toContain("undefined: Help"); // the excerpt carried the compiler's own line
+});

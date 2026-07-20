@@ -12,6 +12,7 @@ import {
   fileContentAt,
   pendingChanges,
   pendingEntries,
+  readDiscardedSources,
   removeWorktree,
   stagedIndexEmpty,
   sweepScratch,
@@ -309,6 +310,17 @@ test("discardPaths is a no-op on empty input and never throws on a missing path"
   const dir = repo();
   expect(() => discardPaths(dir, [])).not.toThrow();
   expect(() => discardPaths(dir, ["does/not/exist.py"])).not.toThrow();
+});
+
+test("readDiscardedSources reads sources, skips oversized and missing paths, never throws", () => {
+  const root = mkdtempSync(join(tmpdir(), "styre-rds-"));
+  writeFileSync(join(root, "small.go"), "package a\n\nfunc Help() int { return 1 }\n");
+  writeFileSync(join(root, "big.go"), "x".repeat(256 * 1024 + 1));
+  const out = readDiscardedSources(root, ["small.go", "big.go", "absent.go"]);
+  expect([...out.keys()]).toEqual(["small.go"]);
+  expect(out.get("small.go")).toContain("func Help()");
+  expect(readDiscardedSources(root, []).size).toBe(0);
+  rmSync(root, { recursive: true, force: true });
 });
 
 // --- sweepScratch (Task 1) ----------------------------------------------------------------------

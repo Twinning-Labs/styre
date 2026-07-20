@@ -1,6 +1,12 @@
 import { basename, dirname } from "node:path";
 import type { CommandResult } from "../util/run-command.ts";
-import { CHECK_RULES, type MatchContext, moduleDotted, moduleLeaf } from "./check-rules.ts";
+import {
+  CHECK_RULES,
+  type MatchContext,
+  moduleDotted,
+  moduleLeaf,
+  symbolLeaf,
+} from "./check-rules.ts";
 
 /** A concrete test framework the selector constructor + coarse run-output reader understand.
  *  Derived from a profile component's `kind` and its `test` command string. */
@@ -241,6 +247,7 @@ export function importErrorImplicatesDiscarded(
   rawOutput: string,
   discarded: string[],
   framework: CheckFramework | null,
+  sources?: Map<string, string>,
 ): string[] {
   if (discarded.length === 0 || rawOutput.trim() === "" || framework === null) return [];
   const rules = CHECK_RULES[framework];
@@ -265,6 +272,22 @@ export function importErrorImplicatesDiscarded(
   }
   const ctx: MatchContext = { dotted, hasIndicator, hasFixtureError };
 
+  // Symbols the toolchain names without naming their defining file (design 4.5). Collected whenever
+  // this language declares `symbolNaming` — NOT gated on `sources`, so the excerpt and this list stay
+  // independent of whether contents happened to be supplied.
+  const symbols: string[] = [];
+  if (rules.symbolNaming !== undefined) {
+    for (const pattern of rules.symbolNaming) {
+      const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+      const re = new RegExp(pattern.source, flags);
+      let sm: RegExpExecArray | null;
+      // biome-ignore lint/suspicious/noAssignInExpressions: canonical exec-loop over a /g regex.
+      while ((sm = re.exec(rawOutput)) !== null) {
+        if (sm[1]) symbols.push(symbolLeaf(sm[1]));
+      }
+    }
+  }
+
   const matched: string[] = [];
   for (const d of discarded) {
     const base = (d.split(/[\\/]/).pop() ?? d).toLowerCase();
@@ -274,6 +297,13 @@ export function importErrorImplicatesDiscarded(
       if (shape.match(d, ctx)) {
         hit = true;
         break;
+      }
+    }
+    if (!hit && symbols.length > 0 && rules.definesSymbol !== undefined) {
+      const content = sources?.get(d);
+      if (content !== undefined) {
+        const defines = rules.definesSymbol;
+        if (symbols.some((s) => defines(s).test(content))) hit = true;
       }
     }
     if (!hit && rules.tiesByLeaf) {
@@ -305,7 +335,9 @@ export function collectionErrorExcerpt(
   if (framework === null) return undefined;
   const rules = CHECK_RULES[framework];
   // `.test()` on a /g regex advances lastIndex between calls, so strip `g` for these probes.
-  const probes = rules.naming.map((p) => new RegExp(p.source, p.flags.replace("g", "")));
+  const probes = [...rules.naming, ...(rules.symbolNaming ?? [])].map(
+    (p) => new RegExp(p.source, p.flags.replace("g", "")),
+  );
   let summary: string | undefined;
   let lastIndicator: string | undefined;
   let lastNaming: string | undefined;

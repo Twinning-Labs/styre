@@ -104,6 +104,23 @@ export interface LanguageRules {
   fixturePattern?: RegExp;
   /** When true, a line beginning `ERROR` is preferred as the excerpt (pytest's summary line). */
   prefersErrorSummary?: boolean;
+  /** Patterns whose capture group 1 is a SYMBOL the toolchain says is missing while never naming the
+   *  file that defined it (`undefined: Help`, `symbol: class Helper`). */
+  symbolNaming?: RegExp[];
+  /** Given a symbol name, a pattern matching its DEFINITION in source. Paired with `symbolNaming`:
+   *  the tier fires only when the error names the symbol AND a discarded file defines it. */
+  definesSymbol?: (symbol: string) => RegExp;
+}
+
+/** Escape regex metacharacters so a captured symbol can be embedded in a definition pattern. */
+function escapeSymbol(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** The last segment of a qualified symbol: `App\Helper` → `Helper`, `Foo::Bar` → `Bar`, `a.b` → `b`. */
+export function symbolLeaf(ref: string): string {
+  const parts = ref.split(/[\\.:]+/).filter((s) => s.length > 0);
+  return parts[parts.length - 1] ?? ref;
 }
 
 /** CONSERVATIVE match tying a discarded `__init__.py` to a missing-module error. Derive the package
@@ -215,6 +232,18 @@ const goRules: LanguageRules = {
   ],
   tiesByLeaf: false,
   shapes: [{ match: goPackageImplicated }],
+  // Both patterns are ANCHORED to the compiler's `file.go:LINE:COL:` gutter. Unanchored,
+  // `undefined: Config` inside a test's own assertion message would fire the tier: ordinary program
+  // text masquerading as a diagnostic, the same failure class the registry exists to prevent.
+  // definesSymbol allows an optional receiver so methods (`func (r T) Help()`) tie, not just functions.
+  symbolNaming: [
+    /^[^\s:]+\.go:\d+:\d+:[^\S\r\n]+undefined:[^\S\r\n]+([\w.]+)/gim,
+    /^[^\s:]+\.go:\d+:\d+:.*has no field or method[^\S\r\n]+(\w+)/gim,
+  ],
+  definesSymbol: (s) =>
+    new RegExp(
+      `\\b(?:func[^\\S\\r\\n]+(?:\\([^)]*\\)[^\\S\\r\\n]*)?|type[^\\S\\r\\n]+|var[^\\S\\r\\n]+|const[^\\S\\r\\n]+)${escapeSymbol(s)}\\b`,
+    ),
 };
 
 const jvmRules: LanguageRules = {
@@ -235,6 +264,12 @@ const jvmRules: LanguageRules = {
   ],
   tiesByLeaf: false,
   shapes: [{ match: jvmPackageImplicated }],
+  // `variable` and `method` are deliberately NOT captured: definesSymbol only recognises type
+  // declarations, so capturing them could only ever produce a cross-kind mismatch (a `symbol:
+  // method helper(int)` wrongly tying a file that declares `class helper`).
+  symbolNaming: [/symbol:[^\S\r\n]+(?:class|interface|enum|record)[^\S\r\n]+([\w.]+)/gi],
+  definesSymbol: (s) =>
+    new RegExp(`\\b(?:class|interface|enum|record)[^\\S\\r\\n]+${escapeSymbol(s)}\\b`),
 };
 
 const rustRules: LanguageRules = {
@@ -246,6 +281,16 @@ const rustRules: LanguageRules = {
   naming: [/file not found for module[^\S\r\n]+['"`]?(\w+)/gi],
   tiesByLeaf: true,
   shapes: [{ basename: "mod.rs", match: modMarkerImplicated }],
+  // The kind list is a loose character class because rustc writes compound kinds with commas
+  // ("cannot find function, tuple struct or tuple variant `Point`"). The second pattern covers E0433
+  // (`use of undeclared type `Helper``), which is what rustc emits for `Helper::new()` — the most
+  // common way a Rust test reaches a discarded helper.
+  symbolNaming: [
+    /cannot find [a-z, ]*?['"`](\w+)['"`]/gi,
+    /use of (?:undeclared|unresolved)[\w ]*?['"`](\w+)['"`]/gi,
+  ],
+  definesSymbol: (s) =>
+    new RegExp(`\\b(?:fn|struct|enum|trait|const|static|type)[^\\S\\r\\n]+${escapeSymbol(s)}\\b`),
 };
 
 const RUBY_INDICATORS = ["cannot load such file", "loaderror"];
@@ -259,6 +304,8 @@ const rubyRules: LanguageRules = {
   naming: [/cannot load such file --[^\S\r\n]+([\w./-]+)/gi],
   tiesByLeaf: true,
   shapes: [],
+  symbolNaming: [/uninitialized constant[^\S\r\n]+([\w:]+)/gi],
+  definesSymbol: (s) => new RegExp(`\\b(?:class|module)[^\\S\\r\\n]+${escapeSymbol(s)}\\b`),
 };
 
 const PHP_INDICATORS = ["failed opening required", "failed to open stream"];
@@ -269,6 +316,11 @@ const phpRules: LanguageRules = {
   naming: [/failed opening required[^\S\r\n]+['"]?([\w./-]+)['"]?/gi],
   tiesByLeaf: true,
   shapes: [],
+  // Case-insensitive: PHP class names are, so `Class "Helper" not found` must tie a file declaring
+  // `class helper`.
+  symbolNaming: [/Class[^\S\r\n]+["']([\w\\]+)["'][^\S\r\n]+not found/gi],
+  definesSymbol: (s) =>
+    new RegExp(`\\b(?:class|interface|trait)[^\\S\\r\\n]+${escapeSymbol(s)}\\b`, "i"),
 };
 
 /** The per-language rule registry — THE extension point for the discard poison guard. Add new
