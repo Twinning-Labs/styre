@@ -123,6 +123,30 @@ function packageInitImplicated(initPath: string, ctx: MatchContext): boolean {
   return false;
 }
 
+/** A Go package IS a directory, and the module prefix is NOT on disk — so the discarded file's
+ *  directory segments must be a trailing SUFFIX of the package path's segments.
+ *  `example.com/m/helper` implicates `helper/helper.go` and `helper/util.go` (dir `helper`), but a
+ *  missing DEPENDENCY implicates nothing: `github.com/stretchr/testify/assert` against
+ *  `internal/assert/helper.go` compares `[internal, assert]` to `[testify, assert]` and fails. Pure. */
+function goPackageImplicated(path: string, ctx: MatchContext): boolean {
+  const dirSegs = dirSegments(path);
+  if (dirSegs.length === 0) return false;
+  return ctx.dotted.some((m) => isSegSuffix(dirSegs, dotSegments(m)));
+}
+
+/** A JVM package IS a directory, and the source root (`src/test/java`) IS on disk — so the package's
+ *  segments must be a trailing SUFFIX of the file's directory segments (the mirror of the Go rule).
+ *  Requires >=2 segments, matching the `__init__.py` rule: a single generic segment (`util`, `api`)
+ *  is exactly the collision the directory rules exist to remove. Pure. */
+function jvmPackageImplicated(path: string, ctx: MatchContext): boolean {
+  const dirSegs = dirSegments(path);
+  if (dirSegs.length === 0) return false;
+  return ctx.dotted.some((m) => {
+    const segs = dotSegments(m);
+    return segs.length >= 2 && isSegSuffix(segs, dirSegs);
+  });
+}
+
 /** The pre-ENG-343 shared vocabulary, kept VERBATIM for python and node so their behaviour is
  *  unchanged (design 4.1). Python and node phrasings are genuinely distinctive from each other,
  *  unlike `package X does not exist`, so sharing these two carries no cross-language risk. */
@@ -174,6 +198,37 @@ const noRules: LanguageRules = {
   shapes: [],
 };
 
+const GO_INDICATORS = [
+  "no required module provides package",
+  "cannot find module providing package",
+  "cannot find package",
+];
+
+const goRules: LanguageRules = {
+  indicators: GO_INDICATORS,
+  basenameGates: GO_INDICATORS,
+  naming: [
+    /no required module provides package\s+([\w./-]+)/gi,
+    /cannot find module providing package\s+([\w./-]+)/gi,
+    /cannot find package\s+["']?([\w./-]+)["']?/gi,
+  ],
+  tiesByLeaf: false,
+  shapes: [{ match: goPackageImplicated }],
+};
+
+const jvmRules: LanguageRules = {
+  // Excerpt only. `cannot find symbol` is a documented residual: it names the symbol, never the file,
+  // which is already deleted. It appears here so the retry message carries a real compiler line, and
+  // it cannot cause a match because basenameGates is empty and no naming pattern consumes it.
+  // `error: package` rather than a bare `does not exist`, which would let an unrelated later line win
+  // the excerpt's last-match rule.
+  indicators: ["error: package", "cannot find symbol"],
+  basenameGates: [],
+  naming: [/error:\s+package\s+([\w.]+)\s+does not exist/gi],
+  tiesByLeaf: false,
+  shapes: [{ match: jvmPackageImplicated }],
+};
+
 /** The per-language rule registry — THE extension point for the discard poison guard. Add new
  *  languages, new toolchain phrasings and per-language exceptions HERE, never to a shared list: a
  *  shared list applies every phrase to every run, which produced confirmed cross-language false
@@ -182,10 +237,10 @@ export const CHECK_RULES: Record<CheckFramework, LanguageRules> = {
   pytest: pythonRules,
   jest: nodeRules,
   vitest: nodeRules,
-  go: noRules,
+  go: goRules,
   cargo: noRules,
-  "junit-maven": noRules,
-  "junit-gradle": noRules,
+  "junit-maven": jvmRules,
+  "junit-gradle": jvmRules,
   rspec: noRules,
   minitest: noRules,
   phpunit: noRules,

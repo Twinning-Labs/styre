@@ -441,16 +441,12 @@ describe("importErrorImplicatesDiscarded (discard-poison guard: conservative imp
     ).toEqual([]);
   });
 
-  test("the five new frameworks are inert until their rules land (a deliberate, temporary narrowing)", () => {
+  test("the remaining new frameworks stay inert until their rules land (a deliberate, temporary narrowing)", () => {
     // NOT byte-identical to before: the old matcher was framework-blind, so the legacy Python/Node
-    // vocabulary incidentally fired on these stacks too. This commit narrows that away; Tasks 2 and 3
+    // vocabulary incidentally fired on these stacks too. This commit narrows that away; later tasks
     // restore it deliberately and more precisely. Recorded here so the transitional loss is visible
-    // rather than hidden — this task must not merge to main without Tasks 2 and 3.
-    const goOut =
-      "go: cannot find module providing package example.com/m/helper\nhelper/helper.go:5:2: no required module provides package";
-    expect(importErrorImplicatesDiscarded(goOut, ["helper/helper.go"], "go")).toEqual([]);
-    // Same shape for cargo: the legacy `importerror` indicator plus the bounded-basename tier used to
-    // implicate this; under noRules it does not.
+    // rather than hidden. Go and JVM are no longer part of this: ENG-343 Task 2 gave them real rules
+    // (see "discard-poison: Go" / "discard-poison: JVM" above) — cargo is still pending.
     const cargoOut =
       "error[E0583]: file not found for module 'common'\nImportError: boom in tests/common/mod.rs";
     expect(importErrorImplicatesDiscarded(cargoOut, ["tests/common/mod.rs"], "cargo")).toEqual([]);
@@ -569,5 +565,174 @@ describe("binaryFor (M2a decision 3: go/cargo carry the subcommand; maven/gradle
     expect(binaryFor("rspec")).toBe("rspec");
     expect(binaryFor("phpunit")).toBe("phpunit");
     expect(binaryFor("minitest")).toBe("ruby -Itest");
+  });
+});
+
+describe("discard-poison: Go (ties by package/directory segment alignment)", () => {
+  // Real go1.24 module-mode text. GOPATH-era `cannot find package "…"` is kept in the vocabulary as a
+  // legacy phrase but is NOT what a modern toolchain emits.
+  const missingHelper =
+    "app/x_test.go:6:2: no required module provides package example.com/m/helper; to add it:";
+  const missingDep =
+    "app/x_test.go:6:2: no required module provides package github.com/stretchr/testify/assert; to add it:";
+
+  test("implicates a discarded file in the missing package's directory", () => {
+    expect(importErrorImplicatesDiscarded(missingHelper, ["helper/helper.go"], "go")).toEqual([
+      "helper/helper.go",
+    ]);
+  });
+
+  test("implicates any file in that directory, not only one named after the package", () => {
+    expect(importErrorImplicatesDiscarded(missingHelper, ["helper/util.go"], "go")).toEqual([
+      "helper/util.go",
+    ]);
+  });
+
+  test("contrast: same output, unrelated discarded file ⇒ no match", () => {
+    expect(importErrorImplicatesDiscarded(missingHelper, ["scratch/scratch.go"], "go")).toEqual([]);
+  });
+
+  test("colliding LEAF: a missing dependency must not implicate a throwaway sharing its leaf", () => {
+    expect(
+      importErrorImplicatesDiscarded(missingDep, ["internal/scratch/assert.go"], "go"),
+    ).toEqual([]);
+  });
+
+  test("colliding DIRECTORY: a missing dependency must not implicate a throwaway in a like-named dir", () => {
+    // The measured false positive that leaf-to-directory matching alone would produce: dir `assert`
+    // equals the package leaf. Segment alignment rejects it — [internal, assert] ≠ [testify, assert].
+    expect(importErrorImplicatesDiscarded(missingDep, ["internal/assert/helper.go"], "go")).toEqual(
+      [],
+    );
+    const missingCmp =
+      "app/x_test.go:6:2: no required module provides package github.com/google/go-cmp/cmp; to add it:";
+    expect(importErrorImplicatesDiscarded(missingCmp, ["testutil/cmp/x.go"], "go")).toEqual([]);
+  });
+
+  test("returns only the implicated subset when several files were discarded", () => {
+    expect(
+      importErrorImplicatesDiscarded(missingHelper, ["helper/helper.go", "scratch/s.go"], "go"),
+    ).toEqual(["helper/helper.go"]);
+  });
+
+  test("surfaces the compiler's own line as the excerpt", () => {
+    expect(collectionErrorExcerpt(missingHelper, "go")).toBe(missingHelper);
+  });
+
+  // DOCUMENTATION PIN (not a guard): records an accepted residual. It asserts the gap exists; it does
+  // not defend it — closing the gap would require a naming pattern that captures a symbol name.
+  test("residual: a helper in the SAME package names only the symbol ⇒ not tied", () => {
+    expect(
+      importErrorImplicatesDiscarded("app/y_test.go:5:30: undefined: Help", ["helper.go"], "go"),
+    ).toEqual([]);
+  });
+});
+
+describe("discard-poison: JVM (ties by package/directory segment alignment)", () => {
+  const missingPkg =
+    "src/test/java/com/helper/ATest.java:3: error: package com.helper does not exist";
+
+  test("implicates a discarded class in the missing package's directory", () => {
+    expect(
+      importErrorImplicatesDiscarded(
+        missingPkg,
+        ["src/test/java/com/helper/Helper.java"],
+        "junit-maven",
+      ),
+    ).toEqual(["src/test/java/com/helper/Helper.java"]);
+  });
+
+  test("contrast: same output, a class outside that package ⇒ no match", () => {
+    expect(
+      importErrorImplicatesDiscarded(
+        missingPkg,
+        ["src/test/java/com/other/Helper.java"],
+        "junit-maven",
+      ),
+    ).toEqual([]);
+  });
+
+  test("colliding leaf: a missing dependency must not implicate a throwaway sharing its leaf", () => {
+    const out = "Foo.java:3: error: package org.junit.jupiter.api does not exist";
+    expect(importErrorImplicatesDiscarded(out, ["src/test/java/api.java"], "junit-gradle")).toEqual(
+      [],
+    );
+  });
+
+  test("a single-segment package never matches (the generic-noun collision floor)", () => {
+    const out = "Foo.java:3: error: package util does not exist";
+    expect(
+      importErrorImplicatesDiscarded(out, ["src/test/java/util/Scratch.java"], "junit-maven"),
+    ).toEqual([]);
+  });
+
+  test("surfaces the compiler's own line as the excerpt (the reason naming patterns feed it)", () => {
+    expect(collectionErrorExcerpt(missingPkg, "junit-maven")).toBe(missingPkg);
+  });
+
+  // DOCUMENTATION PIN (not a guard): records an accepted residual.
+  test("residual: `cannot find symbol` names the symbol, never the file ⇒ not tied", () => {
+    const out =
+      "ATest.java:12: error: cannot find symbol\n  symbol:   class Helper\n  location: class ATest";
+    expect(
+      importErrorImplicatesDiscarded(out, ["src/test/java/com/helper/Helper.java"], "junit-maven"),
+    ).toEqual([]);
+  });
+});
+
+describe("discard-poison: the framework gate (ENG-343 design section 2)", () => {
+  // These EXACT inputs implicated wrongly under a shared vocabulary. `package X does not exist` is
+  // ordinary English; gating on the framework is what makes them safe.
+  test("JVM wording in a Ruby run implicates nothing", () => {
+    const out = 'Failure: expected "package tracking does not exist" but got "ok"';
+    expect(importErrorImplicatesDiscarded(out, ["spec/tracking.rb"], "minitest")).toEqual([]);
+  });
+
+  test("JVM wording in a pytest run implicates nothing", () => {
+    const out = "AssertionError: assert 'package acme.widget does not exist' in msg";
+    expect(importErrorImplicatesDiscarded(out, ["tools/widget.py"], "pytest")).toEqual([]);
+  });
+
+  test("JVM wording in a pytest run does not reach the __init__.py shape tier either", () => {
+    const out = "AssertionError: assert 'package foo does not exist' in msg";
+    expect(importErrorImplicatesDiscarded(out, ["foo/__init__.py"], "pytest")).toEqual([]);
+  });
+});
+
+describe("mutation guards: the Go/JVM negatives above must discriminate", () => {
+  // A negative that would pass under the WRONG implementation proves nothing. These mutate the real
+  // rule object and assert the collision reappears — committed evidence, not a manual ritual.
+  const missingDep =
+    "app/x_test.go:6:2: no required module provides package github.com/stretchr/testify/assert; to add it:";
+
+  test("leaf tying would re-introduce the Go collision", () => {
+    const orig = CHECK_RULES.go.tiesByLeaf;
+    try {
+      (CHECK_RULES.go as { tiesByLeaf: boolean }).tiesByLeaf = true;
+      expect(
+        importErrorImplicatesDiscarded(missingDep, ["internal/scratch/assert.go"], "go"),
+      ).toEqual(["internal/scratch/assert.go"]);
+    } finally {
+      (CHECK_RULES.go as { tiesByLeaf: boolean }).tiesByLeaf = orig;
+    }
+    expect(
+      importErrorImplicatesDiscarded(missingDep, ["internal/scratch/assert.go"], "go"),
+    ).toEqual([]);
+  });
+
+  test("leaf tying would re-introduce the JVM collision", () => {
+    const out = "Foo.java:3: error: package org.junit.jupiter.api does not exist";
+    const orig = CHECK_RULES["junit-maven"].tiesByLeaf;
+    try {
+      (CHECK_RULES["junit-maven"] as { tiesByLeaf: boolean }).tiesByLeaf = true;
+      expect(
+        importErrorImplicatesDiscarded(out, ["src/test/java/api.java"], "junit-maven"),
+      ).toEqual(["src/test/java/api.java"]);
+    } finally {
+      (CHECK_RULES["junit-maven"] as { tiesByLeaf: boolean }).tiesByLeaf = orig;
+    }
+    expect(importErrorImplicatesDiscarded(out, ["src/test/java/api.java"], "junit-maven")).toEqual(
+      [],
+    );
   });
 });
