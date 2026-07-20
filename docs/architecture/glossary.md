@@ -6,6 +6,28 @@ term means in this codebase — no more. Definitions are grounded in the source 
 
 ---
 
+### acceptance criterion / ac_check
+
+an `acceptance_criterion` row is one testable requirement derived from the ticket during the design
+stage (`checks:dispatch`); an `ac_check` is a RED-first test authored for that criterion, stored in
+the `ac_check` table. The checks author is deliberately plan-blind — it sees only the AC text — so a
+check fails on current code *for the right reason* before any implementation exists. (control-loop
+§4; schema.sql; ticket-template.md)
+
+### AC checks-gate
+
+the gate that actually blocks a ticket in the implement stage: the behavioral `ac_check` tests must
+go green at the branch HEAD (`verify:checks-gate`). Unlike the advisory per-unit build/test checks,
+a still-red AC gate does not advance — it routes into arbitration. Round-capped
+(`GATE_ROUND_CAP = 3`). (control-loop §4; resolver.ts)
+
+### arbiter (checks)
+
+the `checks:arbitrate` step that judges *why* an AC check is still red at HEAD and assigns two-way
+blame: `code-wrong` (loop back to re-implement) or `check-wrong` (loop to `checks:reauthor`, which
+rewrites the check). It exists because a red check is ambiguous — the code may be wrong, or the test
+may be. (control-loop §4; arbiter-verdict.ts)
+
 ### ground truth
 
 a verdict produced by an objective mechanism: build output, test results, CI
@@ -52,25 +74,26 @@ for a ticket. It is a pure function of the ticket's current `stage`, work-unit s
 ### open-core seam (projector contract)
 
 the set of versioned, stable interfaces the commercial
-Control Plane integrates through without forking the OSS core: (1) the Linear ticket input contract
-(`IngestedTicket`: title / description / type), (2) the project-profile artifact (`profile.md`), and
-(3) the telemetry / state export (the structured NDJSON stdout stream of `dispatch` /
-`event_log` / `ground_truth_signal` rows, plus a per-ticket summary on exit). Treat these as a
-public API. (build-operations.md §5)
+Control Plane integrates through without forking the OSS core: (1) the ticket input contract
+(`IngestedTicket`: title / description / type — from Linear or Jira), (2) the project-profile
+artifact (`profile.json`), and (3) the telemetry / state export (the structured NDJSON stdout stream
+of `dispatch` / `event_log` / `ground_truth_signal` rows, plus a per-ticket summary on exit). Treat
+these as a public API. (build-operations.md §5)
 
 ### projection_outbox
 
-the table that holds pending outward writes (to Linear and GitHub). Every
+the table that holds pending outward writes. Every
 outbox row is inserted in the *same transaction* as the state change that motivates it, so the SoT
-and the intent-to-project can never disagree. The projector drains it idempotently. (control-loop §5;
-projector.md §2; schema.sql)
+and the intent-to-project can never disagree. Rows target one of three sinks — the issue tracker, the
+forge, or the notifier. The projector drains it idempotently. (control-loop §5; projector.md §2;
+schema.sql)
 
 ### projector
 
 the component that drains `projection_outbox` and applies each row idempotently to
-Linear and GitHub. It is the sole outward write path from SQLite; it never reads Linear or GitHub to
-decide control flow. Implemented as `drain_outbox()` inside the runner (not a separate process).
-(projector.md §1–§4)
+its target — the issue tracker (Linear/Jira), the forge (GitHub), or the notifier (Slack). It is the
+sole outward write path from SQLite; it never reads the tracker or forge to decide control flow.
+Implemented as `drainOutbox()` inside the runner (not a separate process). (projector.md §1–§4)
 
 ### signal
 
@@ -85,16 +108,27 @@ table. (control-loop §7, §4 S8)
 ### SoT (Source of Truth)
 
 the single transactional SQLite database. Only the runner writes it;
-workers and agents return results but never persist to it. The schema has 14 active tables; the
-`memory_record` table is a deferred stub, intentionally out of scope for the substrate.
+workers and agents return results but never persist to it. The schema has **16 `CREATE TABLE`
+statements**; the `memory_record` table is a commented-out deferred stub (not one of the 16), and
+`metric_event` / `external_id_cache` / `projection_state` are defined but currently unwired.
 (control-loop §2; schema.sql; README.md invariants)
 
 ### stage
 
-the ticket's position in the lifecycle. `ticket.stage` is one of exactly six values:
-`design`, `implement`, `verify`, `review`, `merge`, `released`. There is no hardcoded stage for UI
-work (UI is a frontend work-unit with a visual verify check-type) and no legacy gerund stage
-vocabulary. (control-loop §2.3; README.md invariants; schema.sql)
+the ticket's position in the lifecycle. `ticket.stage` is one of exactly six valid values:
+`design`, `implement`, `verify`, `review`, `merge`, `released`. In the current loop the runtime only
+ever *assigns* `design`, `implement`, `review`, `merge`, `released` — verify work runs inside the
+implement stage, so a ticket does not pass through a distinct `verify` stage (the value remains valid
+in the vocabulary). There is no hardcoded stage for UI work (UI is a frontend work-unit with a visual
+verify check-type) and no legacy gerund stage vocabulary. (control-loop §2.3; README.md invariants;
+schema.sql)
+
+### track (fast / full)
+
+a ticket's review ceremony level, set by the `design:size` step. `full` runs the semantic
+`design:review` gate; `fast` skips it. Sizing is deterministic (sprawl-only) unless
+`complexityGrading` is enabled, which adds a cold read-only complexity grader. The track is a routing
+heuristic, never a ship-gate verdict. (control-loop §4; runtime-config `complexityGrading`)
 
 ### work_unit
 
