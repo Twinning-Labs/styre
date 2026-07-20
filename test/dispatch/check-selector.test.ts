@@ -641,6 +641,16 @@ describe("discard-poison: Go (ties by package/directory segment alignment)", () 
     expect(importErrorImplicatesDiscarded(twoLine, ["helper/other.go"], "go")).toEqual([]);
   });
 
+  test("the excerpt is not displaced by a trailing deprecation warning (no `] package ` indicator)", () => {
+    const out =
+      "[ERROR] /repo/src/test/java/com/x/ATest.java:[3,26] package com.helper does not exist\n" +
+      "[INFO] --- jar:3.3.0:jar (default-jar) @ demo ---\n" +
+      "[WARNING] [deprecation] package com.old does not exist anymore";
+    expect(collectionErrorExcerpt(out, "junit-maven")).toBe(
+      "[ERROR] /repo/src/test/java/com/x/ATest.java:[3,26] package com.helper does not exist",
+    );
+  });
+
   // DOCUMENTATION PINS (not guards): accepted residuals, recorded so they cannot drift unnoticed.
   test("residual: a single-segment directory still collides with a dependency's package leaf", () => {
     const missingDep =
@@ -738,6 +748,22 @@ describe("discard-poison: the framework gate (ENG-343 design section 2)", () => 
   test("JVM wording in a pytest run does not reach the __init__.py shape tier either", () => {
     const out = "AssertionError: assert 'package foo does not exist' in msg";
     expect(importErrorImplicatesDiscarded(out, ["foo/__init__.py"], "pytest")).toEqual([]);
+  });
+});
+
+describe("single-line capture guards (a capture must never span a line break)", () => {
+  // Task 2's review found only the Go site was guarded; these cover the other two, and LEGACY_NAMING
+  // is the higher-blast-radius one because python and node both depend on it.
+  test("LEGACY_NAMING (python/node) does not lift a capture off the next line", () => {
+    const out = "ModuleNotFoundError: No module named\nsupport/helper:2: something";
+    expect(importErrorImplicatesDiscarded(out, ["support/helper.py"], "pytest")).toEqual([]);
+  });
+
+  test("the JVM patterns do not lift a capture off the next line", () => {
+    const out = "[ERROR] /r/ATest.java:[3,26] package\ncom.helper does not exist";
+    expect(
+      importErrorImplicatesDiscarded(out, ["src/test/java/com/helper/Helper.java"], "junit-maven"),
+    ).toEqual([]);
   });
 });
 

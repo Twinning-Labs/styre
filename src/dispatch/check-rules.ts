@@ -226,10 +226,13 @@ const jvmRules: LanguageRules = {
   // Excerpt only. `cannot find symbol` is a documented residual: it names the symbol, never the file,
   // which is already deleted. It appears here so the retry message carries a real compiler line, and
   // it cannot cause a match because basenameGates is empty and no naming pattern consumes it.
-  // `error: package` / `] package ` rather than a bare `does not exist`, which would let an unrelated
-  // later line win the excerpt's last-match rule. `] package ` covers maven-compiler-plugin's
-  // reformatted `[ERROR] …:[3,26] package … does not exist`, which drops javac's `error:` token.
-  indicators: ["error: package", "] package ", "cannot find symbol"],
+  // `error: package` rather than a bare `does not exist`, which would let an unrelated later line win
+  // the excerpt's last-match rule. Maven's reformatted `[ERROR] …:[3,26] package … does not exist`
+  // (which drops javac's `error:` token) is carried by the second naming pattern below, NOT by an
+  // indicator: a `] package ` indicator would let a trailing `[WARNING] [deprecation] package … does
+  // not exist anymore` line displace the real error in the excerpt — the very displacement this
+  // comment claims to avoid.
+  indicators: ["error: package", "cannot find symbol"],
   basenameGates: [],
   naming: [
     /error:[^\S\r\n]+package[^\S\r\n]+([\w.]+)[^\S\r\n]+does not exist/gi,
