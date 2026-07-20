@@ -80,3 +80,29 @@ test("formatRunSummary: pr-ready suppresses the 'Waiting on:' line even with a p
 
   expect(s).not.toContain("Waiting on:");
 });
+
+test("STYRE-7 acceptance: escalation surfaced as blocked reads legibly without internal vocab", () => {
+  const { db, ticketId } = makeTestDb();
+  insertPending(db, { ticketId, signalType: "human_resume" });
+
+  const s = formatRunSummary(db, ticketId, {
+    outcome: "blocked",
+    iterations: 3,
+    stage: "design",
+    status: "waiting",
+  });
+  db.close();
+
+  // Outcome sentence and pending signal are clear
+  expect(s).toContain("Stopped — no actionable work remains.");
+  expect(s).toContain("Waiting on: human_resume");
+
+  // No internal detector vocabulary
+  expect(s).not.toContain("no-progress");
+
+  // No stack-trace frames
+  expect(s).not.toMatch(/\bat .*\(.*:\d+:\d+\)/);
+
+  // No bare internal status enum
+  expect(s).not.toContain("status=waiting");
+});
