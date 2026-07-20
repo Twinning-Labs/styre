@@ -9,7 +9,7 @@ The free, open-source execution core that drives a structured ticket `design →
 ---
 
 ```
-  Linear ticket
+  ticket (Linear / Jira)
        │
        ▼
   ┌──────────────────────────────────────────────┐
@@ -20,9 +20,10 @@ The free, open-source execution core that drives a structured ticket `design →
         ┌────────┴────────┐
         ▼                 ▼
   agent (worktree)  agent (worktree)
-  isolated: no      isolated: no
-  creds / gh /      creds / gh /
-  Linear tools      Linear tools
+  no gh / tracker   no gh / tracker
+  tools; tracker    tools; tracker
+  + forge creds     + forge creds
+  stripped          stripped
         │                 │
         └────────┬────────┘
                  │  results returned to the runner
@@ -31,9 +32,10 @@ The free, open-source execution core that drives a structured ticket `design →
           │  projector  │  (one-way write path)
           └──────┬──────┘
                  │
-        ┌────────┴────────┐
-        ▼                 ▼
-     Linear            GitHub
+     ┌───────────┼───────────┐
+     ▼           ▼           ▼
+  tracker      GitHub      Slack
+ (Linear/Jira) (forge)   (notifier)
 ```
 
 ---
@@ -75,9 +77,9 @@ License: GPLv3.
 
 ## How it works
 
-Styre's trust story starts with capability isolation: dispatched agents receive no credentials, no `gh` binary, no Linear API key, and no shell access outside their dedicated worktree. The worktree is the only writable surface. The runner (`styre run`) holds credentials, commits the results, and is the sole writer to the SQLite state-of-truth.
+Styre's trust story starts with capability isolation: dispatched agents get no `gh` or issue-tracker tools, and the runner strips the tracker/forge credentials (`LINEAR_API_KEY`, `JIRA_API_TOKEN`, `GITHUB_TOKEN`) from their environment — so an agent can't reach your tracker or code host. The agent CLI does keep the LLM provider key it needs to authenticate its own model calls; that key is additionally stripped from verify-time commands, which run agent-authored code. The worktree is the only writable surface. The runner (`styre run`) holds the outward credentials, commits the results, and is the sole writer to the SQLite state-of-truth. (Full model in [`SECURITY.md`](SECURITY.md).)
 
-Each step in the control loop is journaled before it runs. If a step has already succeeded, replay returns the recorded result — the step never re-executes. This gives you crash-resume for free. Verdicts (design sound? tests green? diff in scope?) come from build output, CI, and an independent reviewer step — never from the agent self-reporting success.
+Each step in the control loop is journaled before it runs. If a step has already succeeded, replay returns the recorded result — the step never re-executes. This gives you crash-resume for free. Verdicts (design sound? tests green? acceptance criteria met? diff in scope?) come from build output, the test and acceptance-criteria gates, and an independent reviewer step — never from the agent self-reporting success. (CI is *reported* at PR-open, not used as a gate.)
 
 See [`docs/architecture/execution-model.md`](docs/architecture/execution-model.md) for the full step catalog and state machine.
 
@@ -88,7 +90,7 @@ See [`docs/architecture/execution-model.md`](docs/architecture/execution-model.m
 The three commands you use day to day:
 
 ```sh
-# Probe the repo and write its Styre profile (profile.json) — the project-shape artifact runs use
+# Probe the repo and write its Styre profile (profile.json) — the project-shape artifact a run reads
 styre setup <repo>
 
 # Run one ticket end-to-end, exit when a PR is ready
@@ -196,7 +198,7 @@ bun run build         # → dist/styre (single self-contained binary)
 
 ## How the commercial plane fits
 
-Styre's core is free, open source, and ends at PR-ready. A commercial **Control Plane** (a separate product in its own repository — not yet public) runs *on top of* this core: a persistent service that orchestrates many `styre run` invocations with multi-ticket scheduling, dependency-aware ticket selection, a needs-you inbox, and dashboards. It plugs in only through Styre's versioned seam — the Linear ticket contract, the project-profile artifact, and the NDJSON telemetry/state export — and never forks or imports the core. The core has no knowledge of the plane; you can run the OSS core on its own, forever.
+Styre's core is free, open source, and ends at PR-ready. A commercial **Control Plane** (a separate product in its own repository — not yet public) runs *on top of* this core: a persistent service that orchestrates many `styre run` invocations with multi-ticket scheduling, dependency-aware ticket selection, a needs-you inbox, and dashboards. It plugs in only through Styre's versioned seam — the ticket contract, the project-profile artifact, and the NDJSON telemetry/state export — and never forks or imports the core. The core has no knowledge of the plane; you can run the OSS core on its own, forever.
 
 ---
 
