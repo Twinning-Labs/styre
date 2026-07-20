@@ -1,11 +1,33 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { configError } from "../cli/errors.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
+import { FORGE_KEYS, ISSUE_TRACKER_KEYS, NOTIFIER_KEYS, PROVIDER_KEYS } from "./adapter-keys.ts";
 import { parseConfigOrThrow } from "./parse-config.ts";
 import { configDir } from "./paths.ts";
 import { type RuntimeConfig, RuntimeConfigSchema } from "./runtime-config.ts";
 import { type GitRun, deriveSlug, discoverRepoRoot } from "./slug.ts";
+
+/** Validate the adapter-selecting fields against the exported key lists so a typo fails here,
+ *  naming the valid options, rather than surfacing later inside selectIssueTracker/selectForge/etc. */
+function validateAdapters(config: RuntimeConfig, file: string): void {
+  const checks: Array<[string, string, readonly string[]]> = [
+    ["issueTracker", config.issueTracker, ISSUE_TRACKER_KEYS],
+    ["forge", config.forge, FORGE_KEYS],
+    ["notifier", config.notifier, NOTIFIER_KEYS],
+  ];
+  if (config.agent?.provider) checks.push(["agent.provider", config.agent.provider, PROVIDER_KEYS]);
+  for (const [field, value, valid] of checks) {
+    if (!valid.includes(value)) {
+      throw configError({
+        file,
+        field,
+        detail: `got '${value}'. Valid values: ${valid.join(", ")}.`,
+      });
+    }
+  }
+}
 
 /** The repo slug for the cwd, or null when cwd is not a git repo. */
 export function slugForCwd(cwd: string = process.cwd(), git?: GitRun): string | null {
@@ -50,15 +72,19 @@ export function discoverRuntimeConfig(opts: {
   configHome?: string;
 }): RuntimeConfig {
   if (opts.explicitPath && opts.explicitPath.length > 0) {
-    return parseConfigOrThrow(
+    const parsed = parseConfigOrThrow(
       RuntimeConfigSchema,
       JSON.parse(readFileSync(opts.explicitPath, "utf8")),
       opts.explicitPath,
     );
+    validateAdapters(parsed, opts.explicitPath);
+    return parsed;
   }
   const home = opts.configHome ?? configDir();
   const global = readJsonIfPresent(join(home, "config.json"));
   const perProject = opts.slug ? readJsonIfPresent(join(home, opts.slug, "config.json")) : {};
   const file = opts.slug ? join(home, opts.slug, "config.json") : join(home, "config.json");
-  return parseConfigOrThrow(RuntimeConfigSchema, { ...global, ...perProject }, file);
+  const parsed = parseConfigOrThrow(RuntimeConfigSchema, { ...global, ...perProject }, file);
+  validateAdapters(parsed, file);
+  return parsed;
 }
