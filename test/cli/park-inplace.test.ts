@@ -114,24 +114,26 @@ test("resumeRun derives in-place from the persisted worktree path: skips wipe/re
     // inside `resumeRun`, with the real `inPlace` value it derives. Only `ports` are faked.
     // Nothing here ever reaches an agent dispatch (verified below via the deterministic
     // escalation path), so the real (unused) claude runner selection is never invoked.
-    await expect(
-      resumeRun({ resume: ident }, profile, DEFAULT_RUNTIME_CONFIG, {
-        ports: {
-          issueTracker: fakeIssueTracker({
-            ticket: {
-              ident,
-              title: "In-place resume",
-              description: "body",
-              typeLabel: "Feature",
-              externalId: "uuid-inplace",
-              url: null,
-            },
-          }),
-          forge: fakeForge(),
-          checks: fakeChecks("passing"),
-        },
-      }),
-    ).rejects.toThrow(/blocked/);
+    // Task 9: a 'blocked' terminal outcome is an operational stop, not a thrown error — resumeRun
+    // sets process.exitCode = 1 (via exitCodeForOutcome) and returns normally.
+    process.exitCode = 0;
+    await resumeRun({ resume: ident }, profile, DEFAULT_RUNTIME_CONFIG, {
+      ports: {
+        issueTracker: fakeIssueTracker({
+          ticket: {
+            ident,
+            title: "In-place resume",
+            description: "body",
+            typeLabel: "Feature",
+            externalId: "uuid-inplace",
+            url: null,
+          },
+        }),
+        forge: fakeForge(),
+        checks: fakeChecks("passing"),
+      },
+    });
+    expect(process.exitCode).toBe(1);
 
     // --- (a)+(b): inPlace was derived true AND threaded into the registry's handlers ---
     // Proof: `ensureWorktree`/`worktreeFor` resolve `worktreePath === repoPath` only when
@@ -418,24 +420,26 @@ test("resumeRun with the marker present re-applies profile.targetRepo (the disco
     });
     expect(profile.targetRepo).not.toBe(repoPath);
 
-    await expect(
-      resumeRun({ resume: ident }, profile, DEFAULT_RUNTIME_CONFIG, {
-        ports: {
-          issueTracker: fakeIssueTracker({
-            ticket: {
-              ident,
-              title: "In-place resume override re-apply",
-              description: "body",
-              typeLabel: "Feature",
-              externalId: "uuid-inplace-override",
-              url: null,
-            },
-          }),
-          forge: fakeForge(),
-          checks: fakeChecks("passing"),
-        },
-      }),
-    ).rejects.toThrow(/blocked/);
+    // Task 9: a 'blocked' terminal outcome is an operational stop, not a thrown error — resumeRun
+    // sets process.exitCode = 1 (via exitCodeForOutcome) and returns normally.
+    process.exitCode = 0;
+    await resumeRun({ resume: ident }, profile, DEFAULT_RUNTIME_CONFIG, {
+      ports: {
+        issueTracker: fakeIssueTracker({
+          ticket: {
+            ident,
+            title: "In-place resume override re-apply",
+            description: "body",
+            typeLabel: "Feature",
+            externalId: "uuid-inplace-override",
+            url: null,
+          },
+        }),
+        forge: fakeForge(),
+        checks: fakeChecks("passing"),
+      },
+    });
+    expect(process.exitCode).toBe(1);
 
     // The override reached: `profile.targetRepo` now matches the discovered `project.target_repo`.
     expect(profile.targetRepo).toBe(repoPath);

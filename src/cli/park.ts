@@ -18,6 +18,7 @@ import { makeProjectorPorts } from "../daemon/ports.ts";
 import type { ProjectorPorts } from "../daemon/projector.ts";
 import { realRecoverDeps, recover } from "../daemon/recover.ts";
 import { driveToTerminal, formatRunSummary } from "../daemon/run-ticket.ts";
+import type { RunOutcome } from "../daemon/run-ticket.ts";
 import type { StepRegistry } from "../daemon/step-registry.ts";
 import { openDb } from "../db/client.ts";
 import { migrate } from "../db/migrate.ts";
@@ -32,14 +33,18 @@ import { resetProvision } from "../dispatch/provision.ts";
 import { branchHeadSha, removeWorktree } from "../dispatch/worktree.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
+import { usageError } from "./errors.ts";
+import { exitCodeForOutcome } from "./outcome.ts";
+import { formatMessage } from "./output.ts";
 
 /**
  * Handle the terminal result of a `styre run` after `runTicket`/`driveToTerminal` returns.
  * Mirrors the inline tail of `src/cli/run.ts` so the same code path is exercised in tests.
  *
  * - parked: calls `dumpPark` (which closes db), sets `process.exitCode = 75`, returns.
- * - blocked | no-progress: closes db, throws.
- * - otherwise (pr-ready): closes db, returns.
+ * - blocked | no-progress: closes db, sets `process.exitCode = 1` (via `exitCodeForOutcome`),
+ *   returns — this is an operational stop, not a bug, so it must not throw a stack trace.
+ * - otherwise (pr-ready | done): closes db, sets `process.exitCode = 0`, returns.
  *
  * The human-readable resume-hint line (`Resume with: styre run --resume …`) is intentionally
  * left in `run.ts` because it requires `args.profile` which we don't want to thread here.
@@ -49,17 +54,15 @@ export function finishRunResult(
   dbPath: string,
   slug: string,
   ident: string,
-  out: { outcome: string; park?: ParkInfo },
+  out: { outcome: RunOutcome; park?: ParkInfo },
 ): void {
   if (out.outcome === "parked" && out.park) {
     dumpPark(db, dbPath, slug, ident, out.park); // closes db
-    process.exitCode = 75;
+    process.exitCode = exitCodeForOutcome("parked"); // 75
     return;
   }
   db.close();
-  if (out.outcome === "blocked" || out.outcome === "no-progress") {
-    throw new Error(`run: ticket ${ident} ended ${out.outcome}`);
-  }
+  process.exitCode = exitCodeForOutcome(out.outcome); // 0 for pr-ready/done, 1 for blocked/no-progress
 }
 
 /** The durable dump dir for a parked run: ~/.local/state/styre/<project-stub>/<ticket-ident>/ */
@@ -166,7 +169,10 @@ export async function resumeRun(
   const dir = parkDir(profile.slug, args.resume);
   const dbPath = join(dir, "run.db");
   if (!existsSync(dbPath)) {
-    throw new Error(`resume: no parked run at ${dbPath}`);
+    throw usageError(
+      `no parked run at ${dbPath}`,
+      "Check the ticket ident, or start fresh: styre run <ticket>.",
+    );
   }
   migrate(dbPath);
   const db = openDb(dbPath);
@@ -288,12 +294,12 @@ export async function resumeRun(
 
   if (result.outcome === "parked" && result.park) {
     dumpPark(db, dbPath, profile.slug, ticket.ident, result.park); // re-dump (closes db)
-    process.stderr.write(`Parked again: ${result.park.cause}. Dump: ${dir}\n`);
-    process.exitCode = 75;
+    process.stderr.write(
+      `${formatMessage("run", `Parked again: ${result.park.cause}. Dump: ${dir}`)}\n`,
+    );
+    process.exitCode = exitCodeForOutcome("parked"); // 75
     return;
   }
   db.close();
-  if (result.outcome === "blocked" || result.outcome === "no-progress") {
-    throw new Error(`resume: ticket ${ticket.ident} ended ${result.outcome}`);
-  }
+  process.exitCode = exitCodeForOutcome(result.outcome); // 1 for blocked/no-progress, 0 otherwise
 }
