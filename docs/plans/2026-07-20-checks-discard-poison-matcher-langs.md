@@ -36,7 +36,7 @@
 
 `check-rules.ts` imports `CheckFramework` from `check-selector.ts` with `import type`, erased at compile time — no runtime cycle.
 
-**Task shape.** Task 1 is a pure, behaviour-preserving refactor: the five new frameworks map to an empty `noRules` entry, so the `Record` is complete, the build is green, and behaviour on those stacks is byte-identical to today. Tasks 2 and 3 then replace `noRules` with real rules **and** ship the tests that exercise them in the same commit — so each task is genuinely test-driven and a reviewer can reject one language's semantics without unpicking the refactor.
+**Task shape.** Task 1 restructures without adding languages: the five new frameworks map to an empty `noRules` entry, so the `Record` is complete and the build is green. Note this is a **deliberate, temporary narrowing, not byte-identical behaviour** — the old matcher was framework-blind, so the legacy Python/Node vocabulary incidentally fired on the other stacks too (`go: cannot find module providing package …` hit the legacy `cannot find module` indicator). Tasks 2 and 3 restore that coverage deliberately and more precisely. **The branch must therefore ship as one PR; Task 1 alone would regress the guard on Go, Rust and PHP.** Each shape predicate is declared in the task that first uses it, since an unused function fails `noUnusedLocals`. Tasks 2 and 3 then replace `noRules` with real rules **and** ship the tests that exercise them in the same commit — so each task is genuinely test-driven and a reviewer can reject one language's semantics without unpicking the refactor.
 
 ---
 
@@ -278,7 +278,10 @@ export interface LanguageRules {
 /** CONSERVATIVE match tying a discarded `__init__.py` to a missing-module error. Derive the package
  *  from the file's DIRECTORY, then implicate iff some named module M: (1) equals the full dotted dir;
  *  (2) strictly extends it as a prefix (a submodule import); or (3) is a >=2-segment trailing suffix
- *  of the dir. A bare single-segment interior name never matches. Pure. */
+ *  of the dir. A bare single-segment interior name never matches. Pure.
+ *
+ *  This is the ONLY shape predicate Task 1 declares. The Go, JVM and Rust predicates arrive in the
+ *  tasks that first use them — `noUnusedLocals` rejects a function nothing calls. */
 function packageInitImplicated(initPath: string, ctx: MatchContext): boolean {
   const dirSegs = dirSegments(initPath);
   if (dirSegs.length === 0) return false;
@@ -290,37 +293,6 @@ function packageInitImplicated(initPath: string, ctx: MatchContext): boolean {
     if (modSegs.length >= 2 && isSegSuffix(modSegs, dirSegs)) return true;
   }
   return false;
-}
-
-/** A discarded Rust `mod.rs` is leafless (`moduleLeaf` yields `mod`), so tie it by its directory:
- *  `tests/common/mod.rs` is implicated when a named module equals `common`. Pure. */
-function modMarkerImplicated(modPath: string, ctx: MatchContext): boolean {
-  const dirLeaf = dirSegments(modPath).at(-1);
-  return dirLeaf !== undefined && ctx.dotted.includes(dirLeaf);
-}
-
-/** A Go package IS a directory, and the module prefix is NOT on disk — so the discarded file's
- *  directory segments must be a trailing SUFFIX of the package path's segments.
- *  `example.com/m/helper` implicates `helper/helper.go` and `helper/util.go` (dir `helper`), but a
- *  missing DEPENDENCY implicates nothing: `github.com/stretchr/testify/assert` against
- *  `internal/assert/helper.go` compares `[internal, assert]` to `[testify, assert]` and fails. Pure. */
-function goPackageImplicated(path: string, ctx: MatchContext): boolean {
-  const dirSegs = dirSegments(path);
-  if (dirSegs.length === 0) return false;
-  return ctx.dotted.some((m) => isSegSuffix(dirSegs, dotSegments(m)));
-}
-
-/** A JVM package IS a directory, and the source root (`src/test/java`) IS on disk — so the package's
- *  segments must be a trailing SUFFIX of the file's directory segments (the mirror of the Go rule).
- *  Requires >=2 segments, matching the `__init__.py` rule: a single generic segment (`util`, `api`)
- *  is exactly the collision the directory rules exist to remove. Pure. */
-function jvmPackageImplicated(path: string, ctx: MatchContext): boolean {
-  const dirSegs = dirSegments(path);
-  if (dirSegs.length === 0) return false;
-  return ctx.dotted.some((m) => {
-    const segs = dotSegments(m);
-    return segs.length >= 2 && isSegSuffix(segs, dirSegs);
-  });
 }
 
 /** The pre-ENG-343 shared vocabulary, kept VERBATIM for python and node so their behaviour is
@@ -531,7 +503,7 @@ git commit -m "refactor(checks): per-language rule registry for the discard pois
 - Test: `test/dispatch/check-selector.test.ts`
 
 **Interfaces:**
-- Consumes: `importErrorImplicatesDiscarded(rawOutput, discarded, framework)`, `CHECK_RULES`, and the private `goPackageImplicated` / `jvmPackageImplicated` from Task 1.
+- Consumes: `importErrorImplicatesDiscarded(rawOutput, discarded, framework)`, `CHECK_RULES`, `MatchContext`, `dirSegments`, `dotSegments` and `isSegSuffix` from Task 1.
 - Produces: `goRules` and `jvmRules` wired into `CHECK_RULES`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -697,7 +669,35 @@ Expected: FAIL — every Go and JVM assertion fails, because `go`, `junit-maven`
 
 - [ ] **Step 3: Wire the Go and JVM rules into the registry**
 
-In `src/dispatch/check-rules.ts`, add above the `CHECK_RULES` declaration:
+In `src/dispatch/check-rules.ts`, first add the two shape predicates this task introduces (Task 1 deliberately does not ship them — an unused function fails `noUnusedLocals`, and each predicate belongs to the task that first uses it). Place them beside `packageInitImplicated`:
+
+```ts
+/** A Go package IS a directory, and the module prefix is NOT on disk — so the discarded file's
+ *  directory segments must be a trailing SUFFIX of the package path's segments.
+ *  `example.com/m/helper` implicates `helper/helper.go` and `helper/util.go` (dir `helper`), but a
+ *  missing DEPENDENCY implicates nothing: `github.com/stretchr/testify/assert` against
+ *  `internal/assert/helper.go` compares `[internal, assert]` to `[testify, assert]` and fails. Pure. */
+function goPackageImplicated(path: string, ctx: MatchContext): boolean {
+  const dirSegs = dirSegments(path);
+  if (dirSegs.length === 0) return false;
+  return ctx.dotted.some((m) => isSegSuffix(dirSegs, dotSegments(m)));
+}
+
+/** A JVM package IS a directory, and the source root (`src/test/java`) IS on disk — so the package's
+ *  segments must be a trailing SUFFIX of the file's directory segments (the mirror of the Go rule).
+ *  Requires >=2 segments, matching the `__init__.py` rule: a single generic segment (`util`, `api`)
+ *  is exactly the collision the directory rules exist to remove. Pure. */
+function jvmPackageImplicated(path: string, ctx: MatchContext): boolean {
+  const dirSegs = dirSegments(path);
+  if (dirSegs.length === 0) return false;
+  return ctx.dotted.some((m) => {
+    const segs = dotSegments(m);
+    return segs.length >= 2 && isSegSuffix(segs, dirSegs);
+  });
+}
+```
+
+Then add above the `CHECK_RULES` declaration:
 
 ```ts
 const GO_INDICATORS = [
@@ -766,7 +766,7 @@ git commit -m "feat(checks): Go and JVM discard-poison rules with directory alig
 - Test: `test/dispatch/check-selector.test.ts`
 
 **Interfaces:**
-- Consumes: `importErrorImplicatesDiscarded`, `collectionErrorExcerpt`, `CHECK_RULES`, and the private `modMarkerImplicated` from Task 1.
+- Consumes: `importErrorImplicatesDiscarded`, `collectionErrorExcerpt`, `CHECK_RULES`, `MatchContext` and `dirSegments` from Task 1.
 - Produces: `rustRules`, `rubyRules`, `phpRules` wired into `CHECK_RULES`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -908,7 +908,18 @@ Expected: FAIL — every Rust, Ruby and PHP assertion fails, because those frame
 
 - [ ] **Step 3: Wire the Rust, Ruby and PHP rules into the registry**
 
-In `src/dispatch/check-rules.ts`, add above the `CHECK_RULES` declaration:
+In `src/dispatch/check-rules.ts`, first add the marker predicate this task introduces (Task 1 deliberately does not ship it — an unused function fails `noUnusedLocals`). Place it beside `packageInitImplicated`:
+
+```ts
+/** A discarded Rust `mod.rs` is leafless (`moduleLeaf` yields `mod`), so tie it by its directory:
+ *  `tests/common/mod.rs` is implicated when a named module equals `common`. Pure. */
+function modMarkerImplicated(modPath: string, ctx: MatchContext): boolean {
+  const dirLeaf = dirSegments(modPath).at(-1);
+  return dirLeaf !== undefined && ctx.dotted.includes(dirLeaf);
+}
+```
+
+Then add above the `CHECK_RULES` declaration:
 
 ```ts
 const rustRules: LanguageRules = {
@@ -1740,6 +1751,6 @@ No gaps.
 
 **2. Placeholder scan.** No TBD/TODO, no "add error handling", no "similar to Task N". Every code step carries complete code. The `--body "..."` in Task 4 Step 8 is the one spot an implementer must compose prose: summarise the four commits and link the design and ENG-343.
 
-**3. Type consistency.** `LanguageRules`, `ShapeRule`, `MatchContext`, `CHECK_RULES`, `moduleLeaf`, `moduleDotted` are defined once in Task 1 and used with identical names in Tasks 2–4. `importErrorImplicatesDiscarded(rawOutput, discarded, framework)` and `collectionErrorExcerpt(rawOutput, framework)` keep that arity everywhere after Task 1. `goPackageImplicated`, `jvmPackageImplicated`, `modMarkerImplicated`, `packageInitImplicated`, `dirSegments`, `dotSegments`, `isSegPrefix`, `isSegSuffix` are module-private in `check-rules.ts` (all are referenced internally, so `noUnusedLocals` is satisfied). All framework keys used in tests exist in the `CheckFramework` union.
+**3. Type consistency.** `LanguageRules`, `ShapeRule`, `MatchContext`, `CHECK_RULES`, `moduleLeaf`, `moduleDotted` are defined once in Task 1 and used with identical names in Tasks 2–4. `importErrorImplicatesDiscarded(rawOutput, discarded, framework)` and `collectionErrorExcerpt(rawOutput, framework)` keep that arity everywhere after Task 1. `packageInitImplicated`, `dirSegments`, `dotSegments`, `isSegPrefix` and `isSegSuffix` are module-private in `check-rules.ts` and referenced from Task 1 onward. `goPackageImplicated`/`jvmPackageImplicated` (Task 2) and `modMarkerImplicated` (Task 3) are declared in the task that first uses them — `noUnusedLocals` rejects a function nothing calls, so declaring them earlier breaks the build. All framework keys used in tests exist in the `CheckFramework` union.
 
 **4. Honesty about residuals.** The four weak residual pins (Go `undefined:`, JVM `cannot find symbol`, Rust E0432, Ruby NameError, PHP PSR-4) are labelled in-comment as DOCUMENTATION PINS, not guards — a review found they still pass under the natural "someone tried to close this gap" mutation. They record accepted gaps; they do not defend them. The three negatives that *do* defend (Go collision, JVM collision, Rust help note) each carry a committed mutation guard proving the collision reappears when the rule is removed.
