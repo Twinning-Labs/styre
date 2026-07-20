@@ -193,28 +193,64 @@ matching can tie these to a file, because the file's name never appears.
 They can be tied by **evidence** instead of by name: read each undeclared file's contents just before
 discarding it, then ask whether any of them *defined* the symbol the toolchain says is missing. If the
 discarded file contains `func Help(`, the deletion is the cause. This is not a guess — it is the
-strongest tie in the whole matcher, and it is more conservative than the directory rules, because it
-requires the error to name the exact symbol *and* a discarded file to define it.
+strongest tie in the whole matcher, because it requires the error to name the exact symbol *and* a
+discarded file to define it.
 
-**Plumbing.** `discardPaths` (`run-dispatch.ts:240`) deletes the files, and only the path strings survive
-in `discarded`. So the contents must be captured immediately before that call and carried alongside.
-`discarded: string[]` stays exactly as it is — it feeds the `scope-discarded` telemetry payload
-(`run-dispatch.ts:246`), the retry note (`handlers.ts:720`) and the implement handler
-(`handlers.ts:976`), none of which should carry file contents. A separate, process-local
-`discardedSources: Map<path, content>` is added beside it and consumed only by the guard.
+**Why Python and Node get no symbol tier, and why Ruby and PHP do.** Python's `NameError: name 'x' is not
+defined` and Node's `ReferenceError: X is not defined` arrive on *runtime* failures of checks that
+collected fine — and a RED-first check failing on an absent name is the normal, correct case there, so a
+symbol tier would reject legitimately red checks wholesale. Ruby's `uninitialized constant` and PHP's
+`Class "X" not found` are the same runtime shape, so the exclusion argument would apply to them too were
+it taken alone. They are included because the *conjunction* is the real gate: the error must name the
+symbol **and** a file discarded on this very attempt must define it. On Python and Node that conjunction
+would additionally have to displace behaviour this change promises to leave untouched (§4.1), which is the
+deciding difference. The cost of including Ruby and PHP is the residual below, not a new class of failure.
+
+**Plumbing.** `discardPaths` deletes the files, and only the path strings survive in `discarded`. So the
+contents are captured on the line immediately before that call — the sole `discardPaths` call site, so
+there is no path that discards without capturing. `discarded: string[]` stays exactly as it is: it feeds
+the `scope-discarded` telemetry payload, the retry note and the implement handler, none of which should
+carry file contents. A separate, process-local `discardedSources: Map<path, content>` rides beside it and
+is read in exactly two places — the destructure in `checks:dispatch` and the guard call. **No file
+contents reach SQLite, telemetry, or any log**, and a test pins that by asserting the payload's key set.
+
+**This plumbing fails open and quiet**, which is its main risk: if the map arrives empty the tier silently
+does nothing and every name-based test still passes. Two things guard it. The map's keys must be the exact
+strings in `discarded` — both come from the same array, never rebuilt or normalised — and that identity is
+pinned directly. And smoke cell A20 drives the real dispatch path end to end, so emptying the map,
+un-threading it, or prefixing its keys each turns it red.
+
+Reads are bounded: 256 KB per file and 4 MB total per dispatch, so an agent emitting hundreds of generated
+files cannot pin unbounded memory. Symlinks are skipped rather than followed, so a discarded link cannot
+cause an arbitrary file outside the worktree to be read.
 
 **Registry fields.** Two optional per-language entries: `symbolNaming` (patterns whose capture is the
 missing symbol) and `definesSymbol` (given a symbol, a pattern matching its definition in source):
 
 | Stack | Symbol named by | Definition matched by |
 |---|---|---|
-| Go | `undefined: Help` | `func`/`type`/`var`/`const Help` |
-| JVM | `symbol: class Helper` | `class`/`interface`/`enum`/`record Helper` |
-| PHP | `Class "App\Helper" not found` | `class Helper` |
+| Go | `undefined: Help` **and** `… has no field or method Help`, both anchored to the `file.go:LINE:COL:` gutter | `func`/`type`/`var`/`const Help`, with an optional receiver so methods tie |
+| JVM | `symbol: class Helper` (type kinds only) | `class`/`interface`/`enum`/`record Helper` |
+| PHP | `Class "App\Helper" not found` | `class`/`interface`/`trait Helper`, case-insensitively |
 | Ruby | `uninitialized constant Helper` | `class`/`module Helper` |
-| Rust | `cannot find function \`help\` in this scope` | `fn`/`struct`/`enum`/`trait`/`const Help` |
+| Rust | `cannot find <kind> \`help\`` (kinds may be compound: *"function, tuple struct or tuple variant"*) **and** E0433 `use of undeclared \`Helper\`` | `fn`/`struct`/`enum`/`trait`/`const`/`static`/`type Help` |
 
 Qualified names are reduced to their last segment first (`App\Helper` → `Helper`, `Foo::Bar` → `Bar`).
+
+Four of these entries are narrower or wider than they first look, and each difference was measured:
+
+- **Go is anchored to the compiler's gutter.** Unanchored, `undefined: Config` inside a test's own
+  assertion message would fire the tier — ordinary program text masquerading as a diagnostic, the §2
+  failure class reappearing *within* a single language.
+- **Go needs the receiver form**, or a discarded `func (r T) Help()` never ties.
+- **JVM captures only type kinds.** `symbol: method helper(int)` would otherwise cross-match a file
+  declaring `class helper`, since the definition side only recognises type declarations.
+- **Rust needed widening twice.** rustc writes compound kinds with commas, and emits E0433 for
+  `Helper::new()` — the most common way a test reaches a discarded helper. The first draft's single narrow
+  pattern caught neither.
+
+**PHP is case-insensitive on the definition side** because PHP class names are; `Class "Helper" not found`
+must tie a file declaring `class helper`.
 
 **Degradation.** When contents are unavailable — a file too large to read, an unreadable path, or a
 caller that does not supply them — the tier is simply inert and the other tiers behave exactly as
