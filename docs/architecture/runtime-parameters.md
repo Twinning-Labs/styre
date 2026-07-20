@@ -119,19 +119,32 @@ honored).
 
 ---
 
-## Exit codes
+## Exit codes (error codes) and their meaning
 
-The intended space is enumerated in `src/cli/run.ts`. A code comment there notes a final
-cross-command reconciliation is still outstanding, so treat `run` as the authority.
+The process exit code is the machine-readable error code. The space is enumerated in `src/cli/run.ts`;
+a code comment there flags that a final cross-command reconciliation is still outstanding (ENG-338),
+so treat `styre run` as the authority. Codes above `2` follow the BSD `sysexits.h` convention, which
+is what lets a CI/fleet caller branch on them.
 
-| Code | Name | Condition |
-|---|---|---|
-| `0` | success | A PR is open (`run`); also `--version`, `--help`, and `run --resume --inspect`. |
-| `1` | error | Any thrown error (missing ticket, unresolved profile commands, no profile/slug, setup not approved, bad `--checks`, missing provider key, Slack misconfig, …). citty's `runMain` maps a throw to exit `1`. |
-| `2` | notify misuse | `styre notify` invoked without `--test`. |
-| `65` | resume refused | `run --resume` and the branch HEAD moved without `--accept-head`. |
-| `69` | `EX_TOOLCHAIN_MISSING` | A required repo toolchain program is not installed (fresh-run preflight; never on `--resume`/`--inspect`). |
-| `75` | `EX_TEMPFAIL` (parked) | Session limit / out of credits: SoT + transcript dumped, resumable, no retry attempt consumed. |
+| Code | Name | Meaning | Retryable? |
+|---|---|---|---|
+| `0` | success | The command did its job. For `run`: a PR is open and ready. Also returned by `--version`, `--help`, and `run --resume --inspect`. | — |
+| `1` | error (generic) | Any thrown, non-classified error. citty's `runMain` maps an uncaught throw to exit `1`. | No — fix the cause first. |
+| `2` | usage / notifier-config | `styre notify` was invoked without `--test`. A misuse/config error, not a run failure. | No — correct the invocation or config. |
+| `65` | resume refused | `run --resume`, but the branch HEAD moved since the run parked, and `--accept-head` was not passed — so the carried-forward context no longer matches the branch. (`sysexits` `EX_DATAERR`.) | Yes, deliberately — re-run with `--accept-head` (resume against the new HEAD, dropping carryover) or `--inspect` (diagnose, exits `0`). |
+| `69` | toolchain missing (`EX_TOOLCHAIN_MISSING`) | A required repo toolchain program (a build/test/check tool the profile depends on) is not installed on this machine. Detected by the fresh-run preflight *before any spend*; never raised on `--resume`/`--inspect`. (`sysexits` `EX_UNAVAILABLE`.) | Yes, after you install the missing tool — the stderr report names it. |
+| `75` | parked (`EX_TEMPFAIL`) | A **temporary** failure: the run hit a session limit / out-of-credits interrupt. The SoT + transcript are dumped to the park dir and **no retry attempt is consumed** — this is the "come back later" code, not a defect. (`sysexits` `EX_TEMPFAIL`.) | Yes — resume with `styre run --resume <ident> --profile <p>` once you have capacity again. |
+
+**How to read them as a caller:**
+
+- **`0`** — done; for `run`, go merge the PR.
+- **`75`** — transient; safe to re-run the *same* ticket later with `--resume`. A fleet scheduler should back off and retry, not mark the ticket failed.
+- **`65`** — the world moved under a parked run; a human (or a policy) decides whether to accept the new HEAD (`--accept-head`) or investigate (`--inspect`).
+- **`69`** — an environment/provisioning gap on this machine, not a problem with the ticket; fix the host toolchain and re-run.
+- **`1` / `2`** — a real error or a misuse: the ticket/config/invocation needs attention before retrying. Anything the runner surfaces as an escalation it cannot resolve autonomously also exits nonzero here (with the trace on stderr).
+
+Stream reminder: for `run`, the human-readable explanation for any nonzero code is on **stderr**;
+stdout carries only the NDJSON telemetry stream.
 
 ---
 
