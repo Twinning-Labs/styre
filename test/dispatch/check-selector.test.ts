@@ -440,17 +440,6 @@ describe("importErrorImplicatesDiscarded (discard-poison guard: conservative imp
       ),
     ).toEqual([]);
   });
-
-  test("the remaining new frameworks stay inert until their rules land (a deliberate, temporary narrowing)", () => {
-    // NOT byte-identical to before: the old matcher was framework-blind, so the legacy Python/Node
-    // vocabulary incidentally fired on these stacks too. This commit narrows that away; later tasks
-    // restore it deliberately and more precisely. Recorded here so the transitional loss is visible
-    // rather than hidden. Go and JVM are no longer part of this: ENG-343 Task 2 gave them real rules
-    // (see "discard-poison: Go" / "discard-poison: JVM" above) — cargo is still pending.
-    const cargoOut =
-      "error[E0583]: file not found for module 'common'\nImportError: boom in tests/common/mod.rs";
-    expect(importErrorImplicatesDiscarded(cargoOut, ["tests/common/mod.rs"], "cargo")).toEqual([]);
-  });
 });
 
 describe("CHECK_RULES registry", () => {
@@ -764,6 +753,144 @@ describe("single-line capture guards (a capture must never span a line break)", 
     expect(
       importErrorImplicatesDiscarded(out, ["src/test/java/com/helper/Helper.java"], "junit-maven"),
     ).toEqual([]);
+  });
+});
+
+describe("discard-poison: Rust", () => {
+  // Real rustc 1.94 output. The help line names BOTH candidate paths — which is exactly why cargo's
+  // basenameGates is empty.
+  const e0583 =
+    "error[E0583]: file not found for module `helper`\n" +
+    '  = help: to create the module `helper`, create file "src/helper.rs" or "src/helper/mod.rs"';
+
+  test("implicates a discarded module file named by E0583", () => {
+    expect(importErrorImplicatesDiscarded(e0583, ["src/helper.rs"], "cargo")).toEqual([
+      "src/helper.rs",
+    ]);
+  });
+
+  test("implicates a discarded mod.rs via its directory (its leaf would be `mod`)", () => {
+    const out = "error[E0583]: file not found for module `common`";
+    expect(importErrorImplicatesDiscarded(out, ["tests/common/mod.rs"], "cargo")).toEqual([
+      "tests/common/mod.rs",
+    ]);
+  });
+
+  test("contrast: same output, an unrelated discarded module ⇒ no match", () => {
+    expect(importErrorImplicatesDiscarded(e0583, ["src/scratch.rs"], "cargo")).toEqual([]);
+  });
+
+  test("E0583's help note must NOT implicate an unrelated discarded mod.rs", () => {
+    // The help line contains the literal token `src/newfeature/mod.rs`. If error[e0583] gated the
+    // bounded-basename tier, ANY discarded mod.rs would match ANY E0583.
+    const out =
+      "error[E0583]: file not found for module `newfeature`\n" +
+      '  = help: to create the module `newfeature`, create file "src/newfeature.rs" or "src/newfeature/mod.rs"';
+    expect(importErrorImplicatesDiscarded(out, ["tests/scratch/mod.rs"], "cargo")).toEqual([]);
+  });
+
+  test("surfaces the rustc error line, not the help note", () => {
+    expect(collectionErrorExcerpt(e0583, "cargo")).toBe(
+      "error[E0583]: file not found for module `helper`",
+    );
+  });
+
+  // DOCUMENTATION PIN (not a guard): records an accepted residual.
+  test("residual: E0432 unresolved imports name no file ⇒ not tied", () => {
+    const out = "error[E0432]: unresolved import `crate::helper`\n --> tests/x.rs:3:5";
+    expect(importErrorImplicatesDiscarded(out, ["src/helper.rs"], "cargo")).toEqual([]);
+  });
+});
+
+describe("discard-poison: Ruby", () => {
+  const loadErr =
+    "spec/a_spec.rb:2:in `require': cannot load such file -- support/helper (LoadError)";
+
+  test("implicates a discarded helper named by a LoadError", () => {
+    expect(importErrorImplicatesDiscarded(loadErr, ["spec/support/helper.rb"], "minitest")).toEqual(
+      ["spec/support/helper.rb"],
+    );
+  });
+
+  test("ties on rspec too, for the boot-time require failure design section 5 credits it with", () => {
+    const boot = "cannot load such file -- ./spec/support/helper (LoadError)";
+    expect(importErrorImplicatesDiscarded(boot, ["spec/support/helper.rb"], "rspec")).toEqual([
+      "spec/support/helper.rb",
+    ]);
+  });
+
+  test("contrast: same output, unrelated discarded file ⇒ no match", () => {
+    expect(
+      importErrorImplicatesDiscarded(loadErr, ["spec/support/scratch.rb"], "minitest"),
+    ).toEqual([]);
+  });
+
+  test("near-miss leaf: `helpers.rb` is not `helper` ⇒ no match", () => {
+    expect(
+      importErrorImplicatesDiscarded(loadErr, ["spec/support/helpers.rb"], "minitest"),
+    ).toEqual([]);
+  });
+
+  // DOCUMENTATION PIN (not a guard): records an accepted residual.
+  test("residual: the Dir[].each autoload shape raises NameError, which names no file ⇒ not tied", () => {
+    const out = "spec/c_spec.rb:2:in `<main>': uninitialized constant Helper (NameError)";
+    expect(importErrorImplicatesDiscarded(out, ["spec/support/helper.rb"], "rspec")).toEqual([]);
+  });
+});
+
+describe("discard-poison: PHP", () => {
+  const failedOpen =
+    "PHP Fatal error:  Uncaught Error: Failed opening required 'helper.php' (include_path='.:/usr/share/php')";
+  // The realistic shape: a `require` warning. It has NO naming pattern, so it can only tie through
+  // the bounded-basename tier — the path most likely to over-fire, and untested otherwise.
+  const failedStream =
+    "PHP Warning:  require(/app/src/helper.php): Failed to open stream: No such file or directory in /app/tests/ATest.php on line 3";
+
+  test("implicates a discarded file named by a failed require (naming tier)", () => {
+    expect(importErrorImplicatesDiscarded(failedOpen, ["src/helper.php"], "phpunit")).toEqual([
+      "src/helper.php",
+    ]);
+  });
+
+  test("implicates via the bounded-basename tier on the `Failed to open stream` shape", () => {
+    expect(importErrorImplicatesDiscarded(failedStream, ["src/helper.php"], "phpunit")).toEqual([
+      "src/helper.php",
+    ]);
+  });
+
+  test("contrast: same stream output, unrelated discarded file ⇒ no match", () => {
+    expect(importErrorImplicatesDiscarded(failedStream, ["src/scratch.php"], "phpunit")).toEqual(
+      [],
+    );
+  });
+
+  test("contrast: same output, unrelated discarded file ⇒ no match", () => {
+    expect(importErrorImplicatesDiscarded(failedOpen, ["src/scratch.php"], "phpunit")).toEqual([]);
+  });
+
+  // DOCUMENTATION PIN (not a guard): records an accepted residual.
+  test("residual: PSR-4 autoload reports a missing CLASS, which names no file ⇒ not tied", () => {
+    const out =
+      'PHP Fatal error:  Uncaught Error: Class "Helper" not found in /app/tests/ATest.php:9';
+    expect(importErrorImplicatesDiscarded(out, ["src/Helper.php"], "phpunit")).toEqual([]);
+  });
+});
+
+describe("mutation guard: the Rust help-note negative must discriminate", () => {
+  test("gating the basename tier on E0583 would implicate any discarded mod.rs", () => {
+    const out =
+      "error[E0583]: file not found for module `newfeature`\n" +
+      '  = help: to create the module `newfeature`, create file "src/newfeature.rs" or "src/newfeature/mod.rs"';
+    const orig = CHECK_RULES.cargo.basenameGates;
+    try {
+      (CHECK_RULES.cargo as { basenameGates: string[] }).basenameGates = ["error[e0583]"];
+      expect(importErrorImplicatesDiscarded(out, ["tests/scratch/mod.rs"], "cargo")).toEqual([
+        "tests/scratch/mod.rs",
+      ]);
+    } finally {
+      (CHECK_RULES.cargo as { basenameGates: string[] }).basenameGates = orig;
+    }
+    expect(importErrorImplicatesDiscarded(out, ["tests/scratch/mod.rs"], "cargo")).toEqual([]);
   });
 });
 

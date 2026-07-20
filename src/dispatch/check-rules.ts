@@ -123,6 +123,13 @@ function packageInitImplicated(initPath: string, ctx: MatchContext): boolean {
   return false;
 }
 
+/** A discarded Rust `mod.rs` is leafless (`moduleLeaf` yields `mod`), so tie it by its directory:
+ *  `tests/common/mod.rs` is implicated when a named module equals `common`. Pure. */
+function modMarkerImplicated(modPath: string, ctx: MatchContext): boolean {
+  const dirLeaf = dirSegments(modPath).at(-1);
+  return dirLeaf !== undefined && ctx.dotted.includes(dirLeaf);
+}
+
 /** A Go package IS a directory, and the module prefix is NOT on disk — so the discarded file's
  *  directory segments must be a trailing SUFFIX of the package path's segments.
  *  `example.com/m/helper` implicates `helper/helper.go` and `helper/util.go` (dir `helper`), while a
@@ -192,18 +199,6 @@ const nodeRules: LanguageRules = {
   shapes: [],
 };
 
-/** No rules — a deliberate, TEMPORARY narrowing, not parity with before ENG-343. The old matcher was
- *  framework-blind, so the legacy Python/Node vocabulary incidentally fired on these stacks too
- *  (`go: cannot find module providing package …` hit the legacy `cannot find module` indicator).
- *  Replaced per language with real rules, which restore that coverage more precisely. */
-const noRules: LanguageRules = {
-  indicators: [],
-  basenameGates: [],
-  naming: [],
-  tiesByLeaf: false,
-  shapes: [],
-};
-
 const GO_INDICATORS = [
   "no required module provides package",
   "cannot find module providing package",
@@ -242,6 +237,37 @@ const jvmRules: LanguageRules = {
   shapes: [{ match: jvmPackageImplicated }],
 };
 
+const rustRules: LanguageRules = {
+  indicators: ["file not found for module", "unresolved import", "error[e0432]", "error[e0583]"],
+  // Deliberately empty: rustc's E0583 help line names `src/<mod>.rs` and `src/<mod>/mod.rs` as
+  // CANDIDATES to create. Gating the bounded-basename tier on it would implicate ANY discarded
+  // `mod.rs` on ANY E0583, regardless of which module is missing.
+  basenameGates: [],
+  naming: [/file not found for module[^\S\r\n]+['"`]?(\w+)/gi],
+  tiesByLeaf: true,
+  shapes: [{ basename: "mod.rs", match: modMarkerImplicated }],
+};
+
+const RUBY_INDICATORS = ["cannot load such file", "loaderror"];
+
+const rubyRules: LanguageRules = {
+  indicators: [...RUBY_INDICATORS],
+  basenameGates: [...RUBY_INDICATORS],
+  naming: [/cannot load such file --[^\S\r\n]+([\w./-]+)/gi],
+  tiesByLeaf: true,
+  shapes: [],
+};
+
+const PHP_INDICATORS = ["failed opening required", "failed to open stream"];
+
+const phpRules: LanguageRules = {
+  indicators: [...PHP_INDICATORS],
+  basenameGates: [...PHP_INDICATORS],
+  naming: [/failed opening required[^\S\r\n]+['"]?([\w./-]+)['"]?/gi],
+  tiesByLeaf: true,
+  shapes: [],
+};
+
 /** The per-language rule registry — THE extension point for the discard poison guard. Add new
  *  languages, new toolchain phrasings and per-language exceptions HERE, never to a shared list: a
  *  shared list applies every phrase to every run, which produced confirmed cross-language false
@@ -251,10 +277,10 @@ export const CHECK_RULES: Record<CheckFramework, LanguageRules> = {
   jest: nodeRules,
   vitest: nodeRules,
   go: goRules,
-  cargo: noRules,
+  cargo: rustRules,
   "junit-maven": jvmRules,
   "junit-gradle": jvmRules,
-  rspec: noRules,
-  minitest: noRules,
-  phpunit: noRules,
+  rspec: rubyRules,
+  minitest: rubyRules,
+  phpunit: phpRules,
 };
