@@ -680,8 +680,13 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         // discarded undeclared files, whose output shows an import/collection/module error naming a
         // discarded file, could not actually run — the referenced helper was stripped before commit.
         // Route it to the SAME uncovered path `selected-none` uses so no permanently-broken check is
-        // installed and the discard is surfaced in the retry feedback. Conservative: fires only when
-        // the import error NAMES a discarded file (never a bare basename). Diagnosis-only (INV-B).
+        // installed and the discard is surfaced in the retry feedback. Four tiers, looked up per
+        // language in CHECK_RULES so one language's phrasing can never fire on another's output: shape
+        // rules, a symbol tier (the output names a symbol a discarded file's contents define), a leaf
+        // tier, and a bounded-basename tier (a delimiter-bounded basename occurrence, gated on a
+        // per-language indicator; disabled for cargo/JVM, whose diagnostics print candidate paths that
+        // would poison it). A red naming some other (e.g. feature) module is left alone, so a check
+        // that legitimately fails is never rejected. Diagnosis-only (INV-B).
         if (discarded.length > 0 && coarse !== "green") {
           const implicated = importErrorImplicatesDiscarded(
             rawOutput,

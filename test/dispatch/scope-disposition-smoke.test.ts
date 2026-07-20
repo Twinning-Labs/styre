@@ -1390,7 +1390,7 @@ test("A17 ⚔ a discarded Go helper package → AC uncovered, file surfaced", as
   expect(checks).toHaveLength(0);
   expect(message).toMatch(/import or collection error/);
   expect(message).toContain("helper/helper.go");
-  // The framework-aware excerpt (design 4.5) carried a real Go compiler line into the feedback.
+  // The framework-aware excerpt (design 4.6) carried a real Go compiler line into the feedback.
   expect(message).toContain("no required module provides package");
 });
 

@@ -462,6 +462,17 @@ describe("CHECK_RULES registry", () => {
     expect(CHECK_RULES.pytest.prefersErrorSummary).toBe(true);
     expect(CHECK_RULES["junit-maven"].prefersErrorSummary).toBeUndefined();
   });
+
+  test("no rule set shares one array object between indicators and basenameGates", () => {
+    // A shared array lets a later `push` on one field leak into the other — and, via an aliased rule
+    // set, across a language boundary. Note several frameworks deliberately SHARE a rule set object
+    // (jest/vitest, junit-maven/junit-gradle, rspec/minitest); this asserts the arrays, not the objects.
+    for (const [name, rules] of Object.entries(CHECK_RULES)) {
+      if (rules.indicators.length > 0 && rules.basenameGates.length > 0) {
+        expect(`${name}:${rules.indicators === rules.basenameGates}`).toBe(`${name}:false`);
+      }
+    }
+  });
 });
 
 describe("collectionErrorExcerpt", () => {
@@ -608,14 +619,6 @@ describe("discard-poison: Go (ties by package/directory segment alignment)", () 
     expect(collectionErrorExcerpt(missingHelper, "go")).toBe(missingHelper);
   });
 
-  // DOCUMENTATION PIN (not a guard): records an accepted residual. It asserts the gap exists; it does
-  // not defend it — closing the gap would require a naming pattern that captures a symbol name.
-  test("residual: a helper in the SAME package names only the symbol ⇒ not tied", () => {
-    expect(
-      importErrorImplicatesDiscarded("app/y_test.go:5:30: undefined: Help", ["helper.go"], "go"),
-    ).toEqual([]);
-  });
-
   test("a capture never spans a line break (the naming patterns are horizontal-whitespace only)", () => {
     // NOTE: deliberately not the literal `go/scratch.go` fixture from the review — that fixture's
     // discarded file also collides with the (separately documented, accepted) bounded-basename tier,
@@ -711,8 +714,10 @@ describe("discard-poison: JVM (ties by package/directory segment alignment)", ()
     expect(collectionErrorExcerpt(mvn, "junit-maven")).toBe(mvn);
   });
 
-  // DOCUMENTATION PIN (not a guard): records an accepted residual.
-  test("residual: `cannot find symbol` names the symbol, never the file ⇒ not tied", () => {
+  // Fallback behaviour (not an accepted gap): without file contents, the name-based tiers alone
+  // cannot tie this. The symbol tier closes it when sources are supplied — see the symbol-tier
+  // describe block below.
+  test("degrades to no tie without file contents (JVM `cannot find symbol` names no file; the symbol tier closes this when sources are supplied)", () => {
     const out =
       "ATest.java:12: error: cannot find symbol\n  symbol:   class Helper\n  location: class ATest";
     expect(
@@ -869,8 +874,10 @@ describe("discard-poison: Ruby", () => {
     ).toEqual([]);
   });
 
-  // DOCUMENTATION PIN (not a guard): records an accepted residual.
-  test("residual: the Dir[].each autoload shape raises NameError, which names no file ⇒ not tied", () => {
+  // Fallback behaviour (not an accepted gap): without file contents, the name-based tiers alone
+  // cannot tie this. The symbol tier closes it when sources are supplied — see the symbol-tier
+  // describe block below.
+  test("degrades to no tie without file contents (Ruby's Dir[].each autoload shape raises NameError, naming no file; the symbol tier closes this when sources are supplied)", () => {
     const out = "spec/c_spec.rb:2:in `<main>': uninitialized constant Helper (NameError)";
     expect(importErrorImplicatesDiscarded(out, ["spec/support/helper.rb"], "rspec")).toEqual([]);
   });
@@ -916,8 +923,10 @@ describe("discard-poison: PHP", () => {
     expect(importErrorImplicatesDiscarded(failedOpen, ["src/scratch.php"], "phpunit")).toEqual([]);
   });
 
-  // DOCUMENTATION PIN (not a guard): records an accepted residual.
-  test("residual: PSR-4 autoload reports a missing CLASS, which names no file ⇒ not tied", () => {
+  // Fallback behaviour (not an accepted gap): without file contents, the name-based tiers alone
+  // cannot tie this. The symbol tier closes it when sources are supplied — see the symbol-tier
+  // describe block below.
+  test("degrades to no tie without file contents (PHP's PSR-4 autoload reports a missing class, naming no file; the symbol tier closes this when sources are supplied)", () => {
     const out =
       'PHP Fatal error:  Uncaught Error: Class "Helper" not found in /app/tests/ATest.php:9';
     expect(importErrorImplicatesDiscarded(out, ["src/Helper.php"], "phpunit")).toEqual([]);
@@ -1068,6 +1077,19 @@ describe("discard-poison: the symbol definition tier (design 4.5)", () => {
         src("src/Other.php", "<?php\nnamespace App;\nclass Other {}\n"),
       ),
     ).toEqual([]);
+  });
+
+  test("PHP class names are case-insensitive, so a lowercase declaration still ties", () => {
+    const out =
+      'PHP Fatal error:  Uncaught Error: Class "Helper" not found in /app/tests/ATest.php:9';
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/helper.php"],
+        "phpunit",
+        src("src/helper.php", "<?php\nclass helper {}\n"),
+      ),
+    ).toEqual(["src/helper.php"]);
   });
 
   test("Rust: a missing item is tied when the discarded module defined it", () => {

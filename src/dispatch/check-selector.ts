@@ -238,11 +238,13 @@ export function interpretRunOutput(fw: CheckFramework, run: RunOutcome): CoarseO
  *  check could not run *because* a file it references was discarded.
  *
  *  Rules are looked up per framework in CHECK_RULES so one language's phrasing can never fire on
- *  another's output. Three tiers per discarded file: (1) shape rules (directory- or marker-based, for
- *  files whose own name never appears); (2) the leaf tier, where a naming phrase names the file's
- *  module leaf — disabled for package-oriented languages; (3) the bounded-basename tier, gated on an
- *  indicator. A red whose error names some OTHER (e.g. feature) module is left untouched, so a test
- *  that legitimately fails because the feature is absent is never rejected. Pure. */
+ *  another's output. Four tiers per discarded file: (1) shape rules (directory- or marker-based, for
+ *  files whose own name never appears); (2) the symbol tier, where the output names a symbol and a
+ *  discarded file's captured contents define it (requires `sources`; silently inert without them); (3)
+ *  the leaf tier, where a naming phrase names the file's module leaf — disabled for package-oriented
+ *  languages; (4) the bounded-basename tier, gated on an indicator. A red whose error names some OTHER
+ *  (e.g. feature) module is left untouched, so a test that legitimately fails because the feature is
+ *  absent is never rejected. Pure. */
 export function importErrorImplicatesDiscarded(
   rawOutput: string,
   discarded: string[],
@@ -325,7 +327,9 @@ export function importErrorImplicatesDiscarded(
  *  first is often a re-raised error deep in a third-party traceback). Naming patterns are a strict
  *  FALLBACK, used only when no indicator or fixture-pattern line matched anywhere in the output — a
  *  trailing naming-only line (e.g. a package-manager summary that happens to name a path) must never
- *  displace a real indicator line that appeared earlier. Strips a leading pytest error gutter
+ *  displace a real indicator line that appeared earlier. The naming probes also include this
+ *  language's `symbolNaming` patterns (a symbol-only red still needs a real compiler line in the
+ *  excerpt; smoke cell A20 depends on this). Strips a leading pytest error gutter
  *  (`E   `) — `^E\s+` requires whitespace right after `E`, so it never eats an `ERROR …` summary
  *  line. `undefined` when nothing matches. Pure. */
 export function collectionErrorExcerpt(

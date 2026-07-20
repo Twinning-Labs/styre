@@ -112,7 +112,10 @@ export interface LanguageRules {
   definesSymbol?: (symbol: string) => RegExp;
 }
 
-/** Escape regex metacharacters so a captured symbol can be embedded in a definition pattern. */
+/** Escape regex metacharacters so a captured symbol can be embedded in a definition pattern.
+ *  Unreachable defence-in-depth as written: every `symbolNaming` capture class is `\w`-only after
+ *  `symbolLeaf` strips separators, so `s` never contains a metacharacter for this to escape. Kept in
+ *  case a future `symbolNaming` pattern captures something wider. */
 function escapeSymbol(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
