@@ -312,8 +312,10 @@ In each case a test's own assertion text is mistaken for a diagnostic — the §
 *within* a single language, where the registry cannot help. Rust's kind class is the loosest of the three,
 since `cannot find "x"` is ordinary English. The cost is the same as every other over-fire here: a spurious
 retry on an already-failing check, never a bad merge. Anchoring Rust to `error[E0` (and requiring a rustc
-kind word) would close most of it and is the obvious follow-up; it is not done here because it is a
-behaviour change arriving after the branch's final review, and the safe direction is already held.
+kind word) would close most of it, and the same treatment applies to Ruby's `(NameError)` suffix and PHP's
+`Uncaught Error:` prefix. **Filed as ENG-348** rather than patched here: it is a behaviour change arriving
+after the branch's final review, and landing unreviewed matching logic at the end is precisely the failure
+mode this ticket kept surfacing. The safe direction is already held — a misfire costs a retry, not a merge.
 
 ### 4.6 Excerpt
 
@@ -358,7 +360,7 @@ merge unverified.
 5. Toolchain wording outside the listed phrases (other versions, other locales).
 6. The `error` bucket with empty output — ENG-347, out of scope here (§8).
 7. **Unanchored symbol patterns on Rust, Ruby and PHP** (§4.5): a test's own assertion text mentioning
-   the symbol is mistaken for a diagnostic. Reproduced on all three.
+   the symbol is mistaken for a diagnostic. Reproduced on all three. **Tracked as ENG-348.**
 8. **Go's single-segment directory collision** (§4.3), and Go's missed ties: a repo-root package, a
    nested-module layout, and a directory name containing a dot.
 9. **The bounded-basename tier fires on a delimiter-bounded basename**, so a file merely named in the
