@@ -244,12 +244,12 @@ absence.
 
 ## 8. Out of scope, and what is left open
 
-- **The `error` bucket (tracked separately).** A check with `coarse === "error"` and empty output — no
+- **The `error` bucket — tracked as ENG-347.** A check with `coarse === "error"` and empty output — no
   framework detected, no interpreter, or a timeout — reaches the guard with nothing to match, is marked
   covered, then `classify-prior.ts:23` stamps it `environmental` and `post-implement-rerun.ts:84-86`
   downgrades it to a non-gating advisory. The criterion ships unverified. No phrase vocabulary can close
   this. It is reachable on a new stack specifically: a Ruby component whose test command names neither rspec
-  nor minitest yields `framework = null`. **Filed as its own ticket; explicitly not fixed here.**
+  nor minitest yields `framework = null`. **Filed as ENG-347; explicitly not fixed here.**
 - **The coarse bucketing** (`interpretRunOutput`), including the rspec branch (§6).
 - **The downstream downgrade rule** (`post-implement-rerun.ts`).
 - **`prompts/checks.md`.** The convention it states — declare the support files your check needs — is already
@@ -287,6 +287,6 @@ toolchain output through it. Findings adopted:
 | Go exemplar used GOPATH-era wording | Modern module wording throughout (7.1) |
 | All five proposed negatives were vacuous | Replaced with one-variable contrasts plus colliding-leaf cases (7.1) |
 | Harness plan named the wrong lever (work-unit kind) | Corrected — framework comes from the profile component (7.2) |
-| The `error` bucket is a guard-proof route to the same bad merge | §8, filed as a separate ticket |
+| The `error` bucket is a guard-proof route to the same bad merge | §8, filed as ENG-347 |
 | "Does not introduce a new way to fail" was false | Replaced with an explicit cost statement (§5) |
 | Excerpt change affects more than JVM | Stated and pinned (4.5, 7.1) |
