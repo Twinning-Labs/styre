@@ -291,11 +291,13 @@ export function importErrorImplicatesDiscarded(
 
 /** The one line that states a collection/import/fixture cause, in original casing, ≤200 chars.
  *  Prefers pytest's short-test-summary line (`ERROR path - Cause`, printed last and authoritative)
- *  where this language declares that preference; else the LAST matching line (the first is often a
- *  re-raised error deep in a third-party traceback). Strips a leading pytest error gutter (`E   `) —
- *  `^E\s+` requires whitespace right after `E`, so it never eats an `ERROR …` summary line. Considers
- *  this framework's naming patterns as well as its indicators, so a language with no flat indicator
- *  still yields a real compiler line. `undefined` when nothing matches. Pure. */
+ *  where this language declares that preference; else the LAST indicator/fixture-pattern line (the
+ *  first is often a re-raised error deep in a third-party traceback). Naming patterns are a strict
+ *  FALLBACK, used only when no indicator or fixture-pattern line matched anywhere in the output — a
+ *  trailing naming-only line (e.g. a package-manager summary that happens to name a path) must never
+ *  displace a real indicator line that appeared earlier. Strips a leading pytest error gutter
+ *  (`E   `) — `^E\s+` requires whitespace right after `E`, so it never eats an `ERROR …` summary
+ *  line. `undefined` when nothing matches. Pure. */
 export function collectionErrorExcerpt(
   rawOutput: string,
   framework: CheckFramework | null,
@@ -305,18 +307,19 @@ export function collectionErrorExcerpt(
   // `.test()` on a /g regex advances lastIndex between calls, so strip `g` for these probes.
   const probes = rules.naming.map((p) => new RegExp(p.source, p.flags.replace("g", "")));
   let summary: string | undefined;
-  let lastMatch: string | undefined;
+  let lastIndicator: string | undefined;
+  let lastNaming: string | undefined;
   for (const line of rawOutput.split(/\r?\n/)) {
     const low = line.toLowerCase();
-    const isMatch =
-      rules.indicators.some((k) => low.includes(k)) ||
-      (rules.fixturePattern?.test(line) ?? false) ||
-      probes.some((p) => p.test(line));
-    if (!isMatch) continue;
-    lastMatch = line;
+    const byIndicator =
+      rules.indicators.some((k) => low.includes(k)) || (rules.fixturePattern?.test(line) ?? false);
+    const byNaming = byIndicator ? false : probes.some((p) => p.test(line));
+    if (!byIndicator && !byNaming) continue;
+    if (byIndicator) lastIndicator = line;
+    else lastNaming = line;
     if (rules.prefersErrorSummary === true && /^\s*ERROR\b/.test(line)) summary = line;
   }
-  const chosen = (summary ?? lastMatch)?.trim().replace(/^E\s+/, "");
+  const chosen = (summary ?? lastIndicator ?? lastNaming)?.trim().replace(/^E\s+/, "");
   if (chosen === undefined || chosen === "") return undefined;
   return chosen.length > 200 ? `${chosen.slice(0, 197)}...` : chosen;
 }

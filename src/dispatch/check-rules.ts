@@ -98,7 +98,9 @@ export interface LanguageRules {
   tiesByLeaf: boolean;
   shapes: ShapeRule[];
   /** This language's "fixture not found" pattern, if it has one. Per-language by design: a global
-   *  pattern leaked across languages (Rails emits `fixture 'users' not found`). */
+   *  pattern leaked across languages (Rails emits `fixture 'users' not found`). Used with `.test()`
+   *  on a single line, so it must NOT carry the `g` flag — a global regex's `lastIndex` state would
+   *  make `.test()` results alternate between calls (true, false, true, false, ...) across lines. */
   fixturePattern?: RegExp;
   /** When true, a line beginning `ERROR` is preferred as the excerpt (pytest's summary line). */
   prefersErrorSummary?: boolean;
@@ -121,37 +123,6 @@ function packageInitImplicated(initPath: string, ctx: MatchContext): boolean {
   return false;
 }
 
-/** A discarded Rust `mod.rs` is leafless (`moduleLeaf` yields `mod`), so tie it by its directory:
- *  `tests/common/mod.rs` is implicated when a named module equals `common`. Pure. */
-export function modMarkerImplicated(modPath: string, ctx: MatchContext): boolean {
-  const dirLeaf = dirSegments(modPath).at(-1);
-  return dirLeaf !== undefined && ctx.dotted.includes(dirLeaf);
-}
-
-/** A Go package IS a directory, and the module prefix is NOT on disk — so the discarded file's
- *  directory segments must be a trailing SUFFIX of the package path's segments.
- *  `example.com/m/helper` implicates `helper/helper.go` and `helper/util.go` (dir `helper`), but a
- *  missing DEPENDENCY implicates nothing: `github.com/stretchr/testify/assert` against
- *  `internal/assert/helper.go` compares `[internal, assert]` to `[testify, assert]` and fails. Pure. */
-export function goPackageImplicated(path: string, ctx: MatchContext): boolean {
-  const dirSegs = dirSegments(path);
-  if (dirSegs.length === 0) return false;
-  return ctx.dotted.some((m) => isSegSuffix(dirSegs, dotSegments(m)));
-}
-
-/** A JVM package IS a directory, and the source root (`src/test/java`) IS on disk — so the package's
- *  segments must be a trailing SUFFIX of the file's directory segments (the mirror of the Go rule).
- *  Requires >=2 segments, matching the `__init__.py` rule: a single generic segment (`util`, `api`)
- *  is exactly the collision the directory rules exist to remove. Pure. */
-export function jvmPackageImplicated(path: string, ctx: MatchContext): boolean {
-  const dirSegs = dirSegments(path);
-  if (dirSegs.length === 0) return false;
-  return ctx.dotted.some((m) => {
-    const segs = dotSegments(m);
-    return segs.length >= 2 && isSegSuffix(segs, dirSegs);
-  });
-}
-
 /** The pre-ENG-343 shared vocabulary, kept VERBATIM for python and node so their behaviour is
  *  unchanged (design 4.1). Python and node phrasings are genuinely distinctive from each other,
  *  unlike `package X does not exist`, so sharing these two carries no cross-language risk. */
@@ -171,8 +142,8 @@ const LEGACY_NAMING =
   /(?:no module named|cannot find module|could not import|unable to resolve|cannot import name\s+[^\n]*?\bfrom)\s+['"]?([\w./-]+)['"]?/gi;
 
 const pythonRules: LanguageRules = {
-  indicators: LEGACY_INDICATORS,
-  basenameGates: LEGACY_INDICATORS,
+  indicators: [...LEGACY_INDICATORS],
+  basenameGates: [...LEGACY_INDICATORS],
   naming: [LEGACY_NAMING],
   tiesByLeaf: true,
   shapes: [
@@ -184,8 +155,8 @@ const pythonRules: LanguageRules = {
 };
 
 const nodeRules: LanguageRules = {
-  indicators: LEGACY_INDICATORS,
-  basenameGates: LEGACY_INDICATORS,
+  indicators: [...LEGACY_INDICATORS],
+  basenameGates: [...LEGACY_INDICATORS],
   naming: [LEGACY_NAMING],
   tiesByLeaf: true,
   shapes: [],

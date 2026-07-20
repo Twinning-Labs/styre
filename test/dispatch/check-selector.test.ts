@@ -441,23 +441,22 @@ describe("importErrorImplicatesDiscarded (discard-poison guard: conservative imp
     ).toEqual([]);
   });
 
-  test("the five new frameworks are inert until their rules land (Task 1 is a pure refactor)", () => {
-    // noRules: behaviour on these stacks is byte-identical to before this change.
+  test("the five new frameworks are inert until their rules land (a deliberate, temporary narrowing)", () => {
+    // NOT byte-identical to before: the old matcher was framework-blind, so the legacy Python/Node
+    // vocabulary incidentally fired on these stacks too. This commit narrows that away; Tasks 2 and 3
+    // restore it deliberately and more precisely. Recorded here so the transitional loss is visible
+    // rather than hidden — this task must not merge to main without Tasks 2 and 3.
+    const goOut =
+      "go: cannot find module providing package example.com/m/helper\nhelper/helper.go:5:2: no required module provides package";
+    expect(importErrorImplicatesDiscarded(goOut, ["helper/helper.go"], "go")).toEqual([]);
     expect(
       importErrorImplicatesDiscarded("cannot load such file -- helper", ["helper.rb"], "rspec"),
-    ).toEqual([]);
-    expect(
-      importErrorImplicatesDiscarded(
-        "no required module provides package m/helper",
-        ["helper/helper.go"],
-        "go",
-      ),
     ).toEqual([]);
   });
 });
 
 describe("CHECK_RULES registry", () => {
-  test("aliased frameworks share one rule set (a mis-aliased key is the failure this catches)", () => {
+  test("aliased frameworks share one rule set (forward pin; bites once Tasks 2-3 give them distinct objects)", () => {
     expect(CHECK_RULES.vitest).toBe(CHECK_RULES.jest);
     expect(CHECK_RULES.minitest).toBe(CHECK_RULES.rspec);
     expect(CHECK_RULES["junit-gradle"]).toBe(CHECK_RULES["junit-maven"]);
@@ -529,6 +528,12 @@ describe("collectionErrorExcerpt (framework-aware)", () => {
     expect(collectionErrorExcerpt("npm ERR! unable to resolve dependency tree", "jest")).toBe(
       "npm ERR! unable to resolve dependency tree",
     );
+  });
+
+  test("an indicator line beats a trailing naming-only line (no displacement)", () => {
+    const out =
+      "Error: Cannot find module './helper'\n  at Object.<anonymous>\nnpm ERR! unable to resolve dependency tree";
+    expect(collectionErrorExcerpt(out, "jest")).toBe("Error: Cannot find module './helper'");
   });
 });
 
