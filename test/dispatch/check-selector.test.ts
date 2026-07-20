@@ -1032,6 +1032,18 @@ describe("discard-poison: the symbol definition tier (design 4.5)", () => {
     ).toEqual(["spec/support/helper.rb"]);
   });
 
+  test("Ruby contrast: same error, a discarded file that does NOT define the constant", () => {
+    const out = "spec/c_spec.rb:2:in `<main>': uninitialized constant Helper (NameError)";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["spec/support/other.rb"],
+        "rspec",
+        src("spec/support/other.rb", "module Other\n  def self.x; true; end\nend\n"),
+      ),
+    ).toEqual([]);
+  });
+
   test("PHP: a Composer autoload miss is tied, and the namespace is reduced to the class name", () => {
     const out =
       'PHP Fatal error:  Uncaught Error: Class "App\\Helper" not found in /app/tests/ATest.php:9';
@@ -1045,6 +1057,19 @@ describe("discard-poison: the symbol definition tier (design 4.5)", () => {
     ).toEqual(["src/Helper.php"]);
   });
 
+  test("PHP contrast: same error, a discarded file that does NOT define the class", () => {
+    const out =
+      'PHP Fatal error:  Uncaught Error: Class "App\\Helper" not found in /app/tests/ATest.php:9';
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/Other.php"],
+        "phpunit",
+        src("src/Other.php", "<?php\nnamespace App;\nclass Other {}\n"),
+      ),
+    ).toEqual([]);
+  });
+
   test("Rust: a missing item is tied when the discarded module defined it", () => {
     const out = "error[E0425]: cannot find function `help` in this scope";
     expect(
@@ -1055,6 +1080,18 @@ describe("discard-poison: the symbol definition tier (design 4.5)", () => {
         src("src/helper.rs", "pub fn help() -> u8 { 1 }\n"),
       ),
     ).toEqual(["src/helper.rs"]);
+  });
+
+  test("Rust contrast: same error, a discarded file that does NOT define the symbol", () => {
+    const out = "error[E0425]: cannot find function `help` in this scope";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/other.rs"],
+        "cargo",
+        src("src/other.rs", "pub fn other() -> u8 { 2 }\n"),
+      ),
+    ).toEqual([]);
   });
 
   test("the tier is inert when no contents are supplied (degrades to the other tiers)", () => {
@@ -1108,6 +1145,18 @@ describe("discard-poison: the symbol definition tier (design 4.5)", () => {
         src("h.go", "package app\n\nfunc (r T) Help() int { return 1 }\n"),
       ),
     ).toEqual(["h.go"]);
+  });
+
+  test("Go: a missing METHOD ties too (`has no field or method`, not just `undefined:`)", () => {
+    const out = "./y_test.go:7:4: x.Help undefined (type T has no field or method Help)";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["helper.go"],
+        "go",
+        src("helper.go", "package app\n\nfunc (r T) Help() int { return 1 }\n"),
+      ),
+    ).toEqual(["helper.go"]);
   });
 
   test("Go: `undefined:` inside a test's own assertion message must NOT fire (no compiler gutter)", () => {

@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -320,6 +320,29 @@ test("readDiscardedSources reads sources, skips oversized and missing paths, nev
   expect([...out.keys()]).toEqual(["small.go"]);
   expect(out.get("small.go")).toContain("func Help()");
   expect(readDiscardedSources(root, []).size).toBe(0);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("readDiscardedSources stops at the total budget", () => {
+  const root = mkdtempSync(join(tmpdir(), "styre-rds-budget-"));
+  const paths: string[] = [];
+  for (let i = 0; i < 40; i++) {
+    const p = `f${i}.go`;
+    writeFileSync(join(root, p), "x".repeat(200 * 1024));
+    paths.push(p);
+  }
+  const out = readDiscardedSources(root, paths);
+  // 4 MB budget / 200 KB per file = 20 files kept, the rest skipped.
+  expect(out.size).toBe(20);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("readDiscardedSources skips symlinks rather than reading through them", () => {
+  const root = mkdtempSync(join(tmpdir(), "styre-rds-link-"));
+  writeFileSync(join(root, "target.txt"), "secret contents\n");
+  symlinkSync(join(root, "target.txt"), join(root, "link.go"));
+  const out = readDiscardedSources(root, ["link.go"]);
+  expect(out.size).toBe(0);
   rmSync(root, { recursive: true, force: true });
 });
 

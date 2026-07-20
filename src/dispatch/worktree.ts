@@ -1,4 +1,4 @@
-import { type Dirent, existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { type Dirent, existsSync, lstatSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join, relative } from "node:path";
 
 /** Run git in `cwd`, returning trimmed stdout; throws on failure. */
@@ -213,7 +213,9 @@ const MAX_DISCARDED_SOURCE_TOTAL = 4 * 1024 * 1024;
 /** Read the about-to-be-discarded files so the discard-poison guard can later ask whether one of them
  *  DEFINED a symbol the toolchain reports as missing (design 4.5). Must be called immediately before
  *  `discardPaths`, which deletes them. Unreadable, oversized and non-regular paths are skipped, as is
- *  anything past the total budget. Binary files are read but simply never match a definition pattern.
+ *  anything past the total budget. Symlinks are skipped (not followed) — a discarded symlink may
+ *  resolve outside the worktree entirely, and reading through it could cause a false tie even though
+ *  the contents never leave memory. Binary files are read but simply never match a definition pattern.
  *  The symbol tier is best-effort — every other tier works without it. Never throws. */
 export function readDiscardedSources(worktreePath: string, paths: string[]): Map<string, string> {
   const out = new Map<string, string>();
@@ -221,7 +223,7 @@ export function readDiscardedSources(worktreePath: string, paths: string[]): Map
   for (const p of paths) {
     try {
       const full = join(worktreePath, p);
-      const st = statSync(full);
+      const st = lstatSync(full);
       if (!st.isFile() || st.size > MAX_DISCARDED_SOURCE_BYTES || st.size > budget) continue;
       out.set(p, readFileSync(full, "utf8"));
       budget -= st.size;
