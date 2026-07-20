@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { CHECK_RULES } from "../../src/dispatch/check-rules.ts";
 import { frameworkFor } from "../../src/dispatch/check-selector.ts";
 
 const comp = (kind: string, test?: string) => ({
@@ -283,32 +284,42 @@ import {
 describe("importErrorImplicatesDiscarded (discard-poison guard: conservative import-error → discarded-file matcher)", () => {
   test("fires on `No module named '<discarded-mod>'` (pytest exit-2 collection error)", () => {
     expect(
-      importErrorImplicatesDiscarded("ModuleNotFoundError: No module named 'helper'", [
-        "checks/helper.py",
-      ]),
+      importErrorImplicatesDiscarded(
+        "ModuleNotFoundError: No module named 'helper'",
+        ["checks/helper.py"],
+        "pytest",
+      ),
     ).toEqual(["checks/helper.py"]);
     // bare `No module named 'util'` with the discarded file at a nested path (basename → module leaf)
     expect(
-      importErrorImplicatesDiscarded("E   ModuleNotFoundError: No module named 'util'", [
-        "tests/support/util.py",
-      ]),
+      importErrorImplicatesDiscarded(
+        "E   ModuleNotFoundError: No module named 'util'",
+        ["tests/support/util.py"],
+        "pytest",
+      ),
     ).toEqual(["tests/support/util.py"]);
   });
 
   test("fires on a dotted python module whose LEAF is a discarded file", () => {
     expect(
-      importErrorImplicatesDiscarded("No module named 'pkg.helper'", ["pkg/helper.py"]),
+      importErrorImplicatesDiscarded("No module named 'pkg.helper'", ["pkg/helper.py"], "pytest"),
     ).toEqual(["pkg/helper.py"]);
   });
 
   test("fires on Node `Cannot find module './helper'` and on `cannot import name X from '<mod>'`", () => {
     expect(
-      importErrorImplicatesDiscarded("Error: Cannot find module './helper'", ["src/helper.js"]),
+      importErrorImplicatesDiscarded(
+        "Error: Cannot find module './helper'",
+        ["src/helper.js"],
+        "jest",
+      ),
     ).toEqual(["src/helper.js"]);
     expect(
-      importErrorImplicatesDiscarded("ImportError: cannot import name 'foo' from 'helper'", [
-        "helper.py",
-      ]),
+      importErrorImplicatesDiscarded(
+        "ImportError: cannot import name 'foo' from 'helper'",
+        ["helper.py"],
+        "pytest",
+      ),
     ).toEqual(["helper.py"]);
   });
 
@@ -316,9 +327,11 @@ describe("importErrorImplicatesDiscarded (discard-poison guard: conservative imp
     // true-negative core: the test legitimately fails because `newfeature` is absent; an UNRELATED
     // throwaway was discarded. The feature-absence red must remain a real, installable red.
     expect(
-      importErrorImplicatesDiscarded("ModuleNotFoundError: No module named 'newfeature'", [
-        "throwaway.py",
-      ]),
+      importErrorImplicatesDiscarded(
+        "ModuleNotFoundError: No module named 'newfeature'",
+        ["throwaway.py"],
+        "pytest",
+      ),
     ).toEqual([]);
   });
 
@@ -328,48 +341,60 @@ describe("importErrorImplicatesDiscarded (discard-poison guard: conservative imp
       importErrorImplicatesDiscarded(
         "1 failed, 3 passed\nassert result == expected  # test the widget\nFAILED test_widget.py::test_x",
         ["test.py"],
+        "pytest",
       ),
     ).toEqual([]);
     // a genuine assertion-failure red (exit 1) that mentions the discarded basename in prose but has
     // no import/module error at all.
     expect(
-      importErrorImplicatesDiscarded("AssertionError: helper returned False", ["helper.py"]),
+      importErrorImplicatesDiscarded(
+        "AssertionError: helper returned False",
+        ["helper.py"],
+        "pytest",
+      ),
     ).toEqual([]);
   });
 
   test("no discarded files, or empty output → never fires", () => {
-    expect(importErrorImplicatesDiscarded("No module named 'helper'", [])).toEqual([]);
-    expect(importErrorImplicatesDiscarded("", ["helper.py"])).toEqual([]);
+    expect(importErrorImplicatesDiscarded("No module named 'helper'", [], "pytest")).toEqual([]);
+    expect(importErrorImplicatesDiscarded("", ["helper.py"], "pytest")).toEqual([]);
   });
 
   test("returns only the implicated subset when several files were discarded", () => {
     expect(
-      importErrorImplicatesDiscarded("ModuleNotFoundError: No module named 'helper'", [
-        "helper.py",
-        "unrelated_scratch.py",
-      ]),
+      importErrorImplicatesDiscarded(
+        "ModuleNotFoundError: No module named 'helper'",
+        ["helper.py", "unrelated_scratch.py"],
+        "pytest",
+      ),
     ).toEqual(["helper.py"]);
   });
 
   // --- package-init (__init__.py) shape matching ---
   test("implicates a discarded __init__.py when the missing module IS its package (shallow)", () => {
     const out = "E   ModuleNotFoundError: No module named 'pkg'";
-    expect(importErrorImplicatesDiscarded(out, ["pkg/__init__.py"])).toEqual(["pkg/__init__.py"]);
+    expect(importErrorImplicatesDiscarded(out, ["pkg/__init__.py"], "pytest")).toEqual([
+      "pkg/__init__.py",
+    ]);
   });
 
   test("implicates a discarded nested __init__.py by its full dotted package", () => {
     const out = "ModuleNotFoundError: No module named 'a.b'";
-    expect(importErrorImplicatesDiscarded(out, ["a/b/__init__.py"])).toEqual(["a/b/__init__.py"]);
+    expect(importErrorImplicatesDiscarded(out, ["a/b/__init__.py"], "pytest")).toEqual([
+      "a/b/__init__.py",
+    ]);
   });
 
   test("implicates a discarded __init__.py when a SUBMODULE of its package is imported", () => {
     const out = "ModuleNotFoundError: No module named 'pkg.sub'";
-    expect(importErrorImplicatesDiscarded(out, ["pkg/__init__.py"])).toEqual(["pkg/__init__.py"]);
+    expect(importErrorImplicatesDiscarded(out, ["pkg/__init__.py"], "pytest")).toEqual([
+      "pkg/__init__.py",
+    ]);
   });
 
   test("implicates a discarded __init__.py under a src/ prefix via a >=2-seg suffix", () => {
     const out = "ModuleNotFoundError: No module named 'mypkg.sub'";
-    expect(importErrorImplicatesDiscarded(out, ["src/mypkg/sub/__init__.py"])).toEqual([
+    expect(importErrorImplicatesDiscarded(out, ["src/mypkg/sub/__init__.py"], "pytest")).toEqual([
       "src/mypkg/sub/__init__.py",
     ]);
   });
@@ -377,31 +402,79 @@ describe("importErrorImplicatesDiscarded (discard-poison guard: conservative imp
   test("does NOT implicate a discarded nested __init__.py for an unrelated top-level import (no false reject)", () => {
     // a/b/__init__.py discarded, but the test legitimately fails importing an unrelated top-level `b`.
     const out = "ModuleNotFoundError: No module named 'b'";
-    expect(importErrorImplicatesDiscarded(out, ["a/b/__init__.py"])).toEqual([]);
+    expect(importErrorImplicatesDiscarded(out, ["a/b/__init__.py"], "pytest")).toEqual([]);
   });
 
   test("does NOT implicate a discarded __init__.py for an unrelated feature module", () => {
     const out = "ModuleNotFoundError: No module named 'unrelated_feature'";
-    expect(importErrorImplicatesDiscarded(out, ["pkg/__init__.py"])).toEqual([]);
+    expect(importErrorImplicatesDiscarded(out, ["pkg/__init__.py"], "pytest")).toEqual([]);
   });
 
   // --- conftest.py shape matching ---
   test("implicates a discarded conftest.py on a fixture-not-found error", () => {
     const out = "E       fixture 'db' not found";
-    expect(importErrorImplicatesDiscarded(out, ["tests/conftest.py"])).toEqual([
+    expect(importErrorImplicatesDiscarded(out, ["tests/conftest.py"], "pytest")).toEqual([
       "tests/conftest.py",
     ]);
   });
 
   test("does NOT implicate a discarded conftest.py on a plain assertion failure (no collection/fixture error)", () => {
     const out = "E       assert 1 == 2";
-    expect(importErrorImplicatesDiscarded(out, ["tests/conftest.py"])).toEqual([]);
+    expect(importErrorImplicatesDiscarded(out, ["tests/conftest.py"], "pytest")).toEqual([]);
   });
 
   // --- existing general tier still works (regression) ---
   test("still implicates a directly-named discarded helper", () => {
     const out = "ModuleNotFoundError: No module named 'helper'";
-    expect(importErrorImplicatesDiscarded(out, ["tests/helper.py"])).toEqual(["tests/helper.py"]);
+    expect(importErrorImplicatesDiscarded(out, ["tests/helper.py"], "pytest")).toEqual([
+      "tests/helper.py",
+    ]);
+  });
+
+  test("a null framework never implicates", () => {
+    expect(
+      importErrorImplicatesDiscarded(
+        "ModuleNotFoundError: No module named 'helper'",
+        ["helper.py"],
+        null,
+      ),
+    ).toEqual([]);
+  });
+
+  test("the five new frameworks are inert until their rules land (Task 1 is a pure refactor)", () => {
+    // noRules: behaviour on these stacks is byte-identical to before this change.
+    expect(
+      importErrorImplicatesDiscarded("cannot load such file -- helper", ["helper.rb"], "rspec"),
+    ).toEqual([]);
+    expect(
+      importErrorImplicatesDiscarded(
+        "no required module provides package m/helper",
+        ["helper/helper.go"],
+        "go",
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("CHECK_RULES registry", () => {
+  test("aliased frameworks share one rule set (a mis-aliased key is the failure this catches)", () => {
+    expect(CHECK_RULES.vitest).toBe(CHECK_RULES.jest);
+    expect(CHECK_RULES.minitest).toBe(CHECK_RULES.rspec);
+    expect(CHECK_RULES["junit-gradle"]).toBe(CHECK_RULES["junit-maven"]);
+  });
+
+  test("python and node share the legacy vocabulary verbatim (design 4.1: behaviour unchanged)", () => {
+    expect(CHECK_RULES.jest.indicators).toEqual(CHECK_RULES.pytest.indicators);
+    // The Python marker shapes stay Python-only: an __init__.py in a jest run is not a thing.
+    expect(CHECK_RULES.jest.shapes).toHaveLength(0);
+    expect(CHECK_RULES.pytest.shapes).toHaveLength(2);
+  });
+
+  test("only python carries a fixture pattern and the ERROR-summary preference", () => {
+    expect(CHECK_RULES.pytest.fixturePattern).toBeDefined();
+    expect(CHECK_RULES.rspec.fixturePattern).toBeUndefined();
+    expect(CHECK_RULES.pytest.prefersErrorSummary).toBe(true);
+    expect(CHECK_RULES["junit-maven"].prefersErrorSummary).toBeUndefined();
   });
 });
 
@@ -413,22 +486,49 @@ describe("collectionErrorExcerpt", () => {
       "=== short test summary info ===",
       "ERROR tests/x_test.py - ModuleNotFoundError: No module named 'pkg'",
     ].join("\n");
-    expect(collectionErrorExcerpt(out)).toBe(
+    expect(collectionErrorExcerpt(out, "pytest")).toBe(
       "ERROR tests/x_test.py - ModuleNotFoundError: No module named 'pkg'",
     );
   });
 
   test("collectionErrorExcerpt falls back to the last indicator line when no summary line exists", () => {
     const out = "line one\nE   ModuleNotFoundError: No module named 'pkg'\ntrailing noise";
-    expect(collectionErrorExcerpt(out)).toBe("ModuleNotFoundError: No module named 'pkg'");
+    expect(collectionErrorExcerpt(out, "pytest")).toBe(
+      "ModuleNotFoundError: No module named 'pkg'",
+    );
   });
 
   test("collectionErrorExcerpt surfaces a fixture-not-found line", () => {
-    expect(collectionErrorExcerpt("E       fixture 'db' not found")).toBe("fixture 'db' not found");
+    expect(collectionErrorExcerpt("E       fixture 'db' not found", "pytest")).toBe(
+      "fixture 'db' not found",
+    );
   });
 
   test("collectionErrorExcerpt returns undefined when no collection/import indicator is present", () => {
-    expect(collectionErrorExcerpt("E   assert 1 == 2")).toBeUndefined();
+    expect(collectionErrorExcerpt("E   assert 1 == 2", "pytest")).toBeUndefined();
+  });
+});
+
+describe("collectionErrorExcerpt (framework-aware)", () => {
+  test("returns undefined for a null framework", () => {
+    expect(
+      collectionErrorExcerpt("ModuleNotFoundError: No module named 'x'", null),
+    ).toBeUndefined();
+  });
+
+  test("a Ruby fixture error does NOT produce an excerpt (fixture patterns are python-only)", () => {
+    // Rails fixtures emit this phrase; under a global pattern it leaked across languages.
+    expect(
+      collectionErrorExcerpt("ActiveRecord::FixtureError: fixture 'users' not found", "minitest"),
+    ).toBeUndefined();
+  });
+
+  test("naming patterns trigger the excerpt (drift pin, design 4.5)", () => {
+    // `unable to resolve` is a naming alternative that was never an indicator: before this change the
+    // excerpt was undefined for such a line. Pinned so the drift is deliberate, not accidental.
+    expect(collectionErrorExcerpt("npm ERR! unable to resolve dependency tree", "jest")).toBe(
+      "npm ERR! unable to resolve dependency tree",
+    );
   });
 });
 

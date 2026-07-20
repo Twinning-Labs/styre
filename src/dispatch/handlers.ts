@@ -682,9 +682,9 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         // installed and the discard is surfaced in the retry feedback. Conservative: fires only when
         // the import error NAMES a discarded file (never a bare basename). Diagnosis-only (INV-B).
         if (discarded.length > 0 && coarse !== "green") {
-          const implicated = importErrorImplicatesDiscarded(rawOutput, discarded);
+          const implicated = importErrorImplicatesDiscarded(rawOutput, discarded, fw);
           if (implicated.length > 0) {
-            const excerpt = collectionErrorExcerpt(rawOutput);
+            const excerpt = collectionErrorExcerpt(rawOutput, fw);
             const base = `the check could not be collected (import or collection error) — this attempt discarded ${implicated.join(", ")} (undeclared)`;
             missReason.set(c.ac_id, excerpt ? `${base}. Framework said: ${excerpt}` : `${base}.`);
             continue; // uncovered → loud retry path, no poisoned check persisted

@@ -1,5 +1,6 @@
 import { basename, dirname } from "node:path";
 import type { CommandResult } from "../util/run-command.ts";
+import { CHECK_RULES, type MatchContext, moduleDotted, moduleLeaf } from "./check-rules.ts";
 
 /** A concrete test framework the selector constructor + coarse run-output reader understand.
  *  Derived from a profile component's `kind` and its `test` command string. */
@@ -225,192 +226,95 @@ export function interpretRunOutput(fw: CheckFramework, run: RunOutcome): CoarseO
   }
 }
 
-/** Source-file extensions we strip when reducing a path/module reference to its leaf module name. A
- *  reference whose final dotted segment is one of these is a filename (extension), not a dotted-module
- *  leaf. */
-const SOURCE_EXTS = new Set([
-  "py",
-  "pyi",
-  "js",
-  "jsx",
-  "ts",
-  "tsx",
-  "mjs",
-  "cjs",
-  "go",
-  "rs",
-  "rb",
-  "php",
-  "java",
-  "kt",
-  "scala",
-]);
-
-/** The leaf module identifier for a path OR a dotted/slashed module reference, lower-cased for
- *  case-insensitive comparison. Takes the last path segment, drops a trailing source extension, then
- *  takes the last remaining dotted segment: `checks/helper.py`→`helper`, `pkg.helper`→`helper`,
- *  `./a/helper.js`→`helper`, `util`→`util`. Pure. */
-function moduleLeaf(ref: string): string {
-  const seg = ref.split(/[\\/]/).pop() ?? ref; // last path segment
-  const parts = seg.split(".").filter((s) => s.length > 0);
-  if (parts.length === 0) return seg.toLowerCase();
-  if (parts.length >= 2 && SOURCE_EXTS.has((parts[parts.length - 1] ?? "").toLowerCase())) {
-    parts.pop(); // strip a file extension (a real dotted module leaf is never a known ext)
-  }
-  return (parts[parts.length - 1] ?? seg).toLowerCase();
-}
-
-/** Import/collection/module-error indicator phrases (lower-cased substrings). Their PRESENCE gates the
- *  filename-in-traceback rule; the leaf-name rule additionally requires the module identifier to sit
- *  adjacent to one of the naming phrases below.
+/** CONSERVATIVE discard-poison matcher (guards against a bad merge nobody notices). Given a run's raw
+ *  output, the files THIS dispatch discarded, and the framework that produced the output, return the
+ *  subset of discarded files the output implicates in an import/collection/module error — i.e. the
+ *  check could not run *because* a file it references was discarded.
  *
- *  FRAMEWORK BOUNDARY (documented residual — ENG-343): this vocabulary covers Python
- *  (ModuleNotFoundError/ImportError/No module named) and Node (Cannot find module) only. On Go/Rust/JVM/
- *  Ruby/PHP a discarded imported file produces a compile/collection error whose phrasing is NOT listed
- *  here, so the discard-poison guard does not fire and the same silent-bad-merge (poisoned red →
- *  environmental → non-gating advisory) remains open on those stacks. Extending this list to the other
- *  supported frameworks is tracked in ENG-343. */
-const IMPORT_ERROR_INDICATORS = [
-  "modulenotfounderror",
-  "importerror",
-  "no module named",
-  "cannot find module",
-  "cannot import name",
-  "error collecting",
-  "errors during collection",
-  "import file mismatch", // pytest prepend-import-mode mismatch (a moved/removed package marker)
-  "error importing test module",
-];
-
-/** pytest's fixture-not-found line (a discarded `conftest.py` that provided the fixture). Kept out of
- *  IMPORT_ERROR_INDICATORS so the generic basename tier stays precise; used only by the conftest tier
- *  and by collectionErrorExcerpt. */
-const FIXTURE_NOT_FOUND = /fixture ['"]?[\w.-]+['"]? not found/i;
-
-/** An import/module-error phrase followed by the module identifier it names. The capture group is the
- *  identifier (a bare `helper`, a dotted `pkg.helper`, or a `./path/helper` for Node). Global +
- *  case-insensitive; a fresh instance is constructed per call so lastIndex never leaks. */
-const IMPORT_ERROR_NAMING = String.raw`(?:no module named|cannot find module|could not import|unable to resolve|cannot import name\s+[^\n]*?\bfrom)\s+['"]?([\w./-]+)['"]?`;
-
-/** A dotted, lower-cased module reference from a "No module named 'X'" capture: slashes → dots,
- *  trimmed of leading/trailing dots. `a/b` → `a.b`, `Pkg.Sub` → `pkg.sub`. Pure. */
-function moduleDotted(ref: string): string {
-  return ref
-    .replace(/[\\/]/g, ".")
-    .replace(/^\.+|\.+$/g, "")
-    .toLowerCase();
-}
-
-/** True iff `a`'s segments are the trailing segments of `b` (a is a suffix of b). */
-function isSegSuffix(a: string[], b: string[]): boolean {
-  if (a.length === 0 || a.length > b.length) return false;
-  const off = b.length - a.length;
-  return a.every((s, i) => s === b[off + i]);
-}
-
-/** True iff `long` starts with every segment of `short` (short is a leading prefix of long). */
-function isSegPrefix(short: string[], long: string[]): boolean {
-  if (short.length === 0 || short.length > long.length) return false;
-  return short.every((s, i) => s === long[i]);
-}
-
-/** CONSERVATIVE match tying a discarded `__init__.py` to a missing-module error (option A). Derive the
- *  package from the file's DIRECTORY, then implicate iff some named module M: (1) equals the full dotted
- *  dir; (2) strictly extends it as a prefix (a submodule import); or (3) is a >=2-segment trailing suffix
- *  of the dir (absorbs a `src/` or component prefix). A bare single-segment interior name (e.g. `b` for
- *  `a/b/__init__.py`) never matches — that is the no-false-reject guarantee. Residuals (documented, not
- *  closed): a single-segment error against a deeper dir (`pkg` vs `src/pkg/__init__.py`); PEP 420
- *  namespace packages; a deep submodule with a dir prefix. Pure. */
-function packageInitImplicated(initPath: string, namedModules: string[]): boolean {
-  const dirSegs = initPath
-    .split("/")
-    .slice(0, -1)
-    .filter((s) => s.length > 0);
-  if (dirSegs.length === 0) return false;
-  for (const mod of namedModules) {
-    const modSegs = mod.split(".").filter((s) => s.length > 0);
-    if (modSegs.length === 0) continue;
-    if (modSegs.length === dirSegs.length && isSegPrefix(modSegs, dirSegs)) return true; // (1) exact
-    if (modSegs.length > dirSegs.length && isSegPrefix(dirSegs, modSegs)) return true; // (2) submodule
-    if (modSegs.length >= 2 && isSegSuffix(modSegs, dirSegs)) return true; // (3) prefixed dir
-  }
-  return false;
-}
-
-/** CONSERVATIVE discard-poison matcher (silent-bad-merge guard). Given a framework's raw run output and
- *  the files THIS dispatch discarded (undeclared new files stripped before commit), return the subset of
- *  discarded files that the output implicates in an import/collection/module error — i.e. the check could
- *  not run *because* a file it references was discarded. Never fires on a bare basename appearing
- *  incidentally: a discarded file is implicated only when (1) an import/module-error phrase NAMES its
- *  module leaf, or (2) an import-error indicator is present AND the file's exact basename-with-extension
- *  appears as a bounded token (a traceback/collection line). A red whose import error names some OTHER
- *  (e.g. feature) module is left untouched, so a legitimate fail-first test is never rejected. Pure. */
-export function importErrorImplicatesDiscarded(rawOutput: string, discarded: string[]): string[] {
-  if (discarded.length === 0 || rawOutput.trim() === "") return [];
+ *  Rules are looked up per framework in CHECK_RULES so one language's phrasing can never fire on
+ *  another's output. Three tiers per discarded file: (1) shape rules (directory- or marker-based, for
+ *  files whose own name never appears); (2) the leaf tier, where a naming phrase names the file's
+ *  module leaf — disabled for package-oriented languages; (3) the bounded-basename tier, gated on an
+ *  indicator. A red whose error names some OTHER (e.g. feature) module is left untouched, so a test
+ *  that legitimately fails because the feature is absent is never rejected. Pure. */
+export function importErrorImplicatesDiscarded(
+  rawOutput: string,
+  discarded: string[],
+  framework: CheckFramework | null,
+): string[] {
+  if (discarded.length === 0 || rawOutput.trim() === "" || framework === null) return [];
+  const rules = CHECK_RULES[framework];
   const hay = rawOutput.toLowerCase();
-  const hasIndicator = IMPORT_ERROR_INDICATORS.some((k) => hay.includes(k));
-  const hasFixtureError = FIXTURE_NOT_FOUND.test(rawOutput);
+  const hasIndicator = rules.indicators.some((k) => hay.includes(k));
+  const gatesBasename = rules.basenameGates.some((k) => hay.includes(k));
+  const hasFixtureError = rules.fixturePattern?.test(rawOutput) ?? false;
 
-  // module identifiers named by an import/module-error phrase: leaf-reduced (existing tier) AND raw
-  // dotted (new package-init tier — the prefix/suffix test is meaningless on a leaf-reduced name).
-  const named = new Set<string>();
-  const namedModules: string[] = [];
-  const re = new RegExp(IMPORT_ERROR_NAMING, "gi");
-  let m: RegExpExecArray | null;
-  // biome-ignore lint/suspicious/noAssignInExpressions: canonical exec-loop over a /g regex.
-  while ((m = re.exec(rawOutput)) !== null) {
-    if (m[1]) {
-      named.add(moduleLeaf(m[1]));
-      namedModules.push(moduleDotted(m[1]));
+  const leaves = new Set<string>();
+  const dotted: string[] = [];
+  for (const pattern of rules.naming) {
+    const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+    const re = new RegExp(pattern.source, flags);
+    let m: RegExpExecArray | null;
+    // biome-ignore lint/suspicious/noAssignInExpressions: canonical exec-loop over a /g regex.
+    while ((m = re.exec(rawOutput)) !== null) {
+      if (m[1]) {
+        leaves.add(moduleLeaf(m[1]));
+        dotted.push(moduleDotted(m[1]));
+      }
     }
   }
+  const ctx: MatchContext = { dotted, hasIndicator, hasFixtureError };
 
   const matched: string[] = [];
   for (const d of discarded) {
-    const base = d.split(/[\\/]/).pop() ?? d;
-
-    // (A) support-file shapes (Python): a marker/fixture whose ABSENCE names the package/fixture, not
-    // the file — the exact blind spot the general tiers below miss.
-    if (base === "__init__.py" && packageInitImplicated(d, namedModules)) {
-      matched.push(d);
-      continue;
+    const base = (d.split(/[\\/]/).pop() ?? d).toLowerCase();
+    let hit = false;
+    for (const shape of rules.shapes) {
+      if (shape.basename !== undefined && shape.basename !== base) continue;
+      if (shape.match(d, ctx)) {
+        hit = true;
+        break;
+      }
     }
-    if (base === "conftest.py" && (hasIndicator || hasFixtureError)) {
-      matched.push(d);
-      continue;
+    if (!hit && rules.tiesByLeaf) {
+      const leaf = moduleLeaf(d);
+      if (leaf !== "" && leaves.has(leaf)) hit = true;
     }
-
-    // (B) general tiers (unchanged): the error NAMES the discarded file's module leaf, or its exact
-    // basename appears as a bounded token while an import indicator is present.
-    const leaf = moduleLeaf(d);
-    if (leaf !== "" && named.has(leaf)) {
-      matched.push(d);
-      continue;
-    }
-    if (hasIndicator && base.includes(".")) {
+    if (!hit && gatesBasename && base.includes(".")) {
       const bounded = new RegExp(`(?:^|[\\s"'\`/(])${escapeRegex(base)}(?:[\\s"'\`:)]|$)`, "im");
-      if (bounded.test(rawOutput)) matched.push(d);
+      if (bounded.test(rawOutput)) hit = true;
     }
+    if (hit) matched.push(d);
   }
   return matched;
 }
 
-/** The one line that states a collection/import/fixture cause, in original casing, ≤200 chars. Prefers
- *  pytest's short-test-summary line (`ERROR path - Cause`, printed last and authoritative); else the
- *  LAST matching line (the first is often a re-raised error deep in a third-party traceback). Strips a
- *  leading pytest error gutter (`E   `) so the cause reads cleanly — `^E\s+` requires whitespace right
- *  after `E`, so it never eats an `ERROR …` summary line (whose next char is `R`). `undefined` when the
- *  output carries no collection/import/fixture indicator. Pure. */
-export function collectionErrorExcerpt(rawOutput: string): string | undefined {
+/** The one line that states a collection/import/fixture cause, in original casing, ≤200 chars.
+ *  Prefers pytest's short-test-summary line (`ERROR path - Cause`, printed last and authoritative)
+ *  where this language declares that preference; else the LAST matching line (the first is often a
+ *  re-raised error deep in a third-party traceback). Strips a leading pytest error gutter (`E   `) —
+ *  `^E\s+` requires whitespace right after `E`, so it never eats an `ERROR …` summary line. Considers
+ *  this framework's naming patterns as well as its indicators, so a language with no flat indicator
+ *  still yields a real compiler line. `undefined` when nothing matches. Pure. */
+export function collectionErrorExcerpt(
+  rawOutput: string,
+  framework: CheckFramework | null,
+): string | undefined {
+  if (framework === null) return undefined;
+  const rules = CHECK_RULES[framework];
+  // `.test()` on a /g regex advances lastIndex between calls, so strip `g` for these probes.
+  const probes = rules.naming.map((p) => new RegExp(p.source, p.flags.replace("g", "")));
   let summary: string | undefined;
   let lastMatch: string | undefined;
   for (const line of rawOutput.split(/\r?\n/)) {
     const low = line.toLowerCase();
     const isMatch =
-      IMPORT_ERROR_INDICATORS.some((k) => low.includes(k)) || FIXTURE_NOT_FOUND.test(line);
+      rules.indicators.some((k) => low.includes(k)) ||
+      (rules.fixturePattern?.test(line) ?? false) ||
+      probes.some((p) => p.test(line));
     if (!isMatch) continue;
     lastMatch = line;
-    if (/^\s*ERROR\b/.test(line)) summary = line;
+    if (rules.prefersErrorSummary === true && /^\s*ERROR\b/.test(line)) summary = line;
   }
   const chosen = (summary ?? lastMatch)?.trim().replace(/^E\s+/, "");
   if (chosen === undefined || chosen === "") return undefined;

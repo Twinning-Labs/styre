@@ -1,0 +1,218 @@
+import type { CheckFramework } from "./check-selector.ts";
+
+/** Source-file extensions stripped when reducing a path or module reference to its leaf name. */
+const SOURCE_EXTS = new Set([
+  "py",
+  "pyi",
+  "js",
+  "jsx",
+  "ts",
+  "tsx",
+  "mjs",
+  "cjs",
+  "go",
+  "rs",
+  "rb",
+  "php",
+  "java",
+  "kt",
+  "scala",
+]);
+
+/** The leaf module identifier for a path OR a dotted/slashed module reference, lower-cased. Takes the
+ *  last path segment, drops a trailing source extension, then the last remaining dotted segment:
+ *  `checks/helper.py`→`helper`, `pkg.helper`→`helper`, `./a/helper.js`→`helper`, `util`→`util`. Pure. */
+export function moduleLeaf(ref: string): string {
+  const seg = ref.split(/[\\/]/).pop() ?? ref;
+  const parts = seg.split(".").filter((s) => s.length > 0);
+  if (parts.length === 0) return seg.toLowerCase();
+  if (parts.length >= 2 && SOURCE_EXTS.has((parts[parts.length - 1] ?? "").toLowerCase())) {
+    parts.pop();
+  }
+  return (parts[parts.length - 1] ?? seg).toLowerCase();
+}
+
+/** A dotted, lower-cased reference: slashes → dots, trimmed of leading/trailing dots. Pure. */
+export function moduleDotted(ref: string): string {
+  return ref
+    .replace(/[\\/]/g, ".")
+    .replace(/^\.+|\.+$/g, "")
+    .toLowerCase();
+}
+
+/** The lower-cased path segments of a path's DIRECTORY (the filename is dropped). */
+function dirSegments(path: string): string[] {
+  return path
+    .split(/[\\/]/)
+    .slice(0, -1)
+    .filter((s) => s.length > 0)
+    .map((s) => s.toLowerCase());
+}
+
+/** The lower-cased dot-separated segments of a reference. */
+function dotSegments(ref: string): string[] {
+  return ref.split(".").filter((s) => s.length > 0);
+}
+
+/** True iff `long` starts with every segment of `short`. */
+function isSegPrefix(short: string[], long: string[]): boolean {
+  if (short.length === 0 || short.length > long.length) return false;
+  return short.every((s, i) => s === long[i]);
+}
+
+/** True iff `a`'s segments are the trailing segments of `b`. */
+function isSegSuffix(a: string[], b: string[]): boolean {
+  if (a.length === 0 || a.length > b.length) return false;
+  const off = b.length - a.length;
+  return a.every((s, i) => s === b[off + i]);
+}
+
+/** What a shape rule may consult about the run, besides the discarded path itself. */
+export interface MatchContext {
+  /** Raw dotted references captured by this language's naming patterns (lower-cased). */
+  dotted: string[];
+  /** True when any of this language's indicator phrases appear in the output. */
+  hasIndicator: boolean;
+  /** True when this language's fixture pattern (if any) fired. */
+  hasFixtureError: boolean;
+}
+
+/** Ties a discarded file to the failure by its DIRECTORY or by being a known marker filename — for
+ *  the cases where the file's own name never appears in the output. */
+export interface ShapeRule {
+  /** Restrict to discarded files with this exact (lower-cased) basename; undefined = any file. */
+  basename?: string;
+  match: (discardedPath: string, ctx: MatchContext) => boolean;
+}
+
+export interface LanguageRules {
+  /** Lower-cased substrings marking an import/collection failure. Drive the excerpt. */
+  indicators: string[];
+  /** The subset of indicators permitted to gate the bounded-basename tier. Empty where the toolchain
+   *  prints candidate paths that would poison it (cargo — the E0583 help note). */
+  basenameGates: string[];
+  /** Patterns whose capture group 1 is a named module, package or file reference. Single-line only. */
+  naming: RegExp[];
+  /** When true, a discarded file whose module leaf equals a named reference is implicated. FALSE for
+   *  package-oriented languages (go, jvm), where leaf matching collides on generic nouns. */
+  tiesByLeaf: boolean;
+  shapes: ShapeRule[];
+  /** This language's "fixture not found" pattern, if it has one. Per-language by design: a global
+   *  pattern leaked across languages (Rails emits `fixture 'users' not found`). */
+  fixturePattern?: RegExp;
+  /** When true, a line beginning `ERROR` is preferred as the excerpt (pytest's summary line). */
+  prefersErrorSummary?: boolean;
+}
+
+/** CONSERVATIVE match tying a discarded `__init__.py` to a missing-module error. Derive the package
+ *  from the file's DIRECTORY, then implicate iff some named module M: (1) equals the full dotted dir;
+ *  (2) strictly extends it as a prefix (a submodule import); or (3) is a >=2-segment trailing suffix
+ *  of the dir. A bare single-segment interior name never matches. Pure. */
+function packageInitImplicated(initPath: string, ctx: MatchContext): boolean {
+  const dirSegs = dirSegments(initPath);
+  if (dirSegs.length === 0) return false;
+  for (const mod of ctx.dotted) {
+    const modSegs = dotSegments(mod);
+    if (modSegs.length === 0) continue;
+    if (modSegs.length === dirSegs.length && isSegPrefix(modSegs, dirSegs)) return true;
+    if (modSegs.length > dirSegs.length && isSegPrefix(dirSegs, modSegs)) return true;
+    if (modSegs.length >= 2 && isSegSuffix(modSegs, dirSegs)) return true;
+  }
+  return false;
+}
+
+/** A discarded Rust `mod.rs` is leafless (`moduleLeaf` yields `mod`), so tie it by its directory:
+ *  `tests/common/mod.rs` is implicated when a named module equals `common`. Pure. */
+export function modMarkerImplicated(modPath: string, ctx: MatchContext): boolean {
+  const dirLeaf = dirSegments(modPath).at(-1);
+  return dirLeaf !== undefined && ctx.dotted.includes(dirLeaf);
+}
+
+/** A Go package IS a directory, and the module prefix is NOT on disk — so the discarded file's
+ *  directory segments must be a trailing SUFFIX of the package path's segments.
+ *  `example.com/m/helper` implicates `helper/helper.go` and `helper/util.go` (dir `helper`), but a
+ *  missing DEPENDENCY implicates nothing: `github.com/stretchr/testify/assert` against
+ *  `internal/assert/helper.go` compares `[internal, assert]` to `[testify, assert]` and fails. Pure. */
+export function goPackageImplicated(path: string, ctx: MatchContext): boolean {
+  const dirSegs = dirSegments(path);
+  if (dirSegs.length === 0) return false;
+  return ctx.dotted.some((m) => isSegSuffix(dirSegs, dotSegments(m)));
+}
+
+/** A JVM package IS a directory, and the source root (`src/test/java`) IS on disk — so the package's
+ *  segments must be a trailing SUFFIX of the file's directory segments (the mirror of the Go rule).
+ *  Requires >=2 segments, matching the `__init__.py` rule: a single generic segment (`util`, `api`)
+ *  is exactly the collision the directory rules exist to remove. Pure. */
+export function jvmPackageImplicated(path: string, ctx: MatchContext): boolean {
+  const dirSegs = dirSegments(path);
+  if (dirSegs.length === 0) return false;
+  return ctx.dotted.some((m) => {
+    const segs = dotSegments(m);
+    return segs.length >= 2 && isSegSuffix(segs, dirSegs);
+  });
+}
+
+/** The pre-ENG-343 shared vocabulary, kept VERBATIM for python and node so their behaviour is
+ *  unchanged (design 4.1). Python and node phrasings are genuinely distinctive from each other,
+ *  unlike `package X does not exist`, so sharing these two carries no cross-language risk. */
+const LEGACY_INDICATORS = [
+  "modulenotfounderror",
+  "importerror",
+  "no module named",
+  "cannot find module",
+  "cannot import name",
+  "error collecting",
+  "errors during collection",
+  "import file mismatch",
+  "error importing test module",
+];
+
+const LEGACY_NAMING =
+  /(?:no module named|cannot find module|could not import|unable to resolve|cannot import name\s+[^\n]*?\bfrom)\s+['"]?([\w./-]+)['"]?/gi;
+
+const pythonRules: LanguageRules = {
+  indicators: LEGACY_INDICATORS,
+  basenameGates: LEGACY_INDICATORS,
+  naming: [LEGACY_NAMING],
+  tiesByLeaf: true,
+  shapes: [
+    { basename: "__init__.py", match: packageInitImplicated },
+    { basename: "conftest.py", match: (_p, ctx) => ctx.hasIndicator || ctx.hasFixtureError },
+  ],
+  fixturePattern: /fixture ['"]?[\w.-]+['"]? not found/i,
+  prefersErrorSummary: true,
+};
+
+const nodeRules: LanguageRules = {
+  indicators: LEGACY_INDICATORS,
+  basenameGates: LEGACY_INDICATORS,
+  naming: [LEGACY_NAMING],
+  tiesByLeaf: true,
+  shapes: [],
+};
+
+/** No rules: behaviour identical to before ENG-343. Replaced per language in Tasks 2 and 3. */
+const noRules: LanguageRules = {
+  indicators: [],
+  basenameGates: [],
+  naming: [],
+  tiesByLeaf: false,
+  shapes: [],
+};
+
+/** The per-language rule registry — THE extension point for the discard poison guard. Add new
+ *  languages, new toolchain phrasings and per-language exceptions HERE, never to a shared list: a
+ *  shared list applies every phrase to every run, which produced confirmed cross-language false
+ *  rejects (`package X does not exist` is ordinary English). See the ENG-343 design, section 2. */
+export const CHECK_RULES: Record<CheckFramework, LanguageRules> = {
+  pytest: pythonRules,
+  jest: nodeRules,
+  vitest: nodeRules,
+  go: noRules,
+  cargo: noRules,
+  "junit-maven": noRules,
+  "junit-gradle": noRules,
+  rspec: noRules,
+  minitest: noRules,
+  phpunit: noRules,
+};
