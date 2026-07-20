@@ -1377,8 +1377,7 @@ test("A17 ⚔ a discarded Go helper package → AC uncovered, file surfaced", as
     runCheck: async () => ({
       exitCode: 1,
       stdout: "",
-      stderr:
-        "checks/ENG-1_ac1_test.go:3:8: no required module provides package example.com/m/helper; to add it:",
+      stderr: `checks/${h.ident}_ac1_test.go:3:8: no required module provides package example.com/m/helper; to add it:`,
       timedOut: false,
     }),
   });
@@ -1425,8 +1424,7 @@ test("A18 ⚔ a Go red naming a FEATURE package + an unrelated discarded file st
     runCheck: async () => ({
       exitCode: 1,
       stdout: "",
-      stderr:
-        "checks/ENG-1_ac1_test.go:3:8: no required module provides package example.com/m/newfeature; to add it:",
+      stderr: `checks/${h.ident}_ac1_test.go:3:8: no required module provides package example.com/m/newfeature; to add it:`,
       timedOut: false,
     }),
   });
@@ -1442,8 +1440,9 @@ test("A18 ⚔ a Go red naming a FEATURE package + an unrelated discarded file st
 
 // --- A19 (ENG-343 residual pin: rspec load errors never reach the guard) ------------------------
 // RSpec does NOT abort on a spec-file load error — it reports it and still prints `0 examples`,
-// exiting 1. interpretRunOutput (check-selector.ts:216-218) tests `\b0 examples` BEFORE the exit code,
-// so the run is bucketed `selected-none` and handlers.ts returns ABOVE the discard-poison guard.
+// exiting 1. interpretRunOutput's `case "rspec"` tests `\b0 examples` BEFORE the exit code, so the run
+// is bucketed `selected-none` and handlers.ts `continue`s the per-AC loop ABOVE the discard-poison
+// guard — the guard is never consulted.
 // This is SAFE (the AC still goes uncovered and discardNote still names the file) but the specific
 // "could not be collected" message is never produced.
 //
@@ -1481,7 +1480,7 @@ test("A19 an rspec load error is bucketed selected-none, bypassing the discard-p
         "An error occurred while loading ./spec/ENG-1_ac1_test.rb.\n" +
         "Failure/Error: require 'support/helper'\n\n" +
         "LoadError:\n  cannot load such file -- support/helper\n\n" +
-        "0 examples, 0 failures\n\n1 error occurred outside of examples",
+        "0 examples, 0 failures, 1 error occurred outside of examples",
       stderr: "",
       timedOut: false,
     }),
