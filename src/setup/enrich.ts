@@ -1,5 +1,6 @@
 import setupEnrichTemplate from "../../prompts/setup-enrich.md" with { type: "text" };
 import type { AgentRunner } from "../agent/runner.ts";
+import { configError } from "../cli/errors.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
 import { modelForTier } from "../config/agent-config.ts";
 import type { RuntimeContext } from "../dispatch/profile.ts";
@@ -78,11 +79,16 @@ export async function enrichRuntimeContext(
       if (parsed.ok) return mergeScanAndEnrichment(scan, parsed.value);
       lastReason = `sidecar ${parsed.reason}: ${parsed.detail}`;
     } else {
-      lastReason = result.timedOut ? "timed out" : `exit ${result.exitCode}`;
+      lastReason = result.timedOut
+        ? "timed out"
+        : `exit ${result.exitCode}: ${result.stderr.trim().slice(0, 500)}`;
     }
     if (attempt < MAX_ATTEMPTS) await sleep(BACKOFF_MS[attempt - 1] ?? 0);
   }
-  throw new Error(
-    `enrichRuntimeContext: agent enrichment failed after ${MAX_ATTEMPTS} attempts: ${lastReason}`,
-  );
+  throw configError({
+    file: "the agent CLI",
+    detail: `enrichment failed after ${MAX_ATTEMPTS} attempts: ${lastReason}`,
+    recovery:
+      "Check the agent CLI is authenticated (e.g. ANTHROPIC_API_KEY) and re-run styre setup.",
+  });
 }
