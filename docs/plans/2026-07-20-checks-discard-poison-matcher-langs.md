@@ -1209,10 +1209,10 @@ git add test/dispatch/scope-disposition-smoke.test.ts
 git commit -m "test(checks): smoke cells for Go discard poison and the rspec residual (ENG-343)"
 ```
 
-- [ ] **Step 7: Proceed to Task 5, then return here for Steps 7–8**
+- [ ] **Step 7: Go and do Task 5 now, then come back for Steps 8 and 9**
 
 Task 5 adds the symbol definition tier. Do it before the design correction and the PR, so both reflect
-the finished state. (Steps 7 and 8 below run after Task 5 is committed.)
+the finished state. Steps 8 and 9 below run only after Task 5 is committed.
 
 - [ ] **Step 8: Update the design's coverage section to match what shipped**
 
@@ -1221,6 +1221,10 @@ Two claims in `docs/brainstorms/2026-07-20-checks-discard-poison-matcher-langs-d
 1. §4.3 and §5 describe the Go rule as matching the package leaf against the directory name. It is stricter: the file's directory segments must be a trailing **suffix** of the package path. Update the wording, and note this is the mirror of the JVM rule (JVM: package is a suffix of the directory, because the source root is on disk; Go: directory is a suffix of the package, because the module prefix is not).
 2. §5 says a discarded `helper/util.go` does not tie for Go. Under directory alignment it **does** — any file in the missing package's directory is implicated. Correct the Go row.
 3. §5's statement that "the directory rules remove the known collisions" holds only with segment alignment; say so explicitly, and record the surviving narrow residual: a top-level directory whose name equals a dependency's package leaf (e.g. a repo-root `assert/` against `github.com/stretchr/testify/assert`).
+4. §9's "Conservative matching" bullet still reads "every rule ties to a named file, module or package directory". The symbol tier ties to file *contents*. Amend the bullet to name the evidence tier.
+5. §7.1 still lists Go `undefined: Helper` and JVM `cannot find symbol` as residual pins, and §10's trail still records rspec `NameError` and PHP Composer as shapes that "do not tie". With Task 5 those are covered whenever contents are present. The Task 2/3 unit pins still pass (they pass no `sources`), so nothing turns red — the docs would simply misdescribe the product. Correct both.
+6. §5's Rust row: state that `cannot find <kind>` and E0433 forms tie; do not claim blanket Rust symbol coverage.
+7. Add the residuals Task 5's review surfaced: Go grouped `const (…)` declarations, PHP `Call to undefined function`, and PHP `Interface`/`Trait` not found.
 
 Commit:
 
@@ -1326,6 +1330,93 @@ describe("discard-poison: the symbol definition tier (design 4.5)", () => {
       importErrorImplicatesDiscarded(out, ["src/test/java/com/x/Helper.java"], "junit-maven", src("src/test/java/com/x/Helper.java", "package com.x;\n\npublic class Helper {}\n")),
     ).toEqual([]);
   });
+
+  test("Rust: rustc's compound kinds and E0433 are captured", () => {
+    // Real rustc wording. `Helper::new()` produces E0433, the most common way a test reaches a helper.
+    const compound = "error[E0422]: cannot find struct, variant or union type `Config` in this scope";
+    expect(
+      importErrorImplicatesDiscarded(compound, ["src/c.rs"], "cargo", src("src/c.rs", "pub struct Config {}\n")),
+    ).toEqual(["src/c.rs"]);
+    const e0433 = "error[E0433]: failed to resolve: use of undeclared type `Helper`";
+    expect(
+      importErrorImplicatesDiscarded(e0433, ["src/h.rs"], "cargo", src("src/h.rs", "pub struct Helper;\n")),
+    ).toEqual(["src/h.rs"]);
+  });
+
+  test("Go: a method on a receiver ties, not just a bare func", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    expect(
+      importErrorImplicatesDiscarded(out, ["h.go"], "go", src("h.go", "package app\n\nfunc (r T) Help() int { return 1 }\n")),
+    ).toEqual(["h.go"]);
+  });
+
+  test("Go: `undefined:` inside a test's own assertion message must NOT fire (no compiler gutter)", () => {
+    // Ordinary program text masquerading as a diagnostic — the section 2 failure class, within one
+    // language. The gutter anchor is what rejects it.
+    const out = 'x_test.go:12: want no error, got "undefined: Config"';
+    expect(
+      importErrorImplicatesDiscarded(out, ["scratch/dump.go"], "go", src("scratch/dump.go", "package scratch\n\ntype Config struct{}\n")),
+    ).toEqual([]);
+  });
+
+  test("JVM: a `symbol: method` capture cannot cross-match a type declaration", () => {
+    const out = "ATest.java:12: error: cannot find symbol\n  symbol:   method helper(int)";
+    expect(
+      importErrorImplicatesDiscarded(out, ["Helper.java"], "junit-maven", src("Helper.java", "class helper {}\n")),
+    ).toEqual([]);
+  });
+
+  // DOCUMENTATION PINS (design section 5, residual 4): the tier is a text search, so a discarded file
+  // that merely MENTIONS a definition is implicated. Recorded so the residual cannot drift unnoticed.
+  test("residual: a comment mentioning the definition implicates the file", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    expect(
+      importErrorImplicatesDiscarded(out, ["n.go"], "go", src("n.go", "package app\n// TODO: func Help should live here one day\n")),
+    ).toEqual(["n.go"]);
+  });
+
+  test("residual: a compile stub the agent wrote for its own test is implicated", () => {
+    // The realistic case: the agent stubs `type Config struct{}` so its RED-first test builds, does not
+    // declare it, and the stub is discarded. Costs one retry; self-heals next attempt (no stub to
+    // discard). Never a bad merge.
+    const out = "checks/x_test.go:3:10: undefined: Config";
+    expect(
+      importErrorImplicatesDiscarded(out, ["checks/stub.go"], "go", src("checks/stub.go", "package checks\n\ntype Config struct{}\n")),
+    ).toEqual(["checks/stub.go"]);
+  });
+
+  test("symbolLeaf reduces qualified names; a Go package qualifier is deliberately dropped too", () => {
+    // `helper.Help` means package `helper` lacks `Help`. We reduce to `Help`, so an unrelated
+    // discarded package defining `Help` is implicated. Accepted: the consequence is a retry.
+    const out = "app/y_test.go:5:30: undefined: helper.Help";
+    expect(
+      importErrorImplicatesDiscarded(out, ["other/thing.go"], "go", src("other/thing.go", "package other\n\nfunc Help() int { return 1 }\n")),
+    ).toEqual(["other/thing.go"]);
+  });
+
+  test("a symbol-tier hit yields a real compiler line in the excerpt", () => {
+    expect(collectionErrorExcerpt("app/y_test.go:5:30: undefined: Help", "go")).toBe(
+      "app/y_test.go:5:30: undefined: Help",
+    );
+    expect(
+      collectionErrorExcerpt("spec/c_spec.rb:2:in `<main>': uninitialized constant Helper (NameError)", "rspec"),
+    ).toContain("uninitialized constant Helper");
+  });
+});
+
+describe("mutation guard: the symbol tier's contrast must discriminate", () => {
+  test("a symbol-blind definition pattern would implicate an unrelated discarded file", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    const sources = new Map([["scratch.go", "package app\n\nfunc Other() int { return 2 }\n"]]);
+    const orig = CHECK_RULES.go.definesSymbol;
+    try {
+      (CHECK_RULES.go as { definesSymbol?: (s: string) => RegExp }).definesSymbol = () => /\bfunc\s+\w+/;
+      expect(importErrorImplicatesDiscarded(out, ["scratch.go"], "go", sources)).toEqual(["scratch.go"]);
+    } finally {
+      (CHECK_RULES.go as { definesSymbol?: (s: string) => RegExp }).definesSymbol = orig;
+    }
+    expect(importErrorImplicatesDiscarded(out, ["scratch.go"], "go", sources)).toEqual([]);
+  });
 });
 ```
 
@@ -1365,26 +1456,44 @@ export function symbolLeaf(ref: string): string {
 Then add the fields to the language entries (leave `pythonRules` and `nodeRules` without them — Python and Node name the module, not a bare symbol, and adding a tier there would change behaviour this plan promises to preserve):
 
 ```ts
-// in goRules
-  symbolNaming: [/undefined:\s+([\w.]+)/gi],
-  definesSymbol: (s) => new RegExp(`\\b(?:func|type|var|const)\\s+${escapeSymbol(s)}\\b`),
+// in goRules — both patterns are ANCHORED to the compiler's `file.go:LINE:COL:` gutter. Unanchored,
+// `undefined: Config` inside a test's own assertion message would fire the tier: ordinary program
+// text masquerading as a diagnostic, the same failure class the registry exists to prevent.
+// definesSymbol allows an optional receiver so methods (`func (r T) Help()`) tie, not just functions.
+  symbolNaming: [
+    /^[^\s:]+\.go:\d+:\d+:\s+undefined:\s+([\w.]+)/gim,
+    /^[^\s:]+\.go:\d+:\d+:.*has no field or method\s+(\w+)/gim,
+  ],
+  definesSymbol: (s) =>
+    new RegExp(`\\b(?:func\\s+(?:\\([^)]*\\)\\s*)?|type\\s+|var\\s+|const\\s+)${escapeSymbol(s)}\\b`),
 
-// in jvmRules
-  symbolNaming: [/symbol:\s+(?:class|interface|enum|record|variable|method)\s+([\w.]+)/gi],
+// in jvmRules — `variable` and `method` are deliberately NOT captured: definesSymbol only recognises
+// type declarations, so capturing them could only ever produce a cross-kind mismatch (a `symbol:
+// method helper(int)` wrongly tying a file that declares `class helper`).
+  symbolNaming: [/symbol:\s+(?:class|interface|enum|record)\s+([\w.]+)/gi],
   definesSymbol: (s) => new RegExp(`\\b(?:class|interface|enum|record)\\s+${escapeSymbol(s)}\\b`),
 
-// in rustRules
-  symbolNaming: [/cannot find (?:function|value|type|struct|trait|macro)\s+['"`]?(\w+)['"`]?/gi],
+// in rustRules — the kind list is a loose character class because rustc writes compound kinds with
+// commas ("cannot find function, tuple struct or tuple variant `Point`"). The second pattern covers
+// E0433 (`use of undeclared type `Helper``), which is what rustc emits for `Helper::new()` — the most
+// common way a Rust test reaches a discarded helper.
+  symbolNaming: [
+    /cannot find [a-z, ]*?['"`](\w+)['"`]/gi,
+    /use of (?:undeclared|unresolved)[\w ]*?['"`](\w+)['"`]/gi,
+  ],
   definesSymbol: (s) => new RegExp(`\\b(?:fn|struct|enum|trait|const|static|type)\\s+${escapeSymbol(s)}\\b`),
 
 // in rubyRules
   symbolNaming: [/uninitialized constant\s+([\w:]+)/gi],
   definesSymbol: (s) => new RegExp(`\\b(?:class|module)\\s+${escapeSymbol(s)}\\b`),
 
-// in phpRules
+// in phpRules — case-insensitive: PHP class names are, so `Class "Helper" not found` must tie a file
+// declaring `class helper`.
   symbolNaming: [/Class\s+["']([\w\\]+)["']\s+not found/gi],
-  definesSymbol: (s) => new RegExp(`\\b(?:class|interface|trait)\\s+${escapeSymbol(s)}\\b`),
+  definesSymbol: (s) => new RegExp(`\\b(?:class|interface|trait)\\s+${escapeSymbol(s)}\\b`, "i"),
 ```
+
+Leave `pythonRules` and `nodeRules` without a symbol tier. The reason is not merely that they name modules: Python's `NameError: name 'x' is not defined` and Node's `ReferenceError: X is not defined` arrive on **runtime** failures of checks that collected fine — and a RED-first check failing on an absent name is the *normal, correct* case there. A symbol tier on those stacks would reject legitimately red checks wholesale. Omitting them is the conservative call and it also preserves Task 1's behaviour-unchanged promise.
 
 - [ ] **Step 4: Add the tier to the matcher**
 
@@ -1399,13 +1508,22 @@ export function importErrorImplicatesDiscarded(
 ): string[] {
 ```
 
+Also update `collectionErrorExcerpt`'s probe list so a symbol-tier hit yields a real compiler line. Without this, the four stacks this task exists for get a retry message with no toolchain text at all — `undefined:`, `uninitialized constant`, `Class "…" not found` and `cannot find …` are in no language's `indicators`:
+
+```ts
+  const probes = [...rules.naming, ...(rules.symbolNaming ?? [])].map(
+    (p) => new RegExp(p.source, p.flags.replace("g", "")),
+  );
+```
+
 After the `ctx` construction, add:
 
 ```ts
-  // Symbols the toolchain names without naming their defining file (design 4.5). Empty unless this
-  // language declares `symbolNaming` AND the caller supplied the discarded files' contents.
+  // Symbols the toolchain names without naming their defining file (design 4.5). Collected whenever
+  // this language declares `symbolNaming` — NOT gated on `sources`, so the excerpt and this list stay
+  // independent of whether contents happened to be supplied.
   const symbols: string[] = [];
-  if (sources !== undefined && sources.size > 0 && rules.symbolNaming !== undefined) {
+  if (rules.symbolNaming !== undefined) {
     for (const pattern of rules.symbolNaming) {
       const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
       const re = new RegExp(pattern.source, flags);
@@ -1440,22 +1558,28 @@ Expected: PASS, including every earlier task's assertions (the new parameter is 
 In `src/dispatch/worktree.ts`, extend the `node:fs` import to `{ type Dirent, existsSync, readFileSync, readdirSync, rmSync, statSync }` and add beside `discardPaths`:
 
 ```ts
-/** The largest discarded file whose contents are worth holding in memory for the discard-poison
- *  symbol tier. A source helper is kilobytes; anything larger is not one. */
+/** The largest single discarded file worth holding in memory for the symbol tier. A source helper is
+ *  kilobytes; anything larger is not one. */
 const MAX_DISCARDED_SOURCE_BYTES = 256 * 1024;
+/** Total budget across one dispatch, so an agent that emits hundreds of undeclared generated files
+ *  cannot pin unbounded memory in the runner for the life of the dispatch. */
+const MAX_DISCARDED_SOURCE_TOTAL = 4 * 1024 * 1024;
 
 /** Read the about-to-be-discarded files so the discard-poison guard can later ask whether one of them
  *  DEFINED a symbol the toolchain reports as missing (design 4.5). Must be called immediately before
- *  `discardPaths`, which deletes them. Unreadable, oversized or non-regular paths are skipped: the
- *  symbol tier is best-effort and every other tier works without it. Never throws. */
+ *  `discardPaths`, which deletes them. Unreadable, oversized and non-regular paths are skipped, as is
+ *  anything past the total budget. Binary files are read but simply never match a definition pattern.
+ *  The symbol tier is best-effort — every other tier works without it. Never throws. */
 export function readDiscardedSources(worktreePath: string, paths: string[]): Map<string, string> {
   const out = new Map<string, string>();
+  let budget = MAX_DISCARDED_SOURCE_TOTAL;
   for (const p of paths) {
     try {
       const full = join(worktreePath, p);
       const st = statSync(full);
-      if (!st.isFile() || st.size > MAX_DISCARDED_SOURCE_BYTES) continue;
+      if (!st.isFile() || st.size > MAX_DISCARDED_SOURCE_BYTES || st.size > budget) continue;
       out.set(p, readFileSync(full, "utf8"));
+      budget -= st.size;
     } catch {
       // unreadable → skip; the guard degrades to the name-based tiers
     }
@@ -1463,6 +1587,8 @@ export function readDiscardedSources(worktreePath: string, paths: string[]): Map
   return out;
 }
 ```
+
+This capture also runs for `implement:dispatch` when `implementDisposition` is `"discard"` (`handlers.ts:960`). That handler does not consume the map; the cost is one bounded read per discarded file.
 
 In `src/dispatch/run-dispatch.ts`: add `readDiscardedSources` to the import from `./worktree.ts`; add `discardedSources: Map<string, string>;` to the return type at line ~108; initialise `let discardedSources = new Map<string, string>();` beside `let discarded: string[] = [];` (line ~202); capture before the delete:
 
@@ -1485,7 +1611,42 @@ In `src/dispatch/handlers.ts`, add `discardedSources` to the destructuring at li
           const implicated = importErrorImplicatesDiscarded(rawOutput, discarded, fw, discardedSources);
 ```
 
-- [ ] **Step 8: Add the end-to-end smoke cell**
+- [ ] **Step 8: Pin the invariants the tier silently rests on**
+
+Three properties would fail open and quiet if broken — the tier would go inert and every existing test would still pass. Pin each where it lives.
+
+In `test/dispatch/run-dispatch.test.ts`, extend the existing discard case (the one asserting `out.discarded).toEqual(["scratch.py"])`, around line 628) with the key-identity and telemetry pins:
+
+```ts
+  // The symbol tier looks contents up by the EXACT path string in `discarded`. If these two ever
+  // diverge (a `./` prefix, a separator, a normPath call slipped in between) the tier silently returns
+  // nothing and no other test notices.
+  expect([...out.discardedSources.keys()]).toEqual(out.discarded);
+  expect(out.discardedSources.get("scratch.py")).toContain("scratch");
+  // File CONTENTS must never reach telemetry — the payload carries paths only.
+  expect(Object.keys(JSON.parse(notes[0]?.payload_json ?? "{}"))).toEqual(["discarded"]);
+```
+
+Adjust the `toContain` argument to whatever the existing test writes into `scratch.py`.
+
+In `test/dispatch/worktree.test.ts`, add direct tests for the new function:
+
+```ts
+test("readDiscardedSources reads sources, skips oversized and missing paths, never throws", () => {
+  const root = mkdtempSync(join(tmpdir(), "styre-rds-"));
+  writeFileSync(join(root, "small.go"), "package a\n\nfunc Help() int { return 1 }\n");
+  writeFileSync(join(root, "big.go"), "x".repeat(256 * 1024 + 1));
+  const out = readDiscardedSources(root, ["small.go", "big.go", "absent.go"]);
+  expect([...out.keys()]).toEqual(["small.go"]);
+  expect(out.get("small.go")).toContain("func Help()");
+  expect(readDiscardedSources(root, []).size).toBe(0);
+  rmSync(root, { recursive: true, force: true });
+});
+```
+
+Add `readDiscardedSources` to that file's import from `../../src/dispatch/worktree.ts`, and `mkdtempSync`/`writeFileSync`/`rmSync`/`tmpdir`/`join` if not already imported.
+
+- [ ] **Step 9: Add the end-to-end smoke cell**
 
 The plumbing — contents captured at discard time surviving to the guard — is the real risk in this task, and only an end-to-end cell proves it. Append to `test/dispatch/scope-disposition-smoke.test.ts`:
 
@@ -1534,17 +1695,18 @@ test("A20 ⚔ a discarded same-package Go helper is tied by the symbol it define
   expect(checks).toHaveLength(0); // no poisoned check installed
   expect(message).toMatch(/import or collection error/);
   expect(message).toContain("checks/helper.go"); // tied by evidence, not by name
+  expect(message).toContain("undefined: Help"); // the excerpt carried the compiler's own line
 });
 ```
 
-- [ ] **Step 9: Run the full gate**
+- [ ] **Step 10: Run the full gate**
 
 Run: `bun run typecheck && bun run format && bun run lint && bun test`
 Expected: all clean/green.
 
-If A20 fails on the message assertion, check that `discardedSources` is actually threaded through `handlers.ts:575` — an empty map makes the tier silently inert, which is exactly the plumbing failure this cell exists to catch. Do NOT weaken the assertion.
+If A20 fails on the message assertion, check that `discardedSources` is actually threaded through the `checks:dispatch` destructuring (`handlers.ts:569-576`) — an empty map makes the tier silently inert, which is exactly the plumbing failure this cell exists to catch. Do NOT weaken the assertion.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add src/dispatch/worktree.ts src/dispatch/run-dispatch.ts src/dispatch/handlers.ts src/dispatch/check-rules.ts src/dispatch/check-selector.ts test/dispatch/check-selector.test.ts test/dispatch/scope-disposition-smoke.test.ts

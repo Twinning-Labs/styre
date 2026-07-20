@@ -179,9 +179,30 @@ Qualified names are reduced to their last segment first (`App\Helper` → `Helpe
 caller that does not supply them — the tier is simply inert and the other tiers behave exactly as
 before. Nothing depends on it.
 
-**Residual.** The definition pattern is a text search, so a discarded file that merely *mentions*
-`class Helper` inside a comment or string would match. The error must still name that exact symbol, so
-the combination is unlikely, and the consequence is a retry rather than a bad merge.
+**Residual, stated honestly.** The definition pattern is a text search, so a discarded file that merely
+*contains* a definition of the named symbol is implicated — a comment, a string literal, a code
+generator's fixture, or a **compile stub the agent wrote so its own test would build**.
+
+It is tempting to argue the two conditions rarely co-occur. That argument is wrong on compiled stacks:
+the error naming the missing symbol is not unlikely there, it is the *normal* shape of a healthy
+RED-first check, because the feature genuinely does not exist yet. So the conjunction collapses to a
+single condition — does any discarded file textually define the symbol — and the most likely discarded
+file at checks time is exactly a stub defining it.
+
+The concrete case: the agent writes a check referencing `Config` plus an undeclared stub
+`type Config struct{}`, the stub is discarded, `undefined: Config` follows, and a good RED check is sent
+back as uncovered. The precision of this tier therefore rests entirely on the definition side, not on
+the conjunction.
+
+The cost is one retry attempt, never a bad merge, and it self-heals on the next attempt because there is
+no stub left to discard. The feedback is also arguably right: discarding that stub *did* break the
+check, and naming it tells the agent to declare it. A persistently stubbing agent would burn the budget
+toward an escalation — that is the accepted downside.
+
+Two mitigations are applied rather than relying on the conjunction: Go's symbol patterns are anchored to
+the compiler's `file.go:LINE:COL:` gutter, so `undefined: Config` appearing inside a test's own assertion
+message does not fire the tier; and JVM captures only type-kind symbols, so a `symbol: method` line
+cannot cross-match a type declaration.
 
 ### 4.6 Excerpt
 
@@ -199,7 +220,7 @@ Verified against real toolchains. **The shapes that tie are, in several ecosyste
 | Stack | Ties | Does not tie |
 |---|---|---|
 | **Go** | helper in a *separate* package (`no required module provides package`); helper in the *same* package via the symbol tier (§4.5) | a symbol whose definition the discarded file does not textually contain |
-| **Rust** | `mod`-style modules (E0583), including `tests/common/mod.rs` via the marker shape; missing items via the symbol tier | `use`-style imports (E0432), which name neither a file nor a symbol in scope |
+| **Rust** | `mod`-style modules (E0583), including `tests/common/mod.rs` via the marker shape; `cannot find <kind> \`x\`` and E0433 `use of undeclared …` via the symbol tier | plain `use`-style imports (E0432), which name neither a file nor a symbol in scope |
 | **Ruby, minitest** | explicit `require` of the discarded helper | — |
 | **Ruby, rspec** | the standard `Dir[…].each { require f }` support loader, via the symbol tier (`uninitialized constant Helper` arrives as a normal red); boot-time require failure | a spec-file `LoadError`, which is intercepted as `selected-none` before the guard runs (§6) |
 | **PHP** | explicit `require`/`require_once`; composer PSR-4 autoload via the symbol tier (`Class "Helper" not found`) | — |
@@ -219,8 +240,10 @@ merge unverified.
 1. An rspec spec-file `LoadError`, bucketed `selected-none` before the guard (§6). Safe, vaguer message.
 2. Rust `use`-style imports (E0432): they name neither a file nor an in-scope symbol.
 3. A symbol whose definition the discarded file does not textually contain — generated code, a macro, a
-   symbol re-exported from elsewhere.
-4. A discarded file that merely *mentions* a symbol in a comment or string (§4.5).
+   symbol re-exported from elsewhere. Also Go grouped `const (…)` declarations, PHP
+   `Call to undefined function`, and PHP `Interface`/`Trait` not found.
+4. A discarded file that textually contains a definition without being the cause — a comment, a string
+   literal, a generator fixture, or an agent's own compile stub (§4.5, where the cost is spelled out).
 5. Toolchain wording outside the listed phrases (other versions, other locales).
 6. The `error` bucket with empty output — ENG-347, out of scope here (§8).
 
