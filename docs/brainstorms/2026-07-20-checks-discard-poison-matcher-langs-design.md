@@ -57,7 +57,8 @@ Both are the *common* red on those stacks (a dependency missing from `go.mod` or
 | D2 | Errors naming only a symbol (Go `undefined: X`, JVM `cannot find symbol`) | **Not tied.** Documented residuals, pinned by tests. |
 | D3 | How packages tie | **By directory, not by file leaf,** for Go and JVM, where a package *is* a directory. Reuses the segment-suffix helpers written for `__init__.py`. |
 | D4 | The `error` bucket hole (§8) | **Out of scope.** Documented here, tracked in its own ticket. |
-| D5 | Test coverage | Unit tests per language against the registry, plus three smoke cells. |
+| D5 | Test coverage | Unit tests per language against the registry, plus four smoke cells. |
+| D6 | Symbols the toolchain names without naming a file | **Tie them by evidence** (§4.5): capture each undeclared file's contents before discarding, and implicate one that *defined* the missing symbol. *(Added after the design review; supersedes D2's "not tied" for every case where the discarded file demonstrably defined the symbol. D2's conservatism still governs everything else — a symbol we cannot evidence is still never guessed at by name.)* |
 
 D1 is what makes the rest safe: with the registry, a Ruby run never sees JVM phrases, so the false rejects
 in §2 cannot occur. It also removes an alternation-ordering bug for free — Node's `cannot find module`
@@ -140,7 +141,49 @@ error[E0583]: file not found for module `newfeature`
   tier can never tie it. `mod.rs` is a leafless marker exactly like `__init__.py`, so it gets the same
   directory-derived shape: implicate when a named module equals the containing directory's name.
 
-### 4.5 Excerpt
+### 4.5 The symbol definition tier
+
+Several toolchains report a missing **symbol** rather than a missing file: the file that defined it is
+already deleted, so the compiler has nothing to name. `undefined: Help` (Go, same package),
+`cannot find symbol: class Helper` (JVM), `Class "Helper" not found` (PHP with Composer autoloading),
+`uninitialized constant Helper` (Ruby with rspec's usual support-file loader). No amount of phrase
+matching can tie these to a file, because the file's name never appears.
+
+They can be tied by **evidence** instead of by name: read each undeclared file's contents just before
+discarding it, then ask whether any of them *defined* the symbol the toolchain says is missing. If the
+discarded file contains `func Help(`, the deletion is the cause. This is not a guess — it is the
+strongest tie in the whole matcher, and it is more conservative than the directory rules, because it
+requires the error to name the exact symbol *and* a discarded file to define it.
+
+**Plumbing.** `discardPaths` (`run-dispatch.ts:240`) deletes the files, and only the path strings survive
+in `discarded`. So the contents must be captured immediately before that call and carried alongside.
+`discarded: string[]` stays exactly as it is — it feeds the `scope-discarded` telemetry payload
+(`run-dispatch.ts:246`), the retry note (`handlers.ts:720`) and the implement handler
+(`handlers.ts:976`), none of which should carry file contents. A separate, process-local
+`discardedSources: Map<path, content>` is added beside it and consumed only by the guard.
+
+**Registry fields.** Two optional per-language entries: `symbolNaming` (patterns whose capture is the
+missing symbol) and `definesSymbol` (given a symbol, a pattern matching its definition in source):
+
+| Stack | Symbol named by | Definition matched by |
+|---|---|---|
+| Go | `undefined: Help` | `func`/`type`/`var`/`const Help` |
+| JVM | `symbol: class Helper` | `class`/`interface`/`enum`/`record Helper` |
+| PHP | `Class "App\Helper" not found` | `class Helper` |
+| Ruby | `uninitialized constant Helper` | `class`/`module Helper` |
+| Rust | `cannot find function \`help\` in this scope` | `fn`/`struct`/`enum`/`trait`/`const Help` |
+
+Qualified names are reduced to their last segment first (`App\Helper` → `Helper`, `Foo::Bar` → `Bar`).
+
+**Degradation.** When contents are unavailable — a file too large to read, an unreadable path, or a
+caller that does not supply them — the tier is simply inert and the other tiers behave exactly as
+before. Nothing depends on it.
+
+**Residual.** The definition pattern is a text search, so a discarded file that merely *mentions*
+`class Helper` inside a comment or string would match. The error must still name that exact symbol, so
+the combination is unlikely, and the consequence is a retry rather than a bad merge.
+
+### 4.6 Excerpt
 
 `collectionErrorExcerpt` picks the one line stating the cause for the retry feedback. It becomes framework
 aware alongside the matcher, and additionally triggers on the naming patterns so JVM yields a real compiler
@@ -155,22 +198,38 @@ Verified against real toolchains. **The shapes that tie are, in several ecosyste
 
 | Stack | Ties | Does not tie |
 |---|---|---|
-| **Go** | helper in a *separate* package (`no required module provides package`) | helper in the *same* package → `undefined: Helper` names the symbol; the file is already gone |
-| **Rust** | `mod`-style modules (E0583), including `tests/common/mod.rs` via the marker shape | `use`-style imports (E0432) name no file at all |
+| **Go** | helper in a *separate* package (`no required module provides package`); helper in the *same* package via the symbol tier (§4.5) | a symbol whose definition the discarded file does not textually contain |
+| **Rust** | `mod`-style modules (E0583), including `tests/common/mod.rs` via the marker shape; missing items via the symbol tier | `use`-style imports (E0432), which name neither a file nor a symbol in scope |
 | **Ruby, minitest** | explicit `require` of the discarded helper | — |
-| **Ruby, rspec** | boot-time require failure only (a broken `.rspec --require`, which aborts before any summary) | the **two common shapes**: a spec-file `LoadError` is intercepted as `selected-none` before the guard runs (§6); and the standard `Dir[…].each { require f }` support loader yields `uninitialized constant Helper (NameError)`, not a `LoadError` |
-| **PHP** | explicit `require`/`require_once` | composer PSR-4 autoload — the norm — yields `Class "Helper" not found` |
-| **JVM** | only when the package directory suffix matches (4.3) | the common single-class discard → `cannot find symbol` |
+| **Ruby, rspec** | the standard `Dir[…].each { require f }` support loader, via the symbol tier (`uninitialized constant Helper` arrives as a normal red); boot-time require failure | a spec-file `LoadError`, which is intercepted as `selected-none` before the guard runs (§6) |
+| **PHP** | explicit `require`/`require_once`; composer PSR-4 autoload via the symbol tier (`Class "Helper" not found`) | — |
+| **JVM** | the package directory suffix (4.3); the common single-class discard via the symbol tier (`cannot find symbol`) | a package missing for reasons other than the discard |
 
-**What this means:** ENG-343 delivers real coverage on Go (separate package), Rust (`mod`-style), minitest
-and explicit-require PHP; partial coverage on JVM; and — importantly — **almost nothing on rspec**, which is
-the more common Ruby framework.
+**What this means:** with the symbol tier, ENG-343 delivers real coverage on all five stacks. The Go
+same-package case, the JVM single-class case, rspec's usual support-file loader and PHP's Composer
+autoloading — the four gaps that made this change nearly worthless on two of the five stacks — are all
+closed by evidence rather than by name guessing.
+
+**One wiring gap remains, and it is not a safety hole.** An rspec *spec-file* `LoadError` is bucketed
+`selected-none` before the guard runs (§6), so it produces a vaguer message. The criterion still does not
+merge unverified.
+
+**Remaining residuals, recorded on purpose and pinned by tests:**
+
+1. An rspec spec-file `LoadError`, bucketed `selected-none` before the guard (§6). Safe, vaguer message.
+2. Rust `use`-style imports (E0432): they name neither a file nor an in-scope symbol.
+3. A symbol whose definition the discarded file does not textually contain — generated code, a macro, a
+   symbol re-exported from elsewhere.
+4. A discarded file that merely *mentions* a symbol in a comment or string (§4.5).
+5. Toolchain wording outside the listed phrases (other versions, other locales).
+6. The `error` bucket with empty output — ENG-347, out of scope here (§8).
 
 **Honest cost statement.** The first draft claimed this change "does not introduce a new way to fail." That
 was false. Every rule widens the surface on which a legitimately red check can be wrongly declared uncovered,
 costing a retry attempt and, on exhaustion, an escalation. The registry confines that risk to one language at
-a time and the directory rules remove the known collisions, but the risk is not zero. The trade is: a bounded
-retry cost against preventing a criterion from shipping unverified.
+a time, segment alignment removes the measured directory and leaf collisions, and the symbol tier requires
+positive evidence rather than a name coincidence — but the risk is not zero. The trade is: a bounded retry
+cost against preventing a criterion from shipping unverified.
 
 ## 6. The rspec wiring residual
 
@@ -288,5 +347,13 @@ toolchain output through it. Findings adopted:
 | All five proposed negatives were vacuous | Replaced with one-variable contrasts plus colliding-leaf cases (7.1) |
 | Harness plan named the wrong lever (work-unit kind) | Corrected — framework comes from the profile component (7.2) |
 | The `error` bucket is a guard-proof route to the same bad merge | §8, filed as ENG-347 |
+
+**Amendment (2026-07-20, after the plan review).** The operator asked whether the symbol-only cases could
+be resolved by searching for the helper rather than accepting them as residuals. Searching the worktree
+cannot work — `discardPaths` has already deleted the file, and a symbol being absent from the tree is
+equally consistent with "we discarded it" and "the feature is not built yet", which are exactly the two
+cases the guard must separate. Capturing the file's contents *before* discarding does work, and is
+stronger than any name matching. Added as D6 / §4.5, closing the Go same-package, JVM single-class, rspec
+autoload and PHP Composer gaps that §5 previously recorded as residuals.
 | "Does not introduce a new way to fail" was false | Replaced with an explicit cost statement (§5) |
 | Excerpt change affects more than JVM | Stated and pinned (4.5, 7.1) |

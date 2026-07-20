@@ -1209,7 +1209,12 @@ git add test/dispatch/scope-disposition-smoke.test.ts
 git commit -m "test(checks): smoke cells for Go discard poison and the rspec residual (ENG-343)"
 ```
 
-- [ ] **Step 7: Update the design's coverage section to match what shipped**
+- [ ] **Step 7: Proceed to Task 5, then return here for Steps 7–8**
+
+Task 5 adds the symbol definition tier. Do it before the design correction and the PR, so both reflect
+the finished state. (Steps 7 and 8 below run after Task 5 is committed.)
+
+- [ ] **Step 8: Update the design's coverage section to match what shipped**
 
 Two claims in `docs/brainstorms/2026-07-20-checks-discard-poison-matcher-langs-design.md` are now out of date and must be corrected (a design that overstates its own guarantees is how the first draft failed review):
 
@@ -1224,7 +1229,7 @@ git add docs/brainstorms/2026-07-20-checks-discard-poison-matcher-langs-design.m
 git commit -m "docs(checks): correct the design's Go coverage claims to match the shipped rule (ENG-343)"
 ```
 
-- [ ] **Step 8: Push and open a draft PR**
+- [ ] **Step 9: Push and open a draft PR**
 
 Per CLAUDE.md the operator merges every PR personally — open it and stop. PR titles must be Conventional Commits (enforced by the pr-title CI check).
 
@@ -1234,6 +1239,319 @@ gh pr create --draft --title "fix(checks): per-language rule registry for the di
 ```
 
 Do NOT merge, do not enable auto-merge.
+
+---
+
+### Task 5: The symbol definition tier — tie by evidence, not by name
+
+**Files:**
+- Modify: `src/dispatch/worktree.ts` (add `readDiscardedSources`)
+- Modify: `src/dispatch/run-dispatch.ts` (capture contents before discarding; carry them out)
+- Modify: `src/dispatch/handlers.ts` (pass them to the guard)
+- Modify: `src/dispatch/check-rules.ts` (two optional registry fields + per-language entries)
+- Modify: `src/dispatch/check-selector.ts` (the new tier)
+- Test: `test/dispatch/check-selector.test.ts`, `test/dispatch/scope-disposition-smoke.test.ts`
+
+**Why this task exists.** Go same-package, JVM single-class, rspec's usual support loader and PHP Composer autoloading all report a missing **symbol** — the defining file is already deleted, so no phrase can name it. Reading the file's contents *before* discarding lets us implicate it on evidence: the discarded file literally defined the symbol the toolchain says is missing. See design §4.5.
+
+**Interfaces:**
+- Consumes: `CHECK_RULES`, `LanguageRules`, `importErrorImplicatesDiscarded(rawOutput, discarded, framework)` from Tasks 1–3.
+- Produces:
+  - `readDiscardedSources(worktreePath: string, paths: string[]): Map<string, string>` from `worktree.ts`
+  - `discardedSources: Map<string, string>` added to `runAgentDispatch`'s return type (alongside the existing `discarded: string[]`, which is unchanged)
+  - `importErrorImplicatesDiscarded(rawOutput, discarded, framework, sources?)` — a 4th **optional** parameter, so every existing call and test keeps working untouched
+  - `LanguageRules.symbolNaming?: RegExp[]` and `LanguageRules.definesSymbol?: (symbol: string) => RegExp`
+
+**Critical constraint.** `discarded: string[]` must NOT change shape. It feeds the `scope-discarded` telemetry payload (`run-dispatch.ts:246`), the retry note (`handlers.ts:720`) and the implement handler (`handlers.ts:976`, `:995`) — none of which should carry file contents. Add `discardedSources` beside it.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `test/dispatch/check-selector.test.ts`:
+
+```ts
+describe("discard-poison: the symbol definition tier (design 4.5)", () => {
+  const src = (path: string, content: string) => new Map([[path, content]]);
+
+  test("Go: a same-package helper is tied when the discarded file defined the symbol", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    expect(
+      importErrorImplicatesDiscarded(out, ["helper.go"], "go", src("helper.go", "package app\n\nfunc Help() int { return 1 }\n")),
+    ).toEqual(["helper.go"]);
+  });
+
+  test("Go contrast: same error, a discarded file that does NOT define the symbol", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    expect(
+      importErrorImplicatesDiscarded(out, ["scratch.go"], "go", src("scratch.go", "package app\n\nfunc Other() int { return 2 }\n")),
+    ).toEqual([]);
+  });
+
+  test("JVM: `cannot find symbol` is tied when the discarded class defined it", () => {
+    const out = "ATest.java:12: error: cannot find symbol\n  symbol:   class Helper\n  location: class ATest";
+    expect(
+      importErrorImplicatesDiscarded(out, ["src/test/java/com/x/Helper.java"], "junit-maven", src("src/test/java/com/x/Helper.java", "package com.x;\n\npublic class Helper {}\n")),
+    ).toEqual(["src/test/java/com/x/Helper.java"]);
+  });
+
+  test("Ruby: rspec's autoload NameError is tied when the discarded file defined the constant", () => {
+    const out = "spec/c_spec.rb:2:in `<main>': uninitialized constant Helper (NameError)";
+    expect(
+      importErrorImplicatesDiscarded(out, ["spec/support/helper.rb"], "rspec", src("spec/support/helper.rb", "module Helper\n  def self.x; true; end\nend\n")),
+    ).toEqual(["spec/support/helper.rb"]);
+  });
+
+  test("PHP: a Composer autoload miss is tied, and the namespace is reduced to the class name", () => {
+    const out = 'PHP Fatal error:  Uncaught Error: Class "App\\Helper" not found in /app/tests/ATest.php:9';
+    expect(
+      importErrorImplicatesDiscarded(out, ["src/Helper.php"], "phpunit", src("src/Helper.php", "<?php\nnamespace App;\nclass Helper {}\n")),
+    ).toEqual(["src/Helper.php"]);
+  });
+
+  test("Rust: a missing item is tied when the discarded module defined it", () => {
+    const out = "error[E0425]: cannot find function `help` in this scope";
+    expect(
+      importErrorImplicatesDiscarded(out, ["src/helper.rs"], "cargo", src("src/helper.rs", "pub fn help() -> u8 { 1 }\n")),
+    ).toEqual(["src/helper.rs"]);
+  });
+
+  test("the tier is inert when no contents are supplied (degrades to the other tiers)", () => {
+    const out = "app/y_test.go:5:30: undefined: Help";
+    expect(importErrorImplicatesDiscarded(out, ["helper.go"], "go")).toEqual([]);
+    expect(importErrorImplicatesDiscarded(out, ["helper.go"], "go", new Map())).toEqual([]);
+  });
+
+  test("a symbol named by the error but defined by NO discarded file implicates nothing", () => {
+    const out = "ATest.java:12: error: cannot find symbol\n  symbol:   class Missing";
+    expect(
+      importErrorImplicatesDiscarded(out, ["src/test/java/com/x/Helper.java"], "junit-maven", src("src/test/java/com/x/Helper.java", "package com.x;\n\npublic class Helper {}\n")),
+    ).toEqual([]);
+  });
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `bun test test/dispatch/check-selector.test.ts`
+Expected: FAIL — the tier does not exist, so every positive returns `[]`. (The two negative tests and the inert test already pass; that is expected.)
+
+- [ ] **Step 3: Add the registry fields and per-language entries**
+
+In `src/dispatch/check-rules.ts`, add to the `LanguageRules` interface:
+
+```ts
+  /** Patterns whose capture group 1 is a SYMBOL the toolchain says is missing while never naming the
+   *  file that defined it (`undefined: Help`, `symbol: class Helper`). */
+  symbolNaming?: RegExp[];
+  /** Given a symbol name, a pattern matching its DEFINITION in source. Paired with `symbolNaming`:
+   *  the tier fires only when the error names the symbol AND a discarded file defines it. */
+  definesSymbol?: (symbol: string) => RegExp;
+```
+
+Add this helper beside the other pure functions:
+
+```ts
+/** Escape regex metacharacters so a captured symbol can be embedded in a definition pattern. */
+function escapeSymbol(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** The last segment of a qualified symbol: `App\Helper` → `Helper`, `Foo::Bar` → `Bar`, `a.b` → `b`. */
+export function symbolLeaf(ref: string): string {
+  const parts = ref.split(/[\\.:]+/).filter((s) => s.length > 0);
+  return parts[parts.length - 1] ?? ref;
+}
+```
+
+Then add the fields to the language entries (leave `pythonRules` and `nodeRules` without them — Python and Node name the module, not a bare symbol, and adding a tier there would change behaviour this plan promises to preserve):
+
+```ts
+// in goRules
+  symbolNaming: [/undefined:\s+([\w.]+)/gi],
+  definesSymbol: (s) => new RegExp(`\\b(?:func|type|var|const)\\s+${escapeSymbol(s)}\\b`),
+
+// in jvmRules
+  symbolNaming: [/symbol:\s+(?:class|interface|enum|record|variable|method)\s+([\w.]+)/gi],
+  definesSymbol: (s) => new RegExp(`\\b(?:class|interface|enum|record)\\s+${escapeSymbol(s)}\\b`),
+
+// in rustRules
+  symbolNaming: [/cannot find (?:function|value|type|struct|trait|macro)\s+['"`]?(\w+)['"`]?/gi],
+  definesSymbol: (s) => new RegExp(`\\b(?:fn|struct|enum|trait|const|static|type)\\s+${escapeSymbol(s)}\\b`),
+
+// in rubyRules
+  symbolNaming: [/uninitialized constant\s+([\w:]+)/gi],
+  definesSymbol: (s) => new RegExp(`\\b(?:class|module)\\s+${escapeSymbol(s)}\\b`),
+
+// in phpRules
+  symbolNaming: [/Class\s+["']([\w\\]+)["']\s+not found/gi],
+  definesSymbol: (s) => new RegExp(`\\b(?:class|interface|trait)\\s+${escapeSymbol(s)}\\b`),
+```
+
+- [ ] **Step 4: Add the tier to the matcher**
+
+In `src/dispatch/check-selector.ts`, extend the import to include `symbolLeaf`, add the optional parameter, collect the named symbols, and run the tier immediately after the shape rules:
+
+```ts
+export function importErrorImplicatesDiscarded(
+  rawOutput: string,
+  discarded: string[],
+  framework: CheckFramework | null,
+  sources?: Map<string, string>,
+): string[] {
+```
+
+After the `ctx` construction, add:
+
+```ts
+  // Symbols the toolchain names without naming their defining file (design 4.5). Empty unless this
+  // language declares `symbolNaming` AND the caller supplied the discarded files' contents.
+  const symbols: string[] = [];
+  if (sources !== undefined && sources.size > 0 && rules.symbolNaming !== undefined) {
+    for (const pattern of rules.symbolNaming) {
+      const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+      const re = new RegExp(pattern.source, flags);
+      let sm: RegExpExecArray | null;
+      // biome-ignore lint/suspicious/noAssignInExpressions: canonical exec-loop over a /g regex.
+      while ((sm = re.exec(rawOutput)) !== null) {
+        if (sm[1]) symbols.push(symbolLeaf(sm[1]));
+      }
+    }
+  }
+```
+
+Then, inside the per-file loop, immediately after the shape-rule block and before the leaf tier:
+
+```ts
+    if (!hit && symbols.length > 0 && rules.definesSymbol !== undefined) {
+      const content = sources?.get(d);
+      if (content !== undefined) {
+        const defines = rules.definesSymbol;
+        if (symbols.some((s) => defines(s).test(content))) hit = true;
+      }
+    }
+```
+
+- [ ] **Step 5: Run the unit tests**
+
+Run: `bun test test/dispatch/check-selector.test.ts`
+Expected: PASS, including every earlier task's assertions (the new parameter is optional, so nothing else changes).
+
+- [ ] **Step 6: Capture the contents before discarding**
+
+In `src/dispatch/worktree.ts`, extend the `node:fs` import to `{ type Dirent, existsSync, readFileSync, readdirSync, rmSync, statSync }` and add beside `discardPaths`:
+
+```ts
+/** The largest discarded file whose contents are worth holding in memory for the discard-poison
+ *  symbol tier. A source helper is kilobytes; anything larger is not one. */
+const MAX_DISCARDED_SOURCE_BYTES = 256 * 1024;
+
+/** Read the about-to-be-discarded files so the discard-poison guard can later ask whether one of them
+ *  DEFINED a symbol the toolchain reports as missing (design 4.5). Must be called immediately before
+ *  `discardPaths`, which deletes them. Unreadable, oversized or non-regular paths are skipped: the
+ *  symbol tier is best-effort and every other tier works without it. Never throws. */
+export function readDiscardedSources(worktreePath: string, paths: string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const p of paths) {
+    try {
+      const full = join(worktreePath, p);
+      const st = statSync(full);
+      if (!st.isFile() || st.size > MAX_DISCARDED_SOURCE_BYTES) continue;
+      out.set(p, readFileSync(full, "utf8"));
+    } catch {
+      // unreadable → skip; the guard degrades to the name-based tiers
+    }
+  }
+  return out;
+}
+```
+
+In `src/dispatch/run-dispatch.ts`: add `readDiscardedSources` to the import from `./worktree.ts`; add `discardedSources: Map<string, string>;` to the return type at line ~108; initialise `let discardedSources = new Map<string, string>();` beside `let discarded: string[] = [];` (line ~202); capture before the delete:
+
+```ts
+    if (disposition === "discard" && offendingNew.length > 0) {
+      discardedSources = readDiscardedSources(deps.worktreePath, offendingNew);
+      discardPaths(deps.worktreePath, offendingNew);
+      discarded = offendingNew;
+```
+
+and return it: `return { dispatchId: did, sha, changed, output: result.stdout, discarded, discardedSources };`
+
+Leave the `scope-discarded` event payload as `{ discarded }` — paths only, no contents in telemetry.
+
+- [ ] **Step 7: Pass the contents to the guard**
+
+In `src/dispatch/handlers.ts`, add `discardedSources` to the destructuring at line ~575 (alongside `discarded`), and pass it at the guard:
+
+```ts
+          const implicated = importErrorImplicatesDiscarded(rawOutput, discarded, fw, discardedSources);
+```
+
+- [ ] **Step 8: Add the end-to-end smoke cell**
+
+The plumbing — contents captured at discard time surviving to the guard — is the real risk in this task, and only an end-to-end cell proves it. Append to `test/dispatch/scope-disposition-smoke.test.ts`:
+
+```ts
+// --- A20 ⚔ (ENG-343 design 4.5: a Go helper in the SAME package, tied by symbol evidence) --------
+// The compiler reports `undefined: Help` — it names the FUNCTION, never the file, which is already
+// deleted. No phrase can tie this. The guard implicates the discarded file because that file's
+// captured contents DEFINED `Help`. This cell is the only proof that the contents survive from
+// discardPaths' call site all the way to the guard.
+test("A20 ⚔ a discarded same-package Go helper is tied by the symbol it defined", async () => {
+  const h = await setupChecks("- [ ] one thing\n");
+  const runner = checksRunner(
+    h,
+    (cwd, acId, ident) => {
+      const dir = join(cwd, "checks");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `${ident}_ac${acId}_test.go`),
+        "package checks\n\nfunc TestX(t *testing.T) { _ = Help() }\n",
+      );
+      // Same package, undeclared → discarded. Its NAME never appears in the compiler output.
+      writeFileSync(join(dir, "helper.go"), "package checks\n\nfunc Help() int { return 1 }\n");
+    },
+    (acId, ident) =>
+      `\`\`\`styre-sidecar\n${JSON.stringify({
+        checksAuthored: [
+          { ac_id: acId, test_file: `checks/${ident}_ac${acId}_test.go`, test_name: "TestX" },
+        ],
+      })}\n\`\`\``,
+  );
+  const { outcome, step, wt, message } = await driveChecks(h, runner, {
+    profile: goProfile(h.repo),
+    runCheck: async () => ({
+      exitCode: 1,
+      stdout: "",
+      // Note: names the SYMBOL only. `helper.go` appears nowhere.
+      stderr: "checks/ENG-1_ac1_test.go:3:30: undefined: Help",
+      timedOut: false,
+    }),
+  });
+  const checks = listAcChecks(h.db, h.ticketId);
+  h.db.close();
+  expect(["retry", "escalated"]).toContain(outcome.kind);
+  expect(step?.status).toBe("pending");
+  expect(existsSync(join(wt, "checks", "helper.go"))).toBe(false); // discarded
+  expect(checks).toHaveLength(0); // no poisoned check installed
+  expect(message).toMatch(/import or collection error/);
+  expect(message).toContain("checks/helper.go"); // tied by evidence, not by name
+});
+```
+
+- [ ] **Step 9: Run the full gate**
+
+Run: `bun run typecheck && bun run format && bun run lint && bun test`
+Expected: all clean/green.
+
+If A20 fails on the message assertion, check that `discardedSources` is actually threaded through `handlers.ts:575` — an empty map makes the tier silently inert, which is exactly the plumbing failure this cell exists to catch. Do NOT weaken the assertion.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add src/dispatch/worktree.ts src/dispatch/run-dispatch.ts src/dispatch/handlers.ts src/dispatch/check-rules.ts src/dispatch/check-selector.ts test/dispatch/check-selector.test.ts test/dispatch/scope-disposition-smoke.test.ts
+git commit -m "feat(checks): tie discarded helpers by the symbols they defined (ENG-343)"
+```
+
+Then return to **Task 4, Steps 8–9** (the design correction and the draft PR).
 
 ---
 
@@ -1251,7 +1569,8 @@ Do NOT merge, do not enable auto-merge.
 | §5 coverage and residuals | Documentation pins in Tasks 2–3; §5 itself corrected in Task 4 Step 7 |
 | §6 rspec wiring residual | Task 4, cell A19 |
 | §7.1 unit matrix | Tasks 1–3 |
-| §7.2 smoke cells + harness | Task 4 |
+| §4.5 symbol definition tier (D6) | Task 5 — registry fields, the tier, the content plumbing, and cell A20 |
+| §7.2 smoke cells + harness | Task 4 (A17–A19), Task 5 (A20) |
 | §8 out of scope | No task touches `interpretRunOutput`, `post-implement-rerun.ts`, `classify-prior.ts` or `prompts/checks.md` |
 | §9 invariants | No rule lives outside the registry (fixture pattern and ERROR preference are per-language fields) |
 
