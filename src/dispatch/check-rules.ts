@@ -329,9 +329,13 @@ const phpRules: LanguageRules = {
   naming: [/failed opening required[^\S\r\n]+['"]?([\w./-]+)['"]?/gi],
   tiesByLeaf: true,
   shapes: [],
-  // Case-insensitive: PHP class names are, so `Class "Helper" not found` must tie a file declaring
-  // `class helper`.
-  symbolNaming: [/Class[^\S\r\n]+["']([\w\\]+)["'][^\S\r\n]+not found/gi],
+  // Require the `Error:` exception-class token immediately before `Class "…"`. It survives BOTH PHP
+  // render paths: the CLI process-fatal `… Uncaught Error: Class "X" not found in path:line` and the
+  // PHPUnit-caught form `Error: Class "X" not found` (location on a separate stack-trace line, since PHP 7
+  // made class-not-found `Error`s catchable). Anchoring on the trailing `in <path>:<line>` location would
+  // drop the PHPUnit-caught case. Rejects `Failed asserting that 'Class "Helper" not found'` — `Class` is
+  // preceded by `'`, with no `Error:` token. Case-insensitive: PHP class names are.
+  symbolNaming: [/Error:[^\S\r\n]+Class[^\S\r\n]+["']([\w\\]+)["'][^\S\r\n]+not found/gi],
   definesSymbol: (s) =>
     new RegExp(`\\b(?:class|interface|trait)[^\\S\\r\\n]+${escapeSymbol(s)}\\b`, "i"),
 };

@@ -1092,6 +1092,31 @@ describe("discard-poison: the symbol definition tier (design 4.5)", () => {
     ).toEqual(["src/helper.php"]);
   });
 
+  test('PHP: a `Class "…" not found` inside a phpunit assertion message must NOT fire (no Error: token)', () => {
+    const out = `Failed asserting that 'Class "Helper" not found' equals 'ok'`;
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/Helper.php"],
+        "phpunit",
+        src("src/Helper.php", "<?php\nclass Helper {}\n"),
+      ),
+    ).toEqual([]);
+  });
+
+  test("PHP: the PHPUnit-caught render (location on a separate line) still ties the discarded class", () => {
+    const out =
+      '1) App\\Tests\\ATest::testThing\nError: Class "App\\Helper" not found\n\n/app/tests/ATest.php:9';
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/Helper.php"],
+        "phpunit",
+        src("src/Helper.php", "<?php\nnamespace App;\nclass Helper {}\n"),
+      ),
+    ).toEqual(["src/Helper.php"]);
+  });
+
   test("Rust: a missing item is tied when the discarded module defined it", () => {
     const out = "error[E0425]: cannot find function `help` in this scope";
     expect(
@@ -1357,12 +1382,33 @@ describe("mutation guard: the Ruby symbol anchor must discriminate", () => {
       (CHECK_RULES.rspec as { symbolNaming?: RegExp[] }).symbolNaming = [
         /uninitialized constant[^\S\r\n]+([\w:]+)/gi,
       ];
-      expect(importErrorImplicatesDiscarded(out, ["spec/support/helper.rb"], "rspec", sources)).toEqual([
-        "spec/support/helper.rb",
-      ]);
+      expect(
+        importErrorImplicatesDiscarded(out, ["spec/support/helper.rb"], "rspec", sources),
+      ).toEqual(["spec/support/helper.rb"]);
     } finally {
       (CHECK_RULES.rspec as { symbolNaming?: RegExp[] }).symbolNaming = orig;
     }
-    expect(importErrorImplicatesDiscarded(out, ["spec/support/helper.rb"], "rspec", sources)).toEqual([]);
+    expect(
+      importErrorImplicatesDiscarded(out, ["spec/support/helper.rb"], "rspec", sources),
+    ).toEqual([]);
+  });
+});
+
+describe("mutation guard: the PHP symbol anchor must discriminate", () => {
+  test("the unanchored `Class … not found` pattern would implicate a phpunit assertion message", () => {
+    const out = `Failed asserting that 'Class "Helper" not found' equals 'ok'`;
+    const sources = new Map([["src/Helper.php", "<?php\nclass Helper {}\n"]]);
+    const orig = CHECK_RULES.phpunit.symbolNaming;
+    try {
+      (CHECK_RULES.phpunit as { symbolNaming?: RegExp[] }).symbolNaming = [
+        /Class[^\S\r\n]+["']([\w\\]+)["'][^\S\r\n]+not found/gi,
+      ];
+      expect(importErrorImplicatesDiscarded(out, ["src/Helper.php"], "phpunit", sources)).toEqual([
+        "src/Helper.php",
+      ]);
+    } finally {
+      (CHECK_RULES.phpunit as { symbolNaming?: RegExp[] }).symbolNaming = orig;
+    }
+    expect(importErrorImplicatesDiscarded(out, ["src/Helper.php"], "phpunit", sources)).toEqual([]);
   });
 });
