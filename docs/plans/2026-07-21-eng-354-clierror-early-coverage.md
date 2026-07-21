@@ -675,3 +675,150 @@ No code changed → no tests to run. Confirm the two edits render (Markdown) and
 git add README.md docs/architecture/conventions.md
 git commit -m "docs(telemetry): note first-run consent notice on early-failure path (ENG-354)"
 ```
+
+---
+
+## Task 7: Close the residual consent gap — honor a resolved config's telemetry on early-failure paths
+
+**Context:** The Task-6 fact-check review surfaced that the early-failure fallback hardcodes `{ telemetry: true }` and never consults `runtimeConfig` — so a `config.json` `"telemetry": false` was ignored even when config had already been successfully resolved (e.g. `assertSlackConfigured` throws at `run.ts:123`, AFTER `discoverRuntimeConfig` resolved the config at line 122 but BEFORE `createAnalytics` at line 131). Close it by building analytics as soon as config is resolved, so throws in that window go through the real (config-honoring) client. The `??=` fallback then only handles throws where config was never resolved (unparseable `config.json`, or a failure before config discovery) — the irreducible window with no telemetry preference to honor.
+
+**Files:**
+- Modify: `src/cli/run.ts` (move the `createAnalytics` build up; adjust the fallback comment)
+- Test: `test/cli/run-clierror-coverage.test.ts` (add SLACK_BOT_TOKEN to the env harness; add a negative + positive test)
+- Docs: `README.md` (narrow the early-failure opt-out note), `docs/architecture/conventions.md` (keep accurate)
+
+- [ ] **Step 1: Write the failing test (RED)**
+
+First, extend the file's env harness so `SLACK_BOT_TOKEN` is deterministically unset (the new tests rely on `assertSlackConfigured` throwing on a missing token). In `test/cli/run-clierror-coverage.test.ts`, add a saved var and manage it in `beforeEach`/`afterEach` exactly like the existing env vars:
+```ts
+// add alongside prevXdg/prevDnt/prevStyre
+let prevSlack: string | undefined;
+```
+In `beforeEach` (with the other captures + deletes):
+```ts
+  prevSlack = process.env.SLACK_BOT_TOKEN;
+  Reflect.deleteProperty(process.env, "SLACK_BOT_TOKEN");
+```
+In `afterEach` (the existing `restore(...)` helper handles it):
+```ts
+  restore("SLACK_BOT_TOKEN", prevSlack);
+```
+
+Then append the negative test (this is the RED one — it FAILS before Step 2 because the current fallback hardcodes `telemetry: true` and emits):
+```ts
+test("early failure AFTER config resolves honors config telemetry:false (no cli_error)", async () => {
+  // notifier:slack with SLACK_BOT_TOKEN unset throws in assertSlackConfigured — AFTER
+  // discoverRuntimeConfig resolved the config, but still an early failure (before the run body).
+  // Because that resolved config has telemetry:false, analytics is NOOP and nothing is emitted.
+  const profile = validProfilePath();
+  const config = tmpJson("styre-cfg-", { notifier: "slack", telemetry: false });
+  const { client, events } = fakeClient();
+
+  await expect(
+    runImpl({ args: { profile, config, ticket: "ENG-1" } }, { analyticsClient: client }),
+  ).rejects.toThrow();
+
+  expect(events.some((e) => e.event === "cli_error")).toBe(false);
+});
+
+test("early failure AFTER config resolves still emits when telemetry is on (positive control)", async () => {
+  // Same assertSlackConfigured trigger, telemetry left at its default (true) → cli_error IS emitted.
+  // Pairs with the negative test above so the negative is gated on telemetry, not on the throw.
+  const profile = validProfilePath();
+  const config = tmpJson("styre-cfg-", { notifier: "slack" }); // telemetry defaults to true
+  const { client, events } = fakeClient();
+
+  await expect(
+    runImpl({ args: { profile, config, ticket: "ENG-1" } }, { analyticsClient: client }),
+  ).rejects.toThrow();
+
+  expect(events.some((e) => e.event === "cli_error")).toBe(true);
+});
+```
+
+- [ ] **Step 2: Run to confirm RED**
+
+Run: `bun test test/cli/run-clierror-coverage.test.ts`
+Expected: the NEGATIVE test FAILS (a `cli_error` is captured because the current fallback ignores `telemetry:false`); the positive test passes. This proves the gap exists.
+
+- [ ] **Step 3: Implement the fix (GREEN)**
+
+In `src/cli/run.ts`, move the analytics build to immediately after `discoverRuntimeConfig`, before `assertSlackConfigured`. Replace this block:
+```ts
+    const runtimeConfig = discoverRuntimeConfig({ explicitPath: args.config, slug });
+    assertSlackConfigured(runtimeConfig);
+    if (runtimeConfig.notifier !== "none") {
+      // human-readable status → stderr (stdout carries only NDJSON telemetry)
+      process.stderr.write(
+        `notifier: ${runtimeConfig.notifier} → ${runtimeConfig.slack?.channel} (policy: ${runtimeConfig.notify})\n`,
+      );
+    }
+
+    const a = createAnalytics(runtimeConfig, { client: deps?.analyticsClient });
+    analytics = a;
+    const startedAt = Date.now();
+```
+with:
+```ts
+    const runtimeConfig = discoverRuntimeConfig({ explicitPath: args.config, slug });
+    // Build analytics the moment config is resolved — BEFORE the remaining fail-fast checks
+    // (assertSlackConfigured) — so a throw in that window is counted through the real client and
+    // honors the operator's config-level telemetry setting. The catch's fallback then only handles
+    // throws from before config could be resolved at all.
+    const a = createAnalytics(runtimeConfig, { client: deps?.analyticsClient });
+    analytics = a;
+    const startedAt = Date.now();
+
+    assertSlackConfigured(runtimeConfig);
+    if (runtimeConfig.notifier !== "none") {
+      // human-readable status → stderr (stdout carries only NDJSON telemetry)
+      process.stderr.write(
+        `notifier: ${runtimeConfig.notifier} → ${runtimeConfig.slack?.channel} (policy: ${runtimeConfig.notify})\n`,
+      );
+    }
+```
+
+Then update the fallback comment in the `catch` so it reflects the narrowed role. Replace:
+```ts
+    // If we threw before config was resolved, `analytics` is undefined — build a fallback so the
+    // failure is still counted. `createAnalytics` honors DO_NOT_TRACK / STYRE_TELEMETRY, and
+    // `cli_error` carries no PII. Assigning back to `analytics` lets the finally flush it.
+    analytics ??= createAnalytics({ telemetry: true }, { client: deps?.analyticsClient });
+```
+with:
+```ts
+    // Reached only when we threw before config could be resolved (unparseable config, or a failure
+    // before config discovery) — so `analytics` is undefined and there is no config-level telemetry
+    // preference to honor; default to enabled. `createAnalytics` still honors DO_NOT_TRACK /
+    // STYRE_TELEMETRY, and `cli_error` carries no PII. Assigning back lets the finally flush it.
+    analytics ??= createAnalytics({ telemetry: true }, { client: deps?.analyticsClient });
+```
+
+- [ ] **Step 4: Run to confirm GREEN + no regression**
+
+Run: `bun test test/cli/run-clierror-coverage.test.ts` → all pass (negative now passes: analytics is the NOOP built from the resolved telemetry:false config, so nothing emits).
+Run: `bun test test/cli/ test/telemetry/` → all pass.
+Run: `bun run typecheck` and `bun run lint` → clean.
+
+- [ ] **Step 5: Update the docs to the narrowed gap**
+
+In `README.md`, the early-failure note's last two sentences currently say the `config.json` opt-out is "not consulted by the early-failure fallback". Replace that trailing text (from "The `STYRE_TELEMETRY`/" to the end of the blockquote) with:
+```markdown
+> `DO_NOT_TRACK` env opt-outs suppress it on every path, including these early failures. A
+> `"telemetry": false` in `config.json` is also honored on the early-failure path once the config has
+> been read; it can only be missed when the failure prevents the config from being read at all (an
+> unparseable `config.json`, or a failure before the config is loaded — e.g. running outside a git
+> repo), where the env opt-outs are the reliable suppressor.
+```
+
+In `docs/architecture/conventions.md`, the Task-6 sentence says the latch can be minted "on a run that fails before config resolves". Broaden it to stay accurate (minting now happens as soon as config resolves, so any early failure at/after that point mints too). Replace that sentence with:
+```markdown
+Since `styre run` counts early failures too, the id + first-run-notice latch can be minted (and the notice printed once to stderr) on a run that fails early — not only on a fully successful run. Still at most once; the `STYRE_TELEMETRY`/`DO_NOT_TRACK` opt-outs suppress it, as does a `"telemetry": false` config once the config has been read.
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/cli/run.ts test/cli/run-clierror-coverage.test.ts README.md docs/architecture/conventions.md
+git commit -m "fix(run): honor resolved config telemetry on early-failure paths (ENG-354)"
+```
