@@ -15,11 +15,12 @@ import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
 import { assertSlackConfigured } from "../integrations/notifier.ts";
-import { createAnalytics } from "../telemetry/analytics/index.ts";
+import type { AnalyticsClient } from "../telemetry/analytics/client.ts";
+import { type Analytics, createAnalytics } from "../telemetry/analytics/index.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
 import { buildSummary } from "../telemetry/emitter.ts";
 import type { TelemetryEvent } from "../telemetry/events.ts";
-import { StyreError, errorKindForExit, toolchainError, usageError } from "./errors.ts";
+import { EXIT, StyreError, errorKindForExit, toolchainError, usageError } from "./errors.ts";
 import { guard } from "./output.ts";
 import { finishRunResult, parkDir } from "./park.ts";
 import { formatMissingTools, preflightToolchain } from "./preflight.ts";
@@ -92,36 +93,45 @@ export const runCommand = defineCommand({
   run: (ctx) => guard("run", () => runImpl({ args: ctx.args as unknown as RunArgs })),
 });
 
-export async function runImpl({ args }: { args: RunArgs }): Promise<void> {
-  let profile: Profile;
-  let slug: string;
-  if (args.profile && args.profile.length > 0) {
-    profile = loadProfile(args.profile);
-    slug = args.slug && args.slug.length > 0 ? args.slug : profile.slug;
-  } else {
-    const derived = args.slug && args.slug.length > 0 ? args.slug : slugForCwd();
-    if (!derived) {
-      throw usageError(
-        "no --profile given and the current directory is not a git repo",
-        "cd into the target repo, or pass --profile / --slug.",
+export async function runImpl(
+  { args }: { args: RunArgs },
+  deps?: { analyticsClient?: AnalyticsClient },
+): Promise<void> {
+  // Hoisted so the single catch can emit `cliError` for throws that happen BEFORE analytics is
+  // built (bad/absent profile, "not a git repo" usage error, config-discovery errors). When
+  // config was never resolved, the catch builds a fallback client (env opt-outs still apply).
+  let analytics: Analytics | undefined;
+  try {
+    let profile: Profile;
+    let slug: string;
+    if (args.profile && args.profile.length > 0) {
+      profile = loadProfile(args.profile);
+      slug = args.slug && args.slug.length > 0 ? args.slug : profile.slug;
+    } else {
+      const derived = args.slug && args.slug.length > 0 ? args.slug : slugForCwd();
+      if (!derived) {
+        throw usageError(
+          "no --profile given and the current directory is not a git repo",
+          "cd into the target repo, or pass --profile / --slug.",
+        );
+      }
+      slug = derived;
+      profile = loadProfileByConvention(slug);
+    }
+    assertResolved(profile);
+    const runtimeConfig = discoverRuntimeConfig({ explicitPath: args.config, slug });
+    assertSlackConfigured(runtimeConfig);
+    if (runtimeConfig.notifier !== "none") {
+      // human-readable status → stderr (stdout carries only NDJSON telemetry)
+      process.stderr.write(
+        `notifier: ${runtimeConfig.notifier} → ${runtimeConfig.slack?.channel} (policy: ${runtimeConfig.notify})\n`,
       );
     }
-    slug = derived;
-    profile = loadProfileByConvention(slug);
-  }
-  assertResolved(profile);
-  const runtimeConfig = discoverRuntimeConfig({ explicitPath: args.config, slug });
-  assertSlackConfigured(runtimeConfig);
-  if (runtimeConfig.notifier !== "none") {
-    // human-readable status → stderr (stdout carries only NDJSON telemetry)
-    process.stderr.write(
-      `notifier: ${runtimeConfig.notifier} → ${runtimeConfig.slack?.channel} (policy: ${runtimeConfig.notify})\n`,
-    );
-  }
 
-  const analytics = createAnalytics(runtimeConfig);
-  const startedAt = Date.now();
-  try {
+    const a = createAnalytics(runtimeConfig, { client: deps?.analyticsClient });
+    analytics = a;
+    const startedAt = Date.now();
+
     if (args["in-place"] && !(args.resume && args.resume.length > 0)) {
       const { discoverRepoRoot, assertInPlaceSafe, assertInPlaceIdentity } = await import(
         "../dispatch/in-place.ts"
@@ -182,7 +192,7 @@ export async function runImpl({ args }: { args: RunArgs }): Promise<void> {
       inPlace: (args["in-place"] as boolean | undefined) ?? false,
     });
 
-    analytics.runStarted({
+    a.runStarted({
       projectId: profile.analyticsId ?? "",
       resumed: false,
       tracker: runtimeConfig.issueTracker,
@@ -199,7 +209,7 @@ export async function runImpl({ args }: { args: RunArgs }): Promise<void> {
       emit: stdoutSink,
     });
 
-    analytics.runCompleted(
+    a.runCompleted(
       buildSummary(db, out.ticketId, out) as Extract<TelemetryEvent, { type: "summary" }>,
       Date.now() - startedAt,
       {
@@ -222,7 +232,11 @@ export async function runImpl({ args }: { args: RunArgs }): Promise<void> {
     }
     finishRunResult(db, dbPath, profile.slug, ident, out);
   } catch (err) {
-    const code = err instanceof StyreError ? err.code : 70;
+    const code = err instanceof StyreError ? err.code : EXIT.INTERNAL;
+    // If we threw before config was resolved, `analytics` is undefined — build a fallback so the
+    // failure is still counted. `createAnalytics` honors DO_NOT_TRACK / STYRE_TELEMETRY, and
+    // `cli_error` carries no PII. Assigning back to `analytics` lets the finally flush it.
+    analytics ??= createAnalytics({ telemetry: true }, { client: deps?.analyticsClient });
     analytics.cliError({
       command: "run",
       exitCode: code,
@@ -231,6 +245,6 @@ export async function runImpl({ args }: { args: RunArgs }): Promise<void> {
     });
     throw err; // rethrow → guard renders + sets process.exitCode
   } finally {
-    await analytics.shutdown();
+    await analytics?.shutdown();
   }
 }
