@@ -58,3 +58,27 @@ export function toolchainError(detail: string): StyreError {
     recovery: "Install the missing tool(s) and re-run.",
   });
 }
+
+/** Coarse operator-error kind derived from the shared exit-code scheme, emitted on `cli_error`
+ *  so analytics can distinguish usage vs config vs toolchain vs internal — which `error_class`
+ *  can't (every StyreError shares one class). Unknown codes collapse to "other". */
+export function errorKindForExit(code: number): string {
+  switch (code) {
+    case EXIT.USAGE:
+      return "usage";
+    case EXIT.CONFIG:
+      return "config";
+    case EXIT.TOOLCHAIN_MISSING:
+      return "toolchain";
+    case EXIT.RESUME_REFUSED:
+      return "resume_refused";
+    case EXIT.OPERATIONAL:
+      return "operational";
+    case EXIT.TEMPFAIL:
+      return "tempfail";
+    case EXIT.INTERNAL:
+      return "internal";
+    default:
+      return "other";
+  }
+}
