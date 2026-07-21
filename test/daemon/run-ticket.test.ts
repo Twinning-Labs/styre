@@ -171,7 +171,7 @@ test("a non-merge terminal emits zero ci_handoffs", async () => {
     profile,
     emit: (e) => seen.push(e),
   });
-  expect(r.outcome).toBe("blocked");
+  expect(r.outcome).toBe("escalated");
   expect(seen.filter((e) => e.type === "ci_handoff")).toHaveLength(0);
   db.close();
 });

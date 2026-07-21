@@ -4,7 +4,7 @@ import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { getLatestForTicket } from "../db/repos/dispatch.ts";
 import { type EventLogRow, listByTicket } from "../db/repos/event-log.ts";
 import { insertProject } from "../db/repos/project.ts";
-import { getDeliveredPayload, listPending } from "../db/repos/signal.ts";
+import { getDeliveredPayload, hasPendingHumanResume, listPending } from "../db/repos/signal.ts";
 import { getTicket, insertTicket } from "../db/repos/ticket.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
@@ -106,8 +106,8 @@ export async function driveToTerminal(
     if (r.parked)
       return await finish({ outcome: "parked", iterations: i, ...last, park: r.parked });
     if (t.status === "done") return await finish({ outcome: "done", iterations: i, ...last });
-    if (pending.some((s) => s.signal_type === "human_resume"))
-      return await finish({ outcome: "blocked", iterations: i, ...last });
+    if (hasPendingHumanResume(db, opts.ticketId))
+      return await finish({ outcome: "escalated", iterations: i, ...last });
     if (t.stage === "merge" && pending.some((s) => s.signal_type === "human_merge_approval")) {
       const pr = getDeliveredPayload(db, opts.ticketId, "external_pr_result");
       const sha = getLatestForTicket(db, opts.ticketId)?.branch_head_sha ?? null;
@@ -208,7 +208,12 @@ export function formatRunSummary(db: Database, ticketId: number, result: RunResu
   const pending = listPending(db, ticketId).map((s) => s.signal_type);
   const lines: string[] = [outcomeSentence(result.outcome)];
   if (prUrl) lines.push(`PR: ${prUrl}`);
-  if (pending.length > 0 && result.outcome !== "pr-ready" && result.outcome !== "done") {
+  if (result.outcome === "escalated") {
+    // Name WHY (the latest escalated event's reason); the pending `human_resume` signal name is
+    // internal vocabulary and is intentionally not printed for an escalation.
+    const reason = [...events].reverse().find((e) => e.kind === "escalated")?.reason;
+    if (reason) lines.push(`Reason: ${reason}`);
+  } else if (pending.length > 0 && result.outcome !== "pr-ready" && result.outcome !== "done") {
     lines.push(`Waiting on: ${pending.join(", ")}`);
   }
   lines.push(`Stage ${result.stage} · ${result.iterations} ticks · ${events.length} events`);

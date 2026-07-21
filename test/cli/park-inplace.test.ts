@@ -120,8 +120,9 @@ test("resumeRun derives in-place from the persisted worktree path: skips wipe/re
     // inside `resumeRun`, with the real `inPlace` value it derives. Only `ports` are faked.
     // Nothing here ever reaches an agent dispatch (verified below via the deterministic
     // escalation path), so the real (unused) claude runner selection is never invoked.
-    // Task 9: a 'blocked' terminal outcome is an operational stop, not a thrown error — resumeRun
-    // sets process.exitCode = 1 (via exitCodeForOutcome) and returns normally.
+    // Task 9 / ENG-353: an 'escalated' terminal outcome is an operational stop, not a thrown error
+    // — resumeRun sets process.exitCode = 75 (via exitCodeForOutcome) and returns normally. This
+    // scenario's failing build check escalates (pending human_resume), not a resolver dead-end.
     process.exitCode = 0;
     await resumeRun({ resume: ident }, profile, DEFAULT_RUNTIME_CONFIG, {
       ports: {
@@ -139,7 +140,7 @@ test("resumeRun derives in-place from the persisted worktree path: skips wipe/re
         checks: fakeChecks("passing"),
       },
     });
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(75);
 
     // --- (a)+(b): inPlace was derived true AND threaded into the registry's handlers ---
     // Proof: `ensureWorktree`/`worktreeFor` resolve `worktreePath === repoPath` only when
@@ -426,8 +427,9 @@ test("resumeRun with the marker present re-applies profile.targetRepo (the disco
     });
     expect(profile.targetRepo).not.toBe(repoPath);
 
-    // Task 9: a 'blocked' terminal outcome is an operational stop, not a thrown error — resumeRun
-    // sets process.exitCode = 1 (via exitCodeForOutcome) and returns normally.
+    // Task 9 / ENG-353: an 'escalated' terminal outcome is an operational stop, not a thrown error
+    // — resumeRun sets process.exitCode = 75 (via exitCodeForOutcome) and returns normally. This
+    // scenario's failing build check escalates (pending human_resume), not a resolver dead-end.
     process.exitCode = 0;
     await resumeRun({ resume: ident }, profile, DEFAULT_RUNTIME_CONFIG, {
       ports: {
@@ -445,7 +447,7 @@ test("resumeRun with the marker present re-applies profile.targetRepo (the disco
         checks: fakeChecks("passing"),
       },
     });
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(75);
 
     // The override reached: `profile.targetRepo` now matches the discovered `project.target_repo`.
     expect(profile.targetRepo).toBe(repoPath);
