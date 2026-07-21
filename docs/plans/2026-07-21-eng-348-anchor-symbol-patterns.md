@@ -146,13 +146,24 @@ EOF
 
 ```ts
 test("Ruby: an `uninitialized constant` inside a raise_error string must NOT fire (no NameError token)", () => {
-  const out = 'expect { boom }.to raise_error("uninitialized constant Helper")';
+  // Both rspec spellings: the message-only string, and the class passed as a separate argument
+  // (`NameError` followed by a comma, not the `:` the prefix pattern requires).
+  const files = ["spec/support/helper.rb"];
+  const sources = src("spec/support/helper.rb", "class Helper\nend\n");
   expect(
     importErrorImplicatesDiscarded(
-      out,
-      ["spec/support/helper.rb"],
+      'expect { boom }.to raise_error("uninitialized constant Helper")',
+      files,
       "rspec",
-      src("spec/support/helper.rb", "class Helper\nend\n"),
+      sources,
+    ),
+  ).toEqual([]);
+  expect(
+    importErrorImplicatesDiscarded(
+      'expect { boom }.to raise_error(NameError, "uninitialized constant Helper")',
+      files,
+      "rspec",
+      sources,
     ),
   ).toEqual([]);
 });
@@ -375,7 +386,13 @@ Replace with:
    the `Error:` token — the class is now closed on all five stacks.
 ```
 
-- [ ] **Step 2: Append a closure note to §4.5** — immediately after the `**Filed as ENG-348** …` paragraph that ends the §4.5 mitigations discussion (`…-design.md:318`, just before `### 4.6 Excerpt`), insert:
+- [ ] **Step 2: Append a closure note to §4.5** — find this exact sentence, which ends the §4.5 mitigations discussion (`…-design.md:318`, just before `### 4.6 Excerpt`; it occurs once):
+
+```markdown
+The safe direction is already held — a misfire costs a retry, not a merge.
+```
+
+Insert the following as a new paragraph immediately after it (leave the found sentence in place):
 
 ```markdown
 **Update (ENG-348, 2026-07-21): closed on all five stacks.** Rust, Ruby and PHP are now anchored to a
