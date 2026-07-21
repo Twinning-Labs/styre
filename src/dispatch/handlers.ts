@@ -640,9 +640,13 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         let rawOutput = "";
         let exitCode: number | null = null;
         let command: string | null = null;
+        let errorReason: string | null = null; // ENG-347: why an `error` coarse could not be attempted
 
         if (!comp || !fw) {
           coarse = "error"; // can't attempt — no framework (§5.2)
+          errorReason = comp
+            ? `no test framework could be detected for \`${testPath}\` (its component's \`test\` command names none) — the check could not be attempted`
+            : `no impacted component was found for \`${testPath}\` — the check could not be attempted`;
         } else {
           let interp: string | undefined;
           if (fw === "pytest") {
@@ -654,6 +658,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           }
           if (fw === "pytest" && interp === undefined) {
             coarse = "error"; // no interpreter → can't attempt
+            errorReason = `no Python interpreter could be resolved for \`${testPath}\` — the check could not be attempted`;
           } else {
             const sel = buildCheckSelector(fw, { testFile: testPath, testName: c.test_name });
             selector = sel.runArgs;
@@ -673,6 +678,8 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
               continue; // selects 0 → identity reject (§5.1)
             }
             coarse = res.coarse;
+            if (coarse === "error")
+              errorReason = `the check for \`${testPath}\` timed out or could not be launched and produced no output`;
           }
         }
 
@@ -700,6 +707,23 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
             missReason.set(c.ac_id, excerpt ? `${base}. Framework said: ${excerpt}` : `${base}.`);
             continue; // uncovered → loud retry path, no poisoned check persisted
           }
+        }
+
+        // ENG-347: a check that demonstrably could not be attempted — coarse `error` with no usable
+        // output (no framework detected, no interpreter, or a timeout that produced nothing) — must
+        // NEVER mark its criterion covered. Downstream it would be stamped `environmental`
+        // (classify-prior.ts) and downgraded to a non-gating advisory (post-implement-rerun.ts),
+        // shipping the criterion unverified. The text-based discard-poison guard above cannot see
+        // this path: there is no output to match. Route it to the SAME uncovered path (loud retry,
+        // reason named), for EVERY errored-empty check regardless of discards — the framework=null
+        // case is discard-independent (see docs/brainstorms/2026-07-21-eng-347-…). Diagnosis-only.
+        if (coarse === "error" && rawOutput.trim() === "") {
+          missReason.set(
+            c.ac_id,
+            errorReason ??
+              `the check for \`${testPath}\` could not be attempted (no framework detected, no interpreter, or a timeout) and produced no output`,
+          );
+          continue; // uncovered → loud retry path, no unverified check recorded as covering
         }
 
         records.push({
