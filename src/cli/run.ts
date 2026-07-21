@@ -227,6 +227,7 @@ export async function runImpl({ args }: { args: RunArgs }): Promise<void> {
       command: "run",
       exitCode: code,
       errorClass: err instanceof Error ? err.constructor.name : "Unknown",
+      errorKind: "unknown",
     });
     throw err; // rethrow → guard renders + sets process.exitCode
   } finally {
