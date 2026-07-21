@@ -2,10 +2,11 @@ import { afterAll, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setupCommand } from "../../src/cli/setup.ts";
+import { type SetupArgs, setupImpl } from "../../src/cli/setup.ts";
 
-// This suite exercises the REAL `setup.ts` entrypoint (`setupCommand.run`) directly — not a
-// reimplementation of its preflight block — proving the actual production code path: when the
+// This suite exercises the REAL `setup.ts` entrypoint (`setupImpl`, the unwrapped body behind
+// `setupCommand.run`'s `guard` wrapper) directly — not a reimplementation of its preflight block —
+// proving the actual production code path: when the
 // `repo` positional is omitted, it discovers the cwd git repo and gates it on the
 // `.styre-disposable` marker BEFORE runSetup's write-capable enrichment agent ever runs.
 //
@@ -61,14 +62,7 @@ async function invokeSetup(repo?: string): Promise<void> {
   delete process.env.ANTHROPIC_API_KEY;
   process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "styre-setup-xdg-empty-")); // no host config
   try {
-    await setupCommand.run?.({
-      rawArgs: [],
-      cmd: setupCommand,
-      args: {
-        _: [],
-        repo,
-      } as unknown as Parameters<NonNullable<typeof setupCommand.run>>[0]["args"],
-    });
+    await setupImpl({ args: { repo } as SetupArgs });
   } finally {
     if (prevKey === undefined)
       // biome-ignore lint/performance/noDelete: restoring an unset env var requires delete

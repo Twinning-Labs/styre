@@ -1,8 +1,19 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
+
+// Several cases assert on process.exitCode (a global); reset it so a set value
+// can't leak into a later test file under a different run ordering.
+afterEach(() => {
+  process.exitCode = 0;
+});
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parkDir, resetProvisionForResume, resumeRun } from "../../src/cli/park.ts";
+import {
+  finishRunResult,
+  parkDir,
+  resetProvisionForResume,
+  resumeRun,
+} from "../../src/cli/park.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import { openDb } from "../../src/db/client.ts";
 import { migrate } from "../../src/db/migrate.ts";
@@ -28,6 +39,19 @@ async function succeed(db: Parameters<typeof runStep>[0], ticketId: number, step
     execute: () => ({ ok: true }),
   });
 }
+
+test("finishRunResult does not throw for blocked; sets exit 1 and closes db", () => {
+  const { db, ticketId } = makeTestDb();
+  process.exitCode = 0;
+  expect(() =>
+    finishRunResult(db, "/tmp/does-not-matter.db", "test-project", "ENG-1", {
+      outcome: "blocked",
+    }),
+  ).not.toThrow();
+  expect(process.exitCode).toBe(1);
+  expect(() => db.query("SELECT 1").get()).toThrow(); // closed db throws on use
+  void ticketId;
+});
 
 test("resetProvisionForResume flips a succeeded provision step back to pending with attempt 0", async () => {
   const { db, ticketId } = makeTestDb();

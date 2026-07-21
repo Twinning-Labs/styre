@@ -52,18 +52,18 @@ test("notifyTerminal enqueues pr-ready(success) and no-progress(high); skips par
   db.close();
   expect(got).toEqual([
     { event: "PR ready to merge", severity: "success" },
-    { event: "gave up (no progress)", severity: "high" },
+    { event: "Stopped — couldn't make progress.", severity: "high" },
   ]);
 });
 
 test("blocked terminal: dead-end notifies, escalation-blocked does not (already evented)", () => {
-  // dead-end: no pending human_resume → a "gave up (blocked)" notification.
+  // dead-end: no pending human_resume → a "Stopped — no actionable work remains." notification.
   // Reuse the file's existing `payloads(db)` helper (returns {event, severity}).
   const a = makeTestDb();
   createNotifier(cfg("escalations")).notifyTerminal(a.db, a.ticketId, "blocked");
   const aPayloads = payloads(a.db);
   a.db.close();
-  expect(aPayloads).toEqual([{ event: "gave up (blocked)", severity: "high" }]);
+  expect(aPayloads).toEqual([{ event: "Stopped — no actionable work remains.", severity: "high" }]);
 
   // escalation-blocked: a pending human_resume → NO terminal notification.
   const b = makeTestDb();

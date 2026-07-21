@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { toolchainError } from "../../src/cli/errors.ts";
+import { renderError } from "../../src/cli/output.ts";
 import {
   type MissingCommand,
   collectToolProbes,
@@ -132,16 +134,30 @@ test("missingHint: npm run → the script; otherwise the leading program", () =>
   expect(missingHint("go build ./...")).toBe("go");
 });
 
-test("formatMissingTools: names command, component/label, and missing program", () => {
+test("formatMissingTools: names command, component/label, and missing program — body only, no headline/recovery", () => {
   const missing: MissingCommand[] = [
     { component: "api", label: "prepare", command: "composer install", missing: "composer" },
   ];
   const msg = formatMissingTools(missing);
-  expect(msg).toContain("cannot start");
   expect(msg).toContain("[api / prepare]");
   expect(msg).toContain("composer install");
   expect(msg).toContain("(missing: composer)");
-  expect(msg).toContain("Install the missing tool(s) and re-run.");
+  // The headline and recovery hint now live solely in `toolchainError` — formatMissingTools
+  // must not duplicate them, or the framed message doubles the headline.
+  expect(msg).not.toContain("cannot start");
+  expect(msg).not.toContain("Install the missing tool(s) and re-run.");
+});
+
+test("formatMissingTools + toolchainError: framed message has exactly one headline, one recovery line", () => {
+  const missing: MissingCommand[] = [
+    { component: "api", label: "prepare", command: "composer install", missing: "composer" },
+  ];
+  const rendered = renderError("run", toolchainError(formatMissingTools(missing)));
+  expect(rendered).toContain("cannot start — required commands are not runnable on this machine");
+  expect(rendered).toContain("[api / prepare]");
+  expect(rendered).toContain("Install the missing tool(s) and re-run.");
+  expect(rendered.split("cannot start").length - 1).toBe(1);
+  expect(rendered.split("Install the missing tool(s) and re-run.").length - 1).toBe(1);
 });
 
 test("preflightToolchain (real probe): catches an absent binary, passes a present one", () => {

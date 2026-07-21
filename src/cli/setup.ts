@@ -19,6 +19,7 @@ import { probeProfile } from "../setup/probe.ts";
 import { resolveCommands } from "../setup/resolve-commands.ts";
 import { createAnalytics } from "../telemetry/analytics/index.ts";
 import type { SetupInput } from "../telemetry/analytics/properties.ts";
+import { guard } from "./output.ts";
 
 const CHECKS = new Set(["github", "external", "none"]);
 
@@ -144,20 +145,20 @@ export async function runSetup(args: {
   // and seeds the implement Bash allowlist. Show the FULL final command list and require explicit
   // operator sign-off — not just prompting for the ones that were missing.
   if (interactive) {
-    console.log(
-      "\nResolved components (commands run with repo write + network; paths drive verify routing):",
+    process.stderr.write(
+      "\nResolved components (commands run with repo write + network; paths drive verify routing):\n",
     );
     for (const c of components) {
-      console.log(`  ${c.name} [${c.kind}]  paths: ${c.paths.join(", ")}`);
+      process.stderr.write(`  ${c.name} [${c.kind}]  paths: ${c.paths.join(", ")}\n`);
       for (const [k, v] of Object.entries(c.commands)) {
-        console.log(`    ${k}: ${typeof v === "string" ? v : "(none)"}`);
+        process.stderr.write(`    ${k}: ${typeof v === "string" ? v : "(none)"}\n`);
       }
       if (c.prepare !== undefined) {
-        console.log(`    prepare: ${c.prepare} (stored, not run)`);
+        process.stderr.write(`    prepare: ${c.prepare} (stored, not run)\n`);
       }
     }
     for (const [name, cmd] of Object.entries(discovered.repoCommands)) {
-      console.log(`  repo.${name}: ${cmd}`);
+      process.stderr.write(`  repo.${name}: ${cmd}\n`);
     }
     const ok = globalThis.prompt("Approve these components (commands + paths)? [y/N]");
     if (ok?.trim().toLowerCase() !== "y") {
@@ -230,53 +231,66 @@ export const setupCommand = defineCommand({
         "Headless only: accept agent-refined command strings. These run as code at verify — the metacharacter filter is hygiene, not a sandbox. Use only on trusted repos / isolated environments. Off by default.",
     },
   },
-  async run({ args }) {
-    // No positional `repo`: discover the cwd repo and gate it on the disposability marker BEFORE
-    // any write-capable enrichment agent call (runSetup's enrichRuntimeContext/discoverComponents).
-    // An explicit `setup <repo>` requires no marker — the operator named the target.
-    let repo = args.repo;
-    if (!repo) {
-      const { discoverRepoRoot, assertInPlaceMarker } = await import("../dispatch/in-place.ts");
-      repo = discoverRepoRoot(); // no-arg → discover cwd's repo (throws fail-closed if not a git repo)
-      assertInPlaceMarker(repo); // gate BEFORE runSetup's write-capable enrichment agent
-    }
-    const effSlug = args.slug && args.slug.length > 0 ? args.slug : deriveSlug(resolve(repo));
-    const runtimeConfig = discoverRuntimeConfig({ explicitPath: args.config, slug: effSlug });
-    const agentConfig = runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG;
-    const requiredKey = requiredEnvFor(agentConfig.provider);
-    if (requiredKey && !process.env[requiredKey]) {
-      throw new Error(
-        `setup: ${requiredKey} is required for provider '${agentConfig.provider}' (runtime-context prose enrichment)`,
-      );
-    }
-    const runner = resolveAgentRunner(agentConfig);
-    const { outPath, profile, needsInput } = await runSetup({
-      repo,
-      out: args.out,
-      checks: args.checks,
-      slug: effSlug,
-      force: args.force,
-      reprobe: args.reprobe,
-      trustAgentCommands: args["trust-agent-commands"] === true,
-      deps: { runner, agentConfig },
-    });
-    console.log(`setup: wrote ${outPath}`);
-    if (needsInput.length > 0) {
-      const lines = needsInput.map((s) => `         - ${s}`).join("\n");
-      console.log(
-        `setup: NEEDS INPUT — the probe could not determine these runtime-context sections.\n       Edit ${outPath} and set presence/detail (or re-run after adding tooling):\n${lines}`,
-      );
-    }
-    const note = credNote(profile);
-    if (note) console.log(`setup: ${note}`);
-    console.log(`setup: run with  styre run <ticket> --profile ${outPath}`);
-
-    try {
-      const analytics = createAnalytics(DEFAULT_RUNTIME_CONFIG);
-      analytics.setupCompleted(deriveSetupInput(profile));
-      await analytics.shutdown();
-    } catch {
-      /* telemetry must never fail a completed setup */
-    }
-  },
+  run: (ctx) => guard("setup", () => setupImpl({ args: ctx.args as unknown as SetupArgs })),
 });
+
+export interface SetupArgs {
+  repo?: string;
+  out?: string;
+  checks?: string;
+  slug?: string;
+  force?: boolean;
+  reprobe?: boolean;
+  config?: string;
+  "trust-agent-commands"?: boolean;
+}
+
+export async function setupImpl({ args }: { args: SetupArgs }): Promise<void> {
+  // No positional `repo`: discover the cwd repo and gate it on the disposability marker BEFORE
+  // any write-capable enrichment agent call (runSetup's enrichRuntimeContext/discoverComponents).
+  // An explicit `setup <repo>` requires no marker — the operator named the target.
+  let repo = args.repo;
+  if (!repo) {
+    const { discoverRepoRoot, assertInPlaceMarker } = await import("../dispatch/in-place.ts");
+    repo = discoverRepoRoot(); // no-arg → discover cwd's repo (throws fail-closed if not a git repo)
+    assertInPlaceMarker(repo); // gate BEFORE runSetup's write-capable enrichment agent
+  }
+  const effSlug = args.slug && args.slug.length > 0 ? args.slug : deriveSlug(resolve(repo));
+  const runtimeConfig = discoverRuntimeConfig({ explicitPath: args.config, slug: effSlug });
+  const agentConfig = runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG;
+  const requiredKey = requiredEnvFor(agentConfig.provider);
+  if (requiredKey && !process.env[requiredKey]) {
+    throw new Error(
+      `setup: ${requiredKey} is required for provider '${agentConfig.provider}' (runtime-context prose enrichment)`,
+    );
+  }
+  const runner = resolveAgentRunner(agentConfig);
+  const { outPath, profile, needsInput } = await runSetup({
+    repo,
+    out: args.out,
+    checks: args.checks,
+    slug: effSlug,
+    force: args.force,
+    reprobe: args.reprobe,
+    trustAgentCommands: args["trust-agent-commands"] === true,
+    deps: { runner, agentConfig },
+  });
+  process.stderr.write(`setup: wrote ${outPath}\n`);
+  if (needsInput.length > 0) {
+    const lines = needsInput.map((s) => `         - ${s}`).join("\n");
+    process.stderr.write(
+      `setup: NEEDS INPUT — the probe could not determine these runtime-context sections.\n       Edit ${outPath} and set presence/detail (or re-run after adding tooling):\n${lines}\n`,
+    );
+  }
+  const credNoteMsg = credNote(profile);
+  if (credNoteMsg) process.stderr.write(`setup: ${credNoteMsg}\n`);
+  process.stderr.write(`setup: run with styre run <ticket> --profile ${outPath}\n`);
+
+  try {
+    const analytics = createAnalytics(DEFAULT_RUNTIME_CONFIG);
+    analytics.setupCompleted(deriveSetupInput(profile));
+    await analytics.shutdown();
+  } catch {
+    /* telemetry must never fail a completed setup */
+  }
+}

@@ -1,7 +1,8 @@
 import type { Database } from "bun:sqlite";
+import { outcomeSentence } from "../cli/outcome.ts";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { getLatestForTicket } from "../db/repos/dispatch.ts";
-import { listByTicket } from "../db/repos/event-log.ts";
+import { type EventLogRow, listByTicket } from "../db/repos/event-log.ts";
 import { insertProject } from "../db/repos/project.ts";
 import { getDeliveredPayload, listPending } from "../db/repos/signal.ts";
 import { getTicket, insertTicket } from "../db/repos/ticket.ts";
@@ -170,18 +171,47 @@ export async function runTicket(deps: {
   return { ...result, ticketId, summary: formatRunSummary(deps.db, ticketId, result) };
 }
 
-/** A plain-text run summary from the durable SoT: outcome + final stage/status + the event timeline.
- *  Per-step cost/tokens (incl. cache) live on the `dispatch` rows and are summed into the machine
- *  telemetry summary (buildSummary); this human stderr summary intentionally stays text-only. */
+/** The first `|`-delimited segment of a loopback signature, with a count of the rest — e.g.
+ *  `"a:1|b:2|c:3"` → `"a:1 (+2 more)"`. A single-segment signature passes through unchanged. */
+function firstSignature(sig: string): string {
+  const parts = sig.split("|");
+  return parts.length > 1 ? `${parts[0]} (+${parts.length - 1} more)` : (parts[0] ?? sig);
+}
+
+/** One legible line per event_log row for the terminal timeline — in particular rendering a
+ *  loopback's loop/route/signature instead of the bare word "loopback". */
+function timelineLine(e: EventLogRow): string {
+  switch (e.kind) {
+    case "transition":
+      return `transition ${e.from_stage ?? "?"}→${e.to_stage ?? "?"}`;
+    case "loopback": {
+      const route = e.route_to ? ` → ${e.route_to}` : "";
+      const sig = e.signature ? `: ${firstSignature(e.signature)}` : "";
+      return `loopback ${e.loop ?? "?"}${route}${sig}`;
+    }
+    case "escalated":
+      return `escalated${e.reason ? ` — ${e.reason}` : ""}`;
+    default:
+      return `${e.kind}${e.reason ? ` — ${e.reason}` : ""}`;
+  }
+}
+
+/** A plain-text run summary from the durable SoT: a human outcome sentence, the PR URL on any
+ *  outcome that has one, the pending signal name when the ticket is waiting on a human, and a
+ *  legible event timeline. Per-step cost/tokens (incl. cache) live on the `dispatch` rows and are
+ *  summed into the machine telemetry summary (buildSummary); this human stderr summary
+ *  intentionally stays text-only. */
 export function formatRunSummary(db: Database, ticketId: number, result: RunResult): string {
   const events = listByTicket(db, ticketId);
-  const lines = [
-    `run: ${result.outcome} (stage=${result.stage}, status=${result.status}, ${result.iterations} ticks)`,
-    `events: ${events.length}`,
-    ...events.map(
-      (e) =>
-        `  #${e.seq} ${e.kind}${e.from_stage ? ` ${e.from_stage}→${e.to_stage}` : ""}${e.reason ? ` — ${e.reason}` : ""}`,
-    ),
-  ];
+  const pr = getDeliveredPayload(db, ticketId, "external_pr_result");
+  const prUrl = typeof pr?.url === "string" ? pr.url : undefined;
+  const pending = listPending(db, ticketId).map((s) => s.signal_type);
+  const lines: string[] = [outcomeSentence(result.outcome)];
+  if (prUrl) lines.push(`PR: ${prUrl}`);
+  if (pending.length > 0 && result.outcome !== "pr-ready" && result.outcome !== "done") {
+    lines.push(`Waiting on: ${pending.join(", ")}`);
+  }
+  lines.push(`Stage ${result.stage} · ${result.iterations} ticks · ${events.length} events`);
+  for (const e of events) lines.push(`  #${e.seq} ${timelineLine(e)}`);
   return lines.join("\n");
 }

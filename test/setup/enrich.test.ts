@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import type { AgentRunResult } from "../../src/agent/runner.ts";
+import { StyreError } from "../../src/cli/errors.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { RuntimeContextSchema } from "../../src/dispatch/profile.ts";
 import { enrichRuntimeContext } from "../../src/setup/enrich.ts";
@@ -78,15 +79,19 @@ test("enrich passes read-only tools and the standard-tier model, cwd=repoDir", a
   expect(input?.cwd).toBe("/tmp/repo");
 });
 
-test("enrich retries a malformed sidecar then throws after 3 attempts", async () => {
+test("enrich retries a malformed sidecar then throws a configError after 3 attempts", async () => {
   const runner = new FakeAgentRunner(() => ok("no sidecar here"));
-  await expect(
-    enrichRuntimeContext("/tmp/repo", scan({}), {
+  try {
+    await enrichRuntimeContext("/tmp/repo", scan({}), {
       runner,
       agentConfig: DEFAULT_AGENT_CONFIG,
       sleep: noSleep,
-    }),
-  ).rejects.toThrow(/failed after 3 attempts/);
+    });
+    throw new Error("expected enrichRuntimeContext to throw");
+  } catch (e) {
+    expect(e).toBeInstanceOf(StyreError);
+    expect((e as StyreError).detail).toMatch(/failed after 3 attempts/);
+  }
   expect(runner.inputs.length).toBe(3);
 });
 

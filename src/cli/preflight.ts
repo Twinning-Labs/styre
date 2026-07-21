@@ -78,15 +78,12 @@ export function preflightToolchain(
   return missing;
 }
 
-/** The stderr message for a non-empty missing set. Names each command + the component/slot it
- *  belongs to + the missing program, so the operator can install everything in one pass. */
+/** The detail body for a non-empty missing set: one line per command, naming the
+ *  component/slot it belongs to + the missing program, so the operator can install everything
+ *  in one pass. The headline and recovery hint are supplied by `toolchainError`, which wraps
+ *  this as its `detail` — this function must not duplicate them. */
 export function formatMissingTools(missing: MissingCommand[]): string {
-  const lines = missing.map(
-    (m) => `  - [${m.component} / ${m.label}] \`${m.command}\`  (missing: ${m.missing})`,
-  );
-  return [
-    "styre run: cannot start — required commands are not runnable on this machine:",
-    ...lines,
-    "Install the missing tool(s) and re-run.",
-  ].join("\n");
+  return missing
+    .map((m) => `- [${m.component} / ${m.label}] \`${m.command}\`  (missing: ${m.missing})`)
+    .join("\n");
 }

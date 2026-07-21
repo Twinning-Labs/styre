@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
+import { StyreError } from "../../src/cli/errors.ts";
 import { runSetup, unknownRuntimeSections } from "../../src/cli/setup.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
@@ -138,9 +139,14 @@ test("re-probe failure leaves existing file byte-unchanged", async () => {
     agentConfig: DEFAULT_AGENT_CONFIG,
     sleep: () => Promise.resolve(),
   };
-  await expect(runSetup({ repo, out, reprobe: true, deps: failing })).rejects.toThrow(
-    /failed after 3 attempts/,
-  );
+  let err1: unknown;
+  try {
+    await runSetup({ repo, out, reprobe: true, deps: failing });
+  } catch (e) {
+    err1 = e;
+  }
+  expect(err1).toBeInstanceOf(StyreError);
+  expect((err1 as StyreError).detail).toMatch(/failed after 3 attempts/);
   expect(readFileSync(out, "utf8")).toBe(before);
 });
 
@@ -162,7 +168,14 @@ test("runSetup throws and writes no profile when enrichment fails", async () => 
     agentConfig: DEFAULT_AGENT_CONFIG,
     sleep: () => Promise.resolve(),
   };
-  await expect(runSetup({ repo, out, deps: failing })).rejects.toThrow(/failed after 3 attempts/);
+  let err2: unknown;
+  try {
+    await runSetup({ repo, out, deps: failing });
+  } catch (e) {
+    err2 = e;
+  }
+  expect(err2).toBeInstanceOf(StyreError);
+  expect((err2 as StyreError).detail).toMatch(/failed after 3 attempts/);
   expect(existsSync(out)).toBe(false);
 });
 
@@ -179,10 +192,13 @@ test("interactive confirm block prints prepare line for components that carry it
 
   const out = join(mkdtempSync(join(tmpdir(), "styre-out-ruby-")), "profile.json");
 
-  // Capture console.log output
+  // Capture stderr output (setup's human output moved from console.log to process.stderr.write)
   const logs: string[] = [];
-  const origLog = console.log;
-  console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+  const origStderrWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string) => {
+    logs.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
 
   // Mock globalThis.prompt: return "" for missing-command prompts (→ unavailable),
   // return "y" for the approval prompt.
@@ -208,7 +224,7 @@ test("interactive confirm block prints prepare line for components that carry it
       ),
     ).toBe(true);
   } finally {
-    console.log = origLog;
+    process.stderr.write = origStderrWrite;
     (globalThis as Record<string, unknown>).prompt = origPrompt;
     if (origDescriptor !== undefined) {
       Object.defineProperty(process.stdin, "isTTY", origDescriptor);
