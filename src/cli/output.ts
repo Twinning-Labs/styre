@@ -25,11 +25,6 @@ export function renderInternal(cmd: string, err: unknown): string {
   return formatMessage(cmd, `internal error — please report to ${ISSUES_URL}`, detail);
 }
 
-/** An informational line, house-styled, to stderr. */
-export function note(cmd: string, msg: string): void {
-  process.stderr.write(`${formatMessage(cmd, msg)}\n`);
-}
-
 /** The error boundary. Wrap each subcommand's body so citty's runMain never sees a throw (its
  *  catch is the only place it double-prints + exits 1). Renders once, sets the exit code, returns. */
 export async function guard(cmd: string, body: () => Promise<void>): Promise<void> {

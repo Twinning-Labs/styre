@@ -1,4 +1,10 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
+
+// Cases assert on process.exitCode (a global); reset it so a set value can't
+// leak into a later test file under a different run ordering.
+afterEach(() => {
+  process.exitCode = 0;
+});
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

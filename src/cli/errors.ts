@@ -58,12 +58,3 @@ export function toolchainError(detail: string): StyreError {
     recovery: "Install the missing tool(s) and re-run.",
   });
 }
-
-export function resumeRefusedError(detail: string, recovery: string): StyreError {
-  return new StyreError({
-    code: EXIT.RESUME_REFUSED,
-    headline: "resume refused: branch HEAD moved since the parked attempt",
-    detail,
-    recovery,
-  });
-}

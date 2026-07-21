@@ -21,7 +21,7 @@ test("renderInternal shows a please-report banner, message as detail, no stack b
   const s = renderInternal("run", new Error("kaboom"));
   expect(s).toContain("internal error");
   expect(s).toContain("kaboom");
-  expect(s).not.toContain("at "); // no stack frames without DEBUG
+  expect(s).not.toMatch(/^\s+at .*:\d+:\d+/m); // no stack-frame lines without DEBUG
 });
 
 test("guard: StyreError → renders once, sets its code, does not rethrow", async () => {
