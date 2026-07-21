@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { openDb } from "../../src/db/client.ts";
 import { migrate } from "../../src/db/migrate.ts";
 import { insertProject } from "../../src/db/repos/project.ts";
+import { insertRun } from "../../src/db/repos/run.ts";
 import { insertTicket } from "../../src/db/repos/ticket.ts";
+import { nowUtc } from "../../src/util/time.ts";
 
 /** Migrate a fresh tmp DB, open it, and seed one project + one ticket.
  *  The caller is responsible for db.close(). */
@@ -28,6 +30,7 @@ export function makeTestDb(opts?: { seedTicket?: boolean }): {
   if (seedTicket) {
     const projectId = insertProject(db, { slug: "test-project", targetRepo: "/tmp/repo" });
     const ticketId = insertTicket(db, { projectId, ident: "ENG-1" });
+    insertRun(db, { runId: "test-run-0001", startedAt: nowUtc(), provider: "claude" });
     return { db, projectId, ticketId };
   }
   return { db, projectId: undefined, ticketId: undefined };

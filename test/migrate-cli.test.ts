@@ -6,7 +6,7 @@ import { join } from "node:path";
 const workdir = mkdtempSync(join(tmpdir(), "styre-mig-cli-"));
 afterAll(() => rmSync(workdir, { recursive: true, force: true }));
 
-test("`styre migrate --db <path>` exits 0 and reports v7 on stderr (stdout stays empty)", async () => {
+test("`styre migrate --db <path>` exits 0 and reports v8 on stderr (stdout stays empty)", async () => {
   const dbPath = join(workdir, "styre.db");
   const proc = Bun.spawn(["bun", "run", "src/index.ts", "migrate", "--db", dbPath], {
     stdout: "pipe",
@@ -17,6 +17,6 @@ test("`styre migrate --db <path>` exits 0 and reports v7 on stderr (stdout stays
   const code = await proc.exited;
   expect(code).toBe(0);
   // Human output → stderr (stdout is NDJSON-only across all subcommands).
-  expect(err).toContain("schema v7");
-  expect(out).not.toContain("schema v7");
+  expect(err).toContain("schema v8");
+  expect(out).not.toContain("schema v8");
 });

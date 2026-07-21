@@ -16,10 +16,14 @@ type SummaryEvent = Extract<TelemetryEvent, { type: "summary" }>;
 
 function summary(partial: Partial<SummaryEvent>): SummaryEvent {
   return {
-    schema_version: 1,
+    schema_version: 2,
     type: "summary",
+    run_id: "r1",
     ticket_id: 1,
     ident: "ENG-1",
+    provider: "claude",
+    started_at: "t0",
+    ended_at: "t1",
     outcome: "pr-ready",
     stage: "merge",
     status: "waiting",
@@ -29,6 +33,14 @@ function summary(partial: Partial<SummaryEvent>): SummaryEvent {
     tokens_out: 0,
     cache_read: 0,
     cache_create: 0,
+    usage_coverage: {
+      dispatch_count: 3,
+      cost_usd: 0,
+      tokens_in: 0,
+      tokens_out: 0,
+      cache_read: 0,
+      cache_create: 0,
+    },
     dispatch_count: 3,
     dispatch_outcomes: { "clean-success": 3 },
     cycle_count: 0,

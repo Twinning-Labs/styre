@@ -1,4 +1,5 @@
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
+import { randomUUID } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
@@ -25,6 +26,7 @@ import { migrate } from "../db/migrate.ts";
 import { getLatestForTicket, getLatestWorktreePath } from "../db/repos/dispatch.ts";
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { getProject } from "../db/repos/project.ts";
+import { ensureRunTable, getRun, insertRun, markResumed } from "../db/repos/run.ts";
 import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
 import { listByStatus } from "../db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
@@ -33,6 +35,7 @@ import { resetProvision } from "../dispatch/provision.ts";
 import { branchHeadSha, removeWorktree } from "../dispatch/worktree.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
+import { nowUtc } from "../util/time.ts";
 import { usageError } from "./errors.ts";
 import { exitCodeForOutcome } from "./outcome.ts";
 import { formatMessage } from "./output.ts";
@@ -72,6 +75,25 @@ export function parkDir(slug: string, ident: string): string {
   return join(stateDir(), slug, ident);
 }
 
+/** Best-effort read of the run_id in an existing dump's run.db. Returns null if the file is
+ *  absent or the dump predates the run table (pre-upgrade) — never throws. */
+export function priorRunIdAt(destPath: string): string | null {
+  if (!existsSync(destPath)) return null;
+  try {
+    const db = new Database(destPath, { readonly: true });
+    try {
+      return (
+        db.query<{ run_id: string }, []>("SELECT run_id FROM run ORDER BY id LIMIT 1").get()
+          ?.run_id ?? null
+      );
+    } finally {
+      db.close();
+    }
+  } catch {
+    return null; // no run table / unreadable → treat as no prior id
+  }
+}
+
 /** Persist the parked run so `styre run --resume` can rehydrate it exactly:
  *   - run.db: the SoT (checkpointed so the single file is self-contained), with the interrupted
  *     step left 'running' (recover() resets it on resume)
@@ -87,12 +109,17 @@ export function dumpPark(
 ): string {
   const dir = parkDir(slug, ident);
   mkdirSync(dir, { recursive: true });
+  const currentRunId = getRun(db)?.run_id ?? null; // read before we close db
   db.exec("PRAGMA wal_checkpoint(TRUNCATE);"); // fold WAL into the main file before copy
   db.close();
   const destPath = join(dir, "run.db");
   // Skip the copy when resuming in-place: dbPath and destPath are the same file (re-park from
   // an existing dump — the DB is already at the correct location, no copy needed).
   if (dbPath !== destPath) {
+    const prior = priorRunIdAt(destPath);
+    if (prior !== null && currentRunId !== null && prior !== currentRunId) {
+      process.stderr.write(`overwriting parked run ${prior} with ${currentRunId} for ${ident}\n`);
+    }
     copyFileSync(dbPath, destPath);
   }
   writeFileSync(
@@ -178,6 +205,16 @@ export async function resumeRun(
   }
   migrate(dbPath);
   const db = openDb(dbPath);
+  ensureRunTable(db); // pre-upgrade parks (v1) have no run table; migrate() won't add it
+  if (getRun(db) === null) {
+    // Pre-upgrade park: no identity was ever minted — assign a fresh one for the resumed portion.
+    insertRun(db, {
+      runId: randomUUID(),
+      startedAt: nowUtc(),
+      provider: (runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG).provider,
+    });
+  }
+  markResumed(db); // same logical run for a v2 park; resumed=1, attempt++
   const ticketId = onlyTicketId(db);
   const ticket = getTicket(db, ticketId);
   if (!ticket) throw new Error("resume: ticket vanished");

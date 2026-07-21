@@ -7,6 +7,7 @@ export type EventKind = "transition" | "loopback" | "escalated" | "resumed" | "n
 export interface EventLogRow {
   id: number;
   ticket_id: number;
+  dispatch_id: string | null;
   seq: number;
   kind: EventKind;
   actor: string | null;
@@ -21,7 +22,7 @@ export interface EventLogRow {
 }
 
 const COLS =
-  "id, ticket_id, seq, kind, actor, from_stage, to_stage, loop, route_to, signature, reason, payload_json, created_at";
+  "id, ticket_id, dispatch_id, seq, kind, actor, from_stage, to_stage, loop, route_to, signature, reason, payload_json, created_at";
 
 export function nextSeq(db: Database, ticketId: number): number {
   const row = db

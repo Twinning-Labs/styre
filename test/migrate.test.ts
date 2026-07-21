@@ -26,13 +26,14 @@ const CORE_TABLES = [
   "external_id_cache",
   "projection_state",
   "projection_outbox",
+  "run",
 ];
 
 describe("migrate", () => {
-  test("bootstraps a fresh DB at schema v7", () => {
+  test("bootstraps a fresh DB at schema v8", () => {
     const result = migrate(tmpDbPath());
     expect(result.created).toBe(true);
-    expect(result.version).toBe(7);
+    expect(result.version).toBe(8);
   });
 
   test("creates the core SoT tables", () => {
@@ -54,6 +55,6 @@ describe("migrate", () => {
     migrate(path);
     const second = migrate(path);
     expect(second.created).toBe(false);
-    expect(second.version).toBe(7);
+    expect(second.version).toBe(8);
   });
 });

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,7 @@ import { realRecoverDeps, recover } from "../daemon/recover.ts";
 import { runTicket } from "../daemon/run-ticket.ts";
 import { openDb } from "../db/client.ts";
 import { migrate } from "../db/migrate.ts";
+import { getRun, insertRun } from "../db/repos/run.ts";
 import { getTicket } from "../db/repos/ticket.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
@@ -20,6 +22,7 @@ import { type Analytics, createAnalytics } from "../telemetry/analytics/index.ts
 import { stdoutSink } from "../telemetry/emit.ts";
 import { buildSummary } from "../telemetry/emitter.ts";
 import type { TelemetryEvent } from "../telemetry/events.ts";
+import { nowUtc } from "../util/time.ts";
 import { EXIT, StyreError, errorKindForExit, toolchainError, usageError } from "./errors.ts";
 import { guard } from "./output.ts";
 import { finishRunResult, parkDir } from "./park.ts";
@@ -187,6 +190,15 @@ export async function runImpl(
 
     const ports = makeProjectorPorts(runtimeConfig, profile);
     const agentConfig = runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG;
+    // Mint the run identity before any telemetry emit. Guard on getRun===null so a reused --db
+    // (non-ephemeral) doesn't insert a second run row.
+    if (getRun(db) === null) {
+      insertRun(db, {
+        runId: randomUUID(),
+        startedAt: nowUtc(),
+        provider: (runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG).provider,
+      });
+    }
     const runner = resolveAgentRunner(agentConfig);
     const registry = buildDispatchRegistry({
       runner,

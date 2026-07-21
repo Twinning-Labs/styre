@@ -8,10 +8,14 @@ export interface DispatchRow {
   step_id: number | null;
   dispatch_id: string;
   seq: number;
+  predecessor_dispatch_id: string | null;
   stage: string | null;
   kind: string | null;
   model: string | null;
+  effort: string | null;
+  trigger: string | null;
   outcome: string | null;
+  exit_code: number | null;
   branch_head_sha: string | null;
   worktree_path: string | null;
   started_at: string | null;
@@ -27,9 +31,9 @@ export interface DispatchRow {
 }
 
 const COLS =
-  "id, ticket_id, work_unit_id, step_id, dispatch_id, seq, stage, kind, model, outcome, " +
-  "branch_head_sha, worktree_path, started_at, ended_at, duration_ms, tokens_in, tokens_out, " +
-  "cache_read, cache_create, cost_usd, partial, created_at";
+  "id, ticket_id, work_unit_id, step_id, dispatch_id, seq, predecessor_dispatch_id, stage, kind, " +
+  "model, effort, trigger, outcome, exit_code, branch_head_sha, worktree_path, started_at, " +
+  "ended_at, duration_ms, tokens_in, tokens_out, cache_read, cache_create, cost_usd, partial, created_at";
 
 export function nextSeq(db: Database, ticketId: number): number {
   const row = db
@@ -124,6 +128,20 @@ export function completeDispatch(
     partial?: number;
   },
 ): void {
+  // duration_ms is computed here — at the single writer — so every completed row carries it,
+  // not just the call sites a caller remembered to pass it (ENG-339: it was a dead column).
+  let durationMs = p.durationMs ?? null;
+  if (durationMs === null && p.endedAt) {
+    const started = db
+      .query<{ started_at: string | null }, [number]>(
+        "SELECT started_at FROM dispatch WHERE id = ?",
+      )
+      .get(id)?.started_at;
+    if (started) {
+      const delta = Date.parse(p.endedAt) - Date.parse(started);
+      durationMs = Number.isNaN(delta) ? null : delta;
+    }
+  }
   db.query(
     `UPDATE dispatch
        SET outcome = $outcome, branch_head_sha = $sha, ended_at = $ended, duration_ms = $dur,
@@ -134,7 +152,7 @@ export function completeDispatch(
     $outcome: p.outcome,
     $sha: p.branchHeadSha ?? null,
     $ended: p.endedAt ?? null,
-    $dur: p.durationMs ?? null,
+    $dur: durationMs,
     $tin: p.tokensIn ?? null,
     $tout: p.tokensOut ?? null,
     $cr: p.cacheRead ?? null,
