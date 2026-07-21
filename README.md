@@ -229,6 +229,14 @@ ticket IDs, commands, branch SHAs, costs, or tokens.
 The anonymous ID lives at `~/.local/state/styre/telemetry.json`. In ephemeral CI, cache
 `~/.local/state/styre/` to keep a stable ID across runs (otherwise each CI run is counted as new).
 
+> **First-run notice on an early failure.** The one-time notice above prints on the first run that
+> reaches telemetry. Because `styre run` now counts errors that happen early (e.g. run outside a git
+> repo, or with an unreadable `config.json`), that first run can be one that fails before it gets
+> going — the notice then prints once to **stderr** (never stdout, so machine output is unaffected),
+> and the anonymous ID + notice latch are minted. It appears at most once. The `STYRE_TELEMETRY`/
+> `DO_NOT_TRACK` env opt-outs suppress it on every path; a `"telemetry": false` in `config.json` is
+> honored whenever that file is readable.
+
 ---
 
 ## Develop
