@@ -10,7 +10,7 @@ export const EXIT = {
   RESUME_REFUSED: 65, // EX_DATAERR: resume refused, HEAD moved
   TOOLCHAIN_MISSING: 69, // EX_UNAVAILABLE: a required program is not installed
   INTERNAL: 70, // EX_SOFTWARE: unexpected crash / internal invariant
-  TEMPFAIL: 75, // EX_TEMPFAIL: parked (and, ENG-353, escalated) — resumable
+  TEMPFAIL: 75, // parked (out of budget) and escalated (handed to a human) — both resumable-later
   CONFIG: 78, // EX_CONFIG: bad config/profile value, unknown adapter, unresolved profile
 } as const;
 

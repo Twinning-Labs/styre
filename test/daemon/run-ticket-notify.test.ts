@@ -12,7 +12,7 @@ test("a drive that idles to no-progress delivers the terminal 'Stopped' notifica
   // Park the ticket OUT of v_ready_tickets (status 'waiting', no pending signal) so no ready ticket
   // exists → `tick` returns {advanced:0} without ever calling advanceOneStep → the (empty) registry
   // is never consulted → driveToTerminal idles to "no-progress" after IDLE_CAP(3) ticks. (A pending
-  // human_resume would instead make it return "blocked" — don't use one here.)
+  // human_resume would instead make it return "escalated" — don't use one here.)
   setTicketStatus(db, ticketId, "waiting");
   const notifier = fakeNotifier();
   const config = RuntimeConfigSchema.parse({

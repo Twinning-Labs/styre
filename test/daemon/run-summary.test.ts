@@ -50,22 +50,6 @@ test("formatRunSummary: a loopback event renders route + signature, not the bare
   expect(s).not.toMatch(/#\d+ loopback\s*$/m);
 });
 
-test("formatRunSummary: a blocked run with a pending human_resume names the pending signal", () => {
-  const { db, ticketId } = makeTestDb();
-  insertPending(db, { ticketId, signalType: "human_resume" });
-
-  const s = formatRunSummary(db, ticketId, {
-    outcome: "blocked",
-    iterations: 2,
-    stage: "implement",
-    status: "waiting",
-  });
-  db.close();
-
-  expect(s).toContain("Stopped — no actionable work remains.");
-  expect(s).toContain("Waiting on: human_resume");
-});
-
 test("formatRunSummary: pr-ready suppresses the 'Waiting on:' line even with a pending human_merge_approval", () => {
   const { db, ticketId } = makeTestDb();
   insertPending(db, { ticketId, signalType: "human_merge_approval" });
@@ -81,28 +65,40 @@ test("formatRunSummary: pr-ready suppresses the 'Waiting on:' line even with a p
   expect(s).not.toContain("Waiting on:");
 });
 
-test("STYRE-7 acceptance: escalation surfaced as blocked reads legibly without internal vocab", () => {
+test("formatRunSummary: an escalation reports `escalated`, names the reason, hides internal vocab", () => {
   const { db, ticketId } = makeTestDb();
   insertPending(db, { ticketId, signalType: "human_resume" });
+  appendEvent(db, { ticketId, kind: "escalated", reason: "step 'design:extract' failed" });
 
   const s = formatRunSummary(db, ticketId, {
-    outcome: "blocked",
+    outcome: "escalated",
     iterations: 3,
     stage: "design",
     status: "waiting",
   });
   db.close();
 
-  // Outcome sentence and pending signal are clear
-  expect(s).toContain("Stopped — no actionable work remains.");
-  expect(s).toContain("Waiting on: human_resume");
-
-  // No internal detector vocabulary
+  expect(s).toContain("Escalated — a human needs to unblock this; re-run once it's resolved.");
+  expect(s).toContain("Reason: step 'design:extract' failed");
+  // The blocked sentence and the raw internal signal name must NOT appear for an escalation.
+  expect(s).not.toContain("Stopped — no actionable work remains.");
+  expect(s).not.toContain("Waiting on: human_resume");
+  // No internal detector vocabulary, no stack frames.
   expect(s).not.toContain("no-progress");
-
-  // No stack-trace frames
   expect(s).not.toMatch(/\bat .*\(.*:\d+:\d+\)/);
+});
 
-  // No bare internal status enum
-  expect(s).not.toContain("status=waiting");
+test("formatRunSummary: a resolver dead-end still reports `blocked` (distinct from an escalation)", () => {
+  const { db, ticketId } = makeTestDb();
+  // No pending human_resume, no escalated event → a genuine dead-end.
+  const s = formatRunSummary(db, ticketId, {
+    outcome: "blocked",
+    iterations: 2,
+    stage: "implement",
+    status: "active",
+  });
+  db.close();
+
+  expect(s).toContain("Stopped — no actionable work remains.");
+  expect(s).not.toContain("Escalated");
 });

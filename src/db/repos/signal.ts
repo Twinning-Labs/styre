@@ -30,6 +30,13 @@ export function listPending(db: Database, ticketId: number): SignalRow[] {
     .all(ticketId);
 }
 
+/** True iff the ticket has a pending `human_resume` signal — i.e. the run escalated to a human
+ *  rather than hitting a resolver dead-end. The single source of the escalation predicate; the
+ *  runner's terminal decision reads it to report `escalated` vs `blocked`. */
+export function hasPendingHumanResume(db: Database, ticketId: number): boolean {
+  return listPending(db, ticketId).some((s) => s.signal_type === "human_resume");
+}
+
 export function insertPending(
   db: Database,
   p: { ticketId: number; signalType: string; reason?: string; idempotencyKey?: string | null },

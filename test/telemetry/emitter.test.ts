@@ -72,6 +72,25 @@ test("flushNew emits each row once (dedup) across calls; summary sums cost + cou
   db.close();
 });
 
+test("emitSummary: an escalated outcome passes through to summary.outcome, with escalation reasons", () => {
+  const { db, ticketId } = makeTestDb();
+  appendEvent(db, { ticketId, kind: "escalated", reason: "step 'design:extract' failed" });
+  const sink: TelemetryEvent[] = [];
+  const emitter = createTelemetryEmitter((e) => sink.push(e));
+  emitter.emitSummary(db, ticketId, {
+    outcome: "escalated",
+    iterations: 3,
+    stage: "design",
+    status: "waiting",
+  });
+  const summary = sink.find((e) => e.type === "summary");
+  if (!summary || summary.type !== "summary") throw new Error("no summary emitted");
+  expect(summary.outcome).toBe("escalated");
+  expect(summary.escalation_count).toBe(1);
+  expect(summary.escalation_reasons).toContain("step 'design:extract' failed");
+  db.close();
+});
+
 test("emitCiHandoff sinks a well-formed ci_handoff event", () => {
   const { db, ticketId } = makeTestDb(); // seed a ticket with an ident
   db.query("UPDATE ticket SET ident = 'STYRE-9' WHERE id = ?").run(ticketId);

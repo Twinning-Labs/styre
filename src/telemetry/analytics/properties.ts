@@ -62,7 +62,8 @@ export function failureBucket(outcome: string, escalationReasons: string[]): str
   if (outcome === "pr-ready" || outcome === "done") return null;
   if (outcome === "parked") return "parked-credits";
   if (outcome === "no-progress") return "no-progress";
-  // outcome === "blocked": classify by keyword against the joined reasons (never sent raw).
+  // escalated (reasons populated) or a resolver dead-end blocked (no reasons → "unknown"):
+  // classify by keyword against the joined reasons (the raw text never leaves here).
   const hay = escalationReasons.join(" ").toLowerCase();
   if (/budget|token|limit|exhaust/.test(hay)) return "budget-exhausted";
   if (/plan/.test(hay)) return "plan-defect";

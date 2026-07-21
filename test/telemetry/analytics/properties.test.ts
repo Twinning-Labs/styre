@@ -53,6 +53,11 @@ test("failureBucket: success → null; parked → parked-credits; keyword maps b
   expect(failureBucket("no-progress", [])).toBe("no-progress");
   expect(failureBucket("blocked", ["plan defect found in design"])).toBe("plan-defect");
   expect(failureBucket("blocked", ["something weird"])).toBe("unknown");
+  // An escalation classifies by its reason keywords (reasons are populated).
+  expect(failureBucket("escalated", ["blocking plan-defect found in review"])).toBe("plan-defect");
+  expect(failureBucket("escalated", ["step 'design:extract' failed"])).toBe("unknown");
+  // A resolver dead-end carries no escalation reasons → unknown.
+  expect(failureBucket("blocked", [])).toBe("unknown");
 });
 
 test("run_completed derives first_time_ci_pass and autonomous_fix from dispatch_outcomes", () => {
@@ -86,7 +91,7 @@ test("ALLOW-LIST GUARD: every builder emits only allow-listed keys", () => {
     }),
     runStartedProperties({ projectId: "p", resumed: false, tracker: "linear", forge: "github" }),
     runCompletedProperties(
-      summary({ outcome: "blocked", escalation_reasons: ["budget exhausted"] }),
+      summary({ outcome: "escalated", escalation_reasons: ["budget exhausted"] }),
       5000,
       { complexityGrading: true, onPlanDefect: "redesign" },
     ),

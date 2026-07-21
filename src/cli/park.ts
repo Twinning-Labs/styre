@@ -42,6 +42,8 @@ import { formatMessage } from "./output.ts";
  * Mirrors the inline tail of `src/cli/run.ts` so the same code path is exercised in tests.
  *
  * - parked: calls `dumpPark` (which closes db), sets `process.exitCode = 75`, returns.
+ * - escalated: closes db, sets `process.exitCode = 75` (resumable-later like a park, but it writes
+ *   no dump — it takes the plain `db.close()` path below).
  * - blocked | no-progress: closes db, sets `process.exitCode = 1` (via `exitCodeForOutcome`),
  *   returns — this is an operational stop, not a bug, so it must not throw a stack trace.
  * - otherwise (pr-ready | done): closes db, sets `process.exitCode = 0`, returns.
@@ -62,7 +64,7 @@ export function finishRunResult(
     return;
   }
   db.close();
-  process.exitCode = exitCodeForOutcome(out.outcome); // 0 for pr-ready/done, 1 for blocked/no-progress
+  process.exitCode = exitCodeForOutcome(out.outcome); // 0 pr-ready/done · 1 blocked/no-progress · 75 escalated
 }
 
 /** The durable dump dir for a parked run: ~/.local/state/styre/<project-stub>/<ticket-ident>/ */
@@ -301,5 +303,5 @@ export async function resumeRun(
     return;
   }
   db.close();
-  process.exitCode = exitCodeForOutcome(result.outcome); // 1 for blocked/no-progress, 0 otherwise
+  process.exitCode = exitCodeForOutcome(result.outcome); // 0 pr-ready/done · 1 blocked/no-progress · 75 escalated
 }

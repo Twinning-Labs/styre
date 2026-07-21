@@ -203,8 +203,8 @@ test("B: an offense (source edit) during docs:revise never wedges silently — r
     cap,
   });
 
-  // Escalated, not silently wedged: 'blocked' (a human_resume pending signal), never 'no-progress'.
-  expect(result.outcome).toBe("blocked");
+  // Escalated, not silently wedged: 'escalated' (a human_resume pending signal), never 'no-progress'.
+  expect(result.outcome).toBe("escalated");
   expect(result.iterations).toBeLessThan(cap);
 
   const ticket = getTicket(db, ticketId);

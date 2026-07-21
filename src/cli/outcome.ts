@@ -2,7 +2,8 @@ import type { RunOutcome } from "../daemon/run-ticket.ts";
 import { EXIT } from "./errors.ts";
 
 /** The user-facing sentence for a terminal outcome (presentation layer, NOT a state rename).
- *  `escalated` is intentionally absent — it is not a RunOutcome yet (ENG-353). */
+ *  `escalated` is a distinct outcome from `blocked`: the run explicitly handed the ticket to a
+ *  human (pending `human_resume`), rather than hitting a resolver dead-end (ENG-353). */
 export function outcomeSentence(o: RunOutcome): string {
   switch (o) {
     case "pr-ready":
@@ -15,6 +16,8 @@ export function outcomeSentence(o: RunOutcome): string {
       return "Stopped — no actionable work remains.";
     case "no-progress":
       return "Stopped — couldn't make progress.";
+    case "escalated":
+      return "Escalated — a human needs to unblock this; re-run once it's resolved.";
   }
 }
 
@@ -24,6 +27,7 @@ export function exitCodeForOutcome(o: RunOutcome): number {
     case "done":
       return EXIT.OK;
     case "parked":
+    case "escalated":
       return EXIT.TEMPFAIL;
     case "blocked":
     case "no-progress":
