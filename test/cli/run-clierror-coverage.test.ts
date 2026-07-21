@@ -101,3 +101,18 @@ test("telemetry off in config → later error emits NO cli_error (opt-out preser
 
   expect(events.some((e) => e.event === "cli_error")).toBe(false);
 });
+
+test("fallback honors DO_NOT_TRACK — early error emits no cli_error even with a client available", async () => {
+  // Early-throw path builds the fallback createAnalytics({ telemetry: true }); DO_NOT_TRACK must
+  // still veto it. The guarantee lives in consent.ts; asserted here end-to-end through runImpl.
+  // Positive control: the sibling "earliest error … via fallback" test (no DO_NOT_TRACK) DOES capture.
+  process.env.DO_NOT_TRACK = "1";
+  const badProfile = tmpJson("styre-prof-", { commands: {} }); // throws before config → fallback path
+  const { client, events } = fakeClient();
+
+  await expect(
+    runImpl({ args: { profile: badProfile, ticket: "ENG-1" } }, { analyticsClient: client }),
+  ).rejects.toThrow();
+
+  expect(events.some((e) => e.event === "cli_error")).toBe(false);
+});
