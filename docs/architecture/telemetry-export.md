@@ -5,9 +5,8 @@
 > commercial Control Plane integrates through (build-operations.md §5 item 3). It is **kept current
 > with the code**: the source of truth is the zod schema in
 > [`src/telemetry/events.ts`](../../src/telemetry/events.ts) (`SCHEMA_VERSION`), and any change to
-> that schema must update this doc in the same PR (`docs/architecture/` conventions —
-> `docs/architecture/conventions.md`). Do not hand-edit a field here without checking `events.ts`
-> first.
+> that schema must update this doc in the same PR (per [`README.md`](README.md), the docs-freshness
+> convention). Do not hand-edit a field here without checking `events.ts` first.
 
 ---
 
