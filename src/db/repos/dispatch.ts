@@ -124,6 +124,17 @@ export function completeDispatch(
     partial?: number;
   },
 ): void {
+  // duration_ms is computed here — at the single writer — so every completed row carries it,
+  // not just the call sites a caller remembered to pass it (ENG-339: it was a dead column).
+  let durationMs = p.durationMs ?? null;
+  if (durationMs === null && p.endedAt) {
+    const started = db
+      .query<{ started_at: string | null }, [number]>(
+        "SELECT started_at FROM dispatch WHERE id = ?",
+      )
+      .get(id)?.started_at;
+    if (started) durationMs = Date.parse(p.endedAt) - Date.parse(started);
+  }
   db.query(
     `UPDATE dispatch
        SET outcome = $outcome, branch_head_sha = $sha, ended_at = $ended, duration_ms = $dur,
@@ -134,7 +145,7 @@ export function completeDispatch(
     $outcome: p.outcome,
     $sha: p.branchHeadSha ?? null,
     $ended: p.endedAt ?? null,
-    $dur: p.durationMs ?? null,
+    $dur: durationMs,
     $tin: p.tokensIn ?? null,
     $tout: p.tokensOut ?? null,
     $cr: p.cacheRead ?? null,
