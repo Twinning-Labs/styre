@@ -1261,6 +1261,19 @@ describe("discard-poison: the symbol definition tier (design 4.5)", () => {
       ),
     ).toContain("uninitialized constant Helper");
   });
+
+  test("Rust: `cannot find` inside a test's own assertion string must NOT fire (no error[E…] prefix)", () => {
+    // The section-2 failure class within one language: ordinary prose, not a rustc diagnostic.
+    const out = 'assertion failed: cannot find "widget" in the registry';
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/w.rs"],
+        "cargo",
+        src("src/w.rs", "pub fn widget() -> u8 { 1 }\n"),
+      ),
+    ).toEqual([]);
+  });
 });
 
 describe("mutation guard: the symbol tier's contrast must discriminate", () => {
@@ -1278,5 +1291,24 @@ describe("mutation guard: the symbol tier's contrast must discriminate", () => {
       (CHECK_RULES.go as { definesSymbol?: (s: string) => RegExp }).definesSymbol = orig;
     }
     expect(importErrorImplicatesDiscarded(out, ["scratch.go"], "go", sources)).toEqual([]);
+  });
+});
+
+describe("mutation guard: the Rust symbol anchor must discriminate", () => {
+  test("the unanchored `cannot find` pattern would implicate a test's assertion string", () => {
+    const out = 'assertion failed: cannot find "widget" in the registry';
+    const sources = new Map([["src/w.rs", "pub fn widget() -> u8 { 1 }\n"]]);
+    const orig = CHECK_RULES.cargo.symbolNaming;
+    try {
+      (CHECK_RULES.cargo as { symbolNaming?: RegExp[] }).symbolNaming = [
+        /cannot find [a-z, ]*?['"`](\w+)['"`]/gi,
+      ];
+      expect(importErrorImplicatesDiscarded(out, ["src/w.rs"], "cargo", sources)).toEqual([
+        "src/w.rs",
+      ]);
+    } finally {
+      (CHECK_RULES.cargo as { symbolNaming?: RegExp[] }).symbolNaming = orig;
+    }
+    expect(importErrorImplicatesDiscarded(out, ["src/w.rs"], "cargo", sources)).toEqual([]);
   });
 });

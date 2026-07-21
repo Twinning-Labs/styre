@@ -284,13 +284,14 @@ const rustRules: LanguageRules = {
   naming: [/file not found for module[^\S\r\n]+['"`]?(\w+)/gi],
   tiesByLeaf: true,
   shapes: [{ basename: "mod.rs", match: modMarkerImplicated }],
-  // The kind list is a loose character class because rustc writes compound kinds with commas
-  // ("cannot find function, tuple struct or tuple variant `Point`"). The second pattern covers E0433
-  // (`use of undeclared type `Helper``), which is what rustc emits for `Helper::new()` — the most
-  // common way a Rust test reaches a discarded helper.
+  // Anchored to rustc's `error[E…]:` code prefix, which it prints at column 0 on the primary diagnostic
+  // line — the same structural gutter the Go patterns rely on. Unanchored, `cannot find "x"` inside a
+  // test's own assertion prose fires the tier (ordinary English), the §2 failure class within one
+  // language. The kind class stays loose (`[a-z, ]*?`) for rustc's compound kinds ("struct, variant or
+  // union type"); the second pattern covers E0433 (`use of undeclared type`), what `Helper::new()` emits.
   symbolNaming: [
-    /cannot find [a-z, ]*?['"`](\w+)['"`]/gi,
-    /use of (?:undeclared|unresolved)[\w ]*?['"`](\w+)['"`]/gi,
+    /^error\[e\d+\]:[^\n]*?cannot find [a-z, ]*?['"`](\w+)['"`]/gim,
+    /^error\[e\d+\]:[^\n]*?use of (?:undeclared|unresolved)[\w ]*?['"`](\w+)['"`]/gim,
   ],
   definesSymbol: (s) =>
     new RegExp(`\\b(?:fn|struct|enum|trait|const|static|type)[^\\S\\r\\n]+${escapeSymbol(s)}\\b`),
