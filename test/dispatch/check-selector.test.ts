@@ -1274,6 +1274,41 @@ describe("discard-poison: the symbol definition tier (design 4.5)", () => {
       ),
     ).toEqual([]);
   });
+
+  test("Ruby: an `uninitialized constant` inside a raise_error string must NOT fire (no NameError token)", () => {
+    // Both rspec spellings: the message-only string, and the class passed as a separate argument
+    // (`NameError` followed by a comma, not the `:` the prefix pattern requires).
+    const files = ["spec/support/helper.rb"];
+    const sources = src("spec/support/helper.rb", "class Helper\nend\n");
+    expect(
+      importErrorImplicatesDiscarded(
+        'expect { boom }.to raise_error("uninitialized constant Helper")',
+        files,
+        "rspec",
+        sources,
+      ),
+    ).toEqual([]);
+    expect(
+      importErrorImplicatesDiscarded(
+        'expect { boom }.to raise_error(NameError, "uninitialized constant Helper")',
+        files,
+        "rspec",
+        sources,
+      ),
+    ).toEqual([]);
+  });
+
+  test("Ruby: minitest's `NameError:` prefix render ties the discarded constant", () => {
+    const out = "NameError: uninitialized constant Helper\n    test/foo_test.rb:5:in 'test_x'";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["test/support/helper.rb"],
+        "minitest",
+        src("test/support/helper.rb", "class Helper\nend\n"),
+      ),
+    ).toEqual(["test/support/helper.rb"]);
+  });
 });
 
 describe("mutation guard: the symbol tier's contrast must discriminate", () => {
@@ -1310,5 +1345,24 @@ describe("mutation guard: the Rust symbol anchor must discriminate", () => {
       (CHECK_RULES.cargo as { symbolNaming?: RegExp[] }).symbolNaming = orig;
     }
     expect(importErrorImplicatesDiscarded(out, ["src/w.rs"], "cargo", sources)).toEqual([]);
+  });
+});
+
+describe("mutation guard: the Ruby symbol anchor must discriminate", () => {
+  test("the unanchored `uninitialized constant` pattern would implicate a raise_error string", () => {
+    const out = 'expect { boom }.to raise_error("uninitialized constant Helper")';
+    const sources = new Map([["spec/support/helper.rb", "class Helper\nend\n"]]);
+    const orig = CHECK_RULES.rspec.symbolNaming;
+    try {
+      (CHECK_RULES.rspec as { symbolNaming?: RegExp[] }).symbolNaming = [
+        /uninitialized constant[^\S\r\n]+([\w:]+)/gi,
+      ];
+      expect(importErrorImplicatesDiscarded(out, ["spec/support/helper.rb"], "rspec", sources)).toEqual([
+        "spec/support/helper.rb",
+      ]);
+    } finally {
+      (CHECK_RULES.rspec as { symbolNaming?: RegExp[] }).symbolNaming = orig;
+    }
+    expect(importErrorImplicatesDiscarded(out, ["spec/support/helper.rb"], "rspec", sources)).toEqual([]);
   });
 });

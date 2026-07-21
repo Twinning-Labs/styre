@@ -308,7 +308,16 @@ const rubyRules: LanguageRules = {
   naming: [/cannot load such file --[^\S\r\n]+([\w./-]+)/gi],
   tiesByLeaf: true,
   shapes: [],
-  symbolNaming: [/uninitialized constant[^\S\r\n]+([\w:]+)/gi],
+  // Require the `NameError` exception-class token the runtime's printer emits: the CLI/rspec unhandled
+  // form appends ` (NameError)` after the constant; minitest, catching the error inside a test, prefixes
+  // `NameError:`. `rubyRules` serves both frameworks, so both patterns are needed. Unanchored,
+  // `uninitialized constant Helper` inside a `raise_error("…")` string fires the tier — the §2 failure
+  // class within one language. A test names the class as an argument (`raise_error(NameError, …)`), never
+  // adjacent to the phrase the way the printer does.
+  symbolNaming: [
+    /uninitialized constant[^\S\r\n]+([\w:]+)[^\S\r\n]*\(NameError\)/gi,
+    /NameError:[^\S\r\n]+uninitialized constant[^\S\r\n]+([\w:]+)/gi,
+  ],
   definesSymbol: (s) => new RegExp(`\\b(?:class|module)[^\\S\\r\\n]+${escapeSymbol(s)}\\b`),
 };
 
