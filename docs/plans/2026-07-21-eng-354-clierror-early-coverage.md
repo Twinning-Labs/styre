@@ -594,3 +594,84 @@ EOF
 )"
 ```
 Expected: draft PR opened into `main`. Do NOT merge (operator merges personally).
+
+---
+
+## Task 5: End-to-end DO_NOT_TRACK fallback guard test
+
+**Context:** Post-merge follow-up from the final whole-branch review — the fallback's respect for `DO_NOT_TRACK` currently rests on `consent.ts`/`createAnalytics` unit tests; add one end-to-end assertion through `runImpl`. This is a regression-GUARD test (behavior is already correct), so it is GREEN-only — there is no RED phase. Its positive control is the sibling test "earliest error … emits cli_error via fallback" (same setup WITHOUT `DO_NOT_TRACK`, which DOES capture) — proving this test discriminates on `DO_NOT_TRACK` alone.
+
+**Files:**
+- Test: `test/cli/run-clierror-coverage.test.ts` (append one test)
+
+- [ ] **Step 1: Add the test**
+
+Append this test to `test/cli/run-clierror-coverage.test.ts` (the `beforeEach` deletes `DO_NOT_TRACK`; this test re-sets it, and `afterEach` restores the original):
+```ts
+test("fallback honors DO_NOT_TRACK — early error emits no cli_error even with a client available", async () => {
+  // Early-throw path builds the fallback createAnalytics({ telemetry: true }); DO_NOT_TRACK must
+  // still veto it. The guarantee lives in consent.ts; asserted here end-to-end through runImpl.
+  // Positive control: the sibling "earliest error … via fallback" test (no DO_NOT_TRACK) DOES capture.
+  process.env.DO_NOT_TRACK = "1";
+  const badProfile = tmpJson("styre-prof-", { commands: {} }); // throws before config → fallback path
+  const { client, events } = fakeClient();
+
+  await expect(
+    runImpl({ args: { profile: badProfile, ticket: "ENG-1" } }, { analyticsClient: client }),
+  ).rejects.toThrow();
+
+  expect(events.some((e) => e.event === "cli_error")).toBe(false);
+});
+```
+
+- [ ] **Step 2: Run the file**
+
+Run: `bun test test/cli/run-clierror-coverage.test.ts`
+Expected: PASS (4/4 — the new test plus the three existing). Also confirm `bun run lint` and `bun run typecheck` stay clean.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add test/cli/run-clierror-coverage.test.ts
+git commit -m "test(run): assert fallback honors DO_NOT_TRACK end-to-end (ENG-354)"
+```
+
+---
+
+## Task 6: Consent-doc note — first-run notice on an early failure
+
+**Context:** Because early failures are now counted, the one-time telemetry consent NOTICE can print on a run that fails before config resolves (the fallback builds the analytics client there). Document this operator-facing nuance where telemetry/opt-out already lives. Keep docs consistent with code (this repo keeps `docs/architecture/` current).
+
+**Files:**
+- Modify: `README.md` (the `## Telemetry` section, after the "anonymous ID lives at …" paragraph, ~line 229)
+- Modify: `docs/architecture/conventions.md` (the "Telemetry identity in CI" section, ~line 115, the first-run-notice-latch sentence)
+
+- [ ] **Step 1: README note**
+
+In `README.md`, immediately after the paragraph ending "…otherwise each CI run is counted as new).", insert:
+```markdown
+
+> **First-run notice on an early failure.** The one-time notice above prints on the first run that
+> reaches telemetry. Because `styre run` now counts errors that happen early (e.g. run outside a git
+> repo, or with an unreadable `config.json`), that first run can be one that fails before it gets
+> going — the notice then prints once to **stderr** (never stdout, so machine output is unaffected),
+> and the anonymous ID + notice latch are minted. It appears at most once. The `STYRE_TELEMETRY`/
+> `DO_NOT_TRACK` env opt-outs suppress it on every path; a `"telemetry": false` in `config.json` is
+> honored whenever that file is readable.
+```
+
+- [ ] **Step 2: conventions.md cross-reference**
+
+In `docs/architecture/conventions.md`, the "Telemetry identity in CI" section currently ends with a sentence about the first-run-notice latch surviving across runs. Append one sentence to that section:
+```markdown
+
+Since `styre run` counts early failures too, the id + first-run-notice latch can be minted (and the notice printed once to stderr) on a run that fails before config resolves — not only on a fully successful run. Still at most once; the `STYRE_TELEMETRY`/`DO_NOT_TRACK` opt-outs suppress it.
+```
+
+- [ ] **Step 3: Verify + commit**
+
+No code changed → no tests to run. Confirm the two edits render (Markdown) and are accurate against `src/telemetry/analytics/index.ts` (the NOTICE + `markNoticeShown`) and `consent.ts` (the opt-outs).
+```bash
+git add README.md docs/architecture/conventions.md
+git commit -m "docs(telemetry): note first-run consent notice on early-failure path (ENG-354)"
+```
