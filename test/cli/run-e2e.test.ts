@@ -1,12 +1,14 @@
 import { expect, test } from "bun:test";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import { runTicket } from "../../src/daemon/run-ticket.ts";
+import { insertRun } from "../../src/db/repos/run.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { fakeChecks } from "../../src/integrations/adapters/fake-checks.ts";
 import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import type { TelemetryEvent } from "../../src/telemetry/events.ts";
+import { nowUtc } from "../../src/util/time.ts";
 import { makeTestDb } from "../helpers/db.ts";
 import { skeletonRegistry } from "../helpers/skeleton-registry.ts";
 
@@ -61,6 +63,7 @@ test("runTicket ingests a Linear ticket and drives it to pr-ready", async () => 
 
 test("runTicket emits a telemetry stream (events + summary) to the sink", async () => {
   const { db } = makeTestDb({ seedTicket: false });
+  insertRun(db, { runId: "test-run-e2e", startedAt: nowUtc(), provider: "claude" });
   const profile = parseProfile({
     slug: "demo",
     targetRepo: "/tmp/x",

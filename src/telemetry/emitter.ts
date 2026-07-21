@@ -12,16 +12,39 @@ import {
 import type { EventLogRow } from "../db/repos/event-log.ts";
 import { listByTicketSince as listSignalsSince } from "../db/repos/ground-truth-signal.ts";
 import type { GroundTruthSignalRow } from "../db/repos/ground-truth-signal.ts";
+import { getRun } from "../db/repos/run.ts";
 import { getTicket } from "../db/repos/ticket.ts";
 import { nowUtc } from "../util/time.ts";
 import type { TelemetrySink } from "./emit.ts";
 import { SCHEMA_VERSION, type TelemetryEvent } from "./events.ts";
 
-function toEvent(r: EventLogRow): TelemetryEvent {
+type RunCtx = { runId: string; provider: string; startedAt: string };
+
+/** Read the single run row; a missing row is an invariant violation (D9) — the runner always
+ *  inserts it at start and resume backfills it, so null here means a broken caller, not a "0". */
+function runCtx(db: Database): RunCtx {
+  const r = getRun(db);
+  if (!r)
+    throw new Error("telemetry: no run row — run identity is required (see ENG-349 design D9)");
+  return { runId: r.run_id, provider: r.provider, startedAt: r.started_at };
+}
+
+/** Sum of reported (non-null) values; null iff none reported. `reported` is the coverage count. */
+function aggregate(ns: Array<number | null>): { value: number | null; reported: number } {
+  const present = ns.filter((n): n is number => n !== null);
+  return {
+    value: present.length === 0 ? null : present.reduce((a, n) => a + n, 0),
+    reported: present.length,
+  };
+}
+
+function toEvent(r: EventLogRow, ctx: RunCtx): TelemetryEvent {
   return {
     schema_version: SCHEMA_VERSION,
     type: "event",
+    run_id: ctx.runId,
     ticket_id: r.ticket_id,
+    dispatch_id: r.dispatch_id,
     seq: r.seq,
     kind: r.kind,
     actor: r.actor,
@@ -36,10 +59,11 @@ function toEvent(r: EventLogRow): TelemetryEvent {
   };
 }
 
-function toDispatch(r: DispatchRow): TelemetryEvent {
+function toDispatch(r: DispatchRow, ctx: RunCtx): TelemetryEvent {
   return {
     schema_version: SCHEMA_VERSION,
     type: "dispatch",
+    run_id: ctx.runId,
     dispatch_id: r.dispatch_id,
     ticket_id: r.ticket_id,
     work_unit_id: r.work_unit_id,
@@ -47,6 +71,11 @@ function toDispatch(r: DispatchRow): TelemetryEvent {
     stage: r.stage,
     kind: r.kind,
     model: r.model,
+    provider: ctx.provider,
+    trigger: r.trigger,
+    effort: r.effort,
+    exit_code: r.exit_code,
+    predecessor_dispatch_id: r.predecessor_dispatch_id,
     outcome: r.outcome,
     branch_head_sha: r.branch_head_sha,
     started_at: r.started_at,
@@ -60,10 +89,11 @@ function toDispatch(r: DispatchRow): TelemetryEvent {
   };
 }
 
-function toSignal(r: GroundTruthSignalRow): TelemetryEvent {
+function toSignal(r: GroundTruthSignalRow, ctx: RunCtx): TelemetryEvent {
   return {
     schema_version: SCHEMA_VERSION,
     type: "signal",
+    run_id: ctx.runId,
     id: r.id,
     ticket_id: r.ticket_id,
     work_unit_id: r.work_unit_id,
@@ -77,10 +107,15 @@ function toSignal(r: GroundTruthSignalRow): TelemetryEvent {
 
 /** Compute the per-ticket summary from the durable SoT (cost from the dispatch rows). */
 export function buildSummary(db: Database, ticketId: number, result: RunResult): TelemetryEvent {
+  const ctx = runCtx(db);
   const ticket = getTicket(db, ticketId);
   const events = listEvents(db, ticketId);
   const dispatches = listDispatches(db, ticketId);
-  const sum = (ns: Array<number | null>) => ns.reduce((a: number, n) => a + (n ?? 0), 0);
+  const cost = aggregate(dispatches.map((d) => d.cost_usd));
+  const tin = aggregate(dispatches.map((d) => d.tokens_in));
+  const tout = aggregate(dispatches.map((d) => d.tokens_out));
+  const cr = aggregate(dispatches.map((d) => d.cache_read));
+  const cc = aggregate(dispatches.map((d) => d.cache_create));
   const dispatch_outcomes: Record<string, number> = {};
   for (const d of dispatches) {
     if (d.outcome) dispatch_outcomes[d.outcome] = (dispatch_outcomes[d.outcome] ?? 0) + 1;
@@ -89,17 +124,29 @@ export function buildSummary(db: Database, ticketId: number, result: RunResult):
   return {
     schema_version: SCHEMA_VERSION,
     type: "summary",
+    run_id: ctx.runId,
     ticket_id: ticketId,
     ident: ticket?.ident ?? "",
+    provider: ctx.provider,
+    started_at: ctx.startedAt,
+    ended_at: nowUtc(),
     outcome: result.outcome,
     stage: result.stage,
     status: result.status,
     ticks: result.iterations,
-    cost_usd: sum(dispatches.map((d) => d.cost_usd)),
-    tokens_in: sum(dispatches.map((d) => d.tokens_in)),
-    tokens_out: sum(dispatches.map((d) => d.tokens_out)),
-    cache_read: sum(dispatches.map((d) => d.cache_read)),
-    cache_create: sum(dispatches.map((d) => d.cache_create)),
+    cost_usd: cost.value,
+    tokens_in: tin.value,
+    tokens_out: tout.value,
+    cache_read: cr.value,
+    cache_create: cc.value,
+    usage_coverage: {
+      dispatch_count: dispatches.length,
+      cost_usd: cost.reported,
+      tokens_in: tin.reported,
+      tokens_out: tout.reported,
+      cache_read: cr.reported,
+      cache_create: cc.reported,
+    },
     dispatch_count: dispatches.length,
     dispatch_outcomes,
     cycle_count: events.filter((e) => e.kind === "loopback").length,
@@ -130,10 +177,17 @@ export function createTelemetryEmitter(sink: TelemetrySink): {
   let lastEventSeq = 0;
   let lastDispatchId = 0;
   let lastSignalId = 0;
+  // Read the run row once (lazy) and cache it — run identity is constant for the run's lifetime.
+  let ctx: RunCtx | null = null;
+  const ensureCtx = (db: Database): RunCtx => {
+    if (ctx === null) ctx = runCtx(db);
+    return ctx;
+  };
   return {
     flushNew(db, ticketId) {
+      const c = ensureCtx(db);
       for (const r of listEventsSince(db, ticketId, lastEventSeq)) {
-        sink(toEvent(r));
+        sink(toEvent(r, c));
         lastEventSeq = r.seq;
       }
       // A dispatch is created and completed within one tick, so a row past the watermark is already
@@ -141,10 +195,10 @@ export function createTelemetryEmitter(sink: TelemetrySink): {
       // abandoned/failed dispatch with no ended_at is correctly never emitted — and never re-scanned).
       for (const d of listDispatchesSince(db, ticketId, lastDispatchId)) {
         lastDispatchId = d.id;
-        if (d.ended_at !== null) sink(toDispatch(d));
+        if (d.ended_at !== null) sink(toDispatch(d, c));
       }
       for (const s of listSignalsSince(db, ticketId, lastSignalId)) {
-        sink(toSignal(s));
+        sink(toSignal(s, c));
         lastSignalId = s.id;
       }
     },
@@ -157,10 +211,12 @@ export function createTelemetryEmitter(sink: TelemetrySink): {
     // derived-from-row pattern buys nothing and would cost a row-write + a derive fn. Best-effort,
     // lossy, dup-on-resume — squarely inside the §5.3 telemetry contract.
     emitCiHandoff(db, ticketId, h) {
+      const c = ensureCtx(db);
       const ticket = getTicket(db, ticketId);
       sink({
         schema_version: SCHEMA_VERSION,
         type: "ci_handoff",
+        run_id: c.runId,
         ticket_id: ticketId,
         ident: ticket?.ident ?? "",
         pr_ref: h.prRef,

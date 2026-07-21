@@ -1,11 +1,37 @@
 import { expect, test } from "bun:test";
-import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
+import type { RunResult } from "../../src/daemon/run-ticket.ts";
+import {
+  completeDispatch,
+  getByDispatchId,
+  insertDispatch,
+  nextSeq,
+} from "../../src/db/repos/dispatch.ts";
 import { appendEvent } from "../../src/db/repos/event-log.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
+import { getRun } from "../../src/db/repos/run.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
-import { createTelemetryEmitter } from "../../src/telemetry/emitter.ts";
+import { buildSummary, createTelemetryEmitter } from "../../src/telemetry/emitter.ts";
 import type { TelemetryEvent } from "../../src/telemetry/events.ts";
 import { makeTestDb } from "../helpers/db.ts";
+
+const RESULT: RunResult = { outcome: "pr-ready", stage: "merge", status: "done", iterations: 1 };
+
+/** Narrow buildSummary's union return to the summary member (throws if it isn't). */
+function asSummary(e: TelemetryEvent): Extract<TelemetryEvent, { type: "summary" }> {
+  if (e.type !== "summary") throw new Error(`expected summary, got ${e.type}`);
+  return e;
+}
+
+/** getByDispatchId that throws instead of returning null — for test setup where the row must exist. */
+function dispatchId(
+  db: Parameters<typeof getByDispatchId>[0],
+  ticketId: number,
+  did: string,
+): number {
+  const row = getByDispatchId(db, ticketId, did);
+  if (!row) throw new Error(`dispatch ${did} not found`);
+  return row.id;
+}
 
 test("flushNew emits each row once (dedup) across calls; summary sums cost + counts cycles", () => {
   const { db, ticketId } = makeTestDb();
@@ -88,6 +114,68 @@ test("emitSummary: an escalated outcome passes through to summary.outcome, with 
   expect(summary.outcome).toBe("escalated");
   expect(summary.escalation_count).toBe(1);
   expect(summary.escalation_reasons).toContain("step 'design:extract' failed");
+  db.close();
+});
+
+test("no dispatch reports cost => cost_usd is null, not 0 (ENG-339)", () => {
+  const { db, ticketId } = makeTestDb();
+  // two dispatches, neither reports cost (codex-style)
+  for (const [i, did] of [
+    [1, "ENG-1-d0001"],
+    [2, "ENG-1-d0002"],
+  ] as const) {
+    insertDispatch(db, { ticketId, dispatchId: did, seq: i, startedAt: "t0" });
+    completeDispatch(db, dispatchId(db, ticketId, did), {
+      outcome: "clean-success",
+      endedAt: "t1",
+      tokensIn: 10,
+    });
+  }
+  const s = asSummary(buildSummary(db, ticketId, RESULT));
+  expect(s.type).toBe("summary");
+  expect(s.cost_usd).toBeNull();
+  expect(s.usage_coverage.cost_usd).toBe(0);
+  expect(s.tokens_in).toBe(20); // both reported tokens
+  expect(s.usage_coverage.tokens_in).toBe(2);
+  db.close();
+});
+
+test("mixed cost => floor sum + partial coverage", () => {
+  const { db, ticketId } = makeTestDb();
+  insertDispatch(db, { ticketId, dispatchId: "ENG-1-d0001", seq: 1, startedAt: "t0" });
+  completeDispatch(db, dispatchId(db, ticketId, "ENG-1-d0001"), {
+    outcome: "clean-success",
+    endedAt: "t1",
+    costUsd: 0.4,
+  });
+  insertDispatch(db, { ticketId, dispatchId: "ENG-1-d0002", seq: 2, startedAt: "t0" });
+  completeDispatch(db, dispatchId(db, ticketId, "ENG-1-d0002"), {
+    outcome: "clean-success",
+    endedAt: "t1",
+    costUsd: null,
+  });
+  const s = asSummary(buildSummary(db, ticketId, RESULT));
+  expect(s.cost_usd).toBeCloseTo(0.4); // floor
+  expect(s.usage_coverage.cost_usd).toBe(1);
+  expect(s.usage_coverage.dispatch_count).toBe(2);
+  db.close();
+});
+
+test("summary carries run_id, provider, timestamps", () => {
+  const { db, ticketId } = makeTestDb();
+  const s = asSummary(buildSummary(db, ticketId, RESULT));
+  const run = getRun(db);
+  expect(s.run_id).toBe(run?.run_id ?? "");
+  expect(s.provider).toBe("claude");
+  expect(typeof s.started_at).toBe("string");
+  expect(typeof s.ended_at).toBe("string");
+  db.close();
+});
+
+test("buildSummary throws when no run row (D9 invariant)", () => {
+  const { db, ticketId } = makeTestDb();
+  db.exec("DELETE FROM run;");
+  expect(() => buildSummary(db, ticketId, RESULT)).toThrow();
   db.close();
 });
 
