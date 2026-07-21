@@ -137,7 +137,10 @@ export function completeDispatch(
         "SELECT started_at FROM dispatch WHERE id = ?",
       )
       .get(id)?.started_at;
-    if (started) durationMs = Date.parse(p.endedAt) - Date.parse(started);
+    if (started) {
+      const delta = Date.parse(p.endedAt) - Date.parse(started);
+      durationMs = Number.isNaN(delta) ? null : delta;
+    }
   }
   db.query(
     `UPDATE dispatch

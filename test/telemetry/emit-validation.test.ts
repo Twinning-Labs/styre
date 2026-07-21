@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { stdoutSink } from "../../src/telemetry/emit.ts";
+import type { TelemetryEvent } from "../../src/telemetry/events.ts";
 
 describe("stdoutSink validation (non-fatal)", () => {
   test("does not throw on a malformed event", () => {
@@ -9,7 +10,7 @@ describe("stdoutSink validation (non-fatal)", () => {
   });
 
   test("emits a valid event without complaint", () => {
-    const valid = {
+    const valid: TelemetryEvent = {
       schema_version: 2,
       type: "ci_handoff",
       run_id: "r1",
@@ -22,7 +23,6 @@ describe("stdoutSink validation (non-fatal)", () => {
       read: "not-reported",
       measured_at: "t0",
     };
-    // biome-ignore lint/suspicious/noExplicitAny: bypass literal narrowing so `valid` can be shaped as a plain object above
-    expect(() => stdoutSink(valid as any)).not.toThrow();
+    expect(() => stdoutSink(valid)).not.toThrow();
   });
 });

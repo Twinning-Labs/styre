@@ -46,6 +46,7 @@
   case — a DB parked before the `run` table existed — assigns a fresh `run_id` for the resumed
   portion, since no identity was ever minted to preserve; this is a one-time bridge, not the steady
   state.)
+- **Per-ephemeral-DB identity: reusing the same non-ephemeral `--db` path across separate (non-resume) `styre run` invocations reuses the first invocation's `run_id` (with `resumed` still 0).** Same `--db` = same run identity; different invocation without `--resume` = different run (new DB).
 - **This is the field to join across runs on.** If you need "every row belonging to this
   invocation of `styre run`, across a resume," group by `run_id`.
 
