@@ -865,3 +865,57 @@ test("checks:dispatch — a discarded __init__.py yields a legible, non-persiste
   expect(message).toContain("pkg/__init__.py");
   expect(message).toContain("No module named 'pkg'");
 });
+
+test("a ruby check whose test command names neither rspec nor minitest → framework null, empty output → AC uncovered (ENG-347)", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] one thing\n", ticketId);
+  await markDesignDone(db, ticketId);
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "ruby", verifyCheckTypes: ["test"] });
+  setTicketTrack(db, ticketId, "fast");
+  const runner = new FakeAgentRunner((input) => {
+    const dir = join(input.cwd, "checks");
+    mkdirSync(dir, { recursive: true });
+    // canonical basename `${ident}_ac${n}_test.*`; ident is ENG-1 in this harness
+    writeFileSync(join(dir, "ENG-1_ac1_test.rb"), "def test_x\n  assert true\nend\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout:
+        '```styre-sidecar\n{"checksAuthored":[' +
+        '{"ac_id":1,"test_file":"checks/ENG-1_ac1_test.rb","test_name":"test_x"}]}\n```',
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  // A ruby component whose `test` command is a wrapper — frameworkFor returns null → coarse error,
+  // rawOutput "". runCheckCommand is never called on this path.
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "app", kind: "ruby", paths: ["**"], commands: { test: "bin/test" } }],
+    }),
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
+    runCheckCommand: async () => {
+      throw new Error("runCheckCommand must not be called when no framework is detected");
+    },
+  });
+  let outcome = await advanceOneStep(db, ticketId, registry); // provision
+  outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
+  const checks = listAcChecks(db, ticketId);
+  const step = getByKey(db, ticketId, "checks:dispatch");
+  const message = step?.error_json != null ? (JSON.parse(step.error_json).message ?? "") : "";
+  db.close();
+  expect(["retry", "escalated"]).toContain(outcome.kind);
+  expect(step?.status).toBe("pending");
+  expect(checks).toHaveLength(0); // NOT recorded as covering
+  expect(message).toMatch(/no test framework could be detected/);
+  expect(message).toMatch(/could not be attempted/);
+});
