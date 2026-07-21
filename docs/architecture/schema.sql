@@ -51,8 +51,8 @@ CREATE TABLE schema_meta (
     note        TEXT
 );
 INSERT INTO schema_meta (version, applied_at, note)
-VALUES (7, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-        'v7: neutralize vendor-named identifiers to external_* naming ahead of the JIRA adapter');
+VALUES (8, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+        'v8: add run table for telemetry run identity (ENG-349)');
 
 -- ============================================================================
 -- §A  PROJECT + TICKET   (replaces issue-state.json + stage:* / pipeline:* labels)
@@ -481,6 +481,23 @@ CREATE TABLE projection_outbox (
     sent_at         TEXT
 );
 CREATE INDEX idx_outbox_pending ON projection_outbox (status, created_at);
+
+-- ----------------------------------------------------------------------------
+-- run — per-invocation identity (ENG-349). Exactly one row per ephemeral run DB.
+-- The telemetry export stamps run_id/provider/started_at onto every emitted row so a
+-- consumer can correlate rows and tell two runs of the same ticket apart. ticket_id is a
+-- run-local rowid and is NOT a cross-run key. NOTE: the CREATE below is mirrored verbatim
+-- in src/db/repos/run.ts (ensureRunTable) as the pre-upgrade-park resume bridge — keep them
+-- identical (schema.sql remains the source of truth).
+-- ----------------------------------------------------------------------------
+CREATE TABLE run (
+    id          INTEGER PRIMARY KEY,
+    run_id      TEXT    NOT NULL,               -- UUIDv4, minted at fresh-run start
+    started_at  TEXT    NOT NULL,               -- run wall-clock start (UTC ISO-8601)
+    provider    TEXT    NOT NULL,               -- run-level agent provider ('claude'|'codex'|…)
+    resumed     INTEGER NOT NULL DEFAULT 0 CHECK (resumed IN (0,1)),
+    attempt     INTEGER NOT NULL DEFAULT 1
+);
 
 -- ============================================================================
 -- §H  DERIVED VIEWS  (derived, not stored)
