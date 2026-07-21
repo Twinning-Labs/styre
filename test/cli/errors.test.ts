@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test";
-import { EXIT, StyreError, configError, errorKindForExit, toolchainError, usageError } from "../../src/cli/errors.ts";
+import {
+  EXIT,
+  StyreError,
+  configError,
+  errorKindForExit,
+  toolchainError,
+  usageError,
+} from "../../src/cli/errors.ts";
 
 test("StyreError carries code + headline + optional detail/recovery", () => {
   const e = new StyreError({ code: 78, headline: "bad", detail: "d", recovery: "fix it" });

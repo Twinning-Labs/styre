@@ -19,7 +19,7 @@ import { createAnalytics } from "../telemetry/analytics/index.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
 import { buildSummary } from "../telemetry/emitter.ts";
 import type { TelemetryEvent } from "../telemetry/events.ts";
-import { StyreError, toolchainError, usageError } from "./errors.ts";
+import { StyreError, errorKindForExit, toolchainError, usageError } from "./errors.ts";
 import { guard } from "./output.ts";
 import { finishRunResult, parkDir } from "./park.ts";
 import { formatMissingTools, preflightToolchain } from "./preflight.ts";
@@ -227,7 +227,7 @@ export async function runImpl({ args }: { args: RunArgs }): Promise<void> {
       command: "run",
       exitCode: code,
       errorClass: err instanceof Error ? err.constructor.name : "Unknown",
-      errorKind: "unknown",
+      errorKind: errorKindForExit(code),
     });
     throw err; // rethrow → guard renders + sets process.exitCode
   } finally {
