@@ -317,6 +317,14 @@ kind word) would close most of it, and the same treatment applies to Ruby's `(Na
 after the branch's final review, and landing unreviewed matching logic at the end is precisely the failure
 mode this ticket kept surfacing. The safe direction is already held — a misfire costs a retry, not a merge.
 
+**Update (ENG-348, 2026-07-21): closed on all five stacks.** Rust, Ruby and PHP are now anchored to a
+runtime-emitted structural token, the way Go and JVM already were — Rust to rustc's `error[E…]` code
+prefix, Ruby to the `NameError` exception-class token (the CLI/rspec `(NameError)` suffix or minitest's
+`NameError:` prefix), and PHP to the `Error:` token preceding `Class "…" not found` in both the CLI fatal
+and the PHPUnit-caught render. Each of the three §4.5 negatives above now implicates nothing, proven by a
+per-stack negative and mutation guard. See
+`docs/brainstorms/2026-07-21-eng-348-anchor-symbol-patterns-design.md`.
+
 ### 4.6 Excerpt
 
 `collectionErrorExcerpt` picks the one line stating the cause for the retry feedback. It becomes framework
@@ -360,7 +368,9 @@ merge unverified.
 5. Toolchain wording outside the listed phrases (other versions, other locales).
 6. The `error` bucket with empty output — ENG-347, out of scope here (§8).
 7. **Unanchored symbol patterns on Rust, Ruby and PHP** (§4.5): a test's own assertion text mentioning
-   the symbol is mistaken for a diagnostic. Reproduced on all three. **Tracked as ENG-348.**
+   the symbol is mistaken for a diagnostic. Reproduced on all three. **Closed by ENG-348 (2026-07-21):**
+   Rust anchored to the `error[E…]` code prefix, Ruby to the `NameError` exception-class token, PHP to
+   the `Error:` token — the class is now closed on all five stacks.
 8. **Go's single-segment directory collision** (§4.3), and Go's missed ties: a repo-root package, a
    nested-module layout, and a directory name containing a dot.
 9. **The bounded-basename tier fires on a delimiter-bounded basename**, so a file merely named in the
