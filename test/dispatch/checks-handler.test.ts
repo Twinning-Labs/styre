@@ -919,3 +919,53 @@ test("a ruby check whose test command names neither rspec nor minitest → frame
   expect(message).toMatch(/no test framework could be detected/);
   expect(message).toMatch(/could not be attempted/);
 });
+
+test("a check that times out with empty output → error, empty → AC uncovered (ENG-347)", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] one thing\n", ticketId);
+  await markDesignDone(db, ticketId);
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
+  setTicketTrack(db, ticketId, "fast");
+  const runner = new FakeAgentRunner((input) => {
+    const dir = join(input.cwd, "checks");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "ENG-1_ac1_test.py"), "def test_x():\n    assert True\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout:
+        '```styre-sidecar\n{"checksAuthored":[' +
+        '{"ac_id":1,"test_file":"checks/ENG-1_ac1_test.py","test_name":"test_x"}]}\n```',
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  // Force the timeout cause through the injected runner: null exit + timedOut + empty output →
+  // interpretRunOutput returns "error", rawOutput stays "".
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+    }),
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
+    runCheckCommand: async () => ({ exitCode: null, stdout: "", stderr: "", timedOut: true }),
+  });
+  let outcome = await advanceOneStep(db, ticketId, registry); // provision
+  outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
+  const checks = listAcChecks(db, ticketId);
+  const step = getByKey(db, ticketId, "checks:dispatch");
+  const message = step?.error_json != null ? (JSON.parse(step.error_json).message ?? "") : "";
+  db.close();
+  expect(["retry", "escalated"]).toContain(outcome.kind);
+  expect(step?.status).toBe("pending");
+  expect(checks).toHaveLength(0);
+  expect(message).toMatch(/timed out or could not be launched/);
+});
