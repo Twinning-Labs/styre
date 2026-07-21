@@ -114,3 +114,5 @@ The anonymous analytics id lives in `$XDG_STATE_HOME/styre/telemetry.json` as a 
 (never derived from machine/user/repo). There is no env override. In ephemeral CI, cache
 `$XDG_STATE_HOME/styre/` (default `~/.local/state/styre/`) so the id — and the first-run-notice latch
 — survive across runs; otherwise each run counts as a new install.
+
+Since `styre run` counts early failures too, the id + first-run-notice latch can be minted (and the notice printed once to stderr) on a run that fails early — not only on a fully successful run. Still at most once; the `STYRE_TELEMETRY`/`DO_NOT_TRACK` opt-outs suppress it, as does a `"telemetry": false` config once the config has been read.
