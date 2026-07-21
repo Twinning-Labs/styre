@@ -56,19 +56,19 @@ test("notifyTerminal enqueues pr-ready(success) and no-progress(high); skips par
   ]);
 });
 
-test("blocked terminal: dead-end notifies, escalation-blocked does not (already evented)", () => {
-  // dead-end: no pending human_resume → a "Stopped — no actionable work remains." notification.
-  // Reuse the file's existing `payloads(db)` helper (returns {event, severity}).
+test("terminal notify: dead-end blocked pings; an escalation (escalated) does not (already evented)", () => {
+  // A resolver dead-end → the "Stopped — no actionable work remains." ping.
   const a = makeTestDb();
   createNotifier(cfg("escalations")).notifyTerminal(a.db, a.ticketId, "blocked");
   const aPayloads = payloads(a.db);
   a.db.close();
   expect(aPayloads).toEqual([{ event: "Stopped — no actionable work remains.", severity: "high" }]);
 
-  // escalation-blocked: a pending human_resume → NO terminal notification.
+  // An escalation now arrives as `escalated` → NO terminal ping (the swept `escalated` event is
+  // the notification). The pending human_resume no longer routes through the blocked branch.
   const b = makeTestDb();
   insertPending(b.db, { ticketId: b.ticketId, signalType: "human_resume", reason: "boom" });
-  createNotifier(cfg("escalations")).notifyTerminal(b.db, b.ticketId, "blocked");
+  createNotifier(cfg("escalations")).notifyTerminal(b.db, b.ticketId, "escalated");
   const bCount = payloads(b.db).length;
   b.db.close();
   expect(bCount).toBe(0);
