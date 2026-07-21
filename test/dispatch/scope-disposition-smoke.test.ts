@@ -1541,3 +1541,55 @@ test("A20 ⚔ a discarded same-package Go helper is tied by the symbol it define
   expect(message).toContain("checks/helper.go"); // tied by evidence, not by name
   expect(message).toContain("undefined: Help"); // the excerpt carried the compiler's own line
 });
+
+// --- A21 ⚔ (ENG-347: coarse `error` with EMPTY output → uncovered, NOT recorded-then-advisory) -----
+// A check that could not be attempted at all — the run timed out and produced nothing (coarse error,
+// empty rawOutput). The text-based discard-poison guard cannot see this (no text to match). ENG-347
+// routes it to the same uncovered path: the AC is NOT marked covered, and the reason is surfaced.
+// Non-vacuous via the A22 contrast, which differs ONLY in that its errored run DID produce output.
+test("A21 ⚔ an errored check with empty output → AC uncovered, reason surfaced", async () => {
+  const h = await setupChecks("- [ ] one thing\n");
+  const runner = checksRunner(
+    h,
+    (cwd, acId, ident) => canonicalTest(cwd, acId, ident, "def test_x():\n    assert True\n"),
+    (acId, ident) => canonicalDeclared(acId, ident),
+  );
+  const { outcome, step, wt, message } = await driveChecks(h, runner, {
+    runCheck: async () => ({ exitCode: null, stdout: "", stderr: "", timedOut: true }),
+  });
+  const checks = listAcChecks(h.db, h.ticketId);
+  h.db.close();
+  expect(["retry", "escalated"]).toContain(outcome.kind);
+  expect(step?.status).toBe("pending");
+  expect(committedAtHead(wt)).not.toContain("_ac1_test.py"); // reverted, no unverified check committed
+  expect(checks).toHaveLength(0); // NOT covered
+  expect(message).toMatch(/could not be attempted|timed out or could not be launched/);
+});
+
+// --- A22 ⚔ (CONTRAST for A21: coarse `error` WITH output stays covered — out of ENG-347 scope) ------
+// Same timeout → coarse error, but the run produced output. ENG-347 fires ONLY on empty output, so
+// this stays on the existing error→environmental path: the check IS recorded (as error). This proves
+// A21's discriminator is the EMPTINESS of the output, not merely the error coarse.
+test("A22 ⚔ an errored check WITH output stays covered (recorded as error)", async () => {
+  const h = await setupChecks("- [ ] one thing\n");
+  const runner = checksRunner(
+    h,
+    (cwd, acId, ident) => canonicalTest(cwd, acId, ident, "def test_x():\n    assert True\n"),
+    (acId, ident) => canonicalDeclared(acId, ident),
+  );
+  const { outcome, step, wt } = await driveChecks(h, runner, {
+    runCheck: async () => ({
+      exitCode: null,
+      stdout: "Timeout: killed after 120s\n<partial pytest output>",
+      stderr: "",
+      timedOut: true,
+    }),
+  });
+  const checks = listAcChecks(h.db, h.ticketId);
+  h.db.close();
+  expect(outcome.kind).toBe("stepped"); // NOT rejected
+  expect(step?.status).toBe("succeeded");
+  expect(committedAtHead(wt)).toContain("_ac1_test.py"); // the check IS committed
+  expect(checks).toHaveLength(1);
+  expect(checks[0]?.red_first_result).toBe("error"); // recorded as error (environmental path, unchanged)
+});
