@@ -303,5 +303,5 @@ export async function resumeRun(
     return;
   }
   db.close();
-  process.exitCode = exitCodeForOutcome(result.outcome); // 1 for blocked/no-progress, 0 otherwise
+  process.exitCode = exitCodeForOutcome(result.outcome); // 0 pr-ready/done · 1 blocked/no-progress · 75 escalated
 }
