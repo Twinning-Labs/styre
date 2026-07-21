@@ -120,6 +120,14 @@ export async function runImpl(
     }
     assertResolved(profile);
     const runtimeConfig = discoverRuntimeConfig({ explicitPath: args.config, slug });
+    // Build analytics the moment config is resolved — BEFORE the remaining fail-fast checks
+    // (assertSlackConfigured) — so a throw in that window is counted through the real client and
+    // honors the operator's config-level telemetry setting. The catch's fallback then only handles
+    // throws from before config could be resolved at all.
+    const a = createAnalytics(runtimeConfig, { client: deps?.analyticsClient });
+    analytics = a;
+    const startedAt = Date.now();
+
     assertSlackConfigured(runtimeConfig);
     if (runtimeConfig.notifier !== "none") {
       // human-readable status → stderr (stdout carries only NDJSON telemetry)
@@ -127,10 +135,6 @@ export async function runImpl(
         `notifier: ${runtimeConfig.notifier} → ${runtimeConfig.slack?.channel} (policy: ${runtimeConfig.notify})\n`,
       );
     }
-
-    const a = createAnalytics(runtimeConfig, { client: deps?.analyticsClient });
-    analytics = a;
-    const startedAt = Date.now();
 
     if (args["in-place"] && !(args.resume && args.resume.length > 0)) {
       const { discoverRepoRoot, assertInPlaceSafe, assertInPlaceIdentity } = await import(
@@ -233,9 +237,10 @@ export async function runImpl(
     finishRunResult(db, dbPath, profile.slug, ident, out);
   } catch (err) {
     const code = err instanceof StyreError ? err.code : EXIT.INTERNAL;
-    // If we threw before config was resolved, `analytics` is undefined — build a fallback so the
-    // failure is still counted. `createAnalytics` honors DO_NOT_TRACK / STYRE_TELEMETRY, and
-    // `cli_error` carries no PII. Assigning back to `analytics` lets the finally flush it.
+    // Reached only when we threw before config could be resolved (unparseable config, or a failure
+    // before config discovery) — so `analytics` is undefined and there is no config-level telemetry
+    // preference to honor; default to enabled. `createAnalytics` still honors DO_NOT_TRACK /
+    // STYRE_TELEMETRY, and `cli_error` carries no PII. Assigning back lets the finally flush it.
     analytics ??= createAnalytics({ telemetry: true }, { client: deps?.analyticsClient });
     analytics.cliError({
       command: "run",

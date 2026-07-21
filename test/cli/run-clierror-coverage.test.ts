@@ -42,13 +42,16 @@ function validProfilePath(): string {
 let prevXdg: string | undefined;
 let prevDnt: string | undefined;
 let prevStyre: string | undefined;
+let prevSlack: string | undefined;
 beforeEach(() => {
   prevXdg = process.env.XDG_STATE_HOME;
   prevDnt = process.env.DO_NOT_TRACK;
   prevStyre = process.env.STYRE_TELEMETRY;
+  prevSlack = process.env.SLACK_BOT_TOKEN;
   process.env.XDG_STATE_HOME = mkdtempSync(join(tmpdir(), "styre-clierr-state-"));
   Reflect.deleteProperty(process.env, "DO_NOT_TRACK");
   Reflect.deleteProperty(process.env, "STYRE_TELEMETRY");
+  Reflect.deleteProperty(process.env, "SLACK_BOT_TOKEN");
 });
 afterEach(() => {
   const restore = (k: string, v: string | undefined) => {
@@ -61,6 +64,7 @@ afterEach(() => {
   restore("XDG_STATE_HOME", prevXdg);
   restore("DO_NOT_TRACK", prevDnt);
   restore("STYRE_TELEMETRY", prevStyre);
+  restore("SLACK_BOT_TOKEN", prevSlack);
 });
 
 test("early config error (bad adapter) emits cli_error with exit_code 78 / error_kind config", async () => {
@@ -115,4 +119,33 @@ test("fallback honors DO_NOT_TRACK — early error emits no cli_error even with 
   ).rejects.toThrow();
 
   expect(events.some((e) => e.event === "cli_error")).toBe(false);
+});
+
+test("early failure AFTER config resolves honors config telemetry:false (no cli_error)", async () => {
+  // notifier:slack with SLACK_BOT_TOKEN unset throws in assertSlackConfigured — AFTER
+  // discoverRuntimeConfig resolved the config, but still an early failure (before the run body).
+  // Because that resolved config has telemetry:false, analytics is NOOP and nothing is emitted.
+  const profile = validProfilePath();
+  const config = tmpJson("styre-cfg-", { notifier: "slack", telemetry: false });
+  const { client, events } = fakeClient();
+
+  await expect(
+    runImpl({ args: { profile, config, ticket: "ENG-1" } }, { analyticsClient: client }),
+  ).rejects.toThrow();
+
+  expect(events.some((e) => e.event === "cli_error")).toBe(false);
+});
+
+test("early failure AFTER config resolves still emits when telemetry is on (positive control)", async () => {
+  // Same assertSlackConfigured trigger, telemetry left at its default (true) → cli_error IS emitted.
+  // Pairs with the negative test above so the negative is gated on telemetry, not on the throw.
+  const profile = validProfilePath();
+  const config = tmpJson("styre-cfg-", { notifier: "slack" }); // telemetry defaults to true
+  const { client, events } = fakeClient();
+
+  await expect(
+    runImpl({ args: { profile, config, ticket: "ENG-1" } }, { analyticsClient: client }),
+  ).rejects.toThrow();
+
+  expect(events.some((e) => e.event === "cli_error")).toBe(true);
 });
