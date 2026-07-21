@@ -16,7 +16,7 @@ import { createNotifier } from "./notify.ts";
 import { type ProjectorPorts, drainOutbox } from "./projector.ts";
 import type { StepRegistry } from "./step-registry.ts";
 
-export type RunOutcome = "pr-ready" | "done" | "blocked" | "no-progress" | "parked";
+export type RunOutcome = "pr-ready" | "done" | "blocked" | "no-progress" | "parked" | "escalated";
 export interface RunResult {
   outcome: RunOutcome;
   iterations: number;
