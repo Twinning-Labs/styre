@@ -35,8 +35,10 @@ The telemetry NDJSON export (`src/telemetry/`) is a **versioned public API of th
 | D4 | **Compute `duration_ms` centrally in `completeDispatch`.** | One place ⟹ **every** completed row (success, parked, failed, postcondition-failed) gets it — instead of patching 3+ call sites and re-introducing the exact "one caller forgot" bug being fixed. |
 | D5 | **`provider` injected at emit time** from `run.provider` (a run-level constant), not stored per-dispatch. | Avoids a redundant column holding a run-constant on every dispatch row. |
 | D6 | **Park dir stays keyed by ticket ref; latest-wins.** Add a `dumpPark` stderr warning when overwriting a dump whose `run_id` differs. | The park path's job is "the latest parked run of ticket X"; ref-keying is load-bearing for the resume UX (you resume by typing a ref, not a UUID). Run identity belongs on the **wire**, where a *consumer* needs it. The warning kills the silent-loss surprise without changing behavior. |
-| D7 | **`--resume` = same `run_id`, marked.** Resume reads the persisted `run_id` back, sets `resumed=1`, `attempt++`. | A resume is a continuation of the same logical run. The `run` row rides across the park boundary inside the copied `run.db`. |
-| D8 | **Apply `TelemetryEventSchema.parse` on the emit path** (`stdoutSink`). | Cheap at NDJSON volumes; catches schema drift at the source. The schema is currently defined but applied nowhere except its own test. |
+| D7 | **`--resume` = same `run_id`, marked.** For a v2 park, resume reads the persisted `run_id` back and sets `resumed=1`, `attempt++`. | A resume is a continuation of the same logical run. The `run` row rides across the park boundary inside the copied `run.db`. See D10 for the pre-upgrade-park reality. |
+| D8 | **Validate on the emit path, but never throw on the live wire.** `stdoutSink` runs `TelemetryEventSchema.parse` per event; on failure it writes a diagnostic to **stderr** (human channel) and still emits the row best-effort — it does **not** abort the run. Tests assert strict validity. | *(Revised after review — B3.)* Telemetry is best-effort/lossy by contract (§5.3; the CI-handoff comment in `emitter.ts:154-158` already says so). A serialization check must not be able to flip an otherwise-successful run — SoT committed, outbox drained, PR opened — into a hard `exit 70` (`run.ts:225`). Catches drift without gating. |
+| D9 | **Run identity is a SoT invariant: the emitter requires a `run` row.** `getRun(db) == null` is an invariant violation (throws a clear error), never silently a null `run_id`. The runner always inserts the row at start; tests seed it. | *(Added after review — B2.)* Keeps `run_id: string` non-nullable on the wire and makes the failure legible instead of producing malformed events. |
+| D10 | **Pre-upgrade-park resume degrades gracefully; it is not made to preserve the original identity.** `migrate()` is replay-once (`migrate.ts:30-33`) — an existing DB never gains a new table — so a v1 park has no `run` table. Resume runs `CREATE TABLE IF NOT EXISTS run` and, finding no row, inserts a **fresh** `run_id` (`resumed=1`) for the resumed portion. | *(Added after review — B1.)* General schema-change-across-park is a **pre-existing** limitation of the no-migration-framework design, not introduced here. This fix only turns a `no such table` crash into graceful, identity-bearing resumption. The v1-emitted rows predate run identity anyway (different `schema_version`). |
 | D9 | **A field-by-field wire spec lives in `docs/architecture/telemetry-export.md`.** | ENG-349 AC: a wire spec must exist in `docs/`, not just the zod schema. It is a maintained reference kept current with the code. |
 
 ---
@@ -59,9 +61,13 @@ CREATE TABLE run (
 ```
 
 - **Table count:** schema goes 16 → 17 `CREATE TABLE` statements. Update the count in CLAUDE.md and `docs/architecture/build-operations.md`, and keep `src/db/schema.sql` **byte-identical** to `docs/architecture/schema.sql` (CLAUDE.md rule).
-- **Fresh run** (`run.ts`, after `migrate` + `openDb`): insert one row — `run_id = crypto.randomUUID()`, `started_at = nowUtc()`, `provider = agentConfig.provider`, `attempt = 1`. Only-the-runner-writes-the-SoT (B2) is preserved: this write is on the runner path.
-- **Resume** (`park.ts resumeRun`): the row is already present in the copied `run.db`. Read `run_id` back; set `resumed=1`, `attempt = attempt + 1`. **Migration edge:** a pre-upgrade parked DB has no `run` row — resume upserts one (fresh uuid, `resumed=1`, `attempt=2`) so a run parked before this change is still attributable after upgrade.
-- **Reader:** `getRun(db): RunRow | null` in a new `src/db/repos/run.ts`.
+- **Fresh run** (`run.ts`, after `migrate` + `openDb`): `migrate` on a fresh DB runs the full `schemaSql` (`migrate.ts:34`), so the `run` table exists. Insert one row — `run_id = crypto.randomUUID()`, `started_at = nowUtc()`, `provider = agentConfig.provider`, `attempt = 1`. Only-the-runner-writes-the-SoT (B2 invariant) is preserved: this write is on the runner path.
+- **Resume** (`park.ts resumeRun`): `migrate()` is **replay-once** — for an already-bootstrapped parked DB it returns early and creates nothing (`migrate.ts:30-33`). So resume must not assume the table exists:
+  - Call `ensureRun(db)` → `CREATE TABLE IF NOT EXISTS run (…)`, then read the row.
+  - **v2 park:** table + row present in the copied `run.db` → read `run_id` back, set `resumed=1`, `attempt++`. Same logical run.
+  - **v1 park (upgraded between park and resume):** table just created, no row → insert a **fresh** `run_id`, `resumed=1`, `attempt=2` (see D10). Graceful, identity-bearing; the original had no id to preserve.
+  - **DDL-duplication note:** `ensureRun`'s `CREATE TABLE IF NOT EXISTS` mirrors the `run` DDL in `schema.sql`. Keep them identical; `schema.sql` remains the SoT and carries a comment pointing at `run.ts`. This small wart is the bridge given there is no incremental-migration framework — building one is out of scope (a separate ticket).
+- **Reader:** `getRun(db): RunRow | null` in a new `src/db/repos/run.ts`. Per **D9**, callers that require identity (the emitter) treat `null` as an invariant violation and throw a clear error rather than emitting a null `run_id`.
 
 ### 3.2 `SCHEMA_VERSION` → 2
 
@@ -122,15 +128,15 @@ Implementation note: `completeDispatch` takes `id`, not the row — it does one 
 
 ### 3.6 Emitter injection (`emitter.ts`)
 
-`createTelemetryEmitter` / the projection functions read the `run` row once (cache `run_id`/`provider` in the closure) and stamp them onto every projected event. `toEvent` restores `dispatch_id` and the run fields; `toDispatch` adds `provider` + forensic fields; `toSignal`/`emitCiHandoff` add `run_id`; `buildSummary` as above.
+`createTelemetryEmitter` reads the `run` row once at construction (via `getRun(db)`) and caches `run_id`/`provider` in the closure; `getRun == null` throws the D9 invariant error there (one legible failure, not per-row). Every projection stamps the cached values: `toEvent` restores `dispatch_id` and adds `run_id`; `toDispatch` adds `provider` + forensic fields (`trigger`/`exit_code`/`effort`/`predecessor_dispatch_id`); `toSignal`/`emitCiHandoff` add `run_id`; `buildSummary` as above. All emit points already hold `db`, so identity is available on the incremental (`flushNew`) and terminal paths alike.
 
-### 3.7 Emit-path validation (`emit.ts stdoutSink`)
+### 3.7 Emit-path validation (`emit.ts stdoutSink`) — *non-fatal (revised, B3)*
 
-`stdoutSink` runs `TelemetryEventSchema.parse(event)` before `JSON.stringify`. A parse failure is a producer bug (fail-loud in the runner, which is the only writer) — surfaced, not silently shipped.
+`stdoutSink` runs `TelemetryEventSchema.safeParse(event)` before `JSON.stringify`. On **failure** it writes a one-line diagnostic to **stderr** (the human channel — stdout stays pure NDJSON) and still emits the row best-effort; it does **not** throw. Rationale: telemetry is best-effort/lossy by contract (§5.3), and the emitter is called on every tick and at `finish()` (`run-ticket.ts:85-99`) with no surrounding try/catch — a throw would propagate to `run.ts`'s catch and map to `exit 70` (`run.ts:225`), turning a fully-successful run (SoT committed, outbox drained, CI handoff sent) into a crash. Strict `.parse` (throwing) is used **in tests** to assert the producer emits valid events.
 
-### 3.8 Park-dir warning (`park.ts dumpPark`)
+### 3.8 Park-dir warning (`park.ts dumpPark`) — *tolerant of a missing table (B1-aware)*
 
-Before `copyFileSync(dbPath, destPath)`, if `destPath` exists and its `run` row's `run_id` differs from the current run's, write one stderr line: `overwriting parked run <old-run_id> with <new-run_id> for <ident>`. Behavior unchanged (latest-wins); only the surprise is removed.
+Before `copyFileSync(dbPath, destPath)`, if `destPath` exists, best-effort read its `run.run_id`: open a read connection, and if the query throws (a **pre-upgrade dump has no `run` table**) treat it as "no prior id" and skip. If a differing id is found, write one stderr line: `overwriting parked run <old-run_id> with <new-run_id> for <ident>`. Behavior unchanged (latest-wins); only the silent-loss surprise is removed, and the legacy dump never crashes the warning.
 
 ### 3.9 Docs
 
@@ -141,6 +147,8 @@ Before `copyFileSync(dbPath, destPath)`, if `destPath` exists and its `run` row'
 
 ## 4. Testing (extend `test/telemetry/emitter.test.ts`)
 
+**Test-substrate prerequisite (B2):** the emitter now requires a `run` row (D9). Update `makeTestDb` (`test/helpers/db.ts`) — or add a `seedRun(db, {provider?})` helper — to insert one, and call it wherever a telemetry test builds summaries/dispatches. Existing assertions that read `summary.cost_usd`/`cache_read` directly (`emitter.test.ts:65-68`) must handle `number | null`. The dispatch inserted at `emitter.test.ts:17` currently has no `started_at`; the new duration test must seed `startedAt` (else duration is correctly `null`).
+
 - **Cost truth:** a run where no dispatch reports cost emits `cost_usd: null`, **not** `0`; `usage_coverage.cost_usd == 0`.
 - **Mixed case:** some dispatches report, some don't ⟹ aggregate = sum of reported (floor), `usage_coverage.<f> < dispatch_count`.
 - **Full case:** all report ⟹ real sum, `coverage == dispatch_count`.
@@ -149,7 +157,9 @@ Before `copyFileSync(dbPath, destPath)`, if `destPath` exists and its `run` row'
 - **Run identity:** two runs of the same ticket emit distinct `run_id`; resume emits the **same** `run_id` with `resumed=1`.
 - **Summary** carries `started_at`, `ended_at`, `provider`.
 - **`event.dispatch_id`** present on emitted event rows; dispatch forensic fields present.
-- **Emit-path validation:** an intentionally malformed event throws in the sink (not silently emitted).
+- **Emit-path validation:** a valid event round-trips; an intentionally malformed event is still emitted **and** writes a stderr diagnostic — the sink does **not** throw (guards the exit-70 footgun). A separate producer-level test asserts real emitted events pass strict `.parse`.
+- **Missing-run invariant (D9):** building a summary / flushing with no `run` row throws a clear, identifiable error (not a null `run_id` on the wire).
+- **Pre-upgrade resume (D10):** resuming a DB with no `run` table creates it and emits a fresh `run_id` with `resumed=1` rather than crashing.
 - The **STYRE-1 re-emit** acceptance check (ENG-339): re-emitted, cost is `null`, not `$0`.
 - Existing suite green (`bun test`, `bun run lint`).
 
@@ -187,3 +197,15 @@ Before `copyFileSync(dbPath, destPath)`, if `destPath` exists and its `run` row'
 - [ ] `event.dispatch_id` present on emitted event rows.
 - [ ] A field-by-field wire spec exists in `docs/architecture/`, `SCHEMA_VERSION` decision recorded jointly.
 - [ ] Existing suite green.
+
+---
+
+## 7. Independent review — resolutions
+
+An independent code-grounded review (2026-07-21) verified the cost-truth half (ENG-339) sound and confirmed most factual claims (forensic columns exist, 16-table count, byte-identical schema copies, provider is run-level, codex-vs-claude field coverage, no consumer reads the soon-nullable aggregates). It raised three blocking issues, now resolved in the design above:
+
+- **B1 — migration mechanism was misstated.** `migrate()` is replay-once (`migrate.ts:30-33`), so an existing/parked DB never gains the `run` table; the original "resume upserts a row" would throw `no such table: run`. **Resolved:** D10 + §3.1 — resume runs `CREATE TABLE IF NOT EXISTS run` and backfills a fresh id for pre-upgrade parks; general cross-upgrade park resume is documented as a pre-existing limitation, not something this work must solve.
+- **B2 — emitter silently coupled to a `run` row the test substrate never creates.** `makeTestDb` seeds only project + ticket, so `getRun` would be null in existing tests. **Resolved:** D9 (missing-run is a thrown invariant, not a null wire field) + §4 test-substrate prerequisite (seed a `run` row; handle now-nullable aggregate assertions; seed `started_at` for the duration test).
+- **B3 — emit-path `parse` throw was a success-path footgun.** A throw in `stdoutSink` propagates to `exit 70`, flipping a green run to a crash after all durable/external work. **Resolved:** D8 + §3.7 — validate with `safeParse`, warn to stderr, never throw on the live wire; strict `.parse` only in tests.
+
+Non-blocking notes folded in: the park-dir warning tolerates a missing `run` table in a legacy dump (§3.8); central `duration_ms` verified correct (all completion sites pass `endedAt`, none pass `durationMs`, rows insert `started_at`).
