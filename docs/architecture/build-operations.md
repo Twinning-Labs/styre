@@ -189,6 +189,11 @@ The plane integrates *only* through these. Treat them as the public API surface 
      M9, PR #23]` *(The `metric_event` table is an OPTIONAL denormalized rollup the plane may derive
      from this stream; the OSS core does not write it — see schema.sql. The earlier "writes each
      `metric_event` row" phrasing predates the implemented shape, which emits `dispatch` rows.)*
+   - **The wire stream is now `SCHEMA_VERSION = 2`.** The field-by-field spec — every event type
+     (`event`/`dispatch`/`signal`/`summary`/`ci_handoff`), each field's type/nullability/source, the
+     cost/aggregate contract (`usage_coverage`, floor-sum, `null` = unreported), `run_id` vs.
+     run-local `ticket_id` semantics, and the reserved (currently-`null`) `event.dispatch_id` — lives
+     in [`telemetry-export.md`](telemetry-export.md), kept current with `src/telemetry/events.ts`.
 4. **(Later) a programmatic API.** The vision mentions "feeds into the harness API." At OSS cutover the
    artifact contracts (1–3) suffice; a thin REST/IPC API is a later addition for tighter coupling.
 
