@@ -19,7 +19,7 @@
 - **`stdout` is NDJSON telemetry only; `stderr` is human output** (CLAUDE.md stream contract). Diagnostics go to `stderr`.
 - **Telemetry is best-effort/lossy (§5.3)** — the emit path must never throw on the live wire.
 - Run everything from the worktree root: `/Users/rajatgoyal/code/styre/.claude/worktrees/eng-339-349-telemetry`.
-- After each task: `bun test` and `bun run lint` must be green before commit.
+- After each task: `bun test` and `bun run lint` (= `biome check`) must be green before commit. **`bun run lint` does NOT run `tsc`** — for tasks that change types (5, 6) also run `bun run typecheck`, and it is part of the final acceptance sweep (Task 9).
 
 ---
 
@@ -204,6 +204,7 @@ Claude-Session: https://claude.ai/code/session_015wsu2fhwp4o3wmJ6K5jj71"
 - Modify: `docs/architecture/schema.sql` (byte-identical mirror of the same edits)
 - Create: `src/db/repos/run.ts`
 - Modify: `test/helpers/db.ts` (seed a `run` row)
+- Modify: `test/migrate.test.ts` (existing — asserts schema version 7; must become 8)
 - Modify: `CLAUDE.md`, `docs/architecture/build-operations.md` (16→17 table count)
 - Test: `test/db/run.test.ts` (create)
 
@@ -217,7 +218,7 @@ Claude-Session: https://claude.ai/code/session_015wsu2fhwp4o3wmJ6K5jj71"
 
 - [ ] **Step 1: Add the `run` table to BOTH schema files**
 
-In `src/db/schema.sql`, immediately **after** the `projection_outbox` table (ends near line 490, before the `-- §X  DEFERRED` comment block at line 516), insert:
+In `src/db/schema.sql`, immediately **after** the `projection_outbox` table and its index (ends line 483) and **before** the `§H CREATE VIEW` section (starts line 485) — keeping all `CREATE TABLE`s grouped ahead of the views — insert:
 
 ```sql
 -- ----------------------------------------------------------------------------
@@ -377,17 +378,24 @@ import { nowUtc } from "../../src/util/time.ts";
 Run: `bun test test/db/run.test.ts`
 Expected: PASS (3 tests).
 
-- [ ] **Step 8: Update the table-count references in docs**
+- [ ] **Step 8: Fix `test/migrate.test.ts` (it asserts schema version 7)**
 
-In `CLAUDE.md`, find "**16 `CREATE TABLE` statements**" (in the `schema.sql` bullet) and change `16` → `17`, updating the parenthetical to note `run` is now a live table. In `docs/architecture/build-operations.md`, update any "16 tables" count the same way (grep: `grep -rn "16" docs/architecture/build-operations.md | grep -i table`).
+`test/migrate.test.ts:35` and `:57` assert `expect(...version).toBe(7)`; the test at `:32` is named "bootstraps a fresh DB at schema v7". These are runtime assertions — they fail the moment the schema INSERT becomes version 8. Change both `toBe(7)` → `toBe(8)` and rename the test to "…at schema v8". Add `"run"` to the `CORE_TABLES` array (`:12-29`) so the "all core tables exist" check covers it (the check uses `toContain`, so it wouldn't fail without it, but include it for completeness).
 
-- [ ] **Step 9: Full suite + lint, then commit**
+Run: `bun test test/migrate.test.ts`
+Expected: PASS.
+
+- [ ] **Step 9: Update the table-count references in docs**
+
+In `CLAUDE.md`, find "**16 `CREATE TABLE` statements**" (the `schema.sql` bullet, `CLAUDE.md:27`) and change `16` → `17`, updating the parenthetical to note `run` is now a live table. Then check `docs/architecture/build-operations.md` for a literal table count: `grep -rn "16" docs/architecture/build-operations.md | grep -i table`. **Only edit it if the grep returns a real "16 tables" reference** — it may not carry a count, in which case this is a no-op (do not invent one).
+
+- [ ] **Step 10: Full suite + lint, then commit**
 
 Run: `bun test && bun run lint`
-Expected: green (existing telemetry tests still pass — they now have a seeded run row but the emitter doesn't yet read it).
+Expected: green (existing telemetry tests still pass — they now have a seeded run row but the emitter doesn't yet read it; `migrate.test.ts` now expects v8).
 
 ```bash
-git add src/db/schema.sql docs/architecture/schema.sql src/db/repos/run.ts test/db/run.test.ts test/helpers/db.ts CLAUDE.md docs/architecture/build-operations.md
+git add src/db/schema.sql docs/architecture/schema.sql src/db/repos/run.ts test/db/run.test.ts test/helpers/db.ts test/migrate.test.ts CLAUDE.md docs/architecture/build-operations.md
 git commit -m "feat(telemetry): add run table for per-invocation identity (ENG-349)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
@@ -412,16 +420,20 @@ In `src/cli/run.ts`, after `const db = openDb(dbPath);` + `recover(db, realRecov
 
 ```ts
 import { randomUUID } from "node:crypto";
-import { insertRun } from "../db/repos/run.ts";
-// ...after recover(db, realRecoverDeps()); and agentConfig resolution:
-insertRun(db, {
-  runId: randomUUID(),
-  startedAt: nowUtc(),
-  provider: (runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG).provider,
-});
+import { insertRun, getRun } from "../db/repos/run.ts";
+import { nowUtc } from "../util/time.ts"; // NOT currently imported in run.ts — add it
+// ...after recover(db, realRecoverDeps()); and agentConfig resolution (agentConfig is at run.ts:175):
+// Guard on getRun===null so a reused --db (non-ephemeral) doesn't insert a second run row.
+if (getRun(db) === null) {
+  insertRun(db, {
+    runId: randomUUID(),
+    startedAt: nowUtc(),
+    provider: (runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG).provider,
+  });
+}
 ```
 
-(`nowUtc` and `DEFAULT_AGENT_CONFIG` are already imported in `run.ts`; if not, add the imports.)
+(`DEFAULT_AGENT_CONFIG` is already imported in `run.ts`. `nowUtc` is **not** — add the import shown above. `randomUUID` and the `run.ts` repo import are new.)
 
 - [ ] **Step 2: On resume, ensure the table, backfill if pre-upgrade, mark resumed**
 
@@ -430,6 +442,7 @@ In `src/cli/park.ts` `resumeRun`, after `const db = openDb(dbPath);` (line 180) 
 ```ts
 import { ensureRunTable, getRun, insertRun, markResumed } from "../db/repos/run.ts";
 import { randomUUID } from "node:crypto";
+import { nowUtc } from "../util/time.ts"; // NOT currently imported in park.ts — add it
 // ...after const db = openDb(dbPath);
 ensureRunTable(db); // pre-upgrade parks (v1) have no run table; migrate() won't add it
 if (getRun(db) === null) {
@@ -443,7 +456,7 @@ if (getRun(db) === null) {
 markResumed(db); // same logical run for a v2 park; resumed=1, attempt++
 ```
 
-(`nowUtc` and `DEFAULT_AGENT_CONFIG` are already imported in `park.ts`.)
+(`DEFAULT_AGENT_CONFIG` is already imported in `park.ts`. `nowUtc` is **not** — add the import shown above.)
 
 - [ ] **Step 3: Write the failing dumpPark-warning test**
 
@@ -672,64 +685,115 @@ Claude-Session: https://claude.ai/code/session_015wsu2fhwp4o3wmJ6K5jj71"
 
 **Files:**
 - Modify: `src/telemetry/events.ts`
-- Test: `test/telemetry/events-schema.test.ts` (create)
+- Modify: `test/telemetry/events.test.ts` (existing v1 schema test — rewrite to v2, folding in the new null-cost/coverage/provider assertions; no separate file)
+- Modify: `test/cli/run-analytics.test.ts`, `test/telemetry/analytics/properties.test.ts` (existing `SummaryEvent` literals typed `schema_version: 1` — break `bun run typecheck`)
 
 **Interfaces:**
 - Produces (the v2 `TelemetryEvent` union): every member gains `run_id: string`. `SummaryEvent` aggregates become `z.number().nullable()`; adds `provider: string`, `started_at: string`, `ended_at: string`, and `usage_coverage: { dispatch_count, cost_usd, tokens_in, tokens_out, cache_read, cache_create }` (all `z.number()`). `DispatchEvent` adds `provider: string`, `trigger`/`effort`/`predecessor_dispatch_id` (`z.string().nullable()`), `exit_code` (`z.number().nullable()`). `EventEvent` adds `dispatch_id: z.string().nullable()`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Rewrite the existing `test/telemetry/events.test.ts` to v2**
 
-Create `test/telemetry/events-schema.test.ts`:
+Replace the whole file with the v2 shape (every literal gains `run_id`; summary gains `provider`/`started_at`/`ended_at`/`usage_coverage` and nullable aggregates; event gains `dispatch_id`). This subsumes the old assertions and adds the null-cost/coverage/provider/forensic checks:
 
 ```ts
-import { describe, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
+import { noopSink, stdoutSink } from "../../src/telemetry/emit.ts";
 import { SCHEMA_VERSION, TelemetryEventSchema } from "../../src/telemetry/events.ts";
 
-describe("v2 wire schema", () => {
-  test("SCHEMA_VERSION is 2", () => {
-    expect(SCHEMA_VERSION).toBe(2);
-  });
+test("SCHEMA_VERSION is 2", () => {
+  expect(SCHEMA_VERSION).toBe(2);
+});
 
-  test("summary accepts null cost_usd + usage_coverage + identity", () => {
-    const summary = {
+test("a summary round-trips with null cost + usage_coverage + identity", () => {
+  const ev = {
+    schema_version: 2 as const, type: "summary" as const, run_id: "r1", ticket_id: 1,
+    ident: "ENG-1", provider: "codex", started_at: "2026-07-21T00:00:00Z",
+    ended_at: "2026-07-21T00:01:00Z", outcome: "pr-ready", stage: "merge", status: "waiting",
+    ticks: 7, cost_usd: null, tokens_in: 100, tokens_out: 50, cache_read: null, cache_create: null,
+    usage_coverage: { dispatch_count: 2, cost_usd: 0, tokens_in: 2, tokens_out: 2, cache_read: 0, cache_create: 0 },
+    dispatch_count: 2, dispatch_outcomes: { "clean-success": 2 },
+    cycle_count: 1, escalation_count: 0, escalation_reasons: [],
+  };
+  expect(TelemetryEventSchema.parse(ev)).toMatchObject({ type: "summary", cost_usd: null });
+});
+
+test("a dispatch carries run_id + provider + forensic fields", () => {
+  const ev = {
+    schema_version: 2 as const, type: "dispatch" as const, run_id: "r1",
+    dispatch_id: "ENG-1-d0001", ticket_id: 1, work_unit_id: null, seq: 1, stage: "implement",
+    kind: null, model: "claude-opus-4-8", provider: "claude", trigger: "transition",
+    effort: null, exit_code: 0, predecessor_dispatch_id: null, outcome: "clean-success",
+    branch_head_sha: "abc", started_at: "t0", ended_at: "t1", duration_ms: 12,
+    tokens_in: 1, tokens_out: 1, cache_read: null, cache_create: null, cost_usd: 0.5,
+  };
+  expect(TelemetryEventSchema.parse(ev)).toMatchObject({ provider: "claude" });
+});
+
+test("an event carries run_id + nullable dispatch_id", () => {
+  const ev = {
+    schema_version: 2 as const, type: "event" as const, run_id: "r1", ticket_id: 1,
+    dispatch_id: null, seq: 3, kind: "transition", actor: "runner", from_stage: "design",
+    to_stage: "implement", loop: null, route_to: null, signature: null, reason: null,
+    created_at: "2026-06-22T00:00:00Z",
+  };
+  expect(TelemetryEventSchema.parse(ev)).toMatchObject({ type: "event", dispatch_id: null });
+});
+
+test("the schema rejects an unknown type and a wrong version", () => {
+  expect(() => TelemetryEventSchema.parse({ schema_version: 2, type: "nope" })).toThrow();
+  expect(() => TelemetryEventSchema.parse({ schema_version: 1, type: "summary" })).toThrow();
+});
+
+test("TelemetryEventSchema accepts a ci_handoff event", () => {
+  const ev = {
+    schema_version: SCHEMA_VERSION, type: "ci_handoff", run_id: "r1", ticket_id: 1,
+    ident: "STYRE-1", pr_ref: "42", pr_url: "https://github.com/o/r/pull/42",
+    branch_head_sha: "abc123", checks_system: "github", read: "not-reported",
+    measured_at: "2026-07-18T12:00:00Z",
+  };
+  expect(TelemetryEventSchema.safeParse(ev).success).toBe(true);
+});
+
+test("TelemetryEventSchema rejects a ci_handoff with an unknown read value", () => {
+  const ev = {
+    schema_version: SCHEMA_VERSION, type: "ci_handoff", run_id: "r1", ticket_id: 1,
+    ident: "STYRE-1", pr_ref: null, pr_url: null, branch_head_sha: null,
+    checks_system: "none", read: "green", measured_at: "2026-07-18T12:00:00Z",
+  };
+  expect(TelemetryEventSchema.safeParse(ev).success).toBe(false);
+});
+
+test("stdoutSink writes one JSON line; noopSink writes nothing", () => {
+  const written: string[] = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((s: string) => {
+    written.push(s);
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    stdoutSink({
       schema_version: 2, type: "summary", run_id: "r1", ticket_id: 1, ident: "ENG-1",
-      provider: "codex", started_at: "2026-07-21T00:00:00Z", ended_at: "2026-07-21T00:01:00Z",
-      outcome: "pr-ready", stage: "merge", status: "done", ticks: 3,
-      cost_usd: null, tokens_in: 100, tokens_out: 50, cache_read: null, cache_create: null,
-      usage_coverage: { dispatch_count: 2, cost_usd: 0, tokens_in: 2, tokens_out: 2, cache_read: 0, cache_create: 0 },
-      dispatch_count: 2, dispatch_outcomes: { "clean-success": 2 },
-      cycle_count: 0, escalation_count: 0, escalation_reasons: [],
-    };
-    expect(TelemetryEventSchema.parse(summary)).toMatchObject({ cost_usd: null });
-  });
-
-  test("dispatch carries run_id + provider + forensic fields", () => {
-    const d = {
-      schema_version: 2, type: "dispatch", run_id: "r1", dispatch_id: "ENG-1-d0001",
-      ticket_id: 1, work_unit_id: null, seq: 1, stage: "implement", kind: null,
-      model: "claude-opus-4-8", provider: "claude", trigger: "transition", effort: null,
-      exit_code: 0, predecessor_dispatch_id: null, outcome: "clean-success",
-      branch_head_sha: "abc", started_at: "t0", ended_at: "t1", duration_ms: 12,
-      tokens_in: 1, tokens_out: 1, cache_read: null, cache_create: null, cost_usd: 0.5,
-    };
-    expect(TelemetryEventSchema.parse(d)).toMatchObject({ provider: "claude" });
-  });
-
-  test("event carries run_id + nullable dispatch_id", () => {
-    const e = {
-      schema_version: 2, type: "event", run_id: "r1", ticket_id: 1, dispatch_id: null,
-      seq: 1, kind: "note", actor: "runner", from_stage: null, to_stage: null,
-      loop: null, route_to: null, signature: null, reason: "x", created_at: "t0",
-    };
-    expect(TelemetryEventSchema.parse(e)).toMatchObject({ dispatch_id: null });
-  });
+      provider: "claude", started_at: "t0", ended_at: "t1", outcome: "done", stage: "released",
+      status: "done", ticks: 1, cost_usd: 0, tokens_in: 0, tokens_out: 0, cache_read: 0,
+      cache_create: 0,
+      usage_coverage: { dispatch_count: 0, cost_usd: 0, tokens_in: 0, tokens_out: 0, cache_read: 0, cache_create: 0 },
+      dispatch_count: 0, dispatch_outcomes: {}, cycle_count: 0, escalation_count: 0,
+      escalation_reasons: [],
+    });
+    noopSink({ schema_version: 2, type: "summary" } as never);
+  } finally {
+    process.stdout.write = orig;
+  }
+  expect(written.length).toBe(1);
+  expect(written[0].endsWith("\n")).toBe(true);
+  expect(JSON.parse(written[0]).ident).toBe("ENG-1");
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `bun test test/telemetry/events-schema.test.ts`
-Expected: FAIL — `SCHEMA_VERSION` is 1; new fields rejected.
+Run: `bun test test/telemetry/events.test.ts`
+Expected: FAIL — `SCHEMA_VERSION` is still 1; the v2 literals are rejected by the v1 schema.
 
 - [ ] **Step 3: Edit `src/telemetry/events.ts`**
 
@@ -785,13 +849,23 @@ Change the five aggregate lines in `SummaryEvent` to nullable and add the covera
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `bun test test/telemetry/events-schema.test.ts`
-Expected: PASS (4 tests).
+Run: `bun test test/telemetry/events.test.ts`
+Expected: PASS (8 tests).
 
-- [ ] **Step 5: Note — the emitter suite is now RED (expected)**
+- [ ] **Step 5: Fix the two `SummaryEvent` literals that break `typecheck`**
+
+Two existing tests construct a `SummaryEvent` object literal typed to the union; after v2 they no longer type-check (missing `run_id`/`provider`/`started_at`/`ended_at`/`usage_coverage`; `schema_version: 1`). They only *read* present fields at runtime, so the fix is purely to make the literal v2-valid:
+
+- `test/cli/run-analytics.test.ts:7-26` — change `schema_version` to `2`, add `run_id: "r1"`, `provider: "claude"`, `started_at: "t0"`, `ended_at: "t1"`, and `usage_coverage: { dispatch_count: <same as dispatch_count>, cost_usd: 0, tokens_in: 0, tokens_out: 0, cache_read: 0, cache_create: 0 }`. Leave the aggregate values as-is (numbers are valid for the now-nullable fields).
+- `test/telemetry/analytics/properties.test.ts:17-38` — the `summary()` helper returns a `SummaryEvent`; apply the same additions there.
+
+Run: `bun run typecheck` (this is `tsc --noEmit`, `package.json:12`; the per-task `bun run lint` = `biome check` does **not** run it).
+Expected: no errors.
+
+- [ ] **Step 6: Note — the emitter suite is now RED (expected)**
 
 Run: `bun test test/telemetry/emitter.test.ts`
-Expected: FAIL — the emitter (`emitter.ts`) doesn't yet produce the new fields; TypeScript will also flag `toEvent`/`toDispatch`/`buildSummary` returning objects missing `run_id` etc. This is fixed in Task 6. **Do not commit a red suite** — proceed directly to Task 6 and commit them together.
+Expected: FAIL — the emitter (`emitter.ts`) doesn't yet produce the new fields; `tsc` also flags `toEvent`/`toDispatch`/`buildSummary` returning objects missing `run_id` etc. This is fixed in Task 6. **Do not commit a red suite** — proceed directly to Task 6 and commit them together.
 
 ---
 
@@ -799,11 +873,14 @@ Expected: FAIL — the emitter (`emitter.ts`) doesn't yet produce the new fields
 
 **Files:**
 - Modify: `src/telemetry/emitter.ts`
+- Modify: `test/cli/run-e2e.test.ts` (the `seedTicket:false` test at `:63` drives `runTicket`→emitter with no run row; seed one)
 - Test: `test/telemetry/emitter.test.ts` (extend)
 
 **Interfaces:**
 - Consumes: `getRun` (Task 2); the v2 schema (Task 5); widened rows (Task 4).
 - Produces: `buildSummary` returns a valid v2 `summary` with nullable aggregates + `usage_coverage` + identity/provider/timestamps. The emitter throws a clear error if `getRun(db)` is null (D9 invariant).
+
+**Note — the D9 invariant reaches one existing test.** `test/cli/run-e2e.test.ts:63` uses `makeTestDb({ seedTicket: false })` (the only such caller in the suite) then calls `runTicket` directly, which inserts its own project+ticket but no `run` row. After this task, its terminal `emitSummary`→`buildSummary`→`runCtx` throws. Fix in Step 4 below. (The other run-e2e test at `:13` uses the seeded `makeTestDb()`, which Task 2 gave a run row — it's fine. All `gitRepoWithProject()`-based e2e tests wrap the seeded `makeTestDb()`, so they inherit the run row too.)
 
 - [ ] **Step 1: Write the failing tests (extend `emitter.test.ts`)**
 
@@ -1074,18 +1151,29 @@ In `createTelemetryEmitter`, compute `ctx` lazily once and pass it to the projec
   };
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 4: Seed a run row in the `seedTicket:false` e2e test**
 
-Run: `bun test test/telemetry/emitter.test.ts`
-Expected: PASS (existing + new). Fix any existing assertions that read `summary.cost_usd`/`cache_read` as non-null (they now may be null — where the old test seeded costs, keep them; where it didn't, expect null).
+In `test/cli/run-e2e.test.ts`, at the `:63` test that does `const { db } = makeTestDb({ seedTicket: false });`, insert a run row before `runTicket` runs so the emitter's D9 invariant is satisfied (the `run` table has no FK to project/ticket, so order doesn't matter):
 
-- [ ] **Step 5: Full suite + lint, then commit (Task 5 + 6 together)**
+```ts
+import { insertRun } from "../../src/db/repos/run.ts";
+import { nowUtc } from "../../src/util/time.ts";
+// ...immediately after: const { db } = makeTestDb({ seedTicket: false });
+insertRun(db, { runId: "test-run-e2e", startedAt: nowUtc(), provider: "claude" });
+```
 
-Run: `bun test && bun run lint`
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `bun test test/telemetry/emitter.test.ts test/cli/run-e2e.test.ts`
+Expected: PASS (existing + new). Fix any existing emitter-test assertions that read `summary.cost_usd`/`cache_read` as non-null (they now may be null — where the old test seeded costs, keep them; where it didn't, expect null).
+
+- [ ] **Step 6: Full suite + typecheck + lint, then commit (Task 5 + 6 together)**
+
+Run: `bun test && bun run typecheck && bun run lint`
 Expected: green.
 
 ```bash
-git add src/telemetry/events.ts src/telemetry/emitter.ts test/telemetry/events-schema.test.ts test/telemetry/emitter.test.ts
+git add src/telemetry/events.ts src/telemetry/emitter.ts test/telemetry/events.test.ts test/telemetry/emitter.test.ts test/cli/run-e2e.test.ts test/cli/run-analytics.test.ts test/telemetry/analytics/properties.test.ts
 git commit -m "feat(telemetry): SCHEMA_VERSION 2 — cost truth, run identity, provider, timestamps (ENG-339, ENG-349)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
@@ -1260,8 +1348,8 @@ Expected: PASS.
 
 - [ ] **Step 3: Full acceptance sweep**
 
-Run: `bun test && bun run lint`
-Expected: entire suite green.
+Run: `bun test && bun run typecheck && bun run lint`
+Expected: entire suite green — tests, `tsc --noEmit`, and biome all clean. (`typecheck` is included explicitly because `bun run lint` = `biome check` does not run `tsc`, and the v2 schema change touches typed literals across the suite.)
 
 - [ ] **Step 4: Manual STYRE-1 acceptance check (ENG-339 AC)**
 
