@@ -94,7 +94,7 @@ Fields added per event type (existing fields unchanged unless noted):
 
 **`EventEvent`** (`events.ts:8`):
 - `run_id: string`
-- `dispatch_id: z.string().nullable()` — restore the dropped join key (`event_log.dispatch_id`, `schema.sql:287`).
+- `dispatch_id: z.string().nullable()` — **corrected understanding (post-review):** `event_log.dispatch_id` (`schema.sql:287`) is a **dead column** — `appendEvent` (the only `event_log` writer, `event-log.ts:68`) never sets it, so it is always NULL, like `duration_ms` was. Emitting it "restored" would ship `null` forever. *Actually* populating it means threading the causing dispatch through the loopback/escalated append sites (~10 sites across 6 control-loop daemon files — `checks-verdict`, `checks-gate-verdict`, `arbiter-verdict`, `review-verdict`, `failure-policy`, `projector`), an invariant-heavy subsystem outside the telemetry layer. **Decision:** include `dispatch_id` as a **nullable field in v2 now** (so future population is a non-breaking change needing no further bump; wire it through `EventLogRow`/`COLS` so the projection carries whatever the column holds) but **defer populating it** to a follow-up ticket. It reads `null` until then; the wire spec documents it as "reserved — populated by ENG-3XX." The dispatch *forensic* fields below are unaffected — those columns are populated.
 
 **`SignalEvent`, `CiHandoffEvent`** — gain `run_id: string`.
 
