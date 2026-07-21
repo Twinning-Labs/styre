@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test";
-import { EXIT, StyreError, configError, toolchainError, usageError } from "../../src/cli/errors.ts";
+import {
+  EXIT,
+  StyreError,
+  configError,
+  errorKindForExit,
+  toolchainError,
+  usageError,
+} from "../../src/cli/errors.ts";
 
 test("StyreError carries code + headline + optional detail/recovery", () => {
   const e = new StyreError({ code: 78, headline: "bad", detail: "d", recovery: "fix it" });
@@ -29,4 +36,19 @@ test("configError names the file and defaults a recovery line", () => {
 
 test("toolchainError uses EXIT.TOOLCHAIN_MISSING (69)", () => {
   expect(toolchainError("  - pytest").code).toBe(69);
+});
+
+test("errorKindForExit maps each EXIT code to its kind", () => {
+  expect(errorKindForExit(EXIT.USAGE)).toBe("usage");
+  expect(errorKindForExit(EXIT.CONFIG)).toBe("config");
+  expect(errorKindForExit(EXIT.TOOLCHAIN_MISSING)).toBe("toolchain");
+  expect(errorKindForExit(EXIT.RESUME_REFUSED)).toBe("resume_refused");
+  expect(errorKindForExit(EXIT.OPERATIONAL)).toBe("operational");
+  expect(errorKindForExit(EXIT.TEMPFAIL)).toBe("tempfail");
+  expect(errorKindForExit(EXIT.INTERNAL)).toBe("internal");
+});
+
+test("errorKindForExit falls back to 'other' for an unknown code", () => {
+  expect(errorKindForExit(0)).toBe("other");
+  expect(errorKindForExit(255)).toBe("other");
 });

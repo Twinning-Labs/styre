@@ -107,7 +107,12 @@ test("ALLOW-LIST GUARD: every builder emits only allow-listed keys", () => {
       5000,
       { complexityGrading: true, onPlanDefect: "redesign" },
     ),
-    cliErrorProperties({ command: "run", exitCode: 1, errorClass: "TypeError" }),
+    cliErrorProperties({
+      command: "run",
+      exitCode: 1,
+      errorClass: "TypeError",
+      errorKind: "operational",
+    }),
   ];
   for (const bag of bags) {
     for (const key of Object.keys(bag)) {
@@ -136,6 +141,22 @@ test("setupProperties buckets unknown component_kinds to 'other' and dedupes", (
 });
 
 test("cli_error never carries a message field", () => {
-  const bag = cliErrorProperties({ command: "run", exitCode: 1, errorClass: "Error" });
+  const bag = cliErrorProperties({
+    command: "run",
+    exitCode: 1,
+    errorClass: "Error",
+    errorKind: "internal",
+  });
   expect("message" in bag).toBe(false);
+});
+
+test("cli_error carries an allow-listed error_kind", () => {
+  const bag = cliErrorProperties({
+    command: "run",
+    exitCode: 78,
+    errorClass: "StyreError",
+    errorKind: "config",
+  });
+  expect(bag.error_kind).toBe("config");
+  expect(ALLOWED_KEYS.has("error_kind")).toBe(true);
 });

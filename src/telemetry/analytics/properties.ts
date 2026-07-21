@@ -135,12 +135,14 @@ export interface CliErrorInput {
   command: string;
   exitCode: number;
   errorClass: string;
+  errorKind: string;
 }
 export function cliErrorProperties(p: CliErrorInput): Record<string, unknown> {
   return {
     command: p.command,
     exit_code: p.exitCode,
     error_class: p.errorClass,
+    error_kind: p.errorKind,
   };
 }
 
@@ -179,4 +181,5 @@ export const ALLOWED_KEYS: ReadonlySet<string> = new Set([
   "exit_code",
   "error_class",
   "command",
+  "error_kind",
 ]);

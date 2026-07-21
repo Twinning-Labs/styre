@@ -81,7 +81,7 @@ test("setup failure (unwritable state dir) → NOOP, never throws", async () => 
       stackBucket: "node",
       topologyType: "monolith",
     });
-    a?.cliError({ command: "run", exitCode: 1, errorClass: "Error" });
+    a?.cliError({ command: "run", exitCode: 1, errorClass: "Error", errorKind: "operational" });
   }).not.toThrow();
   await a.shutdown();
   expect(events.length).toBe(0);
