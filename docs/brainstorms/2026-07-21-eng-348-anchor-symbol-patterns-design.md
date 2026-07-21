@@ -77,29 +77,44 @@ symbolNaming: [
 Keeps E0425 `cannot find function`, the compound `cannot find struct, variant or union type`, and E0433
 `use of undeclared type`. Rejects `assertion failed: cannot find "widget" in the registry` — no
 `error[E…]` line prefix. rustc prints the `error[EXXXX]:` code at column 0 on the primary diagnostic
-line, the same structural gutter the Go patterns rely on.
+line, the same structural gutter the Go patterns rely on. The `^`/`m` anchor therefore assumes
+un-prefixed rustc output, which is what `cargo test` (and `cargo nextest`, which still builds via cargo)
+emit; codeless diagnostics without an `error[E…]` code fall through (§9).
 
-**Ruby** — require the trailing `(NameError)` exception annotation:
-
-```ts
-symbolNaming: [/uninitialized constant[^\S\r\n]+([\w:]+)[^\S\r\n]*\(NameError\)/gi],
-```
-
-Keeps `… uninitialized constant Helper (NameError)` (and nested `Foo::Bar`, reduced to `Bar` by
-`symbolLeaf`). Rejects `raise_error("uninitialized constant Helper")` — the constant is followed by `")`,
-not ` (NameError)`. The parenthesised exception class is emitted by Ruby's unhandled-exception printer;
-test prose does not append it.
-
-**PHP** — require the trailing `in <path>:<line>` fatal location:
+**Ruby** — require the exception-class token `NameError`, as either the trailing `(NameError)`
+annotation the CLI/rspec unhandled printer emits **or** the leading `NameError:` prefix minitest renders
+when it catches the error inside a test:
 
 ```ts
-symbolNaming: [/Class[^\S\r\n]+["']([\w\\]+)["'][^\S\r\n]+not found[^\S\r\n]+in[^\S\r\n]+\S+:\d+/gi],
+symbolNaming: [
+  /uninitialized constant[^\S\r\n]+([\w:]+)[^\S\r\n]*\(NameError\)/gi,
+  /NameError:[^\S\r\n]+uninitialized constant[^\S\r\n]+([\w:]+)/gi,
+],
 ```
 
-Keeps `Class "App\Helper" not found in /app/tests/ATest.php:9` (namespace reduced to `Helper`). Rejects
-`Failed asserting that 'Class "Helper" not found' equals 'ok'` — `not found` is followed by `' equals`,
-with no source location. The `in <path>:<line>` tail is the PHP fatal's location, the direct analogue of
-Go's gutter.
+`rubyRules` maps both `rspec` and `minitest`, and the two frameworks render this error at opposite ends
+(suffix vs prefix), so both patterns are needed to cover the stack. Keeps `… uninitialized constant
+Helper (NameError)` (and nested `Foo::Bar`, reduced to `Bar` by `symbolLeaf`) and minitest's `NameError:
+uninitialized constant Helper`. Rejects `raise_error("uninitialized constant Helper")` — the constant is
+followed by `")`, not ` (NameError)` — and `raise_error(NameError, "uninitialized constant Helper")`,
+where `NameError` is followed by a comma, not the `:` the prefix pattern requires. Test prose names the
+class as an argument, not adjacent to the phrase the way the runtime's printer does.
+
+**PHP** — require the `Error:` exception-class token immediately before `Class "…"`:
+
+```ts
+symbolNaming: [/Error:[^\S\r\n]+Class[^\S\r\n]+["']([\w\\]+)["'][^\S\r\n]+not found/gi],
+```
+
+This is the token that survives **both** PHP render paths: the CLI process-fatal
+`… Uncaught Error: Class "App\Helper" not found in /app/tests/ATest.php:9` **and** the PHPUnit-caught
+form, where a class-not-found `Error` thrown inside a test method (the common Composer/PSR-4 autoload
+path since PHP 7 made these `Error`s catchable) is reported as `Error: Class "App\Helper" not found`
+with the source location on a *separate* stack-trace line. An earlier draft anchored on that trailing
+`in <path>:<line>` location — but it is exactly what PHPUnit's rendering strips onto its own line, so it
+would have dropped the PHPUnit-caught case (probably the dominant one). Rejects `Failed asserting that
+'Class "Helper" not found' equals 'ok'` — here `Class` is preceded by `'`, with no `Error:` token. The
+namespace is reduced to `Helper` by `symbolLeaf`.
 
 ## 5. Validation
 
@@ -107,15 +122,22 @@ Each anchor was run against every pinned positive and negative before adoption; 
 capture the symbol, negatives implicate nothing):
 
 - **Rust** — E0425 / E0422 compound / E0433 → captured; assertion-prose negative → rejected.
-- **Ruby** — rspec `(NameError)` and nested `Foo::Bar` → captured; `raise_error("…")` negative → rejected.
-- **PHP** — namespaced and lowercase fatal → captured; phpunit assertion negative → rejected.
+- **Ruby** — rspec/CLI `(NameError)`, nested `Foo::Bar`, and minitest `NameError:` prefix → captured;
+  `raise_error("…")` and `raise_error(NameError, "…")` negatives → rejected.
+- **PHP** — CLI `Uncaught Error:` fatal (namespaced and lowercase) and PHPUnit-caught `Error: … not found`
+  (location on a separate line) → captured; phpunit assertion negative → rejected. No pattern captures
+  across a newline (the anchor token forced onto a different line than the symbol yields no match).
 
 ## 6. Tests
 
 Per stack, in `test/dispatch/check-selector.test.ts` (symbol-tier describe block):
 
 1. **A negative** using the exact §1-table output plus a discarded file that *defines* the named symbol,
-   asserting `importErrorImplicatesDiscarded(...) → []`.
+   asserting `importErrorImplicatesDiscarded(...) → []`. The negative **must supply the discarded file's
+   contents** (the 4th `sources` argument): the symbol tier is inert without them
+   (`check-selector.ts:304`), so a sources-less negative would return `[]` under the buggy code too and
+   prove nothing. Supplying contents makes the old unanchored pattern actually implicate — which is what
+   the fix must prevent, and what the mutation guard then re-demonstrates.
 2. **A mutation guard** that swaps `CHECK_RULES.<fw>.symbolNaming` back to the old unanchored pattern,
    asserts the collision *reappears* (the discarded file is implicated), restores, and asserts it is gone
    — the shape of the committed Go/JVM leaf-tie guards (`check-selector.test.ts:954`) and the symbol
@@ -144,7 +166,13 @@ bounded-basename) and any other rule field; `interpretRunOutput`, `post-implemen
 
 ## 9. Residuals (safe direction preserved)
 
-- Ruby's `(NameError)` suffix is the rspec/CLI unhandled-exception form; a minitest-rendered `NameError:`
-  *prefix* form would not match — degrades to a no-tie (a retry), never a wrong verdict.
-- A contrived test asserting a string that *embeds* the full anchor (e.g. `"… (NameError)"`) would still
-  fool it — same bounded retry cost. Out of scope.
+- **Rust codeless diagnostics** — a `cannot find`-class error emitted *without* an `error[E…]` code (some
+  macro-resolution errors print `error: cannot find macro …`) falls through the anchor. No tie is lost
+  (macros are not in `definesSymbol`); the only effect is that a symbol-only red of this shape yields an
+  empty excerpt, since Rust's indicators and `naming` don't cover it either. Low-frequency, safe.
+- **A contrived test that embeds the full anchor token** — e.g. asserting a string containing
+  `"… (NameError)"`, `"NameError: uninitialized constant …"`, or `"Error: Class \"X\" not found"` —
+  would still be misread. This is far less natural than the common negatives (a bare message string, a
+  class passed as a separate argument), which are all rejected. Same bounded retry cost. Out of scope.
+- **Toolchain wording outside the anchored forms** (other locales, other framework renderers) degrades to
+  a no-tie — a retry, never a wrong verdict.
