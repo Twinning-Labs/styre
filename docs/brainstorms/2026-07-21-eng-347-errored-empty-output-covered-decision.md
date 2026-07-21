@@ -73,3 +73,21 @@ ENG-343 §5 residual 6 ("the `error` bucket with empty output — ENG-347, out o
 this change for the empty-output case. The non-empty `error` bucket (a framework that ran and emitted a real
 diagnostic, e.g. a genuine compile error) remains classified `environmental` by design — that is not a
 "could-not-be-attempted" case and is untouched here.
+
+## 5. Known residual — a launch failure that emits a diagnostic (non-empty `error`)
+
+Surfaced by the whole-branch review. `interpretRunOutput` buckets a **shell exit 127** (command not found)
+as `coarse = "error"` (`check-selector.ts:185`), and likewise pytest exit 3/4 and Go/Cargo internal-error
+codes. Only pytest gets a *pre-run* interpreter/binary check (`handlers.ts`, the `fw === "pytest"` branch);
+for go/cargo/rspec/minitest/jest/phpunit a **missing test binary** runs through `runCheckForRed`, returns
+exit 127, and carries a non-empty stderr ("command not found"). That non-empty output means this guard does
+**not** fire, so the check is still recorded → `environmental` → advisory.
+
+This is the *same* silent-bad-merge class ENG-347 targets — a check that could not be attempted marking its
+criterion covered — reached through a launch failure that prints a shell diagnostic rather than nothing.
+It is **out of ENG-347's stated scope** (empty output only; the non-empty `error` bucket and the downstream
+`environmental` rule are explicitly OUT), and closing it cleanly requires distinguishing a launch-failure
+diagnostic ("command not found") from a genuine test diagnostic — i.e. output recognition, which is
+ENG-343/348 matcher territory, not a call-site emptiness check. **Recommended as a follow-up ticket**, not
+folded in here: the wide-breadth principle ("demonstrably could not be attempted must never mark covered")
+is realized for the empty-output door this ticket owns, but is not yet fully realized for the exit-127 door.
