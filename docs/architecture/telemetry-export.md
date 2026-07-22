@@ -80,7 +80,7 @@ note | parked`).
 | `type` | `"event"` (literal) | no | constant |
 | `run_id` | string | no | the run row (§2) |
 | `ticket_id` | number | no | `event_log.ticket_id` (run-local, §2) |
-| `dispatch_id` | string \| null | **yes — reserved** | `event_log.dispatch_id`; see §5, currently always `null` |
+| `dispatch_id` | string \| null | yes | `event_log.dispatch_id` — the dispatch that caused this event; populated for `loopback`/`escalated`, `null` for `transition`/`resumed`/`note` and projection-transport escalations (§5) |
 | `seq` | number | no | `event_log.seq` — monotonic per-ticket sequence, also the streaming watermark |
 | `kind` | string | no | `event_log.kind` (`transition`/`loopback`/`escalated`/`resumed`/`note`/`parked`) |
 | `actor` | string \| null | yes | `event_log.actor` (defaults to `"runner"` when unspecified at write time) |
@@ -235,14 +235,18 @@ Applies to the five aggregate fields on `summary`: `cost_usd`, `tokens_in`, `tok
   "succeeded" — that's an expected, provider-level gap, not partial data. `tokens_in`/`tokens_out`/
   `cache_read` are reported by `codex` when its usage stream includes them.
 
-## 5. `dispatch_id` on `event` rows is reserved
+## 5. `dispatch_id` on `event` rows
 
-`event.dispatch_id` (§3.1) is part of the wire schema and is emitted on every `event` row today, but
-its value is **currently always `null`** — nothing yet populates `event_log.dispatch_id` at write
-time. It exists so that a future change (linking a lifecycle event to the dispatch that caused it)
-does not require a schema-version bump; that population is deferred to a follow-up ticket. **Do not
-treat a non-null value here as reachable today; do not build a consumer that assumes it's ever
-present in v2.**
+`event.dispatch_id` (§3.1) carries the dispatch that caused the event. It is **populated for
+`loopback` and `escalated` events** — the verdict/escalation is derived from the dispatch being
+judged, and that dispatch's id is written to `event_log.dispatch_id` at emit time — so a consumer
+can join a loopback/escalation back to its causing dispatch.
+
+It is `null` for events with no causing dispatch: `transition` (stage advance), `resumed` (operator
+resume), `note` (housekeeping), and the projection-transport escalation raised during outbox drain.
+
+This field shipped in the `SCHEMA_VERSION 1→2` bump (originally reserved/always-null); populating it
+was a non-breaking change and required no further version bump.
 
 ## 6. Compatibility
 
