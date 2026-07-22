@@ -63,11 +63,23 @@ function resetTicketVerifySteps(db: Database, ticketId: number): void {
   if (gate) resetAttempt(db, gate.id);
 }
 
-function escalate(db: Database, ticketId: number, reason: string, signature: string): void {
+function escalate(
+  db: Database,
+  ticketId: number,
+  reason: string,
+  signature: string,
+  dispatchId: string | null,
+): void {
   db.transaction(() => {
     setTicketStatus(db, ticketId, "waiting");
     insertSignal(db, { ticketId, signalType: "human_resume", reason });
-    appendEvent(db, { ticketId, kind: "escalated", reason, signature });
+    appendEvent(db, {
+      ticketId,
+      dispatchId: dispatchId ?? undefined,
+      kind: "escalated",
+      reason,
+      signature,
+    });
   })();
 }
 
@@ -76,6 +88,7 @@ function codeLoopback(
   ticketId: number,
   blocking: ReviewFindingRow[],
   signature: string,
+  dispatchId: string | null,
 ): void {
   db.transaction(() => {
     const ticket = getTicket(db, ticketId);
@@ -108,6 +121,7 @@ function codeLoopback(
     setTicketStage(db, ticketId, "implement");
     appendEvent(db, {
       ticketId,
+      dispatchId: dispatchId ?? undefined,
       kind: "loopback",
       loop: "implement",
       routeTo: "review",
@@ -127,6 +141,7 @@ function redesignLoopback(
   ticketId: number,
   signature: string,
   blocking: ReviewFindingRow[],
+  dispatchId: string | null,
 ): void {
   // Snapshot the blocking findings that forced this redesign into the loopback event's payload, so
   // the re-dispatched design agent (via designFeedback) sees exactly what to fix — regardless of
@@ -159,6 +174,7 @@ function redesignLoopback(
     setTicketStage(db, ticketId, "design");
     appendEvent(db, {
       ticketId,
+      dispatchId: dispatchId ?? undefined,
       kind: "loopback",
       loop: "design",
       routeTo: "review",
@@ -200,10 +216,10 @@ export function applyReviewVerdict(
     }
     const signature = findingsSignature(blocking);
     if (isRepeatedReviewLoopback(db, ticketId, signature)) {
-      escalate(db, ticketId, "no progress: identical plan-review findings", signature);
+      escalate(db, ticketId, "no progress: identical plan-review findings", signature, dispatchId);
       return { decision: "escalated" };
     }
-    redesignLoopback(db, ticketId, signature, blocking);
+    redesignLoopback(db, ticketId, signature, blocking, dispatchId);
     return { decision: "loopback" };
   }
 
@@ -214,7 +230,7 @@ export function applyReviewVerdict(
     const signature = findingsSignature(blocking);
 
     if (isRepeatedReviewLoopback(db, ticketId, signature)) {
-      escalate(db, ticketId, "no progress: identical review findings", signature);
+      escalate(db, ticketId, "no progress: identical review findings", signature, dispatchId);
       return { decision: "escalated" };
     }
 
@@ -223,7 +239,7 @@ export function applyReviewVerdict(
       if (config.onPlanDefect === "redesign") {
         // Carry the triggering code-review findings into the redesign so the design agent knows
         // what forced it (ENG-272): redesignLoopback snapshots them into the loopback event.
-        redesignLoopback(db, ticketId, signature, blocking);
+        redesignLoopback(db, ticketId, signature, blocking, dispatchId);
         return { decision: "loopback" };
       }
       escalate(
@@ -231,11 +247,12 @@ export function applyReviewVerdict(
         ticketId,
         "blocking plan-defect found in code review; operator policy is escalate",
         signature,
+        dispatchId,
       );
       return { decision: "escalated" };
     }
 
-    codeLoopback(db, ticketId, blocking, signature);
+    codeLoopback(db, ticketId, blocking, signature, dispatchId);
     return { decision: "loopback" };
   }
 
@@ -245,6 +262,7 @@ export function applyReviewVerdict(
       ticketId,
       "deferrable major finding requires a human deferral decision",
       findingsSignature(deferred),
+      dispatchId,
     );
     return { decision: "escalated" };
   }
