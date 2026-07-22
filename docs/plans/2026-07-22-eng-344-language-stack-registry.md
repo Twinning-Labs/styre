@@ -20,7 +20,7 @@ The work now splits three ways:
 |---|---|---|
 | **ENG-344** (this plan) | the registry module + the preflight fix — the motivating bug and AC 2 | — |
 | **`fix/` × 2** | the two live bugs found during design, ~2 lines each | nothing |
-| **`refactor/` follow-up** | the mechanical fold of the remaining tables (`docs/plans/2026-07-22-eng-344-followup-mechanical-fold.md`) | ENG-344 |
+| **`refactor/` follow-up** | the mechanical fold of the remaining tables (`docs/plans/2026-07-22-eng-360-mechanical-fold.md`) | ENG-344 |
 
 The two bugs are deliberately **not** bundled: `MANIFEST_BASENAMES` (`provision.ts:192`) omitting `Gemfile`/`composer.json`, and `SOURCE_EXTS` (`check-rules.ts:4`) missing eight extensions. Both are ~2-line fixes needing no registry at all. Bundling them made the registry look load-bearing for bugs it is not.
 
@@ -754,7 +754,7 @@ git push
 | §5 boundary tests pass, incl. the literal snapshot and getter checks | 1 (proven to bite, Step 5) |
 | `format` + `lint` + `typecheck` + `test` green | every task; final in 3 |
 
-**Deferred to the follow-up** (`docs/plans/2026-07-22-eng-344-followup-mechanical-fold.md`) with the spec ACs they carry: `EXTENSIONS_BY_KIND`/`SOURCE_EXTS` supersession, provision's markers/manifests/interpreters, `TARGETED_LANG_MANIFESTS`, `SKIP`/`SWEEP_SKIP_DIRS`, the `runtime-deps` mapping, and invariant RG-1's test (§6b) — RG-1 only becomes live once `extensions` enters the registry.
+**Deferred to the follow-up** (`docs/plans/2026-07-22-eng-360-mechanical-fold.md`) with the spec ACs they carry: `EXTENSIONS_BY_KIND`/`SOURCE_EXTS` supersession, provision's markers/manifests/interpreters, `TARGETED_LANG_MANIFESTS`, `SKIP`/`SWEEP_SKIP_DIRS`, the `runtime-deps` mapping, and invariant RG-1's test (§6b) — RG-1 only becomes live once `extensions` enters the registry.
 
 ## Behavior changes to call out in the PR description
 

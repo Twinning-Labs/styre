@@ -1,229 +1,76 @@
-# Language Stack Registry — Mechanical Fold Implementation Plan (ENG-344 follow-up)
+# Language Stack Registry — Mechanical Fold Implementation Plan (ENG-360)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Migrate the remaining scattered per-ecosystem tables onto `src/dispatch/stack-registry.ts`, adding each registry field alongside the consumers that read it.
+**Goal:** Migrate the remaining scattered per-ecosystem tables onto `src/dispatch/stack-registry.ts`, adding each registry field alongside the consumer that reads it.
 
-**Blocked by:** ENG-344 (the registry module + the preflight fix must land first — this plan assumes `src/dispatch/stack-registry.ts` exists with `STACKS`, `stackFacts`, `isModeledKind`, `GENERIC_IGNORE_DIRS` and its boundary tests).
+**Blocked by:** ENG-344 — the registry module and the preflight fix must land first. This plan assumes `src/dispatch/stack-registry.ts` exists with `STACKS`, `stackFacts`, `isModeledKind` and its boundary tests (including the literal `SNAPSHOT`).
 
-**Architecture:** Each task adds its field(s) to `StackFacts` *and* re-points its consumer in the same commit, so no field is ever speculative (ENG-344's ticket rule: "start with the subset that has ≥2 real consumers"). Every field addition also updates the Task-1 literal `SNAPSHOT` — that is deliberate: the snapshot is the load-bearing boundary assertion, and changing a fact should require a reviewable double entry.
+**Sibling, independent — either order:** ENG-361 (stop persisting `extensions`; derive it and `SOURCE_EXTS` from the registry; `schemaVersion` 3 → 4). It touches no file this plan touches.
 
-**Split rationale:** ENG-344 originally carried all of this. Three independent adversarial reviews found it violated the one-concern rule (`CLAUDE.md`; `docs/architecture/ticket-template.md:309-312`, which cites ENG-332 as the exemplar of an independently-shippable ticket): 11 tasks across `cli`/`dispatch`/`setup` shipping five independent behavior changes in four unrelated subsystems. Those five changes are five independent revert reasons in one PR. This plan carries the pure-refactor half.
+**Architecture:** Each task adds its field(s) to `StackFacts` *and* re-points its consumer in the same commit, so no field is ever speculative (the ticket's rule: don't add fields nothing reads). Every field addition also updates the literal `SNAPSHOT` in `test/dispatch/stack-registry.test.ts` — that is deliberate, not friction: the snapshot is the load-bearing boundary assertion, and changing an ecosystem fact should require a reviewable double entry.
 
-**NOT in this plan** — the two live bugs found during ENG-344's design are each ~2 lines and need no registry, so they ship as their own `fix/` tickets and are NOT bundled here:
-- `MANIFEST_BASENAMES` (`provision.ts:192`) omits `Gemfile`/`composer.json`, so a mid-run Ruby/PHP dependency edit never re-arms provision.
-- `SOURCE_EXTS` (`check-rules.ts:4`) is missing eight extensions relative to `EXTENSIONS_BY_KIND`.
+**Split rationale:** ENG-344 originally carried all of this. Three independent adversarial reviews found it violated the one-concern rule (`CLAUDE.md`; `docs/architecture/ticket-template.md:309-312`, which cites ENG-332 as the exemplar of an independently-shippable ticket): 11 tasks across `cli`/`dispatch`/`setup` shipping five independent behavior changes in four unrelated subsystems — five independent revert reasons in one PR. This plan carries the pure-refactor remainder.
 
-If those tickets have already landed, the corresponding tasks below become pure no-behavior-change refactors — which is the point of the split.
+**Land ENG-358 first if you can.** `MANIFEST_BASENAMES` (`provision.ts:192`) omits `Gemfile`/`composer.json`, so a mid-run Ruby/PHP dependency edit never re-arms provision. That is a ~2-line fix needing no registry. If it has landed, **this plan is a pure refactor with no behavior change** except the one noted in Task 4. If it has not, Task 3 silently carries the bug fix and this plan stops being reviewable as a no-op.
 
 ## Global Constraints
 
-
-- **Never commit to `main`.** All work on `feat/eng-344-language-stack-registry`. No `gh pr merge`, ever.
-- **The registry module must import nothing.** No `import` statement of any kind in `src/dispatch/stack-registry.ts`. Task 1's test enforces this; do not weaken it to make a later task easier — if a later task seems to need an import, the fact belongs in the consumer, not the registry.
-- **No functions, getters, or class instances inside `STACKS`.** Strings, booleans, and readonly arrays of strings only.
-- **Nine kinds, exactly:** `rust`, `node`, `sveltekit`, `python`, `go`, `jvm-maven`, `jvm-gradle`, `ruby`, `php`.
-- **PR 1 does NOT touch `check-selector.ts` at all**, nor `check-rules.ts:349` (`CHECK_RULES`). Those are PR 2. The single exception in the whole checks subsystem is Task 4, which changes `SOURCE_EXTS` at `check-rules.ts:4` only. (An earlier draft had Task 6 edit `binaryFor` at `check-selector.ts:394`; three reviewers flagged it — it contradicted this constraint AND was a no-op, replacing the literal `"python3"` with an expression evaluating to `"python3"`, manufactured to give `interpreters` a second consumer. Removed.)
-- **Do NOT add `checkFrameworks` or `testFilePattern` to `StackFacts`.** They are PR 2 fields; adding them here creates consumer-less speculative fields (spec §3.4).
+- **Never commit to `main`.** Branch with the `refactor/` prefix. No `gh pr merge`, ever.
+- **Every task ends green with `bun run format && bun run lint && bun run typecheck && bun test`** — all four. `bun run lint` is `biome check .` (no `--write`) and the repo enforces `lineWidth: 100` + `organizeImports`, so hand-wrapped pasted code FAILS lint unless formatted first. `bun run typecheck` is what CI runs (`.github/workflows/ci.yml:18`); Biome does not type-check and `bun test` strips types, so a duplicate import or type slip commits green and explodes in CI later.
+- **Import placement and order.** Biome sorts specifiers naturally, so `"bun:test"` sorts BEFORE `"node:fs"`. Never add an import mid-file — merge into the existing import statement for that module.
+- **The registry holds no functions, getters, or class instances.** Strings, booleans, and readonly arrays of strings only. This is what keeps the `runtime-deps` parser functions out in Task 6. Do not weaken the boundary tests to make a task easier — if a task seems to need a function in the table, the logic belongs in the consumer.
+- **Update the `SNAPSHOT` whenever you add a field.** Regenerate it, don't hand-edit:
+  `bun -e 'import("./src/dispatch/stack-registry.ts").then(m => console.log(JSON.stringify(m.STACKS, null, 2)))'`
+- **Do NOT touch** `src/dispatch/check-selector.ts` or `check-rules.ts:349` (`CHECK_RULES`) — framework-keyed, and PR 2's job. Do NOT touch `src/dispatch/components.ts` or `check-rules.ts:4` (`SOURCE_EXTS`) — ENG-361's job.
+- **Do NOT add `checkFrameworks` or `testFilePattern`** to `StackFacts`. Both are PR 2 fields with no consumer here.
 - **Conditional detector logic is out of scope.** Do not modify `src/setup/lang/*.ts` in any task.
-- **Every task ends green with `bun run format && bun run lint && bun run typecheck && bun test`** — all four. `bun run lint` is `biome check .` (no `--write`), and the repo enforces `lineWidth: 100` + `organizeImports`, so hand-wrapped pasted code FAILS lint unless formatted first. `bun run typecheck` (`tsc --noEmit --strict`) is what CI runs (`.github/workflows/ci.yml:18`); Biome does not type-check and `bun test` strips types, so a duplicate import or type slip commits green and explodes in CI 11 commits later.
-- **Import placement and order.** Biome sorts specifiers naturally, so `"bun:test"` sorts BEFORE `"node:fs"`. Every existing test file follows this. Never add an import mid-file — merge into the existing import statement for that module instead.
-- Commit messages: conventional-commit with a scope, e.g. `refactor(dispatch): …`. End every commit message with:
+- Commit messages: conventional-commit with a scope, e.g. `refactor(dispatch): …`, ending with:
   ```
   Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
   Claude-Session: https://claude.ai/code/session_01BBT2nDt4wFTDrk5MDcHQB8
   ```
 
+## File Structure
+
+| File | Status | Responsibility |
+|---|---|---|
+| `src/dispatch/stack-registry.ts` | modify | Gains `installMarkers`, `installOutputDir`, `manifests`, `manifestPatterns`, `interpreters`, `detectAnchors`, `ignoreDirs`, `GENERIC_IGNORE_DIRS` |
+| `src/dispatch/provision.ts` | modify | Markers, install dir, manifests, interpreters from the registry (Tasks 1-3) |
+| `src/setup/manifests.ts` | modify | `SKIP` derived (Task 4) |
+| `src/dispatch/worktree.ts` | modify | `SWEEP_SKIP_DIRS` derived (Task 4) |
+| `src/setup/detect-components.ts` | modify | Detect anchors derived (Task 5) |
+| `src/setup/runtime-deps/collect.ts` | modify | Rows bound to registry kinds; parsers stay local (Task 6) |
+| `docs/architecture/conventions.md` | modify | Updated as fields land (Task 7) |
+
 
 ---
 
-### Task 3: Fold `EXTENSIONS_BY_KIND` into the registry
+### Tasks 3 and 4 — MOVED to ENG-361
 
-**Files:**
-- Modify: `src/dispatch/components.ts:4-20` (delete), `src/setup/detect-components.ts:3,13,28`
-- Test: `test/dispatch/components.test.ts:59-66,177-180,200-201`
+The `EXTENSIONS_BY_KIND` fold and the `SOURCE_EXTS` derivation that stood here have moved to **ENG-361 — stop persisting component file extensions in profile.json (schemaVersion 4)**.
 
-**Interfaces:**
-- Consumes: `stackFacts` from Task 1.
-- Produces: `EXTENSIONS_BY_KIND` no longer exists. `Component.extensions` is still materialized by `runRegistry` and its shape is unchanged.
+**Why they moved.** They would have built the wrong thing first. Both tasks kept `Component.extensions` as a field materialized into `profile.json` at setup time and merely changed *where the value came from*. But `profile.json` travels to CI runners and fleet workers while the registry is read live from the running binary — so the same fact would have existed in two places with different lifecycles, and adding an extension to the registry would leave deployed profiles routing without it. That is the bug class this whole effort exists to delete, recreated by it.
 
-- [ ] **Step 1: Write the failing test**
+The operator chose to remove the second copy outright rather than document an invariant against it, so `extensions` is deleted from the profile schema and derived at the point of use. Doing the fold here first would mean building the persisted version and undoing it days later.
 
-In `test/dispatch/components.test.ts`, replace the `EXTENSIONS_BY_KIND` import with `stackFacts` and re-point its assertions. Add this routing-invariance test:
+ENG-361 also absorbs the `SOURCE_EXTS` derivation, since it is the same fact.
 
-```ts
-import { stackFacts } from "../../src/dispatch/stack-registry.ts";
-
-test("routing is unchanged: extensions still come from the kind", () => {
-  const c = {
-    name: "fe", kind: "sveltekit", paths: ["**"], commands: {},
-    extensions: [...stackFacts("sveltekit").extensions],
-  };
-  expect(matchesComponent(c, "src/App.svelte")).toBe(true);
-  expect(matchesComponent(c, "src/main.ts")).toBe(true);
-  expect(matchesComponent(c, "src/lib.rs")).toBe(false);
-});
-
-test("an unmodeled kind gets empty extensions -> path-only routing", () => {
-  const c = { name: "x", kind: "elixir", paths: ["**"], commands: { }, extensions: [] };
-  expect(matchesComponent(c, "lib/x.ex")).toBe(true);
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bun test test/dispatch/components.test.ts`
-Expected: FAIL — the old `EXTENSIONS_BY_KIND` import still resolves, so the file compiles but the new tests reference nothing broken yet. If both new tests pass immediately, that is fine — they are regression guards; proceed to Step 3, where deleting the export must keep them green.
-
-- [ ] **Step 3: Delete the table and re-point its consumer**
-
-In `src/dispatch/components.ts`, delete lines 4-20 (`NODE_EXTS`, `JVM_EXTS`, the `EXTENSIONS_BY_KIND` doc comment and object). Leave `DOCS_EXTS` and everything below it untouched.
-
-In `src/setup/detect-components.ts`:
-
-```ts
-// line 3 — replace the EXTENSIONS_BY_KIND import
-import { stackFacts } from "../dispatch/stack-registry.ts";
-```
-
-```ts
-/** Engine: run every def, enforce Invariant 1 (command backstop, loud) + Invariant 2 (path backstop).
- *  Attaches `extensions` from the stack registry for the detected `kind` (file-identity routing);
- *  an unmodeled kind gets `[]` → path-only routing. */
-```
-
-```ts
-      // line 28
-      out.push({ ...c, paths, extensions: [...stackFacts(c.kind).extensions] });
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `bun test test/dispatch/components.test.ts test/setup/detect-components.test.ts test/setup/engine.test.ts`
-Expected: PASS. A failure naming `EXTENSIONS_BY_KIND` means another importer exists — find it with `grep -rn "EXTENSIONS_BY_KIND" src/ test/` and re-point it to `stackFacts`.
-
-- [ ] **Step 5: Lint and commit**
-
-```bash
-bun run lint && bun test
-git add src/dispatch/components.ts src/setup/detect-components.ts test/dispatch/components.test.ts
-git commit -m "refactor(dispatch): fold EXTENSIONS_BY_KIND into the stack registry (ENG-344)
-
-The registry supersedes the table; routing behavior is unchanged.
-
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01BBT2nDt4wFTDrk5MDcHQB8"
-```
+**Sequencing:** ENG-361 and this plan are independent of each other; both depend only on ENG-344. Either order works.
 
 ---
 
-### Task 4: Derive `SOURCE_EXTS` from the registry
 
-Closes the live drift: `SOURCE_EXTS` is missing `.svelte`, `.gradle`, `.groovy`, `.cts`, `.mts` today.
-
-**Files:**
-- Modify: `src/dispatch/check-rules.ts:1-20`
-- Test: `test/dispatch/check-rules.test.ts` (create the describe block if the file lacks one; if the file does not exist, create it)
-
-**Interfaces:**
-- Consumes: `STACKS` from Task 1.
-- Produces: no export change — `SOURCE_EXTS` stays module-private; `moduleLeaf` keeps its signature.
-
-- [ ] **Step 1: Write the failing test**
-
-```ts
-import { describe, expect, test } from "bun:test";
-import { moduleLeaf } from "../../src/dispatch/check-rules.ts";
-
-describe("moduleLeaf strips every registry-known source extension", () => {
-  test("extensions it already handled", () => {
-    expect(moduleLeaf("checks/helper.py")).toBe("helper");
-    expect(moduleLeaf("./a/helper.js")).toBe("helper");
-    expect(moduleLeaf("src/main.rs")).toBe("main");
-    expect(moduleLeaf("pkg.helper")).toBe("helper");
-    expect(moduleLeaf("util")).toBe("util");
-  });
-
-  // EIGHT extensions, not five. kts/rake/gemspec were omitted from an earlier
-  // draft and caught independently by two reviewers.
-  test("extensions the SOURCE_EXTS drift was missing (spec §6.4)", () => {
-    expect(moduleLeaf("src/Button.svelte")).toBe("button");
-    expect(moduleLeaf("build.gradle")).toBe("build");
-    expect(moduleLeaf("Foo.groovy")).toBe("foo");
-    expect(moduleLeaf("a/b.cts")).toBe("b");
-    expect(moduleLeaf("a/b.mts")).toBe("b");
-    expect(moduleLeaf("build.gradle.kts")).toBe("gradle");
-    expect(moduleLeaf("tasks.rake")).toBe("tasks");
-    expect(moduleLeaf("styre.gemspec")).toBe("styre");
-  });
-
-  test("a non-source extension is still kept as the leaf", () => {
-    expect(moduleLeaf("config.yaml")).toBe("yaml");
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bun test test/dispatch/check-rules.test.ts`
-Expected: FAIL — `expected "button", got "svelte"` (and similarly for `.gradle`, `.groovy`, `.cts`, `.mts`), because those extensions are absent from today's `SOURCE_EXTS`.
-
-- [ ] **Step 3: Derive the set**
-
-In `src/dispatch/check-rules.ts`, replace lines 1-20:
-
-```ts
-import type { CheckFramework } from "./check-selector.ts";
-import { STACKS } from "./stack-registry.ts";
-
-/** Source-file extensions stripped when reducing a path or module reference to its leaf name.
- *  Derived from the stack registry (dot-less, since `moduleLeaf` splits on ".") so it can never
- *  again drift from `Component.extensions` — before ENG-344 this was a hand-maintained set missing
- *  `.svelte`, `.gradle`, `.groovy`, `.cts` and `.mts`. */
-const SOURCE_EXTS = new Set(
-  Object.values(STACKS).flatMap((f) => f.extensions.map((e) => e.replace(/^\./, ""))),
-);
-```
-
-Leave `moduleLeaf` and everything below unchanged.
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `bun test test/dispatch/check-rules.test.ts`
-Expected: PASS.
-
-- [ ] **Step 5: Check for downstream check-matching regressions**
-
-Run: `bun test test/dispatch/`
-Expected: PASS. If a check-matching test now fails on a `.svelte` or `.gradle` path, that is the drift being corrected — update the expectation and record it in the commit body. Do NOT re-add a hand-maintained exclusion.
-
-- [ ] **Step 6: Lint and commit**
-
-```bash
-bun run lint && bun test
-git add src/dispatch/check-rules.ts test/dispatch/check-rules.test.ts
-git commit -m "fix(checks): derive SOURCE_EXTS from the stack registry (ENG-344)
-
-SOURCE_EXTS and EXTENSIONS_BY_KIND answered the same question and had
-already drifted: SOURCE_EXTS was missing .svelte, .gradle, .groovy, .cts
-and .mts, so moduleLeaf reduced 'Button.svelte' to 'svelte' instead of
-'button'. Deriving it from the registry makes the drift unrepresentable.
-
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01BBT2nDt4wFTDrk5MDcHQB8"
-```
-
----
-
-### Task 5: `isComponentReady` reads markers from the registry
+### Task 1: `isComponentReady` reads markers from the registry
 
 **Files:**
 - Modify: `src/dispatch/provision.ts:14-50`
 - Test: `test/dispatch/provision.test.ts`
 
 **Interfaces:**
-- Consumes: `stackFacts` from Task 1.
-- Produces: `isComponentReady(kind: string, compAbsDir: string): boolean` — signature unchanged.
+- Consumes: `stackFacts` (from ENG-344).
+- Produces: adds `installMarkers`, `installOutputDir`, `manifests` to `StackFacts`. `isComponentReady(kind, compAbsDir)` keeps its signature.
+- **This task introduces `import { stackFacts } from "./stack-registry.ts";` into `provision.ts`** — Tasks 2 and 3 widen that same import rather than adding new ones.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -323,7 +170,7 @@ Claude-Session: https://claude.ai/code/session_01BBT2nDt4wFTDrk5MDcHQB8"
 
 ---
 
-### Task 6: `resolveInterpreter(kind)` reads the fallback order from the registry
+### Task 2: `resolveInterpreter(kind)` reads the fallback order from the registry
 
 **Files:**
 - Modify: `src/dispatch/provision.ts:176-185`, `src/dispatch/check-selector.ts:394`
@@ -409,7 +256,7 @@ Claude-Session: https://claude.ai/code/session_01BBT2nDt4wFTDrk5MDcHQB8"
 
 ---
 
-### Task 7: `diffTouchesManifest` unions the registry's manifests
+### Task 3: `diffTouchesManifest` unions the registry's manifests
 
 Fixes the live bug: `Gemfile` and `composer.json` never re-armed provision.
 
@@ -496,7 +343,7 @@ export function diffTouchesManifest(changedPaths: string[]): boolean {
 }
 ```
 
-Add `STACKS` to the `stack-registry.ts` import added in Task 5.
+Add `STACKS` to the `stack-registry.ts` import added in Task 1.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -523,7 +370,7 @@ Claude-Session: https://claude.ai/code/session_01BBT2nDt4wFTDrk5MDcHQB8"
 
 ---
 
-### Task 8: Derive the repo-walk skip sets
+### Task 4: Derive the repo-walk skip sets
 
 **Files:**
 - Modify: `src/setup/manifests.ts:4-21`, `src/dispatch/worktree.ts:255`
@@ -632,7 +479,7 @@ Claude-Session: https://claude.ai/code/session_01BBT2nDt4wFTDrk5MDcHQB8"
 
 ---
 
-### Task 9: Derive `TARGETED_LANG_MANIFESTS` from detect anchors
+### Task 5: Derive `TARGETED_LANG_MANIFESTS` from detect anchors
 
 **Files:**
 - Modify: `src/setup/detect-components.ts:59-64`
@@ -719,7 +566,7 @@ Claude-Session: https://claude.ai/code/session_01BBT2nDt4wFTDrk5MDcHQB8"
 
 ---
 
-### Task 10: Bind `runtime-deps` rows to registry kinds
+### Task 6: Bind `runtime-deps` rows to registry kinds
 
 The parser functions stay local — putting them in the registry would break the no-functions boundary. The mapping is *verified against* the registry rather than *derived from* it, because deriving is ambiguous: `package.json` appears in both `node.manifests` and `sveltekit.manifests`, so a file→kind union has no single answer.
 
@@ -834,7 +681,7 @@ Claude-Session: https://claude.ai/code/session_01BBT2nDt4wFTDrk5MDcHQB8"
 
 ---
 
-### Task 11: Document the registry and verify the whole branch
+### Task 7: Document the registry and verify the whole branch
 
 **Files:**
 - Modify: `docs/architecture/conventions.md`
