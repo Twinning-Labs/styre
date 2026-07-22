@@ -42,7 +42,7 @@ No new files; all changes extend existing modules following their established pa
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `test/dispatch/check-selector.test.ts`. First add `isLaunchFailure` to the existing import from `../../src/dispatch/check-selector.ts`, then:
+Add to `test/dispatch/check-selector.test.ts`. First extend the `check-selector.ts` import on **line 3** (the file has several imports from that module — use this one) to `import { frameworkFor, isLaunchFailure } from "../../src/dispatch/check-selector.ts";`, then add the test:
 
 ```ts
 test("isLaunchFailure recognises shell launch-failure codes only (ENG-357)", () => {

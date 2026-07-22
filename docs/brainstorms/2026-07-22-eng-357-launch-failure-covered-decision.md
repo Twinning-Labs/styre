@@ -192,10 +192,13 @@ ENG-347 did.
   coarse bucket happened to be `error`. (A `126` test written only against pytest/go/cargo would be vacuous:
   it would pass via the `coarse === "error"` branch and prove nothing about the seven `red`-default
   frameworks — the exact hole the earlier coarse-gated guard left open.)
-- **Non-vacuous smoke cell with a contrast pair** (mirrors `scope-disposition-smoke`): in one dispatch,
-  a missing-binary check (exit 127) → **uncovered**, alongside a genuine non-zero red (exit 1 with real
-  failure output) → **still covered**. The contrast makes the negative non-vacuous: it proves the guard
-  rejects the launch failure *without* over-rejecting a legitimate red.
+- **Non-vacuous contrast pair** (mirrors `scope-disposition-smoke`): a missing-binary check (exit 127) →
+  **uncovered**, versus a genuine non-zero red (exit 1 with real failure output) → **still covered**. This
+  is realized as **two separate single-AC dispatches**, not one mixed dispatch: an uncovered AC throws the
+  `checks:dispatch` postcondition *before* the persist transaction (`handlers.ts:757` precedes `:762`), so
+  a mixed dispatch would persist nothing and the "covered" half would be unobservable. The contrast makes
+  the negative non-vacuous: it proves the guard rejects the launch failure *without* over-rejecting a
+  legitimate red.
 - Full suite green (`bun test`), lint clean (`bun run lint`).
 
 ## 6. Residual / boundary notes
