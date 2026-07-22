@@ -68,10 +68,7 @@ async function runSingleCheckDispatch(fixture: {
     return {
       completed: true,
       exitCode: 0,
-      stdout:
-        '```styre-sidecar\n{"checksAuthored":[' +
-        `{"ac_id":1,"test_file":"checks/ENG-1_ac1_test.${fixture.ext}","test_name":"test_x"}]}\n` +
-        "```",
+      stdout: `\`\`\`styre-sidecar\n{"checksAuthored":[{"ac_id":1,"test_file":"checks/ENG-1_ac1_test.${fixture.ext}","test_name":"test_x"}]}\n\`\`\``,
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -1039,4 +1036,89 @@ test("rspec: a missing launcher (exit 127, non-empty stderr) → AC uncovered, l
   expect(stepStatus).toBe("pending");
   expect(message).toContain("could not be executed (exit 127)");
   expect(message).toContain("rspec");
+});
+
+// Every non-pytest framework: a launcher that exits 127 must not mark its AC covered, and the reason
+// must name that framework's launcher (binaryFor). junit-maven/junit-gradle/vitest ride the same
+// structural path as go/cargo/jest/rspec/minitest/phpunit — included so "covers them for free" is non-vacuous.
+const LAUNCH_FAILURE_FRAMEWORKS: Array<{
+  fw: string;
+  kind: string;
+  testCmd: string;
+  ext: string;
+  launcher: string;
+}> = [
+  { fw: "go", kind: "go", testCmd: "go test ./...", ext: "go", launcher: "go test" },
+  { fw: "cargo", kind: "rust", testCmd: "cargo test", ext: "rs", launcher: "cargo test" },
+  { fw: "jest", kind: "node", testCmd: "jest", ext: "js", launcher: "jest" },
+  { fw: "vitest", kind: "node", testCmd: "vitest", ext: "ts", launcher: "vitest" },
+  { fw: "junit-maven", kind: "jvm-maven", testCmd: "mvn test", ext: "java", launcher: "mvn" },
+  {
+    fw: "junit-gradle",
+    kind: "jvm-gradle",
+    testCmd: "gradle test",
+    ext: "java",
+    launcher: "gradle",
+  },
+  { fw: "rspec", kind: "ruby", testCmd: "rspec", ext: "rb", launcher: "rspec" },
+  { fw: "minitest", kind: "ruby", testCmd: "rake test", ext: "rb", launcher: "ruby -Itest" },
+  { fw: "phpunit", kind: "php", testCmd: "phpunit", ext: "php", launcher: "phpunit" },
+];
+
+for (const f of LAUNCH_FAILURE_FRAMEWORKS) {
+  test(`${f.fw}: a missing test launcher (exit 127) → AC uncovered, launcher named (ENG-357)`, async () => {
+    const { checks, message, outcome } = await runSingleCheckDispatch({
+      kind: f.kind,
+      testCmd: f.testCmd,
+      ext: f.ext,
+      run: () => ({
+        exitCode: 127,
+        stdout: "",
+        stderr: `sh: 1: ${f.launcher}: not found`,
+        timedOut: false,
+      }),
+    });
+    expect(checks).toHaveLength(0); // NOT recorded as covering
+    expect(["retry", "escalated"]).toContain(outcome.kind);
+    expect(message).toContain("could not be executed (exit 127)");
+    expect(message).toContain(f.launcher);
+  });
+}
+
+test("rspec: exit 126 (launcher not executable) → coarse red, yet AC uncovered — decoupled guard (ENG-357)", async () => {
+  // interpretRunOutput leaves 126 in the switch; rspec buckets any non-zero, non-"0 examples" exit as
+  // `red` (check-selector.ts). So coarse === "red" here — a guard gated on `coarse === "error"` would
+  // MISS this and record it as a covered red. The exit-code-keyed guard must still reject it.
+  const { checks, message, outcome } = await runSingleCheckDispatch({
+    kind: "ruby",
+    testCmd: "rspec",
+    ext: "rb",
+    run: () => ({
+      exitCode: 126,
+      stdout: "",
+      stderr: "sh: 1: rspec: Permission denied",
+      timedOut: false,
+    }),
+  });
+  expect(checks).toHaveLength(0); // decoupled guard fires even though coarse === "red"
+  expect(["retry", "escalated"]).toContain(outcome.kind);
+  expect(message).toContain("could not be executed (exit 126)");
+  expect(message).toContain("rspec");
+});
+
+test("ENG-357 contrast: a genuine non-zero red (exit 1) IS recorded as covering (rspec)", async () => {
+  const { checks, outcome } = await runSingleCheckDispatch({
+    kind: "ruby",
+    testCmd: "rspec",
+    ext: "rb",
+    run: () => ({
+      exitCode: 1,
+      stdout: "1 example, 1 failure",
+      stderr: "",
+      timedOut: false,
+    }),
+  });
+  expect(checks).toHaveLength(1); // genuine red → covered
+  expect(checks[0]?.red_first_result).toBe("red");
+  expect(outcome.kind).toBe("stepped"); // succeeded, not a retry/escalation
 });
