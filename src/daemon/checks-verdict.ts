@@ -6,6 +6,7 @@ import {
 } from "../db/repos/ac-check.ts";
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { classificationForAcCheck } from "../db/repos/ground-truth-signal.ts";
+import { latestDispatchForStep } from "../db/repos/review-finding.ts";
 import { insertPending as insertSignal } from "../db/repos/signal.ts";
 import { setTicketStatus } from "../db/repos/ticket.ts";
 import { getByKey, resetToPending } from "../db/repos/workflow-step.ts";
@@ -74,8 +75,9 @@ export function latestChecksReauthorAcs(db: Database, ticketId: number): number[
 export function applyChecksVerdict(
   db: Database,
   ticketId: number,
-  _opts: { stepKey: string },
+  opts: { stepKey: string },
 ): ChecksVerdictResult {
+  const dispatchId = latestDispatchForStep(db, ticketId, opts.stepKey) ?? undefined;
   const flagged = reauthorFindings(db, ticketId);
   if (flagged.length === 0) return { decision: "clean" };
   // Read BEFORE the transaction supersedes the flagged rows — findingsWithReasons keys off the
@@ -99,6 +101,7 @@ export function applyChecksVerdict(
       });
       appendEvent(db, {
         ticketId,
+        dispatchId,
         kind: "escalated",
         reason: "no progress: repeated re-author of the same AC-check",
         signature: `checks:${exhausted.join(",")}`,
@@ -113,6 +116,7 @@ export function applyChecksVerdict(
     // No stage flip — checks:dispatch + checks:classify are both in the design stage.
     appendEvent(db, {
       ticketId,
+      dispatchId,
       kind: "loopback",
       loop: "checks",
       routeTo: "checks:classify",
