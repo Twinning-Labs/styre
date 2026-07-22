@@ -22,7 +22,7 @@
 - **The registry holds no functions, getters, or class instances.** Strings, booleans, and readonly arrays of strings only. This is what keeps the `runtime-deps` parser functions out in Task 6. Do not weaken the boundary tests to make a task easier — if a task seems to need a function in the table, the logic belongs in the consumer.
 - **Update the `SNAPSHOT` whenever you add a field.** Regenerate it, don't hand-edit:
   `bun -e 'import("./src/dispatch/stack-registry.ts").then(m => console.log(JSON.stringify(m.STACKS, null, 2)))'`
-- **Do NOT touch** `src/dispatch/check-selector.ts` or `check-rules.ts:349` (`CHECK_RULES`) — framework-keyed, and PR 2's job. Do NOT touch `src/dispatch/components.ts` or `check-rules.ts:4` (`SOURCE_EXTS`) — ENG-361's job.
+- **Do NOT touch** `src/dispatch/check-selector.ts` or `check-rules.ts:347` (`CHECK_RULES`) — framework-keyed, and PR 2's job. Do NOT touch `src/dispatch/components.ts` or `check-rules.ts:4` (`SOURCE_EXTS`) — ENG-361's job.
 - **Do NOT add `checkFrameworks` or `testFilePattern`** to `StackFacts`. Both are PR 2 fields with no consumer here.
 - **Conditional detector logic is out of scope.** Do not modify `src/setup/lang/*.ts` in any task.
 - Commit messages: conventional-commit with a scope, e.g. `refactor(dispatch): …`, ending with:
