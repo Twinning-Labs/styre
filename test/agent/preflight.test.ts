@@ -14,11 +14,13 @@ const codexConfig: AgentConfig = {
 };
 const env = (e: Record<string, string>): NodeJS.ProcessEnv => e as NodeJS.ProcessEnv;
 
-test("parseCliVersion takes the LAST dotted token (ignores a leading date)", () => {
+test("parseCliVersion takes the LAST full MAJOR.MINOR.PATCH triple (skips leading date AND trailing 2-part noise)", () => {
   expect(parseCliVersion("2.1.216 (Claude Code)")).toEqual([2, 1, 216]);
   expect(parseCliVersion("codex-cli 0.144.6")).toEqual([0, 144, 6]);
-  expect(parseCliVersion("2026.07.22 build; claude 2.1.216")).toEqual([2, 1, 216]);
+  expect(parseCliVersion("2026.07.22 build; claude 2.1.216")).toEqual([2, 1, 216]); // leading date skipped
+  expect(parseCliVersion("claude 2.1.216 (build 1.2)")).toEqual([2, 1, 216]); // trailing 2-part fragment skipped
   expect(parseCliVersion("no version here")).toBeNull();
+  expect(parseCliVersion("claude 2.1")).toBeNull(); // fewer than 3 components → unreadable → caller fails open
 });
 
 test("compareVersions orders by major, then minor, then patch", () => {

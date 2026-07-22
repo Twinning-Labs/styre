@@ -70,14 +70,14 @@ export function agentCliError(
   if (e.reason === "missing") {
     return new StyreError({
       code: EXIT.TOOLCHAIN_MISSING,
-      headline: `${e.command} is not installed or not on PATH`,
+      headline: `'${e.command}' is not installed or not on PATH`,
       detail: `Styre dispatches every agent run by shelling out to the '${e.command}' CLI.`,
       recovery: `Install the '${e.command}' CLI, or set agent.command in your profile, then re-run.`,
     });
   }
   return new StyreError({
     code: EXIT.TOOLCHAIN_MISSING,
-    headline: `${e.command} ${e.found} is below the supported minimum ${e.required}`,
+    headline: `'${e.command}' ${e.found} is below the supported minimum ${e.required}`,
     detail: `Styre's '${e.command}' adapter is pinned to CLI flags that require ${e.required} or newer.`,
     recovery: `Upgrade the '${e.command}' CLI to >= ${e.required} and re-run.`,
   });

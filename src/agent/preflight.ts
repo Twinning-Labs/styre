@@ -17,13 +17,17 @@ const PROVIDER_MIN_VERSION: Record<string, string> = {
 
 type Version = [number, number, number];
 
-/** Parse the LAST `N.N(.N)` token in `text`. Last-match (not first) avoids a false hard-fail when
- *  a line leads with an unrelated dotted number (a build date, a runtime version). Missing patch → 0. */
+/** Parse the LAST full `MAJOR.MINOR.PATCH` triple in `text`. Requiring all three components and
+ *  taking the last match rejects two noise classes that a one-sided position rule would miss: a
+ *  *leading* unrelated dotted number (a build date like `2026.07.22`) is skipped by "last", and a
+ *  *trailing* two-part fragment (a `(build 1.2)` suffix) is skipped by "full triple". A version
+ *  reporting fewer than three components is treated as unreadable → the caller fails OPEN (a present
+ *  binary is never blocked on a format we cannot parse). */
 export function parseCliVersion(text: string): Version | null {
-  const matches = [...text.matchAll(/(\d+)\.(\d+)(?:\.(\d+))?/g)];
+  const matches = [...text.matchAll(/(\d+)\.(\d+)\.(\d+)/g)];
   if (matches.length === 0) return null;
   const m = matches[matches.length - 1];
-  return [Number(m[1]), Number(m[2]), Number(m[3] ?? "0")];
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
 }
 
 /** -1 if a<b, 0 if equal, 1 if a>b (major, then minor, then patch). */

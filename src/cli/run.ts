@@ -211,7 +211,7 @@ export async function runImpl(
       insertRun(db, {
         runId: randomUUID(),
         startedAt: nowUtc(),
-        provider: (runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG).provider,
+        provider: agentConfig.provider,
       });
     }
     const runner = resolveAgentRunner(agentConfig);
