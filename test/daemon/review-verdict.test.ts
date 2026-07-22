@@ -51,6 +51,8 @@ test("blocking code finding → loopback to implement (unit + review step reset,
   const ticket = getTicket(db, ticketId);
   const reviewStep = getByKey(db, ticketId, "review");
   const events = listEvents(db, ticketId);
+  const loopback = events.find((e) => e.kind === "loopback");
+  expect(loopback?.dispatch_id).toBe(did);
   db.close();
   expect(r.decision).toBe("loopback");
   expect(ticket?.stage).toBe("implement");

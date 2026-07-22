@@ -53,6 +53,7 @@ export function appendEvent(
   db: Database,
   e: {
     ticketId: number;
+    dispatchId?: string;
     kind: EventKind;
     actor?: string;
     fromStage?: string;
@@ -67,11 +68,12 @@ export function appendEvent(
   const res = db
     .query(
       `INSERT INTO event_log
-         (ticket_id, seq, kind, actor, from_stage, to_stage, loop, route_to, signature, reason, payload_json, created_at)
-       VALUES ($t, $seq, $kind, $actor, $from, $to, $loop, $route, $sig, $reason, $payload, $now)`,
+         (ticket_id, dispatch_id, seq, kind, actor, from_stage, to_stage, loop, route_to, signature, reason, payload_json, created_at)
+       VALUES ($t, $did, $seq, $kind, $actor, $from, $to, $loop, $route, $sig, $reason, $payload, $now)`,
     )
     .run({
       $t: e.ticketId,
+      $did: e.dispatchId ?? null,
       $seq: nextSeq(db, e.ticketId),
       $kind: e.kind,
       $actor: e.actor ?? "runner",

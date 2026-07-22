@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { applyFailurePolicy } from "../../src/daemon/failure-policy.ts";
+import { insertDispatch } from "../../src/db/repos/dispatch.ts";
 import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { listPending } from "../../src/db/repos/signal.ts";
@@ -40,6 +41,21 @@ function failedStep(
   if (failed === null) throw new Error("failedStep: step missing after markFailed");
   return failed;
 }
+
+test("escalated event carries the failed step's dispatch_id", () => {
+  const { db, ticketId } = makeTestDb();
+  const step = failedStep(db, ticketId, {
+    stepKey: "design:dispatch",
+    stepType: "dispatch",
+    attempts: 3,
+  });
+  insertDispatch(db, { ticketId, dispatchId: "T-d0001", seq: 1, stepId: step.id });
+  const r = applyFailurePolicy(db, ticketId, step, { maxAttempts: 3 });
+  const esc = listEvents(db, ticketId).find((e) => e.kind === "escalated");
+  db.close();
+  expect(r.decision).toBe("escalated");
+  expect(esc?.dispatch_id).toBe("T-d0001");
+});
 
 test("under budget, a non-verify step is retried (reset to pending, no loopback event)", () => {
   const { db, ticketId } = makeTestDb();

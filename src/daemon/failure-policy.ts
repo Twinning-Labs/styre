@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { listByUnit } from "../db/repos/ground-truth-signal.ts";
+import { latestDispatchForStep } from "../db/repos/review-finding.ts";
 import { insertPending as insertSignal } from "../db/repos/signal.ts";
 import { setTicketStatus } from "../db/repos/ticket.ts";
 import {
@@ -66,6 +67,7 @@ export function applyFailurePolicy(
   opts?: { maxAttempts?: number },
 ): FailurePolicyResult {
   const maxAttempts = opts?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+  const dispatchId = latestDispatchForStep(db, ticketId, step.step_key) ?? undefined;
 
   if (step.attempt >= maxAttempts) {
     db.transaction(() => {
@@ -77,6 +79,7 @@ export function applyFailurePolicy(
       });
       appendEvent(db, {
         ticketId,
+        dispatchId,
         kind: "escalated",
         reason: `step '${step.step_key}' failed`,
         signature: failureSignature(step),
@@ -98,6 +101,7 @@ export function applyFailurePolicy(
       });
       appendEvent(db, {
         ticketId,
+        dispatchId,
         kind: "escalated",
         reason: `step '${step.step_key}' failed`,
         signature: failureSignature(step),
@@ -120,6 +124,7 @@ export function applyFailurePolicy(
       });
       appendEvent(db, {
         ticketId,
+        dispatchId,
         kind: "escalated",
         reason: "verify:checks-gate failed (infra/invariant fault)",
         signature: failureSignature(step),
@@ -152,7 +157,13 @@ export function applyFailurePolicy(
           signalType: "human_resume",
           reason: `no progress: '${step.step_key}' failed identically twice`,
         });
-        appendEvent(db, { ticketId, kind: "escalated", reason: "no progress", signature });
+        appendEvent(db, {
+          ticketId,
+          dispatchId,
+          kind: "escalated",
+          reason: "no progress",
+          signature,
+        });
       })();
       return { decision: "escalated" };
     }
@@ -166,6 +177,7 @@ export function applyFailurePolicy(
       }
       appendEvent(db, {
         ticketId,
+        dispatchId,
         kind: "loopback",
         loop: "implement",
         routeTo: step.step_key,
@@ -204,6 +216,7 @@ export function applyFailurePolicy(
       }
       appendEvent(db, {
         ticketId,
+        dispatchId,
         kind: "loopback",
         loop: "integration",
         routeTo: step.step_key,
@@ -234,7 +247,13 @@ export function applyFailurePolicy(
           signalType: "human_resume",
           reason: `no progress: '${step.step_key}' under-delivered identically twice`,
         });
-        appendEvent(db, { ticketId, kind: "escalated", reason: "no progress", signature });
+        appendEvent(db, {
+          ticketId,
+          dispatchId,
+          kind: "escalated",
+          reason: "no progress",
+          signature,
+        });
       })();
       return { decision: "escalated" };
     }
@@ -245,6 +264,7 @@ export function applyFailurePolicy(
       }
       appendEvent(db, {
         ticketId,
+        dispatchId,
         kind: "loopback",
         loop: "implement",
         routeTo: step.step_key,

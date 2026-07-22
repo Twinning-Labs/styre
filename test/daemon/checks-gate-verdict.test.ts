@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { GATE_ROUND_CAP } from "../../src/daemon/arbiter-verdict.ts";
 import { applyAcCheckGateVerdict } from "../../src/daemon/checks-gate-verdict.ts";
+import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
 import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { listPending } from "../../src/db/repos/signal.ts";
@@ -84,6 +85,26 @@ test("integrity-only still-red loopbacks under the cap; units + gate step reset 
   expect(events.length).toBe(1);
   expect(events[0]?.route_to).toBe("verify:checks-gate");
   expect(JSON.parse(events[0]?.payload_json ?? "{}").tampered).toEqual([7]);
+});
+
+test("gate loopback carries the code dispatch's dispatch_id (the gate itself has no dispatch row)", () => {
+  const { db, ticketId } = makeTestDb();
+  seedUnitAndGateStep(db, ticketId, GATE_ROUND_CAP - 1);
+  // The gate is an in-process handler with no dispatch of its own — getLatestForTicket finds the
+  // CODE dispatch instead (the latest dispatch WITH a branch_head_sha, i.e. the HEAD the gate
+  // judged). Mirrors arbiter-verdict.test.ts's seedLatestDispatchSha pattern.
+  const codeDisp = insertDispatch(db, {
+    ticketId,
+    dispatchId: "CODE-d0001",
+    seq: nextSeq(db, ticketId),
+  });
+  completeDispatch(db, codeDisp.id, { outcome: "clean-success", branchHeadSha: "S1" });
+  gateSignal(db, ticketId, { stillRed: [7], tampered: [7], sha: "S1" });
+  const r = applyAcCheckGateVerdict(db, ticketId, { stepKey: "verify:checks-gate" });
+  const loopback = listEvents(db, ticketId).find((e) => e.kind === "loopback");
+  db.close();
+  expect(r.decision).toBe("loopback");
+  expect(loopback?.dispatch_id).toBe("CODE-d0001");
 });
 
 test("LIVENESS: behavioral still-red at the gate-round cap → escalated (closes the pure-code-wrong stuck-HEAD livelock)", () => {

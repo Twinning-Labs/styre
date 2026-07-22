@@ -7,8 +7,10 @@ import {
   reauthorRoundsForAc,
 } from "../../src/db/repos/ac-check.ts";
 import { insertAc } from "../../src/db/repos/acceptance-criterion.ts";
+import { insertDispatch } from "../../src/db/repos/dispatch.ts";
 import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
+import { insertPending } from "../../src/db/repos/workflow-step.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 test("no unresolved active checks → clean", () => {
@@ -103,4 +105,17 @@ test("a multi-check AC (2 active checks) escalates on the 2nd re-author ROUND, n
   expect(round2.decision).toBe("escalated"); // 2nd round ⇒ cap reached
   expect(reauthorRoundsForAc(db, 1)).toBe(2);
   db.close();
+});
+
+test("checks loopback carries the checks:classify dispatch_id", () => {
+  const { db, ticketId } = makeTestDb();
+  const cls = insertPending(db, { ticketId, stepKey: "checks:classify", stepType: "dispatch" });
+  insertDispatch(db, { ticketId, dispatchId: "T-d0002", seq: 1, stepId: cls.id });
+  insertAc(db, { ticketId, seq: 1, text: "ac", source: "checklist" });
+  insertAcCheck(db, { ticketId, acId: 1, selector: "s", testPath: "p" });
+  const r = applyChecksVerdict(db, ticketId, { stepKey: "checks:classify" });
+  const loopback = listEvents(db, ticketId).find((e) => e.kind === "loopback");
+  db.close();
+  expect(r.decision).toBe("loopback");
+  expect(loopback?.dispatch_id).toBe("T-d0002");
 });
