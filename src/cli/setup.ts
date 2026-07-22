@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { defineCommand } from "citty";
+import { preflightAgentCli } from "../agent/preflight.ts";
 import { resolveAgentRunner } from "../agent/resolve.ts";
 import { DEFAULT_AGENT_CONFIG, requiredEnvFor } from "../config/agent-config.ts";
 import { discoverRuntimeConfig } from "../config/discover.ts";
@@ -19,6 +20,7 @@ import { probeProfile } from "../setup/probe.ts";
 import { resolveCommands } from "../setup/resolve-commands.ts";
 import { createAnalytics } from "../telemetry/analytics/index.ts";
 import type { SetupInput } from "../telemetry/analytics/properties.ts";
+import { agentCliError } from "./errors.ts";
 import { guard } from "./output.ts";
 
 const CHECKS = new Set(["github", "external", "none"]);
@@ -264,6 +266,12 @@ export async function setupImpl({ args }: { args: SetupArgs }): Promise<void> {
       `setup: ${requiredKey} is required for provider '${agentConfig.provider}' (runtime-context prose enrichment)`,
     );
   }
+  // The env key alone doesn't prove the CLI is usable. Probe the binary before the write-capable
+  // enrichment agent runs, so a missing/old CLI fails the setup gate with an actionable message
+  // instead of surfacing later as an opaque transient agent failure (ENG-326).
+  const cliPreflight = preflightAgentCli(agentConfig);
+  if (!cliPreflight.ok) throw agentCliError(cliPreflight);
+  if (cliPreflight.unauthHint) process.stderr.write(`setup: ${cliPreflight.unauthHint}\n`);
   const runner = resolveAgentRunner(agentConfig);
   const { outPath, profile, needsInput } = await runSetup({
     repo,
