@@ -232,6 +232,19 @@ export function interpretRunOutput(fw: CheckFramework, run: RunOutcome): CoarseO
   }
 }
 
+/** POSIX shell "could not execute the command" exit codes: 127 = command not found, 126 = found but
+ *  not executable (permission denied / is a directory / broken interpreter line). These come from the
+ *  shell/loader failing to *start* the process — never from a framework reporting a test result — so a
+ *  run carrying one means the check could not be attempted (ENG-357). Recognised structurally at the
+ *  guard site, independent of the coarse bucket: `interpretRunOutput` maps 127 → `error` (above) but
+ *  leaves 126 in the per-framework switch (→ `red` on jest/vitest/junit/rspec/minitest/phpunit), so the
+ *  covered-guard must key off the exit code directly rather than on `coarse === "error"`. */
+export const LAUNCH_FAILURE_EXIT_CODES: ReadonlySet<number> = new Set([126, 127]);
+
+export function isLaunchFailure(exitCode: number | null): boolean {
+  return exitCode !== null && LAUNCH_FAILURE_EXIT_CODES.has(exitCode);
+}
+
 /** CONSERVATIVE discard-poison matcher (guards against a bad merge nobody notices). Given a run's raw
  *  output, the files THIS dispatch discarded, and the framework that produced the output, return the
  *  subset of discarded files the output implicates in an import/collection/module error — i.e. the
