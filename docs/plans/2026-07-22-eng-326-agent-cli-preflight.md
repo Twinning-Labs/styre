@@ -486,13 +486,13 @@ Expected: FAIL — the run proceeds past the (not-yet-wired) probe; it does NOT 
 
 - [ ] **Step 3: Add imports**
 
-In `src/cli/run.ts`, add the probe import after line 6 (`import { resolveAgentRunner } ...`):
+In `src/cli/run.ts`, add the probe import **before** line 6 (`import { resolveAgentRunner } from "../agent/resolve.ts";`). Biome (`bun run lint` = `biome check .`, no autofix) sorts imports by path string, and `../agent/preflight.ts` sorts before `../agent/resolve.ts`, so it must precede it:
 
 ```ts
 import { preflightAgentCli } from "../agent/preflight.ts";
 ```
 
-And add `agentCliError` to the existing `./errors.ts` import (currently line 26):
+And add `agentCliError` to the existing `./errors.ts` import (currently line 26). Keep the names alphabetized (biome enforces named-import order):
 
 ```ts
 import { EXIT, StyreError, agentCliError, errorKindForExit, toolchainError, usageError } from "./errors.ts";
@@ -548,8 +548,10 @@ git commit -m "feat(run): preflight the agent CLI before first dispatch (ENG-326
 - Test: `test/cli/park-agent-preflight.test.ts`
 
 **Interfaces:**
-- Consumes: `preflightAgentCli` (Task 1), `agentCliError` (Task 2), `DEFAULT_AGENT_CONFIG` (already imported in park.ts).
-- Produces: behavioral — `resumeRun` throws `agentCliError` (exit 69) before `buildDispatchRegistry`/`resolveAgentRunner` (:316) when the agent CLI is missing/old, but only after the parked-run existence check and the `--inspect`/resume-refused early returns.
+- Consumes: `preflightAgentCli` + `type AgentCliPreflight` (Task 1), `agentCliError` (Task 2), `DEFAULT_AGENT_CONFIG` + `type AgentConfig` (agent-config.ts).
+- Produces:
+  - A new optional `deps.preflight?: (config: AgentConfig) => AgentCliPreflight` injection point on `resumeRun` (defaults to the real `preflightAgentCli`). **This seam is mandatory:** the existing resume test suites inject fakes precisely to run without a live CLI, so an un-stubbable probe would add a hard `claude ≥ 2.1.200`-on-PATH dependency to ~6 tests and break them on CI. The seam lets those tests force-pass while the new test (Task 4) exercises the real probe.
+  - Behavioral — `resumeRun` throws `agentCliError` (exit 69) before `buildDispatchRegistry`/`resolveAgentRunner` (:315-316) when the agent CLI is missing/old, but only after the parked-run existence check and the `--inspect`/resume-refused early returns.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -670,31 +672,66 @@ test("resumeRun: a missing agent CLI throws (exit 69 error) before re-dispatch",
 Run: `bun test test/cli/park-agent-preflight.test.ts`
 Expected: FAIL — the probe isn't wired, so `buildRegistry` runs (`dispatched` becomes true) and it rejects with `/should not reach dispatch/`, not `/not installed or not on PATH/`.
 
-- [ ] **Step 3: Add the import**
+- [ ] **Step 3: Add the imports (biome-ordered)**
 
-In `src/cli/park.ts`, add `agentCliError` to the existing `./errors.ts` import (it currently imports `usageError`). For example, if the line is `import { usageError } from "./errors.ts";`, change it to:
+In `src/cli/park.ts`:
+
+Change the `./errors.ts` import (currently line 39, `import { usageError } from "./errors.ts";`) to add the factory (alphabetized — `agentCliError` before `usageError`):
 
 ```ts
 import { agentCliError, usageError } from "./errors.ts";
 ```
 
-And add the probe import alongside the other `../agent/` imports (park.ts already imports `resolveAgentRunner` from `../agent/resolve.ts`):
+Add the probe import **between** `import { branchNameFor } from "../agent/branch.ts";` (line 13) and `import { resolveAgentRunner } from "../agent/resolve.ts";` (line 14) — `branch` < `preflight` < `resolve`. Named order: `AgentCliPreflight` sorts before `preflightAgentCli`:
 
 ```ts
-import { preflightAgentCli } from "../agent/preflight.ts";
+import { type AgentCliPreflight, preflightAgentCli } from "../agent/preflight.ts";
 ```
 
-- [ ] **Step 4: Insert the probe**
+Add the `AgentConfig` type to the existing agent-config import (currently line 15, `import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";`) — `AgentConfig` sorts before `DEFAULT_AGENT_CONFIG`:
 
-In `src/cli/park.ts` `resumeRun`, locate the resume-refused block (which ends with `process.exitCode = 65;` then `return;` then `}`), immediately followed by the comment `// Defense-in-depth (whole-branch review I-2 / Task 3 F1):`. Insert the probe between them — after the resume-refused block's closing `}`, before that comment:
+```ts
+import { type AgentConfig, DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
+```
+
+- [ ] **Step 4a: Add the `preflight` seam to the `resumeRun` signature**
+
+In `src/cli/park.ts`, `resumeRun`'s `deps` parameter is currently:
+
+```ts
+  deps?: {
+    buildRegistry?: (
+      resumeContext: { stepKey: string; transcript: string } | undefined,
+    ) => StepRegistry;
+    ports?: ProjectorPorts;
+  },
+```
+
+Add the injectable probe (defaults to the real one — the seam lets the fake-driven resume tests skip the live CLI):
+
+```ts
+  deps?: {
+    buildRegistry?: (
+      resumeContext: { stepKey: string; transcript: string } | undefined,
+    ) => StepRegistry;
+    ports?: ProjectorPorts;
+    preflight?: (config: AgentConfig) => AgentCliPreflight;
+  },
+```
+
+- [ ] **Step 4b: Insert the probe**
+
+In `src/cli/park.ts` `resumeRun`, locate the resume-refused block (which ends with `process.exitCode = 65;` then `return;` then `}` at :248-250), immediately followed by the comment `// Defense-in-depth (whole-branch review I-2 / Task 3 F1):` (:252). Insert the probe between them — after the resume-refused block's closing `}`, before that comment:
 
 ```ts
   // Fail fast (no retry burn) if the configured agent CLI is missing or below its supported
   // version — resume dispatches the CLI too (resolveAgentRunner below), and a resume often runs
   // later / on another machine where the CLI may have changed since the park (ENG-326). Placed
   // after the --inspect and resume-refused early-returns so those stay tool-independent, and
-  // before any repo mutation or dispatch.
-  const cliPreflight = preflightAgentCli(runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG);
+  // before any repo mutation or dispatch. Injectable so fake-driven resume tests skip the live CLI.
+  const cliPreflight = (deps?.preflight ?? preflightAgentCli)(
+    runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG,
+  );
   if (!cliPreflight.ok) {
     db.close();
     throw agentCliError(cliPreflight);
@@ -702,21 +739,38 @@ In `src/cli/park.ts` `resumeRun`, locate the resume-refused block (which ends wi
   if (cliPreflight.unauthHint) process.stderr.write(`resume: ${cliPreflight.unauthHint}\n`);
 ```
 
-(The `db.close()` before the throw mirrors the resume-refused branch, which closes `db` before returning — the parked-run db is open at this point.)
+(The `db.close()` before the throw mirrors the resume-refused branch, which closes `db` before returning — the parked-run db is opened at `park.ts:207` and still open here.)
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [ ] **Step 4c: Force-pass the probe in the existing fake-driven resume tests**
+
+These suites inject a fake registry/ports to run `resumeRun` without a live CLI. Add a passthrough `preflight` to each `resumeRun(...)` `deps` object so the new probe never shells out (add this line inside the `{ ... }` deps literal, next to `buildRegistry`/`ports`):
+
+```ts
+    preflight: () => ({ ok: true, version: null }),
+```
+
+Apply to every `resumeRun(...)` call's deps object:
+- `test/cli/park.test.ts` (the `resumeRun({ resume: ident }, ...)` at ~:158)
+- `test/cli/park-inplace.test.ts` (four calls at ~:127, ~:240, ~:329, ~:434)
+- `test/helpers/run-harness.ts` (the `resumeRun(...)` with `buildRegistry` at ~:243)
+
+- [ ] **Step 5: Run the tests to verify pass + no regression**
 
 Run: `bun test test/cli/park-agent-preflight.test.ts`
-Expected: PASS. Confirm the resume-path placement pins hold:
-Run: `bun test test/cli/park.test.ts test/cli/park-inplace.test.ts test/cli/run-preflight.test.ts`
-Expected: PASS (the `--resume` with no dump still throws `/no parked run/` before the probe, since the probe is after the dump-existence check; `--inspect` still returns before the probe).
+Expected: PASS (the new test injects no `preflight`, so it exercises the real probe against the absent command).
+
+Confirm the patched existing suites and the placement pins hold — these now pass **independently of whether `claude` is installed**, because Step 4c stubbed the probe:
+Run: `bun test test/cli/park.test.ts test/cli/park-inplace.test.ts test/cli/run-preflight.test.ts test/helpers/run-harness.ts`
+Expected: PASS (`run-preflight.test.ts`'s `--resume` with no dump still throws `/no parked run/` before the probe — the probe is after the dump-existence check; `--inspect` still returns before it). Also run the two harness consumers:
+Run: `bun test test/cli/head-guard-e2e.test.ts test/cli/park-resume-e2e.test.ts`
+Expected: PASS.
 
 - [ ] **Step 6: Lint, then commit**
 
 Run: `bun run lint`
 
 ```bash
-git add src/cli/park.ts test/cli/park-agent-preflight.test.ts
+git add src/cli/park.ts test/cli/park-agent-preflight.test.ts test/cli/park.test.ts test/cli/park-inplace.test.ts test/helpers/run-harness.ts
 git commit -m "feat(resume): preflight the agent CLI before re-dispatch (ENG-326)"
 ```
 
@@ -791,13 +845,13 @@ Expected: FAIL — without the probe, setup proceeds to `resolveAgentRunner`/`ru
 
 - [ ] **Step 3: Add imports**
 
-In `src/cli/setup.ts`, add the probe import right after `import { resolveAgentRunner } from "../agent/resolve.ts";` (line 5):
+In `src/cli/setup.ts`, add the probe import **before** `import { resolveAgentRunner } from "../agent/resolve.ts";` (line 5). Biome sorts by path and `../agent/preflight.ts` < `../agent/resolve.ts`, so it must precede it:
 
 ```ts
 import { preflightAgentCli } from "../agent/preflight.ts";
 ```
 
-`setup.ts` does NOT currently import from `./errors.ts` (its env-key gate throws a plain `Error`), so add a new import line for the factory:
+`setup.ts` does NOT currently import from `./errors.ts` (its env-key gate throws a plain `Error`), so add a new import line for the factory. In the relative-import group, `./errors.ts` sorts before `./output.ts`, so place it **immediately before** `import { guard } from "./output.ts";` (line 22):
 
 ```ts
 import { agentCliError } from "./errors.ts";
