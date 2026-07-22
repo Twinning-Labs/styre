@@ -19,12 +19,13 @@ The work now splits three ways:
 | Ticket | Carries | Depends on |
 |---|---|---|
 | **ENG-344** (this plan) | the registry module + the preflight fix — the motivating bug and AC 2 | — |
-| **`fix/` × 2** | the two live bugs found during design, ~2 lines each | nothing |
-| **`refactor/` follow-up** | the mechanical fold of the remaining tables (`docs/plans/2026-07-22-eng-360-mechanical-fold.md`) | ENG-344 |
+| **ENG-358 / ENG-359** | the two live bugs found during design, ~2 lines each | nothing |
+| **ENG-361** | stop persisting `extensions`; derive it and `SOURCE_EXTS` from the registry; `schemaVersion` 3 → 4 | ENG-344 |
+| **ENG-360** | the mechanical fold of the remaining tables (`docs/plans/2026-07-22-eng-360-mechanical-fold.md`) | ENG-344 |
 
 The two bugs are deliberately **not** bundled: `MANIFEST_BASENAMES` (`provision.ts:192`) omitting `Gemfile`/`composer.json`, and `SOURCE_EXTS` (`check-rules.ts:4`) missing eight extensions. Both are ~2-line fixes needing no registry at all. Bundling them made the registry look load-bearing for bugs it is not.
 
-**Consequence for the registry's shape.** With the folds moved out, `extensions`, `manifests`, `installMarkers`, `interpreters`, `detectAnchors`, `ignoreDirs` and `manifestPatterns` have **zero consumers here**. The ticket's own rule — *"start with the subset that has ≥2 real consumers — don't add speculative fields"* — means they do not ship in this PR. Each lands in the follow-up task that reads it. `StackFacts` therefore starts with two fields and grows; the module is the single home regardless of how many it currently holds.
+**Consequence for the registry's shape.** With the folds moved out, `extensions`, `manifests`, `installMarkers`, `interpreters`, `detectAnchors`, `ignoreDirs` and `manifestPatterns` have **zero consumers here**. The ticket's own rule — *"start with the subset that has ≥2 real consumers — don't add speculative fields"* — means they do not ship in this PR. Each lands in ENG-360 or ENG-361, with the consumer that reads it. `StackFacts` therefore starts with two fields and grows; the module is the single home regardless of how many it currently holds.
 
 This also means **PR 1 creates no duplication window**: `EXTENSIONS_BY_KIND`, `SKIP`, `MANIFEST_BASENAMES` and friends are untouched and un-duplicated until the task that deletes them.
 
