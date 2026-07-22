@@ -16,10 +16,11 @@
 - **The registry module must import nothing.** No `import` statement of any kind in `src/dispatch/stack-registry.ts`. Task 1's test enforces this; do not weaken it to make a later task easier — if a later task seems to need an import, the fact belongs in the consumer, not the registry.
 - **No functions, getters, or class instances inside `STACKS`.** Strings, booleans, and readonly arrays of strings only.
 - **Nine kinds, exactly:** `rust`, `node`, `sveltekit`, `python`, `go`, `jvm-maven`, `jvm-gradle`, `ruby`, `php`.
-- **PR 1 does NOT touch** `check-rules.ts:349` (`CHECK_RULES`), `check-selector.ts:120,200,391` (selector/exit-code/binary switches), or `check-selector.ts:54-79` (kind→framework switch). Those are PR 2. The one exception is Task 4, which changes `SOURCE_EXTS` at `check-rules.ts:4` only.
+- **PR 1 does NOT touch `check-selector.ts` at all**, nor `check-rules.ts:349` (`CHECK_RULES`). Those are PR 2. The single exception in the whole checks subsystem is Task 4, which changes `SOURCE_EXTS` at `check-rules.ts:4` only. (An earlier draft had Task 6 edit `binaryFor` at `check-selector.ts:394`; three reviewers flagged it — it contradicted this constraint AND was a no-op, replacing the literal `"python3"` with an expression evaluating to `"python3"`, manufactured to give `interpreters` a second consumer. Removed.)
 - **Do NOT add `checkFrameworks` or `testFilePattern` to `StackFacts`.** They are PR 2 fields; adding them here creates consumer-less speculative fields (spec §3.4).
 - **Conditional detector logic is out of scope.** Do not modify `src/setup/lang/*.ts` in any task.
-- Every task ends green: `bun run lint && bun test`.
+- **Every task ends green with `bun run format && bun run lint && bun run typecheck && bun test`** — all four. `bun run lint` is `biome check .` (no `--write`), and the repo enforces `lineWidth: 100` + `organizeImports`, so hand-wrapped pasted code FAILS lint unless formatted first. `bun run typecheck` (`tsc --noEmit --strict`) is what CI runs (`.github/workflows/ci.yml:18`); Biome does not type-check and `bun test` strips types, so a duplicate import or type slip commits green and explodes in CI 11 commits later.
+- **Import placement and order.** Biome sorts specifiers naturally, so `"bun:test"` sorts BEFORE `"node:fs"`. Every existing test file follows this. Never add an import mid-file — merge into the existing import statement for that module instead.
 - Commit messages: conventional-commit with a scope, e.g. `refactor(dispatch): …`. End every commit message with:
   ```
   Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
@@ -59,15 +60,18 @@
 Create `test/dispatch/stack-registry.test.ts`:
 
 ```ts
+import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { EXTENSIONS_BY_KIND } from "../../src/dispatch/components.ts";
 import {
   GENERIC_IGNORE_DIRS,
   STACKS,
   isModeledKind,
   stackFacts,
 } from "../../src/dispatch/stack-registry.ts";
+import { REGISTRY } from "../../src/setup/registry.ts";
+import { SKIP } from "../../src/setup/manifests.ts";
 
 const KINDS = [
   "rust", "node", "sveltekit", "python", "go",
@@ -75,16 +79,24 @@ const KINDS = [
 ] as const;
 
 describe("boundary: the registry is data, not logic", () => {
-  // §5.1 — no functions anywhere in the table. This is what keeps the
-  // runtime-deps parser functions (and any repo-specific branching) out.
-  test("every reachable value is a primitive or an array of primitives", () => {
+  // §5.1 — no functions AND no getters AND a plain prototype.
+  // getOwnPropertyDescriptors does NOT invoke accessors; Object.entries DOES,
+  // which is how an earlier draft's walk was blind to
+  //   get extensions() { return Bun.file(`${process.cwd()}/go.work`).size > 0 ? A : B; }
+  test("no functions, no getters, no exotic prototypes", () => {
     const walk = (v: unknown, path: string): void => {
       if (Array.isArray(v)) {
         v.forEach((el, i) => walk(el, `${path}[${i}]`));
         return;
       }
       if (v !== null && typeof v === "object") {
-        for (const [k, val] of Object.entries(v)) walk(val, `${path}.${k}`);
+        expect(
+          Object.getPrototypeOf(v) === Object.prototype ? null : `${path}: exotic prototype`,
+        ).toBeNull();
+        for (const [k, d] of Object.entries(Object.getOwnPropertyDescriptors(v))) {
+          expect(d.get === undefined ? null : `${path}.${k}: getter`).toBeNull();
+          walk(d.value, `${path}.${k}`);
+        }
         return;
       }
       expect(
@@ -94,15 +106,25 @@ describe("boundary: the registry is data, not logic", () => {
     walk(STACKS, "STACKS");
   });
 
-  // §5.2 — the load-bearing one. A module that cannot reach node:fs cannot
-  // branch on repo state, so "no repo-specific branching" becomes checkable.
-  test("the module imports nothing", () => {
+  // §5.2 — THE load-bearing assertion. Purity is not decidable from source
+  // text (Bun.*, process.*, globalThis all reach the filesystem with no
+  // import), so pin the whole table to a literal instead: a repo-state-
+  // dependent registry would have to produce this byte-for-byte from every
+  // working directory, and any deliberate fact change must be made twice,
+  // in a diff a reviewer sees.
+  test("STACKS equals its checked-in snapshot", () => {
+    expect(STACKS).toEqual(SNAPSHOT); // SNAPSHOT defined at the bottom of this file
+  });
+
+  // §5.3 — defence in depth and a fast, legible failure. A lint rule, not a proof.
+  test("the module source reaches for nothing external", () => {
     const src = readFileSync(
       join(import.meta.dir, "../../src/dispatch/stack-registry.ts"),
       "utf8",
     );
-    const imports = src.match(/^\s*import\s/gm) ?? [];
-    expect(imports).toEqual([]);
+    for (const bad of ["import ", "import(", "require(", "Bun.", "process.", "globalThis"]) {
+      expect(src.includes(bad) ? `${bad} found` : null).toBeNull();
+    }
   });
 
   // §5.4 — shared facts must not be mutable by a consumer.
@@ -164,18 +186,15 @@ describe("the ENG-332 facts", () => {
 });
 
 describe("facts migrated from existing tables", () => {
-  test("extensions match today's EXTENSIONS_BY_KIND exactly", () => {
-    const NODE = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cts", ".mts"];
-    const JVM = [".java", ".kt", ".kts", ".scala", ".groovy"];
-    expect(stackFacts("rust").extensions).toEqual([".rs"]);
-    expect(stackFacts("node").extensions).toEqual(NODE);
-    expect(stackFacts("sveltekit").extensions).toEqual([...NODE, ".svelte"]);
-    expect(stackFacts("python").extensions).toEqual([".py", ".pyi"]);
-    expect(stackFacts("go").extensions).toEqual([".go"]);
-    expect(stackFacts("jvm-maven").extensions).toEqual(JVM);
-    expect(stackFacts("jvm-gradle").extensions).toEqual([...JVM, ".gradle"]);
-    expect(stackFacts("ruby").extensions).toEqual([".rb", ".rake", ".gemspec"]);
-    expect(stackFacts("php").extensions).toEqual([".php"]);
+  // DIFFERENTIAL, not transcribed. At Task 1 time every source table still
+  // exists and is importable, so compare against the LIVE table — a
+  // hand-copied literal passes even if the same transcription error was made
+  // in both places. Delete each of these in the task that deletes its table.
+  test("extensions match today's live EXTENSIONS_BY_KIND exactly", () => {
+    for (const [kind, exts] of Object.entries(EXTENSIONS_BY_KIND)) {
+      expect(stackFacts(kind).extensions).toEqual([...exts]);
+    }
+    expect(Object.keys(EXTENSIONS_BY_KIND).sort()).toEqual([...KINDS].sort());
   });
 
   test("node install markers and manifests match provision's tables", () => {
@@ -188,10 +207,16 @@ describe("facts migrated from existing tables", () => {
     ]);
   });
 
-  test("sveltekit install facts are identical to node's", () => {
-    expect(stackFacts("sveltekit").installMarkers).toEqual(stackFacts("node").installMarkers);
+  // NOT `toEqual(stackFacts("node").x)` — the ...NODE_INSTALL spread shares the
+  // same array OBJECTS, so that would compare an array to itself and can never fail.
+  test("sveltekit install facts are pinned independently of node's", () => {
+    expect(stackFacts("sveltekit").installMarkers).toEqual([
+      ".package-lock.json", ".yarn-state.yml", ".modules.yaml",
+    ]);
     expect(stackFacts("sveltekit").installOutputDir).toBe("node_modules");
-    expect(stackFacts("sveltekit").manifests).toEqual(stackFacts("node").manifests);
+    expect(stackFacts("sveltekit").manifests).toEqual([
+      "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    ]);
   });
 
   test("python's interpreter fallback order is python3 then python", () => {
@@ -206,19 +231,15 @@ describe("facts migrated from existing tables", () => {
     expect(re.test("norequirements.txt")).toBe(false);
   });
 
-  test("the ignore-dir union EQUALS today's SKIP set", () => {
+  test("the ignore-dir union EQUALS today's live SKIP set", () => {
     // Set equality, NOT superset: SKIP prunes the manifest walk, so extra
-    // entries would silently find fewer components (spec §6.5).
-    const TODAYS_SKIP = [
-      "node_modules", "target", ".git", "dist", "build", ".svelte-kit",
-      ".venv", "venv", "__pycache__", ".tox", ".nox", "vendor",
-      ".gradle", ".mvn", "Pods", "testdata",
-    ];
+    // entries would silently find FEWER components (spec §6.5). Compared
+    // against the live SKIP, not a transcription of it.
     const derived = new Set([
       ...GENERIC_IGNORE_DIRS,
       ...Object.values(STACKS).flatMap((f) => [...f.ignoreDirs]),
     ]);
-    expect([...derived].sort()).toEqual([...TODAYS_SKIP].sort());
+    expect([...derived].sort()).toEqual([...SKIP].sort());
   });
 
   test("detect anchors match the detectors' trigger manifests", () => {
@@ -248,6 +269,10 @@ describe("facts migrated from existing tables", () => {
   });
 });
 ```
+
+**`SNAPSHOT`**: after Step 3 compiles, append to the test file a `const SNAPSHOT = { ... }` that is the full literal of all nine entries. Produce it mechanically — `bun -e 'console.log(JSON.stringify((await import("./src/dispatch/stack-registry.ts")).STACKS, null, 2))'` — and paste the result. Hand-typing it would defeat the point.
+
+**Import order:** `bun:test` sorts BEFORE `node:fs`/`node:path` under Biome's natural sort. Put it first, matching `test/cli/preflight.test.ts:1` and every other test file.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -491,13 +516,9 @@ Expected: PASS, all tests green. If "the ignore-dir union EQUALS today's SKIP se
 
 - [ ] **Step 5: Verify the exhaustiveness link to the detector registry**
 
-Add the import to the **top** of `test/dispatch/stack-registry.test.ts` alongside the others (Biome enforces top-of-file import placement), and append the test at the end:
+`REGISTRY` is already imported at the top from Step 1. Append at the end of the file:
 
 ```ts
-// with the other imports at the top of the file:
-import { REGISTRY } from "../../src/setup/registry.ts";
-
-// at the end of the file:
 test("every kind the detector registry emits has stack facts (§5.3)", () => {
   for (const def of REGISTRY) expect(isModeledKind(def.kind)).toBe(true);
 });
@@ -540,7 +561,7 @@ Retires the ENG-332 special-case. This is AC 2 and the reason the ticket exists.
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `test/cli/preflight.test.ts`. Match the existing file's profile-fixture style; if it has a local `mkProfile` helper, reuse it rather than redefining one.
+Add to `test/cli/preflight.test.ts`. **Reuse the file's existing `makeProfile` helper at `test/cli/preflight.test.ts:21-23`** — it routes through `parseProfile`, so fixtures are schema-validated. Do NOT redefine a local `profileWith` that casts `as unknown as Profile`; that bypasses validation and lets an invalid `runtimeContext: {}` pass silently. Merge any new imports into the file's existing import statements (`describe/expect/test`, `collectToolProbes` and `type Profile` are already imported at lines 1, 9, 14) — only `isInstallProvided` and `stackFacts` are new.
 
 ```ts
 import { describe, expect, test } from "bun:test";
@@ -716,7 +737,17 @@ describe("collectToolProbes — the unmodeled-kind fallback (spec §6.6)", () =>
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `bun test test/cli/preflight.test.ts`
-Expected: FAIL — `isInstallProvided` is not exported, and the node/python/ruby "restored coverage" tests fail because the current special-case returns only the prepare probe.
+Expected: FAIL — `isInstallProvided` is not exported, and the new "restored coverage" tests fail.
+
+**After Step 3, THREE PRE-EXISTING tests in this same file will also fail.** Two reviewers reproduced this. They are not regressions; they encode the ENG-332 semantics this task deletes. Update each — do NOT weaken `collectToolProbes` to preserve them:
+
+| Test | Why it breaks | New expectation |
+|---|---|---|
+| `preflight.test.ts:30` | php fixture's `build: "composer build"` — `composer` is neither under `vendor/bin` nor in the tools list, so it is now probed | add the `{component:"api",label:"build",command:"composer build"}` probe |
+| `preflight.test.ts:90` | node fixture gains `web/build` + `web/test` npm-script probes (intended, §6.1) | add both entries |
+| `preflight.test.ts:115` `"a prepare-provided test tool is NOT probed (php clean checkout)"` | its `build: "true"` is now probed and `fakeProbe(["composer"])` lacks `true` | give the fixture no `build` slot, so the test still isolates the `./vendor/bin/phpunit` skip it exists to check |
+
+`test/cli/run-preflight.test.ts` is **unaffected** (`kind:"custom"`, no `prepare`).
 
 - [ ] **Step 3: Rewrite `collectToolProbes`**
 
@@ -740,6 +771,10 @@ import { probeCommandExists } from "../setup/discover-schema.ts";
  *  provision runs is the ENG-332 bug; NOT probing a precondition is lost coverage. */
 export function isInstallProvided(command: string, facts: StackFacts): boolean {
   const token = (command.trim().split(/\s+/)[0] ?? "").replace(/^\.\//, "");
+  // Kind-agnostic: any relative path is build/install output. Covers composer's configurable
+  // bin-dir ("config": {"bin-dir": "bin"} → `bin/phpunit`), ./mvnw, ./gradlew, and every
+  // unmodeled ecosystem's ./deps/bin/x with no registry entry at all.
+  if (token.includes("/")) return true;
   if (facts.installBinDirs.some((d) => token.startsWith(`${d}/`))) return true;
   return facts.installProvidedTools.includes(token);
 }
@@ -768,7 +803,11 @@ export function collectToolProbes(profile: Profile): ToolProbe[] {
     for (const label of ["build", "test", "check"] as const) {
       const command = commandFor(c, label);
       if (!command) continue;
-      if (isInstallProvided(command, facts)) continue;
+      // The `c.prepare` gate is load-bearing: the registry says what an install WOULD provide,
+      // but if this component has no install step, nothing will ever supply the tool — so it is
+      // a precondition and must be probed. Without the gate a prepare-less python component
+      // (pythonPrepare has a `return undefined` branch) gets ZERO probes.
+      if (c.prepare !== undefined && isInstallProvided(command, facts)) continue;
       probes.push({ component: c.name, label, command, cwd });
     }
   }
@@ -786,7 +825,7 @@ Expected: PASS.
 - [ ] **Step 5: Run the wider preflight suite for regressions**
 
 Run: `bun test test/cli/`
-Expected: PASS. `test/cli/run-preflight.test.ts` exercises the exit-69 path end-to-end; if a fixture there asserted a specific probe count for a node or python component, update it to the new expectation and note the change in the commit body — do not weaken `collectToolProbes` to preserve a stale count.
+Expected: PASS, with the three Step-2 tests updated. Note every changed assertion in the commit body.
 
 - [ ] **Step 6: Lint and commit**
 
@@ -922,12 +961,17 @@ describe("moduleLeaf strips every registry-known source extension", () => {
     expect(moduleLeaf("util")).toBe("util");
   });
 
+  // EIGHT extensions, not five. kts/rake/gemspec were omitted from an earlier
+  // draft and caught independently by two reviewers.
   test("extensions the SOURCE_EXTS drift was missing (spec §6.4)", () => {
     expect(moduleLeaf("src/Button.svelte")).toBe("button");
     expect(moduleLeaf("build.gradle")).toBe("build");
     expect(moduleLeaf("Foo.groovy")).toBe("foo");
     expect(moduleLeaf("a/b.cts")).toBe("b");
     expect(moduleLeaf("a/b.mts")).toBe("b");
+    expect(moduleLeaf("build.gradle.kts")).toBe("gradle");
+    expect(moduleLeaf("tasks.rake")).toBe("tasks");
+    expect(moduleLeaf("styre.gemspec")).toBe("styre");
   });
 
   test("a non-source extension is still kept as the leaf", () => {
@@ -1072,6 +1116,13 @@ export function isComponentReady(kind: string, compAbsDir: string): boolean {
 Run: `bun test test/dispatch/provision.test.ts`
 Expected: PASS, including the pre-existing yarn/pnpm marker tests and the mtime-staleness tests. Those are the regression surface — they must not change.
 
+**Then verify the refactor actually happened.** This task has zero observable behavior delta, so a subagent that writes the test, sees green, and never edits `provision.ts` also produces a green branch. Run:
+
+```bash
+grep -n 'kind === "node"\|kind !== "node"\|kind === "sveltekit"' src/dispatch/provision.ts || true
+```
+Expected: no output. Non-empty means the rewrite was skipped.
+
 - [ ] **Step 5: Lint and commit**
 
 ```bash
@@ -1149,32 +1200,25 @@ export function resolvePythonInterpreter(): string {
 
 The thrown message for python is byte-identical to today's (`provision: no python3 or python interpreter found on PATH`), so any existing assertion on it still passes.
 
-In `src/dispatch/check-selector.ts:394`, replace the hardcoded default:
-
-```ts
-    case "pytest":
-      // Fall back to the registry's first python interpreter rather than a hardcoded "python3".
-      return `${opts?.interp ?? stackFacts("python").interpreters[0]} -m pytest`;
-```
-
-Add `import { stackFacts } from "./stack-registry.ts";` to `check-selector.ts`. This is the only `check-selector.ts` change in PR 1.
+**Do NOT touch `check-selector.ts`.** An earlier draft changed its `binaryFor` pytest default to `opts?.interp ?? stackFacts("python").interpreters[0]`. All three reviewers flagged it: the expression evaluates to the literal `"python3"`, so it resolves nothing (unlike `resolveInterpreter`, which probes PATH); it existed only to manufacture a second consumer for `interpreters`; and it contradicts the Global Constraint that PR 1 leaves `check-selector.ts` alone. `binaryFor` is PR 2's job.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `bun test test/dispatch/provision.test.ts test/dispatch/check-selector.test.ts`
+Run: `bun test test/dispatch/provision.test.ts`
 Expected: PASS.
+
+Note the Step-1 test must tolerate a machine with neither `python3` nor `python`, as `test/dispatch/provision.test.ts:214-222` already does — wrap in `try/catch` rather than asserting unconditionally, or a python-less CI container errors instead of skipping.
 
 - [ ] **Step 5: Lint and commit**
 
 ```bash
 bun run lint && bun test
-git add src/dispatch/provision.ts src/dispatch/check-selector.ts test/dispatch/provision.test.ts
+git add src/dispatch/provision.ts test/dispatch/provision.test.ts
 git commit -m "refactor(provision): read interpreter fallback order from the registry (ENG-344)
 
 resolvePythonInterpreter becomes a wrapper over resolveInterpreter(kind).
-Same order, same error string. Also retires check-selector's hardcoded
-'python3' default. The bare-pip/python portability follow-up will consume
-this same field.
+Same order, same error string. The bare-pip/python portability follow-up
+will consume this same field.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01BBT2nDt4wFTDrk5MDcHQB8"
@@ -1310,9 +1354,9 @@ Claude-Session: https://claude.ai/code/session_01BBT2nDt4wFTDrk5MDcHQB8"
 
 Add to `test/setup/manifests.test.ts`:
 
-```ts
-import { SKIP } from "../../src/setup/manifests.ts";
+`test/setup/manifests.test.ts:5` currently imports only `findManifests`. **Edit that line** to `import { SKIP, findManifests } from "../../src/setup/manifests.ts";` — a second mid-file import trips `organizeImports`.
 
+```ts
 test("SKIP membership is unchanged by the registry derivation", () => {
   // Set EQUALITY, not superset: SKIP prunes the walk, so an extra entry would
   // silently find fewer components (spec §6.5).
@@ -1349,11 +1393,9 @@ export const SKIP: ReadonlySet<string> = new Set([
 ]);
 ```
 
-In `src/dispatch/worktree.ts`, replace line 255:
+In `src/dispatch/worktree.ts`, add `import { STACKS } from "./stack-registry.ts";` **to the existing import block at the top of the file** (Biome's `organizeImports` errors on a mid-file import), then replace line 255 with:
 
 ```ts
-import { STACKS } from "./stack-registry.ts";
-
 /** Dirs `sweepScratch` must not descend into: VCS metadata plus every ecosystem's install output
  *  (`node_modules`, `vendor`). A `styre_scratch/` inside a dependency tree is not the worker's. */
 const SWEEP_SKIP_DIRS = new Set([
@@ -1419,24 +1461,33 @@ Claude-Session: https://claude.ai/code/session_01BBT2nDt4wFTDrk5MDcHQB8"
 
 - [ ] **Step 1: Write the failing test**
 
-```ts
-test("unrooted-manifest warnings still cover exactly the targeted languages", () => {
-  const repo = mkdtempSync(join(tmpdir(), "styre-unrooted-"));
-  roots.push(repo);
-  mkdirSync(join(repo, "svc"), { recursive: true });
-  writeFileSync(join(repo, "svc", "Gemfile"), "");
-  writeFileSync(join(repo, "svc", "composer.json"), "{}");
+`test/setup/detect-components.test.ts` has **no `roots` array and no `afterAll`** — it uses a local `fixture(files)` helper (lines 7-15). Use that, and export `TARGETED_LANG_MANIFESTS` so the derivation itself is asserted:
 
-  const warnings = unrootedManifestWarnings(repo);
-  expect(warnings.some((w) => w.includes("Gemfile") && w.includes("no ruby component"))).toBe(true);
-  expect(warnings.some((w) => w.includes("composer.json") && w.includes("no php component"))).toBe(true);
+```ts
+// The behavioral test alone is BLIND: a wrong derivation using `.manifests`
+// instead of `.detectAnchors` passes all 20 tests in this file, because the
+// fixture writes Gemfile/composer.json — the FIRST element of both lists —
+// and the loop breaks there. Assert the derived structure directly.
+test("targeted-language manifests derive to exactly today's table", () => {
+  expect(TARGETED_LANG_MANIFESTS).toEqual([
+    ["jvm-maven", ["pom.xml"]],
+    ["jvm-gradle", ["build.gradle", "build.gradle.kts"]],
+    ["ruby", ["Gemfile"]],
+    ["php", ["composer.json"]],
+  ]);
 });
 
-test("a rooted manifest produces no warning", () => {
-  const repo = mkdtempSync(join(tmpdir(), "styre-rooted-"));
-  roots.push(repo);
-  writeFileSync(join(repo, "Gemfile"), "");
-  expect(unrootedManifestWarnings(repo).some((w) => w.includes("Gemfile"))).toBe(false);
+test("a lockfile-only subdir produces NO warning (the .manifests mis-derivation)", () => {
+  // Gemfile.lock is in ruby.manifests but NOT ruby.detectAnchors.
+  expect(unrootedManifestWarnings(fixture({ "svc/Gemfile.lock": "" }))).toEqual([]);
+});
+
+test("unrooted-manifest warnings still cover the targeted languages", () => {
+  const warnings = unrootedManifestWarnings(
+    fixture({ "svc/Gemfile": "", "svc/composer.json": "{}" }),
+  );
+  expect(warnings.some((w) => w.includes("Gemfile") && w.includes("no ruby component"))).toBe(true);
+  expect(warnings.some((w) => w.includes("composer.json") && w.includes("no php component"))).toBe(true);
 });
 ```
 
@@ -1456,7 +1507,7 @@ In `src/setup/detect-components.ts`, replace lines 59-64. Add `STACKS` to the ex
  *  ecosystem fact, so it does not belong in the registry. */
 const TARGETED_LANG_KINDS = ["jvm-maven", "jvm-gradle", "ruby", "php"] as const;
 
-const TARGETED_LANG_MANIFESTS: Array<[string, readonly string[]]> = TARGETED_LANG_KINDS.map(
+export const TARGETED_LANG_MANIFESTS: Array<[string, readonly string[]]> = TARGETED_LANG_KINDS.map(
   (kind) => [kind, STACKS[kind].detectAnchors],
 );
 ```
@@ -1613,9 +1664,11 @@ Claude-Session: https://claude.ai/code/session_01BBT2nDt4wFTDrk5MDcHQB8"
 - [ ] **Step 1: Confirm no table survived the migration**
 
 ```bash
-grep -rn "EXTENSIONS_BY_KIND\|NODE_INSTALL_MARKERS\|NODE_MANIFEST_FILES\|TARGETED_LANG_MANIFESTS = \[" src/ test/
+grep -rn "EXTENSIONS_BY_KIND\|NODE_INSTALL_MARKERS\|NODE_MANIFEST_FILES" src/ test/ || true
 ```
-Expected: no output except `TARGETED_LANG_KINDS` in `detect-components.ts` (a different identifier). Any other hit is an un-migrated consumer — migrate it before continuing.
+Expected: exactly **one** hit — the stale doc comment at `src/setup/lang/types.ts:3` (`materialized from \`EXTENSIONS_BY_KIND\``). Fix that comment now to say "materialized from the stack registry". Any other hit is an un-migrated consumer.
+
+(`|| true` again: `grep -r` exits 1 when it matches nothing.)
 
 ```bash
 grep -rn 'kind === "node"\|kind !== "node"\|kind === "sveltekit"' src/dispatch/provision.ts
@@ -1625,9 +1678,11 @@ Expected: no output.
 - [ ] **Step 2: Confirm the boundary still holds**
 
 ```bash
-grep -c "^import" src/dispatch/stack-registry.ts
+grep -cE "^\s*(import|const .* = require)" src/dispatch/stack-registry.ts || true
 ```
-Expected: `0`. If non-zero, a task added an import to the registry — revert it; the fact belongs in the consumer.
+Expected: `0`. Note the `|| true`: `grep -c` **exits 1 on a zero count**, so without it the success case reads as a failed step.
+
+This grep is a convenience only. The real guarantee is Task 1's literal-snapshot test (spec §5.2) — `grep` cannot see `Bun.file()`, `process.cwd()`, a dynamic `import()`, or a lazy getter, all of which reach repo state with no import statement.
 
 - [ ] **Step 3: Document the extension point**
 
