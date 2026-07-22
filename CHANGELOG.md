@@ -1,6 +1,26 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.11.0] - 2026-07-22
+
+### Features
+
+- **Preflight now checks your toolchain, not just your CLI provider.** `styre run` fails fast, before any spend, if a command your repo's build/test/check steps need isn't installed, and the `design` phase now runs `provision` first so environment problems surface before design work begins.
+- **Missing or outdated `claude`/`codex` CLIs are now caught immediately.** If your configured agent CLI is missing or below the version styre requires, `styre run`, `styre setup`, and `--resume` all fail fast with a clear message telling you to install or upgrade it, instead of retrying three times and failing with a cryptic error.
+- **Run outcomes are easier to read.** `styre run` now leads with a plain-language outcome sentence, always prints the PR URL when there is one, names the pending signal when a ticket is waiting on you, and shows loopback history as a readable timeline instead of raw internal terms. Errors render as a single clear message with a suggested fix instead of a stack trace.
+- **Escalations to a human are now reported distinctly from dead ends.** A run that hands off to a person now shows the outcome `escalated` (exit code 75) everywhere — the terminal summary, Slack, and analytics — instead of being lumped in with `blocked`.
+- **Telemetry now includes run identity and honest cost totals.** Every exported event carries a stable `run_id` so you can tell two runs of the same ticket apart (and `--resume` keeps the same id), summary cost/token fields are `null` when nothing reported them (instead of a misleading `0`), and a new `usage_coverage` field tells you how complete a summary total is. This is a breaking change to the NDJSON export schema (v1 → v2).
+- **`styre notify` and legibility docs.** Documentation now fully covers the checks/arbiter subsystem, all config keys, exit codes, environment variables, and prompt templates, so the reference material actually matches shipping behavior.
+
+### Bug Fixes
+
+- **A missing or broken test launcher no longer counts as a passed check.** If the test framework can't even start (exit code 126/127, e.g. the launcher isn't installed), styre no longer marks the acceptance criterion as covered — it's retried loudly instead.
+- **A check that errors with no output no longer counts as covered.** Previously a check that couldn't run at all (no test framework detected, no interpreter, or a timeout) and produced no output was silently marked as covering its acceptance criterion; it's now routed to a loud retry with a reason.
+- **Discarded-file detection now works across more languages.** The guard that catches a check silently broken by an undeclared, discarded file now understands Go, Rust, JVM, Ruby, and PHP output (previously Python/Node only), and Rust/Ruby/PHP symbol matching is now anchored so a test's own error text can't be mistaken for a real compiler error.
+- **Discarded Python support files now produce a clear message.** If a discarded `__init__.py` or `conftest.py` breaks test collection, styre now names the real cause instead of silently installing a broken check.
+- **Telemetry events can now be joined back to the dispatch that caused them.** `loopback` and `escalated` events now carry the originating `dispatch_id`, which was previously always null.
+- **Early failures (bad config, wrong adapter, running outside a git repo) are now counted in analytics.** Previously only failures after config was fully resolved were recorded, so early exits were invisible to usage tracking.
+
 ## [0.10.0] - 2026-07-19
 
 ### Features
