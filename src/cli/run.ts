@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defineCommand } from "citty";
+import { preflightAgentCli } from "../agent/preflight.ts";
 import { resolveAgentRunner } from "../agent/resolve.ts";
 import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { discoverRuntimeConfig, loadProfileByConvention, slugForCwd } from "../config/discover.ts";
@@ -23,7 +24,14 @@ import { stdoutSink } from "../telemetry/emit.ts";
 import { buildSummary } from "../telemetry/emitter.ts";
 import type { TelemetryEvent } from "../telemetry/events.ts";
 import { nowUtc } from "../util/time.ts";
-import { EXIT, StyreError, errorKindForExit, toolchainError, usageError } from "./errors.ts";
+import {
+  EXIT,
+  StyreError,
+  agentCliError,
+  errorKindForExit,
+  toolchainError,
+  usageError,
+} from "./errors.ts";
 import { guard } from "./output.ts";
 import { finishRunResult, parkDir } from "./park.ts";
 import { formatMissingTools, preflightToolchain } from "./preflight.ts";
@@ -180,6 +188,14 @@ export async function runImpl(
       throw toolchainError(formatMissingTools(missingTools));
     }
 
+    // Fail fast (no retry burn) if the configured agent CLI is missing or below its supported
+    // version — BEFORE any DB/dispatch, so a missing binary never reaches the provider spawn and
+    // gets mislabeled cause:"transient" and retried 3x (ENG-326).
+    const agentConfig = runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG;
+    const cliPreflight = preflightAgentCli(agentConfig);
+    if (!cliPreflight.ok) throw agentCliError(cliPreflight);
+    if (cliPreflight.unauthHint) process.stderr.write(`run: ${cliPreflight.unauthHint}\n`);
+
     const dbPath =
       args.db && args.db.length > 0
         ? args.db
@@ -189,7 +205,6 @@ export async function runImpl(
     recover(db, realRecoverDeps());
 
     const ports = makeProjectorPorts(runtimeConfig, profile);
-    const agentConfig = runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG;
     // Mint the run identity before any telemetry emit. Guard on getRun===null so a reused --db
     // (non-ephemeral) doesn't insert a second run row.
     if (getRun(db) === null) {
