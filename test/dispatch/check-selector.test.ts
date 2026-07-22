@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { CHECK_RULES } from "../../src/dispatch/check-rules.ts";
-import { frameworkFor } from "../../src/dispatch/check-selector.ts";
+import { frameworkFor, isLaunchFailure } from "../../src/dispatch/check-selector.ts";
 
 const comp = (kind: string, test?: string) => ({
   kind,
@@ -265,6 +265,18 @@ describe("interpretRunOutput", () => {
       "selected-none",
     );
     expect(interpretRunOutput("phpunit", run({ exitCode: 2, stdout: "Error" }))).toBe("red");
+  });
+});
+
+describe("isLaunchFailure", () => {
+  test("isLaunchFailure recognises shell launch-failure codes only (ENG-357)", () => {
+    expect(isLaunchFailure(127)).toBe(true); // command not found
+    expect(isLaunchFailure(126)).toBe(true); // found but not executable
+    expect(isLaunchFailure(0)).toBe(false); // success
+    expect(isLaunchFailure(1)).toBe(false); // ordinary test failure / jest-rspec red
+    expect(isLaunchFailure(2)).toBe(false); // go build error / pytest collection
+    expect(isLaunchFailure(101)).toBe(false); // cargo test failure
+    expect(isLaunchFailure(null)).toBe(false); // timeout / spawn error
   });
 });
 

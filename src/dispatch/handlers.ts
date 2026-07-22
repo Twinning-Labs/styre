@@ -61,6 +61,7 @@ import {
   collectionErrorExcerpt,
   frameworkFor,
   importErrorImplicatesDiscarded,
+  isLaunchFailure,
   signalResultForCoarse,
 } from "./check-selector.ts";
 import { checksFeedback } from "./checks-feedback.ts";
@@ -678,7 +679,14 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
               continue; // selects 0 → identity reject (§5.1)
             }
             coarse = res.coarse;
-            if (coarse === "error")
+            // ENG-357: a shell launch failure (127 command-not-found / 126 not-executable) means the
+            // runner never started — name the missing launcher. Keyed on the exit code, NOT on
+            // `coarse === "error"`: exit 126 buckets as `red` on jest/vitest/junit/rspec/minitest/phpunit
+            // (interpretRunOutput leaves 126 in the per-framework switch), where a coarse-gated
+            // assignment would leave errorReason unset. Diagnosis-only (INV-B): names the fact, no advice.
+            if (isLaunchFailure(exitCode))
+              errorReason = `the test launcher \`${binaryFor(fw, { interp })}\` for \`${testPath}\` could not be executed (exit ${exitCode}) — the check could not be attempted`;
+            else if (coarse === "error")
               errorReason = `the check for \`${testPath}\` timed out or could not be launched and produced no output`;
           }
         }
@@ -717,7 +725,12 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         // this path: there is no output to match. Route it to the SAME uncovered path (loud retry,
         // reason named), for EVERY errored-empty check regardless of discards — the framework=null
         // case is discard-independent (see docs/brainstorms/2026-07-21-eng-347-…). Diagnosis-only.
-        if (coarse === "error" && rawOutput.trim() === "") {
+        // ENG-357: also reject a shell launch failure (127/126) whose output is NON-empty ("command not
+        // found" on stderr) — ENG-347's empty-only clause cannot see it. Keyed directly on the exit code
+        // so it fires even where interpretRunOutput buckets 126 as `red`. Safe: no framework returns
+        // 126/127 as a test verdict, so a `red`-coarse launch failure can never be a genuine failing
+        // test. Same uncovered/loud-retry path — the launch failure is never recorded as covering.
+        if (isLaunchFailure(exitCode) || (coarse === "error" && rawOutput.trim() === "")) {
           missReason.set(
             c.ac_id,
             errorReason ??
