@@ -67,7 +67,7 @@ export function parseCodexUsage(stdout: string): {
   tokensIn: number | null;
   tokensOut: number | null;
   cacheRead: number | null;
-  cacheCreate: null;
+  cacheCreate: number | null;
 } {
   const empty = {
     costUsd: null,
@@ -93,7 +93,7 @@ export function parseCodexUsage(stdout: string): {
         tokensIn: num(usage.input_tokens),
         tokensOut: num(usage.output_tokens),
         cacheRead: num(usage.cached_input_tokens),
-        cacheCreate: null,
+        cacheCreate: num(usage.cache_write_input_tokens),
       };
     }
   }
