@@ -48,10 +48,10 @@ Three approaches were weighed:
 
 - **Structural (chosen).** Exit `127`/`126` is an unambiguous, language-agnostic launch-failure signal
   already carried by the run (`exitCode` is a live local at the guard site). One integer comparison; no
-  output vocabulary; nothing to maintain per language. Because it keys off the exit code rather than any
-  framework-specific phrasing, it covers **every** non-pytest framework — including junit-maven,
-  junit-gradle and vitest, which the ticket's prose list omits — for free, and covers pytest too (belt
-  and suspenders over its existing pre-check).
+  output vocabulary; nothing to maintain per language. Because the guard keys off the exit code **directly**
+  (see §3 — *not* off the coarse bucket, which buckets the two launch codes inconsistently), it covers
+  **every** framework for **both** launch codes — including junit-maven, junit-gradle and vitest, which the
+  ticket's prose list omits, and pytest itself (belt and suspenders over its existing pre-check).
 - **Per-framework pre-run binary probe (rejected).** Mirror pytest's `resolvePythonInterpreter()` for every
   framework: probe the binary on `PATH` before running. More code, duplicates work the run already does,
   and adds a per-framework surface to keep current. Its only edge — a tailored message *before* attempting
@@ -117,31 +117,48 @@ export const isLaunchFailure = (exitCode: number | null): boolean =>
   exitCode !== null && LAUNCH_FAILURE_EXIT_CODES.has(exitCode);
 ```
 
-**b. Set a launcher-naming `errorReason` on the real-run path.** Today, when a real run returns coarse
-`error`, `handlers.ts` sets a single generic reason ("timed out or could not be launched and produced no
-output"). Split it: when `isLaunchFailure(exitCode)`, set a reason that **names the missing launcher** using
-the existing `binaryFor(fw)` helper (`"cargo test"`, `"go test"`, `"rspec"`, `"ruby -Itest"`, `"phpunit"`,
-`"mvn"`, `"gradle"`, `"jest"`, `"vitest"`); otherwise keep the existing timeout wording. Example message:
+**b. Set a launcher-naming `errorReason` keyed on the launch failure — not on `coarse === "error"`.**
+Today `handlers.ts:681-682` sets a single generic reason ("timed out or could not be launched and produced
+no output") only inside an `if (coarse === "error")`. Two changes: (i) when `isLaunchFailure(exitCode)`, set
+a reason that **names the missing launcher** via the existing `binaryFor(fw, { interp })` helper
+(`"cargo test"`, `"go test"`, `"rspec"`, `"ruby -Itest"`, `"phpunit"`, `"mvn"`, `"gradle"`, `"jest"`,
+`"vitest"`); (ii) key that assignment on `isLaunchFailure(exitCode)`, **not** on `coarse === "error"` —
+because a `126` launch failure surfaces as `coarse === "red"` on seven of ten frameworks (§3c), where the
+old `coarse === "error"` gate would leave `errorReason` unset and the guard would fall through to the wrong
+"produced no output" wording. Keep the existing timeout wording for the non-launch `coarse === "error"`
+case. Example message:
 
 > the test launcher `cargo test` for `crates/foo/tests/bar.rs` could not be executed (exit 127) — the
 > check could not be attempted
 
 Diagnosis-only: it states the fact and names the launcher; it gives no instruction (no "install X").
 
-**c. Extend the ENG-347 guard** to also fire on a launch failure:
+**c. Extend the ENG-347 guard so the launch-failure clause is NOT gated on `coarse === "error"`:**
 
 ```ts
-if (coarse === "error" && (rawOutput.trim() === "" || isLaunchFailure(exitCode))) {
+if (isLaunchFailure(exitCode) || (coarse === "error" && rawOutput.trim() === "")) {
   missReason.set(c.ac_id, errorReason ?? /* existing empty-output fallback */);
   continue; // uncovered → loud retry path, no unverified check recorded as covering
 }
 ```
 
-`exitCode` is already a live local at this site; `interpretRunOutput` already maps `126`/`127` → `error`
-before the per-framework switch, so `coarse === "error"` always holds when `isLaunchFailure(exitCode)` is
-true (the `coarse` clause is kept for symmetry with ENG-347, not because it can differ). Nothing downstream
-of the guard changes: `classify-prior.ts` and `post-implement-rerun.ts` are untouched — the fix stops the
-bad input from reaching them, exactly as ENG-347 did.
+**Why the launch clause must stand alone** (not `&&`-ed under `coarse === "error"`). `interpretRunOutput`
+maps exit **127** → `error` uniformly (`check-selector.ts:185`, before the per-framework switch), but it
+does **not** map exit **126** — 126 falls through into the switch, where the frameworks whose non-zero
+default is `red` (jest, vitest, junit-maven, junit-gradle, rspec, minitest, phpunit) return
+`coarse === "red"`; only pytest, go and cargo route 126 to `error`. A guard gated on `coarse === "error"`
+would therefore **miss a 126 launch failure on seven of ten frameworks**, recording it as a genuine covered
+red — the exact bug this ticket closes. Keying the launch clause directly on `exitCode` closes 126
+everywhere. This is safe — it cannot over-reject a real red — precisely by the §2.2 argument: no framework
+returns 126/127 as a *test* verdict (those codes come only from the shell failing to start the process), so
+firing on a `red` coarse whose code is 126/127 can never swallow a genuine test failure. `exitCode === 0`
+(green) never satisfies `isLaunchFailure`, `selected-none` has already `continue`d before this site, and
+`isLaunchFailure(null)` is false — so the empty-output/timeout and green paths keep their existing behavior.
+
+Nothing downstream of the guard changes: `classify-prior.ts` and `post-implement-rerun.ts` are untouched.
+`interpretRunOutput` is likewise left **unchanged** — the guard, not the coarse bucketer, owns launch-failure
+recognition (see §4). The fix stops the bad input from reaching the classify/downgrade chain, exactly as
+ENG-347 did.
 
 ## 4. Scope held
 
@@ -155,9 +172,11 @@ bad input from reaching them, exactly as ENG-347 did.
 **OUT**
 
 - The empty-output case (ENG-347, done).
-- The coarse bucketing itself (`interpretRunOutput`) — the `127`/`126` → `error` mapping is affirmed
-  correct; other `error` codes (pytest 3/4, Go/Cargo internal, truncated timeout) are affirmed
-  `environmental` (§2.3).
+- The coarse bucketing itself (`interpretRunOutput`) is left **unchanged**. We deliberately do **not** add a
+  `126 → error` mapping to it (that would be a broader bucketing change, and other consumers read `coarse`);
+  the guard recognizes launch failures structurally from `exitCode` instead (§3c), so the fix does not
+  depend on the coarse bucket. The existing `127 → error` mapping stays; the other `error` codes (pytest
+  3/4, Go/Cargo internal, timeout) stay `environmental` (§2.3).
 - The downstream `environmental → advisory` rule (`post-implement-rerun.ts`) — stop the bad input reaching
   it; don't change the rule (same posture as ENG-347).
 - The discard-poison matcher vocabulary / language registry (ENG-343 / ENG-348).
@@ -167,8 +186,12 @@ bad input from reaching them, exactly as ENG-347 did.
 - **Unit, per affected non-pytest framework** (go, cargo, rspec, minitest, jest, phpunit; junit-maven /
   junit-gradle / vitest covered by the same structural path): inject a run returning
   `{ exitCode: 127, stdout: "", stderr: "<launcher>: command not found", timedOut: false }` → the AC is
-  **not** recorded as covering; the step's uncovered reason names the missing launcher. One `126` case
-  (permission-denied stderr) proves the second code is live.
+  **not** recorded as covering; the step's uncovered reason names the missing launcher. One `126` case must
+  target a framework whose non-zero default is `red` (e.g. rspec or jest) — where a `126` run surfaces as
+  `coarse === "red"`, not `error` — so it proves the guard fires on the **exit code alone**, not because the
+  coarse bucket happened to be `error`. (A `126` test written only against pytest/go/cargo would be vacuous:
+  it would pass via the `coarse === "error"` branch and prove nothing about the seven `red`-default
+  frameworks — the exact hole the earlier coarse-gated guard left open.)
 - **Non-vacuous smoke cell with a contrast pair** (mirrors `scope-disposition-smoke`): in one dispatch,
   a missing-binary check (exit 127) → **uncovered**, alongside a genuine non-zero red (exit 1 with real
   failure output) → **still covered**. The contrast makes the negative non-vacuous: it proves the guard
@@ -178,7 +201,9 @@ bad input from reaching them, exactly as ENG-347 did.
 ## 6. Residual / boundary notes
 
 - The truncated-but-non-empty **timeout** subcase stays `environmental` (inherited from ENG-347 §2). A
-  timeout is not a launch failure — the process *did* start — so it is correctly outside this guard.
+  timeout is not a launch failure — the process *did* start — so it is correctly outside this guard. (In
+  production `runCommand` returns empty output on timeout — `run-command.ts` — so this subcase is reachable
+  only via an injected test runner; harmless either way.)
 - If a future need arises to fail *earlier* with a per-tool preflight message (the pre-run-probe edge in
   §2.1), that belongs with the toolchain-preflight design, not a widening of this guard.
 - No change to the `environmental → advisory` rule or the coarse bucketing means this ticket is composable
