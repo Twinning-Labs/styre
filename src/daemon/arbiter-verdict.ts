@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import { getLatestForTicket } from "../db/repos/dispatch.ts"; // the current branch HEAD sha source used by the resolver
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { latestBlameAtSha, latestReauthorAtSha } from "../db/repos/ground-truth-signal.ts";
+import { latestDispatchForStep } from "../db/repos/review-finding.ts";
 import { insertPending as insertSignal } from "../db/repos/signal.ts";
 import { setTicketStatus } from "../db/repos/ticket.ts";
 import { getByKey, resetToPending } from "../db/repos/workflow-step.ts";
@@ -40,8 +41,9 @@ function reauthorRoundExceeded(db: Database, ticketId: number, cap: number): boo
 export function applyArbiterVerdict(
   db: Database,
   ticketId: number,
-  _opts: { stepKey: string },
+  opts: { stepKey: string },
 ): GateVerdictResult {
+  const dispatchId = latestDispatchForStep(db, ticketId, opts.stepKey);
   const sha = getLatestForTicket(db, ticketId)?.branch_head_sha ?? null;
   const blames = sha === null ? [] : latestBlameAtSha(db, ticketId, sha);
   if (blames.length === 0) return { decision: "clean" }; // nothing to route (no-op guard)
@@ -56,6 +58,7 @@ export function applyArbiterVerdict(
       });
       appendEvent(db, {
         ticketId,
+        dispatchId: dispatchId ?? undefined,
         kind: "escalated",
         reason: "gate-round cap",
         signature: `gate-cap:${GATE_ROUND_CAP}`,
@@ -86,6 +89,7 @@ export function applyArbiterVerdict(
       }
       appendEvent(db, {
         ticketId,
+        dispatchId: dispatchId ?? undefined,
         kind: "loopback",
         loop: "reauthor",
         routeTo: "checks:reauthor",
@@ -97,9 +101,15 @@ export function applyArbiterVerdict(
   }
 
   // Pure code-wrong (no check-wrong) → loopback implement now (no re-author needed this round).
-  gateOriginLoopback(db, ticketId, "checks:arbitrate", {
-    blame: blames.map((b) => ({ acCheckId: b.acCheckId, blame: b.blame })),
-  });
+  gateOriginLoopback(
+    db,
+    ticketId,
+    "checks:arbitrate",
+    {
+      blame: blames.map((b) => ({ acCheckId: b.acCheckId, blame: b.blame })),
+    },
+    dispatchId,
+  );
   return { decision: "loopback" };
 }
 
@@ -134,8 +144,9 @@ export function latestReauthorRoute(
 export function applyReauthorVerdict(
   db: Database,
   ticketId: number,
-  _opts: { stepKey: string },
+  opts: { stepKey: string },
 ): GateVerdictResult {
+  const dispatchId = latestDispatchForStep(db, ticketId, opts.stepKey);
   const route = latestReauthorRoute(db, ticketId);
   if (route === null) return { decision: "clean" }; // nothing routed (no-op guard)
   const blames = latestBlameAtSha(db, ticketId, route.sha);
@@ -156,6 +167,7 @@ export function applyReauthorVerdict(
       });
       appendEvent(db, {
         ticketId,
+        dispatchId: dispatchId ?? undefined,
         kind: "escalated",
         reason: "gate-round cap",
         signature: `gate-cap:${GATE_ROUND_CAP}`,
@@ -172,10 +184,16 @@ export function applyReauthorVerdict(
     // Mixed (code-wrong also present) OR a rejected re-author → re-code. gateOriginLoopback resets
     // units + gate + arbitrate + reauthor; the installed re-authors persist (supersede+insert already
     // committed) and re-run next gate round.
-    gateOriginLoopback(db, ticketId, "checks:reauthor", {
-      codeWrong: anyCodeWrong,
-      rejected: anyRejected,
-    });
+    gateOriginLoopback(
+      db,
+      ticketId,
+      "checks:reauthor",
+      {
+        codeWrong: anyCodeWrong,
+        rejected: anyRejected,
+      },
+      dispatchId,
+    );
     return { decision: "loopback" };
   }
   if (anyInstalled) {
@@ -195,6 +213,7 @@ export function applyReauthorVerdict(
       // payload to this event without first renaming its loop label off "checks".
       appendEvent(db, {
         ticketId,
+        dispatchId: dispatchId ?? undefined,
         kind: "loopback",
         loop: "checks",
         routeTo: "verify:checks-gate",

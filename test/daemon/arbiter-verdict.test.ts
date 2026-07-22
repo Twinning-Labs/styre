@@ -93,6 +93,27 @@ test("arbiter verdict: code-wrong under the cap loops implement (attempt preserv
   expect(events[0]?.route_to).toBe("checks:arbitrate");
 });
 
+test("arbiter loopback carries the checks:arbitrate dispatch_id", () => {
+  const { db, ticketId } = makeTestDb();
+  seedGateStepWithAttempt(db, ticketId, 1); // attempt=1 < CAP=3
+  seedLatestDispatchSha(db, ticketId, "S1");
+  const arb = insertPending(db, { ticketId, stepKey: "checks:arbitrate", stepType: "dispatch" });
+  insertDispatch(db, { ticketId, dispatchId: "T-d0004", seq: nextSeq(db, ticketId), stepId: arb.id });
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", verifyCheckTypes: ["test"], status: "verified" });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-blame",
+    result: "fail",
+    branchHeadSha: "S1",
+    detail: { acId: 4, acCheckId: 40, blame: "code-wrong", reason: "r" },
+  });
+  const v = applyArbiterVerdict(db, ticketId, { stepKey: "checks:arbitrate" });
+  const loopback = listEvents(db, ticketId).find((e) => e.kind === "loopback");
+  db.close();
+  expect(v.decision).toBe("loopback");
+  expect(loopback?.dispatch_id).toBe("T-d0004");
+});
+
 test("arbiter verdict: check-wrong routes to checks:reauthor (loop:'reauthor', NOT loop:'checks') — units + gate untouched, checks:reauthor reset to pending", () => {
   const { db, ticketId } = makeTestDb();
   seedGateStepWithAttempt(db, ticketId, 1);
