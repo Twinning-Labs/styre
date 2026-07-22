@@ -272,7 +272,15 @@ Enumerated because "no behavior change" would be false, and reviewers should see
 5. **`ignoreDirs`/`SKIP` must be set-EQUAL, not a superset.** (Corrected during planning — the first draft said "⊇", which is backwards: `SKIP` *prunes* the manifest walk, so a superset would skip more dirs and silently find fewer components.) `SKIP`'s `.git`, `dist`, `Pods` belong to no kind and move to `GENERIC_IGNORE_DIRS`; the rest decompose cleanly per kind (`target`→rust+jvm-maven, `testdata`→go, `.tox`/`.nox`/`.venv`/`venv`/`__pycache__`→python, `.svelte-kit`→node, `.gradle`/`build`→jvm-gradle, `.mvn`→jvm-maven, `vendor`→ruby+php, `node_modules`→node). A test asserts the derived union **equals** today's `SKIP` exactly.
 
    `SWEEP_SKIP_DIRS` (`worktree.ts:255`, today `.git` + `node_modules`) becomes `.git` + every kind's `installOutputDir` — which adds `vendor`. Behavior delta: `sweepScratch` no longer descends into a PHP `vendor/` tree looking for `styre_scratch/`. Correct and faster; needs a test.
-6. **Unmodeled kinds keep the conservative path.** `kind` is an unconstrained `z.string()` (`profile.ts:98`), so custom kinds are legal. `stackFacts()` returns empty facts for them, which would probe everything and risk re-introducing the ENG-332 false-fail for an un-modeled ecosystem. So the preflight keeps "unmodeled kind **and** has `prepare` → probe prepare only" as an explicit, documented fallback. Combined with the §5.3 exhaustiveness test, it is unreachable for the 9 real kinds. This is a narrowing of the special-case, not a retention of it — AC 2 is met for every kind the registry models.
+6. **Unmodeled kinds keep the conservative path. Decision (operator, 2026-07-22): keep it.**
+
+   `kind` is an unconstrained `z.string()` (`profile.ts:98`), so custom kinds are legal via config override or a hand-edited profile. `stackFacts()` returns empty facts for them; probing everything on that basis would re-introduce the ENG-332 false-fail for any un-modeled ecosystem whose test tool its install step provides. So the preflight keeps "unmodeled kind **and** has `prepare` → probe prepare only".
+
+   **Stated honestly:** the branch, its comment, and its behavior are identical to ENG-332's. Only the guard narrowed, from `c.prepare` to `c.prepare && !isModeledKind(kind)`. An earlier draft of this section argued that made it "a narrowing, not a retention" — that was pre-arguing the acceptance criterion into compliance, which is the move ENG-332's own review objected to in its first draft. It is a retention, scoped to the cases where the registry has no data to offer instead.
+
+   **What it costs:** a component in an un-modeled language gets no build/test tool coverage at all — the very coverage ENG-332 §1.3 said the preflight existed to provide. Accepted, because the alternative reintroduces the motivating bug for those users.
+
+   **The AC is therefore reworded** to describe what happens rather than claim a clean deletion (§9). A reviewer who wants genuine deletion should take the option recorded here: probe un-modeled build/test tools but **warn** instead of exiting 69 — coverage without the false stop. That needs a second, softer outcome in a check that currently only knows how to halt the run, so it is its own small ticket, not a line in this one.
 
 ## 6b. `profile.json` and the registry: two lifecycles for one fact
 
@@ -289,11 +297,36 @@ Add `.vue` to `STACKS.node.extensions` tomorrow and every deployed profile keeps
 
 The repo has already ruled on this hazard once: `profile.ts:139-144` hard-rejects a `schemaVersion: 2` profile precisely because it "does not carry per-component `extensions[]` required for file-identity routing." So when extensions became a frozen artifact field, that warranted a schema bump and a hard error.
 
-**Decision: option (b), the documented invariant.** Deriving `extensions` at load instead of persisting it (option (a)) would remove the split-brain, but it re-opens the schemaVersion-2 decision, changes a seam artifact's meaning, and is out of proportion to PR 1. Instead:
+**Decision (operator, 2026-07-22): option (b) — stop persisting it.** The documented-invariant option was rejected as the weaker answer: it makes the drift *discouraged* rather than *impossible*, and relies on a future reader remembering a rule. Option (b) removes the second copy, so the invariant it would have protected becomes unnecessary.
 
-> **Invariant (RG-1).** A registry field that is materialized into `profile.json` may not change without a `schemaVersion` bump. Today that list is exactly one field: `extensions`. Every other registry field is read live and may change freely.
+### 6b.1 What option (b) entails
 
-Enforced by a test asserting the materialized-field list is exactly `["extensions"]`, so adding a second persisted field forces a reader to confront this invariant. Documented in `docs/architecture/conventions.md` alongside the registry.
+1. **Delete `extensions` from `ComponentSchema`** (`profile.ts:102`) and from `Component`. `ComponentDraft = Omit<Component, "extensions">` (`lang/types.ts:5`) collapses to `Component`.
+2. **Derive at the point of use.** `extMatches` (`components.ts:73`) reads `stackFacts(c.kind).extensions` instead of `c.extensions`. Nothing is stored, so nothing can go stale.
+3. **Delete the materialization**: `runRegistry`'s `extensions: [...]` (`detect-components.ts:28`), `mergeComponents`'s `extensions: s.extensions` (`discover-schema.ts:43`), and `EXTENSIONS_BY_KIND` itself.
+4. **Bump `schemaVersion` 3 → 4.**
+
+### 6b.2 Why the bump is needed, and why it is cheap
+
+The bump is **not** for new binaries reading old files — that direction is safe (see below). It is for the reverse: a **v3 binary reading a v4 file**. The v4 file omits `extensions`; v3's schema has `.default([])`, and `extMatches` treats an empty list as *"match every file"* (`components.ts:75`). So a stale binary would silently over-route every component against every changed file — more components marked impacted, wrong attribution, more verify work. Silent and wrong.
+
+`ProfileSchema.schemaVersion` is `z.literal(3)` (`profile.ts:116`), so a v3 binary reading a v4 file **already fails loudly** at parse. The bump costs one line and buys exactly the guard we need. This is the one place the existing design was better than it knew.
+
+**Old files keep working.** `parseProfile` should accept **both 3 and 4**, ignoring a v3 file's stored `extensions` and deriving instead. That is safe because for all nine kinds the derived list *equals* the stored one by construction — that equality is precisely what the migration test asserts — and for an unrecognised kind both are empty. So **no deployed profile needs regenerating**, which removes the disruption that made this option look expensive. `styre setup` simply starts writing 4.
+
+*Residual, accepted:* a hand-edited v3 profile carrying custom `extensions` would have them silently ignored. `extensions` has always been scan-authoritative (the agent cannot author it — `discover-schema.ts:43`; it is absent from `DiscoverSchema`), so hand-editing is unsupported today. Worth a line in the changelog, not a mechanism.
+
+### 6b.3 The principle this replaces RG-1 with
+
+> **A registry fact is never persisted into `profile.json`.** The setup file records what setup *decided* about this repo — its components, their commands, their install step. The registry records what is *true of an ecosystem*. Persisting the latter creates two copies with different lifecycles, which is the bug class this work exists to delete.
+
+This is a better rule than RG-1 because it needs no enforcement test and no version-bump ritual — it is a statement about what belongs in each place.
+
+**It has one more customer already.** `testFilePattern` (`profile.ts:101`) is persisted today and is emitted by only php and ruby (`php.ts:35`, `ruby.ts:29`) as a fixed per-ecosystem string — i.e. it is a registry fact sitting in the setup file. When PR 2 moves it into the registry it gets the same treatment, under the same principle and (if the timing works) the same schema bump.
+
+### 6b.4 Scope
+
+Its own ticket, per the operator's "even if it means splitting this development effort further." It needs `extensions` in the registry, so it supersedes the `EXTENSIONS_BY_KIND` and `SOURCE_EXTS` fold tasks in the follow-up rather than sitting after them — those tasks would otherwise build the persisted-field version first and then immediately undo it.
 
 ## 7. Adjacent findings (recorded, NOT fixed here)
 
@@ -319,23 +352,24 @@ Three independent adversarial reviews found the original single-PR scope violate
 | **ENG-344** | `stack-registry.ts` + the preflight fix (§4.2). The motivating bug and AC 2. | — |
 | **`fix/` A** | `MANIFEST_BASENAMES` omits `Gemfile`/`composer.json` (§6.3) | — |
 | **`fix/` B** | `SOURCE_EXTS` missing eight extensions (§6.4) | — |
-| **`refactor/` follow-up** | the mechanical fold of the remaining tables (§4.1 rows other than preflight) | ENG-344 |
+| **`refactor/` extensions** | stop persisting `extensions`; derive from the registry; `schemaVersion` 3 → 4 (§6b). Supersedes the `EXTENSIONS_BY_KIND` + `SOURCE_EXTS` fold tasks. | ENG-344 |
+| **`refactor/` follow-up** | the mechanical fold of the remaining tables (§4.1 rows other than preflight or extensions) | ENG-344 |
 | **PR 2** | the framework-keyed half (§4.3) | ENG-344 |
 
 **Consequence for the registry's shape.** With the folds moved out, only `installBinDirs` and `installProvidedTools` have a consumer in ENG-344. The ticket's own rule ("start with the subset that has ≥2 real consumers — don't add speculative fields") therefore means every other field in §3.3 lands in the follow-up, with the consumer that reads it. `StackFacts` starts with two fields and grows. This also removes any duplication window: `EXTENSIONS_BY_KIND`, `SKIP`, `MANIFEST_BASENAMES` and friends are untouched until the task that deletes them.
 
-**§6b (RG-1) becomes live only when `extensions` enters the registry** — that is the field materialized into `profile.json`, so the invariant and its test travel with the follow-up task that adds it.
+**§6b is now its own ticket** rather than an invariant carried by the fold: the operator chose to stop persisting `extensions` outright, so the `EXTENSIONS_BY_KIND`/`SOURCE_EXTS` fold tasks are superseded — building the persisted version first and undoing it immediately after would be wasted work.
 
 ## 9. Acceptance criteria (ENG-344)
 
 - [ ] `src/dispatch/stack-registry.ts` exists, exports `STACKS` with entries for all 9 kinds and a total `stackFacts(kind)`.
 - [ ] Preflight derives precondition-vs-install-provided from `installBinDirs`/`installProvidedTools`/the relative-path rule, **gated on `c.prepare !== undefined`** (§4.2). php/python clean-checkout pass; go/jvm still probe build/test; a modeled-kind component with no `prepare` still probes its build/test.
-- [ ] The ENG-332 special-case is gone for every modeled kind, retained only as the documented unmodeled-kind fallback (§6.6).
+- [ ] The ENG-332 special-case no longer fires for any kind the registry models; it is **retained, deliberately and documented**, only where the registry has no facts to offer (an un-modeled `kind` that also has a `prepare`). §6.6 records the cost and the path to genuine deletion.
 - [ ] `EXTENSIONS_BY_KIND` and `SOURCE_EXTS` are both superseded by the registry; routing unchanged except the **eight** extensions §6.4 adds, each with a test.
 - [ ] Provision reads markers, install output dir, manifests, and interpreters from the registry; conditional detector logic untouched.
 - [ ] `TARGETED_LANG_MANIFESTS`, `SKIP`, `SWEEP_SKIP_DIRS`, and `runtime-deps`' file→lang mapping all derive from the registry; the parser map stays local.
 - [ ] The §5 boundary tests pass — including the **literal snapshot** (§5.2), which is the load-bearing one, and the getter/prototype structural checks.
-- [ ] Invariant RG-1 (§6b) is documented and tested: the set of registry fields materialized into `profile.json` is exactly `["extensions"]`.
+- [ ] *(Moved to its own ticket, §6b.4.)* `extensions` stops being persisted into `profile.json` and is derived from the registry at the point of use; `schemaVersion` 3 → 4.
 - [ ] `bun run lint` + `bun run typecheck` + `bun test` green. (`typecheck` is a distinct gate — CI runs it, Biome does not type-check, and `bun test` strips types.)
 
 ## 10. Out of scope
