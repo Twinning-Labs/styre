@@ -80,7 +80,7 @@ note | parked`).
 | `type` | `"event"` (literal) | no | constant |
 | `run_id` | string | no | the run row (§2) |
 | `ticket_id` | number | no | `event_log.ticket_id` (run-local, §2) |
-| `dispatch_id` | string \| null | yes | `event_log.dispatch_id` — the dispatch that caused this event; populated for `loopback`/`escalated`, `null` for `transition`/`resumed`/`note` and projection-transport escalations (§5) |
+| `dispatch_id` | string \| null | yes | `event_log.dispatch_id` — the dispatch that caused this event; populated for `loopback`/`escalated`, `null` for `transition`/`resumed`/`note`/`parked` and projection-transport escalations (§5) |
 | `seq` | number | no | `event_log.seq` — monotonic per-ticket sequence, also the streaming watermark |
 | `kind` | string | no | `event_log.kind` (`transition`/`loopback`/`escalated`/`resumed`/`note`/`parked`) |
 | `actor` | string \| null | yes | `event_log.actor` (defaults to `"runner"` when unspecified at write time) |
@@ -243,7 +243,8 @@ judged, and that dispatch's id is written to `event_log.dispatch_id` at emit tim
 can join a loopback/escalation back to its causing dispatch.
 
 It is `null` for events with no causing dispatch: `transition` (stage advance), `resumed` (operator
-resume), `note` (housekeeping), and the projection-transport escalation raised during outbox drain.
+resume), `note` (housekeeping), `parked` (stashes its dispatch id in `payload.dispatchId` instead of
+the column), and the projection-transport escalation raised during outbox drain.
 
 This field shipped in the `SCHEMA_VERSION 1→2` bump (originally reserved/always-null); populating it
 was a non-breaking change and required no further version bump.

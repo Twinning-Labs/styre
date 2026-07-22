@@ -146,6 +146,12 @@ the dispatch is recorded, before any new dispatch on the same step is created). 
 gains concurrency or defers verdicts across ticks, this re-derivation must become source-threading
 (the rejected third option).
 
+**Gate exception:** `verify:checks-gate` events derive from the **code dispatch**
+(`getLatestForTicket(db, ticketId)`) instead of `latestDispatchForStep`, because the gate is an
+in-process handler (`src/dispatch/handlers.ts`) that never calls `runAgentDispatch` and so has no
+dispatch row of its own — `latestDispatchForStep` would return `null`. Where a judged step runs
+multiple sub-dispatches (e.g. `checks:arbitrate`), "latest" deliberately means the final sub-dispatch.
+
 ---
 
 ## 6. Testing (TDD)
