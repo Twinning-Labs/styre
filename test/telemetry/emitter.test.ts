@@ -12,6 +12,8 @@ import { getRun } from "../../src/db/repos/run.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { buildSummary, createTelemetryEmitter } from "../../src/telemetry/emitter.ts";
 import type { TelemetryEvent } from "../../src/telemetry/events.ts";
+import { PricingConfigSchema } from "../../src/telemetry/pricing.ts";
+import { nowUtc } from "../../src/util/time.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 const RESULT: RunResult = { outcome: "pr-ready", stage: "merge", status: "done", iterations: 1 };
@@ -202,5 +204,173 @@ test("emitCiHandoff sinks a well-formed ci_handoff event", () => {
     expect(ev.read).toBe("pending");
     expect(typeof ev.measured_at).toBe("string");
   }
+  db.close();
+});
+
+test("claude run: reported cost_usd untouched AND cost_usd_estimated computed", () => {
+  const { db, ticketId } = makeTestDb(); // provider = claude
+  const sink: TelemetryEvent[] = [];
+  const emitter = createTelemetryEmitter((e) => sink.push(e));
+  const d = insertDispatch(db, {
+    ticketId,
+    dispatchId: "C1",
+    seq: nextSeq(db, ticketId),
+    model: "claude-opus-4-8",
+  });
+  completeDispatch(db, d.id, {
+    outcome: "clean-success",
+    costUsd: 0.25,
+    tokensIn: 1000,
+    tokensOut: 200,
+    cacheRead: 400,
+    cacheCreate: 100,
+    endedAt: nowUtc(),
+  });
+  emitter.flushNew(db, ticketId);
+  const ev = sink.find((e) => e.type === "dispatch" && e.dispatch_id === "C1");
+  expect(ev?.type).toBe("dispatch");
+  if (ev?.type === "dispatch") {
+    expect(ev.cost_usd).toBeCloseTo(0.25); // reported, untouched
+    expect(ev.cost_usd_estimated).toBeCloseTo(
+      (1000 * 5.0 + 400 * 0.5 + 100 * 6.25 + 200 * 25.0) / 1e6,
+      8,
+    );
+  }
+  db.close();
+});
+
+test("calibration: a claude run's estimate tracks its reported cost within tolerance", () => {
+  const { db, ticketId } = makeTestDb();
+  const sink: TelemetryEvent[] = [];
+  const emitter = createTelemetryEmitter((e) => sink.push(e));
+  const d = insertDispatch(db, {
+    ticketId,
+    dispatchId: "K1",
+    seq: nextSeq(db, ticketId),
+    model: "claude-opus-4-8",
+  });
+  // What an API-key `claude` CLI would report for these tokens at list price.
+  const reported = (120_000 * 5.0 + 800_000 * 0.5 + 40_000 * 6.25 + 6_000 * 25.0) / 1e6;
+  completeDispatch(db, d.id, {
+    outcome: "clean-success",
+    costUsd: reported,
+    tokensIn: 120_000,
+    tokensOut: 6_000,
+    cacheRead: 800_000,
+    cacheCreate: 40_000,
+    endedAt: nowUtc(),
+  });
+  emitter.flushNew(db, ticketId);
+  const ev = sink.find((e) => e.type === "dispatch" && e.dispatch_id === "K1");
+  if (ev?.type === "dispatch" && ev.cost_usd !== null && ev.cost_usd_estimated !== null) {
+    // Guards gross table/formula drift: estimate within 1% of the provider-reported figure.
+    expect(Math.abs(ev.cost_usd_estimated - ev.cost_usd) / ev.cost_usd).toBeLessThan(0.01);
+  } else {
+    throw new Error("expected both reported and estimated cost");
+  }
+  db.close();
+});
+
+test("codex run: cost_usd null, cost_usd_estimated non-null; summary floor-sum + coverage", () => {
+  const { db, ticketId } = makeTestDb({ provider: "codex" });
+  const sink: TelemetryEvent[] = [];
+  const emitter = createTelemetryEmitter((e) => sink.push(e));
+  const d = insertDispatch(db, {
+    ticketId,
+    dispatchId: "X1",
+    seq: nextSeq(db, ticketId),
+    model: "gpt-5.6-sol",
+  });
+  completeDispatch(db, d.id, {
+    outcome: "clean-success",
+    // no costUsd → cost_usd stays null (codex reports none)
+    tokensIn: 51599,
+    tokensOut: 267,
+    cacheRead: 36339,
+    cacheCreate: 15248,
+    endedAt: nowUtc(),
+  });
+  emitter.flushNew(db, ticketId);
+  const ev = sink.find((e) => e.type === "dispatch" && e.dispatch_id === "X1");
+  if (ev?.type === "dispatch") {
+    expect(ev.cost_usd).toBeNull();
+    expect(ev.cost_usd_estimated).toBeCloseTo(0.1215395, 6);
+  }
+  emitter.emitSummary(db, ticketId, {
+    outcome: "pr-ready",
+    iterations: 1,
+    stage: "merge",
+    status: "done",
+  });
+  const s = sink.find((e) => e.type === "summary");
+  if (s?.type === "summary") {
+    expect(s.cost_usd).toBeNull(); // no dispatch reported USD
+    expect(s.cost_usd_estimated).toBeCloseTo(0.1215395, 6);
+    expect(s.usage_coverage.cost_usd_estimated).toBe(1);
+    expect(s.pricing_version).toBe("builtin@2026-07-22");
+  }
+  db.close();
+});
+
+test("codex unknown model: cost_usd_estimated null", () => {
+  const { db, ticketId } = makeTestDb({ provider: "codex" });
+  const sink: TelemetryEvent[] = [];
+  const emitter = createTelemetryEmitter((e) => sink.push(e));
+  const d = insertDispatch(db, {
+    ticketId,
+    dispatchId: "U1",
+    seq: nextSeq(db, ticketId),
+    model: "gpt-9.9-unknown",
+  });
+  completeDispatch(db, d.id, {
+    outcome: "clean-success",
+    tokensIn: 100,
+    tokensOut: 40,
+    cacheRead: 0,
+    cacheCreate: 0,
+    endedAt: nowUtc(),
+  });
+  emitter.flushNew(db, ticketId);
+  const ev = sink.find((e) => e.type === "dispatch" && e.dispatch_id === "U1");
+  if (ev?.type === "dispatch") expect(ev.cost_usd_estimated).toBeNull();
+  db.close();
+});
+
+test("the emitter HONORS an injected pricing config (not just the built-in default)", () => {
+  const { db, ticketId } = makeTestDb({ provider: "codex" });
+  const sink: TelemetryEvent[] = [];
+  const cfg = PricingConfigSchema.parse({
+    version: "operator-test",
+    rates: { "gpt-5.6-sol": { input: 1, cacheRead: 1, cacheWrite: 1, output: 1 } },
+  });
+  const emitter = createTelemetryEmitter((e) => sink.push(e), cfg);
+  const d = insertDispatch(db, {
+    ticketId,
+    dispatchId: "O1",
+    seq: nextSeq(db, ticketId),
+    model: "gpt-5.6-sol",
+  });
+  completeDispatch(db, d.id, {
+    outcome: "clean-success",
+    tokensIn: 1000,
+    tokensOut: 100,
+    cacheRead: 0,
+    cacheCreate: 0,
+    endedAt: nowUtc(),
+  });
+  emitter.flushNew(db, ticketId);
+  const ev = sink.find((e) => e.type === "dispatch" && e.dispatch_id === "O1");
+  if (ev?.type === "dispatch") {
+    // All-1.0 rates → (1000 + 100)/1e6. Would be ~0.008 under the built-in sol rates.
+    expect(ev.cost_usd_estimated).toBeCloseTo(1100 / 1e6, 10);
+  }
+  emitter.emitSummary(db, ticketId, {
+    outcome: "pr-ready",
+    iterations: 1,
+    stage: "merge",
+    status: "done",
+  });
+  const s = sink.find((e) => e.type === "summary");
+  if (s?.type === "summary") expect(s.pricing_version).toBe("operator-test");
   db.close();
 });

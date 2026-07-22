@@ -241,7 +241,10 @@ export async function runImpl(
     });
 
     a.runCompleted(
-      buildSummary(db, out.ticketId, out) as Extract<TelemetryEvent, { type: "summary" }>,
+      buildSummary(db, out.ticketId, out, runtimeConfig.pricing) as Extract<
+        TelemetryEvent,
+        { type: "summary" }
+      >,
       Date.now() - startedAt,
       {
         complexityGrading: runtimeConfig.complexityGrading,
