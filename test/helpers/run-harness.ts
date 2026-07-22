@@ -302,6 +302,7 @@ export async function resumeParkedTicket(
           });
         },
         ports: fakePorts,
+        preflight: () => ({ ok: true, version: null }),
       },
     );
 

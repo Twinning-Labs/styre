@@ -125,6 +125,10 @@ export function classifyCodexFailure(
 /** The Codex adapter: spawn `codex exec`, feed the prompt on stdin, capture the JSONL usage stream
  *  on stdout + the final message from `--output-last-message`, under the same HARD timeout bound as
  *  the Claude adapter (race proc.exited vs the timer, SIGKILL + prompt resolve on timeout). */
+/** Minimum `codex` CLI version this adapter's flag surface is verified against (ENG-326).
+ *  codex is pre-1.0, so the minor component is the significant one. */
+export const CODEX_MIN_CLI_VERSION = "0.140.0";
+
 export function codexAgentRunner(command = "codex"): AgentRunner {
   return {
     async run(input: AgentRunInput): Promise<AgentRunResult> {

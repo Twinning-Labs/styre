@@ -84,6 +84,10 @@ export function classifyFailure(
  *  On timeout we SIGKILL and resolve PROMPTLY — without awaiting `proc.exited` or draining pipes,
  *  either of which can stall on the same wedged child. The normal path drains stdout/stderr
  *  concurrently with the exit wait (avoids the large-output pipe-buffer deadlock). */
+/** Minimum `claude` CLI version this adapter's flag surface is verified against (ENG-326).
+ *  Single source of truth for the preflight probe. Bump when a newer floor is required. */
+export const CLAUDE_MIN_CLI_VERSION = "2.1.200";
+
 export function claudeAgentRunner(command = "claude"): AgentRunner {
   return {
     async run(input: AgentRunInput): Promise<AgentRunResult> {

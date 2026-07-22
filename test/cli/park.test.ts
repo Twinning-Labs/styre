@@ -170,6 +170,7 @@ test("resumeRun wires resetProvisionForResume into the resume path (S4)", async 
           forge: fakeForge(),
           checks: fakeChecks("passing"),
         },
+        preflight: () => ({ ok: true, version: null }),
         buildRegistry: () => {
           const checkDb = openDb(dbPath);
           observedStatus = getByKey(checkDb, ticketId, "provision")?.status;

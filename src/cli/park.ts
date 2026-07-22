@@ -11,8 +11,9 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { branchNameFor } from "../agent/branch.ts";
+import { type AgentCliPreflight, preflightAgentCli } from "../agent/preflight.ts";
 import { resolveAgentRunner } from "../agent/resolve.ts";
-import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
+import { type AgentConfig, DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { stateDir } from "../config/paths.ts";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
@@ -36,7 +37,7 @@ import { branchHeadSha, removeWorktree } from "../dispatch/worktree.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
 import { nowUtc } from "../util/time.ts";
-import { usageError } from "./errors.ts";
+import { agentCliError, usageError } from "./errors.ts";
 import { exitCodeForOutcome } from "./outcome.ts";
 import { formatMessage } from "./output.ts";
 
@@ -193,6 +194,7 @@ export async function resumeRun(
       resumeContext: { stepKey: string; transcript: string } | undefined,
     ) => StepRegistry;
     ports?: ProjectorPorts;
+    preflight?: (config: AgentConfig) => AgentCliPreflight;
   },
 ): Promise<void> {
   const dir = parkDir(profile.slug, args.resume);
@@ -248,6 +250,20 @@ export async function resumeRun(
     process.exitCode = 65;
     return;
   }
+
+  // Fail fast (no retry burn) if the configured agent CLI is missing or below its supported
+  // version — resume dispatches the CLI too (resolveAgentRunner below), and a resume often runs
+  // later / on another machine where the CLI may have changed since the park (ENG-326). Placed
+  // after the --inspect and resume-refused early-returns so those stay tool-independent, and
+  // before any repo mutation or dispatch. Injectable so fake-driven resume tests skip the live CLI.
+  const cliPreflight = (deps?.preflight ?? preflightAgentCli)(
+    runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG,
+  );
+  if (!cliPreflight.ok) {
+    db.close();
+    throw agentCliError(cliPreflight);
+  }
+  if (cliPreflight.unauthHint) process.stderr.write(`resume: ${cliPreflight.unauthHint}\n`);
 
   // Defense-in-depth (whole-branch review I-2 / Task 3 F1): `assertInPlaceSafe` is NOT reusable on
   // resume (HEAD legitimately sits on the styre branch mid-run in the supported same-container
