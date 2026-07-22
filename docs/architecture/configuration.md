@@ -102,13 +102,21 @@ is the PostHog adoption-analytics toggle; this one is pricing data).
   unpriced, not zero.
 - `tiers` — `Record<provider, {threshold, inputMultiplier, outputMultiplier}>`. Above `threshold`
   input tokens, input/output rates (and cache rates, which ride the input multiplier) are scaled for
-  that dispatch. Built-in: `codex` at a 272K-token threshold, 2× input / 1.5× output.
-- **Because config resolution is a shallow per-top-level-key spread (see Precedence, below),
-  `pricing` as a whole — and `pricing.rates` in particular — is replaced wholesale, not deep-merged.**
-  An override that sets `pricing.rates` replaces the *entire* built-in rates map; any model id you
-  don't restate becomes unpriced (`cost_usd_estimated: null` for it) even though the built-in table
-  used to price it. To retune one model's price, copy the full built-in map and change the one entry
-  — you cannot patch a single rate in isolation.
+  that dispatch. Built-in: `codex` at a 272K-token threshold, 2× input / 1.5× output. Note that
+  `threshold` is compared against `input_tokens`, and what that field *means* is provider-dependent
+  (§4 of `telemetry-export.md`, D6/D8 in the design brainstorm): under the codex convention
+  `input_tokens` is the TOTAL input (fresh + cached + cache-write), but under the claude convention
+  it excludes the cache buckets. An operator configuring a `tiers` entry for a claude-style provider
+  is comparing against a smaller, differently-scoped quantity than for codex.
+- **Because config resolution is a shallow per-top-level-key spread (see Precedence, below), the
+  `pricing` *object* is replaced across config files at that granularity — it is not deep-merged with
+  the global file.** *Within* the `pricing` object, though, its three keys are independent: a
+  supplied `rates` replaces the built-in rates map wholesale, while any sibling key you don't restate
+  (`tiers`, `version`) still takes its built-in default (`test/config/pricing-config.test.ts` pins
+  this). An override that sets `pricing.rates` replaces the *entire* built-in rates map; any model id
+  you don't restate becomes unpriced (`cost_usd_estimated: null` for it) even though the built-in
+  table used to price it. To retune one model's price, copy the full built-in map and change the one
+  entry — you cannot patch a single rate in isolation.
 - **The token-accounting convention is not configurable.** Which token fields feed the formula, and
   how they're combined per provider (codex's partition-subtract vs. claude's disjoint buckets), is a
   verified structural fact that lives in code (`src/telemetry/pricing.ts`), not in this config block.

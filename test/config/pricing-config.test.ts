@@ -23,3 +23,15 @@ test("a pricing.rates override REPLACES the whole rates map (shallow, wholesale)
 test("nesting pricing under telemetry is rejected (telemetry is a boolean)", () => {
   expect(() => RuntimeConfigSchema.parse({ telemetry: { pricing: {} } })).toThrow();
 });
+
+// Regression guard for the zod-4 `.default()` trap: `.default()` does NOT parse its argument, so
+// a "simplification" from `.default(() => PricingConfigSchema.parse({}))` to `.default({})` would
+// silently resolve `pricing` to `{}` — no rates, no tiers, every cost estimate `null`. This test
+// would FAIL under that bad simplification and MUST stay in the suite.
+test("a runtime config parsed with no `pricing` key still has populated rates + tiers maps", () => {
+  const cfg = RuntimeConfigSchema.parse({});
+  expect(Object.keys(cfg.pricing.rates).length).toBeGreaterThan(0);
+  expect(Object.keys(cfg.pricing.tiers).length).toBeGreaterThan(0);
+  expect(cfg.pricing.rates["gpt-5.6-sol"]).toBeDefined();
+  expect(cfg.pricing.tiers.codex).toBeDefined();
+});

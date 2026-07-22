@@ -36,7 +36,10 @@ const BUILTIN_TIERS: Record<string, z.infer<typeof TierRuleSchema>> = {
  *  (codex partition-subtract vs claude disjoint) is a verified structural fact and stays in code. */
 export const PricingConfigSchema = z.object({
   version: z.string().default("builtin@2026-07-22"),
+  // zod 4's .default() does NOT parse its argument — .default({}) would yield an empty pricing
+  // config (no rates/tiers => every estimate null, silently). Keep the thunk.
   rates: z.record(z.string(), ModelRateSchema).default(() => ({ ...BUILTIN_RATES })),
+  // Same trap applies here — do NOT simplify to `.default(BUILTIN_TIERS)` or `.default({})`.
   tiers: z.record(z.string(), TierRuleSchema).default(() => ({ ...BUILTIN_TIERS })),
 });
 export type PricingConfig = z.infer<typeof PricingConfigSchema>;
@@ -50,6 +53,10 @@ export interface DispatchUsage {
 }
 
 type Convention = "codex-partition" | "claude-disjoint";
+// ASSUMPTION: any provider other than "codex" is treated as claude-disjoint. This is a silent
+// default, not a verified fact about that provider — if an operator ever adds a third provider's
+// model to `pricing.rates`, its cost will be computed with the claude-disjoint token-accounting
+// convention with no observable signal that the convention might be wrong for it.
 function conventionFor(provider: string): Convention {
   return provider === "codex" ? "codex-partition" : "claude-disjoint";
 }
@@ -94,10 +101,7 @@ export function deriveCost(
     return fresh * inRate + cacheRead * crRate + cacheCreate * cwRate + tokensOut * outRate;
   }
   // claude-disjoint: input / cache_read / cache_creation are already non-overlapping buckets.
-  return (
-    tokensIn * inRate +
-    (cacheRead ?? 0) * crRate +
-    (cacheCreate ?? 0) * cwRate +
-    tokensOut * outRate
-  );
+  // Symmetric with the codex branch above: a needed-but-null cache field → null, never treated as 0.
+  if (cacheRead === null || cacheCreate === null) return null;
+  return tokensIn * inRate + cacheRead * crRate + cacheCreate * cwRate + tokensOut * outRate;
 }

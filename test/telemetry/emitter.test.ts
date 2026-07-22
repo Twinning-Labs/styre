@@ -239,7 +239,12 @@ test("claude run: reported cost_usd untouched AND cost_usd_estimated computed", 
   db.close();
 });
 
-test("calibration: a claude run's estimate tracks its reported cost within tolerance", () => {
+test("table-drift guard: claude estimate matches a SYNTHETIC reported cost computed from the same rate literals", () => {
+  // NOT a calibration test and NOT a real invoice: `reported` below is computed from the exact same
+  // list-price literals that `deriveCost`'s rate table uses, so this cannot detect the table being
+  // miscalibrated against reality. What it DOES catch is drift between the two computations of "cost
+  // from these rates" — e.g. an arithmetic slip in `deriveCost`, or the pricing table being edited in
+  // one place and not the other. Treat it as a regression/drift guard, not evidence of accuracy.
   const { db, ticketId } = makeTestDb();
   const sink: TelemetryEvent[] = [];
   const emitter = createTelemetryEmitter((e) => sink.push(e));
@@ -249,7 +254,8 @@ test("calibration: a claude run's estimate tracks its reported cost within toler
     seq: nextSeq(db, ticketId),
     model: "claude-opus-4-8",
   });
-  // What an API-key `claude` CLI would report for these tokens at list price.
+  // Synthetic "reported" cost: same list-price literals as BUILTIN_RATES["claude-opus-4-8"], not a
+  // captured invoice.
   const reported = (120_000 * 5.0 + 800_000 * 0.5 + 40_000 * 6.25 + 6_000 * 25.0) / 1e6;
   completeDispatch(db, d.id, {
     outcome: "clean-success",
@@ -263,7 +269,7 @@ test("calibration: a claude run's estimate tracks its reported cost within toler
   emitter.flushNew(db, ticketId);
   const ev = sink.find((e) => e.type === "dispatch" && e.dispatch_id === "K1");
   if (ev?.type === "dispatch" && ev.cost_usd !== null && ev.cost_usd_estimated !== null) {
-    // Guards gross table/formula drift: estimate within 1% of the provider-reported figure.
+    // Guards gross table/formula drift: estimate within 1% of the synthetic "reported" figure.
     expect(Math.abs(ev.cost_usd_estimated - ev.cost_usd) / ev.cost_usd).toBeLessThan(0.01);
   } else {
     throw new Error("expected both reported and estimated cost");

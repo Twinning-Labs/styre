@@ -127,6 +127,12 @@ still in flight (no `ended_at`) is never emitted — only completed rows cross t
 | `cost_usd` | number \| null | yes | `dispatch.cost_usd` |
 | `cost_usd_estimated` | number \| null | yes | derived at emit time — see §4 |
 
+`dispatch.cost_usd_estimated` carries no provenance field of its own — the price table that produced
+it (built-in or operator-overridden, per §4) is stamped only on that run's `summary` event, as
+`pricing_version`. A consumer ingesting `dispatch` rows without their corresponding `summary` (the
+stream is best-effort and can duplicate rows on resume — §1) holds an unattributable estimate: it
+cannot tell which price table produced the number without the `summary` row alongside it.
+
 ### 3.3 `signal` — a ground-truth verdict (`ground_truth_signal` row)
 
 One row per objective verdict (build/test/lint/AC-check/integration result — never an agent's
@@ -248,6 +254,19 @@ Applies to the five aggregate fields on `summary`: `cost_usd`, `tokens_in`, `tok
   "spent" and "would-have-spent." The table + long-context multipliers are operator-configurable
   (the `pricing` config block — see `configuration.md`); `pricing_version` on the summary stamps
   which table produced the estimate. Reported `cost_usd` is never overwritten by an estimate.
+- **The claude cache-write rate is an inferred, disclosed assumption about TTL.** The built-in
+  `cacheWrite` rate for each claude model (`src/telemetry/pricing.ts`) encodes Anthropic's published
+  1.25× (uncached input) rate for the **5-minute ephemeral** prompt-cache TTL; the 1-hour TTL tier
+  publishes 2×. Which TTL styre's `claude` dispatches actually use is **not established in this
+  repo** — this is an inferred, disclosed assumption, in the same spirit as the 272K long-context
+  cache-scaling inference above (D6 in the design brainstorm): reversible if a real invoice or
+  provider confirmation shows otherwise.
+- **`pricing_version` is opaque — do not parse it.** It is a free-text provenance stamp, not a
+  structured field. `builtin@YYYY-MM-DD` is merely the *shape* the built-in default happens to take;
+  an operator can set `pricing.version` in config to any string at all (see `configuration.md`). A
+  consumer should treat two runs with different `pricing_version` values as "possibly a different
+  table" and nothing more precise than that — do not attempt to parse a date out of it or compare
+  versions lexically/semantically.
 
 ## 5. `dispatch_id` on `event` rows
 

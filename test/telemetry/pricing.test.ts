@@ -53,6 +53,11 @@ test("claude disjoint: no subtraction (buckets already separate)", () => {
   expect(cost).toBeCloseTo((1000 * 5.0 + 400 * 0.5 + 100 * 6.25 + 200 * 25.0) / 1e6, 10);
 });
 
+test("claude: a null needed cache token → null (never treated as 0)", () => {
+  expect(deriveCost(u(1000, 200, null, 100), "claude-opus-4-8", "claude")).toBeNull();
+  expect(deriveCost(u(1000, 200, 400, null), "claude-opus-4-8", "claude")).toBeNull();
+});
+
 test("codex 272K tier: input-side ×2, output ×1.5 (strict >, boundary excluded)", () => {
   expect(deriveCost(u(272000, 100, 0, 0), "gpt-5.6-terra", "codex")).toBeCloseTo(
     (272000 * 2.5 + 100 * 15.0) / 1e6,
