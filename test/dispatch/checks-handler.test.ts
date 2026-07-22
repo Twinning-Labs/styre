@@ -45,6 +45,63 @@ async function markDesignDone(db: Parameters<typeof runStep>[0], ticketId: numbe
   });
 }
 
+// ENG-357 helper: run a single-AC checks:dispatch for `kind`/`testCmd`, with the injected check
+// runner returning a fixed CommandResult, and report what the covered-gate did.
+async function runSingleCheckDispatch(fixture: {
+  kind: string;
+  testCmd: string;
+  ext: string;
+  run: () => { exitCode: number | null; stdout: string; stderr: string; timedOut: boolean };
+}) {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] one thing\n", ticketId);
+  await markDesignDone(db, ticketId);
+  insertWorkUnit(db, { ticketId, seq: 1, kind: fixture.kind, verifyCheckTypes: ["test"] });
+  setTicketTrack(db, ticketId, "fast");
+  const runner = new FakeAgentRunner((input) => {
+    const dir = join(input.cwd, "checks");
+    mkdirSync(dir, { recursive: true });
+    // Content must include the declared test_name ("test_x") — the M2b name-in-content identity gate.
+    writeFileSync(join(dir, `ENG-1_ac1_test.${fixture.ext}`), "test_x placeholder\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout:
+        '```styre-sidecar\n{"checksAuthored":[' +
+        `{"ac_id":1,"test_file":"checks/ENG-1_ac1_test.${fixture.ext}","test_name":"test_x"}]}\n` +
+        "```",
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [
+        { name: "c", kind: fixture.kind, paths: ["**"], commands: { test: fixture.testCmd } },
+      ],
+    }),
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
+    runCheckCommand: async () => fixture.run(),
+  });
+  await advanceOneStep(db, ticketId, registry); // provision
+  const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
+  const checks = listAcChecks(db, ticketId);
+  const step = getByKey(db, ticketId, "checks:dispatch");
+  const message = step?.error_json != null ? (JSON.parse(step.error_json).message ?? "") : "";
+  const stepStatus = step?.status;
+  db.close();
+  return { checks, message, outcome, stepStatus };
+}
+
 test("checks:dispatch authors, verifies identity, runs RED-first, and persists a coarse red", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
@@ -968,4 +1025,18 @@ test("a check that times out with empty output → error, empty → AC uncovered
   expect(step?.status).toBe("pending");
   expect(checks).toHaveLength(0);
   expect(message).toMatch(/timed out or could not be launched/);
+});
+
+test("rspec: a missing launcher (exit 127, non-empty stderr) → AC uncovered, launcher named (ENG-357)", async () => {
+  const { checks, message, outcome, stepStatus } = await runSingleCheckDispatch({
+    kind: "ruby",
+    testCmd: "rspec",
+    ext: "rb",
+    run: () => ({ exitCode: 127, stdout: "", stderr: "sh: 1: rspec: not found", timedOut: false }),
+  });
+  expect(checks).toHaveLength(0); // NOT recorded as covering
+  expect(["retry", "escalated"]).toContain(outcome.kind);
+  expect(stepStatus).toBe("pending");
+  expect(message).toContain("could not be executed (exit 127)");
+  expect(message).toContain("rspec");
 });
