@@ -1,6 +1,35 @@
 import type { CheckFramework } from "./check-selector.ts";
 
-/** Source-file extensions stripped when reducing a path or module reference to its leaf name. */
+/** Source-file extensions stripped when reducing a path or module reference to its leaf name.
+ *
+ *  This list is NOT the routing extension list (`EXTENSIONS_BY_KIND`) and must not be derived from
+ *  it. It feeds only the LEAF TIER of the discard-poison guard, which is gated per language by
+ *  `LanguageRules.tiesByLeaf` — false for `goRules` and `jvmRules`.
+ *
+ *  RULE FOR NEW ENTRIES: add an extension only if a check in some `tiesByLeaf` language can
+ *  actually IMPORT a file with it. That is the only way stripping produces a TRUE match, and
+ *  because `discarded` is dispatch-wide while the rules object is chosen by the CHECK's framework,
+ *  every other entry can only ever produce a FALSE tie.
+ *
+ *  Excluded on that rule, though `EXTENSIONS_BY_KIND` lists them:
+ *  - `gradle`, `rake`, `gemspec` — build manifests; nothing imports them. Stripping `.gradle`
+ *    would reduce `build.gradle` to the leaf `build`, colliding with a node check failing on
+ *    `Cannot find module '../build'`; `.gemspec` would reduce `styre.gemspec` to `styre`,
+ *    colliding with a genuinely-missing `lib/styre.rb`. Both reproduce.
+ *  - `kts`, `groovy` — JVM source. No `tiesByLeaf` language can import them, so like the manifests
+ *    above they yield false ties only (a discarded `Foo.groovy` would tie to a node check failing
+ *    on `./foo`), not merely no-ops.
+ *
+ *  GRANDFATHERED, and failing the rule above: `go`, `java`, `kt`, `scala` predate it. Their
+ *  languages are `tiesByLeaf: false`, so no check that can import them ever reaches this tier —
+ *  yet they are stripped, so a discarded `cmd/build.go` DOES tie to a node check failing on
+ *  `'../build'` (verified). Removing them is a behavior change with its own blast radius, so it is
+ *  filed separately rather than folded into the ENG-359 fix. Do not cite them as precedent.
+ *
+ *  CAVEAT — multi-dot stems. `moduleLeaf` pops exactly ONE extension, so `types.d.mts` reduces to
+ *  `d` and `utils.test.mts` to `test`. Pre-existing (`foo.d.ts` already yields `d`), but the
+ *  `.cts`/`.mts` additions widen it, and `test` is a highly collision-prone leaf given the
+ *  discarded set is exactly agent-authored test files. Filed separately; see the tests. */
 const SOURCE_EXTS = new Set([
   "py",
   "pyi",
@@ -10,6 +39,9 @@ const SOURCE_EXTS = new Set([
   "tsx",
   "mjs",
   "cjs",
+  "cts",
+  "mts",
+  "svelte",
   "go",
   "rs",
   "rb",
