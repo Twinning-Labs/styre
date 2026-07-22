@@ -139,6 +139,7 @@ test("resumeRun derives in-place from the persisted worktree path: skips wipe/re
         forge: fakeForge(),
         checks: fakeChecks("passing"),
       },
+      preflight: () => ({ ok: true, version: null }),
     });
     expect(process.exitCode).toBe(75);
 
@@ -252,6 +253,7 @@ test("resumeRun re-checks in-place identity before mutating: throws when the act
           forge: fakeForge(),
           checks: fakeChecks("passing"),
         },
+        preflight: () => ({ ok: true, version: null }),
       }),
     ).rejects.toThrow(/is not installed against/); // the identity error specifically, not the marker one
 
@@ -341,6 +343,7 @@ test("resumeRun refuses in-place resume when the disposability marker is absent:
           forge: fakeForge(),
           checks: fakeChecks("passing"),
         },
+        preflight: () => ({ ok: true, version: null }),
       }),
     ).rejects.toThrow(/disposable/);
 
@@ -446,6 +449,7 @@ test("resumeRun with the marker present re-applies profile.targetRepo (the disco
         forge: fakeForge(),
         checks: fakeChecks("passing"),
       },
+      preflight: () => ({ ok: true, version: null }),
     });
     expect(process.exitCode).toBe(75);
 
