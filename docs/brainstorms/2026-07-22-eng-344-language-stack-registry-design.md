@@ -103,7 +103,7 @@ export interface StackFacts {
 }
 
 export const STACKS: Record<string, StackFacts>;
-export const GENERIC_IGNORE_DIRS: readonly string[]; // .git, dist, build — belong to no kind
+export const GENERIC_IGNORE_DIRS: readonly string[]; // .git, dist, Pods — belong to no kind
 
 /** Total. An unmodeled kind (kind is an unconstrained z.string()) yields conservative facts. */
 export function stackFacts(kind: string): StackFacts;
@@ -186,15 +186,19 @@ The ticket says *"start with the subset that has ≥2 real consumers — don't a
 ```
 for each component c, facts = stackFacts(c.kind):
   if c.prepare: probe c.prepare
+  if c.prepare and kind is unmodeled: continue          // conservative fallback, §6.6
   for label in [build, test, check]:
     command = commandFor(c, label);  if absent, skip
-    if installProvided(command, facts): skip     // provision supplies it
+    if c.prepare AND installProvided(command, facts): skip   // an install will supply it
     else probe
 ```
 
+**The `c.prepare AND` gate is not optional** (independent review, BLOCKER). An earlier draft skipped install-provided commands unconditionally, so a modeled-kind component with **no** `prepare` — a real `pythonPrepare` output; it has a `return undefined` branch (`python.ts:33`) — got **zero** probes. The registry would claim `pytest` is install-provided when no install would ever run, and the preflight would guarantee nothing where today it probes `pytest`. Whether *this component* installs is `c.prepare !== undefined`; the registry only says what an install *would* provide. §3.4 argued exactly this and the draft then failed to implement it.
+
 `installProvided(command, facts)` — take the command's leading whitespace token, strip a leading `./`, then:
 - true if it sits under any `facts.installBinDirs` entry, **or**
-- true if it equals any `facts.installProvidedTools` entry.
+- true if it equals any `facts.installProvidedTools` entry, **or**
+- true if it is a **relative path** (contains `/`) — kind-agnostic, §5.6. This covers composer's configurable `bin-dir` (`bin/phpunit`), `./mvnw`, `./gradlew`, and every unmodeled ecosystem's `./deps/bin/x` with no registry entry at all. Combined with the `c.prepare` gate it cannot over-skip: a component with no install step probes everything regardless.
 
 Traced against every real detector output:
 
@@ -219,25 +223,77 @@ Adds `CHECK_FRAMEWORKS: Record<CheckFramework, FrameworkFacts>` to the **same mo
 
 ## 5. The data-vs-logic boundary, made mechanical
 
-AC 5 asks for a test that "the registry has no repo-specific branching". Prose can't assert that; these can:
+AC 5 asks for a test that "the registry has no repo-specific branching."
 
-1. **No functions.** Every value reachable in `STACKS` is a string, boolean, or readonly array of strings. A recursive walk asserts `typeof v !== "function"`. This is what keeps `runtime-deps`' parsers out.
-2. **No imports.** The module's source text contains no `import` statement (in particular no `node:fs`, `node:path`). A registry that cannot read the filesystem cannot branch on repo state — this is the boundary, stated as an executable assertion.
-3. **Exhaustive.** Every `kind` in `src/setup/registry.ts`'s `REGISTRY` has a `STACKS` entry, and (PR 2) every `checkFrameworks` entry is a `CHECK_FRAMEWORKS` key.
-4. **Frozen.** `STACKS` and its arrays are deep-frozen, so no consumer can mutate shared facts.
+**What an earlier draft got wrong.** It claimed one assertion settled this: *"the module imports nothing, and a module that cannot reach `node:fs` cannot branch on repo state — this is the boundary, stated as an executable assertion."* Independent review demonstrated that is false. The following passed every one of that draft's four assertions while branching on repo state:
+
+```ts
+get extensions() { return Bun.file(`${process.cwd()}/go.work`).size > 0 ? GO_B : GO_A; }
+```
+
+Three holes: `Bun.*`, `process.*` and `globalThis` reach the filesystem with **no import at all**; `import(` and `require(` are invisible to a `/^\s*import\s/gm` regex; and `Object.entries` *invokes* a getter, so the "no functions" walk never sees one. A second reviewer reached the same conclusion analytically — the import test shows the module cannot *compute* a repo-specific answer, not that its constants aren't repo-specific answers someone computed by hand.
+
+Purity is not decidable from source text. The honest design is layered, each layer stating what it actually buys:
+
+1. **No functions, no getters, plain prototype.** Walk with `Object.getOwnPropertyDescriptors` (which does NOT invoke accessors); assert every descriptor has `get === undefined`, every leaf is a string or boolean, and `Object.getPrototypeOf(entry) === Object.prototype`. *Buys:* the `runtime-deps` parsers and the lazy-getter attack are both structurally excluded.
+2. **A checked-in literal snapshot.** `expect(STACKS).toEqual(SNAPSHOT)` against a full literal in the test file. *Buys:* the real guarantee. A repo-state-dependent registry would have to produce byte-identical facts from every working directory, and any deliberate change to a fact must be made twice, in a diff a reviewer sees. **This is the load-bearing assertion — not the import check.**
+3. **A source-text denylist** — no `import`, `import(`, `require(`, `Bun.`, `process.`, `globalThis`. *Buys:* defence in depth and a fast, legible failure. It is a lint rule; this document does not claim it proves anything alone.
+4. **Exhaustive.** Every `kind` in `src/setup/registry.ts`'s `REGISTRY` has a `STACKS` entry; (PR 2) every `checkFrameworks` entry is a `CHECK_FRAMEWORKS` key.
+5. **Frozen.** `STACKS` and its arrays are deep-frozen, so no consumer can mutate a shared fact.
+
+**What none of these can check** — and this spec should stop implying otherwise — is whether a constant is *genuinely ecosystem-invariant* or a repo-policy choice transcribed by hand. `installProvidedTools: ["pytest","tox","nox"]` is exactly `pythonTestCommand`'s ladder (`python.ts:6-19`) minus its fallback; `["phpunit","pest"]` is exactly the two branches of `usesPest` (`php.ts:11-19`). That is a review responsibility, not a test responsibility, and §5.6 is the honest mitigation.
+
+### 5.6 The residual: kind-keyed facts about component-keyed truths
+
+"Tool X is produced by the install step" is a property of **this component's `prepare`**, not of the ecosystem. `pythonPrepare` (`python.ts:21-33`) emits four different commands installing four different things; the registry answers `["pytest","tox","nox"]` for all four. So `{prepare: "pip install -r requirements.txt", test: "pytest"}` where the requirements file omits pytest has its one real precondition silently unprobed.
+
+This is **not a regression** — today's blanket special-case has the identical hole — but the ticket's premise is "replace a workaround with a fact," and this fact is conditional on the prepare string. Two mitigations, both adopted:
+
+- **Gate the skip on the component actually having an install step** (§4.2). Without this the design was strictly worse than today: a modeled-kind component with NO `prepare` got *zero* probes, because the registry claimed its tools were install-provided when no install would ever run.
+- **Add a kind-agnostic relative-path rule** (§4.2). A reviewer proposed replacing the registry mechanism entirely with *skip a leading token that is a relative path* plus *skip a bare token appearing as a substring of `prepare`*. **The replacement is rejected, and the rejection is load-bearing:** for a repo with `pytest.ini` and `prepare: "pip install -e ."`, `pytest` is neither a relative path nor a substring of the prepare string, so it would be probed on a clean checkout — reintroducing the exact ENG-332 bug this ticket exists to kill. But the relative-path rule *as an additional rule* is a genuine improvement: it makes unmodeled ecosystems work with no registry entry, and it covers composer's configurable `bin-dir` (`"config": {"bin-dir": "bin"}` yields `bin/phpunit`, which `installBinDirs: ["vendor/bin"]` alone would miss and false-fail on).
 
 ## 6. Behavior changes (each needs a test)
 
 Enumerated because "no behavior change" would be false, and reviewers should see the list rather than discover it.
 
-1. **node regains its probes.** `npm run build|test|check` is probed again. This restores coverage the special-case silently dropped — including the exact case the ENG-332 design §7 listed as a wanted test: *"a node repo missing `npm` though `prepare` is `pnpm` → caught by probing `npm run …`"*. `probeCommandExists` also verifies the npm script exists in the cwd `package.json` (`discover-schema.ts:57-62`).
+1. **node regains its npm-SCRIPT existence check.** `npm run build|test|check` is probed again, which verifies the script key exists in the cwd `package.json`.
+
+   **Correction (independent review).** An earlier draft of this section claimed the change "restores the exact case the ENG-332 design §7 wanted — a node repo missing `npm` though `prepare` is `pnpm`, caught by probing `npm run …`". **That is false.** `probeCommandExists` (`discover-schema.ts:57-62`) short-circuits on `npm run`:
+
+   ```ts
+   const npmRun = trimmed.match(/^npm run ([\w:-]+)/);
+   if (npmRun) { ... return Boolean(pkg.scripts?.[npmRun[1]]); }  // returns — never reaches `command -v`
+   ```
+
+   It checks **only** the script key; `npm` is never resolved on PATH. ENG-332 §7's own bullet was wrong, and this design quoted it as vindication. The genuine delta is narrower: a check against profile staleness (a script renamed since `styre setup`). Making the original claim true requires a separate 2-line fix to `probeCommandExists` (probe the leading binary *in addition to* the script) — filed as a follow-up, not smuggled in here.
 2. **`python -m pytest` now probes `python`.** On a python3-only machine with a working `pip` shim, this converts a mid-run verify death into a clean exit-69 at second zero. That is the fail-fast the feature exists for, but it is a *new early hard stop*. The bare-`pip`/`python` portability fix remains the ticket's named follow-up and will consume `facts.interpreters`.
 3. **`diffTouchesManifest` gains `Gemfile` and `composer.json`** — fixes the live re-arm bug (§1). It also gains `Cargo.toml`, `go.mod`, `pom.xml`, `build.gradle*`, where the re-arm is a cheap no-op: those kinds have no `prepare`, so `planProvision` emits nothing (`provision.ts:57`).
-4. **`moduleLeaf` gains `.svelte`, `.gradle`, `.groovy`, `.cts`, `.mts`** — closes the `SOURCE_EXTS` drift. `Button.svelte` now reduces to `button`. Affects check name-matching; needs a targeted test.
+4. **`moduleLeaf` gains EIGHT extensions** — `.svelte`, `.gradle`, `.groovy`, `.cts`, `.mts`, **and `.kts`, `.rake`, `.gemspec`** (an earlier draft listed only the first five; two reviewers independently caught the omission). Closes the `SOURCE_EXTS` drift. Concrete deltas, all in check name-matching, all needing tests: `Button.svelte`→`button` (was `svelte`), `build.gradle.kts`→`gradle` (was `kts`), `tasks.rake`→`tasks` (was `rake`), `styre.gemspec`→`styre` (was `gemspec`).
 5. **`ignoreDirs`/`SKIP` must be set-EQUAL, not a superset.** (Corrected during planning — the first draft said "⊇", which is backwards: `SKIP` *prunes* the manifest walk, so a superset would skip more dirs and silently find fewer components.) `SKIP`'s `.git`, `dist`, `Pods` belong to no kind and move to `GENERIC_IGNORE_DIRS`; the rest decompose cleanly per kind (`target`→rust+jvm-maven, `testdata`→go, `.tox`/`.nox`/`.venv`/`venv`/`__pycache__`→python, `.svelte-kit`→node, `.gradle`/`build`→jvm-gradle, `.mvn`→jvm-maven, `vendor`→ruby+php, `node_modules`→node). A test asserts the derived union **equals** today's `SKIP` exactly.
 
    `SWEEP_SKIP_DIRS` (`worktree.ts:255`, today `.git` + `node_modules`) becomes `.git` + every kind's `installOutputDir` — which adds `vendor`. Behavior delta: `sweepScratch` no longer descends into a PHP `vendor/` tree looking for `styre_scratch/`. Correct and faster; needs a test.
 6. **Unmodeled kinds keep the conservative path.** `kind` is an unconstrained `z.string()` (`profile.ts:98`), so custom kinds are legal. `stackFacts()` returns empty facts for them, which would probe everything and risk re-introducing the ENG-332 false-fail for an un-modeled ecosystem. So the preflight keeps "unmodeled kind **and** has `prepare` → probe prepare only" as an explicit, documented fallback. Combined with the §5.3 exhaustiveness test, it is unreachable for the 9 real kinds. This is a narrowing of the special-case, not a retention of it — AC 2 is met for every kind the registry models.
+
+## 6b. `profile.json` and the registry: two lifecycles for one fact
+
+**Missed entirely by the first draft; raised by independent review.** `profile.json` is a versioned, portable open-core-seam artifact that travels to CI runners and fleet workers. `Component.extensions[]` is **materialized into it at setup time** (`detect-components.ts:28`, `profile.ts:102`) and routing reads it at run time (`components.ts:70-77`).
+
+After this change the same fact has two lifecycles:
+
+| Consumer | Reads extensions from | Lifecycle |
+|---|---|---|
+| `matchesComponent` (routing) | `profile.json` | frozen by whichever binary ran `styre setup` |
+| `moduleLeaf` / `SOURCE_EXTS`, `SKIP`, `MANIFEST_BASENAMES` | the registry | live, from the running binary |
+
+Add `.vue` to `STACKS.node.extensions` tomorrow and every deployed profile keeps routing without it while `moduleLeaf` starts stripping it. That is a **new drift axis, created by the ticket whose thesis is that drift is the bug class being deleted.**
+
+The repo has already ruled on this hazard once: `profile.ts:139-144` hard-rejects a `schemaVersion: 2` profile precisely because it "does not carry per-component `extensions[]` required for file-identity routing." So when extensions became a frozen artifact field, that warranted a schema bump and a hard error.
+
+**Decision: option (b), the documented invariant.** Deriving `extensions` at load instead of persisting it (option (a)) would remove the split-brain, but it re-opens the schemaVersion-2 decision, changes a seam artifact's meaning, and is out of proportion to PR 1. Instead:
+
+> **Invariant (RG-1).** A registry field that is materialized into `profile.json` may not change without a `schemaVersion` bump. Today that list is exactly one field: `extensions`. Every other registry field is read live and may change freely.
+
+Enforced by a test asserting the materialized-field list is exactly `["extensions"]`, so adding a second persisted field forces a reader to confront this invariant. Documented in `docs/architecture/conventions.md` alongside the registry.
 
 ## 7. Adjacent findings (recorded, NOT fixed here)
 
@@ -256,13 +312,15 @@ Enumerated because "no behavior change" would be false, and reviewers should see
 
 ## 9. Acceptance criteria (ENG-344, PR 1)
 
-- [ ] `src/dispatch/stack-registry.ts` exists, imports nothing, exports `STACKS` with entries for all 9 kinds and a total `stackFacts(kind)`.
-- [ ] Preflight derives precondition-vs-install-provided from `installBinDirs`/`installProvidedTools`; the ENG-332 special-case is gone for every modeled kind (retained only as the documented unmodeled-kind fallback, §6.6). php/python clean-checkout pass; go/jvm still probe build/test.
-- [ ] `EXTENSIONS_BY_KIND` and `SOURCE_EXTS` are both superseded by the registry; routing behavior unchanged except the four extensions §6.4 adds.
+- [ ] `src/dispatch/stack-registry.ts` exists, exports `STACKS` with entries for all 9 kinds and a total `stackFacts(kind)`.
+- [ ] Preflight derives precondition-vs-install-provided from `installBinDirs`/`installProvidedTools`/the relative-path rule, **gated on `c.prepare !== undefined`** (§4.2). php/python clean-checkout pass; go/jvm still probe build/test; a modeled-kind component with no `prepare` still probes its build/test.
+- [ ] The ENG-332 special-case is gone for every modeled kind, retained only as the documented unmodeled-kind fallback (§6.6).
+- [ ] `EXTENSIONS_BY_KIND` and `SOURCE_EXTS` are both superseded by the registry; routing unchanged except the **eight** extensions §6.4 adds, each with a test.
 - [ ] Provision reads markers, install output dir, manifests, and interpreters from the registry; conditional detector logic untouched.
 - [ ] `TARGETED_LANG_MANIFESTS`, `SKIP`, `SWEEP_SKIP_DIRS`, and `runtime-deps`' file→lang mapping all derive from the registry; the parser map stays local.
-- [ ] The §5 boundary tests pass.
-- [ ] `bun run lint` + `bun test` green.
+- [ ] The §5 boundary tests pass — including the **literal snapshot** (§5.2), which is the load-bearing one, and the getter/prototype structural checks.
+- [ ] Invariant RG-1 (§6b) is documented and tested: the set of registry fields materialized into `profile.json` is exactly `["extensions"]`.
+- [ ] `bun run lint` + `bun run typecheck` + `bun test` green. (`typecheck` is a distinct gate — CI runs it, Biome does not type-check, and `bun test` strips types.)
 
 ## 10. Out of scope
 
