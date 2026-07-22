@@ -68,6 +68,7 @@ The table stores **explicit ground-truth numbers per model**, not the family rat
 | D5 | **Derivation runs at emit time in `emitter.ts`, nothing stored on the dispatch row.** | It's a pure function of already-stored fields (`model`, tokens, run `provider`); `emitter.ts` already holds the DB. Honors "only the runner writes the SoT" (CLAUDE.md B2) and the ticket's own lean. Re-emitting under a newer binary re-prices — desirable, and avoids storing a historical estimate to re-price (which is explicitly OUT). |
 | D6 | **Apply the 272K tier multiplier in `deriveCost`** (codex: input-side ×2, output ×1.5 when `input_tokens > 272000`); the cache-rate scaling is an inferred-not-verbatim reading, recorded as an auditable caveat. | The data (`input_tokens`) is in hand; ignoring a documented step-function is its own honesty gap. Large implement-stage contexts can cross 272K. |
 | D7 | **Pricing table = in-binary default keyed by exact model id, operator-overridable, provenance-stamped.** Unknown model → `null` (never a guessed number). A `price_table_version` (or source-date) is recorded so an estimate is auditable. | Correct-by-default with no config; operators can correct drift. Exact-match-or-null honors "unknown → no estimate, never a wrong number" (ticket). Config override makes the estimate operator-dependent — a wrinkle for cross-operator aggregation, noted in the doc. |
+| D8 | **All pricing *parameters* are configurable; the *convention* stays code.** Configurable via a `telemetry.pricing` config block (in-binary §3 table as zod defaults): per-model `{input, cacheRead, cacheWrite, output}` rates **and** the per-provider long-context tier `{threshold, inputMultiplier, outputMultiplier}`. **Not** configurable: the partition-subtract (codex) vs disjoint-bucket (claude) structure. | The rates + multipliers + 272K threshold are *pricing facts that drift* — exactly what a real invoice retunes; making them config means correcting them without a binary release ("reconfirm once we have real billing, then set it right"). The token-accounting **convention** is a *verified structural fact* (ground truth §2.3), not a pricing choice — a real invoice won't change whether `input_tokens` is a total (codex) or disjoint (claude); leaving it in code avoids a foot-gun where a mis-set convention silently double-counts. A fully data-driven formula engine is YAGNI. |
 
 ---
 
@@ -80,23 +81,26 @@ Read `usage.cache_write_input_tokens` into the returned `cacheCreate` (currently
 ### 5.2 Pricing table + `deriveCost` (new `src/telemetry/pricing.ts`)
 
 ```ts
-// USD per token (store per-model; numbers from §3, /1e6 at load).
-interface ModelRate { input: number; cacheRead: number; cacheWrite: number; output: number; }
-// keyed by exact runtime model id; unknown id ⇒ undefined ⇒ deriveCost returns null.
-const PRICE_TABLE: Record<string, ModelRate> = { /* gpt-5.6-*, claude-* from §3 */ };
-const PRICE_TABLE_VERSION = "2026-07-22";           // provenance stamp (D7)
-const LONG_CONTEXT_THRESHOLD = 272_000;             // codex tier (D6)
+// Numbers from §3 as zod DEFAULTS; operator-overridable via config (D8).
+interface ModelRate { input: number; cacheRead: number; cacheWrite: number; output: number; }  // USD/token
+interface TierRule  { threshold: number; inputMultiplier: number; outputMultiplier: number; }    // per-provider long-context tier
+interface PricingConfig {
+  version: string;                              // provenance stamp (D7); "builtin@2026-07-22" or operator-set
+  rates: Record<string, ModelRate>;             // keyed by EXACT runtime model id; unknown ⇒ null estimate
+  tiers: Record<string, TierRule>;              // per provider; codex ⇒ {272000, 2, 1.5}, claude ⇒ absent/none
+}
 
-type Convention = "codex-partition" | "claude-disjoint";
+type Convention = "codex-partition" | "claude-disjoint";  // CODE — verified structural fact (§2.3), not config (D8)
 function conventionFor(provider: string): Convention { /* codex ⇒ partition, else disjoint */ }
 
-// Pure. null when model unknown or the tokens needed by the convention are absent.
-function deriveCost(usage: Usage, model: string | null, provider: string): number | null;
+// Pure. null when model unknown or the tokens the convention needs are absent.
+function deriveCost(usage: Usage, model: string | null, provider: string, cfg: PricingConfig): number | null;
 ```
 
-- **codex-partition:** `fresh = input − cached − cacheWrite` (floor at 0 for safety); `cost = fresh·input + cached·cacheRead + cacheWrite·cacheWrite + output·output`. If `input_tokens > 272000`: input-side rates ×2, output ×1.5 (D6).
-- **claude-disjoint:** `cost = input·input + cacheRead·cacheRead + cacheCreate·cacheWrite + output·output` (no subtraction). No long-context tier for the table's current claude models.
+- **codex-partition:** `fresh = input − cached − cacheWrite` (floor at 0 for safety); `cost = fresh·input + cached·cacheRead + cacheWrite·cacheWrite + output·output`. If `input_tokens > tier.threshold`: input-side rates × `tier.inputMultiplier`, output × `tier.outputMultiplier` (D6). Multipliers/threshold come from `cfg.tiers[provider]` (D8).
+- **claude-disjoint:** `cost = input·input + cacheRead·cacheRead + cacheCreate·cacheWrite + output·output` (no subtraction). No tier rule configured for claude by default.
 - **Null discipline:** unknown model → `null`. Missing a token the convention needs → `null` (never treat absent as 0). `provider`/`model` come from the run row + `dispatch.model` at the call site.
+- **Config (D8):** the `PricingConfig` loads from a `telemetry.pricing` block via the standard precedence (CLAUDE.md: `--config` hermetic **XOR** per-project shallow-spread over global, then zod defaults = the §3 table). Only rates/tiers/threshold are tunable — `conventionFor` is code. The resolved `version` is stamped so a config-overridden estimate is auditable (§9).
 
 ### 5.3 Wire shape (v2, additive-nullable — no bump) (D4)
 
@@ -113,7 +117,8 @@ function deriveCost(usage: Usage, model: string | null, provider: string): numbe
 
 ### 5.5 Docs
 
-- `docs/architecture/telemetry-export.md`: document `cost_usd_estimated` on dispatch + summary and `usage_coverage.cost_usd_estimated`; the **list-price-equivalent** definition + accuracy caveat (D1); the pricing-table location/ownership + `price_table_version` provenance (D7); the 272K tier and its inferred cache-scaling caveat (D6); **correct** §4's stale "codex has no cache-write metric" line (D2).
+- `docs/architecture/telemetry-export.md`: document `cost_usd_estimated` on dispatch + summary and `usage_coverage.cost_usd_estimated`; the **list-price-equivalent** definition + accuracy caveat (D1); the pricing-config block + `version` provenance and the parameters-configurable/convention-in-code split (D7/D8); the 272K tier and its inferred cache-scaling caveat (D6); **correct** §4's stale "codex has no cache-write metric" line (D2).
+- `docs/architecture/configuration.md`: document the new `telemetry.pricing` config block (rates + per-provider tier rule), its zod defaults (§3), and that it feeds the estimate only — no effect on reported `cost_usd`.
 
 ---
 
@@ -131,7 +136,7 @@ function deriveCost(usage: Usage, model: string | null, provider: string): numbe
 
 ## 7. Scope
 
-**IN:** per-model pricing table + `deriveCost` (provider-keyed convention, 272K tier, unknown→null); the `parseCodexUsage` cache-write fix (D2); `cost_usd_estimated` + coverage on dispatch/summary, emit-time (D4/D5); always-compute incl. claude; wire-spec update incl. the corrected codex cache-write claim; the tests above.
+**IN:** per-model pricing table + `deriveCost` (provider-keyed convention, 272K tier, unknown→null); **configurable rates + tier multipliers/threshold via a `telemetry.pricing` block with §3 as zod defaults, convention in code (D8)**; the `parseCodexUsage` cache-write fix (D2); `cost_usd_estimated` + coverage on dispatch/summary, emit-time (D4/D5); always-compute incl. claude; wire-spec + configuration-doc updates incl. the corrected codex cache-write claim; the tests above (incl. a config-override test).
 
 **OUT:** making the codex CLI report cost; re-pricing historical runs (presentation-time derivation moots it); any `SCHEMA_VERSION` bump (additive-nullable avoids it); a `cost_source` marker (D4 makes it redundant); building plane-side ingest.
 
@@ -144,7 +149,8 @@ function deriveCost(usage: Usage, model: string | null, provider: string): numbe
 - [ ] A claude run's reported `cost_usd` is unchanged; it **also** carries a `cost_usd_estimated` (calibration).
 - [ ] Estimated vs reported is distinguishable on the wire (separate nullable fields; no `cost_source`) and documented.
 - [ ] codex `cache_write_input_tokens` is captured (`cacheCreate` non-null) and priced; the stale "no cache-write metric" claims are corrected.
-- [ ] Pricing-table location/ownership decided + documented; provenance (`price_table_version`) auditable; 272K tier documented with its cache-scaling caveat.
+- [ ] Pricing-table location/ownership decided + documented; provenance (`version`) auditable; 272K tier documented with its cache-scaling caveat.
+- [ ] Rates + tier multipliers/threshold are operator-configurable (both providers) with the §3 table as zod defaults; the token-accounting convention is code, not config; a config override changes the estimate and is reflected in the stamped `version`.
 - [ ] Wire spec documents the estimate, its **list-price-equivalent** meaning, and the accuracy caveat.
 - [ ] No `SCHEMA_VERSION` bump. Existing suite green.
 
@@ -153,6 +159,6 @@ function deriveCost(usage: Usage, model: string | null, provider: string): numbe
 ## 9. Provenance & caveats (for the wire spec)
 
 - **List-price-equivalent, not billed** (D1) — token×list-price; real USD depends on operator auth (API key vs subscription). Summing `cost_usd_estimated` across providers/auth mixes "spent" and "would-have-spent"; that's the defined unit, stated plainly.
-- **Table drift** — a stale price silently mis-estimates; `price_table_version` makes an estimate auditable. Operator override makes the estimate operator-dependent — a wrinkle for cross-operator aggregation on the plane.
+- **Table drift + config (D7/D8)** — a stale price silently mis-estimates; the resolved pricing `version` (built-in date or operator-set) is stamped so an estimate is auditable. Because rates/multipliers are operator-configurable, the estimate is operator-dependent — a wrinkle for cross-operator aggregation on the plane; the `version` stamp is what lets a consumer tell built-in-default estimates from config-overridden ones. The retune path is deliberate: when real invoices arrive, correct config, not code.
 - **272K cache-scaling** (D6) is inferred from the rate-derivation structure, not stated verbatim by OpenAI — reversible if billing proves otherwise.
 - **Lower bound under partial coverage** — the summary estimate is a floor-sum (a dispatch with an unknown model contributes nothing), same semantics as reported cost; `usage_coverage.cost_usd_estimated` signals it.
