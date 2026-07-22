@@ -51,6 +51,7 @@ const DispatchEvent = z.object({
   cache_read: z.number().nullable(),
   cache_create: z.number().nullable(),
   cost_usd: z.number().nullable(),
+  cost_usd_estimated: z.number().nullable(),
 });
 
 /** A ground-truth signal row (verify result: build/test/lint pass|fail|error). */
@@ -84,6 +85,10 @@ const SummaryEvent = z.object({
   status: z.string(),
   ticks: z.number(),
   cost_usd: z.number().nullable(),
+  cost_usd_estimated: z.number().nullable(),
+  // Provenance of the price table used for cost_usd_estimated (built-in date or operator-set),
+  // so a consumer can tell default estimates from config-overridden ones.
+  pricing_version: z.string(),
   tokens_in: z.number().nullable(),
   tokens_out: z.number().nullable(),
   cache_read: z.number().nullable(),
@@ -91,6 +96,7 @@ const SummaryEvent = z.object({
   usage_coverage: z.object({
     dispatch_count: z.number(),
     cost_usd: z.number(),
+    cost_usd_estimated: z.number(),
     tokens_in: z.number(),
     tokens_out: z.number(),
     cache_read: z.number(),

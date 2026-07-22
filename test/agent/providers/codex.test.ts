@@ -109,3 +109,18 @@ test("run SIGKILLs and returns promptly on a process that traps SIGTERM and hang
   expect(Date.now() - start).toBeLessThan(5000);
   expect(r.cause).toBe("transient");
 });
+
+test("parseCodexUsage reads cache_write_input_tokens into cacheCreate", () => {
+  const line =
+    '{"type":"turn.completed","usage":{"input_tokens":51599,"cached_input_tokens":36339,"cache_write_input_tokens":15248,"output_tokens":267}}';
+  const u = parseCodexUsage(line);
+  expect(u.cacheCreate).toBe(15248);
+  expect(u.cacheRead).toBe(36339);
+  expect(u.tokensIn).toBe(51599);
+});
+
+test("parseCodexUsage: absent cache_write_input_tokens → cacheCreate null", () => {
+  const line =
+    '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":3,"cached_input_tokens":7}}';
+  expect(parseCodexUsage(line).cacheCreate).toBeNull();
+});

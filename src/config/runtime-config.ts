@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PricingConfigSchema } from "../telemetry/pricing.ts";
 import { AgentConfigSchema } from "./agent-config.ts";
 
 /** Daemon runtime config: operator policy knobs, threaded as one object through the loop.
@@ -28,6 +29,12 @@ export const RuntimeConfigSchema = z.object({
   forge: z.string().default("github"),
   // OSS adoption analytics (PostHog). On by default; honors DO_NOT_TRACK / STYRE_TELEMETRY too.
   telemetry: z.boolean().default(true),
+  // ENG-356: list-price-equivalent cost-estimate pricing. Top-level (NOT under `telemetry`, which is
+  // the PostHog on/off boolean). Numbers/multipliers are operator-tunable; the built-in table is the
+  // default. The token-accounting convention lives in code (telemetry/pricing.ts), not here.
+  // zod 4's .default() does NOT parse its argument — .default({}) would yield an empty pricing
+  // config (no rates/tiers => every estimate null, silently). Keep the thunk.
+  pricing: PricingConfigSchema.default(() => PricingConfigSchema.parse({})),
   notifier: z.enum(["none", "slack"]).default("none"),
   notify: z.enum(["escalations", "transitions", "everything"]).default("escalations"),
   slack: z.object({ channel: z.string() }).optional(),

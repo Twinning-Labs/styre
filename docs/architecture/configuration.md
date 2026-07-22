@@ -30,6 +30,7 @@ check spelling against this table.
 | `jira.bugTypeNames` | `string[]` | `["Bug"]` | Issue-type names treated as Bug (case-insensitive); decides `fix/` vs `feat/` branch prefix. |
 | `forge` | string | `"github"` | Which forge (code host) adapter handles push/PR. Only `github` is registered. Credentials via env. |
 | `telemetry` | boolean | `true` | PostHog adoption analytics. On by default; also honored: `DO_NOT_TRACK` / `STYRE_TELEMETRY` env (a one-way veto). |
+| `pricing` | object | built-in price table | Price table + long-context tiers feeding the telemetry `cost_usd_estimated` estimate (see below). Deliberately a **separate top-level key**, not nested under the boolean `telemetry` above. |
 | `notifier` | `"none" \| "slack"` | `"none"` | Outbound notifier. `slack` requires `slack.channel` and `SLACK_BOT_TOKEN`; `assertSlackConfigured` fails loud at startup otherwise. |
 | `notify` | `"escalations" \| "transitions" \| "everything"` | `"escalations"` | Notification verbosity. `escalations` = escalated/parked only; `transitions` also sends stage transitions; `everything` also sends loopbacks (`src/daemon/notify.ts`). |
 | `slack.channel` | string | absent | Target Slack channel; required when `notifier: "slack"`. |
@@ -56,7 +57,7 @@ no partial inheritance from the binary default (see precedence below).
 ```
 
 Absent `agent` → the built-in **Claude preset** (`DEFAULT_AGENT_CONFIG`) shown above. A built-in
-**Codex preset** (`CODEX_PRESET`: `gpt-5.4` / `gpt-5.4-codex` / `gpt-5.4-codex-mini`) exists as a
+**Codex preset** (`CODEX_PRESET`: `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna`) exists as a
 copy-paste template but is **not** auto-selected — you must write the block to use it.
 
 Models are chosen per **tier**, never hardcoded per step. The step→tier map is `src/agent/tiers.ts`:
@@ -68,6 +69,57 @@ Models are chosen per **tier**, never hardcoded per step. The step→tier map is
 
 The provider's auth env var is gated at `styre setup`: `claude → ANTHROPIC_API_KEY`,
 `codex → OPENAI_API_KEY` (`requiredEnvFor`). The gate runs in `setup`, not `run`.
+
+### The `pricing` block
+
+`PricingConfigSchema` (`src/telemetry/pricing.ts`). Feeds only the telemetry `cost_usd_estimated`
+estimate (`docs/architecture/telemetry-export.md` §4) — it has **no effect on reported `cost_usd`**,
+which always comes straight from the provider and is never overwritten by an estimate. It is a
+**new top-level key**, deliberately *not* nested under the boolean `telemetry` key above (that key
+is the PostHog adoption-analytics toggle; this one is pricing data).
+
+```jsonc
+{
+  "pricing": {
+    "version": "builtin@2026-07-22",   // provenance stamp; surfaced verbatim as `pricing_version`
+                                        // on the telemetry summary event
+    "rates": {                         // per-model USD per 1M tokens
+      "claude-sonnet-4-6": { "input": 3.0, "cacheRead": 0.3, "cacheWrite": 3.75, "output": 15.0 }
+      // ... one entry per priced model id
+    },
+    "tiers": {                         // per-provider long-context multiplier rule
+      "codex": { "threshold": 272000, "inputMultiplier": 2, "outputMultiplier": 1.5 }
+    }
+  }
+}
+```
+
+- `version` — a free-text provenance stamp for the table in use; defaults to a built-in
+  `builtin@<date>` string. Set it when you override `rates`/`tiers` so the telemetry stream records
+  that a non-default table produced the estimate.
+- `rates` — `Record<model_id, {input, cacheRead, cacheWrite, output}>`, all USD per 1,000,000
+  tokens. A model id absent from `rates` yields a `null` estimate for dispatches on that model —
+  unpriced, not zero.
+- `tiers` — `Record<provider, {threshold, inputMultiplier, outputMultiplier}>`. Above `threshold`
+  input tokens, input/output rates (and cache rates, which ride the input multiplier) are scaled for
+  that dispatch. Built-in: `codex` at a 272K-token threshold, 2× input / 1.5× output. Note that
+  `threshold` is compared against `input_tokens`, and what that field *means* is provider-dependent
+  (§4 of `telemetry-export.md`, D6/D8 in the design brainstorm): under the codex convention
+  `input_tokens` is the TOTAL input (fresh + cached + cache-write), but under the claude convention
+  it excludes the cache buckets. An operator configuring a `tiers` entry for a claude-style provider
+  is comparing against a smaller, differently-scoped quantity than for codex.
+- **Because config resolution is a shallow per-top-level-key spread (see Precedence, below), the
+  `pricing` *object* is replaced across config files at that granularity — it is not deep-merged with
+  the global file.** *Within* the `pricing` object, though, its three keys are independent: a
+  supplied `rates` replaces the built-in rates map wholesale, while any sibling key you don't restate
+  (`tiers`, `version`) still takes its built-in default (`test/config/pricing-config.test.ts` pins
+  this). An override that sets `pricing.rates` replaces the *entire* built-in rates map; any model id
+  you don't restate becomes unpriced (`cost_usd_estimated: null` for it) even though the built-in
+  table used to price it. To retune one model's price, copy the full built-in map and change the one
+  entry — you cannot patch a single rate in isolation.
+- **The token-accounting convention is not configurable.** Which token fields feed the formula, and
+  how they're combined per provider (codex's partition-subtract vs. claude's disjoint buckets), is a
+  verified structural fact that lives in code (`src/telemetry/pricing.ts`), not in this config block.
 
 ---
 

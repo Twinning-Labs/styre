@@ -21,6 +21,8 @@ test("a summary round-trips with null cost + usage_coverage + identity", () => {
     status: "waiting",
     ticks: 7,
     cost_usd: null,
+    cost_usd_estimated: null,
+    pricing_version: "builtin@2026-07-22",
     tokens_in: 100,
     tokens_out: 50,
     cache_read: null,
@@ -28,6 +30,7 @@ test("a summary round-trips with null cost + usage_coverage + identity", () => {
     usage_coverage: {
       dispatch_count: 2,
       cost_usd: 0,
+      cost_usd_estimated: 0,
       tokens_in: 2,
       tokens_out: 2,
       cache_read: 0,
@@ -69,6 +72,7 @@ test("a dispatch carries run_id + provider + forensic fields", () => {
     cache_read: null,
     cache_create: null,
     cost_usd: 0.5,
+    cost_usd_estimated: null,
   };
   expect(TelemetryEventSchema.parse(ev)).toMatchObject({ provider: "claude" });
 });
@@ -155,6 +159,8 @@ test("stdoutSink writes one JSON line; noopSink writes nothing", () => {
       status: "done",
       ticks: 1,
       cost_usd: 0,
+      cost_usd_estimated: null,
+      pricing_version: "builtin@2026-07-22",
       tokens_in: 0,
       tokens_out: 0,
       cache_read: 0,
@@ -162,6 +168,7 @@ test("stdoutSink writes one JSON line; noopSink writes nothing", () => {
       usage_coverage: {
         dispatch_count: 0,
         cost_usd: 0,
+        cost_usd_estimated: 0,
         tokens_in: 0,
         tokens_out: 0,
         cache_read: 0,

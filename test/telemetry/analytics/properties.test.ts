@@ -29,6 +29,8 @@ function summary(partial: Partial<SummaryEvent>): SummaryEvent {
     status: "waiting",
     ticks: 7,
     cost_usd: 0,
+    cost_usd_estimated: 0,
+    pricing_version: "builtin@2026-07-22",
     tokens_in: 0,
     tokens_out: 0,
     cache_read: 0,
@@ -36,6 +38,7 @@ function summary(partial: Partial<SummaryEvent>): SummaryEvent {
     usage_coverage: {
       dispatch_count: 3,
       cost_usd: 0,
+      cost_usd_estimated: 0,
       tokens_in: 0,
       tokens_out: 0,
       cache_read: 0,

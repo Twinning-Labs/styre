@@ -79,7 +79,7 @@ export async function driveToTerminal(
 ): Promise<RunResult> {
   const cap = opts.cap ?? DEFAULT_CAP;
   const ciReadTimeoutMs = opts.ciReadTimeoutMs ?? CI_READ_TIMEOUT_MS;
-  const emitter = createTelemetryEmitter(opts.emit ?? noopSink);
+  const emitter = createTelemetryEmitter(opts.emit ?? noopSink, opts.config.pricing);
   const notifier = createNotifier(opts.config);
   const finish = async (result: RunResult): Promise<RunResult> => {
     emitter.flushNew(db, opts.ticketId);

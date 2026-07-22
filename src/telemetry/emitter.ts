@@ -17,6 +17,7 @@ import { getTicket } from "../db/repos/ticket.ts";
 import { nowUtc } from "../util/time.ts";
 import type { TelemetrySink } from "./emit.ts";
 import { SCHEMA_VERSION, type TelemetryEvent } from "./events.ts";
+import { DEFAULT_PRICING_CONFIG, type PricingConfig, deriveCost } from "./pricing.ts";
 
 type RunCtx = { runId: string; provider: string; startedAt: string };
 
@@ -59,7 +60,7 @@ function toEvent(r: EventLogRow, ctx: RunCtx): TelemetryEvent {
   };
 }
 
-function toDispatch(r: DispatchRow, ctx: RunCtx): TelemetryEvent {
+function toDispatch(r: DispatchRow, ctx: RunCtx, pricing: PricingConfig): TelemetryEvent {
   return {
     schema_version: SCHEMA_VERSION,
     type: "dispatch",
@@ -86,6 +87,17 @@ function toDispatch(r: DispatchRow, ctx: RunCtx): TelemetryEvent {
     cache_read: r.cache_read,
     cache_create: r.cache_create,
     cost_usd: r.cost_usd,
+    cost_usd_estimated: deriveCost(
+      {
+        tokensIn: r.tokens_in,
+        tokensOut: r.tokens_out,
+        cacheRead: r.cache_read,
+        cacheCreate: r.cache_create,
+      },
+      r.model,
+      ctx.provider,
+      pricing,
+    ),
   };
 }
 
@@ -106,7 +118,12 @@ function toSignal(r: GroundTruthSignalRow, ctx: RunCtx): TelemetryEvent {
 }
 
 /** Compute the per-ticket summary from the durable SoT (cost from the dispatch rows). */
-export function buildSummary(db: Database, ticketId: number, result: RunResult): TelemetryEvent {
+export function buildSummary(
+  db: Database,
+  ticketId: number,
+  result: RunResult,
+  pricing: PricingConfig = DEFAULT_PRICING_CONFIG,
+): TelemetryEvent {
   const ctx = runCtx(db);
   const ticket = getTicket(db, ticketId);
   const events = listEvents(db, ticketId);
@@ -116,6 +133,21 @@ export function buildSummary(db: Database, ticketId: number, result: RunResult):
   const tout = aggregate(dispatches.map((d) => d.tokens_out));
   const cr = aggregate(dispatches.map((d) => d.cache_read));
   const cc = aggregate(dispatches.map((d) => d.cache_create));
+  const estCost = aggregate(
+    dispatches.map((d) =>
+      deriveCost(
+        {
+          tokensIn: d.tokens_in,
+          tokensOut: d.tokens_out,
+          cacheRead: d.cache_read,
+          cacheCreate: d.cache_create,
+        },
+        d.model,
+        ctx.provider,
+        pricing,
+      ),
+    ),
+  );
   const dispatch_outcomes: Record<string, number> = {};
   for (const d of dispatches) {
     if (d.outcome) dispatch_outcomes[d.outcome] = (dispatch_outcomes[d.outcome] ?? 0) + 1;
@@ -135,6 +167,8 @@ export function buildSummary(db: Database, ticketId: number, result: RunResult):
     status: result.status,
     ticks: result.iterations,
     cost_usd: cost.value,
+    cost_usd_estimated: estCost.value,
+    pricing_version: pricing.version,
     tokens_in: tin.value,
     tokens_out: tout.value,
     cache_read: cr.value,
@@ -142,6 +176,7 @@ export function buildSummary(db: Database, ticketId: number, result: RunResult):
     usage_coverage: {
       dispatch_count: dispatches.length,
       cost_usd: cost.reported,
+      cost_usd_estimated: estCost.reported,
       tokens_in: tin.reported,
       tokens_out: tout.reported,
       cache_read: cr.reported,
@@ -157,7 +192,10 @@ export function buildSummary(db: Database, ticketId: number, result: RunResult):
 
 /** A stateful per-run emitter: flushNew streams rows journaled since the last call (dedup by
  *  natural key); emitSummary emits the terminal summary. */
-export function createTelemetryEmitter(sink: TelemetrySink): {
+export function createTelemetryEmitter(
+  sink: TelemetrySink,
+  pricing: PricingConfig = DEFAULT_PRICING_CONFIG,
+): {
   flushNew(db: Database, ticketId: number): void;
   emitSummary(db: Database, ticketId: number, result: RunResult): void;
   emitCiHandoff(
@@ -195,7 +233,7 @@ export function createTelemetryEmitter(sink: TelemetrySink): {
       // abandoned/failed dispatch with no ended_at is correctly never emitted — and never re-scanned).
       for (const d of listDispatchesSince(db, ticketId, lastDispatchId)) {
         lastDispatchId = d.id;
-        if (d.ended_at !== null) sink(toDispatch(d, c));
+        if (d.ended_at !== null) sink(toDispatch(d, c, pricing));
       }
       for (const s of listSignalsSince(db, ticketId, lastSignalId)) {
         sink(toSignal(s, c));
@@ -203,7 +241,7 @@ export function createTelemetryEmitter(sink: TelemetrySink): {
       }
     },
     emitSummary(db, ticketId, result) {
-      sink(buildSummary(db, ticketId, result));
+      sink(buildSummary(db, ticketId, result, pricing));
     },
     // The ONE deliberate push-style emit (the other members are derived from SoT rows by flushNew).
     // Justified: the handoff is an external network fact captured at the terminal, not a SoT row —

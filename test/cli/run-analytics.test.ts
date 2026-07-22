@@ -18,6 +18,8 @@ const parked: SummaryEvent = {
   status: "running",
   ticks: 12,
   cost_usd: 0,
+  cost_usd_estimated: null,
+  pricing_version: "builtin@2026-07-22",
   tokens_in: 0,
   tokens_out: 0,
   cache_read: 0,
@@ -25,6 +27,7 @@ const parked: SummaryEvent = {
   usage_coverage: {
     dispatch_count: 4,
     cost_usd: 0,
+    cost_usd_estimated: 0,
     tokens_in: 0,
     tokens_out: 0,
     cache_read: 0,
