@@ -186,9 +186,14 @@ export function resolvePythonInterpreter(): string {
 
 // ─── Task 9: re-provision when a loopback edits a dependency manifest ──────────
 
-/** Basenames that identify a dependency manifest/lockfile across the supported ecosystems.
- *  `requirements*.txt` (e.g. `requirements-dev.txt`) is matched separately via regex — pip's
- *  convention allows an arbitrary suffix. */
+/** Basenames that identify a dependency manifest/lockfile for an ecosystem that HAS an install
+ *  step (`prepare`) — node/sveltekit, python, ruby, php. Deliberately excludes rust/go/jvm: they
+ *  resolve dependencies inside their own build invocation and emit no `prepare`, so `planProvision`
+ *  would produce nothing for them. Listing them would still re-arm the TICKET-level `provision`
+ *  step (`resetProvision` keys on ticketId only), needlessly re-running a sibling component's
+ *  install in a polyglot repo.
+ *
+ *  Patterns that a fixed basename can't express are matched separately below. */
 const MANIFEST_BASENAMES = new Set([
   "package.json",
   "package-lock.json",
@@ -200,9 +205,18 @@ const MANIFEST_BASENAMES = new Set([
   "poetry.lock",
   "Pipfile",
   "Pipfile.lock",
+  "Gemfile",
+  "Gemfile.lock",
+  "composer.json",
+  "composer.lock",
 ]);
 
-const REQUIREMENTS_RE = /^requirements.*\.txt$/;
+/** Manifests whose filename varies, so they cannot be a fixed basename:
+ *  - `requirements*.txt` — pip's convention allows an arbitrary suffix (`requirements-dev.txt`).
+ *  - `*.gemspec` — named after the gem. In a gem repo the `Gemfile` is often just
+ *    `source ...; gemspec`, and every runtime/dev dependency is declared in the gemspec via
+ *    `add_dependency`, so a dependency change touches ONLY this file. */
+const MANIFEST_PATTERNS: readonly RegExp[] = [/^requirements.*\.txt$/, /\.gemspec$/];
 
 /** True iff any changed path's basename is a dependency manifest/lockfile — i.e. an `implement`
  *  dispatch's committed diff could have added/changed a dependency, which the once-gated
@@ -211,7 +225,7 @@ const REQUIREMENTS_RE = /^requirements.*\.txt$/;
 export function diffTouchesManifest(changedPaths: string[]): boolean {
   return changedPaths.some((p) => {
     const base = basename(p);
-    return MANIFEST_BASENAMES.has(base) || REQUIREMENTS_RE.test(base);
+    return MANIFEST_BASENAMES.has(base) || MANIFEST_PATTERNS.some((re) => re.test(base));
   });
 }
 
