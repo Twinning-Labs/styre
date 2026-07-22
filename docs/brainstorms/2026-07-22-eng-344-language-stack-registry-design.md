@@ -310,7 +310,23 @@ Enforced by a test asserting the materialized-field list is exactly `["extension
 - **Walk** — derived ignore-dir union ⊇ today's `SKIP`.
 - `bun run lint` + `bun test` green.
 
-## 9. Acceptance criteria (ENG-344, PR 1)
+## 8b. Scope split (post-review)
+
+Three independent adversarial reviews found the original single-PR scope violated the one-concern rule (`CLAUDE.md`; `ticket-template.md:309-312`, which cites ENG-332 as the exemplar of an independently-shippable ticket): 11 tasks, 10 files across `cli`/`dispatch`/`setup`, five independent behavior changes in four unrelated subsystems — i.e. five independent revert reasons in one PR. A reviewer also observed that the two live bugs cited as *evidence for* the registry are each ~2-line fixes needing no registry at all, so bundling them made the registry look load-bearing for bugs it is not.
+
+| Ticket | Carries | Depends on |
+|---|---|---|
+| **ENG-344** | `stack-registry.ts` + the preflight fix (§4.2). The motivating bug and AC 2. | — |
+| **`fix/` A** | `MANIFEST_BASENAMES` omits `Gemfile`/`composer.json` (§6.3) | — |
+| **`fix/` B** | `SOURCE_EXTS` missing eight extensions (§6.4) | — |
+| **`refactor/` follow-up** | the mechanical fold of the remaining tables (§4.1 rows other than preflight) | ENG-344 |
+| **PR 2** | the framework-keyed half (§4.3) | ENG-344 |
+
+**Consequence for the registry's shape.** With the folds moved out, only `installBinDirs` and `installProvidedTools` have a consumer in ENG-344. The ticket's own rule ("start with the subset that has ≥2 real consumers — don't add speculative fields") therefore means every other field in §3.3 lands in the follow-up, with the consumer that reads it. `StackFacts` starts with two fields and grows. This also removes any duplication window: `EXTENSIONS_BY_KIND`, `SKIP`, `MANIFEST_BASENAMES` and friends are untouched until the task that deletes them.
+
+**§6b (RG-1) becomes live only when `extensions` enters the registry** — that is the field materialized into `profile.json`, so the invariant and its test travel with the follow-up task that adds it.
+
+## 9. Acceptance criteria (ENG-344)
 
 - [ ] `src/dispatch/stack-registry.ts` exists, exports `STACKS` with entries for all 9 kinds and a total `stackFacts(kind)`.
 - [ ] Preflight derives precondition-vs-install-provided from `installBinDirs`/`installProvidedTools`/the relative-path rule, **gated on `c.prepare !== undefined`** (§4.2). php/python clean-checkout pass; go/jvm still probe build/test; a modeled-kind component with no `prepare` still probes its build/test.
