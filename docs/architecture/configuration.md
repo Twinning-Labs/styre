@@ -57,7 +57,7 @@ no partial inheritance from the binary default (see precedence below).
 ```
 
 Absent `agent` → the built-in **Claude preset** (`DEFAULT_AGENT_CONFIG`) shown above. A built-in
-**Codex preset** (`CODEX_PRESET`: `gpt-5.4` / `gpt-5.4-codex` / `gpt-5.4-codex-mini`) exists as a
+**Codex preset** (`CODEX_PRESET`: `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna`) exists as a
 copy-paste template but is **not** auto-selected — you must write the block to use it.
 
 Models are chosen per **tier**, never hardcoded per step. The step→tier map is `src/agent/tiers.ts`:
