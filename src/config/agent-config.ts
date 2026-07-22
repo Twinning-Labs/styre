@@ -31,7 +31,7 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
 export const CODEX_PRESET: AgentConfig = {
   provider: "codex",
   command: "codex",
-  models: { deep: "gpt-5.4", standard: "gpt-5.4-codex", cheap: "gpt-5.4-codex-mini" },
+  models: { deep: "gpt-5.6-sol", standard: "gpt-5.6-terra", cheap: "gpt-5.6-luna" },
 };
 
 export function parseAgentConfig(raw: unknown): AgentConfig {
