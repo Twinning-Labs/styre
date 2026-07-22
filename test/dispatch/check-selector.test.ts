@@ -1092,6 +1092,31 @@ describe("discard-poison: the symbol definition tier (design 4.5)", () => {
     ).toEqual(["src/helper.php"]);
   });
 
+  test('PHP: a `Class "…" not found` inside a phpunit assertion message must NOT fire (no Error: token)', () => {
+    const out = `Failed asserting that 'Class "Helper" not found' equals 'ok'`;
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/Helper.php"],
+        "phpunit",
+        src("src/Helper.php", "<?php\nclass Helper {}\n"),
+      ),
+    ).toEqual([]);
+  });
+
+  test("PHP: the PHPUnit-caught render (location on a separate line) still ties the discarded class", () => {
+    const out =
+      '1) App\\Tests\\ATest::testThing\nError: Class "App\\Helper" not found\n\n/app/tests/ATest.php:9';
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/Helper.php"],
+        "phpunit",
+        src("src/Helper.php", "<?php\nnamespace App;\nclass Helper {}\n"),
+      ),
+    ).toEqual(["src/Helper.php"]);
+  });
+
   test("Rust: a missing item is tied when the discarded module defined it", () => {
     const out = "error[E0425]: cannot find function `help` in this scope";
     expect(
@@ -1261,6 +1286,54 @@ describe("discard-poison: the symbol definition tier (design 4.5)", () => {
       ),
     ).toContain("uninitialized constant Helper");
   });
+
+  test("Rust: `cannot find` inside a test's own assertion string must NOT fire (no error[E…] prefix)", () => {
+    // The section-2 failure class within one language: ordinary prose, not a rustc diagnostic.
+    const out = 'assertion failed: cannot find "widget" in the registry';
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["src/w.rs"],
+        "cargo",
+        src("src/w.rs", "pub fn widget() -> u8 { 1 }\n"),
+      ),
+    ).toEqual([]);
+  });
+
+  test("Ruby: an `uninitialized constant` inside a raise_error string must NOT fire (no NameError token)", () => {
+    // Both rspec spellings: the message-only string, and the class passed as a separate argument
+    // (`NameError` followed by a comma, not the `:` the prefix pattern requires).
+    const files = ["spec/support/helper.rb"];
+    const sources = src("spec/support/helper.rb", "class Helper\nend\n");
+    expect(
+      importErrorImplicatesDiscarded(
+        'expect { boom }.to raise_error("uninitialized constant Helper")',
+        files,
+        "rspec",
+        sources,
+      ),
+    ).toEqual([]);
+    expect(
+      importErrorImplicatesDiscarded(
+        'expect { boom }.to raise_error(NameError, "uninitialized constant Helper")',
+        files,
+        "rspec",
+        sources,
+      ),
+    ).toEqual([]);
+  });
+
+  test("Ruby: minitest's `NameError:` prefix render ties the discarded constant", () => {
+    const out = "NameError: uninitialized constant Helper\n    test/foo_test.rb:5:in 'test_x'";
+    expect(
+      importErrorImplicatesDiscarded(
+        out,
+        ["test/support/helper.rb"],
+        "minitest",
+        src("test/support/helper.rb", "class Helper\nend\n"),
+      ),
+    ).toEqual(["test/support/helper.rb"]);
+  });
 });
 
 describe("mutation guard: the symbol tier's contrast must discriminate", () => {
@@ -1278,5 +1351,64 @@ describe("mutation guard: the symbol tier's contrast must discriminate", () => {
       (CHECK_RULES.go as { definesSymbol?: (s: string) => RegExp }).definesSymbol = orig;
     }
     expect(importErrorImplicatesDiscarded(out, ["scratch.go"], "go", sources)).toEqual([]);
+  });
+});
+
+describe("mutation guard: the Rust symbol anchor must discriminate", () => {
+  test("the unanchored `cannot find` pattern would implicate a test's assertion string", () => {
+    const out = 'assertion failed: cannot find "widget" in the registry';
+    const sources = new Map([["src/w.rs", "pub fn widget() -> u8 { 1 }\n"]]);
+    const orig = CHECK_RULES.cargo.symbolNaming;
+    try {
+      (CHECK_RULES.cargo as { symbolNaming?: RegExp[] }).symbolNaming = [
+        /cannot find [a-z, ]*?['"`](\w+)['"`]/gi,
+      ];
+      expect(importErrorImplicatesDiscarded(out, ["src/w.rs"], "cargo", sources)).toEqual([
+        "src/w.rs",
+      ]);
+    } finally {
+      (CHECK_RULES.cargo as { symbolNaming?: RegExp[] }).symbolNaming = orig;
+    }
+    expect(importErrorImplicatesDiscarded(out, ["src/w.rs"], "cargo", sources)).toEqual([]);
+  });
+});
+
+describe("mutation guard: the Ruby symbol anchor must discriminate", () => {
+  test("the unanchored `uninitialized constant` pattern would implicate a raise_error string", () => {
+    const out = 'expect { boom }.to raise_error("uninitialized constant Helper")';
+    const sources = new Map([["spec/support/helper.rb", "class Helper\nend\n"]]);
+    const orig = CHECK_RULES.rspec.symbolNaming;
+    try {
+      (CHECK_RULES.rspec as { symbolNaming?: RegExp[] }).symbolNaming = [
+        /uninitialized constant[^\S\r\n]+([\w:]+)/gi,
+      ];
+      expect(
+        importErrorImplicatesDiscarded(out, ["spec/support/helper.rb"], "rspec", sources),
+      ).toEqual(["spec/support/helper.rb"]);
+    } finally {
+      (CHECK_RULES.rspec as { symbolNaming?: RegExp[] }).symbolNaming = orig;
+    }
+    expect(
+      importErrorImplicatesDiscarded(out, ["spec/support/helper.rb"], "rspec", sources),
+    ).toEqual([]);
+  });
+});
+
+describe("mutation guard: the PHP symbol anchor must discriminate", () => {
+  test("the unanchored `Class … not found` pattern would implicate a phpunit assertion message", () => {
+    const out = `Failed asserting that 'Class "Helper" not found' equals 'ok'`;
+    const sources = new Map([["src/Helper.php", "<?php\nclass Helper {}\n"]]);
+    const orig = CHECK_RULES.phpunit.symbolNaming;
+    try {
+      (CHECK_RULES.phpunit as { symbolNaming?: RegExp[] }).symbolNaming = [
+        /Class[^\S\r\n]+["']([\w\\]+)["'][^\S\r\n]+not found/gi,
+      ];
+      expect(importErrorImplicatesDiscarded(out, ["src/Helper.php"], "phpunit", sources)).toEqual([
+        "src/Helper.php",
+      ]);
+    } finally {
+      (CHECK_RULES.phpunit as { symbolNaming?: RegExp[] }).symbolNaming = orig;
+    }
+    expect(importErrorImplicatesDiscarded(out, ["src/Helper.php"], "phpunit", sources)).toEqual([]);
   });
 });

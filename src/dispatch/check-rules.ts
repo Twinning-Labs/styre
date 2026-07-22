@@ -284,13 +284,14 @@ const rustRules: LanguageRules = {
   naming: [/file not found for module[^\S\r\n]+['"`]?(\w+)/gi],
   tiesByLeaf: true,
   shapes: [{ basename: "mod.rs", match: modMarkerImplicated }],
-  // The kind list is a loose character class because rustc writes compound kinds with commas
-  // ("cannot find function, tuple struct or tuple variant `Point`"). The second pattern covers E0433
-  // (`use of undeclared type `Helper``), which is what rustc emits for `Helper::new()` — the most
-  // common way a Rust test reaches a discarded helper.
+  // Anchored to rustc's `error[E…]:` code prefix, which it prints at column 0 on the primary diagnostic
+  // line — the same structural gutter the Go patterns rely on. Unanchored, `cannot find "x"` inside a
+  // test's own assertion prose fires the tier (ordinary English), the §2 failure class within one
+  // language. The kind class stays loose (`[a-z, ]*?`) for rustc's compound kinds ("struct, variant or
+  // union type"); the second pattern covers E0433 (`use of undeclared type`), what `Helper::new()` emits.
   symbolNaming: [
-    /cannot find [a-z, ]*?['"`](\w+)['"`]/gi,
-    /use of (?:undeclared|unresolved)[\w ]*?['"`](\w+)['"`]/gi,
+    /^error\[e\d+\]:[^\n]*?cannot find [a-z, ]*?['"`](\w+)['"`]/gim,
+    /^error\[e\d+\]:[^\n]*?use of (?:undeclared|unresolved)[\w ]*?['"`](\w+)['"`]/gim,
   ],
   definesSymbol: (s) =>
     new RegExp(`\\b(?:fn|struct|enum|trait|const|static|type)[^\\S\\r\\n]+${escapeSymbol(s)}\\b`),
@@ -307,7 +308,16 @@ const rubyRules: LanguageRules = {
   naming: [/cannot load such file --[^\S\r\n]+([\w./-]+)/gi],
   tiesByLeaf: true,
   shapes: [],
-  symbolNaming: [/uninitialized constant[^\S\r\n]+([\w:]+)/gi],
+  // Require the `NameError` exception-class token the runtime's printer emits: the CLI/rspec unhandled
+  // form appends ` (NameError)` after the constant; minitest, catching the error inside a test, prefixes
+  // `NameError:`. `rubyRules` serves both frameworks, so both patterns are needed. Unanchored,
+  // `uninitialized constant Helper` inside a `raise_error("…")` string fires the tier — the §2 failure
+  // class within one language. A test names the class as an argument (`raise_error(NameError, …)`), never
+  // adjacent to the phrase the way the printer does.
+  symbolNaming: [
+    /uninitialized constant[^\S\r\n]+([\w:]+)[^\S\r\n]*\(NameError\)/gi,
+    /NameError:[^\S\r\n]+uninitialized constant[^\S\r\n]+([\w:]+)/gi,
+  ],
   definesSymbol: (s) => new RegExp(`\\b(?:class|module)[^\\S\\r\\n]+${escapeSymbol(s)}\\b`),
 };
 
@@ -319,9 +329,13 @@ const phpRules: LanguageRules = {
   naming: [/failed opening required[^\S\r\n]+['"]?([\w./-]+)['"]?/gi],
   tiesByLeaf: true,
   shapes: [],
-  // Case-insensitive: PHP class names are, so `Class "Helper" not found` must tie a file declaring
-  // `class helper`.
-  symbolNaming: [/Class[^\S\r\n]+["']([\w\\]+)["'][^\S\r\n]+not found/gi],
+  // Require the `Error:` exception-class token immediately before `Class "…"`. It survives BOTH PHP
+  // render paths: the CLI process-fatal `… Uncaught Error: Class "X" not found in path:line` and the
+  // PHPUnit-caught form `Error: Class "X" not found` (location on a separate stack-trace line, since PHP 7
+  // made class-not-found `Error`s catchable). Anchoring on the trailing `in <path>:<line>` location would
+  // drop the PHPUnit-caught case. Rejects `Failed asserting that 'Class "Helper" not found'` — `Class` is
+  // preceded by `'`, with no `Error:` token. Case-insensitive: PHP class names are.
+  symbolNaming: [/Error:[^\S\r\n]+Class[^\S\r\n]+["']([\w\\]+)["'][^\S\r\n]+not found/gi],
   definesSymbol: (s) =>
     new RegExp(`\\b(?:class|interface|trait)[^\\S\\r\\n]+${escapeSymbol(s)}\\b`, "i"),
 };
