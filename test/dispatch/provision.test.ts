@@ -544,8 +544,26 @@ describe("diffTouchesManifest", () => {
       expect(diffTouchesManifest([p])).toBe(true);
     }
   });
-  test("false for a file that merely contains 'gemspec' in its name", () => {
-    expect(diffTouchesManifest(["gemspec_helper.rb", "docs/gemspec.md"])).toBe(false);
+  // Pins the PATTERN's shape, not just its happy path. `gemspec_helper.rb` alone would pass
+  // against any plausible regex (it has no `.gemspec` suffix at all), so these are the cases
+  // that actually constrain it: a suffixed/edited copy, a templated one, the wrong case, and a
+  // bare dotfile that is not a gemspec.
+  test("false for near-misses of the .gemspec pattern", () => {
+    for (const p of [
+      "gemspec_helper.rb",
+      "docs/gemspec.md",
+      "foo.gemspec.bak",
+      "my.gemspec.erb",
+      "A.GEMSPEC", // case-sensitive, consistent with the basename set
+      ".gemspec", // a bare dotfile is not a gemspec
+    ]) {
+      expect(diffTouchesManifest([p])).toBe(false);
+    }
+  });
+  test("false for edited/templated copies of the basename manifests", () => {
+    for (const p of ["Gemfile.lock.orig", "composer.json.dist", "package.json.bak"]) {
+      expect(diffTouchesManifest([p])).toBe(false);
+    }
   });
   // Deliberately NOT re-armed: rust/go/jvm emit no `prepare`, so planProvision yields nothing
   // for them, while resetProvision is ticket-level and would re-run a sibling's install.
