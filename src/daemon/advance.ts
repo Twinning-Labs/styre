@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { DEFAULT_RUNTIME_CONFIG, type RuntimeConfig } from "../config/runtime-config.ts";
+import { getLatestForTicket } from "../db/repos/dispatch.ts";
 import { appendEvent } from "../db/repos/event-log.ts";
-import { latestDispatchForStep } from "../db/repos/review-finding.ts";
 import { getTicket, setTicketStage, setTicketStatus } from "../db/repos/ticket.ts";
 import { setStatus as setUnitStatus } from "../db/repos/work-unit.ts";
 import { decrementAttempt, getByKey } from "../db/repos/workflow-step.ts";
@@ -92,7 +92,9 @@ export async function advanceOneStep(
       // The resolver only DETECTED the terminal stuck-replay state (Task 12 LIVENESS fix); the
       // mutation (ticket → waiting + human_resume signal + an 'escalated' event) happens here, the
       // interpreter — never inside the pure resolver.
-      const stuckDispatchId = latestDispatchForStep(db, ticketId, "verify:checks-gate");
+      // The gate has no dispatch of its own (in-process handler) — carry the code dispatch instead
+      // (the latest dispatch whose HEAD the gate judged), same derivation as checks-gate-verdict.ts.
+      const stuckDispatchId = getLatestForTicket(db, ticketId)?.dispatch_id ?? undefined;
       escalate(db, ticketId, d.reason, "gate-stuck-head", stuckDispatchId);
       return { kind: "escalated", stepKey: "verify:checks-gate" };
     }

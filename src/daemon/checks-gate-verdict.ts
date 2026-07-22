@@ -1,10 +1,10 @@
 import type { Database } from "bun:sqlite";
+import { getLatestForTicket } from "../db/repos/dispatch.ts";
 import { appendEvent } from "../db/repos/event-log.ts";
 import {
   behavioralStillRed,
   listByTicket as listSignals,
 } from "../db/repos/ground-truth-signal.ts";
-import { latestDispatchForStep } from "../db/repos/review-finding.ts";
 import { insertPending as insertSignal } from "../db/repos/signal.ts";
 import { setTicketStatus } from "../db/repos/ticket.ts";
 import { listByTicket as listUnits, setStatus as setUnitStatus } from "../db/repos/work-unit.ts";
@@ -108,9 +108,13 @@ export function gateOriginLoopback(
 export function applyAcCheckGateVerdict(
   db: Database,
   ticketId: number,
-  opts: { stepKey: string },
+  _opts: { stepKey: string },
 ): GateVerdictResult {
-  const dispatchId = latestDispatchForStep(db, ticketId, opts.stepKey);
+  // The gate is an in-process handler (src/dispatch/handlers.ts) — it never calls
+  // runAgentDispatch, so it has no dispatch row of its own. Its events instead carry the CODE
+  // dispatch (the latest dispatch whose HEAD the gate judged), matching what the gate handler
+  // itself already looks up to find the sha it checks.
+  const dispatchId = getLatestForTicket(db, ticketId)?.dispatch_id ?? undefined;
   const { stillRed, sha } = latestGate(db, ticketId);
   if (stillRed.length === 0) return { decision: "clean" };
   const behavioral = sha === null ? [] : behavioralStillRed(db, ticketId, sha);
