@@ -8,7 +8,9 @@
 
 **Tech Stack:** TypeScript on Bun. Tests are `bun test`. Lint is `bun run lint` (Biome); types are `bun run typecheck` (`tsc --noEmit --strict`).
 
-**Blocked by:** ENG-344 — `src/dispatch/stack-registry.ts` must exist with `STACKS`, `stackFacts`, `isModeledKind` and its boundary tests (including the literal `SNAPSHOT`).
+**Blocked by:** ENG-344 (`src/dispatch/stack-registry.ts` must exist with `STACKS`, `stackFacts`, `isModeledKind` and its boundary tests, including the literal `SNAPSHOT`) **and ENG-362**.
+
+> **ENG-362 is a hard prerequisite, not a nicety.** This plan re-points routing from a scan-authoritative stored list onto `c.kind` — the one component field the discovery agent can author. `mergeComponents` (`discover-schema.ts:38-43`) applies the agent's `kind` while carrying the scan's `extensions`, and `discover.ts:47` runs it *before* the `trusted` gate, which filters only `commands`. So a machine-written v3 profile can already carry `kind: python` with node extensions. Deriving from `kind` then makes `.ts` files stop routing to that component — a **silent under-verify**, which `docs/plans/2026-06-30-wo5-file-identity-routing.md` calls "the cardinal sin", and which WO-5's decision **D1** materialized `extensions` specifically to close. Do not execute this plan until ENG-362 has landed.
 
 **Sibling, independent — either order:** ENG-360 (the mechanical fold of provision/manifests/skip-dirs/runtime-deps). It touches no file this plan touches.
 
@@ -24,15 +26,18 @@ Add `.vue` to the registry tomorrow: a repo whose profile was written last month
 
 The operator chose to remove the second copy outright rather than document an invariant against it (design §6b), because an invariant makes drift *discouraged* rather than *impossible*.
 
+**What this plan originally got wrong.** It claimed the derived list "equals the stored one by construction", so no profile could change behavior. Three independent reviewers falsified that: `kind` is agent-authorable and ungated (see the ENG-362 note above), so stored and derived can already disagree in a machine-written profile. With ENG-362 landed, the claim holds for profiles written *after* it; profiles written *before* it may still carry a drifted `kind`. That residual is real and is listed in the behavior changes at the end — it is not "by construction" safe.
+
 ## Global Constraints
 
-- **Never commit to `main`.** Branch `refactor/eng-361-extensions-not-persisted`. No `gh pr merge`, ever.
-- **Every task ends green with `bun run format && bun run lint && bun run typecheck && bun test`** — all four. `bun run lint` is `biome check .` (no `--write`) and the repo enforces `lineWidth: 100` + `organizeImports`, so hand-wrapped pasted code FAILS lint unless formatted first. `bun run typecheck` is what CI runs (`.github/workflows/ci.yml:18`); Biome does not type-check and `bun test` strips types. **Typecheck matters more than usual here** — Task 4 removes a field from a widely-constructed type, and object-literal excess-property errors are the mechanism that finds every fixture.
-- **Import placement and order.** Biome sorts specifiers naturally, so `"bun:test"` sorts BEFORE `"node:fs"`. Never add an import mid-file — merge into the existing import statement for that module.
+- **Never commit to `main`.** Branch `feat/eng-361-extensions-not-persisted` — `CONTRIBUTING.md:46` allows only `feat/` and `fix/` prefixes. No `gh pr merge`, ever.
+- **Every task ends green with `bun run format && bun run lint && bun run typecheck && bun test`** — all four. `bun run lint` is `biome check .` (no `--write`) and the repo enforces `lineWidth: 100` + `organizeImports`, so hand-wrapped pasted code FAILS lint unless formatted first. `bun run typecheck` is what CI runs (`.github/workflows/ci.yml:18`); Biome does not type-check and `bun test` strips types. **Typecheck matters more than usual here** — Task 4 removes a field from a widely-constructed type. But it is a *helper*, not the enumeration mechanism: it catches ~12 of the 15 fixture files. `grep -rln "extensions" test` is the authority (Task 4 Step 2).
+- **Import placement and order.** `bun run format` (`biome format --write`) does **NOT** fix import order — `organizeImports` is an assist enforced only by `biome check`, never auto-fixed. "Format first" will not save you here. Biome sorts by module specifier (`"bun:test"` before `"node:fs"`). Every import this plan adds is from a **different module** than the existing ones, so each needs **its own statement in sorted position** — not a merge into an existing block.
 - **Task order is load-bearing.** The version bump (Task 3) must land *before* the field deletion (Task 4). Reversed, there is a window where `styre setup` writes a profile with no extension list still marked v3, which a stale binary reads as "match every file". Do not reorder these.
-- **Do NOT touch** `src/dispatch/check-selector.ts` or `check-rules.ts:349` (`CHECK_RULES`) — PR 2's job. Do NOT touch `src/dispatch/provision.ts`, `src/setup/manifests.ts`, `src/dispatch/worktree.ts`, or `src/setup/runtime-deps/` — ENG-360's job.
+- **Do NOT touch** `src/dispatch/check-selector.ts` or `check-rules.ts:347` (`CHECK_RULES`) — PR 2's job. Do NOT touch `src/dispatch/provision.ts`, `src/setup/manifests.ts`, `src/dispatch/worktree.ts`, or `src/setup/runtime-deps/` — ENG-360's job.
 - **Regenerate the registry `SNAPSHOT`, never hand-edit it:**
-  `bun -e 'import("./src/dispatch/stack-registry.ts").then(m => console.log(JSON.stringify(m.STACKS, null, 2)))'`
+  `bun -e 'import("./src/dispatch/stack-registry.ts").then(m => console.log("const SNAPSHOT = " + JSON.stringify(m.STACKS, null, 2) + ";"))'`
+  (Identical to ENG-344's form, which emits the `const SNAPSHOT = ` prefix — the two plans run back to back and must not diverge.)
 - Commit messages: conventional-commit with a scope, ending with:
   ```
   Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
@@ -104,7 +109,7 @@ In `src/dispatch/stack-registry.ts`, add to `StackFacts`:
   readonly extensions: readonly string[];
 ```
 
-Then populate all nine entries. The shared `NO_INSTALL_STEP` / `INSTALLS_NO_NAMED_TOOLS` constants from ENG-344 must now be **split**, because extensions differ per kind — that split was anticipated in ENG-344's Task 1 note.
+Then populate all nine entries. ENG-344's shared `NO_INSTALL_STEP` / `INSTALLS_NO_NAMED_TOOLS` constants change from full `StackFacts` values to **spreadable partials**, because `extensions` differs per kind and must be written inline. (An earlier draft called this "splitting" them — it is not; their bodies stay identical. What changes is reference → spread, which also **drops ENG-344's `: StackFacts` annotation**, the only compile-time check that those constants are complete. Unavoidable here — an annotated literal missing `extensions` would not compile — but note it: a future `StackFacts` field will now only fail at the nine `RAW` entries.)
 
 ```ts
 const NODE_EXTS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cts", ".mts"] as const;
@@ -142,9 +147,9 @@ Also update `UNMODELED` to include `extensions: []`.
 - [ ] **Step 4: Regenerate the snapshot and run**
 
 ```bash
-bun -e 'import("./src/dispatch/stack-registry.ts").then(m => console.log(JSON.stringify(m.STACKS, null, 2)))'
+bun -e 'import("./src/dispatch/stack-registry.ts").then(m => console.log("const SNAPSHOT = " + JSON.stringify(m.STACKS, null, 2) + ";"))'
 ```
-Replace the `SNAPSHOT` literal in `test/dispatch/stack-registry.test.ts` with the output (keeping the `const SNAPSHOT = ` prefix and trailing `;`).
+Replace the `SNAPSHOT` literal in `test/dispatch/stack-registry.test.ts` with the output verbatim.
 
 Run: `bun test test/dispatch/stack-registry.test.ts`
 Expected: PASS. If the differential test fails, the diff names the offending kind — fix the registry entry, never the assertion.
@@ -186,9 +191,11 @@ This is the one place Task 2 can change behavior, so find it before writing code
 grep -rn "extensions:" test --include="*.ts"
 ```
 
-For each hit, check the fixture's `kind` against the registry. A fixture with `kind: "custom"` and `extensions: [".x"]` currently filters to `.x`; after this task it routes by path alone (unmodeled kind → empty → unfiltered). Any such fixture must be updated **and the change noted in the commit body** — it is a genuine behavior difference for hand-authored profiles, which is the accepted residual in design §6b.2.
+For each hit, ask: **does the fixture's stored list equal `stackFacts(kind).extensions`? If not, does anything route files through it?**
 
-Expected: the real fixtures use kinds the registry models with matching extension lists, so most need no change. Verify rather than assume.
+An earlier draft told you to hunt for `kind: "custom"` + `extensions: [".x"]` (modeled → unmodeled). Two reviewers measured the real population and it is the **mirror image**: modeled kinds with an **empty** list, flipping from *unfiltered* to *extension-filtered*. Confirmed in `test/cli/run-guard.test.ts:18-21,33-40,50-57,67-70`, `test/dispatch/reuse.test.ts:58-61,87-90,105-108,115-118`, `test/setup/resolve-commands.test.ts:10-13,17-20,45-52`, `test/dispatch/prompt-vars.test.ts:210-231`, `test/setup/discover-schema.test.ts`, `test/dispatch/provision.test.ts:39-42`, `test/setup/discover.test.ts:40-50,166-169`.
+
+None feeds a routing assertion today, so the suite stays green — but that is luck, not design, and the original search would have found none of them. Check each; note any real change in the commit body.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -229,7 +236,13 @@ test("registry-backed kinds still filter by extension", () => {
 - [ ] **Step 3: Run test to verify it fails**
 
 Run: `bun test test/dispatch/components.test.ts`
-Expected: FAIL on "routing follows the component's kind" — today `extMatches` reads the stale `[".ts"]` and returns `false` for `App.svelte`.
+Expected: **two** failures, not one (a reviewer ran this):
+- *"routing follows the component's kind"* — today `extMatches` reads the stale `[".ts"]` and returns `false` for `App.svelte`.
+- *"registry-backed kinds still filter by extension"* — its fixture omits `extensions`, so today `c.extensions ?? []` is `[]` and `extMatches` returns `true` for `a/b.rs`.
+
+The middle test, *"an unmodeled kind routes by path alone"*, **passes before and after** — a regression guard, not a red test.
+
+**Missing coverage to add here:** nothing locks down the unmodeled-kind-with-stored-extensions case (`kind: "custom"`, `extensions: [".x"]`) — the exact residual the changelog and PR description promise to have accepted. Add a test asserting it now routes by path alone.
 
 - [ ] **Step 4: Derive**
 
@@ -293,7 +306,11 @@ The bump does *not* protect new binaries reading old files — that direction is
 
 **Accepting 3 is safe** because the derived extension list equals the stored one by construction for all nine kinds (Task 1 asserts precisely that), and both are empty for an unrecognised kind. So no deployed profile needs regenerating.
 
-**But acceptance alone is a trap.** `styre setup` re-reads an existing profile to carry its `analyticsId` forward (`setup.ts:120-126`) and writes the result. If a parsed v3 profile kept `schemaVersion: 3`, that rewrite would emit a file with **no extension list still marked v3** — precisely the silent over-routing the bump exists to prevent, manufactured by our own write path. So the parser must **normalize to 4**, not merely accept 3.
+**Why normalize rather than merely accept.** An earlier version of this plan justified normalization with a hazard that does not exist — it claimed `styre setup` re-reads a profile and carries its `schemaVersion` forward. **It does not.** `src/cli/setup.ts:112` builds from a fresh `probeProfile`, and the re-read at `:118-127` contributes only `analyticsId` and `runtimeContext`; `schemaVersion` always comes from the schema default. Two reviewers traced this independently. That reasoning has been removed from the code comment and the commit body — do not reintroduce it.
+
+The real reasons are narrower and honest: `Profile["schemaVersion"]` stays a single literal rather than a `3 | 4` union every consumer must handle, and any future code that round-trips a loaded profile writes the correct version by default rather than by remembering to. Both are worth one line; neither is a safety-critical hazard.
+
+**Watch the default.** `.default(4)` means a profile with **no** `schemaVersion` key is now read as 4 where it previously became 3. That is the one genuine parse-behavior change for old files. It is harmless (extensions are ignored either way) but it must be tested — an existing test at `test/dispatch/profile.test.ts:127` already covers this path and asserts `3`; it will need updating.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -352,12 +369,16 @@ Expected: FAIL — the v3 test gets `3` not `4`, and the v4 test throws (`z.lite
 In `src/dispatch/profile.ts`, replace the `schemaVersion` line (`:116`):
 
 ```ts
-  /** Accepts 3 or 4 on input and ALWAYS yields 4. Normalization is not cosmetic: `styre setup`
-   *  re-reads an existing profile to carry `analyticsId` forward (`setup.ts:120-126`) and writes
-   *  the result, so a preserved `3` would emit a file with no `extensions[]` still marked v3 — and
-   *  a v3 binary reads a missing extension list as "match every file" (`components.ts:75`),
-   *  silently over-routing every component. Accepting 3 means no deployed profile needs
-   *  regenerating: the derived extension list equals the stored one by construction. */
+  /** Accepts 3 or 4 on input and always yields 4, so `Profile["schemaVersion"]` stays a single
+   *  literal rather than a union every consumer must narrow, and any future round-trip of a loaded
+   *  profile writes the correct version without having to remember to.
+   *
+   *  Accepting 3 means no deployed profile needs regenerating — a v3 file's stored `extensions[]`
+   *  is stripped and re-derived from `kind`, which agrees for any profile written after ENG-362
+   *  gated agent `kind` refinement. The bump itself exists for the OTHER direction: a v4 file omits
+   *  `extensions[]`, and a v3 binary would default that to `[]`, which `extMatches` reads as "match
+   *  every file" (`components.ts:75`) — silent over-routing. `z.literal(3)` makes that a loud
+   *  parse failure instead. */
   schemaVersion: z
     .union([z.literal(3), z.literal(4)])
     .default(4)
@@ -366,7 +387,9 @@ In `src/dispatch/profile.ts`, replace the `schemaVersion` line (`:116`):
 
 Update the two doc comments above `ComponentSchema` (`:92-95`) and `ProfileSchema` (`:113-114`) to describe 4, and the schemaVersion-1 error text (`:136`) to say "schemaVersion-4 profile".
 
-Leave the bespoke v1/v2 pre-checks (`:133-144`) exactly as they are — they give better messages than a bare union failure, and their wording about `extensions[]` is still accurate history for why v2 was rejected.
+Keep the bespoke v1/v2 pre-checks (`:133-144`) — they give far better messages than a bare union failure — but **update the v2 wording**. An earlier draft said to leave it as "accurate history"; it is not history, it is an instruction printed to an operator, and after this change both halves are wrong: `extensions[]` is no longer "required for file-identity routing" (this PR deletes that requirement), and re-running setup now produces a **schemaVersion-4** profile. `test/dispatch/profile.test.ts:43` asserts only `/schemaVersion 2.*re-run.*styre setup/i`, so rewording is free.
+
+**Also add the symmetric pre-check for a version that is too NEW.** The failure this bump creates — a newer profile meeting an older binary — currently falls through to a bare `field schemaVersion` union error that reads like a corrupt file. This binary cannot fix that for already-shipped binaries, but it can make the *next* bump diagnosable: reject `schemaVersion > 4` with "profile was written by a newer styre; upgrade the binary or re-run `styre setup`".
 
 - [ ] **Step 4: Run tests**
 
@@ -436,35 +459,49 @@ Update the `runRegistry` doc comment (line 13) — delete the sentence about att
 export type ComponentDraft = Component;
 ```
 
-- [ ] **Step 2: Run typecheck to enumerate every fixture**
+- [ ] **Step 2: Enumerate every fixture — by GREP, not by typecheck**
 
 ```bash
-bun run typecheck
+grep -rln "extensions" test --include="*.ts"    # THE authority: 15 files
+bun run typecheck                                # a helper: catches ~12 of them
 ```
-Expected: **many** `TS2353` / excess-property errors across `test/`. That is the mechanism, not a problem — TypeScript is listing every fixture that constructs a `Component` with an `extensions` key. Roughly 15 files:
 
-```bash
-grep -rln "extensions" test --include="*.ts"
-```
+**Typecheck alone is not sufficient, and an earlier version of this plan wrongly said it was.** Two reviewers measured it independently: `tsc` reports ~61 errors across 12 files, while grep finds 15. Three files defeat excess-property checking entirely, and because zod strips the unknown key they keep **passing** with dead, misleading data:
+
+| File | Why `tsc` cannot see it |
+|---|---|
+| `test/cli/preflight.test.ts:17-19` | `Omit<Profile["components"][number], "extensions"> & { extensions?: string[] }` — `Omit` of a key that no longer exists is a legal no-op, and the intersection re-adds it as optional |
+| `test/dispatch/replay-harness.test.ts:11-21` | a named `const PY = {…}`, not a fresh literal at the call site |
+| `test/setup/lang/php.test.ts:100-102,113-115` | `drafts.map((d) => ({ ...d, extensions: [".php"] }))` — spread result, no contextual type |
+
+There is also a **within-file** hole: `test/setup/discover.test.ts` is flagged at `:43,:50` but not `:169` (`extensions: [] as string[]` inside an un-annotated const). Clearing the `tsc` errors will feel complete when it is not.
 
 - [ ] **Step 3: Sweep the fixtures**
 
 For each file, **delete the `extensions:` property from the fixture**. Do not replace it with anything — routing now comes from `kind`.
 
-Two files need more than deletion:
+**`test/dispatch/stack-registry.test.ts` is the exception to "delete the `extensions:` property":** its `SNAPSHOT` literal legitimately contains nine `extensions` keys. Delete only the Task-1 differential test and its `EXTENSIONS_BY_KIND` import — **leave the `SNAPSHOT` entries alone.** (A mechanical sweep here produces `TS2769: Property 'extensions' is missing in type … but required in type 'StackFacts'`.)
+
+These files need more than a property deletion:
 
 - **`test/dispatch/profile.test.ts:39-40`** asserts `p.components[0].extensions` directly. Those assertions cannot survive; replace them with the behavior they were standing in for:
 
   ```ts
   // was: expect(p.components[0].extensions).toEqual([".rs"]);
-  expect(matchesComponent(p.components[0], "src/main.rs")).toBe(true);
-  expect(matchesComponent(p.components[0], "src/main.py")).toBe(false);
+  // NOTE the paths: this fixture's `paths` is ["src-tauri/**"], and matchesComponent is
+  // extMatches AND a path-glob match. "src/main.rs" does NOT match that glob, so asserting
+  // toBe(true) on it fails for a reason that has nothing to do with extensions.
+  expect(matchesComponent(p.components[0], "src-tauri/main.rs")).toBe(true);
+  expect(matchesComponent(p.components[0], "src-tauri/main.py")).toBe(false);
   ```
-  (Import `matchesComponent` from `../../src/dispatch/components.ts`, merged into the existing import block.)
+  Add as its **own import statement in sorted position** (Biome sorts by module specifier, and this is a different module from the existing `profile.ts` import) — `import { matchesComponent } from "../../src/dispatch/components.ts";` goes after the `node:path` import and before the `../../src/dispatch/profile.ts` one.
 
 - **`test/dispatch/stack-registry.test.ts`** — delete the differential test added in Task 1 Step 1 and its `EXTENSIONS_BY_KIND` import. The table it compared against no longer exists; the `SNAPSHOT` test now carries that duty.
 
-- **`test/dispatch/components.test.ts`** — its `EXTENSIONS_BY_KIND` assertions (around lines 59-66, 177-180, 200-201) go too. The registry's own tests cover the table's contents; this file should assert *routing*, which the Task 2 tests already do.
+- **`test/dispatch/components.test.ts`** — its `EXTENSIONS_BY_KIND` assertions (lines 59-66, 177-180, 200-201) go too. The registry's own tests cover the table's contents; this file should assert *routing*, which the Task 2 tests already do. Also retire or restate `:112-121` (`"extMatches: undefined or empty extensions → path-only fallback"`): after Task 2 `extMatches` never reads `c.extensions`, so its `{...noExts, extensions: undefined} as unknown as Component` cast asserts nothing. What it now measures is "an unmodeled kind routes by path alone" — rename it to that or delete it.
+- **`test/cli/preflight.test.ts`** — delete the `ComponentInput` alias (`:17-19`) and its now-false comment; change `makeProfile`'s parameter to `Profile["components"]`. **Coordinate with ENG-344**, whose Task 2 adds ~15 fixtures to this same file using `const base = { paths: ["**"], extensions: [] }` — that `extensions: []` must go when this lands.
+- **`test/dispatch/replay-harness.test.ts:11-21`** and **`test/setup/lang/php.test.ts:100-102,113-115`** — delete the key *and* the comments describing `extensions` as required / "mirrors what runRegistry does", which this task falsifies.
+- **`test/setup/discover.test.ts:169`** — the `tsc`-invisible one.
 
 - [ ] **Step 4: Verify nothing still references the deleted symbols**
 
@@ -506,7 +543,7 @@ Claude-Session: https://claude.ai/code/session_01BBT2nDt4wFTDrk5MDcHQB8"
 
 **Files:**
 - Modify: `src/dispatch/check-rules.ts:1-20`
-- Test: `test/dispatch/check-rules.test.ts` (create if ENG-359 has not already)
+- **Create:** `test/dispatch/check-rules.test.ts` — it does **not** exist today (unless ENG-359 created it)
 
 **Interfaces:**
 - Consumes: `STACKS` from Task 1.
@@ -552,6 +589,8 @@ describe("moduleLeaf strips every registry-known source extension", () => {
 
 Run: `bun test test/dispatch/check-rules.test.ts`
 Expected: **PASS** if ENG-359 landed; **FAIL** on the eight otherwise (`expected "button", got "svelte"`). Record which you saw — it determines the commit message.
+
+As of this plan's writing ENG-359 had **not** landed (`check-rules.ts:4-19` is still the 15-entry hand list), so expect FAIL. Only the *"eight the drift was missing"* test is load-bearing; the other two pass either way.
 
 - [ ] **Step 3: Derive**
 
@@ -622,9 +661,11 @@ it is a registry fact currently living in the profile; it moves under this same 
 framework-keyed half lands.
 ```
 
-- [ ] **Step 3: Changelog**
+- [ ] **Step 3: The behavior note goes in the PR body, NOT `CHANGELOG.md`**
 
-Add under the unreleased heading, matching the file's existing style:
+An earlier draft said to hand-edit `CHANGELOG.md` "under the unreleased heading". **There is no unreleased heading, and the file is generated.** `CONTRIBUTING.md:53`: the changelog is produced by **git-cliff** from conventional-commit subjects; `release.yml` splices generated notes in, so a hand-added block is clobbered at the next release. Worse, `ci.yml:24-26` documents that the repo **squash-merges** — the PR title becomes the commit git-cliff parses, and every per-task commit body in this plan is discarded at merge.
+
+So: put the following in the **PR description**, and make the PR title the conventional-commit line you want in the changelog (e.g. `feat(profile)!: derive component extensions from the stack registry (schemaVersion 4)`).
 
 ```markdown
 - **Profile `schemaVersion` 4.** Per-component `extensions[]` is no longer written to
@@ -632,8 +673,11 @@ Add under the unreleased heading, matching the file's existing style:
   Existing v3 profiles are accepted unchanged and normalized to v4 on load — **no regeneration
   required**. An older styre binary will now refuse a v4 profile with a validation error rather than
   mis-route; re-run `styre setup` or upgrade the binary. *Residual:* a hand-edited profile carrying
-  custom `extensions[]` has them ignored — the field was always machine-written (absent from the
-  discovery schema, so the agent could never author it), so hand-editing was never supported.
+  custom `extensions[]` has them **silently stripped**, with no diagnostic. Note `profile.ts:80-82`
+  states in source that "`profile.json` is hand-editable", so calling this unsupported would be
+  wrong — it was undocumented as an override, not forbidden. Consider a warn-on-strip in
+  `parseProfile`, which already hand-writes diagnostics for v1/v2, to make this a visible migration
+  rather than quiet data loss.
 ```
 
 - [ ] **Step 4: Full verification**
@@ -704,13 +748,17 @@ git push
 | `schemaVersion` is 4; `parseProfile` accepts 3 and 4; a v3 file's stored `extensions` ignored without error | 3, 4 Step 1 |
 | A test proves the version guard works | 3 ("an unknown future schemaVersion is rejected" — the same guard a v3 binary applies to a v4 file, testable from this side) |
 | Stale doc comment at `lang/types.ts:3` updated | 4 |
+| v2 error message updated; too-new pre-check added | 3 |
+| Unmodeled-kind-with-stored-extensions residual has a test | 2 |
 | Changelog notes the hand-edited-`extensions` residual | 6 |
 | `format` + `lint` + `typecheck` + `test` green | every task; final in 6 |
 
 ## Behavior changes to call out in the PR description
 
 1. **Older styre binaries reject profiles written by this version** (validation error naming `schemaVersion`). Intended — it is the whole point of the bump, and the alternative is silent over-routing. Operators upgrade the binary or re-run `styre setup`.
-2. **A hand-edited profile's custom `extensions[]` is ignored.** The field was machine-written and absent from the discovery schema, so hand-editing was never supported. Changelogged.
-3. **`moduleLeaf` gains eight extensions** — only if ENG-359 has not already landed. Prefer landing it first so this PR is a clean no-op.
+2. **A hand-edited profile's custom `extensions[]` is silently stripped.** Not "unsupported" — `profile.ts:80-82` says in source that the profile *is* hand-editable; the field was merely undocumented as an override. Silent is the problem; a warn-on-strip would fix it.
+3. **A profile written before ENG-362 whose `kind` was refined by the discovery agent may route differently.** `mergeComponents` applied the agent's `kind` while keeping the scan's `extensions`, so stored and derived can disagree; deriving from `kind` changes routing for exactly those components. ENG-362 closes the source, but does not retroactively repair profiles already on disk. Re-running `styre setup` regenerates them.
+4. **A profile with no `schemaVersion` key at all** is now read as 4 rather than 3 (the schema default moves). Harmless — extensions are ignored either way — but it is a real parse-behavior change and `test/dispatch/profile.test.ts:127` covers this path today asserting `3`.
+5. **`moduleLeaf` gains eight extensions** — ENG-359 had not landed as of writing, so expect this. Prefer landing ENG-359 first so this PR is a clean no-op.
 
-Everything else is behavior-preserving by construction: the derived extension list equals the stored one for every kind, which Task 1 asserts differentially against the live table before deleting it.
+Everything else is behavior-preserving *for profiles written after ENG-362*: the derived extension list equals the stored one for every kind whose `kind` was not agent-refined, which Task 1 asserts differentially against the live table before deleting it. The earlier claim that this held "by construction" for all profiles was false — see the note under **Why**.
