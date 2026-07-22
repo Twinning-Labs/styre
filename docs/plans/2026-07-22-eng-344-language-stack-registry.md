@@ -120,13 +120,17 @@ describe("boundary: the registry is data, not logic", () => {
   });
 
   // §5.3 — defence in depth and a fast, legible failure. A lint rule, not a proof.
+  // Scans CODE, not prose: the registry's own header comment explains why a source-text
+  // check is insufficient and therefore names `Bun.file()`, `process.cwd()` and
+  // `globalThis` — so an unstripped scan fails on its own documentation.
   test("the module source reaches for nothing external", () => {
     const src = readFileSync(
       join(import.meta.dir, "../../src/dispatch/stack-registry.ts"),
       "utf8",
     );
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
     for (const bad of ["import ", "import(", "require(", "Bun.", "process.", "globalThis"]) {
-      expect(src.includes(bad) ? `${bad} found` : null).toBeNull();
+      expect(code.includes(bad) ? `${bad} found in code` : null).toBeNull();
     }
   });
 
@@ -346,6 +350,10 @@ Object.defineProperty(RAW.go, "installProvidedTools", { get: () => [] });
 
 Run: `bun test test/dispatch/stack-registry.test.ts`
 Expected: **FAIL** on "no functions, no getters, no exotic prototypes" with `STACKS.go.installProvidedTools: getter`. If it passes, the walk is using `Object.entries` (which invokes accessors) instead of `Object.getOwnPropertyDescriptors` — fix it. **Then revert this line.**
+
+Now prove the denylist bites without false-positiving on prose. Temporarily add a real import (`import { extname } from "node:path";`) at the top of the registry:
+
+Expected: **FAIL** on "the module source reaches for nothing external" with `import  found in code`. Then revert. If instead the test was *already* failing before you added the import, the comment-stripping regex is wrong — the registry's own header names `Bun.file()`, `process.cwd()` and `globalThis` while explaining why this check is weak, and an unstripped scan trips on that.
 
 This step exists because the previous version of this boundary test did *not* bite, and nobody noticed until an independent reviewer demonstrated a repo-state-branching registry passing every assertion.
 
