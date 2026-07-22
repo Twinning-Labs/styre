@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   EXIT,
   StyreError,
+  agentCliError,
   configError,
   errorKindForExit,
   toolchainError,
@@ -51,4 +52,23 @@ test("errorKindForExit maps each EXIT code to its kind", () => {
 test("errorKindForExit falls back to 'other' for an unknown code", () => {
   expect(errorKindForExit(0)).toBe("other");
   expect(errorKindForExit(255)).toBe("other");
+});
+
+test("agentCliError(missing) → exit 69, 'not installed' headline, install recovery", () => {
+  const e = agentCliError({ reason: "missing", command: "claude" });
+  expect(e.code).toBe(EXIT.TOOLCHAIN_MISSING);
+  expect(e.headline).toMatch(/claude is not installed or not on PATH/);
+  expect(e.recovery).toMatch(/Install the 'claude' CLI/);
+});
+
+test("agentCliError(unsupported-version) → exit 69, upgrade headline naming found+required", () => {
+  const e = agentCliError({
+    reason: "unsupported-version",
+    command: "claude",
+    found: "2.0.9",
+    required: "2.1.200",
+  });
+  expect(e.code).toBe(EXIT.TOOLCHAIN_MISSING);
+  expect(e.headline).toMatch(/claude 2\.0\.9 is below the supported minimum 2\.1\.200/);
+  expect(e.recovery).toMatch(/Upgrade the 'claude' CLI to >= 2\.1\.200/);
 });

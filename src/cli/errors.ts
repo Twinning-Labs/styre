@@ -59,6 +59,30 @@ export function toolchainError(detail: string): StyreError {
   });
 }
 
+/** The configured agent CLI is missing or below its supported version (ENG-326). Distinct from
+ *  toolchainError because an out-of-range binary IS runnable — the fix is to upgrade, not install.
+ *  Both variants exit 69 (non-retry), so a missing/old CLI never reaches the transient-retry path. */
+export function agentCliError(
+  e:
+    | { reason: "missing"; command: string }
+    | { reason: "unsupported-version"; command: string; found: string; required: string },
+): StyreError {
+  if (e.reason === "missing") {
+    return new StyreError({
+      code: EXIT.TOOLCHAIN_MISSING,
+      headline: `${e.command} is not installed or not on PATH`,
+      detail: `Styre dispatches every agent run by shelling out to the '${e.command}' CLI.`,
+      recovery: `Install the '${e.command}' CLI, or set agent.command in your profile, then re-run.`,
+    });
+  }
+  return new StyreError({
+    code: EXIT.TOOLCHAIN_MISSING,
+    headline: `${e.command} ${e.found} is below the supported minimum ${e.required}`,
+    detail: `Styre's '${e.command}' adapter is pinned to CLI flags that require ${e.required} or newer.`,
+    recovery: `Upgrade the '${e.command}' CLI to >= ${e.required} and re-run.`,
+  });
+}
+
 /** Coarse operator-error kind derived from the shared exit-code scheme, emitted on `cli_error`
  *  so analytics can distinguish usage vs config vs toolchain vs internal — which `error_class`
  *  can't (every StyreError shares one class). Unknown codes collapse to "other". */
