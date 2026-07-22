@@ -206,7 +206,7 @@ Traced against every real detector output:
 | python | `python -m pytest` | `python` | **probe** ⚠️ new (§6.2) |
 | python | `pip install -e .` (prepare) | `pip` | **probe** ✅ unchanged |
 | node | `npm run test` | `npm` | **probe** ⚠️ restored (§6.1) |
-| ruby | `bundle exec rspec` | `bundle` | **probe** — dup of the prepare probe, dedupe by `(cwd, command)` |
+| ruby | `bundle exec rspec` | `bundle` | **probe** ✅ new, and correct — `bundle` is a precondition, not install output |
 | go / rust / jvm | `go test ./...`, `cargo build`, `mvn -q test` | — | **probe** ✅ unchanged |
 
 The ENG-332 special-case is deleted for all 9 modeled kinds. It survives **only** as the unmodeled-kind fallback (§6.6).
@@ -234,7 +234,9 @@ Enumerated because "no behavior change" would be false, and reviewers should see
 2. **`python -m pytest` now probes `python`.** On a python3-only machine with a working `pip` shim, this converts a mid-run verify death into a clean exit-69 at second zero. That is the fail-fast the feature exists for, but it is a *new early hard stop*. The bare-`pip`/`python` portability fix remains the ticket's named follow-up and will consume `facts.interpreters`.
 3. **`diffTouchesManifest` gains `Gemfile` and `composer.json`** — fixes the live re-arm bug (§1). It also gains `Cargo.toml`, `go.mod`, `pom.xml`, `build.gradle*`, where the re-arm is a cheap no-op: those kinds have no `prepare`, so `planProvision` emits nothing (`provision.ts:57`).
 4. **`moduleLeaf` gains `.svelte`, `.gradle`, `.groovy`, `.cts`, `.mts`** — closes the `SOURCE_EXTS` drift. `Button.svelte` now reduces to `button`. Affects check name-matching; needs a targeted test.
-5. **`ignoreDirs`/`SKIP` must stay a superset.** `SKIP` currently contains `.git`, `dist`, `build`, `Pods`, `testdata` — not cleanly per-kind. They move to `GENERIC_IGNORE_DIRS`; a test asserts the derived union ⊇ today's `SKIP`, so no repo walk widens.
+5. **`ignoreDirs`/`SKIP` must be set-EQUAL, not a superset.** (Corrected during planning — the first draft said "⊇", which is backwards: `SKIP` *prunes* the manifest walk, so a superset would skip more dirs and silently find fewer components.) `SKIP`'s `.git`, `dist`, `Pods` belong to no kind and move to `GENERIC_IGNORE_DIRS`; the rest decompose cleanly per kind (`target`→rust+jvm-maven, `testdata`→go, `.tox`/`.nox`/`.venv`/`venv`/`__pycache__`→python, `.svelte-kit`→node, `.gradle`/`build`→jvm-gradle, `.mvn`→jvm-maven, `vendor`→ruby+php, `node_modules`→node). A test asserts the derived union **equals** today's `SKIP` exactly.
+
+   `SWEEP_SKIP_DIRS` (`worktree.ts:255`, today `.git` + `node_modules`) becomes `.git` + every kind's `installOutputDir` — which adds `vendor`. Behavior delta: `sweepScratch` no longer descends into a PHP `vendor/` tree looking for `styre_scratch/`. Correct and faster; needs a test.
 6. **Unmodeled kinds keep the conservative path.** `kind` is an unconstrained `z.string()` (`profile.ts:98`), so custom kinds are legal. `stackFacts()` returns empty facts for them, which would probe everything and risk re-introducing the ENG-332 false-fail for an un-modeled ecosystem. So the preflight keeps "unmodeled kind **and** has `prepare` → probe prepare only" as an explicit, documented fallback. Combined with the §5.3 exhaustiveness test, it is unreachable for the 9 real kinds. This is a narrowing of the special-case, not a retention of it — AC 2 is met for every kind the registry models.
 
 ## 7. Adjacent findings (recorded, NOT fixed here)
@@ -246,7 +248,7 @@ Enumerated because "no behavior change" would be false, and reviewers should see
 ## 8. Testing
 
 - **Registry invariants** — the four assertions in §5.
-- **Preflight** — the §4.2 table as cases; php and python clean-checkout still pass; go/jvm still probe build/test; node's `npm run test` is probed; duplicate `(cwd, command)` probes deduped.
+- **Preflight** — the §4.2 table as cases; php and python clean-checkout still pass; go/jvm still probe build/test; node's `npm run test` is probed; ruby's `bundle exec rspec` is probed.
 - **Provision** — `isComponentReady` unchanged for node/sveltekit (marker + mtime staleness) and still `false` for every other kind; `resolveInterpreter("python")` matches `resolvePythonInterpreter`'s old order and still throws when neither is present; `diffTouchesManifest` gains `Gemfile`/`composer.json` and keeps `requirements-dev.txt`.
 - **Routing** — `EXTENSIONS_BY_KIND`'s existing assertions (`test/dispatch/components.test.ts:59-66,177-180,200-201`) re-pointed at the registry with identical expectations; `moduleLeaf` gains the five new extensions.
 - **Walk** — derived ignore-dir union ⊇ today's `SKIP`.
