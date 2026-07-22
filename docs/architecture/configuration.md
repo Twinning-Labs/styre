@@ -30,6 +30,7 @@ check spelling against this table.
 | `jira.bugTypeNames` | `string[]` | `["Bug"]` | Issue-type names treated as Bug (case-insensitive); decides `fix/` vs `feat/` branch prefix. |
 | `forge` | string | `"github"` | Which forge (code host) adapter handles push/PR. Only `github` is registered. Credentials via env. |
 | `telemetry` | boolean | `true` | PostHog adoption analytics. On by default; also honored: `DO_NOT_TRACK` / `STYRE_TELEMETRY` env (a one-way veto). |
+| `pricing` | object | built-in price table | Price table + long-context tiers feeding the telemetry `cost_usd_estimated` estimate (see below). Deliberately a **separate top-level key**, not nested under the boolean `telemetry` above. |
 | `notifier` | `"none" \| "slack"` | `"none"` | Outbound notifier. `slack` requires `slack.channel` and `SLACK_BOT_TOKEN`; `assertSlackConfigured` fails loud at startup otherwise. |
 | `notify` | `"escalations" \| "transitions" \| "everything"` | `"escalations"` | Notification verbosity. `escalations` = escalated/parked only; `transitions` also sends stage transitions; `everything` also sends loopbacks (`src/daemon/notify.ts`). |
 | `slack.channel` | string | absent | Target Slack channel; required when `notifier: "slack"`. |
@@ -68,6 +69,49 @@ Models are chosen per **tier**, never hardcoded per step. The step→tier map is
 
 The provider's auth env var is gated at `styre setup`: `claude → ANTHROPIC_API_KEY`,
 `codex → OPENAI_API_KEY` (`requiredEnvFor`). The gate runs in `setup`, not `run`.
+
+### The `pricing` block
+
+`PricingConfigSchema` (`src/telemetry/pricing.ts`). Feeds only the telemetry `cost_usd_estimated`
+estimate (`docs/architecture/telemetry-export.md` §4) — it has **no effect on reported `cost_usd`**,
+which always comes straight from the provider and is never overwritten by an estimate. It is a
+**new top-level key**, deliberately *not* nested under the boolean `telemetry` key above (that key
+is the PostHog adoption-analytics toggle; this one is pricing data).
+
+```jsonc
+{
+  "pricing": {
+    "version": "builtin@2026-07-22",   // provenance stamp; surfaced verbatim as `pricing_version`
+                                        // on the telemetry summary event
+    "rates": {                         // per-model USD per 1M tokens
+      "claude-sonnet-4-6": { "input": 3.0, "cacheRead": 0.3, "cacheWrite": 3.75, "output": 15.0 }
+      // ... one entry per priced model id
+    },
+    "tiers": {                         // per-provider long-context multiplier rule
+      "codex": { "threshold": 272000, "inputMultiplier": 2, "outputMultiplier": 1.5 }
+    }
+  }
+}
+```
+
+- `version` — a free-text provenance stamp for the table in use; defaults to a built-in
+  `builtin@<date>` string. Set it when you override `rates`/`tiers` so the telemetry stream records
+  that a non-default table produced the estimate.
+- `rates` — `Record<model_id, {input, cacheRead, cacheWrite, output}>`, all USD per 1,000,000
+  tokens. A model id absent from `rates` yields a `null` estimate for dispatches on that model —
+  unpriced, not zero.
+- `tiers` — `Record<provider, {threshold, inputMultiplier, outputMultiplier}>`. Above `threshold`
+  input tokens, input/output rates (and cache rates, which ride the input multiplier) are scaled for
+  that dispatch. Built-in: `codex` at a 272K-token threshold, 2× input / 1.5× output.
+- **Because config resolution is a shallow per-top-level-key spread (see Precedence, below),
+  `pricing` as a whole — and `pricing.rates` in particular — is replaced wholesale, not deep-merged.**
+  An override that sets `pricing.rates` replaces the *entire* built-in rates map; any model id you
+  don't restate becomes unpriced (`cost_usd_estimated: null` for it) even though the built-in table
+  used to price it. To retune one model's price, copy the full built-in map and change the one entry
+  — you cannot patch a single rate in isolation.
+- **The token-accounting convention is not configurable.** Which token fields feed the formula, and
+  how they're combined per provider (codex's partition-subtract vs. claude's disjoint buckets), is a
+  verified structural fact that lives in code (`src/telemetry/pricing.ts`), not in this config block.
 
 ---
 

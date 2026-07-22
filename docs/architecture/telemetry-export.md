@@ -125,6 +125,7 @@ still in flight (no `ended_at`) is never emitted — only completed rows cross t
 | `cache_read` | number \| null | yes | `dispatch.cache_read` |
 | `cache_create` | number \| null | yes | `dispatch.cache_create` |
 | `cost_usd` | number \| null | yes | `dispatch.cost_usd` |
+| `cost_usd_estimated` | number \| null | yes | derived at emit time — see §4 |
 
 ### 3.3 `signal` — a ground-truth verdict (`ground_truth_signal` row)
 
@@ -171,6 +172,8 @@ dashboard rates (autonomous-fix ratio, first-time CI pass rate, unit cost per ti
 | `status` | string | no | the run result's `status` |
 | `ticks` | number | no | the run result's `iterations` |
 | `cost_usd` | number \| null | yes | floor-sum of dispatch `cost_usd` — see §4 |
+| `cost_usd_estimated` | number \| null | yes | floor-sum of dispatch `cost_usd_estimated` — see §4 |
+| `pricing_version` | string | no | provenance of the price table used (built-in date or operator-set) |
 | `tokens_in` | number \| null | yes | floor-sum of dispatch `tokens_in` — see §4 |
 | `tokens_out` | number \| null | yes | floor-sum of dispatch `tokens_out` — see §4 |
 | `cache_read` | number \| null | yes | floor-sum of dispatch `cache_read` — see §4 |
@@ -178,6 +181,7 @@ dashboard rates (autonomous-fix ratio, first-time CI pass rate, unit cost per ti
 | `usage_coverage` | object (below) | no | computed alongside the aggregates — see §4 |
 | `usage_coverage.dispatch_count` | number | no | count of dispatch rows for this ticket |
 | `usage_coverage.cost_usd` | number | no | count of those dispatches that reported a non-null `cost_usd` |
+| `usage_coverage.cost_usd_estimated` | number | no | count of dispatches with a non-null derived estimate |
 | `usage_coverage.tokens_in` | number | no | count reporting non-null `tokens_in` |
 | `usage_coverage.tokens_out` | number | no | count reporting non-null `tokens_out` |
 | `usage_coverage.cache_read` | number | no | count reporting non-null `cache_read` |
@@ -227,13 +231,23 @@ Applies to the five aggregate fields on `summary`: `cost_usd`, `tokens_in`, `tok
   usage_coverage.dispatch_count` means not every dispatch reported `f`, so `summary.f` is a lower
   bound, not a total. `usage_coverage.f === usage_coverage.dispatch_count` means every dispatch
   reported it — the aggregate is complete.
-- **`provider` explains systematic (not random) gaps.** The `codex` provider adapter
-  (`src/agent/providers/codex.ts`) never reports `cost_usd` or `cache_create` — its usage stream has
-  no USD-cost field and no cache-write metric, so every `codex` dispatch has `cost_usd: null` and
-  `cache_create: null` by construction, and a ticket run entirely on `codex` will show
-  `usage_coverage.cost_usd === 0` and `usage_coverage.cache_create === 0` even though every dispatch
-  "succeeded" — that's an expected, provider-level gap, not partial data. `tokens_in`/`tokens_out`/
-  `cache_read` are reported by `codex` when its usage stream includes them.
+- **`provider` explains the systematic `cost_usd` gap.** The `codex` adapter never reports a USD
+  `cost_usd` (its CLI emits none), so every `codex` dispatch has `cost_usd: null`; a ticket run
+  entirely on `codex` shows `usage_coverage.cost_usd === 0`. It **does** report token usage
+  including `cache_write_input_tokens` (→ `cache_create`) and `cached_input_tokens` (→ `cache_read`).
+  `claude` reports `cost_usd`.
+
+- **`cost_usd_estimated` — a derived, list-price-equivalent cost.** For any dispatch with a known
+  model id and the token counts its provider's accounting convention needs, the exporter derives an
+  estimate = tokens × a per-model price table (USD/1M tokens), floor-summed on the summary with its
+  own `usage_coverage.cost_usd_estimated` count. It is populated for **both** providers (for
+  `claude` it sits beside the reported `cost_usd` as a calibration cross-check); an unknown model or
+  a missing needed token yields `null` (never a guessed number). **It is a *list-price-equivalent*
+  figure, not billed spend:** real USD depends on operator auth (an API key bills list price; a
+  subscription has ~$0 marginal cost), so summing `cost_usd_estimated` across providers/auth mixes
+  "spent" and "would-have-spent." The table + long-context multipliers are operator-configurable
+  (the `pricing` config block — see `configuration.md`); `pricing_version` on the summary stamps
+  which table produced the estimate. Reported `cost_usd` is never overwritten by an estimate.
 
 ## 5. `dispatch_id` on `event` rows
 
