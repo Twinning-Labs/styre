@@ -1,6 +1,23 @@
 import type { CheckFramework } from "./check-selector.ts";
 
-/** Source-file extensions stripped when reducing a path or module reference to its leaf name. */
+/** Source-file extensions stripped when reducing a path or module reference to its leaf name.
+ *
+ *  SCOPE (ENG-358/359 review): an extension belongs here only if a check in some language whose
+ *  rules set `tiesByLeaf` can actually IMPORT a file with it — that is the only way the leaf tier
+ *  produces a true match. `svelte`/`cts`/`mts` qualify: a node check imports a `.svelte` component
+ *  or a `.mts` helper, and `nodeRules.tiesByLeaf` is true.
+ *
+ *  Deliberately ABSENT, though `EXTENSIONS_BY_KIND` lists them for routing:
+ *  - `kts`, `groovy` — JVM source, but `jvmRules.tiesByLeaf` is false, so JVM checks never reach
+ *    the leaf tier. Adding them buys nothing.
+ *  - `gradle`, `rake`, `gemspec` — build manifests. Nothing imports them, so they can only ever
+ *    produce a FALSE tie. `discarded` is dispatch-wide and the rules object is chosen by the
+ *    CHECK's framework, so a discarded `build.gradle` is evaluated against node/python/ruby/php
+ *    checks too; stripping `.gradle` would reduce it to the leaf `build`, colliding with any node
+ *    check failing on `Cannot find module '../build'`. Likewise `styre.gemspec` → `styre` would
+ *    collide with a genuinely-missing `lib/styre.rb`.
+ *
+ *  This list is therefore NOT the routing extension list, and must not be derived from it. */
 const SOURCE_EXTS = new Set([
   "py",
   "pyi",
@@ -10,6 +27,9 @@ const SOURCE_EXTS = new Set([
   "tsx",
   "mjs",
   "cjs",
+  "cts",
+  "mts",
+  "svelte",
   "go",
   "rs",
   "rb",
