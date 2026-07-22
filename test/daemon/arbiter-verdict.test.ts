@@ -98,8 +98,19 @@ test("arbiter loopback carries the checks:arbitrate dispatch_id", () => {
   seedGateStepWithAttempt(db, ticketId, 1); // attempt=1 < CAP=3
   seedLatestDispatchSha(db, ticketId, "S1");
   const arb = insertPending(db, { ticketId, stepKey: "checks:arbitrate", stepType: "dispatch" });
-  insertDispatch(db, { ticketId, dispatchId: "T-d0004", seq: nextSeq(db, ticketId), stepId: arb.id });
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", verifyCheckTypes: ["test"], status: "verified" });
+  insertDispatch(db, {
+    ticketId,
+    dispatchId: "T-d0004",
+    seq: nextSeq(db, ticketId),
+    stepId: arb.id,
+  });
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+    status: "verified",
+  });
   insertSignal(db, {
     ticketId,
     signalType: "ac-check-blame",

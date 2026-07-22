@@ -93,7 +93,11 @@ test("gate loopback carries the code dispatch's dispatch_id (the gate itself has
   // The gate is an in-process handler with no dispatch of its own — getLatestForTicket finds the
   // CODE dispatch instead (the latest dispatch WITH a branch_head_sha, i.e. the HEAD the gate
   // judged). Mirrors arbiter-verdict.test.ts's seedLatestDispatchSha pattern.
-  const codeDisp = insertDispatch(db, { ticketId, dispatchId: "CODE-d0001", seq: nextSeq(db, ticketId) });
+  const codeDisp = insertDispatch(db, {
+    ticketId,
+    dispatchId: "CODE-d0001",
+    seq: nextSeq(db, ticketId),
+  });
   completeDispatch(db, codeDisp.id, { outcome: "clean-success", branchHeadSha: "S1" });
   gateSignal(db, ticketId, { stillRed: [7], tampered: [7], sha: "S1" });
   const r = applyAcCheckGateVerdict(db, ticketId, { stepKey: "verify:checks-gate" });
