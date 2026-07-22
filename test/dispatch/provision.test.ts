@@ -522,6 +522,56 @@ describe("diffTouchesManifest", () => {
       expect(diffTouchesManifest([p])).toBe(true);
     }
   });
+  // ENG-358: ruby and php are prepare-bearing (`bundle install`, `composer install`), so a
+  // dependency edit must re-arm provision. These basenames were missing, so an implement
+  // dispatch that added a gem or a composer package left provision `succeeded` and the next
+  // verify ran against a worktree that never installed it.
+  test("true for ruby dependency manifests", () => {
+    for (const p of ["Gemfile", "Gemfile.lock", "svc/Gemfile", "svc/Gemfile.lock"]) {
+      expect(diffTouchesManifest([p])).toBe(true);
+    }
+  });
+  test("true for php dependency manifests", () => {
+    for (const p of ["composer.json", "composer.lock", "svc/composer.json"]) {
+      expect(diffTouchesManifest([p])).toBe(true);
+    }
+  });
+  // In a gem repo the Gemfile is often just `source ...; gemspec` and every dependency is
+  // declared in `<name>.gemspec` via add_dependency — so a dependency change touches ONLY the
+  // gemspec. Its filename varies, hence a pattern rather than a basename.
+  test("true for a .gemspec at any name or depth", () => {
+    for (const p of ["styre.gemspec", "my-gem.gemspec", "pkg/other_gem.gemspec"]) {
+      expect(diffTouchesManifest([p])).toBe(true);
+    }
+  });
+  // Pins the PATTERN's shape, not just its happy path. `gemspec_helper.rb` alone would pass
+  // against any plausible regex (it has no `.gemspec` suffix at all), so these are the cases
+  // that actually constrain it: a suffixed/edited copy, a templated one, the wrong case, and a
+  // bare dotfile that is not a gemspec.
+  test("false for near-misses of the .gemspec pattern", () => {
+    for (const p of [
+      "gemspec_helper.rb",
+      "docs/gemspec.md",
+      "foo.gemspec.bak",
+      "my.gemspec.erb",
+      "A.GEMSPEC", // case-sensitive, consistent with the basename set
+      ".gemspec", // a bare dotfile is not a gemspec
+    ]) {
+      expect(diffTouchesManifest([p])).toBe(false);
+    }
+  });
+  test("false for edited/templated copies of the basename manifests", () => {
+    for (const p of ["Gemfile.lock.orig", "composer.json.dist", "package.json.bak"]) {
+      expect(diffTouchesManifest([p])).toBe(false);
+    }
+  });
+  // Deliberately NOT re-armed: rust/go/jvm emit no `prepare`, so planProvision yields nothing
+  // for them, while resetProvision is ticket-level and would re-run a sibling's install.
+  test("false for manifests of ecosystems with no install step", () => {
+    for (const p of ["Cargo.toml", "Cargo.lock", "go.mod", "go.sum", "pom.xml", "build.gradle"]) {
+      expect(diffTouchesManifest([p])).toBe(false);
+    }
+  });
   test("false for ordinary source/doc files", () => {
     expect(diffTouchesManifest(["src/main.py", "README.md"])).toBe(false);
   });

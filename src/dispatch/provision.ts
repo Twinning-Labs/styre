@@ -186,9 +186,22 @@ export function resolvePythonInterpreter(): string {
 
 // ─── Task 9: re-provision when a loopback edits a dependency manifest ──────────
 
-/** Basenames that identify a dependency manifest/lockfile across the supported ecosystems.
- *  `requirements*.txt` (e.g. `requirements-dev.txt`) is matched separately via regex — pip's
- *  convention allows an arbitrary suffix. */
+/** Basenames that identify a dependency manifest/lockfile for an ecosystem that HAS an install
+ *  step (`prepare`) — node/sveltekit, python, ruby, php.
+ *
+ *  Deliberately excludes rust/go/jvm. Two reasons, stated at their real strength:
+ *  1. No DETECTOR emits a `prepare` for those kinds (`src/setup/lang/{rust,go,jvm}.ts`), so in a
+ *     detected profile `planProvision` produces nothing for them and the re-arm would be waste.
+ *     This is a fact about the detectors, NOT a schema guarantee: `ComponentSchema.prepare` is
+ *     optional on ANY `kind` and `profile.json` is hand-editable, so a hand-added `prepare` on a
+ *     rust component would install without a manifest here to re-arm it. Accepted residual, same
+ *     config-override seam `EDITABLE_PIP_RE` below already documents.
+ *  2. `resetProvision` is TICKET-level (it keys on ticketId + "provision"), so listing these would
+ *     re-run a sibling component's install. Note the cost is real only for python/ruby/php
+ *     siblings, which always reinstall — for a node/sveltekit sibling `isComponentReady` is
+ *     content-aware and short-circuits, so a spurious reset costs nothing there.
+ *
+ *  Patterns that a fixed basename can't express are matched separately below. */
 const MANIFEST_BASENAMES = new Set([
   "package.json",
   "package-lock.json",
@@ -200,9 +213,24 @@ const MANIFEST_BASENAMES = new Set([
   "poetry.lock",
   "Pipfile",
   "Pipfile.lock",
+  "Gemfile",
+  "Gemfile.lock",
+  "composer.json",
+  "composer.lock",
 ]);
 
-const REQUIREMENTS_RE = /^requirements.*\.txt$/;
+/** Manifests whose filename varies, so they cannot be a fixed basename:
+ *  - `requirements*.txt` — pip's convention allows an arbitrary suffix (`requirements-dev.txt`).
+ *  - `*.gemspec` — named after the gem. In a gem repo the `Gemfile` is often just
+ *    `source ...; gemspec`, and every runtime/dev dependency is declared in the gemspec via
+ *    `add_dependency`, so a dependency change touches ONLY this file. Anchored both ends like its
+ *    sibling: a bare `.gemspec` dotfile is not a gemspec.
+ *
+ *  NOT listed: bundler's `gems.rb`/`gems.locked` Gemfile aliases. Harmless today ONLY because
+ *  `rubyDef.detect` hard-gates on `Gemfile` (`src/setup/lang/ruby.ts`), so a `gems.rb`-only repo
+ *  yields no ruby component and there is nothing to re-arm. If that gate ever learns `gems.rb`,
+ *  add the aliases here in the same change or this silently regresses. */
+const MANIFEST_PATTERNS: readonly RegExp[] = [/^requirements.*\.txt$/, /^.+\.gemspec$/];
 
 /** True iff any changed path's basename is a dependency manifest/lockfile — i.e. an `implement`
  *  dispatch's committed diff could have added/changed a dependency, which the once-gated
@@ -211,7 +239,7 @@ const REQUIREMENTS_RE = /^requirements.*\.txt$/;
 export function diffTouchesManifest(changedPaths: string[]): boolean {
   return changedPaths.some((p) => {
     const base = basename(p);
-    return MANIFEST_BASENAMES.has(base) || REQUIREMENTS_RE.test(base);
+    return MANIFEST_BASENAMES.has(base) || MANIFEST_PATTERNS.some((re) => re.test(base));
   });
 }
 
