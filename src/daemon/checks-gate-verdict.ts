@@ -4,6 +4,7 @@ import {
   behavioralStillRed,
   listByTicket as listSignals,
 } from "../db/repos/ground-truth-signal.ts";
+import { latestDispatchForStep } from "../db/repos/review-finding.ts";
 import { insertPending as insertSignal } from "../db/repos/signal.ts";
 import { setTicketStatus } from "../db/repos/ticket.ts";
 import { listByTicket as listUnits, setStatus as setUnitStatus } from "../db/repos/work-unit.ts";
@@ -36,12 +37,14 @@ export function escalate(
   ticketId: number,
   reason: string,
   signature = `gate-cap:${GATE_ROUND_CAP}`,
+  dispatchId?: string | null,
 ): void {
   db.transaction(() => {
     setTicketStatus(db, ticketId, "waiting");
     insertSignal(db, { ticketId, signalType: "human_resume", reason });
     appendEvent(db, {
       ticketId,
+      dispatchId: dispatchId ?? undefined,
       kind: "escalated",
       reason,
       signature,
@@ -56,6 +59,7 @@ export function gateOriginLoopback(
   ticketId: number,
   routeTo: string,
   payload: Record<string, unknown>,
+  dispatchId?: string | null,
 ): void {
   db.transaction(() => {
     for (const u of listUnits(db, ticketId)) {
@@ -68,6 +72,7 @@ export function gateOriginLoopback(
     }
     appendEvent(db, {
       ticketId,
+      dispatchId: dispatchId ?? undefined,
       kind: "loopback",
       loop: "implement",
       routeTo,
@@ -103,8 +108,9 @@ export function gateOriginLoopback(
 export function applyAcCheckGateVerdict(
   db: Database,
   ticketId: number,
-  _opts: { stepKey: string },
+  opts: { stepKey: string },
 ): GateVerdictResult {
+  const dispatchId = latestDispatchForStep(db, ticketId, opts.stepKey);
   const { stillRed, sha } = latestGate(db, ticketId);
   if (stillRed.length === 0) return { decision: "clean" };
   const behavioral = sha === null ? [] : behavioralStillRed(db, ticketId, sha);
@@ -114,6 +120,8 @@ export function applyAcCheckGateVerdict(
         db,
         ticketId,
         `gate: check(s) ${behavioral.join(",")} still red after ${GATE_ROUND_CAP} arbitrated rounds`,
+        undefined,
+        dispatchId,
       );
       return { decision: "escalated" };
     }
@@ -125,9 +133,11 @@ export function applyAcCheckGateVerdict(
       db,
       ticketId,
       `gate: check(s) ${stillRed.join(",")} tampered after ${GATE_ROUND_CAP} rounds`,
+      undefined,
+      dispatchId,
     );
     return { decision: "escalated" };
   }
-  gateOriginLoopback(db, ticketId, "verify:checks-gate", { tampered: stillRed });
+  gateOriginLoopback(db, ticketId, "verify:checks-gate", { tampered: stillRed }, dispatchId);
   return { decision: "loopback" };
 }
