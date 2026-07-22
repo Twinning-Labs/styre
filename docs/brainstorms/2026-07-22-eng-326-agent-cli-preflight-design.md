@@ -73,6 +73,13 @@ Declared as exported constants **at the provider adapters** (`claude.ts`, `codex
 of truth the probe references (AC: "Supported CLI version range is declared per provider and referenced by
 the probe"). Bump these when a newer CLI floor is required.
 
+Placement note: the ticket explicitly asks for these "documented **alongside the provider adapters**", and
+the floor exists precisely *because* each adapter's flag surface is version-coupled — so co-locating the
+floor with the flags it guards is the intended home. The alternative (beside `PROVIDER_REQUIRED_ENV` in
+`agent-config.ts:46-49`, which already centralizes provider metadata) is also valid and would keep all
+provider metadata in one module; we follow the ticket and keep it at the adapters, with `preflight.ts`
+importing both constants. No import cycle either way.
+
 ### 3.3 Unauth signal: env-key inference only, **no extra spawn**
 
 The "binary present but unauthenticated" distinction is derived from the already-known
@@ -86,17 +93,30 @@ auth validation stays OUT.
 
 AC #4 — "a missing binary is no longer classified as a transient transport failure on the dispatch path
 **or is pre-empted by the run-start probe** so it can never reach that path" — offers two routes. We take
-**pre-emption**: the run-start probe throws *before* `resolveAgentRunner`/dispatch, so a missing-binary
-case never reaches the provider `catch` at `claude.ts:152`. The catch's `cause: "transient"` classification
-is left untouched.
+**pre-emption**: the probe throws *before* `resolveAgentRunner`/dispatch on **both** dispatch entry points
+— the fresh-run path (`run.ts`) and the resume path (`resumeRun` in `park.ts`) — so a missing-binary case
+never reaches the provider `catch` at `claude.ts:152`. The catch's `cause: "transient"` classification is
+left untouched.
+
+**Resume is a first-class dispatch flow and must be probed too** (independent-review finding, 2026-07-22).
+`resumeRun` (`park.ts:187`) re-dispatches the agent via `resolveAgentRunner` (`park.ts:316`), and a resume
+typically happens *later* — after a park, possibly on a different machine — which is precisely when the CLI
+may have been uninstalled or downgraded since the original run. Skipping the probe there would leave the
+ticket's exact defect intact behind `--resume`. So the probe runs inside `resumeRun` as well (§4.3). The
+`--inspect` sub-path stays probe-free — it must remain exit-0 on a tool-less machine (same rule that keeps
+`preflightToolchain` off `--inspect`).
+
+The only genuine residual is the truly exotic intra-invocation race — the binary vanishing *between* a
+probe and a later dispatch *within the same* `run`/`resume` process. That is YAGNI and left to the existing
+transient path.
 
 Rejected alternative (Route B): sniff ENOENT in the provider catch and return a new non-retryable
 `FailureCause`. `FailureCause` (`src/agent/runner.ts:3`) is a closed union of
 `"session-limit" | "out-of-credits" | "transient"`; adding a value ripples through every `cause` switch
 (`run-dispatch.ts`, park-vs-fail logic, `failure-policy.ts`) and re-opens a hot path the ticket did not ask
-to touch. Route B's only marginal gain is defending an exotic race (the binary vanishing *between* the
-run-start probe and a mid-run dispatch) — YAGNI. The existing test that pins spawn-failure = transient
-(`test/agent/providers/claude.test.ts:99-109`) therefore stays green unchanged.
+to touch. Now that pre-emption covers both fresh and resume dispatch, Route B's only marginal gain is that
+exotic intra-invocation race — not worth the enum ripple. The existing test that pins spawn-failure =
+transient (`test/agent/providers/claude.test.ts:99-109`) therefore stays green unchanged.
 
 ## 4. Design
 
@@ -113,23 +133,33 @@ export type AgentCliPreflight =
 
 export function preflightAgentCli(
   config: AgentConfig,
-  deps?: { runVersion?: (command: string) => { ok: boolean; output: string }; env?: NodeJS.ProcessEnv },
+  // Both the PATH check and the --version call are injected as ONE seam (a fake CLI stub or a
+  // stubbed runner), so unit tests can drive the version/unparse branches without an on-PATH binary.
+  deps?: { runCli?: (command: string, args: string[]) => { ok: boolean; output: string };
+           env?: NodeJS.ProcessEnv },
 ): AgentCliPreflight;
 ```
 
 Steps:
 
-1. **Resolve the command** — `command = config.command ?? providerDefault(config.provider)`, the same rule
-   the factories use in `src/agent/resolve.ts:9-14` (`claude` / `codex`).
+1. **Resolve the command** — `command = config.command ?? providerDefault(config.provider)`. The default
+   itself lives in the factory *parameter defaults* (`claudeAgentRunner(command = "claude")` at
+   `claude.ts:87`; `codexAgentRunner(command = "codex")` at `codex.ts:128`) — `resolveAgentRunner`
+   (`resolve.ts:9-14`) passes `config.command` straight through (possibly `undefined`). `providerDefault`
+   must replicate those factory defaults. In practice `DEFAULT_AGENT_CONFIG.command` is set, so this only
+   bites a custom config that omits `command`.
 2. **PATH check** — an inline `command -v` probe via `Bun.spawnSync(["sh", "-c", 'command -v "$1"', "sh",
    command])`, mirroring `probeCommandExists` (`discover-schema.ts:67-68`) but kept local so `preflight.ts`
-   does not depend on the setup module. Not found → `{ ok: false, reason: "missing", command }`.
-3. **Run `<command> --version`** — `Bun.spawnSync([command, "--version"], { timeout: ~5_000 })`, injectable
-   via `deps.runVersion` for tests.
-4. **Parse + compare** — extract the **first** `/(\d+)\.(\d+)(?:\.(\d+))?/` match anywhere in the output
-   (claude prints `2.1.216 (Claude Code)` — version first; codex prints `codex-cli 0.144.6` — version
-   second; the "first match anywhere" rule handles both). Compare numerically major→minor→patch against the
-   provider floor. Below floor → `unsupported-version`. No match → `{ ok: true, version: null }` (fail-open).
+   does not depend on the setup module. Not found → `{ ok: false, reason: "missing", command }`. (Runs
+   through the injected `deps.runCli` so tests can force present/absent.)
+3. **Run `<command> --version`** — `Bun.spawnSync([command, "--version"], { timeout: ~5_000 })`, via the
+   same `deps.runCli` seam.
+4. **Parse + compare** — extract the **last** `/(\d+)\.(\d+)(?:\.(\d+))?/` match in the output. Last-match
+   (not first) avoids a false hard-fail when a line *leads* with an unrelated dotted number — a build date
+   `2026.07.22`, a runtime version, a `1.2-compatible` note — which under first-match could parse below the
+   floor and reject a healthy CLI. Both current CLIs still parse correctly: `2.1.216 (Claude Code)` →
+   `2.1.216`; `codex-cli 0.144.6` → `0.144.6`. Compare numerically major→minor→patch against the provider
+   floor. Below floor → `unsupported-version`. No match → `{ ok: true, version: null }` (fail-open).
 5. **Unauth hint** — if `ok` and `requiredEnvFor(provider)` is set but absent from `env`, attach
    `unauthHint`. No extra spawn.
 
@@ -137,49 +167,77 @@ A small `provider → { label, minVersion }` table built from the adapter-export
 the floor. Numeric comparison is hand-rolled (~10 lines over the three captured groups) — **no semver dep**
 is added; none exists in the repo today and one CLI-version comparator does not justify it.
 
-### 4.2 Wiring — `styre setup`
+### 4.2 Error factory — dedicated `agentCliError`, not `toolchainError`
 
-In `setupImpl` (`src/cli/setup.ts`), immediately after the existing env-key gate (:260-266) and before the
-agent is ever invoked: run `preflightAgentCli`. On `!ok`, throw a `StyreError` at `EXIT.TOOLCHAIN_MISSING`
-(69, `src/cli/errors.ts`) via `toolchainError(...)` (or a peer factory), with an actionable message naming
-the binary and the required version. This closes the gap where setup checks the env key, then invokes the
-agent, so a missing binary surfaces late as a transient failure.
+The probe needs its own `StyreError` factory (independent-review finding, 2026-07-22). `toolchainError`
+(`errors.ts:53-60`) hard-codes headline *"cannot start — required commands are not runnable on this
+machine"* + recovery *"Install the missing tool(s) and re-run."* — wrong for the **out-of-range** case,
+where the binary *is* runnable and the fix is to *upgrade*, not install. (Reusing it would also collide
+with `run-preflight.test.ts:66`'s `/cannot start/` assertion.)
 
-### 4.3 Wiring — `styre run`
+Add `agentCliError(result: AgentCliPreflight & { ok: false })` at `EXIT.TOOLCHAIN_MISSING` (69), producing
+distinct headline + recovery per reason:
 
-In `runImpl` (`src/cli/run.ts`), beside the existing `preflightToolchain` fail-fast (:177-181) — the
-fresh-run-only window, after `--resume`/`--inspect` return (:158-166), before any DB/dispatch. Run
-`preflightAgentCli`; on `!ok` throw `toolchainError(...)` → exit 69. Because this throws **before**
-`resolveAgentRunner` (:202) and the first `runTicket` dispatch (:218), a missing/old CLI structurally
-cannot reach the `cause:"transient"` → `applyFailurePolicy` → 3-attempt burn.
+- **missing** → headline "`claude` is not installed or not on PATH"; recovery "Install the `claude` CLI, or
+  set `agent.command` in your profile, then re-run."
+- **unsupported-version** → headline "`claude` 2.0.9 is below the supported minimum 2.1.200"; recovery
+  "Upgrade the `claude` CLI to ≥ 2.1.200 and re-run."
+
+Both exit 69 (already `EX_UNAVAILABLE`, "a required program is not available" — semantically apt, already
+non-retry). Rendered through the existing `StyreError` → `renderError` path (`output.ts:4-18`):
+`styre <cmd>: <headline>` + indented detail + recovery line.
+
+### 4.3 Wiring — dispatch entry points (`styre run` fresh + resume)
+
+**Fresh run** — in `runImpl` (`src/cli/run.ts`), beside the existing `preflightToolchain` fail-fast
+(:177-181): the fresh-run-only window, after `--resume`/`--inspect` return (:158-166), before any
+DB/dispatch. Compute `const agentConfig = runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG` here — it must be
+**hoisted** above the probe (it currently lives at `run.ts:192`, after the toolchain hook and after the
+temp-DB `migrate`). `runtimeConfig` is already in scope from :125, so hoisting is trivial and keeps the
+probe before any DB creation. Run `preflightAgentCli(agentConfig)`; on `!ok` throw `agentCliError(...)` →
+exit 69. Because this throws **before** `resolveAgentRunner` (:202) and the first `runTicket` dispatch
+(:218), a missing/old CLI structurally cannot reach the `cause:"transient"` → `applyFailurePolicy` →
+3-attempt burn.
+
+**Resume** — in `resumeRun` (`src/cli/park.ts:187`), after the `--inspect` early-return (~:237) and the
+resume-refused HEAD check, and **before** the re-dispatch that calls `resolveAgentRunner` (:316). Same
+probe on `runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG`, same `agentCliError` → exit 69. This closes the gap
+where a resume on a machine that lost/downgraded the CLI would otherwise burn retries (§3.4). `--inspect`
+stays probe-free (must remain exit-0 on a tool-less machine).
 
 Unauth hint and the unparseable-version warning are emitted to stderr (via the existing output layer,
 `src/cli/output.ts`) without failing the run.
 
-### 4.4 Error-text shape
+### 4.4 `styre setup` wiring
 
-Three distinguishable messages (AC): **missing** ("`claude` is not installed or not on PATH — install it,
-or set `agent.command` in your profile"); **out-of-range** ("`claude` 2.0.9 is below the supported minimum
-2.1.200 — upgrade the CLI"); **unauth hint** appended when cheaply known. Formatted through the existing
-`StyreError` → `renderError` path (`output.ts:4-18`): `styre <cmd>: <headline>` + indented detail +
-recovery line.
+In `setupImpl` (`src/cli/setup.ts`), immediately after the existing env-key gate (:260-266) and before the
+agent is ever invoked (enrichment/discovery): run `preflightAgentCli(agentConfig)` — `agentConfig` is
+already computed at `setup.ts:260`. On `!ok`, throw `agentCliError(...)` (exit 69). This closes the gap
+where setup checks the env key, then invokes the agent, so a missing/old binary surfaces late as a
+transient failure. (Note: the existing env-key gate throws a plain `Error` → `EXIT.INTERNAL`; the new probe
+uses a `StyreError` for a clean exit-69 + actionable render.)
 
 ## 5. Tests
 
 Mirrors the repo's two established patterns.
 
-- **Unit** — `test/agent/preflight.test.ts`. Fake `--version` scripts on disk à la `fakeCli`
-  (`claude.test.ts:17-22`), or the injected `deps.runVersion` seam:
+- **Unit** — `test/agent/preflight.test.ts`, driven through the single `deps.runCli` seam (so both the
+  PATH-check and the `--version` branches are reachable without an on-PATH binary; an executable
+  `#!/bin/sh` `fakeCli` stub à la `claude.test.ts:17-22` also works under `Bun.spawnSync`):
   - supported version → `{ ok: true }`
   - below floor → `{ ok: false, reason: "unsupported-version", found, required }`
   - unparseable output → `{ ok: true, version: null }` (fail-open) + warning surfaced
-  - nonexistent command → `{ ok: false, reason: "missing" }` (no retry burn)
+  - nonexistent command (PATH check fails) → `{ ok: false, reason: "missing" }` (no retry burn)
   - binary present + env key unset → `unauthHint` populated
-  - codex `codex-cli 0.144.6` and claude `2.1.216 (Claude Code)` both parse (position-independent)
+  - codex `codex-cli 0.144.6` and claude `2.1.216 (Claude Code)` both parse via last-match; and a
+    leading-dotted-number line (e.g. `2026.07.22 build … claude 2.1.216`) still parses `2.1.216`
 - **Integration — setup** — missing binary ⇒ `setup` rejects at exit 69, agent never invoked.
-- **Integration — run** — mirror `test/cli/run-preflight.test.ts`: call unwrapped `runImpl`; missing/old
-  binary ⇒ rejects before dispatch, **no park dump written, no retry burn**; assert `--resume`/`--inspect`
-  bypass the probe (as they bypass `preflightToolchain`).
+- **Integration — run (fresh)** — mirror `test/cli/run-preflight.test.ts` (unwrapped `runImpl`): missing/old
+  binary ⇒ rejects before dispatch, **no park dump written, no retry burn**; assert `--inspect` bypasses the
+  probe.
+- **Integration — resume** — the new coverage the review demands: a `resumeRun` (non-`--inspect`) against a
+  missing/old CLI ⇒ rejects at exit 69 before re-dispatch (`park.ts:316`); `--inspect` stays exit-0 on a
+  tool-less machine.
 - **Regression** — existing `claude.test.ts:99-109` (spawn failure = transient) stays green; full
   `bun test` + `bun run lint` green.
 
@@ -190,11 +248,12 @@ Mirrors the repo's two established patterns.
 | `src/agent/preflight.ts` | **new** — `preflightAgentCli` + version parse/compare + provider floor table |
 | `src/agent/providers/claude.ts` | export `CLAUDE_MIN_CLI_VERSION = "2.1.200"` (documented constant) |
 | `src/agent/providers/codex.ts` | export `CODEX_MIN_CLI_VERSION = "0.140.0"` (documented constant) |
-| `src/cli/setup.ts` | call probe after env-key gate; throw `StyreError` (69) on `!ok` |
-| `src/cli/run.ts` | call probe beside `preflightToolchain`; throw `toolchainError` (69) on `!ok` |
-| `src/cli/errors.ts` | (if needed) a peer factory for the message shape; reuse `EXIT.TOOLCHAIN_MISSING` |
+| `src/cli/errors.ts` | **new** `agentCliError` factory (distinct missing/out-of-range headlines, exit 69) |
+| `src/cli/setup.ts` | call probe after env-key gate (:260-266); throw `agentCliError` on `!ok` |
+| `src/cli/run.ts` | hoist `agentConfig` above the toolchain hook; call probe there; throw `agentCliError` on `!ok` |
+| `src/cli/park.ts` | call probe in `resumeRun` after `--inspect` return, before re-dispatch (:316) |
 | `test/agent/preflight.test.ts` | **new** — unit coverage |
-| `test/cli/run-preflight.test.ts` (or peer) | run-start integration coverage |
+| `test/cli/run-preflight.test.ts` (+ resume peer) | fresh-run and resume integration coverage |
 
 No change to `FailureCause`, the provider `catch`, or the dispatch/retry path (§3.4).
 
@@ -203,9 +262,9 @@ No change to `FailureCause`, the provider `catch`, or the dispatch/retry path (�
 | AC | satisfied by |
 | -- | -- |
 | Typed probe result `{ok}｜{missing}｜{unsupportedVersion,…}` (+unauth) | §4.1 `AgentCliPreflight` |
-| `styre setup` fails with actionable message | §4.2 |
-| `styre run` fails fast before first dispatch, no retry burn | §4.3 |
-| Missing binary no longer a transient failure on dispatch path | §3.4 (pre-emption) |
+| `styre setup` fails with actionable message | §4.4 |
+| `styre run` fails fast before first dispatch, no retry burn | §4.3 (fresh **and** resume) |
+| Missing binary no longer a transient failure on dispatch path | §3.4 (pre-emption on both dispatch entry points) |
 | Version range declared per provider, single source of truth | §3.2 |
 | Tests: supported / missing / old + existing dispatch green | §5 |
 | `bun run lint` + `bun test` green | §5 |
