@@ -49,3 +49,10 @@ test("appendEvent records loopback fields; listByTicket returns in order", () =>
   expect(list[1]?.loop).toBe("implement");
   expect(list[1]?.signature).toBe("tests-red:[t1]");
 });
+
+test("appendEvent round-trips dispatch_id", () => {
+  const { db, ticketId } = makeTestDb();
+  const row = eventLog.appendEvent(db, { ticketId, kind: "escalated", dispatchId: "ENG-9-d0007" });
+  expect(row.dispatch_id).toBe("ENG-9-d0007");
+  db.close();
+});

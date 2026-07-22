@@ -16,12 +16,13 @@ describe("row widening", () => {
     db.close();
   });
 
-  test("EventLogRow carries dispatch_id (null until populated)", () => {
+  test("appendEvent writes dispatch_id when given, null otherwise", () => {
     const { db, ticketId } = makeTestDb();
-    appendEvent(db, { ticketId, kind: "note", reason: "x" });
-    const ev = listEvents(db, ticketId)[0];
-    expect(ev).toHaveProperty("dispatch_id");
-    expect(ev.dispatch_id).toBeNull();
+    appendEvent(db, { ticketId, kind: "note", reason: "no-dispatch" });
+    appendEvent(db, { ticketId, kind: "loopback", dispatchId: "ENG-1-d0001" });
+    const evs = listEvents(db, ticketId);
+    expect(evs[0].dispatch_id).toBeNull();
+    expect(evs[1].dispatch_id).toBe("ENG-1-d0001");
     db.close();
   });
 });
