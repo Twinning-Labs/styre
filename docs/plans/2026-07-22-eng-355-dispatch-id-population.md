@@ -12,7 +12,7 @@
 
 - **No `SCHEMA_VERSION` bump.** The `event.dispatch_id` wire field already exists (shipped by ENG-349); this change only supplies its value.
 - **No emitter change.** `toEvent` (`src/telemetry/emitter.ts:47`) already maps `dispatch_id: r.dispatch_id`; do not touch it.
-- **No schema change expected.** `event_log.dispatch_id TEXT` already exists in both `schema.sql` and `src/db/schema.sql` (byte-identical copies per CLAUDE.md — if either is ever touched, keep them identical).
+- **No schema change expected.** `event_log.dispatch_id TEXT` already exists (`src/db/schema.sql:287`) in both byte-identical copies — `src/db/schema.sql` and `docs/architecture/schema.sql` (per CLAUDE.md — if either is ever touched, keep them identical).
 - **`latestDispatchForStep` stays in `src/db/repos/review-finding.ts`** (already imported by daemon + dispatch code). Do not move it.
 - **Events with no causing dispatch stay `null`:** `transition`, `note`, `resumed`, and `projector.escalateProjection`. Do not thread a dispatch into those.
 - **Verdicts run inside `db.transaction(...)`.** Derive `dispatchId` with a plain read at the top of the entrypoint (before/around the transaction); reads of the `dispatch` table are unaffected by the verdict's writes.
@@ -86,12 +86,12 @@ Expected: PASS
 
 - [ ] **Step 6: Add positive writer coverage in `test/db/repos/event-log.test.ts`**
 
-Append this test (uses the file's existing `makeTestDb` import; add it if missing):
+Append this test. **Note:** `event-log.test.ts` imports the module as a namespace (`import * as eventLog from "../../../src/db/repos/event-log.ts"`), so call `eventLog.appendEvent`, not a bare `appendEvent`. `makeTestDb` is already imported.
 
 ```ts
 test("appendEvent round-trips dispatch_id", () => {
   const { db, ticketId } = makeTestDb();
-  const row = appendEvent(db, { ticketId, kind: "escalated", dispatchId: "ENG-9-d0007" });
+  const row = eventLog.appendEvent(db, { ticketId, kind: "escalated", dispatchId: "ENG-9-d0007" });
   expect(row.dispatch_id).toBe("ENG-9-d0007");
   db.close();
 });
