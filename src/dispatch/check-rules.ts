@@ -27,6 +27,20 @@ import type { CheckFramework } from "./check-selector.ts";
  *    the leaf `mypkg`, so the discarded `mypkg/go.py` (leaf `go`) never tied and a genuinely
  *    poisoned check was persisted as covering its criterion. Both reproduce; see the tests.
  *
+ *    RESIDUAL, and the reason this is a NARROWING and not a clean win: removal is not
+ *    one-directional. Every discarded `.go` file now reduces to the constant leaf `go` (`.java` to
+ *    `java`, and so on), so the very output shape that unlocks the true tie above ALSO implicates
+ *    every unrelated discarded `.go` file in the dispatch — `No module named 'mypkg.go'` against
+ *    `[mypkg/go.py, cmd/build.go]` returns BOTH. It fires even with no true tie present. This is
+ *    strictly narrower than what it replaces and that is the whole justification: stripped, the
+ *    discarded side collapsed to generic STEMS (`build`, `server`, `util`) that collide with any
+ *    python/node error naming a common module; unstripped it collapses to a fixed extension token
+ *    that collides only when the output names a reference literally ending in `.go`/`.java`/`.kt`/
+ *    `.scala` — i.e. a submodule actually named after the extension. Consequence is a spurious
+ *    retry, never a wrong verdict. The real fix is to stop sharing `moduleLeaf` between the two
+ *    sides (a discarded PATH whose extension no `tiesByLeaf` language can import should reduce to
+ *    "", which the tier already skips) — a separate ticket, as ENG-365 anticipated.
+ *
  *  CAVEAT — multi-dot stems. `moduleLeaf` pops exactly ONE extension, so `types.d.mts` reduces to
  *  `d` and `utils.test.mts` to `test`. Pre-existing (`foo.d.ts` already yields `d`), but the
  *  `.cts`/`.mts` additions widen it, and `test` is a highly collision-prone leaf given the

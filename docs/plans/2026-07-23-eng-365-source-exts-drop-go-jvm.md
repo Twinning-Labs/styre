@@ -66,7 +66,23 @@ it is the strongest possible evidence the change is not merely a narrowing.
 
 ## Risk
 
-Low, and one-directional. The change can only *remove* leaf-tier matches involving these four
-extensions, and every such match is provably false (§corollary). The user-visible effect is that a
-polyglot repo stops escalating to a human on a manufactured tie. No schema, no projector, no
-outward write path is touched.
+Low, but **not one-directional** — corrected after independent review, which falsified the original
+claim here. The change also *adds* a false-tie shape: every discarded `.go` file now reduces to the
+constant leaf `go`, so the same output that unlocks the true tie above (`No module named 'mypkg.go'`)
+implicates every unrelated discarded `.go` file too, and fires with no true tie present at all.
+
+Accepted, because it is strictly narrower than what it replaces. Stripped, the discarded side
+collapsed to generic **stems** (`build`, `server`, `util`) which collide with any python/node error
+naming a common module. Unstripped it collapses to a fixed extension token, which collides only when
+the output names a reference literally ending in `.go`/`.java`/`.kt`/`.scala`. Consequence is a
+spurious retry, never a wrong verdict. Pinned by a test rather than left undocumented; the real fix
+is to stop sharing `moduleLeaf` between the output and discarded sides — a separate ticket, which
+ENG-365 itself anticipated ("the answer is to split the list rather than restore them").
+
+Also noted by review and **out of scope**: `pyi` fails the same membership rule (CPython never
+imports a `.pyi` stub, so stripping it can only manufacture ties, and that tie is *intra*-language
+and so likelier than the cross-language ones removed here). Pre-existing on `main`, unchanged by this
+commit. Step 3's "no exceptions" wording is therefore wrong: the list satisfies its rule except for
+`pyi`, which wants its own ticket.
+
+No schema, no projector, no outward write path is touched.

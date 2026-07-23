@@ -6,7 +6,10 @@ import { importErrorImplicatesDiscarded } from "../../src/dispatch/check-selecto
 // of the discard-poison guard (`importErrorImplicatesDiscarded`), which asks whether a red check
 // failed BECAUSE this dispatch discarded a file the check imports. Both sides of that comparison
 // go through `moduleLeaf`: the discarded path, and the module reference parsed out of the runner's
-// output. So an extension added here makes ties MORE likely on both sides.
+// output. So an extension added here changes ties on BOTH sides — usually making them more likely,
+// but not always in the same direction: ENG-365 showed that adding `go` also DESTROYS a tie, by
+// popping `.go` off a real python reference `mypkg.go` so it can no longer meet `mypkg/go.py`.
+// Neither adding nor removing an entry is a one-directional change; reason about both sides.
 
 describe("moduleLeaf: extensions already handled", () => {
   // `Foo.java` used to be asserted here as `foo`. ENG-365 removed `java` from SOURCE_EXTS, so it
@@ -216,11 +219,11 @@ describe("importErrorImplicatesDiscarded: the false ties removed by ENG-365", ()
     ).toEqual([]);
   });
 
-  // The other direction, and the reason removal is not merely a narrowing: stripping was WRONG on
-  // the OUTPUT side too. A python package may legitimately hold a submodule named `go`. Stripping
-  // popped `.go` off `mypkg.go` as though it were a file extension, yielding the leaf `mypkg`,
-  // while the discarded `mypkg/go.py` yields `go` — so a GENUINELY poisoned check went untied and
-  // was persisted as covering its criterion. Removal makes the two meet.
+  // The other direction: stripping was WRONG on the OUTPUT side too. A python package may
+  // legitimately hold a submodule named `go`. Stripping popped `.go` off `mypkg.go` as though it
+  // were a file extension, yielding the leaf `mypkg`, while the discarded `mypkg/go.py` yields
+  // `go` — so a GENUINELY poisoned check went untied and was persisted as covering its criterion.
+  // Removal makes the two meet. NOT a clean win, though — see the residual pinned below.
   test("a python submodule named `go` now ties to the file that defines it", () => {
     expect(
       importErrorImplicatesDiscarded(
@@ -229,5 +232,27 @@ describe("importErrorImplicatesDiscarded: the false ties removed by ENG-365", ()
         "pytest",
       ),
     ).toEqual(["mypkg/go.py"]);
+  });
+
+  // RESIDUAL, pinned so it is visible rather than discovered later. Removal is NOT
+  // one-directional: every discarded `.go` file now reduces to the constant leaf `go`, so the very
+  // output shape that unlocks the true tie above also implicates unrelated Go files — and fires
+  // with no true tie present at all. Accepted because it is strictly narrower than what it
+  // replaces: stripped, the discarded side collapsed to generic STEMS (`build`, `server`) that
+  // collide with any python/node error naming a common module; unstripped it collides only when
+  // the output names a reference literally ending in `.go`. Consequence is a spurious retry, never
+  // a wrong verdict. Asserted as CURRENT behavior, not as endorsement — the fix (stop sharing
+  // `moduleLeaf` between the output and discarded sides) is a separate ticket.
+  test("RESIDUAL: that same output also implicates unrelated discarded Go files", () => {
+    const out = "ModuleNotFoundError: No module named 'mypkg.go'";
+    // Alongside the true tie.
+    expect(importErrorImplicatesDiscarded(out, ["mypkg/go.py", "cmd/build.go"], "pytest")).toEqual([
+      "mypkg/go.py",
+      "cmd/build.go",
+    ]);
+    // And with no true tie present at all.
+    expect(importErrorImplicatesDiscarded(out, ["cmd/build.go"], "pytest")).toEqual([
+      "cmd/build.go",
+    ]);
   });
 });

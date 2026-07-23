@@ -969,12 +969,15 @@ describe("mutation guards: the Go/JVM negatives above must discriminate", () => 
   //
   // ENG-365 CHANGED WHAT THE MUTATION MUST USE. The discarded paths here were `assert.go` and
   // `api.java`. Removing go/java from SOURCE_EXTS means those now reduce to the leaves `go` and
-  // `java` rather than `assert` and `api`, so flipping `tiesByLeaf` alone stopped re-introducing
-  // the collision — the guard would have passed vacuously, which is the one thing it exists to
-  // prevent. The discarded file is therefore now one whose extension IS still stripped. That is
-  // not a contrivance: `discarded` is dispatch-wide and unfiltered by language, so a python file
-  // reaching a Go check's rules is exactly the real shape (it is the premise of ENG-365 itself).
-  // The final assertion in each test pins the second, independent barrier ENG-365 added.
+  // `java` rather than `assert` and `api`, so flipping `tiesByLeaf` alone no longer re-introduces
+  // the collision: these two tests went RED (the mutated call returns [] where it asserts the
+  // file). They did not silently pass — the collision they were built to demonstrate simply became
+  // inexpressible, because the negative they guard is now protected by TWO independent barriers
+  // and a single-flag mutation can only lift one. The discarded file is therefore now one whose
+  // extension IS still stripped, which keeps the mutation able to fail. That is not a contrivance:
+  // `discarded` is dispatch-wide and unfiltered by language, so a python file reaching a Go
+  // check's rules is exactly the real shape (it is the premise of ENG-365 itself). The extra
+  // assertion inside each mutation pins the second barrier directly.
   const missingDep =
     "app/x_test.go:6:2: no required module provides package github.com/stretchr/testify/assert; to add it:";
 
