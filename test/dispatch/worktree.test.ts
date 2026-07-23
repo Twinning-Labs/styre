@@ -302,9 +302,11 @@ test("addedFilesAt returns raw non-ASCII paths", () => {
 });
 
 test("a path containing a newline stays ONE entry (what -z buys over core.quotePath=false)", () => {
-  // `-c core.quotePath=false` alone does NOT stop git quoting control characters — it would emit
-  // `"we\nird/pyproject.toml"` (quoted). Splitting raw output on "\n" instead yields TWO bogus
-  // entries ("we" and "ird/pyproject.toml"). Only NUL-delimited output is correct here.
+  // Two separate facts, and only `-z` covers both. (a) `-c core.quotePath=false` alone does NOT
+  // stop git quoting CONTROL characters — this path still comes back as the quoted string
+  // `"we\nird/pyproject.toml"`, so that option would leave this case broken. (b) Once output IS
+  // raw, "\n" is no longer a safe delimiter: splitting it would yield two bogus entries ("we" and
+  // "ird/pyproject.toml"). NUL-delimiting is what makes (b) moot, which is why `-z` is the flag.
   const { root, headSha, weirdPath } = repoWithNonAsciiPaths();
   const files = changedFilesAt(headSha, root);
   expect(files).toContain(weirdPath);
