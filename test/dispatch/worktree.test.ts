@@ -1,7 +1,8 @@
 import { afterAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { diffTouchesManifest } from "../../src/dispatch/provision.ts";
 import {
   addedFilesAt,
   changedFilesAt,
@@ -228,6 +229,105 @@ test("fileContentAt reads committed content, null when the path is absent at tha
   const { root, addSha } = repoWithCommits();
   expect(fileContentAt(addSha, "new_test.py", root)).toContain("def test_ok()");
   expect(fileContentAt(addSha, "does_not_exist.py", root)).toBeNull();
+});
+
+// --- ENG-363: the three diff-listing helpers must return RAW paths, never C-quoted -------------
+
+/** A repo whose second commit adds files under directories git would C-quote by default:
+ *  a Latin-1 accent, CJK, and (`weirdDir`) an embedded newline — plus one plain-ASCII file, so
+ *  every assertion doubles as a no-regression check on the ordinary case. Returns the shas and
+ *  the exact path strings used to create the files, so assertions compare like with like. */
+function repoWithNonAsciiPaths(): {
+  root: string;
+  headSha: string;
+  baseSha: string;
+  accentPath: string;
+  cjkPath: string;
+  weirdPath: string;
+} {
+  const root = mkdtempSync(join(tmpdir(), "styre-nonascii-"));
+  roots.push(root);
+  const git = (a: string[]) => {
+    const r = Bun.spawnSync(["git", ...a], { cwd: root });
+    if (!r.success) throw new Error(`git ${a.join(" ")}: ${r.stderr.toString()}`);
+    return r.stdout.toString().trim();
+  };
+  git(["init", "-b", "main"]);
+  git(["config", "user.email", "t@s.dev"]);
+  git(["config", "user.name", "T"]);
+  writeFileSync(join(root, "seed.txt"), "seed\n");
+  git(["add", "-A"]);
+  git(["commit", "-m", "seed"]);
+  const baseSha = git(["rev-parse", "HEAD"]);
+
+  const accentPath = "café/Gemfile";
+  const cjkPath = "文档/package.json";
+  const weirdPath = "we\nird/pyproject.toml";
+  for (const p of [accentPath, cjkPath, weirdPath]) {
+    mkdirSync(join(root, dirname(p)), { recursive: true });
+    writeFileSync(join(root, p), "x\n");
+  }
+  writeFileSync(join(root, "plain.txt"), "y\n");
+  git(["add", "-A"]);
+  git(["commit", "-m", "non-ascii"]);
+  return { root, headSha: git(["rev-parse", "HEAD"]), baseSha, accentPath, cjkPath, weirdPath };
+}
+
+test("changedFilesAt returns raw non-ASCII paths, not git's C-quoted form", () => {
+  const { root, headSha, accentPath, cjkPath } = repoWithNonAsciiPaths();
+  const files = changedFilesAt(headSha, root);
+  expect(files).toContain(accentPath);
+  expect(files).toContain(cjkPath);
+  expect(files).toContain("plain.txt"); // the ASCII case is unchanged
+  // Nothing arrives wrapped in git's double quotes or carrying an octal escape.
+  for (const f of files) {
+    expect(f.startsWith('"')).toBe(false);
+    expect(f).not.toContain("\\3");
+  }
+});
+
+test("changedFilesBetween returns raw non-ASCII paths across a range", () => {
+  const { root, baseSha, headSha, accentPath, cjkPath } = repoWithNonAsciiPaths();
+  const files = changedFilesBetween(baseSha, headSha, root);
+  expect(files).toContain(accentPath);
+  expect(files).toContain(cjkPath);
+  expect(files).toContain("plain.txt");
+});
+
+test("addedFilesAt returns raw non-ASCII paths", () => {
+  const { root, headSha, accentPath, cjkPath } = repoWithNonAsciiPaths();
+  const files = addedFilesAt(headSha, root);
+  expect(files).toContain(accentPath);
+  expect(files).toContain(cjkPath);
+});
+
+test("a path containing a newline stays ONE entry (what -z buys over core.quotePath=false)", () => {
+  // `-c core.quotePath=false` alone does NOT stop git quoting control characters — it would emit
+  // `"we\nird/pyproject.toml"` (quoted). Splitting raw output on "\n" instead yields TWO bogus
+  // entries ("we" and "ird/pyproject.toml"). Only NUL-delimited output is correct here.
+  const { root, headSha, weirdPath } = repoWithNonAsciiPaths();
+  const files = changedFilesAt(headSha, root);
+  expect(files).toContain(weirdPath);
+  expect(files).not.toContain("we");
+  expect(files.filter((f) => f.includes("pyproject.toml"))).toHaveLength(1);
+  expect(files).toHaveLength(4); // exactly the four files the commit added, no split artefacts
+});
+
+test("a manifest under a non-ASCII directory re-arms provision (ENG-363 end-to-end)", () => {
+  // The reason this bug matters: `diffTouchesManifest` basenames the path, and `Gemfile"` (with
+  // git's trailing quote) matches nothing — so a dependency edit under `café/` silently skipped
+  // reinstall, defeating ENG-358.
+  const { root, headSha } = repoWithNonAsciiPaths();
+  expect(diffTouchesManifest(changedFilesAt(headSha, root))).toBe(true);
+});
+
+test("fileContentAt can read back a non-ASCII path reported by addedFilesAt", () => {
+  // Downstream proof: checks-identity feeds addedFilesAt's output straight into `git show <sha>:`.
+  // A C-quoted path is not a real pathspec, so that read returned null before this fix.
+  const { root, headSha, accentPath } = repoWithNonAsciiPaths();
+  const added = addedFilesAt(headSha, root);
+  expect(added).toContain(accentPath);
+  expect(fileContentAt(headSha, accentPath, root)).toBe("x\n");
 });
 
 // --- pendingEntries / pendingChanges / stagedIndexEmpty / undoAttempt (Task 1) -----------------
