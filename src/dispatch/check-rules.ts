@@ -41,13 +41,51 @@ import type { CheckFramework } from "./check-selector.ts";
  *    sides (a discarded PATH whose extension no `tiesByLeaf` language can import should reduce to
  *    "", which the tier already skips) — a separate ticket, as ENG-365 anticipated.
  *
+ *  - `pyi` — python STUBS, excluded on the same rule (ENG-367). A `.pyi` is read by type checkers
+ *    at analysis time and never imported at runtime (PEP 484; CPython resolves only
+ *    `SOURCE_SUFFIXES == ['.py']`), so it could not be causal for a test-runner failure. The guard
+ *    only ever sees test-command output (`binaryFor`, handlers.ts), and `CheckFramework` has no
+ *    type-checker member, so the one shape where a stub IS causal cannot reach these rules at all.
+ *    Because `moduleLeaf` is shared by both sides, the effect space is a 2x2 (does the discarded
+ *    path end `.pyi`? does the captured reference end `.pyi`?), so removal has FOUR effects, not
+ *    the three an earlier draft of this comment claimed. All four are reproduced in the tests:
+ *      (a) it killed the false ties — and they were not only intra-language: a discarded
+ *          `stubs/helper.pyi` tied to node, ruby, rust and php checks too, since `discarded` is
+ *          dispatch-wide while the rules object follows the CHECK's framework;
+ *      (b) it GAINED a true tie, the mirror of the `go` case above — `No module named 'mypkg.pyi'`
+ *          had `.pyi` popped off a genuine reference, so the discarded `mypkg/pyi.py` never tied
+ *          and a genuinely poisoned check was persisted as covering its criterion. This is the
+ *          wrong-verdict-class miss that made ENG-367 worth shipping ahead of the `moduleLeaf`
+ *          split (ENG-366), which fixes only the DISCARDED side and would have left it broken;
+ *      (c) RESIDUAL — every discarded `.pyi` now reduces to the constant leaf `pyi`, so a captured
+ *          reference that also reduces to `pyi` implicates all of them. The condition is a
+ *          reference literally ending `.pyi`: a submodule named `pyi`, OR a captured FILE PATH
+ *          ending `.pyi`, since `LEGACY_NAMING`'s class `([\w./-]+)` accepts `/` and `.`.
+ *          Consequence is a spurious retry, never a wrong verdict. Pinned as current behaviour,
+ *          not endorsed. SCOPE OF THAT JUDGEMENT: the residual is live on ALL SIX `tiesByLeaf`
+ *          frameworks, not just pytest — `discarded` is dispatch-wide while the rules object
+ *          follows the check's framework, the same asymmetry (a) turns on. Verified firing on
+ *          rspec and phpunit with a `.pyi`-suffixed path in the output. "No realistic tool
+ *          message has that shape" is an argument about pytest (which prints the stub path but
+ *          CAPTURES the module name); it is asserted, not proven, for the other five.
+ *      (d) It also DROPS output-side ties to stem-named, non-`.pyi` discarded files — the mirror
+ *          of (b) and the class the three-effect draft missed. `No module named 'mypkg.pyi'` no
+ *          longer implicates a discarded `src/mypkg.py`, because the reference now reduces to
+ *          `pyi` rather than `mypkg`. Those were FALSE ties by CPython's submodule semantics (that
+ *          error is raised only when `mypkg` itself resolved and the submodule did not, so the
+ *          discarded `mypkg.py` cannot have been the cause), so the direction is benign — but it
+ *          is a removal on the output side and belongs in the ledger. If a captured reference
+ *          ending `.pyi` is conceivable enough to document (c), it is conceivable enough to
+ *          document this.
+ *    Note `EXTENSIONS_BY_KIND` keeps `.pyi`: that is the file→component ROUTING map, disjoint from
+ *    this list, and a `.pyi` genuinely is a python file for routing purposes.
+ *
  *  CAVEAT — multi-dot stems. `moduleLeaf` pops exactly ONE extension, so `types.d.mts` reduces to
  *  `d` and `utils.test.mts` to `test`. Pre-existing (`foo.d.ts` already yields `d`), but the
  *  `.cts`/`.mts` additions widen it, and `test` is a highly collision-prone leaf given the
  *  discarded set is exactly agent-authored test files. Filed separately; see the tests. */
 const SOURCE_EXTS = new Set([
   "py",
-  "pyi",
   "js",
   "jsx",
   "ts",
