@@ -10,6 +10,27 @@ function git(args: string[], cwd: string): string {
   return res.stdout.toString().trim();
 }
 
+/** Run a git command whose output is a NUL-delimited path list, returning the raw paths (ENG-363).
+ *
+ *  Every path-listing git command MUST go through this. Git's default for `--name-only` is to
+ *  **C-quote** any path holding a byte outside printable ASCII: `café/Gemfile` comes back as the
+ *  literal 15-character string `"caf\303\251/Gemfile"`, double quotes included. Downstream that is
+ *  not a path at all — `basename()` yields `Gemfile"`, so no manifest matched, no scope glob
+ *  matched, and `git show <sha>:<path>` could not read it back.
+ *
+ *  `-z` is the load-bearing flag, not `core.quotePath=false`: quotePath only governs the
+ *  non-ASCII case, and git still C-quotes a path containing a control character (a directory
+ *  whose name embeds a newline still arrives as `"we\nird/x"` with it set). `-z` disables quoting
+ *  unconditionally, and NUL-delimiting is the only framing a path containing a newline survives —
+ *  splitting that same output on "\n" would silently yield two bogus entries. Callers therefore
+ *  pass `-z` in `args`; this helper does the raw read (no trim — see `gitRaw`) and the split.
+ *  The trailing NUL git writes after the last path is what the empty-token filter drops. */
+function gitPathsZ(args: string[], cwd: string): string[] {
+  return gitRaw(args, cwd)
+    .split("\0")
+    .filter((p) => p !== "");
+}
+
 /** Create a worktree on `branch` (reset to current HEAD) if absent; reuse if present.
  *  The worktree is the agent's only writable surface (capability isolation, move 4).
  *
@@ -66,34 +87,34 @@ export function branchHeadSha(repoPath: string, branch: string): string | null {
 }
 
 /** The files changed by commit `sha` (its diff vs its parent). Read-only; used by the verify
- *  gates to inspect what a coding attempt actually touched. */
+ *  gates to inspect what a coding attempt actually touched. NUL-delimited — see `gitPathsZ`. */
 export function changedFilesAt(sha: string, worktreePath: string): string[] {
-  const out = git(["diff-tree", "--no-commit-id", "-r", "--name-only", sha], worktreePath);
-  return out === "" ? [] : out.split("\n").filter((l) => l !== "");
+  return gitPathsZ(["diff-tree", "--no-commit-id", "-r", "--name-only", "-z", sha], worktreePath);
 }
 
 /** Files changed between two commits (cumulative, `base..head`). Used by verify to attribute a
- *  work-unit's FULL diff — across all its commits, including loopback re-codes — to components. */
+ *  work-unit's FULL diff — across all its commits, including loopback re-codes — to components.
+ *  NUL-delimited — see `gitPathsZ`. */
 export function changedFilesBetween(
   baseSha: string,
   headSha: string,
   worktreePath: string,
 ): string[] {
   if (baseSha === headSha) return [];
-  const out = git(["diff", "--name-only", `${baseSha}..${headSha}`], worktreePath);
-  return out === "" ? [] : out.split("\n").filter((l) => l !== "");
+  return gitPathsZ(["diff", "--name-only", "-z", `${baseSha}..${headSha}`], worktreePath);
 }
 
 /** Files ADDED (git-status `A`) by commit `sha` — its diff vs its parent, `--diff-filter=A` only.
  *  M2's checks-identity (§5.1) accepts a check ONLY when its test file is newly added: the file-scoped
  *  selector is safe precisely because the added file contains nothing but styre's check. A modified
- *  (`M`) file is rejected — it would re-admit the pre-existing tests around the edit. */
+ *  (`M`) file is rejected — it would re-admit the pre-existing tests around the edit.
+ *  NUL-delimited — see `gitPathsZ`; its output feeds `git show <sha>:<path>` in `fileContentAt`,
+ *  which a C-quoted path could not address. */
 export function addedFilesAt(sha: string, worktreePath: string): string[] {
-  const out = git(
-    ["diff-tree", "--no-commit-id", "-r", "--name-only", "--diff-filter=A", sha],
+  return gitPathsZ(
+    ["diff-tree", "--no-commit-id", "-r", "--name-only", "--diff-filter=A", "-z", sha],
     worktreePath,
   );
-  return out === "" ? [] : out.split("\n").filter((l) => l !== "");
 }
 
 /** The committed content of `file` at `sha` (`git show <sha>:<file>`), or `null` when the path is
