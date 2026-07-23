@@ -966,6 +966,15 @@ describe("mutation guard: the Rust help-note negative must discriminate", () => 
 describe("mutation guards: the Go/JVM negatives above must discriminate", () => {
   // A negative that would pass under the WRONG implementation proves nothing. These mutate the real
   // rule object and assert the collision reappears — committed evidence, not a manual ritual.
+  //
+  // ENG-365 CHANGED WHAT THE MUTATION MUST USE. The discarded paths here were `assert.go` and
+  // `api.java`. Removing go/java from SOURCE_EXTS means those now reduce to the leaves `go` and
+  // `java` rather than `assert` and `api`, so flipping `tiesByLeaf` alone stopped re-introducing
+  // the collision — the guard would have passed vacuously, which is the one thing it exists to
+  // prevent. The discarded file is therefore now one whose extension IS still stripped. That is
+  // not a contrivance: `discarded` is dispatch-wide and unfiltered by language, so a python file
+  // reaching a Go check's rules is exactly the real shape (it is the premise of ENG-365 itself).
+  // The final assertion in each test pins the second, independent barrier ENG-365 added.
   const missingDep =
     "app/x_test.go:6:2: no required module provides package github.com/stretchr/testify/assert; to add it:";
 
@@ -974,13 +983,17 @@ describe("mutation guards: the Go/JVM negatives above must discriminate", () => 
     try {
       (CHECK_RULES.go as { tiesByLeaf: boolean }).tiesByLeaf = true;
       expect(
+        importErrorImplicatesDiscarded(missingDep, ["internal/scratch/assert.py"], "go"),
+      ).toEqual(["internal/scratch/assert.py"]);
+      // Second barrier: even WITH leaf tying on, a real `.go` path no longer reduces to `assert`.
+      expect(
         importErrorImplicatesDiscarded(missingDep, ["internal/scratch/assert.go"], "go"),
-      ).toEqual(["internal/scratch/assert.go"]);
+      ).toEqual([]);
     } finally {
       (CHECK_RULES.go as { tiesByLeaf: boolean }).tiesByLeaf = orig;
     }
     expect(
-      importErrorImplicatesDiscarded(missingDep, ["internal/scratch/assert.go"], "go"),
+      importErrorImplicatesDiscarded(missingDep, ["internal/scratch/assert.py"], "go"),
     ).toEqual([]);
   });
 
@@ -989,13 +1002,17 @@ describe("mutation guards: the Go/JVM negatives above must discriminate", () => 
     const orig = CHECK_RULES["junit-maven"].tiesByLeaf;
     try {
       (CHECK_RULES["junit-maven"] as { tiesByLeaf: boolean }).tiesByLeaf = true;
+      expect(importErrorImplicatesDiscarded(out, ["src/test/java/api.py"], "junit-maven")).toEqual([
+        "src/test/java/api.py",
+      ]);
+      // Second barrier, as above: `.java` no longer reduces to `api`.
       expect(
         importErrorImplicatesDiscarded(out, ["src/test/java/api.java"], "junit-maven"),
-      ).toEqual(["src/test/java/api.java"]);
+      ).toEqual([]);
     } finally {
       (CHECK_RULES["junit-maven"] as { tiesByLeaf: boolean }).tiesByLeaf = orig;
     }
-    expect(importErrorImplicatesDiscarded(out, ["src/test/java/api.java"], "junit-maven")).toEqual(
+    expect(importErrorImplicatesDiscarded(out, ["src/test/java/api.py"], "junit-maven")).toEqual(
       [],
     );
   });

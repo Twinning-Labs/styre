@@ -9,11 +9,13 @@ import { importErrorImplicatesDiscarded } from "../../src/dispatch/check-selecto
 // output. So an extension added here makes ties MORE likely on both sides.
 
 describe("moduleLeaf: extensions already handled", () => {
+  // `Foo.java` used to be asserted here as `foo`. ENG-365 removed `java` from SOURCE_EXTS, so it
+  // now reduces to `java`; the assertion moved to the not-stripped block below rather than being
+  // dropped, because that reduction is the point of the change, not collateral.
   test("reduces a path to its module leaf", () => {
     expect(moduleLeaf("checks/helper.py")).toBe("helper");
     expect(moduleLeaf("./a/helper.js")).toBe("helper");
     expect(moduleLeaf("src/main.rs")).toBe("main");
-    expect(moduleLeaf("Foo.java")).toBe("foo");
     expect(moduleLeaf("spec/user_spec.rb")).toBe("user_spec");
   });
 
@@ -91,14 +93,24 @@ describe("moduleLeaf: multi-dot stems collapse to the second-to-last segment", (
   });
 });
 
-describe("moduleLeaf: grandfathered entries that fail the current scope rule", () => {
-  // go/java/kt/scala predate the rule in SOURCE_EXTS's doc comment: their languages are
-  // tiesByLeaf:false, so no check that can import them reaches the leaf tier — yet they are
-  // stripped, so they can only produce false ties. Pinned as CURRENT behavior, not as endorsement.
-  test("they are still stripped", () => {
-    expect(moduleLeaf("cmd/build.go")).toBe("build");
-    expect(moduleLeaf("src/Build.java")).toBe("build");
-    expect(moduleLeaf("jvm/util.kt")).toBe("util");
+describe("moduleLeaf: go/JVM source extensions are NOT stripped (ENG-365)", () => {
+  // These four were grandfathered in, failing the rule in SOURCE_EXTS's doc comment: their
+  // languages are tiesByLeaf:false, so no check that CAN import them ever reaches the leaf tier,
+  // while every tiesByLeaf language that does reach it can only tie to them falsely. They now sit
+  // beside kts/groovy — excluded on identical reasoning. The end-to-end consequence is pinned in
+  // "the false ties removed by ENG-365" below; these assert the reduction itself.
+  test("the extension survives as the leaf", () => {
+    expect(moduleLeaf("cmd/build.go")).toBe("go");
+    expect(moduleLeaf("src/Build.java")).toBe("java");
+    expect(moduleLeaf("jvm/util.kt")).toBe("kt");
+    expect(moduleLeaf("jvm/Helper.scala")).toBe("scala");
+  });
+
+  test("no collision with the tokens those stems would have produced", () => {
+    // The shape of the false tie: stripped, `cmd/build.go` reduces to `build` and meets a node
+    // check failing on `Cannot find module '../build'`. Unstripped, the two cannot meet.
+    expect(moduleLeaf("cmd/build.go")).not.toBe(moduleLeaf("../build"));
+    expect(moduleLeaf("jvm/util.kt")).not.toBe(moduleLeaf("util"));
   });
 });
 
@@ -153,5 +165,69 @@ describe("importErrorImplicatesDiscarded: the leaf tier after ENG-359", () => {
 
   test("a red naming an unrelated module implicates nothing", () => {
     expect(guard("Error: Cannot find module './feature'", ["src/lib/Button.svelte"])).toEqual([]);
+  });
+});
+
+describe("importErrorImplicatesDiscarded: the false ties removed by ENG-365", () => {
+  // WHY these are cross-language: `discarded` is dispatch-wide and carries every file this
+  // dispatch dropped, whatever its language, while the rules object is chosen by the CHECK's
+  // framework. So a discarded .go/.java/.kt/.scala file IS evaluated against node/python/ruby
+  // checks — the languages where the leaf tier is live. Each case below returned the discarded
+  // file before the fix (verified by running these against unmodified source), which left the
+  // acceptance criterion uncovered, threw the dispatch, and escalated to a human after 3 attempts.
+  //
+  // Each pairing also avoids the bounded-basename tier by construction: the full basename
+  // (`build.go`, `Build.java`, …) appears nowhere in the output, so the leaf tier is the only
+  // route to a match and these assertions cannot pass for the wrong reason.
+
+  test("a discarded Go file does not tie to a node check's missing module", () => {
+    expect(
+      importErrorImplicatesDiscarded(
+        "Error: Cannot find module '../build'",
+        ["cmd/build.go"],
+        "vitest",
+      ),
+    ).toEqual([]);
+  });
+
+  test("a discarded Java file does not tie to a jest check's missing module", () => {
+    expect(
+      importErrorImplicatesDiscarded("Cannot find module './build'", ["src/Build.java"], "jest"),
+    ).toEqual([]);
+  });
+
+  test("a discarded Kotlin file does not tie to a pytest collection error", () => {
+    expect(
+      importErrorImplicatesDiscarded(
+        "ModuleNotFoundError: No module named 'util'",
+        ["jvm/util.kt"],
+        "pytest",
+      ),
+    ).toEqual([]);
+  });
+
+  test("a discarded Scala file does not tie to an rspec load error", () => {
+    expect(
+      importErrorImplicatesDiscarded(
+        "LoadError: cannot load such file -- helper",
+        ["jvm/Helper.scala"],
+        "rspec",
+      ),
+    ).toEqual([]);
+  });
+
+  // The other direction, and the reason removal is not merely a narrowing: stripping was WRONG on
+  // the OUTPUT side too. A python package may legitimately hold a submodule named `go`. Stripping
+  // popped `.go` off `mypkg.go` as though it were a file extension, yielding the leaf `mypkg`,
+  // while the discarded `mypkg/go.py` yields `go` — so a GENUINELY poisoned check went untied and
+  // was persisted as covering its criterion. Removal makes the two meet.
+  test("a python submodule named `go` now ties to the file that defines it", () => {
+    expect(
+      importErrorImplicatesDiscarded(
+        "ModuleNotFoundError: No module named 'mypkg.go'",
+        ["mypkg/go.py"],
+        "pytest",
+      ),
+    ).toEqual(["mypkg/go.py"]);
   });
 });

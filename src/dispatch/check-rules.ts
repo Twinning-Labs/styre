@@ -19,12 +19,13 @@ import type { CheckFramework } from "./check-selector.ts";
  *  - `kts`, `groovy` — JVM source. No `tiesByLeaf` language can import them, so like the manifests
  *    above they yield false ties only (a discarded `Foo.groovy` would tie to a node check failing
  *    on `./foo`), not merely no-ops.
- *
- *  GRANDFATHERED, and failing the rule above: `go`, `java`, `kt`, `scala` predate it. Their
- *  languages are `tiesByLeaf: false`, so no check that can import them ever reaches this tier —
- *  yet they are stripped, so a discarded `cmd/build.go` DOES tie to a node check failing on
- *  `'../build'` (verified). Removing them is a behavior change with its own blast radius, so it is
- *  filed separately rather than folded into the ENG-359 fix. Do not cite them as precedent.
+ *  - `go`, `java`, `kt`, `scala` — go/JVM source, excluded on that same reasoning (ENG-365). These
+ *    four predated the rule and were stripped anyway until then, which was wrong in BOTH
+ *    directions. On the discarded side it manufactured ties: `cmd/build.go` reduced to `build` and
+ *    met a node check failing on `'../build'`. On the OUTPUT side it corrupted a real reference: a
+ *    python `No module named 'mypkg.go'` had `.go` popped as though it were an extension, yielding
+ *    the leaf `mypkg`, so the discarded `mypkg/go.py` (leaf `go`) never tied and a genuinely
+ *    poisoned check was persisted as covering its criterion. Both reproduce; see the tests.
  *
  *  CAVEAT — multi-dot stems. `moduleLeaf` pops exactly ONE extension, so `types.d.mts` reduces to
  *  `d` and `utils.test.mts` to `test`. Pre-existing (`foo.d.ts` already yields `d`), but the
@@ -42,13 +43,9 @@ const SOURCE_EXTS = new Set([
   "cts",
   "mts",
   "svelte",
-  "go",
   "rs",
   "rb",
   "php",
-  "java",
-  "kt",
-  "scala",
 ]);
 
 /** The leaf module identifier for a path OR a dotted/slashed module reference, lower-cased. Takes the
