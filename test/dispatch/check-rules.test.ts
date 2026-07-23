@@ -299,11 +299,37 @@ describe("importErrorImplicatesDiscarded: the pyi false ties removed by ENG-367 
     ).toEqual([]);
   });
 
+  test("cross-language: nor to a rust check", () => {
+    expect(
+      importErrorImplicatesDiscarded(
+        "error[E0432]: unresolved import\nfile not found for module `helper`",
+        discarded,
+        "cargo",
+      ),
+    ).toEqual([]);
+  });
+
+  test("cross-language: nor to a php check", () => {
+    expect(
+      importErrorImplicatesDiscarded("Failed opening required 'helper'", discarded, "phpunit"),
+    ).toEqual([]);
+  });
+
   test("the reduction itself: a stub no longer yields its stem", () => {
     expect(moduleLeaf("stubs/helper.pyi")).toBe("pyi");
+  });
+
+  test("the reduction no longer collides with the stem it used to produce", () => {
+    // Separate test, not a trailing assertion on the one above: as a trailing assertion it would
+    // never be reached under the counterfactual (the first expect aborts), so it could not be
+    // shown to bite.
     expect(moduleLeaf("stubs/helper.pyi")).not.toBe(moduleLeaf("helper"));
-    // (d) Bonus: `types.d.pyi` no longer collapses to the generic `d`, which collides with the
-    // already-pinned `foo.d.ts` -> `d` hazard above.
+  });
+
+  test("LATERAL: `types.d.pyi` swaps one collision-prone leaf for another", () => {
+    // Not billed as an improvement. `d` was generic and collided with the already-pinned
+    // `foo.d.ts` -> `d` hazard above; `pyi` is a constant that collides with every other discarded
+    // `.pyi` (residual (c)). A sideways move on a file shape that is not a python convention.
     expect(moduleLeaf("types.d.pyi")).toBe("pyi");
   });
 });
@@ -345,5 +371,45 @@ describe("importErrorImplicatesDiscarded: what removing pyi GAINS (b) and (c)", 
         "pytest",
       ),
     ).toEqual(["other/thing.pyi"]);
+  });
+
+  // (c) is NOT pytest-only. `discarded` is dispatch-wide while the rules object follows the
+  // check's framework — the same asymmetry (a) turns on — so the residual is live on every
+  // tiesByLeaf framework. Pinned on two more so the doc comment's scope claim is test-backed
+  // rather than asserted.
+  test("(c) the residual is live on other frameworks too, not just pytest", () => {
+    expect(
+      importErrorImplicatesDiscarded(
+        "cannot load such file -- stubs/helper.pyi",
+        ["other/thing.pyi"],
+        "rspec",
+      ),
+    ).toEqual(["other/thing.pyi"]);
+    expect(
+      importErrorImplicatesDiscarded(
+        "Failed opening required 'stubs/helper.pyi'",
+        ["other/thing.pyi"],
+        "phpunit",
+      ),
+    ).toEqual(["other/thing.pyi"]);
+  });
+
+  // (d) The fourth effect, and the one a three-effect draft of this change missed: the output-side
+  // reduction ALSO drops ties to stem-named, non-`.pyi` discarded files. `mypkg.pyi` used to
+  // reduce to `mypkg` and meet a discarded `src/mypkg.py`; it now reduces to `pyi` and cannot.
+  //
+  // Benign by CPython's submodule semantics — `No module named 'mypkg.pyi'` is raised only when
+  // `mypkg` itself RESOLVED and the submodule did not, so a discarded `mypkg.py` cannot have been
+  // the cause and the tie was false. But it is a removal on the output side, so it belongs in the
+  // ledger: if a captured reference ending `.pyi` is conceivable enough to pin (c), it is
+  // conceivable enough to pin this.
+  test("(d) a stem-named non-pyi discarded file is no longer implicated", () => {
+    expect(
+      importErrorImplicatesDiscarded(
+        "ModuleNotFoundError: No module named 'mypkg.pyi'",
+        ["src/mypkg.py"],
+        "pytest",
+      ),
+    ).toEqual([]);
   });
 });

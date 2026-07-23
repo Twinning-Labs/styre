@@ -1,6 +1,6 @@
 # ENG-367 — remove `pyi` from `SOURCE_EXTS`
 
-*Plan. 2026-07-23. Branch `fix/eng-367-source-exts-drop-pyi`, off `f886319`. **Not yet implemented — awaiting sign-off.***
+*Plan. 2026-07-23. Branch `fix/eng-367-source-exts-drop-pyi`, off `f886319`. **Option A approved; implemented in this branch.** A later whole-branch review found the effect ledger below incomplete — see the `SOURCE_EXTS` doc comment for the corrected FOUR-effect version.*
 *Revised after independent review of the plan; every claim below was verified by execution.*
 
 ## The defect
