@@ -1,7 +1,7 @@
 # Unified pause/resume model — one `paused` state, one recovery path
 
-**Date:** 2026-07-24 (rev 3: 2026-07-25)
-**Status:** Draft — rev 3 (Option 2: human-driven recovery; two adversarial-review rounds folded in)
+**Date:** 2026-07-24 (rev 3.1: 2026-07-25)
+**Status:** Draft — rev 3.1 (Option 2: human-driven recovery; three adversarial-review rounds folded in)
 **Related:** ENG-331 (dump+resume escalated), ENG-353 (escalated outcome), ENG-332 (provision-first)
 
 ### Revision history
@@ -9,7 +9,7 @@
 - **rev 1** — one `paused` state + `reason`; single resume path.
 - **rev 2** — "Option A": normalize every halt by *raising a signal and leaving a re-armable step*,
   bounded by an automatic `exhausted` ceiling.
-- **rev 3 (this)** — a second code-grounded review proved rev 2's mechanism unsound for the two
+- **rev 3** — a second code-grounded review proved rev 2's mechanism unsound for the two
   dead-ends it targeted: `blocked`/`no-progress` run **no step**, so there is nothing to re-arm and
   the per-step attempt counter never climbs — the `exhausted` ceiling was unreachable and would have
   produced an unbounded resume-limbo. rev 3 adopts **Option 2 (human-driven recovery)**: all halts
@@ -19,6 +19,11 @@
   re-plans**. No automatic give-up; `abandoned` is a human/explicit decision. Worktree removal is
   **liveness-gated** (not a path heuristic), and the DB inserts are **find-or-create** (not
   `INSERT OR IGNORE`). Review-driven corrections are marked ✎.
+- **rev 3.1 (this)** — a third review confirmed the load-bearing mechanisms are buildable
+  (step-independent `pauseTicket`, no-step re-plan, find-or-create, failed-step re-run). Folded its
+  two substantive gaps — the ticket-1/ticket-2 lock-home coupling (ticket 1 is now **prunable-only**
+  and needs no lock; the lock is a ticket-2 artifact) and **WAL-sidecar teardown** on `--fresh` —
+  tightened `pauseTicket` to `needs_you`-only, and fixed telemetry line cites.
 
 ---
 
@@ -90,18 +95,29 @@ it is unnecessary: resume is human-invoked and a no-change resume is a cheap, vi
 | `needs_you` | `escalated`, `blocked`, `no-progress` | a human fixes, edits, or decides | `human_resume` consumed |
 | `interrupted` | crash, SIGINT, power loss ✎ *(net-new — no current terminal; enabled by §6)* | nothing | none |
 
-✎ **A step-independent `pauseTicket(db, ticketId, reason, detail)` primitive** is the concrete
-normalization mechanism (rev 2 wrongly routed through the step-only `escalate()`, which needs a
-`stepKey`/`dispatchId` that `blocked`/`no-progress` do not have — `checks-gate-verdict.ts:35-53`).
-`pauseTicket` sets ticket → `waiting`, raises `human_resume` (no step reference required), and records
-`reason`/`detail`. Callers:
-- the existing step-escalate path — *additionally* leaves the `failed` step (unchanged);
-- the resolver's `blocked` branch (`advance.ts:87-88`) — has `db`+`ticketId`, no step;
-- `driveToTerminal`'s `no-progress` branch (`run-ticket.ts:128-135`) — has `db`+`ticketId`, no step.
+✎ **Three reasons, three pause entrypoints — but one `paused` checkpoint and one resume verb.** The
+pause *side* is not a single code path; `reason` records which entrypoint fired:
 
-Setting `waiting` is load-bearing: it removes the ticket from `v_ready_tickets` (`schema.sql:522-530`,
-gated on `status='active'`), closing the latent daemon re-pick loop a `blocked`-but-`active` ticket
-would otherwise sit in.
+- **`needs_you`** — a new step-independent **`pauseTicket(db, ticketId, detail)`** primitive: sets
+  ticket → `waiting`, raises `human_resume` (no step reference required — the `signal` table has no
+  step/dispatch column and `insertPending` needs only `ticketId`+`signalType`, `signal.ts:40-61`),
+  records `detail`. Called by the step-escalate path (which *additionally* leaves its `failed` step,
+  unchanged), the resolver's `blocked` branch (`advance.ts:87-88`), and `driveToTerminal`'s
+  `no-progress` branch (`run-ticket.ts:128-135`) — both have `db`+`ticketId` in scope and no step.
+  `pauseTicket` is the **`needs_you` mechanism only**: it must never be called for `budget`, whose
+  resume gate never consumes `human_resume`, so the signal would instant-re-pause the next tick via
+  `hasPendingHumanResume` (`run-ticket.ts:109`). (rev 2 wrongly routed these through the step-only
+  `escalate()`, which needs a `stepKey`/`dispatchId` — `checks-gate-verdict.ts:35-53`.)
+- **`budget`** — keeps the existing `ParkSignal` handler (`advance.ts:157-179`): `waiting` + a
+  `parked` event, **no signal**.
+- **`interrupted`** — the crash / live-location path (§6): no handler runs; the checkpoint is already
+  on disk.
+
+Reaching `waiting` (either entrypoint) is load-bearing: it removes the ticket from `v_ready_tickets`
+(`schema.sql:522-530`, gated on `status='active'`), closing the latent daemon re-pick loop a
+`blocked`-but-`active` ticket would otherwise sit in. ✎ *Once `blocked` routes through `pauseTicket`,
+`hasPendingHumanResume` (`run-ticket.ts:109`) intercepts before the old `r.blocked` terminal branch
+(`:126`), making that branch + `tick`'s `blocked` flag dead code — a cleanup for ticket 3.*
 
 ### 3.3 Resume mechanism — re-arm if there's a step, else re-plan
 
@@ -161,7 +177,7 @@ prime candidate for the §3.5.2 honesty-abandon). `detail` must distinguish them
   "parked-credits"` / `no-progress → "no-progress"` then keyword-classifies
   (`src/telemetry/analytics/properties.ts:61-76`); `outcome:"paused"` falls through every branch. The
   bucket map must be re-keyed on `reason`, and the change must also cover `runCompletedProperties`'
-  `outcome`/`success` fields (`properties.ts:119,128`) and `ALLOWED_KEYS`.
+  `success` / `outcome` fields (`properties.ts:118,120`) and `ALLOWED_KEYS`.
 
 ---
 
@@ -192,13 +208,22 @@ reconciled only by a copy that only `parked` performs. Fix it at the root: **a f
 directly to `~/.local/state/styre/<slug>/<ident>/run.db`** (`parkDir`, `park.ts:75-77`) instead of a
 temp DB (`run.ts:199-203`). Then the journal is always at the checkpoint (a crash leaves it there —
 no signal handler), `pause` writes only a `reason`/`detail`/transcript sidecar, and `run <ticket>`
-refusing = testing whether the dir exists. `--db` override stays for tests.
+refusing = **testing whether `run.db` exists** in the checkpoint dir (not merely the dir — `styre ls`
+or an empty scaffold could create the dir). `--db` override stays for tests.
+
+✎ **WAL sidecars.** `openDb` sets `journal_mode = WAL` (`client.ts:6`), so a live-location run leaves
+`run.db-wal`/`run.db-shm`; `wal_checkpoint(TRUNCATE)` runs only on graceful hand-off (`park.ts:114`),
+so a crash leaves an un-checkpointed WAL. Resume is safe (a valid WAL auto-recovers on open), but
+**`--fresh` must delete the whole checkpoint dir** (`run.db` + `-wal` + `-shm` + sidecar), never just
+`run.db` — an orphaned `-wal` reattaching to a freshly-created `run.db` is a corruption hazard.
 
 Two safeguards, both required (the review showed the first is not enough alone):
 
 ✎ **(a) A per-ticket run lock.** A lock/pid file in the checkpoint dir, held for the life of a run,
 prevents two `styre run <same-ticket>` processes at once. This is the same liveness signal §7 needs to
 reconcile worktrees safely, and it closes the concurrent-insert race the refuse-guard alone can't.
+✎ *Because the lock lives in the checkpoint dir, it arrives **with live-location** — so it is a
+ticket-2 artifact, and ticket 1's worktree fix must not depend on it (§7, §11).*
 
 ✎ **(b) Find-or-create inserts, not `INSERT OR IGNORE`.** `insertProject`/`insertTicket` are unguarded
 plain INSERTs against UNIQUE columns (`project.ts:20`/`schema.sql:64`; `ticket.ts:41`/`schema.sql:122`)
@@ -240,7 +265,8 @@ This deletes `dumpPark`'s copy machinery (`park.ts:104-136`) and the overwrite g
    6. next terminal -> pause() again (cheap no-op if inputs unchanged), done, or abandoned
 
  --fresh(ident):
-   locate -> (skip gate) -> reconcileWorktree() -> delete checkpoint (AFTER reconcile) -> fresh run
+   locate -> (skip gate) -> reconcileWorktree() -> delete WHOLE checkpoint dir
+            (run.db + -wal/-shm + sidecar, AFTER reconcile) -> fresh run
 ```
 
 ### `reconcileWorktree(...)` — liveness-gated, never a blind force-remove
@@ -253,16 +279,25 @@ one ticket both produce `styre-wt-*` holders of the same branch — the path pre
 not deadness*, and `git worktree remove --force` (`worktree.ts:75-77`) would destroy a **live** run's
 worktree and its uncommitted work.
 
-Correct gate — **process liveness** via the §6(a) lock/pid:
-- holder's owning process **dead** (lock stale / pid gone) → stale → `git worktree remove --force` +
-  `git worktree prune` + re-mint (`ensureWorktree`) + re-arm provision (`resetProvisionForResume`,
-  `park.ts:149`);
-- holder **alive**, or **not styre-owned** (a human's own `git worktree add <branch>`) → **refuse**
-  with a clear message; never force-remove.
+Correct gate — **prove staleness before removing**, in two phases matching §11 (✎ resolves the
+ticket-1/ticket-2 lock-home coupling the third review flagged):
+- **Ticket 1 (no lock yet) — prunable-only.** Free a holder only if git reports it **`prunable`**
+  (its working dir is already gone — `git worktree list --porcelain`), then `git worktree prune`;
+  removal is then unambiguously safe. This alone fixes the reported STYRE-7 leak (its worktrees are
+  `prunable`, §2). Any **non-prunable** holder → **refuse** with a clear message (`styre clean`, or
+  free it yourself). No live worktree is ever force-removed.
+- **Ticket 2+ (lock exists) — full liveness.** A non-prunable holder whose owning process is provably
+  **dead** (its checkpoint lock is stale / pid gone via `process.kill(pid, 0)` — the idiom already at
+  `recover.ts:38`) is also freed; a holder that is **alive**, or **not styre-owned** (a human's own
+  `git worktree add <branch>`), still → **refuse**, never force-remove.
 
-✎ `prunable` detection and lock-liveness parsing are **new** code (`worktree.ts` has no
-`git worktree list --porcelain` parsing today) — so ticket 1 is more than "extract Fix B." In-place
-mode (`worktreePath === repoPath`) skips removal as today (`park.ts:277-282,290`).
+When a holder is confirmed removable: `git worktree remove --force <holder>` + `git worktree prune` +
+re-mint (`ensureWorktree`) + re-arm provision (`resetProvisionForResume`, `park.ts:149`).
+
+✎ Both `git worktree list --porcelain` parsing (`prunable`, ticket 1) and lock-liveness
+(`process.kill(pid,0)`, ticket 2) are **new** code — `worktree.ts` has neither today — so even the
+prunable-only ticket 1 is more than "extract Fix B." In-place mode (`worktreePath === repoPath`) skips
+removal as today (`park.ts:277-282,290`).
 
 ---
 
@@ -309,14 +344,19 @@ mode (`worktreePath === repoPath`) skips removal as today (`park.ts:277-282,290`
 
 ## 11. Proposed ticket decomposition
 
-1. **`reconcileWorktree` primitive — liveness-gated — + per-ticket run lock.** Extract Fix B, add the
-   lock/pid + `git worktree list --porcelain` liveness parsing (§6a, §7). **Directly fixes the
-   reported STYRE-7 bug; ship first.** (Bigger than "extract existing code" — it's the lock + gate.)
-2. **Live-location checkpoint + hardened refuse-guard + find-or-create inserts.** Journal to `parkDir`
-   from the start; get-or-create `insertProject`/`insertTicket`; `run <ticket>` refuses on existing
-   checkpoint; delete `dumpPark` copy path (§6). Root-causes ENG-331.
+1. **`reconcileWorktree` primitive — prunable-only gate (no lock).** Extract Fix B + add
+   `git worktree list --porcelain` parsing to free `prunable` holders and refuse the rest (§7).
+   **Directly fixes the reported STYRE-7 leak (its worktrees are `prunable`); ship first.** Needs no
+   per-ticket lock — a leaked worktree has no live owner.
+2. **Live-location checkpoint + per-ticket run lock + hardened refuse-guard + find-or-create inserts.**
+   Journal to `parkDir` from the start; add the lock/pid in the checkpoint dir (§6a); get-or-create
+   `insertProject`/`insertTicket`; `run <ticket>` refuses when `run.db` exists; `--fresh` deletes the
+   whole checkpoint dir; delete `dumpPark` copy path (§6). Once the lock lands, upgrade §7's gate from
+   prunable-only to full liveness. Root-causes ENG-331.
 3. **`pauseTicket` primitive + route `blocked`/`no-progress` through it.** Step-independent
-   `waiting`+`human_resume`+`reason`/`detail`; the honest-note rule; the §3.5.2 honesty-abandon (§3.2–3.5).
+   `waiting`+`human_resume`+`detail` (`needs_you` only); the honest-note rule; the §3.5.2
+   honesty-abandon (§3.2–3.5); retire the now-dead `r.blocked` terminal branch + `tick` `blocked`
+   flag (`run-ticket.ts:126`).
 4. **Outcome collapse + exit codes + telemetry.** `RunOutcome → pr-ready|done|paused|abandoned`
    (+`reason`); `paused → 75`, `abandoned → 1`; re-key telemetry on `reason` (§4). Ships **together
    with** the code that emits the new outcomes (3), not after. (Absorbs ENG-353's surface.)
@@ -324,8 +364,9 @@ mode (`worktreePath === repoPath`) skips removal as today (`park.ts:277-282,290`
    `human_resume` for `needs_you`; `--fresh` (§3.3, §7). (Absorbs the rest of ENG-331.)
 6. **Housekeeping** — `styre ls`, `styre clean` (incl. stale `pr-ready` reap). *(optional)*
 
-Sequence: **1 → 2 → (3+4) → 5 → 6.** 1 alone fixes the live bug; 2 unblocks the rest; 3 and 4 land
-together (the outcome enum must gain its new values with the code that emits them).
+Sequence: **1 → 2 → (3+4) → 5 → 6.** Ticket 1 (prunable-only) fixes the STYRE-7 leak with no lock
+dependency; ticket 2 adds live-location + the per-ticket lock, which upgrades §7's gate to full
+liveness; 3 and 4 land together (the outcome enum must gain its values with the code that emits them).
 
 ---
 
