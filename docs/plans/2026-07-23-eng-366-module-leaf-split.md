@@ -1,6 +1,8 @@
 # ENG-366 — split `moduleLeaf` by side
 
-**Status:** plan, awaiting approval. No code written.
+**Status:** implemented. Approved option A (accept the §4.2 loss, pin it, file follow-ups). Follow-ups
+filed: ENG-368 (output-side `moduleLeaf` path-shaped stripping), ENG-369 (`.vue`/importable exts),
+ENG-370 (the two second-class `LEGACY_NAMING` phrases). ENG-369 blocked-by ENG-366 + ENG-368.
 **Ticket:** ENG-366 — *fix(checks): split moduleLeaf by side — a discarded path is not a module reference*
 **Base:** `origin/main` @ `f5cf8b4` (ENG-365 and ENG-367 both landed)
 **Branch:** `fix/eng-366-module-leaf-split`

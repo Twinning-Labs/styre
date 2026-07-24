@@ -1,15 +1,19 @@
 import { describe, expect, test } from "bun:test";
-import { moduleLeaf } from "../../src/dispatch/check-rules.ts";
+import { importableLeaf, moduleLeaf } from "../../src/dispatch/check-rules.ts";
 import { importErrorImplicatesDiscarded } from "../../src/dispatch/check-selector.ts";
 
-// `moduleLeaf` reduces a path or module reference to its leaf identifier. It feeds the leaf tier
-// of the discard-poison guard (`importErrorImplicatesDiscarded`), which asks whether a red check
-// failed BECAUSE this dispatch discarded a file the check imports. Both sides of that comparison
-// go through `moduleLeaf`: the discarded path, and the module reference parsed out of the runner's
-// output. So an extension added here changes ties on BOTH sides — usually making them more likely,
-// but not always in the same direction: ENG-365 showed that adding `go` also DESTROYS a tie, by
-// popping `.go` off a real python reference `mypkg.go` so it can no longer meet `mypkg/go.py`.
-// Neither adding nor removing an entry is a one-directional change; reason about both sides.
+// The leaf tier of the discard-poison guard (`importErrorImplicatesDiscarded`) asks whether a red
+// check failed BECAUSE this dispatch discarded a file the check imports. It compares two leaves —
+// and after ENG-366 they are computed by TWO DIFFERENT functions, deliberately:
+//   - `moduleLeaf`   reduces a module REFERENCE parsed out of the runner's output (output side).
+//   - `importableLeaf` reduces a discarded FILE PATH (discarded side), returning "" when the path
+//                    is not importable by any tiesByLeaf language — which the tier skips.
+// Both read the shared `SOURCE_EXTS`, so adding an entry still changes both sides (ENG-369) — but
+// they apply it under different POLICIES: an extension token is a real leaf for a reference naming a
+// submodule after it (`mypkg.ts` → submodule `ts`), and never a real leaf for a file PATH. Conflating
+// the two was the ENG-365/367 false-tie class. NB the output side is still unsound for
+// submodule-after-extension references (`moduleLeaf("mypkg.ts")` → `mypkg`); that half is ENG-368,
+// not fixed here, and its tests live with that ticket.
 
 describe("moduleLeaf: extensions already handled", () => {
   // `Foo.java` used to be asserted here as `foo`. ENG-365 removed `java` from SOURCE_EXTS, so it
@@ -45,37 +49,38 @@ describe("moduleLeaf: the node source extensions added by ENG-359", () => {
     expect(moduleLeaf("a/helper.mts")).toBe("helper");
   });
 
-  // NOT `toBe(moduleLeaf(other))` — without the fix both sides reduce to "svelte" and such an
-  // assertion passes vacuously. Pin the concrete leaf on each side instead.
+  // Pin the concrete leaf on each side — NOT `toBe(other)`, which would pass vacuously if both
+  // happened to collapse to the same token. The two sides go through DIFFERENT functions now.
   test("both sides of the guard's pairing reduce to the same concrete leaf", () => {
-    expect(moduleLeaf("./Button.svelte")).toBe("button"); // output side
-    expect(moduleLeaf("src/lib/Button.svelte")).toBe("button"); // discarded-path side
+    expect(moduleLeaf("./Button.svelte")).toBe("button"); // output side (a reference)
+    expect(importableLeaf("src/lib/Button.svelte")).toBe("button"); // discarded-path side
   });
 });
 
-describe("moduleLeaf: extensions deliberately NOT stripped", () => {
-  // Build manifests. Nothing imports them, so stripping could only ever produce a FALSE tie —
-  // and their stems are among the most collision-prone tokens in a repo.
-  test("a build manifest keeps its extension as the leaf", () => {
-    expect(moduleLeaf("infra/build.gradle")).toBe("gradle");
-    expect(moduleLeaf("tasks.rake")).toBe("rake");
-    expect(moduleLeaf("styre.gemspec")).toBe("gemspec");
+describe("importableLeaf: extensions deliberately NOT importable", () => {
+  // These are discarded-side concerns: the guard must not tie a discarded manifest/JVM file to a
+  // check just because its stem or extension token happens to collide with a named module. Under
+  // ENG-366 that is enforced by `importableLeaf` returning "" — the tier skips "", so no tie is
+  // even expressible, a stronger guarantee than the old "keeps its extension token" reduction.
+  test("a build manifest is not importable", () => {
+    // Nothing imports these; their stems are among the most collision-prone tokens in a repo.
+    expect(importableLeaf("infra/build.gradle")).toBe("");
+    expect(importableLeaf("tasks.rake")).toBe("");
+    expect(importableLeaf("styre.gemspec")).toBe("");
   });
 
-  test("no collision with the tokens those stems would have produced", () => {
-    // If `.gradle` were stripped, this would be `build` — matching a node check that fails on
-    // `Cannot find module '../build'`, implicating an unrelated discarded file.
-    expect(moduleLeaf("infra/build.gradle")).not.toBe(moduleLeaf("../build"));
-    // If `.gemspec` were stripped, this would be `styre` — matching a genuinely-missing
-    // `lib/styre.rb`, so the retry message would name the wrong culprit.
-    expect(moduleLeaf("styre.gemspec")).not.toBe(moduleLeaf("lib/styre.rb"));
+  test("no collision is possible with the module tokens those files sit near", () => {
+    // "" can never equal a real output leaf, so a discarded `build.gradle` cannot meet a node check
+    // failing on `Cannot find module '../build'`, nor `styre.gemspec` a missing `lib/styre.rb`.
+    expect(importableLeaf("infra/build.gradle")).not.toBe(moduleLeaf("../build"));
+    expect(importableLeaf("styre.gemspec")).not.toBe(moduleLeaf("lib/styre.rb"));
   });
 
-  // JVM source extensions: `jvmRules.tiesByLeaf` is false, so JVM checks never reach the leaf
-  // tier and adding these would buy nothing while widening cross-language tie opportunities.
-  test("JVM-only source extensions are left alone", () => {
-    expect(moduleLeaf("Main.kts")).toBe("kts");
-    expect(moduleLeaf("FooSpec.groovy")).toBe("groovy");
+  // JVM source extensions: `jvmRules.tiesByLeaf` is false, so JVM checks never reach the leaf tier,
+  // and a discarded `.kts`/`.groovy` evaluated against a tiesByLeaf check must not tie either.
+  test("JVM-only source extensions are not importable", () => {
+    expect(importableLeaf("Main.kts")).toBe("");
+    expect(importableLeaf("FooSpec.groovy")).toBe("");
   });
 });
 
@@ -96,31 +101,61 @@ describe("moduleLeaf: multi-dot stems collapse to the second-to-last segment", (
   });
 });
 
-describe("moduleLeaf: go/JVM source extensions are NOT stripped (ENG-365)", () => {
-  // These four were grandfathered in, failing the rule in SOURCE_EXTS's doc comment: their
-  // languages are tiesByLeaf:false, so no check that CAN import them ever reaches the leaf tier,
-  // while every tiesByLeaf language that does reach it can only tie to them falsely. They now sit
-  // beside kts/groovy — excluded on identical reasoning. The end-to-end consequence is pinned in
-  // "the false ties removed by ENG-365" below; these assert the reduction itself.
-  test("the extension survives as the leaf", () => {
-    expect(moduleLeaf("cmd/build.go")).toBe("go");
-    expect(moduleLeaf("src/Build.java")).toBe("java");
-    expect(moduleLeaf("jvm/util.kt")).toBe("kt");
-    expect(moduleLeaf("jvm/Helper.scala")).toBe("scala");
+describe("importableLeaf: go/JVM source extensions are not importable (ENG-365/366)", () => {
+  // These four fail the SOURCE_EXTS membership rule: their languages are tiesByLeaf:false, so no
+  // check that CAN import them ever reaches the leaf tier, while every tiesByLeaf language that does
+  // reach it could only tie to them falsely. ENG-365 kept them OUT of the list; ENG-366 makes the
+  // discarded-side consequence exact — a discarded `.go`/`.java`/`.kt`/`.scala` reduces to "", so
+  // the ENG-365 RESIDUAL (a discarded `.go` reducing to the constant token `go`) is gone. The
+  // end-to-end consequence is pinned in "the false ties removed by ENG-365" below.
+  test("the reduction is empty, not the extension token", () => {
+    expect(importableLeaf("cmd/build.go")).toBe("");
+    expect(importableLeaf("src/Build.java")).toBe("");
+    expect(importableLeaf("jvm/util.kt")).toBe("");
+    expect(importableLeaf("jvm/Helper.scala")).toBe("");
   });
 
-  test("no collision with the tokens those stems would have produced", () => {
-    // The shape of the false tie: stripped, `cmd/build.go` reduces to `build` and meets a node
-    // check failing on `Cannot find module '../build'`. Unstripped, the two cannot meet.
-    expect(moduleLeaf("cmd/build.go")).not.toBe(moduleLeaf("../build"));
-    expect(moduleLeaf("jvm/util.kt")).not.toBe(moduleLeaf("util"));
+  test("no collision with any module token, in either direction", () => {
+    // The old false tie: shared `moduleLeaf` reduced `cmd/build.go` to the token `go`, which met a
+    // python reference `mypkg.go` (also `go`). "" meets nothing, so neither shape of the tie exists.
+    expect(importableLeaf("cmd/build.go")).not.toBe(moduleLeaf("../build"));
+    expect(importableLeaf("cmd/build.go")).not.toBe(moduleLeaf("mypkg.go"));
+    expect(importableLeaf("jvm/util.kt")).not.toBe(moduleLeaf("util"));
+  });
+
+  // The surviving true tie, at the reduction level. `.go` is NOT in SOURCE_EXTS, so the output side
+  // does NOT strip it: `moduleLeaf("mypkg.go")` → `go` (a submodule literally named `go`), which
+  // meets the discarded `mypkg/go.py` → `go`. Both sides land on `go` through different functions.
+  test("both sides land on `go` for the surviving submodule tie", () => {
+    expect(moduleLeaf("mypkg.go")).toBe("go");
+    expect(importableLeaf("mypkg/go.py")).toBe("go");
   });
 });
 
-describe("moduleLeaf: non-source extensions", () => {
-  test("keeps a data/config extension as the leaf", () => {
-    expect(moduleLeaf("config.yaml")).toBe("yaml");
-    expect(moduleLeaf("data.json")).toBe("json");
+describe("importableLeaf: non-source extensions and extensionless paths", () => {
+  // Data/config files and extensionless files are not importable, so a discarded one cannot be the
+  // cause of an import error. Old shared `moduleLeaf` returned the extension token (`yaml`, `json`)
+  // or the bare name (`deploy`, `makefile`); `importableLeaf` returns "".
+  test("a data/config file is not importable", () => {
+    expect(importableLeaf("config.yaml")).toBe("");
+    expect(importableLeaf("data.json")).toBe("");
+  });
+
+  test("an extensionless file is not importable", () => {
+    expect(importableLeaf("scripts/deploy")).toBe("");
+    expect(importableLeaf("Makefile")).toBe("");
+    expect(importableLeaf(".env")).toBe("");
+  });
+
+  // The importable cases importableLeaf must still reduce correctly — the stem before a source
+  // extension, lower-cased, one extension popped (the multi-dot CAVEAT applies equally here).
+  test("a source file reduces to its stem", () => {
+    expect(importableLeaf("checks/helper.py")).toBe("helper");
+    expect(importableLeaf("src/main.rs")).toBe("main");
+    expect(importableLeaf("spec/user_spec.rb")).toBe("user_spec");
+    expect(importableLeaf("a/helper.mts")).toBe("helper");
+    expect(importableLeaf("utils.test.mts")).toBe("test"); // one extension popped, CAVEAT
+    expect(importableLeaf("Button.SVELTE")).toBe("button"); // extension match is case-insensitive
   });
 });
 
@@ -219,12 +254,12 @@ describe("importErrorImplicatesDiscarded: the false ties removed by ENG-365", ()
     ).toEqual([]);
   });
 
-  // The other direction: stripping was WRONG on the OUTPUT side too. A python package may
-  // legitimately hold a submodule named `go`. Stripping popped `.go` off `mypkg.go` as though it
-  // were a file extension, yielding the leaf `mypkg`, while the discarded `mypkg/go.py` yields
-  // `go` — so a GENUINELY poisoned check went untied and was persisted as covering its criterion.
-  // Removal makes the two meet. NOT a clean win, though — see the residual pinned below.
-  test("a python submodule named `go` now ties to the file that defines it", () => {
+  // The leaf-tie that SURVIVES, and the case that proves ENG-366 is not a blanket narrowing. A
+  // python package may legitimately hold a submodule named `go`. `.go` is NOT in SOURCE_EXTS, so
+  // `moduleLeaf("mypkg.go")` does not strip it and yields the leaf `go`, which meets the discarded
+  // `mypkg/go.py` (`importableLeaf` → `go`) — a genuinely poisoned check ties. Now a CLEAN win under
+  // ENG-366: the residual this pairing used to carry is fixed in the test one describe down.
+  test("a python submodule named `go` still ties to the file that defines it", () => {
     expect(
       importErrorImplicatesDiscarded(
         "ModuleNotFoundError: No module named 'mypkg.go'",
@@ -234,26 +269,19 @@ describe("importErrorImplicatesDiscarded: the false ties removed by ENG-365", ()
     ).toEqual(["mypkg/go.py"]);
   });
 
-  // RESIDUAL, pinned so it is visible rather than discovered later. Removal is NOT
-  // one-directional: every discarded `.go` file now reduces to the constant leaf `go`, so the very
-  // output shape that unlocks the true tie above also implicates unrelated Go files — and fires
-  // with no true tie present at all. Accepted because it is strictly narrower than what it
-  // replaces: stripped, the discarded side collapsed to generic STEMS (`build`, `server`) that
-  // collide with any python/node error naming a common module; unstripped it collides only when
-  // the output names a reference literally ending in `.go`. Consequence is a spurious retry, never
-  // a wrong verdict. Asserted as CURRENT behavior, not as endorsement — the fix (stop sharing
-  // `moduleLeaf` between the output and discarded sides) is a separate ticket.
-  test("RESIDUAL: that same output also implicates unrelated discarded Go files", () => {
+  // AC #2 — this was the ENG-365 RESIDUAL, previously pinned as ACCEPTED behavior: the same output
+  // that unlocks the true tie above ALSO implicated every unrelated discarded `.go` file, because
+  // the shared `moduleLeaf` reduced `cmd/build.go` to the constant token `go`. ENG-366 gives the
+  // discarded side `importableLeaf`, which reduces a non-importable `.go` path to "" — so the false
+  // tie is GONE while the true tie is untouched. Inverted from the residual assertion it replaces.
+  test("FIXED (ENG-366): that same output no longer implicates unrelated discarded Go files", () => {
     const out = "ModuleNotFoundError: No module named 'mypkg.go'";
-    // Alongside the true tie.
+    // The true tie survives; the unrelated `.go` file no longer rides along on it.
     expect(importErrorImplicatesDiscarded(out, ["mypkg/go.py", "cmd/build.go"], "pytest")).toEqual([
       "mypkg/go.py",
-      "cmd/build.go",
     ]);
-    // And with no true tie present at all.
-    expect(importErrorImplicatesDiscarded(out, ["cmd/build.go"], "pytest")).toEqual([
-      "cmd/build.go",
-    ]);
+    // And with no true tie present at all, the output now implicates nothing.
+    expect(importErrorImplicatesDiscarded(out, ["cmd/build.go"], "pytest")).toEqual([]);
   });
 });
 
@@ -315,34 +343,37 @@ describe("importErrorImplicatesDiscarded: the pyi false ties removed by ENG-367 
     ).toEqual([]);
   });
 
-  test("the reduction itself: a stub no longer yields its stem", () => {
-    expect(moduleLeaf("stubs/helper.pyi")).toBe("pyi");
+  test("the discarded-side reduction: a stub is not importable", () => {
+    // Under ENG-366 the discarded side is `importableLeaf`, and `pyi` is not in SOURCE_EXTS
+    // (ENG-367), so a discarded stub reduces to "" — the tier skips it. This is now the mechanism
+    // behind the no-tie end-to-end tests above, independent of how `moduleLeaf` treats a reference.
+    expect(importableLeaf("stubs/helper.pyi")).toBe("");
   });
 
-  test("the reduction no longer collides with the stem it used to produce", () => {
-    // Separate test, not a trailing assertion on the one above: as a trailing assertion it would
-    // never be reached under the counterfactual (the first expect aborts), so it could not be
-    // shown to bite.
-    expect(moduleLeaf("stubs/helper.pyi")).not.toBe(moduleLeaf("helper"));
+  test("the reduction cannot collide with the stem it used to produce", () => {
+    // Separate test, not a trailing assertion: as a trailing assertion it would never be reached
+    // under the counterfactual (the first expect aborts), so it could not be shown to bite.
+    expect(importableLeaf("stubs/helper.pyi")).not.toBe(moduleLeaf("helper"));
   });
 
-  test("LATERAL: `types.d.pyi` swaps one collision-prone leaf for another", () => {
-    // Not billed as an improvement. `d` was generic and collided with the already-pinned
-    // `foo.d.ts` -> `d` hazard above; `pyi` is a constant that collides with every other discarded
-    // `.pyi` (residual (c)). A sideways move on a file shape that is not a python convention.
+  test("`types.d.pyi` is likewise not importable on the discarded side", () => {
+    // Under the old shared `moduleLeaf` this was a LATERAL swap (`d` → `pyi`, one collision-prone
+    // leaf for another). `importableLeaf` retires the question on the discarded side entirely: `pyi`
+    // is not a source extension, so the reduction is "". (The output side still yields `pyi` — that
+    // is the (c) residual, tracked as output-side under ENG-368.)
+    expect(importableLeaf("types.d.pyi")).toBe("");
     expect(moduleLeaf("types.d.pyi")).toBe("pyi");
   });
 });
 
-describe("importErrorImplicatesDiscarded: what removing pyi GAINS (b) and (c)", () => {
-  // (b) The gained TRUE tie — the same shape as the `go` case above, and the reason this is not
-  // merely a narrowing. A python package may hold a submodule named `pyi`. Stripping popped
-  // `.pyi` off a genuine module REFERENCE, yielding the leaf `mypkg`, while the discarded
-  // `mypkg/pyi.py` yields `pyi` — so a GENUINELY poisoned check went untied and was persisted as
-  // covering its criterion. This is a wrong-verdict-class miss, which is why ENG-367 was shipped
-  // standalone rather than folded into the moduleLeaf split (ENG-366): that ticket fixes only the
-  // DISCARDED side and would have left this broken.
-  test("(b) a python submodule named `pyi` now ties to the file that defines it", () => {
+describe("importErrorImplicatesDiscarded: removing pyi GAINS (b), ENG-366 then fixes (c)", () => {
+  // (b) The gained TRUE tie — the same shape as the `go` case above, and the reason ENG-367 was not
+  // merely a narrowing. A python package may hold a submodule named `pyi`. `.pyi` is not in
+  // SOURCE_EXTS, so `moduleLeaf("mypkg.pyi")` yields the leaf `pyi`, which meets the discarded
+  // `mypkg/pyi.py` (`importableLeaf` → `pyi`). This is an OUTPUT-side gain, so ENG-366 (which only
+  // touches the discarded side) leaves it intact — verified below. It is why ENG-367 shipped
+  // standalone rather than waiting for this split, which would have left the miss unfixed.
+  test("(b) a python submodule named `pyi` ties to the file that defines it (still)", () => {
     expect(
       importErrorImplicatesDiscarded(
         "ModuleNotFoundError: No module named 'mypkg.pyi'",
@@ -352,46 +383,40 @@ describe("importErrorImplicatesDiscarded: what removing pyi GAINS (b) and (c)", 
     ).toEqual(["mypkg/pyi.py"]);
   });
 
-  // (c) RESIDUAL, pinned as CURRENT behavior rather than endorsed — the mirror of the ENG-365
-  // residual. Every discarded `.pyi` now reduces to the constant leaf `pyi`, so any captured
-  // reference that also reduces to `pyi` implicates all of them.
-  //
-  // The necessary condition is a captured reference literally ending `.pyi` — which is EITHER a
-  // submodule named `pyi` OR a captured FILE PATH ending `.pyi`, because LEGACY_NAMING's capture
-  // class `([\w./-]+)` accepts `/` and `.`. (Stating only the first was a review finding on this
-  // ticket's plan: too tight a claim, the same habit ENG-365 was caught by.) Accepted because no
-  // realistic tool message has that shape — pytest prints the path but the CAPTURED token is the
-  // module: `ERROR stubs/helper.pyi - ModuleNotFoundError: No module named 'helper'` captures
-  // `helper`, not the path. Consequence is a spurious retry, never a wrong verdict.
-  test("(c) a captured path ending .pyi implicates unrelated discarded stubs", () => {
+  // (c) FIXED by ENG-366. This was the ENG-367 RESIDUAL — the mirror of the ENG-365 one — pinned as
+  // ACCEPTED behavior: under the shared `moduleLeaf`, every discarded `.pyi` reduced to the constant
+  // leaf `pyi`, so any captured reference also reducing to `pyi` (e.g. a captured FILE PATH ending
+  // `.pyi`, since LEGACY_NAMING's class `([\w./-]+)` accepts `/` and `.`) implicated all of them.
+  // ENG-366's `importableLeaf` reduces a discarded `.pyi` path to "" (pyi ∉ SOURCE_EXTS), so the
+  // residual is gone. Inverted from the residual assertion these two replace.
+  test("(c) FIXED: a captured path ending .pyi no longer implicates unrelated discarded stubs", () => {
     expect(
       importErrorImplicatesDiscarded(
         "could not import stubs/helper.pyi",
         ["other/thing.pyi"],
         "pytest",
       ),
-    ).toEqual(["other/thing.pyi"]);
+    ).toEqual([]);
   });
 
-  // (c) is NOT pytest-only. `discarded` is dispatch-wide while the rules object follows the
-  // check's framework — the same asymmetry (a) turns on — so the residual is live on every
-  // tiesByLeaf framework. Pinned on two more so the doc comment's scope claim is test-backed
-  // rather than asserted.
-  test("(c) the residual is live on other frameworks too, not just pytest", () => {
+  // (c) fixed on EVERY tiesByLeaf framework, not just pytest — `discarded` is dispatch-wide while
+  // the rules object follows the check's framework, the same asymmetry the false ties turned on.
+  // Was pinned firing on rspec and phpunit; now pinned NOT firing.
+  test("(c) FIXED on other frameworks too, not just pytest", () => {
     expect(
       importErrorImplicatesDiscarded(
         "cannot load such file -- stubs/helper.pyi",
         ["other/thing.pyi"],
         "rspec",
       ),
-    ).toEqual(["other/thing.pyi"]);
+    ).toEqual([]);
     expect(
       importErrorImplicatesDiscarded(
         "Failed opening required 'stubs/helper.pyi'",
         ["other/thing.pyi"],
         "phpunit",
       ),
-    ).toEqual(["other/thing.pyi"]);
+    ).toEqual([]);
   });
 
   // (d) The fourth effect, and the one a three-effect draft of this change missed: the output-side
@@ -400,9 +425,8 @@ describe("importErrorImplicatesDiscarded: what removing pyi GAINS (b) and (c)", 
   //
   // Benign by CPython's submodule semantics — `No module named 'mypkg.pyi'` is raised only when
   // `mypkg` itself RESOLVED and the submodule did not, so a discarded `mypkg.py` cannot have been
-  // the cause and the tie was false. But it is a removal on the output side, so it belongs in the
-  // ledger: if a captured reference ending `.pyi` is conceivable enough to pin (c), it is
-  // conceivable enough to pin this.
+  // the cause and the tie was false. It is an OUTPUT-side removal (via `moduleLeaf`), so — unlike
+  // (c) — it survives the ENG-366 discarded-side split untouched, and is pinned to prove it.
   test("(d) a stem-named non-pyi discarded file is no longer implicated", () => {
     expect(
       importErrorImplicatesDiscarded(
@@ -411,5 +435,86 @@ describe("importErrorImplicatesDiscarded: what removing pyi GAINS (b) and (c)", 
         "pytest",
       ),
     ).toEqual([]);
+  });
+});
+
+describe("importErrorImplicatesDiscarded: ENG-366 §4.2 — accepted non-importable-extension losses", () => {
+  // A discarded `.json`/`.vue` file used to tie via the shared `moduleLeaf`'s constant extension
+  // token. ENG-366 reduces it to "" on the discarded side, so the leaf tier no longer fires for it.
+  // Sometimes that removes a TRUE tie — accepted (option A) because a constant-token match fires on
+  // EVERY discarded file of that extension and is right only by coincidence. Two follow-ups recover
+  // the true case principledly: ENG-370 (make naming-only phrases gate tier 4) and ENG-369 (add
+  // genuinely-importable extensions like `.vue`).
+
+  test("tier 4 still rescues the true case when the output is an INDICATOR naming the file literally", () => {
+    // `Cannot find module` IS an indicator, so the bounded-basename tier is live; `data.json`
+    // contains a dot; the bounded regex accepts the `/`-prefixed `'`-suffixed jest form. So the one
+    // realistic shape where the discard really is the cause keeps a route to coverage.
+    expect(
+      importErrorImplicatesDiscarded(
+        "Cannot find module './fixtures/data.json' from 'src/a.test.js'",
+        ["fixtures/data.json"],
+        "jest",
+      ),
+    ).toEqual(["fixtures/data.json"]);
+  });
+
+  test("KNOWN GAP: a naming-ONLY phrase loses the tie to a non-importable-extension discard", () => {
+    // `could not import` / `unable to resolve` are naming phrases but NOT indicators, so tier 4 is
+    // disabled and the leaf tier was the only route — which ENG-366 removes for a "" reduction. This
+    // is the accepted loss, pinned as a known gap (ENG-370 closes the tier-4 half, ENG-369 the
+    // list half). `.vue` is source, not a fixture, which is why ENG-369 exists.
+    expect(
+      importErrorImplicatesDiscarded(
+        "could not import ./fixtures/data.json",
+        ["fixtures/data.json"],
+        "vitest",
+      ),
+    ).toEqual([]);
+    expect(
+      importErrorImplicatesDiscarded(
+        "could not import ./Button.vue",
+        ["src/lib/Button.vue"],
+        "vitest",
+      ),
+    ).toEqual([]);
+  });
+
+  test("an extensionless discard no longer ties, and has no tier-4 backstop", () => {
+    // `scripts/deploy` reduced to `deploy` under shared `moduleLeaf` and tied to `./deploy`.
+    // `importableLeaf` → "" (no extension). base has no dot, so tier 4 never applies either — the
+    // deliberate D1 decision: nothing extensionless is importable in a tiesByLeaf ecosystem.
+    expect(
+      importErrorImplicatesDiscarded(
+        "Error: Cannot find module './deploy'",
+        ["scripts/deploy"],
+        "vitest",
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("importErrorImplicatesDiscarded: ENG-366 §4.3 — the discarded side stays framework-blind", () => {
+  // `importableLeaf` asks "can SOME tiesByLeaf language import this path", not "can THIS check's
+  // framework" — so a discarded `.rb` still ties to a node check by stem, cross-language. Not fixed
+  // here (a future `importableLeaf(path, rules)` would); pinned so the residual is visible.
+  test("a discarded ruby file still ties to a node check by stem", () => {
+    expect(
+      importErrorImplicatesDiscarded(
+        "Error: Cannot find module './helper'",
+        ["lib/helper.rb"],
+        "vitest",
+      ),
+    ).toEqual(["lib/helper.rb"]);
+  });
+
+  // A package-oriented framework (go, jvm) has tiesByLeaf:false, so NEITHER reduction is consulted
+  // and ENG-366 cannot change its verdicts. Pinned as the no-op boundary of the change.
+  test("a package-oriented framework never reaches the leaf tier, so the split is a no-op for it", () => {
+    // `undefined: helper` names a bare symbol; with no `sources` the symbol tier is inert and the
+    // leaf tier is off for go, so a discarded `pkg/helper.go` sharing the name is NOT implicated.
+    expect(importErrorImplicatesDiscarded("undefined: helper", ["pkg/helper.go"], "go")).toEqual(
+      [],
+    );
   });
 });

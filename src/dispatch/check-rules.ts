@@ -1,86 +1,70 @@
 import type { CheckFramework } from "./check-selector.ts";
 
-/** Source-file extensions stripped when reducing a path or module reference to its leaf name.
+/** Source-file extensions a `tiesByLeaf` language can IMPORT. Consulted by BOTH leaf reductions —
+ *  `importableLeaf` (the discarded side of `importErrorImplicatesDiscarded`'s leaf tier) and
+ *  `moduleLeaf` (the output side) — but they are two DIFFERENT rules over one shared list (see TWO RULES
+ *  below). Kept as one list because two would start identical and drift, not because the two sides
+ *  compute the same thing.
  *
  *  This list is NOT the routing extension list (`EXTENSIONS_BY_KIND`) and must not be derived from
- *  it. It feeds only the LEAF TIER of the discard-poison guard, which is gated per language by
+ *  it. It feeds only the LEAF TIER of the discard-poison guard, gated per language by
  *  `LanguageRules.tiesByLeaf` — false for `goRules` and `jvmRules`.
  *
- *  RULE FOR NEW ENTRIES: add an extension only if a check in some `tiesByLeaf` language can
- *  actually IMPORT a file with it. That is the only way stripping produces a TRUE match, and
- *  because `discarded` is dispatch-wide while the rules object is chosen by the CHECK's framework,
- *  every other entry can only ever produce a FALSE tie.
+ *  RULE FOR NEW ENTRIES: add an extension only if a check in some `tiesByLeaf` language can actually
+ *  IMPORT a file with it. That is the only way a discarded file of that type reduces (via
+ *  `importableLeaf`) to a stem that can be a TRUE cause; every other entry would let a non-importable
+ *  path keep a stem it should have dropped, and since `discarded` is dispatch-wide while the rules
+ *  object follows the CHECK's framework, that surfaces as a FALSE tie. Adding an entry is
+ *  BIDIRECTIONAL — it also changes how `moduleLeaf` parses a reference ending in it — so weigh both
+ *  sides. ENG-369 tracks importable extensions that arguably belong here (e.g. `.vue`).
  *
- *  Excluded on that rule, though `EXTENSIONS_BY_KIND` lists them:
- *  - `gradle`, `rake`, `gemspec` — build manifests; nothing imports them. Stripping `.gradle`
- *    would reduce `build.gradle` to the leaf `build`, colliding with a node check failing on
- *    `Cannot find module '../build'`; `.gemspec` would reduce `styre.gemspec` to `styre`,
- *    colliding with a genuinely-missing `lib/styre.rb`. Both reproduce.
- *  - `kts`, `groovy` — JVM source. No `tiesByLeaf` language can import them, so like the manifests
- *    above they yield false ties only (a discarded `Foo.groovy` would tie to a node check failing
- *    on `./foo`), not merely no-ops.
- *  - `go`, `java`, `kt`, `scala` — go/JVM source, excluded on that same reasoning (ENG-365). These
- *    four predated the rule and were stripped anyway until then, which was wrong in BOTH
- *    directions. On the discarded side it manufactured ties: `cmd/build.go` reduced to `build` and
- *    met a node check failing on `'../build'`. On the OUTPUT side it corrupted a real reference: a
- *    python `No module named 'mypkg.go'` had `.go` popped as though it were an extension, yielding
- *    the leaf `mypkg`, so the discarded `mypkg/go.py` (leaf `go`) never tied and a genuinely
- *    poisoned check was persisted as covering its criterion. Both reproduce; see the tests.
+ *  TWO RULES, NOT ONE. It is tempting to state a single predicate "strip `.X` iff `.X` is importable"
+ *  and say the two sides share it. They do not, and an earlier draft that claimed so was falsified:
+ *   - discarded side (`importableLeaf`, a PATH): the last dotted segment IS an extension. If it is
+ *     not importable the file cannot be an import cause, so the leaf is "" — which the tier skips.
+ *   - output side (`moduleLeaf`, a REFERENCE): the last dotted segment may be an extension OR a
+ *     submodule literally named after one — `mypkg.ts` names submodule `ts`. Keying THAT on
+ *     importability is a latent wrong-verdict bug, live for every entry in this list: `mypkg.ts`
+ *     reduces to `mypkg` and misses a discarded `mypkg/ts.py`. The sound output-side predicate is
+ *     "is the reference path-shaped", not "is the tail importable". Tracked as ENG-368; do NOT fold
+ *     the two reductions back together until it lands.
  *
- *    RESIDUAL, and the reason this is a NARROWING and not a clean win: removal is not
- *    one-directional. Every discarded `.go` file now reduces to the constant leaf `go` (`.java` to
- *    `java`, and so on), so the very output shape that unlocks the true tie above ALSO implicates
- *    every unrelated discarded `.go` file in the dispatch — `No module named 'mypkg.go'` against
- *    `[mypkg/go.py, cmd/build.go]` returns BOTH. It fires even with no true tie present. This is
- *    strictly narrower than what it replaces and that is the whole justification: stripped, the
- *    discarded side collapsed to generic STEMS (`build`, `server`, `util`) that collide with any
- *    python/node error naming a common module; unstripped it collapses to a fixed extension token
- *    that collides only when the output names a reference literally ending in `.go`/`.java`/`.kt`/
- *    `.scala` — i.e. a submodule actually named after the extension. Consequence is a spurious
- *    retry, never a wrong verdict. The real fix is to stop sharing `moduleLeaf` between the two
- *    sides (a discarded PATH whose extension no `tiesByLeaf` language can import should reduce to
- *    "", which the tier already skips) — a separate ticket, as ENG-365 anticipated.
+ *  RESIDUAL on the discarded side (ENG-366 §4.3): `importableLeaf` is framework-BLIND while the rules
+ *  object follows the check's framework, so a discarded `lib/helper.rb` still ties to a node check
+ *  naming `./helper`. A future `importableLeaf(path, rules)` would close it.
  *
- *  - `pyi` — python STUBS, excluded on the same rule (ENG-367). A `.pyi` is read by type checkers
- *    at analysis time and never imported at runtime (PEP 484; CPython resolves only
- *    `SOURCE_SUFFIXES == ['.py']`), so it could not be causal for a test-runner failure. The guard
- *    only ever sees test-command output (`binaryFor`, handlers.ts), and `CheckFramework` has no
- *    type-checker member, so the one shape where a stub IS causal cannot reach these rules at all.
- *    Because `moduleLeaf` is shared by both sides, the effect space is a 2x2 (does the discarded
- *    path end `.pyi`? does the captured reference end `.pyi`?), so removal has FOUR effects, not
- *    the three an earlier draft of this comment claimed. All four are reproduced in the tests:
- *      (a) it killed the false ties — and they were not only intra-language: a discarded
- *          `stubs/helper.pyi` tied to node, ruby, rust and php checks too, since `discarded` is
- *          dispatch-wide while the rules object follows the CHECK's framework;
- *      (b) it GAINED a true tie, the mirror of the `go` case above — `No module named 'mypkg.pyi'`
- *          had `.pyi` popped off a genuine reference, so the discarded `mypkg/pyi.py` never tied
- *          and a genuinely poisoned check was persisted as covering its criterion. This is the
- *          wrong-verdict-class miss that made ENG-367 worth shipping ahead of the `moduleLeaf`
- *          split (ENG-366), which fixes only the DISCARDED side and would have left it broken;
- *      (c) RESIDUAL — every discarded `.pyi` now reduces to the constant leaf `pyi`, so a captured
- *          reference that also reduces to `pyi` implicates all of them. The condition is a
- *          reference literally ending `.pyi`: a submodule named `pyi`, OR a captured FILE PATH
- *          ending `.pyi`, since `LEGACY_NAMING`'s class `([\w./-]+)` accepts `/` and `.`.
- *          Consequence is a spurious retry, never a wrong verdict. Pinned as current behaviour,
- *          not endorsed. SCOPE OF THAT JUDGEMENT: the residual is live on ALL SIX `tiesByLeaf`
- *          frameworks, not just pytest — `discarded` is dispatch-wide while the rules object
- *          follows the check's framework, the same asymmetry (a) turns on. Verified firing on
- *          rspec and phpunit with a `.pyi`-suffixed path in the output. "No realistic tool
- *          message has that shape" is an argument about pytest (which prints the stub path but
- *          CAPTURES the module name); it is asserted, not proven, for the other five.
- *      (d) It also DROPS output-side ties to stem-named, non-`.pyi` discarded files — the mirror
- *          of (b) and the class the three-effect draft missed. `No module named 'mypkg.pyi'` no
- *          longer implicates a discarded `src/mypkg.py`, because the reference now reduces to
- *          `pyi` rather than `mypkg`. Those were FALSE ties by CPython's submodule semantics (that
- *          error is raised only when `mypkg` itself resolved and the submodule did not, so the
- *          discarded `mypkg.py` cannot have been the cause), so the direction is benign — but it
- *          is a removal on the output side and belongs in the ledger. If a captured reference
- *          ending `.pyi` is conceivable enough to document (c), it is conceivable enough to
- *          document this.
+ *  Excluded on the membership rule, though `EXTENSIONS_BY_KIND` lists them:
+ *  - `gradle`, `rake`, `gemspec` — build manifests; nothing imports them. `importableLeaf` returns
+ *    "" for them regardless (their extension isn't in this list), so they can no longer tie on the
+ *    discarded side; keeping them OUT documents the intent.
+ *  - `kts`, `groovy` — JVM source. No `tiesByLeaf` language can import them.
+ *  - `go`, `java`, `kt`, `scala` — go/JVM source (ENG-365). These four predated the membership rule
+ *    and were stripped anyway, wrong in BOTH directions. On the discarded side it manufactured ties
+ *    (`cmd/build.go` reduced to `build`, met a node `'../build'`); on the OUTPUT side it corrupted a
+ *    real reference (`No module named 'mypkg.go'` → `mypkg`, so a discarded `mypkg/go.py` never tied
+ *    and a poisoned check passed). The discarded-side residual ENG-365 had to accept — every `.go`
+ *    reducing to the constant leaf `go` — is now GONE: `importableLeaf("cmd/build.go")` is "". The
+ *    output-side half of the original bug survives untouched here and is ENG-368.
+ *  - `pyi` — python STUBS (ENG-367). A `.pyi` is read by type checkers at analysis time and never
+ *    imported at runtime (PEP 484; CPython resolves only `SOURCE_SUFFIXES == ['.py']`), and
+ *    `CheckFramework` has no type-checker member, so the one shape where a stub IS causal cannot
+ *    reach these rules. While `moduleLeaf` was shared its removal had a 2x2 effect space; the two
+ *    effects that OUTLIVE this split are both output-side and still depend on `.pyi` being absent:
+ *      (b) it GAINED a true tie — `No module named 'mypkg.pyi'` had `.pyi` popped off a genuine
+ *          reference, so a discarded `mypkg/pyi.py` never tied and a poisoned check passed. This is
+ *          the wrong-verdict miss that made ENG-367 worth shipping ahead of this split, which fixes
+ *          only the discarded side and would have left it broken.
+ *      (d) it DROPS output-side ties to stem-named non-`.pyi` discarded files — `No module named
+ *          'mypkg.pyi'` no longer implicates a discarded `src/mypkg.py`. Those were FALSE ties by
+ *          CPython submodule semantics (the error is raised only once `mypkg` itself resolved), so
+ *          the direction is benign, but it is a real output-side removal.
+ *    The DISCARDED-side effects the shared function used to have — the intra/cross-language false
+ *    ties a discarded `.pyi` produced, and the constant-`pyi` residual — are now moot regardless of
+ *    ENG-367: `importableLeaf("stubs/helper.pyi")` is "", because `pyi` is not in this list.
  *    Note `EXTENSIONS_BY_KIND` keeps `.pyi`: that is the file→component ROUTING map, disjoint from
  *    this list, and a `.pyi` genuinely is a python file for routing purposes.
  *
- *  CAVEAT — multi-dot stems. `moduleLeaf` pops exactly ONE extension, so `types.d.mts` reduces to
+ *  CAVEAT — multi-dot stems. Both reductions pop exactly ONE extension, so `types.d.mts` reduces to
  *  `d` and `utils.test.mts` to `test`. Pre-existing (`foo.d.ts` already yields `d`), but the
  *  `.cts`/`.mts` additions widen it, and `test` is a highly collision-prone leaf given the
  *  discarded set is exactly agent-authored test files. Filed separately; see the tests. */
@@ -100,17 +84,43 @@ const SOURCE_EXTS = new Set([
   "php",
 ]);
 
-/** The leaf module identifier for a path OR a dotted/slashed module reference, lower-cased. Takes the
- *  last path segment, drops a trailing source extension, then the last remaining dotted segment:
- *  `checks/helper.py`→`helper`, `pkg.helper`→`helper`, `./a/helper.js`→`helper`, `util`→`util`. Pure. */
-export function moduleLeaf(ref: string): string {
+/** The last path segment split into non-empty dot-separated parts, e.g. `a/b.test.ts` → `[b, test,
+ *  ts]`, `mod.rs` → `[mod, rs]`, `deploy` → `[deploy]`, `a/b/` → `[]`. The shared tokenizer for the
+ *  two leaf reductions below, so they cannot drift on path-separator or empty-segment handling; the
+ *  reductions differ only in POLICY (what to do with the parts), which is the axis they must differ
+ *  on. Pure. */
+function dotParts(ref: string): string[] {
   const seg = ref.split(/[\\/]/).pop() ?? ref;
-  const parts = seg.split(".").filter((s) => s.length > 0);
-  if (parts.length === 0) return seg.toLowerCase();
+  return seg.split(".").filter((s) => s.length > 0);
+}
+
+/** OUTPUT-side reduction: the leaf identifier of a module REFERENCE parsed from runner output,
+ *  lower-cased. Drops a trailing source extension, then takes the last remaining dotted segment:
+ *  `checks/helper.py`→`helper`, `pkg.helper`→`helper`, `./a/helper.js`→`helper`, `util`→`util`.
+ *  NB: keys the extension-strip on `SOURCE_EXTS` membership, which is unsound for a reference naming
+ *  a submodule after an extension (`mypkg.ts`→`mypkg`); that is ENG-368, not fixed here. Pure. */
+export function moduleLeaf(ref: string): string {
+  const parts = dotParts(ref);
+  if (parts.length === 0) return (ref.split(/[\\/]/).pop() ?? ref).toLowerCase();
   if (parts.length >= 2 && SOURCE_EXTS.has((parts[parts.length - 1] ?? "").toLowerCase())) {
     parts.pop();
   }
-  return (parts[parts.length - 1] ?? seg).toLowerCase();
+  return (parts[parts.length - 1] ?? ref).toLowerCase();
+}
+
+/** DISCARDED-side reduction: the leaf identifier of a discarded FILE PATH, lower-cased, or "" when
+ *  the path is not importable by any `tiesByLeaf` language. A path is importable only if it has an
+ *  extension in `SOURCE_EXTS`; then the leaf is the stem before it (`src/lib/Button.svelte`→`button`,
+ *  `mypkg/go.py`→`go`). Everything else — a non-source extension (`cmd/build.go`, `stubs/helper.pyi`,
+ *  `data.json`) or no extension at all (`scripts/deploy`, `Makefile`) — reduces to "", which the leaf
+ *  tier skips. This is the split ENG-366 introduced: a discarded path is not a module reference, so
+ *  it must not borrow `moduleLeaf`'s reference semantics. Pure. */
+export function importableLeaf(path: string): string {
+  const parts = dotParts(path);
+  if (parts.length < 2) return "";
+  if (!SOURCE_EXTS.has((parts[parts.length - 1] ?? "").toLowerCase())) return "";
+  parts.pop();
+  return (parts[parts.length - 1] ?? "").toLowerCase();
 }
 
 /** A dotted, lower-cased reference: slashes → dots, trimmed of leading/trailing dots. Pure. */
@@ -224,8 +234,8 @@ function packageInitImplicated(initPath: string, ctx: MatchContext): boolean {
   return false;
 }
 
-/** A discarded Rust `mod.rs` is leafless (`moduleLeaf` yields `mod`), so tie it by its directory:
- *  `tests/common/mod.rs` is implicated when a named module equals `common`. Pure. */
+/** A discarded Rust `mod.rs` is leafless (`importableLeaf` yields the generic `mod`), so tie it by
+ *  its directory: `tests/common/mod.rs` is implicated when a named module equals `common`. Pure. */
 function modMarkerImplicated(modPath: string, ctx: MatchContext): boolean {
   const dirLeaf = dirSegments(modPath).at(-1);
   return dirLeaf !== undefined && ctx.dotted.includes(dirLeaf);

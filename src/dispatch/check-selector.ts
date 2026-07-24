@@ -3,6 +3,7 @@ import type { CommandResult } from "../util/run-command.ts";
 import {
   CHECK_RULES,
   type MatchContext,
+  importableLeaf,
   moduleDotted,
   moduleLeaf,
   symbolLeaf,
@@ -254,8 +255,9 @@ export function isLaunchFailure(exitCode: number | null): boolean {
  *  another's output. Four tiers per discarded file: (1) shape rules (directory- or marker-based, for
  *  files whose own name never appears); (2) the symbol tier, where the output names a symbol and a
  *  discarded file's captured contents define it (requires `sources`; silently inert without them); (3)
- *  the leaf tier, where a naming phrase names the file's module leaf — disabled for package-oriented
- *  languages; (4) the bounded-basename tier, gated on an indicator. A red whose error names some OTHER
+ *  the leaf tier, where a naming phrase's leaf (`moduleLeaf`) equals the discarded file's importable
+ *  leaf (`importableLeaf`, "" for a non-importable path) — disabled for package-oriented languages;
+ *  (4) the bounded-basename tier, gated on an indicator. A red whose error names some OTHER
  *  (e.g. feature) module is left untouched, so a test that legitimately fails because the feature is
  *  absent is never rejected. Pure. */
 export function importErrorImplicatesDiscarded(
@@ -322,7 +324,10 @@ export function importErrorImplicatesDiscarded(
       }
     }
     if (!hit && rules.tiesByLeaf) {
-      const leaf = moduleLeaf(d);
+      // `d` is a discarded PATH, not a module reference — reduce it with `importableLeaf`, which
+      // returns "" for a non-importable path (ENG-366). The output side (`leaves`, built above) keeps
+      // `moduleLeaf`; the two must not be merged (see the SOURCE_EXTS comment's TWO RULES / ENG-368).
+      const leaf = importableLeaf(d);
       if (leaf !== "" && leaves.has(leaf)) hit = true;
     }
     if (!hit && gatesBasename && base.includes(".")) {
