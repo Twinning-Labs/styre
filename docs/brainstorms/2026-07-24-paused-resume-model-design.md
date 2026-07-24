@@ -1,18 +1,24 @@
 # Unified pause/resume model — one `paused` state, one recovery path
 
-**Date:** 2026-07-24
-**Status:** Draft — rev 2 (Option A folded in; adversarial review findings incorporated)
+**Date:** 2026-07-24 (rev 3: 2026-07-25)
+**Status:** Draft — rev 3 (Option 2: human-driven recovery; two adversarial-review rounds folded in)
 **Related:** ENG-331 (dump+resume escalated), ENG-353 (escalated outcome), ENG-332 (provision-first)
 
-### Revision note (rev 2)
+### Revision history
 
-A code-grounded adversarial review of rev 1 found that the headline model — "one `paused`, one
-recovery path, `reason` is pure metadata" — did **not** hold as written: `blocked` and
-`no-progress` raise no signal, leave the task `active`, and re-arm no step, so they could not share
-`escalated`'s resume gate (they would re-pause on the same tick). Rev 2 adopts **Option A**: every
-dead-end is *normalized at pause time* into the same waiting-for-a-human shape, which makes `reason`
-genuinely metadata. All other confirmed findings (worktree force-remove hazard, telemetry break,
-UNIQUE-crash reachability, `recover()` scope, `pr-ready` leak) are folded in and marked ✎.
+- **rev 1** — one `paused` state + `reason`; single resume path.
+- **rev 2** — "Option A": normalize every halt by *raising a signal and leaving a re-armable step*,
+  bounded by an automatic `exhausted` ceiling.
+- **rev 3 (this)** — a second code-grounded review proved rev 2's mechanism unsound for the two
+  dead-ends it targeted: `blocked`/`no-progress` run **no step**, so there is nothing to re-arm and
+  the per-step attempt counter never climbs — the `exhausted` ceiling was unreachable and would have
+  produced an unbounded resume-limbo. rev 3 adopts **Option 2 (human-driven recovery)**: all halts
+  become `paused` and *always wait for a human* — matching how styre already behaves (even a failed
+  step at its retry cap escalates to a person, it never auto-abandons). The mechanism is corrected:
+  a **step-independent pause primitive** + a resume that **re-arms a failed step if one exists, else
+  re-plans**. No automatic give-up; `abandoned` is a human/explicit decision. Worktree removal is
+  **liveness-gated** (not a path heuristic), and the DB inserts are **find-or-create** (not
+  `INSERT OR IGNORE`). Review-driven corrections are marked ✎.
 
 ---
 
@@ -20,32 +26,31 @@ UNIQUE-crash reachability, `recover()` scope, `pr-ready` leak) are folded in and
 
 `styre run` has six terminal outcomes (`src/daemon/run-ticket.ts:19`):
 `pr-ready | done | blocked | no-progress | parked | escalated`. Four are *halts that leave
-recoverable work behind*, but they are modeled inconsistently:
+recoverable work behind*, modeled inconsistently:
 
-- **Exit codes disagree.** `parked`/`escalated` → `75`; `blocked`/`no-progress` → `1`
+- **Exit codes disagree:** `parked`/`escalated` → `75`; `blocked`/`no-progress` → `1`
   (`src/cli/outcome.ts:24-36`).
-- **Persistence disagrees.** Only `parked` dumps its journal to a durable location
-  (`finishRunResult`, `src/cli/park.ts:58-72` → `dumpPark`, `:104-136`). A fresh run journals to a
-  throwaway temp DB (`src/cli/run.ts:199-203`), so a non-`parked` halt's journal is orphaned and
-  GC'd.
-- **Worktree cleanup disagrees.** The only removal in the run flow is `released:project`
+- **Persistence disagrees:** only `parked` dumps its journal to a durable location (`finishRunResult`,
+  `src/cli/park.ts:58-72` → `dumpPark`, `:104-136`). A fresh run journals to a throwaway temp DB
+  (`src/cli/run.ts:199-203`), so a non-`parked` halt's journal is orphaned and GC'd.
+- **Worktree cleanup disagrees:** the only removal in the run flow is `released:project`
   (`src/dispatch/handlers.ts:1830-1840`); the branch-freeing cleanup lives only in the resume path
   (`src/cli/park.ts:284-308`, "Fix B"). ✎ *(one out-of-flow removal also exists in the replay/dev
-  harness, `src/dispatch/replay-harness.ts:101` — not part of the run flow, noted so the "only two
-  removals" claim isn't over-stated.)*
-- **The halts themselves disagree in shape** — this is the crux Option A fixes:
+  harness, `src/dispatch/replay-harness.ts:101` — noted so "only two removals" isn't over-stated.)*
+- **The halts differ in *shape*** — the crux this design confronts honestly:
   - `parked`: step left `running`, ticket → `waiting`, `parked` event (`src/daemon/advance.ts:157-179`).
-  - `escalated`: step left `failed`, ticket → `waiting`, `human_resume` signal raised
-    (`src/daemon/failure-policy.ts:75,97,120,155,245`; `src/daemon/advance.ts:91-99,181-186`).
-  - `blocked`: **no state change, no signal**, ticket stays `active` (`src/daemon/loop.ts:34`,
-    `src/daemon/resolver.ts:224`, returned at `advance.ts:87-88`).
-  - `no-progress`: a driveToTerminal idle/iteration counter (`src/daemon/run-ticket.ts:128-135`) —
-    no signal, no status change, no step mutation.
+  - `escalated`: step left `failed`, ticket → `waiting`, `human_resume` raised
+    (`src/daemon/failure-policy.ts:74-88`, `advance.ts:91-100`); a failed step is re-run by `runStep`
+    (`src/engine/step-journal.ts:85`).
+  - `blocked`: **no step, no signal**, ticket stays `active` — the resolver found no unit to serve
+    (`src/daemon/resolver.ts:128,146,224`, returned early at `advance.ts:87-88`).
+  - `no-progress`: decided a layer up in `driveToTerminal` from `tick()`'s counters
+    (`src/daemon/run-ticket.ts:128-135`) — **no step at all**, no access to per-step machinery.
 
-Because `blocked`/`no-progress` leave *nothing to resume against*, a naive "resume" wakes up, hits
-the identical dead-end, and stops again on the same tick.
+Because `blocked`/`no-progress` leave *no step and no signal*, they need a step-independent way to
+become a legible, resumable pause (§3.2) — and their "resume" means *re-plan*, not *retry a step*.
 
-### 2. Ground truth
+## 2. Ground truth
 
 Two live reproductions in `~/code/styre-events` (`git worktree list`, 2026-07-24):
 
@@ -55,80 +60,87 @@ Two live reproductions in `~/code/styre-events` (`git worktree list`, 2026-07-24
 ```
 
 - **STYRE-7** escalated; no dump (`~/.local/state/styre/styre-events/` has no `STYRE-7/`). Its
-  worktree survives holding `feat/STYRE-7`. Re-running mints a fresh worktree root (`run.ts:222`)
-  and calls `git worktree add -B feat/STYRE-7 <new>` (`worktree.ts:49`); git refuses — the branch
-  is still used by the leftover worktree. **This is the "worktree already exists" error.**
-- **STYRE-1** parked; dump survives at `~/.local/state/styre/styre-events/STYRE-1/run.db` (only
-  because `--db` was passed — luck, not design). Its worktree is also leaked and `prunable`.
+  worktree survives holding `feat/STYRE-7`; re-running calls `git worktree add -B feat/STYRE-7`
+  (`worktree.ts:49`) and git refuses — the branch is still used by the leftover worktree. **This is
+  the "worktree already exists" error.**
+- **STYRE-1** parked; dump survives only because `--db` was passed (luck). Worktree also leaked.
 
 ---
 
 ## 3. The model
 
 **One non-terminal stop state: `paused`.** It replaces `parked`, `escalated`, `blocked`, and
-`no-progress` as user-visible outcomes. A `paused` run has a durable checkpoint and is resumable.
+`no-progress` as user-visible outcomes. Every `paused` run has a durable checkpoint, **always waits
+for a human**, and is resumable. A separate terminal, **`abandoned`**, is reached only by an explicit
+human decision (§3.5).
 
-### 3.1 Normalize every stop at pause time (the Option A principle)
+### 3.1 Guiding principle — human-driven, uniform (Option 2)
 
-The load-bearing rule: **before any run exits with a halt, it leaves the *same shape* behind** —
+styre already embodies this: even a failed step that exhausts its retry cap **escalates to a person**
+(`failure-policy.ts:72-89`) — it never unilaterally gives up. So the consistent model is: *every halt
+waits for a human; the human decides when to continue and when to stop.* We add **no** automatic
+"give up after N tries" — that would be a new special-case for the very outcomes we are unifying, and
+it is unnecessary: resume is human-invoked and a no-change resume is a cheap, visible no-op (§3.4).
 
-1. task marked **waiting for a human**,
-2. a **note** (the `detail`, see 3.3) saying *what a resume would need*,
-3. a **re-armable next step**, and
-4. a **saved restart point** (the checkpoint, §6).
-
-`escalated` already does 1–4. Option A makes the quiet quitters do the same:
-
-- **`blocked`** (resolver has no next move) and **`no-progress`** now *raise the hand* — they set the
-  task waiting and raise the `human_resume` signal, exactly as an escalation does, instead of
-  returning silently (`loop.ts:34`, `resolver.ts:224`, `run-ticket.ts:128-135` change to route
-  through the escalate path in `advance.ts:91-99`).
-
-Only once every stop is normalized to this shape does `reason` become *pure metadata*: at resume
-time all reasons look identical (a waiting task + a consumable gate + a re-armable step), and
-`reason` changes only *whether you're allowed to continue yet*, never *how* resume works.
-
-### 3.2 The reason enum
+### 3.2 The reason enum + the step-independent pause primitive
 
 | `reason` | Absorbs | Unblocker | Resume gate |
 | --- | --- | --- | --- |
 | `budget` | `parked` | time / credit reset | reset time reached |
 | `needs_you` | `escalated`, `blocked`, `no-progress` | a human fixes, edits, or decides | `human_resume` consumed |
-| `interrupted` | crash, SIGINT, power loss ✎ *(net-new — no current terminal; enabled by §6, not a rename)* | nothing | none |
+| `interrupted` | crash, SIGINT, power loss ✎ *(net-new — no current terminal; enabled by §6)* | nothing | none |
 
-### 3.3 The honest-note rule
+✎ **A step-independent `pauseTicket(db, ticketId, reason, detail)` primitive** is the concrete
+normalization mechanism (rev 2 wrongly routed through the step-only `escalate()`, which needs a
+`stepKey`/`dispatchId` that `blocked`/`no-progress` do not have — `checks-gate-verdict.ts:35-53`).
+`pauseTicket` sets ticket → `waiting`, raises `human_resume` (no step reference required), and records
+`reason`/`detail`. Callers:
+- the existing step-escalate path — *additionally* leaves the `failed` step (unchanged);
+- the resolver's `blocked` branch (`advance.ts:87-88`) — has `db`+`ticketId`, no step;
+- `driveToTerminal`'s `no-progress` branch (`run-ticket.ts:128-135`) — has `db`+`ticketId`, no step.
 
-The `detail` string must state *what a resume actually requires*, so the operator never presses
-resume into a wall:
+Setting `waiting` is load-bearing: it removes the ticket from `v_ready_tickets` (`schema.sql:522-530`,
+gated on `status='active'`), closing the latent daemon re-pick loop a `blocked`-but-`active` ticket
+would otherwise sit in.
 
-- external fix — `"needs you: composer not installed"` → fix it, resume.
-- edit-then-resume — `"no next move on this plan as written"` → edit the plan/code, **then** resume.
-- exhausted — `"tried 3 times, same failure — needs a rethink"` → the genuine terminal (3.4).
+### 3.3 Resume mechanism — re-arm if there's a step, else re-plan
 
-### 3.4 The retry-budget backstop (how genuinely-hopeless stops end)
+At resume, `reason` gates *permission only*; the mechanism is uniform:
+- **consume the gate** (§3.2 table), set ticket `active`;
+- **`recover()`** resets an interrupted *`running`* step → `pending` (`src/daemon/recover.ts:22-33`);
+  a *`failed`* step is re-run directly by `runStep` (`step-journal.ts:85`) — ✎ `recover()` does **not**
+  touch `failed` steps;
+- **`driveToTerminal` continues** — if there was a failed/interrupted step it re-runs it; if there
+  was **no** step (`blocked`/`no-progress`), the resolver simply re-plans against the current inputs.
 
-The distinction is not "resumable vs not" — it is "resume *after you change something*" vs "resume
-*that changes nothing*." We do **not** add a separate no-resume stop. Instead:
+So for the two dead-ends, "resume" means *re-plan from whatever the human changed*. Changed inputs →
+work appears → run proceeds. Changed nothing → resolver returns `blocked` again → `pauseTicket` again
+→ exit 75. That re-pause is a **cheap no-op, not a loop** (the ticket sits `waiting` between resumes;
+nothing auto-resumes it).
 
-- **Resume never resets the attempt tally.** The per-step attempt counter (`failure-policy.ts:70`,
-  the *only* bound on repeat failures) climbs across resumes. ✎ *(This is why widening
-  `resetProvision` to zero the attempt was rejected in ENG-331 — it deletes the sole backstop.)*
-- **Below a hard ceiling**, a dead-end escalates → `paused (needs_you)` (waits for you).
-- **At the ceiling**, it becomes **`exhausted`** — the one genuinely-terminal failure: "tried N
-  times, resume won't help, this needs a real rethink." Reached automatically by spending the
-  human-retry budget, not by inventing a second stop shape.
+### 3.4 The honest-note rule (carries the weight under Option 2)
 
-This keeps the single "everything is paused, waiting for you" model *and* gives a real end-of-line
-that prevents an infinite resume→loop→wait treadmill (notably for `no-progress`'s iteration-cap
-sub-case, where each resume grants a fresh tick budget — see ✎ 3.5).
+With no automatic backstop, the `detail` string must state *what a resume actually requires*:
+- external fix — `"needs you: composer not installed"` → fix, resume; the failed step re-runs.
+- edit-then-replan — `"no next move on this plan as written"` → edit plan/code, **then** resume; the
+  resolver re-plans.
+- nothing actionable — see §3.5.
 
-### 3.5 ✎ `no-progress` is two cases
+### 3.5 `abandoned` — human/explicit, with one honesty case
 
-The review found `no-progress` conflates a genuinely-stuck **idle-stall** (`run-ticket.ts:128-130` —
-resume re-idles, not helped by a fresh budget) with an **iteration-cap** (`run-ticket.ts:135` —
-resume grants a fresh 200-tick budget and *may* help). Both normalize to `needs_you`, but the
-`detail` must distinguish them (idle-stall leans toward the exhausted ceiling faster), and the
-attempt tally (3.4) must gate the iteration-cap so repeated resumes can't loop forever.
+`abandoned` is an existing terminal ticket status (`schema.sql:104-105`:
+`status IN ('active','waiting','abandoned','done')` — ✎ no schema change, and no new `exhausted`
+value is introduced). It is reached in exactly two ways, **never** by an automatic resume counter:
+1. **Explicit:** the operator runs `styre clean <ident>` (§5) on a pause they judge hopeless.
+2. ✎ **Honesty-at-pause:** when styre has *nothing actionable to hand the human* — a genuinely opaque
+   dead-end with no diagnosable cause **and** no re-plannable state — `pause` marks `abandoned`
+   directly rather than dangle a resume that cannot help ("couldn't make progress, nothing specific
+   to fix — transcript attached; edit and start fresh, or drop it"). This is decided **once, at pause
+   time**, by note-actionability — not by counting resumes.
+
+✎ *`no-progress` is two cases (`run-ticket.ts:128-135`): an **iteration-cap** (resume grants a fresh
+tick budget — genuinely resumable, closer to `budget`) vs an **idle-stall** (resume re-idles — the
+prime candidate for the §3.5.2 honesty-abandon). `detail` must distinguish them.*
 
 `pr-ready` and `done` are unchanged and are **not** pauses.
 
@@ -136,38 +148,37 @@ attempt tally (3.4) must gate the iteration-cap so repeated resumes can't loop f
 
 ## 4. Vocabulary & exit codes
 
-- **Outcome enum:** `pr-ready | done | paused | exhausted` (+ internal `reason` on `paused`).
+- **Outcome enum:** `pr-ready | done | paused | abandoned` (+ internal `reason` on `paused`).
 - **Exit codes** (`src/cli/errors.ts` `EXIT`, `src/cli/outcome.ts`):
   - `0` — `done` / `pr-ready`
   - `75` (TEMPFAIL) — **all** `paused`, every reason (fixes today's `blocked`/`no-progress` → `1`)
-  - `1` (OPERATIONAL) — **`exhausted`** only (the one genuine dead-end). ✎ *This preserves the
-    `1`-means-real-stop / `75`-means-resumable split that `errorKindForExit` and CI scripts rely on
-    (`src/cli/errors.ts:99-102`, `run.ts:39-41`) — the split moves from "operational vs tempfail"
-    to "genuinely-terminal vs resumable," which is the honest line.*
+  - `1` (OPERATIONAL) — **`abandoned`** (a genuine terminal without success). ✎ This preserves the
+    `1`-means-terminal / `75`-means-resumable split CI + `errorKindForExit` rely on
+    (`src/cli/errors.ts:99-102`, `run.ts:39-41`); the line just moves to "terminal vs resumable."
   - `65` resume-refused (HEAD moved), `64` usage, `69` toolchain, `70` internal, `78` config —
     unchanged.
-- ✎ **Telemetry is a breaking change, not a rename.** `failureBucket` hardcodes
-  `outcome === "parked" → "parked-credits"` and `no-progress → "no-progress"`, then keyword-classifies
-  the rest (`src/telemetry/analytics/properties.ts:61-74`). Emitting `outcome:"paused"` makes every
-  branch fall through. The bucket map must be re-keyed on `reason` (so `budget → "parked-credits"`
-  etc. survive), and any dashboard keying on the old `outcome` string must be migrated deliberately.
+- ✎ **Telemetry is a breaking change, not a rename.** `failureBucket` hardcodes `parked →
+  "parked-credits"` / `no-progress → "no-progress"` then keyword-classifies
+  (`src/telemetry/analytics/properties.ts:61-76`); `outcome:"paused"` falls through every branch. The
+  bucket map must be re-keyed on `reason`, and the change must also cover `runCompletedProperties`'
+  `outcome`/`success` fields (`properties.ts:119,128`) and `ALLOWED_KEYS`.
 
 ---
 
 ## 5. CLI surface
 
-Per product decision (2026-07-24): resume stays a **flag on `run`** (no new subcommand), and a
-fresh `run` on an existing checkpoint **refuses**.
+Resume stays a **flag on `run`** (no new subcommand); a fresh `run` on an existing checkpoint
+**refuses**.
 
 | Command | Behavior |
 | --- | --- |
 | `styre run <ticket>` | Fresh run. **Refuses if a checkpoint exists**, pointing at `--resume` / `--fresh`. |
-| `styre run --resume <ident>` | Resume the checkpoint (the one recovery path, §7). |
+| `styre run --resume <ident>` | Resume the checkpoint (§3.3). |
 | `styre run <ident> --fresh` | Discard the checkpoint + reconcile the worktree, then start over. |
-| `styre run --resume <ident> --accept-head` | Resume though branch HEAD moved (exists today, `park.ts:245-252`). |
-| `styre run --resume <ident> --inspect` | Print resume diagnostics, no run (exists today). |
-| `styre ls` | List paused checkpoints: ticket, reason, age, resume hint. *(small, separate)* |
-| `styre clean <ident> \| --all` | Reap checkpoint + worktree for done/abandoned/`exhausted` runs — ✎ **and stale `pr-ready` worktrees** (see §10). *(small, separate)* |
+| `styre run --resume <ident> --accept-head` | Resume though branch HEAD moved (exists, `park.ts:245-252`). |
+| `styre run --resume <ident> --inspect` | Print resume diagnostics, no run (exists). |
+| `styre ls` | List paused checkpoints: ticket, reason, age, honest-note, resume hint. *(separate)* |
+| `styre clean <ident> \| --all` | Reap checkpoint + worktree; the operator's route to `abandoned`. ✎ Also reaps stale `pr-ready` worktrees (§10). *(separate)* |
 
 No `--after-fix` flag — resume always consumes the pending signal, so it is implied (supersedes
 `minimal-loop.md:183-185`).
@@ -179,21 +190,23 @@ No `--after-fix` flag — resume always consumes the pending signal, so it is im
 Orphaning's root cause is that the live journal and the durable checkpoint are different files,
 reconciled only by a copy that only `parked` performs. Fix it at the root: **a fresh run journals
 directly to `~/.local/state/styre/<slug>/<ident>/run.db`** (`parkDir`, `park.ts:75-77`) instead of a
-temp DB (`run.ts:199-203`).
+temp DB (`run.ts:199-203`). Then the journal is always at the checkpoint (a crash leaves it there —
+no signal handler), `pause` writes only a `reason`/`detail`/transcript sidecar, and `run <ticket>`
+refusing = testing whether the dir exists. `--db` override stays for tests.
 
-Consequences: the journal is always at the checkpoint (a crash leaves it there for free — no
-signal handler); `pause()` writes only a small `reason`/`detail`/transcript sidecar; `run <ticket>`
-refusing = testing whether the dir exists; `--db` override stays for tests.
+Two safeguards, both required (the review showed the first is not enough alone):
 
-✎ **The refuse-guard is load-bearing and must be hardened.** `insertProject`/`insertTicket` are
-unguarded plain INSERTs against UNIQUE columns (`src/db/repos/project.ts:20` / `schema.sql:64`;
-`src/db/repos/ticket.ts:41` / `schema.sql:122`); the `getRun()===null` guard (`run.ts:210`) protects
-only the `run` row. So a `run` that reaches `runTicket` on a populated checkpoint crashes with a
-UNIQUE violation — the exact ENG-331 "--db trap." Two defenses, both required:
-1. the dir-existence refuse-guard runs **before** `migrate`/`runTicket`, and
-2. `insertProject`/`insertTicket` become idempotent (`INSERT OR IGNORE` / upsert), so any bypass
-   (partial-crash dir, a `--fresh` that reconciles then fails to delete, a race) degrades to a
-   no-op instead of a crash.
+✎ **(a) A per-ticket run lock.** A lock/pid file in the checkpoint dir, held for the life of a run,
+prevents two `styre run <same-ticket>` processes at once. This is the same liveness signal §7 needs to
+reconcile worktrees safely, and it closes the concurrent-insert race the refuse-guard alone can't.
+
+✎ **(b) Find-or-create inserts, not `INSERT OR IGNORE`.** `insertProject`/`insertTicket` are unguarded
+plain INSERTs against UNIQUE columns (`project.ts:20`/`schema.sql:64`; `ticket.ts:41`/`schema.sql:122`)
+and their `lastInsertRowid` return is load-bearing (`run-ticket.ts:150-164`). `INSERT OR IGNORE` does
+**not** update `lastInsertRowid` on conflict → a stale/0 id flows downstream (worse than the crash).
+So they become explicit get-or-create (`SELECT … WHERE (slug)` / `WHERE (project_id, ident)`, else
+INSERT), returning the *real* id. This also surfaces — rather than masks — a genuine two-repos-same-slug
+collision.
 
 This deletes `dumpPark`'s copy machinery (`park.ts:104-136`) and the overwrite guard
 (`park.ts:80-96,119-125`); the WAL checkpoint before hand-off is retained.
@@ -202,100 +215,93 @@ This deletes `dumpPark`'s copy machinery (`park.ts:104-136`) and the overwrite g
 
 ## 7. The pause/resume symmetry
 
-`reason` touches exactly one step of resume; every other step is identical across all reasons —
-*because* pause normalizes the halt shape (§3.1).
-
 ```
- pause(reason, detail):
-   1. journal already durable at checkpoint (live-location, §6); branch commits already in git
-   2. NORMALIZE (§3.1): task -> waiting; raise human_resume for a dead-end; leave a re-armable step
-   3. write sidecar: reason, honest detail (§3.3), transcript
-   4. RETAIN the worktree (part of the checkpoint, not a leak)
-   5. exit 75; print "Paused (<reason>): <detail>. Resume: styre run --resume <ident>"
-      (or exit 1 "Exhausted (<detail>)" when the retry budget is spent, §3.4)
+ pause(reason, detail):                              # driveToTerminal / advance, on any halt
+   1. journal already durable at checkpoint (§6); branch commits already in git
+   2. pauseTicket(db, ticketId, reason, detail):     # step-independent (§3.2)
+        ticket -> waiting; raise human_resume; record reason + honest detail (§3.4)
+        (step-escalate path ALSO leaves its failed step; blocked/no-progress leave no step)
+      -- OR, if nothing actionable (§3.5.2): mark ticket abandoned instead
+   3. RETAIN the worktree (part of the checkpoint, not a leak)
+   4. exit 75 "Paused (<reason>): <detail>. Resume: styre run --resume <ident>"
+      (exit 1 "Abandoned (<detail>)" for the §3.5.2 case)
 
  resume(ident):
    1. locate checkpoint; absent -> clear error
-   2. GATE (the ONLY reason-dependent step):
+   2. GATE (reason-dependent PERMISSION only):
         budget      -> reset time reached? else refuse (informative)
-        needs_you   -> consume the human_resume signal (markConsumed, src/db/repos/signal.ts:69)  # ✎ was :62
+        needs_you   -> consume human_resume (markConsumed, src/db/repos/signal.ts:69)   # ✎ was :62
         interrupted -> no gate
-      (all reasons) HEAD-moved guard -> refuse unless --accept-head (park.ts:233-252)
-   3. reconcileWorktree()   <-- shared primitive, staleness-gated (below)
-   4. re-arm the step: recover() resets an interrupted *running* step -> pending
-      (src/daemon/recover.ts:22-33); a *failed* step is re-run directly by runStep
-      (src/engine/step-journal.ts:85) -- recover() does NOT touch failed steps  # ✎ rev1 said running/failed
+      (all) HEAD-moved guard -> refuse unless --accept-head (park.ts:233-252)
+   3. reconcileWorktree()                             # liveness-gated (below)
+   4. recover() resets a RUNNING step -> pending; a FAILED step is re-run by runStep;
+      a NO-STEP pause (blocked/no-progress) simply re-plans via the resolver
    5. setTicketStatus(active); driveToTerminal continues
-   6. next terminal -> pause() again, done, or exhausted
+   6. next terminal -> pause() again (cheap no-op if inputs unchanged), done, or abandoned
 
  --fresh(ident):
-   1. locate checkpoint
-   2. (skip gate)
-   3. reconcileWorktree()
-   4. delete checkpoint (AFTER reconcile succeeds); fresh run
+   locate -> (skip gate) -> reconcileWorktree() -> delete checkpoint (AFTER reconcile) -> fresh run
 ```
 
-### `reconcileWorktree(repoPath, branch, staleWorktreePath, newWorktreeRoot)`
+### `reconcileWorktree(...)` — liveness-gated, never a blind force-remove
 
-Extract today's resume-only "Fix B" (`park.ts:284-308`) into one primitive, called by `--resume`,
-`--fresh`, and — as a guard — `ensureWorktree`.
+Extract today's resume-only "Fix B" (`park.ts:284-308`) into one primitive (called by `--resume`,
+`--fresh`, and — guarded — `ensureWorktree`). ✎ **rev 2's "styre-owned path OR prunable" gate was
+unsafe:** every styre worktree root is `mkdtempSync(tmpdir(),"styre-wt-")` (`run.ts:222`, `park.ts:337`)
+and the branch is deterministic `<prefix>/<ident>` (`branch.ts:3-12`), so two concurrent operations on
+one ticket both produce `styre-wt-*` holders of the same branch — the path prefix proves *ownership,
+not deadness*, and `git worktree remove --force` (`worktree.ts:75-77`) would destroy a **live** run's
+worktree and its uncommitted work.
 
-✎ **Staleness-gated, never a blind force-remove.** The branch is deterministic per ticket
-(`<prefix>/<ident>`, `src/agent/branch.ts:3-12`); the worktree root is per-run random
-(`run.ts:222`). A blind `git worktree remove --force` on *whatever holds the branch*
-(`worktree.ts:75-78`) would silently destroy a legitimate holder — a real parallel run, a resume
-racing a fresh run, or your own manual `git worktree add <branch>` — including uncommitted work.
-So the primitive removes a holder **only if it is styre-owned and stale**: its path is under
-styre's tmp worktree root (`styre-wt-*`) **or** git reports it `prunable`. A **foreign / non-stale**
-holder → **refuse** with a clear message ("branch <b> is checked out at <path> by something styre
-doesn't own; free it yourself or use a different ticket"), never force-remove.
+Correct gate — **process liveness** via the §6(a) lock/pid:
+- holder's owning process **dead** (lock stale / pid gone) → stale → `git worktree remove --force` +
+  `git worktree prune` + re-mint (`ensureWorktree`) + re-arm provision (`resetProvisionForResume`,
+  `park.ts:149`);
+- holder **alive**, or **not styre-owned** (a human's own `git worktree add <branch>`) → **refuse**
+  with a clear message; never force-remove.
 
-Steps when the holder is confirmed stale: `git worktree remove --force <stale>` → `git worktree
-prune` → re-mint via `ensureWorktree` → re-arm provision (`resetProvisionForResume`, `park.ts:149`).
-`ensureWorktree` prune-and-retries on git's "already used by worktree" error **subject to the same
-staleness gate**. In-place mode (`worktreePath === repoPath`) skips steps 1–2 as today
-(`park.ts:277-282,290`).
+✎ `prunable` detection and lock-liveness parsing are **new** code (`worktree.ts` has no
+`git worktree list --porcelain` parsing today) — so ticket 1 is more than "extract Fix B." In-place
+mode (`worktreePath === repoPath`) skips removal as today (`park.ts:277-282,290`).
 
 ---
 
 ## 8. Back-compat & migration
 
-- **Old parked dumps** (e.g. the live STYRE-1) have no `reason` sidecar → default `reason = budget`
-  (park was the only pre-change dump-writer). Verify STYRE-1 resumes under the new path.
-- **Leaked worktrees from before this change** (STYRE-7, STYRE-1) are stale/`prunable`, so the
-  staleness-gated `reconcileWorktree` frees them on first resume/`--fresh`; `styre clean` reaps
-  the rest.
-- ✎ **Telemetry migration** (§4) ships with the outcome rename, not after it.
+- **Old parked dumps** (e.g. live STYRE-1) have no `reason` sidecar → default `reason = budget`.
+  Verify STYRE-1 resumes under the new path.
+- **Leaked worktrees from before this change** (STYRE-7, STYRE-1) hold no live lock → treated stale by
+  the liveness gate → freed on first resume/`--fresh`; `styre clean` reaps the rest.
+- ✎ **Telemetry migration** (§4) ships with the outcome rename, not after.
 - `--after-fix`, if any caller uses it, becomes a removed flag / silent no-op.
 
 ---
 
 ## 9. Relationship to existing tickets
 
-- **ENG-331** (Todo) — its intent (dump-on-non-`done`-terminal, resume an escalated dump, consume
-  `human_resume`, `--inspect` from `failed`, `--db` trap) is a **subset** of this model, and its
-  *mechanism* is superseded (live-location replaces dump-on-terminal; §6). Re-scope or close in
-  favor of §11. Its two hard-won constraints are **kept**: resume must not zero the attempt tally
-  (§3.4), and don't widen `resetProvision`.
-- **ENG-353** (Done) — the distinct `escalated` word folds into `reason: needs_you`; its
-  terminal-message work is reused.
+- **ENG-331** (Todo) — its intent (durable non-`done` checkpoint, resume an escalated dump, consume
+  `human_resume`, `--inspect` from `failed`, `--db` trap) is a **subset**; its *mechanism* is
+  superseded (live-location replaces dump-on-terminal; §6). Re-scope or close in favor of §11. Keep
+  its two constraints: don't zero the attempt counter on resume, and don't widen `resetProvision`.
+- **ENG-353** (Done) — the `escalated` word folds into `reason: needs_you`; its message work is reused.
 - **ENG-332** (Done) — provision-first reduces the *frequency* of `needs_you`; orthogonal.
 
 ---
 
 ## 10. Non-goals
 
-- A `ParkCause` taxonomy raising a `ParkSignal` for environmental faults — rejected in ENG-331 (the
-  throw escapes `advanceOneStep` uncaught, losing the checkpoint). `reason`/normalization happen in
-  a graceful `pause()`, not via a signal.
-- ✎ **`exhausted` is a deliberate, bounded exception to P1** ("never a dead end"). It is the *only*
-  genuine terminal-failure, reached solely by spending the human-retry budget (§3.4) — chosen over
-  an unbounded "waits forever" queue. Flagged for explicit sign-off.
-- ✎ **`pr-ready` worktree retention is unbounded.** A PR that never merges never reaches
-  `released:project` (`handlers.ts:1830-1840`), so its worktree leaks — the same class this spec
-  fixes, for the *most common* terminal. Not reaped at pause (the branch is legitimately alive for
-  review), but **`styre clean` must be able to reap stale `pr-ready` worktrees** (age/merged-state
-  heuristic). In scope for the housekeeping ticket; out of scope for the core model.
+- ✎ **No automatic give-up / `exhausted` ceiling.** Rejected (rev 2): unreachable for `blocked`/
+  `no-progress` (no step, no attempt increment — `resolver.ts:224`, `run-ticket.ts:128-135`), and a
+  special-case for the outcomes we are unifying. `abandoned` is human/explicit (§3.5).
+- ✎ **Automated resume is a future seam, not solved here.** If a fleet/cron ever resumes pauses
+  unattended, the "resumed, re-paused identically, stop" judgment lives in the **resumer**, not the
+  OSS core. Noted so it isn't mistaken for a gap.
+- A `ParkCause` taxonomy raising a `ParkSignal` — rejected in ENG-331 (the throw escapes
+  `advanceOneStep` uncaught, losing the checkpoint). `reason` is recorded by a graceful `pauseTicket`.
+- ✎ **`pr-ready` worktree retention is unbounded** — a never-merged PR never reaches `released:project`
+  (`handlers.ts:1830-1840`), leaking its worktree (the most common terminal). Retained at pause (branch
+  legitimately alive for review), but **`styre clean` must reap stale `pr-ready` worktrees**
+  (age/merged-state heuristic). Housekeeping-ticket scope.
 - Auto-resume of `budget` pauses on a timer — the gate only *permits* resume; a human/cron invokes it.
 - `--db` reuse of a populated DB (re-entry is via the checkpoint, one way).
 
@@ -303,30 +309,30 @@ staleness gate**. In-place mode (`worktreePath === repoPath`) skips steps 1–2 
 
 ## 11. Proposed ticket decomposition
 
-1. **`reconcileWorktree` primitive + staleness-gated `ensureWorktree` retry** — extract Fix B, gate
-   on styre-owned/`prunable` (§7). **Independently shippable; directly fixes the reported STYRE-7
-   bug.** Ship first.
-2. **Live-location checkpoint + hardened refuse-guard** — journal to `parkDir` from the start;
-   idempotent `insertProject`/`insertTicket`; `run <ticket>` refuses on existing checkpoint;
-   delete `dumpPark` copy path (§6). Root-causes ENG-331.
-3. **Normalize dead-ends at pause (Option A)** — `blocked`/`no-progress` raise `human_resume` + leave
-   a re-armable step; the honest-note rule; the `exhausted` terminal + no-reset-tally backstop
-   (§3). This is what makes the model true.
-4. **Outcome collapse + exit codes + telemetry** — `RunOutcome → pr-ready|done|paused|exhausted`
-   (+`reason`); `paused → 75`, `exhausted → 1`; re-key the telemetry bucket map on `reason` (§4).
-   (Absorbs ENG-353's surface.)
-5. **Unified resume gate** — one `resume()` switching only on `reason`; consume `human_resume` for
-   `needs_you`; `--fresh` (§7). (Absorbs the rest of ENG-331.)
+1. **`reconcileWorktree` primitive — liveness-gated — + per-ticket run lock.** Extract Fix B, add the
+   lock/pid + `git worktree list --porcelain` liveness parsing (§6a, §7). **Directly fixes the
+   reported STYRE-7 bug; ship first.** (Bigger than "extract existing code" — it's the lock + gate.)
+2. **Live-location checkpoint + hardened refuse-guard + find-or-create inserts.** Journal to `parkDir`
+   from the start; get-or-create `insertProject`/`insertTicket`; `run <ticket>` refuses on existing
+   checkpoint; delete `dumpPark` copy path (§6). Root-causes ENG-331.
+3. **`pauseTicket` primitive + route `blocked`/`no-progress` through it.** Step-independent
+   `waiting`+`human_resume`+`reason`/`detail`; the honest-note rule; the §3.5.2 honesty-abandon (§3.2–3.5).
+4. **Outcome collapse + exit codes + telemetry.** `RunOutcome → pr-ready|done|paused|abandoned`
+   (+`reason`); `paused → 75`, `abandoned → 1`; re-key telemetry on `reason` (§4). Ships **together
+   with** the code that emits the new outcomes (3), not after. (Absorbs ENG-353's surface.)
+5. **Unified resume gate** — one `resume()`: gate on `reason` → reconcile → re-arm-or-replan; consume
+   `human_resume` for `needs_you`; `--fresh` (§3.3, §7). (Absorbs the rest of ENG-331.)
 6. **Housekeeping** — `styre ls`, `styre clean` (incl. stale `pr-ready` reap). *(optional)*
 
-Sequence: **1 → 2 → 3 → 4 → 5 → 6.** (1 alone fixes the live bug; 2 unblocks the rest; 3 must land
-before 4/5 or the unified gate is vacuous for two reasons.)
+Sequence: **1 → 2 → (3+4) → 5 → 6.** 1 alone fixes the live bug; 2 unblocks the rest; 3 and 4 land
+together (the outcome enum must gain its new values with the code that emits them).
 
 ---
 
 ## 12. Open questions
 
-- **`exhausted` ceiling value** — how many human-retry cycles before a dead-end becomes terminal?
-  (Ties to `failure-policy.ts:70`'s existing per-step cap — reuse it, or a distinct higher ceiling?)
 - **`budget` resume** — block until reset time (proposed), or resume-and-immediately-re-pause?
+- **§3.5.2 honesty-abandon threshold** — what precisely counts as "nothing actionable" for an
+  idle-stall `no-progress`? (Proposed: no diagnosable cause *and* the resolver still yields no unit
+  after a re-plan — i.e., prove it's opaque before abandoning; otherwise stay `paused`.)
 - **`pr-ready` reap heuristic** — age-based, merged-state-based, or manual-only via `styre clean`?
