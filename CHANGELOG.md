@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.12.0] - 2026-07-24
+
+### Features
+
+- Telemetry now includes an estimated USD cost (`cost_usd_estimated`) for dispatches and run summaries, so spend from providers like Codex that don't report actual USD is no longer unknowable; this is a list-price estimate derived from token counts, shown alongside (never overwriting) any reported cost.
+- Cost estimates are computed from a new configurable `pricing` block (rates, tiers, and a version stamp), so pricing can be updated without a new release.
+- The default Codex model preset moves from `gpt-5.4-*` to `gpt-5.6-sol/terra/luna`, since the old model IDs are stale and had no matching price data.
+
+### Bug Fixes
+
+- Fixed a bug where a discarded file (like `cmd/build.go`) could falsely count as covering a check's acceptance criterion just because its extension happened to match part of an unrelated module name; this was causing real failures to be silently marked as passing on several languages including Go, Java, Kotlin, Scala, and Python.
+- `.pyi` type-stub files are no longer treated as importable source, which fixes both a class of false "check passed" results and a related case where a genuinely broken check was incorrectly marked as covered.
+- `.svelte`, `.cts`, and `.mts` files are now correctly recognized when matching a failing check to a file your agent discarded, closing gaps where Svelte components or TypeScript helpers reached via compiled `.mjs` specifiers weren't detected.
+- Editing a `Gemfile`, `Gemfile.lock`, `*.gemspec`, `composer.json`, or `composer.lock` now correctly re-triggers dependency installation before the next verify, so Ruby and PHP projects no longer verify against a worktree with stale dependencies.
+- Fixed file paths containing non-ASCII characters (accented letters, CJK, Cyrillic) or newlines being mangled when read from git, which could prevent dependency-manifest changes from re-triggering installs, break file-based check routing, and cause file lookups to silently fail.
+- Corrected the exit-code documentation in the README and runtime-parameters guide to match actual behavior: there is no exit code `2`, escalations exit `75` (not `1`) and are distinct from parked runs (only parked runs can be resumed), and previously undocumented exit codes `64`, `70`, and `78` are now listed.
+- Fixed the `brew install` command in the README, which was missing the tap prefix.
+
 ## [0.11.0] - 2026-07-22
 
 ### Features
