@@ -113,7 +113,7 @@ honored).
 
 | Flag | Type | Default | Effect |
 |---|---|---|---|
-| `--test` | boolean | off | **Required.** Send one test message to the configured channel. Without it: prints `usage: styre notify --test` to stderr and sets exit `2`. |
+| `--test` | boolean | off | **Required.** Send one test message to the configured channel. Without it: prints `usage: styre notify --test` to stderr and sets exit `64` (`EX_USAGE`). |
 | `--config <path>` | string | discovered | Explicit `config.json` path. |
 | `--slug <name>` | string | derived from the cwd repo | Project slug for per-project config. |
 
@@ -121,27 +121,31 @@ honored).
 
 ## Exit codes (error codes) and their meaning
 
-The process exit code is the machine-readable error code. The space is enumerated in `src/cli/run.ts`;
-a code comment there flags that a final cross-command reconciliation is still outstanding (ENG-338),
-so treat `styre run` as the authority. Codes above `2` follow the BSD `sysexits.h` convention, which
-is what lets a CI/fleet caller branch on them.
+The process exit code is the machine-readable error code. The space is enumerated in `src/cli/run.ts`
+(the per-command comment) and defined in `src/cli/errors.ts` (`EXIT`) — treat those as the authority;
+this table is reconciled to them (ENG-338). Codes `64` and above follow the BSD `sysexits.h`
+convention, which is what lets a CI/fleet caller branch on them.
 
 | Code | Name | Meaning | Retryable? |
 |---|---|---|---|
 | `0` | success | The command did its job. For `run`: a PR is open and ready. Also returned by `--version`, `--help`, and `run --resume --inspect`. | — |
-| `1` | error (generic) | Any thrown, non-classified error. citty's `runMain` maps an uncaught throw to exit `1`. | No — fix the cause first. |
-| `2` | usage / notifier-config | `styre notify` was invoked without `--test`. A misuse/config error, not a run failure. | No — correct the invocation or config. |
-| `65` | resume refused | `run --resume`, but the branch HEAD moved since the run parked, and `--accept-head` was not passed — so the carried-forward context no longer matches the branch. (`sysexits` `EX_DATAERR`.) | Yes, deliberately — re-run with `--accept-head` (resume against the new HEAD, dropping carryover) or `--inspect` (diagnose, exits `0`). |
-| `69` | toolchain missing (`EX_TOOLCHAIN_MISSING`) | A required repo toolchain program (a build/test/check tool the profile depends on) is not installed on this machine. Detected by the fresh-run preflight *before any spend*; never raised on `--resume`/`--inspect`. (`sysexits` `EX_UNAVAILABLE`.) | Yes, after you install the missing tool — the stderr report names it. |
-| `75` | parked (`EX_TEMPFAIL`) | A **temporary** failure: the run hit a session limit / out-of-credits interrupt. The SoT + transcript are dumped to the park dir and **no retry attempt is consumed** — this is the "come back later" code, not a defect. (`sysexits` `EX_TEMPFAIL`.) | Yes — resume with `styre run --resume <ident> --profile <p>` once you have capacity again. |
+| `1` | operational stop | The run ran cleanly but reached a dead end — `blocked` or `no-progress` (`exitCodeForOutcome`). Not a crash. | No — a human should look at it. |
+| `64` | usage (`EX_USAGE`) | CLI misuse — e.g. `styre notify` without `--test` (`usageError` → `EXIT.USAGE`). A misuse error, not a run failure. | No — correct the invocation. |
+| `65` | resume refused (`EX_DATAERR`) | `run --resume`, but the branch HEAD moved since the run parked, and `--accept-head` was not passed — so the carried-forward context no longer matches the branch. | Yes, deliberately — re-run with `--accept-head` (resume against the new HEAD, dropping carryover) or `--inspect` (diagnose, exits `0`). |
+| `69` | toolchain missing (`EX_UNAVAILABLE`) | A required repo toolchain program (a build/test/check tool the profile depends on) is not installed on this machine. Detected by the fresh-run preflight *before any spend*; never raised on `--resume`/`--inspect`. | Yes, after you install the missing tool — the stderr report names it. |
+| `70` | internal (`EX_SOFTWARE`) | An unexpected crash or a violated internal invariant — anything that is not a `StyreError` reaching the error boundary. | No — this is a bug; please report it. |
+| `75` | parked / escalated (`EX_TEMPFAIL`) | Two outcomes share this code (`exitCodeForOutcome`). **Parked**: a session-limit / out-of-credits interrupt — the SoT + transcript are dumped and **no retry attempt is consumed**. **Escalated**: the loop bounded its retries and handed the ticket to a human — it writes **no** dump. | Parked: yes — `styre run --resume <ident> --profile <p>`. Escalated: not by `--resume` (no dump exists) — read the reason, change something, re-run. |
+| `78` | config (`EX_CONFIG`) | A bad config/profile value, an unknown adapter, or an unresolved profile (`configError` → `EXIT.CONFIG`). | No — fix the value, or re-run `styre setup`. |
 
 **How to read them as a caller:**
 
 - **`0`** — done; for `run`, go merge the PR.
-- **`75`** — transient; safe to re-run the *same* ticket later with `--resume`. A fleet scheduler should back off and retry, not mark the ticket failed.
+- **`75`** — two cases behind one code, and they differ. A **parked** run is transient: back off and re-run the *same* ticket with `--resume`; a fleet scheduler should retry, not mark it failed. An **escalated** run wrote no dump, so `--resume` cannot pick it up — a human reads the reason on stderr, changes something, and starts a fresh run. Only a park prints a `Resume with: …` line, so branch on that, not on the bare `75`.
 - **`65`** — the world moved under a parked run; a human (or a policy) decides whether to accept the new HEAD (`--accept-head`) or investigate (`--inspect`).
 - **`69`** — an environment/provisioning gap on this machine, not a problem with the ticket; fix the host toolchain and re-run.
-- **`1` / `2`** — a real error or a misuse: the ticket/config/invocation needs attention before retrying. Anything the runner surfaces as an escalation it cannot resolve autonomously also exits nonzero here (with the trace on stderr).
+- **`1`** — an operational dead end (`blocked` / `no-progress`): the run finished without a crash but couldn't make progress. The ticket/plan needs a human before retrying.
+- **`64` / `78`** — a misuse or a bad config value: the invocation or the config needs fixing, not a retry.
+- **`70`** — an internal error: a bug in Styre, not in the ticket or the host. Worth reporting.
 
 Stream reminder: for `run`, the human-readable explanation for any nonzero code is on **stderr**;
 stdout carries only the NDJSON telemetry stream.

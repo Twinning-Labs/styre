@@ -106,16 +106,18 @@ The full flag and environment-variable surface is documented in [`docs/architect
 
 ### Exit codes
 
-The process exit code is the machine-readable error code (codes above `2` follow `sysexits.h`):
+The process exit code is the machine-readable error code (codes `64` and above follow `sysexits.h`):
 
 | Code | Meaning | Retryable? |
 |---|---|---|
 | `0` | success — for `run`, a PR is open and ready | — |
-| `1` | generic error (any uncaught throw; also an escalation the loop can't resolve) | no — fix the cause |
-| `2` | usage / notifier-config (`styre notify` without `--test`) | no |
+| `1` | operational dead end — the run finished but couldn't make progress (blocked / no-progress) | no — a human should look |
+| `64` | usage / notifier-config (`styre notify` without `--test`) | no |
 | `65` | resume refused — the branch HEAD moved since the run parked | yes — `--accept-head` or `--inspect` |
 | `69` | a required repo toolchain program isn't installed on this machine | yes — install it, re-run |
-| `75` | parked — session limit / out of credits; state dumped, no attempt consumed | yes — `styre run --resume <ticket>` |
+| `70` | internal error (an unexpected crash) | no — please report |
+| `75` | parked (session limit / out of credits — resumable) or escalated (handed to a human — not resumable) | parked only — `styre run --resume <ticket>` |
+| `78` | bad config / profile — an invalid value or unknown adapter | no — fix the config |
 
 Full meanings, `sysexits` names, and caller guidance: [runtime-parameters.md → Exit codes](docs/architecture/runtime-parameters.md#exit-codes-error-codes-and-their-meaning).
 
@@ -191,10 +193,10 @@ The agent instructions for every step are editable Markdown templates in [`promp
 Styre ships as a single self-contained binary via Homebrew (macOS & Linux):
 
 ```sh
-brew install twinning-labs/styre
+brew install twinning-labs/styre/styre
 ```
 
-Upgrade with `brew upgrade styre`; remove with `brew uninstall styre` (and `brew untap twinning-labs/styre` to drop the tap). Prebuilt binaries for macOS (arm64/x64) and Linux (arm64/x64) are also attached to each [GitHub Release](https://github.com/Twinning-Labs/styre/releases).
+The argument is `<tap>/<formula>` — `twinning-labs/styre` is the tap, `styre` the formula. Upgrade with `brew upgrade styre`; remove with `brew uninstall styre` (and `brew untap twinning-labs/styre` to drop the tap). Prebuilt binaries for macOS (arm64/x64) and Linux (arm64/x64) are also attached to each [GitHub Release](https://github.com/Twinning-Labs/styre/releases).
 
 ---
 
