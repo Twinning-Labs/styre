@@ -35,6 +35,10 @@ export function insertTicket(
     externalId?: string | null;
   },
 ): number {
+  // Get-or-create on (project_id, ident): returns the existing id; does NOT update title/description
+  // on conflict. (Same defense-in-depth rationale as insertProject.)
+  const existing = getByIdent(db, t.projectId, t.ident);
+  if (existing !== null) return existing.id;
   const now = nowUtc();
   const res = db
     .query(
@@ -63,6 +67,16 @@ export function insertTicket(
 
 export function getTicket(db: Database, id: number): TicketRow | null {
   return db.query<TicketRow, [number]>(`SELECT ${COLS} FROM ticket WHERE id = ?`).get(id) ?? null;
+}
+
+export function getByIdent(db: Database, projectId: number, ident: string): TicketRow | null {
+  return (
+    db
+      .query<TicketRow, [number, string]>(
+        `SELECT ${COLS} FROM ticket WHERE project_id = ? AND ident = ?`,
+      )
+      .get(projectId, ident) ?? null
+  );
 }
 
 export function setTicketStatus(db: Database, id: number, status: string): void {
