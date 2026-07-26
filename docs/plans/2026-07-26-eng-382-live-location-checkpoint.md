@@ -290,7 +290,7 @@ git commit -m "feat(cli): atomic per-ticket run lock (O_EXCL, stale-reclaim) (EN
 - Consumes: `parkDir` (`park.ts:75-77`), `acquireRunLock`/`releaseRunLock` (Task 2), `insertProject`/`insertTicket` find-or-create (Task 1), `IngestedTicket` (`src/integrations/ticket-source.ts:6`), `makeProjectorPorts`, `resolveAgentRunner`.
 - Produces:
   - `runTicket` deps gain `ingested?: IngestedTicket` — when present, `runTicket` skips its own `fetchTicket`.
-  - `runImpl` deps gain `ports?: ProjectorPorts` and `runner?: AgentRunner` (types imported from their existing modules) — used when provided, else built as today. Fresh runs write `run.db` at `parkDir(profile.slug, ingested.ident)`.
+  - `runImpl` deps gain `ports?: ProjectorPorts`, `runner?: AgentRunner`, and `preflight?: (config: AgentConfig) => AgentCliPreflight` (the last mirrors `resumeRun`'s `deps.preflight`, `park.ts:197`) — used when provided, else built/probed as today. Fresh runs write `run.db` at `parkDir(profile.slug, ingested.ident)`.
 
 **Decision — ident-ordering (design decision #1):** `ident` is only known after `fetchTicket`. Hoist that single tracker read into `run.ts` (still exactly ONE `fetchTicket` per run; we move it earlier and pass the result down). **S3 note:** this moves a tracker-read failure to *before* `a.runStarted(...)` fires (`run.ts:226-231`) — an intentional, flagged ordering change; the run simply fails earlier with a `cliError`. Broader telemetry-outcome semantics are ENG-384 scope.
 
@@ -317,7 +317,14 @@ test("a second fresh run on an existing checkpoint refuses (usage error), does n
   first.cleanup();
 });
 ```
-Add `runFreshTicket(opts?)` to `test/helpers/run-harness.ts`. Unlike `runParkedTicket` (which drives `driveToTerminal` directly to force a park), `runFreshTicket` calls the **real** `runImpl({ args }, { ports, runner })`: set `XDG_STATE_HOME` to a temp dir, build a real git repo + profile (reuse `gitRepoWithProject`/`gitRepo` helpers), construct fake `ports` (a fake `issueTracker.fetchTicket` returning `ident: "ENG-1"` + a fake `forge`) and a `FakeAgentRunner` that drives to a non-parked terminal, then invoke `runImpl({ args: { ticket: "ENG-1", slug: "test-project", … } }, { ports, runner })`. Return `{ checkpointDir: parkDir("test-project","ENG-1"), dbPath: join(checkpointDir,"run.db"), cleanup }`. `reuseStateOf` points `XDG_STATE_HOME` at a prior run's state dir so the refuse-guard sees the existing checkpoint.
+Add `runFreshTicket(opts?)` to `test/helpers/run-harness.ts`. Unlike `runParkedTicket` (which drives `driveToTerminal` directly), it calls the **real** `runImpl` so the shipped refuse-guard/lock/journaling is exercised. Real `runImpl` runs three pre-DB gates the helper must clear (or it aborts before journaling to `parkDir`) — exact setup:
+- **Gate 3 (agent-CLI probe, `run.ts:194-197`):** inject `deps.preflight = () => ({ ok: true }) as AgentCliPreflight` so the real `claude` binary is never probed in CI (exit-69 without it).
+- **Gates 1–2 (profile load `run.ts:118-131` + `assertResolved` `run.ts:132` + `preflightToolchain` `run.ts:186`):** write a real `profile.json` to a temp path and pass `args.profile = <that path>` (so `loadProfile` reads it, not `configDir()`). Content: a `parseProfile`-valid profile with `slug: "test-project"`, `targetRepo: <the temp git repo from gitRepo()>`, `defaultBranch: "main"`, and **either zero components** (empty `components: []` clears `assertResolved`/`preflightToolchain` trivially) **or** one component whose `build`/`test`/`check` are all `"true"` (a real PATH binary).
+- **State dir:** set `XDG_STATE_HOME` to a temp dir (as `runParkedTicket`, `run-harness.ts:49-51`) so `parkDir` resolves under it.
+- **Injected `ports`:** a `ProjectorPorts` whose `issueTracker.fetchTicket` returns `{ ident: "ENG-1", title: "T", description: "", typeLabel: null, externalId: null }` (reuse the `fake-issue-tracker` adapter) + a fake `forge`.
+- **Injected `runner`:** a `FakeAgentRunner` that drives to any terminal — the test asserts the SoT *location*, not the outcome.
+- **Invoke:** `await runImpl({ args: { ticket: "ENG-1", profile: profilePath, fresh: opts?.fresh } }, { ports, runner, preflight: () => ({ ok: true }) })`.
+- **Return** `{ checkpointDir: parkDir("test-project","ENG-1"), dbPath: join(checkpointDir,"run.db"), cleanup }`. `reuseStateOf` reuses a prior run's `XDG_STATE_HOME` so the refuse-guard sees the existing checkpoint.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -339,10 +346,18 @@ In `src/cli/run.ts`:
 ```ts
 export async function runImpl(
   { args }: { args: RunArgs },
-  deps?: { analyticsClient?: AnalyticsClient; ports?: ProjectorPorts; runner?: AgentRunner },
+  deps?: {
+    analyticsClient?: AnalyticsClient;
+    ports?: ProjectorPorts;
+    runner?: AgentRunner;
+    preflight?: (config: AgentConfig) => AgentCliPreflight;
+  },
 ): Promise<void> {
 ```
-  (Import `AgentRunner` from its module; `ProjectorPorts` is already imported.)
+  (Import `AgentRunner` from its module and `AgentCliPreflight`/`AgentConfig` types; `preflightAgentCli` is already imported. `ProjectorPorts` is already imported. This `preflight?` mirrors `resumeRun`'s dep at `park.ts:197`.)
+- Wire the agent-CLI seam at the existing probe (`run.ts:195`) — change
+  `const cliPreflight = preflightAgentCli(agentConfig);` to
+  `const cliPreflight = (deps?.preflight ?? preflightAgentCli)(agentConfig);` (mirrors `resumeRun`, `park.ts:259`), so a fresh-run test can bypass the real `claude` probe.
 - Replace the block at `run.ts:199-224` (temp-DB mint → registry) with:
 ```ts
     // Ports first (no DB dependency), then the single tracker read so we know the ident BEFORE
@@ -626,6 +641,12 @@ git commit -m "feat(worktree): reconcile frees a dead-owner styre worktree via t
 **Placeholder scan:** every code step carries real code; the fresh-path is tested against the REAL `runImpl` via the `ports`/`runner` seam (S1), so no duplicated-harness gap remains. The one authored-by-implementer piece is `runFreshTicket`'s body — specified by its exact inputs (real `runImpl`, fake `ports`/`runner`, `XDG_STATE_HOME`, `reuseStateOf`), grounded in the existing `run-harness.ts`/`gitRepoWithProject` helpers.
 
 **Type consistency:** `RunLock`/`runLockStatus`/`acquireRunLock`/`releaseRunLock` used identically in Tasks 2, 3, 5. `checkpointDir?: string` is the added reconcile param (Task 5). `ingested?: IngestedTicket` (runTicket) and `ports?`/`runner?` (runImpl) are the added seams (Task 3). `getBySlug`/`getByIdent` consistent across Task 1 and their callers.
+
+## Re-review NITs (acknowledged, non-blocking)
+
+- **`styreOwned` substring also matches the main-repo path.** `holder.path.includes("/styre-wt-")` could in principle match if the main checkout itself lived under a `styre-wt-*` dir — but this is unreachable: the main repo (`repoPath`) is excluded from removal (the in-place skip; `repoPath` is never the ticket-branch holder we'd free), and the ENG-381 main-worktree-refusal test still guards it. Accepted as-is.
+- **Stale-reclaim retry loop is bounded.** `acquireRunLock`'s `for(;;)` iterates at most a couple of times in practice: a live lock returns `null` immediately; a stale lock is removed then the exclusive `wx` create succeeds (or a racer wins and we re-evaluate its liveness). No unbounded spin.
+- **PID-reuse caveat.** A dead pid whose number was later recycled to an unrelated live process would read as "alive" (keep/refuse a lock that is actually stale). This is identical to the existing `recover.ts` orphan-liveness assumption and is accepted at the same risk level.
 
 ## Residual open questions — all resolved
 
