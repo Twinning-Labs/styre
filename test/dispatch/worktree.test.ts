@@ -543,9 +543,15 @@ test("reconcileWorktree frees the recorded stale worktree (its own prior) so the
 test("reconcileWorktree WITHOUT a recorded path refuses a non-prunable holder (never force-removes)", () => {
   const repo = makeRepo();
   const foreign = addWorktree(repo, "feat/foreign", "foreign");
-  expect(() => reconcileWorktree(repo, "feat/foreign", undefined, freshTarget())).toThrow(
-    /checked out at/,
-  );
+  let msg = "";
+  try {
+    reconcileWorktree(repo, "feat/foreign", undefined, freshTarget());
+  } catch (e) {
+    msg = (e as Error).message;
+  }
+  expect(msg).toMatch(/checked out at/);
+  expect(msg).toContain("git worktree remove"); // actionable remedy
+  expect(msg).not.toContain("--fresh"); // no non-existent flag (that's ENG-385)
   expect(existsSync(join(foreign, "README.md"))).toBe(true);
 });
 

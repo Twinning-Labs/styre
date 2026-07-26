@@ -200,7 +200,7 @@ export function reconcileWorktree(
   if (holder !== null && !holder.prunable) {
     throw new Error(
       `branch ${branch} is checked out at ${holder.path} by a worktree styre can't safely remove; ` +
-        `free it with 'git worktree remove ${holder.path}', or re-run this ticket with --fresh.`,
+        `free it with 'git worktree remove ${holder.path}', then re-run.`,
     );
   }
   return { freed, skipped: null };
