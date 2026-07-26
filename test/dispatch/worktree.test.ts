@@ -11,6 +11,8 @@ import {
   discardPaths,
   ensureWorktree,
   fileContentAt,
+  listWorktrees,
+  parseWorktreePorcelain,
   pendingChanges,
   pendingEntries,
   readDiscardedSources,
@@ -553,6 +555,64 @@ test("reconcileWorktree refuses a LOCKED (non-prunable) holder rather than force
   Bun.spawnSync(["git", "worktree", "lock", locked], { cwd: repo });
   expect(() => reconcileWorktree(repo, "feat/locked")).toThrow(/checked out at/);
   expect(existsSync(join(locked, "README.md"))).toBe(true);
+});
+
+test("parseWorktreePorcelain: extracts path/head/branch and the detached/bare/locked/prunable flags", () => {
+  const out = [
+    "worktree /repo",
+    "HEAD aaaa111",
+    "branch refs/heads/main",
+    "",
+    "worktree /wt/feat",
+    "HEAD bbbb222",
+    "branch refs/heads/feat/STYRE-7",
+    "",
+    "worktree /wt/detached",
+    "HEAD cccc333",
+    "detached",
+    "",
+    "worktree /bare",
+    "bare",
+    "",
+    "worktree /wt/locked",
+    "HEAD dddd444",
+    "branch refs/heads/feat/locked",
+    "locked being-worked-on",
+    "",
+    "worktree /wt/gone",
+    "HEAD eeee555",
+    "branch refs/heads/feat/gone",
+    "prunable gitdir file points to non-existent location",
+  ].join("\n");
+  const recs = parseWorktreePorcelain(out);
+  expect(recs).toHaveLength(6);
+  const byPath = Object.fromEntries(recs.map((r) => [r.path, r]));
+  expect(byPath["/repo"]).toMatchObject({
+    branch: "refs/heads/main",
+    detached: false,
+    prunable: false,
+  });
+  expect(byPath["/wt/feat"]?.branch).toBe("refs/heads/feat/STYRE-7"); // branch name with a slash
+  expect(byPath["/wt/detached"]).toMatchObject({ branch: null, detached: true });
+  expect(byPath["/bare"]).toMatchObject({ bare: true, branch: null, head: null });
+  expect(byPath["/wt/locked"]).toMatchObject({ locked: true, prunable: false });
+  expect(byPath["/wt/gone"]?.prunable).toBe(true);
+});
+
+test("parseWorktreePorcelain: a trailing blank line yields no phantom record", () => {
+  expect(
+    parseWorktreePorcelain("worktree /repo\nHEAD abc\nbranch refs/heads/main\n\n"),
+  ).toHaveLength(1);
+  expect(parseWorktreePorcelain("")).toEqual([]);
+});
+
+test("listWorktrees returns a record per registered worktree of a real repo", () => {
+  const repo = makeRepo();
+  addWorktree(repo, "feat/lw", "lw");
+  const recs = listWorktrees(repo);
+  expect(recs.length).toBeGreaterThanOrEqual(2); // main + the added worktree
+  expect(recs.some((r) => r.branch === "refs/heads/feat/lw")).toBe(true);
+  expect(recs.some((r) => r.branch === "refs/heads/main")).toBe(true);
 });
 
 test("worktreeHoldingBranch matches the MAIN worktree; reconcileWorktree refuses to remove it", () => {

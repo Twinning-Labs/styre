@@ -87,32 +87,68 @@ export function removeWorktree(repoPath: string, worktreePath: string): void {
   git(["worktree", "remove", "--force", worktreePath], repoPath);
 }
 
-/** A worktree registered in a repo that currently has some branch checked out. */
-export interface BranchHolder {
+/** One worktree registered in a repo, as reported by `git worktree list --porcelain`. */
+export interface WorktreeRecord {
   /** The worktree's path as git records it. */
   path: string;
+  /** The checked-out commit, or null for a bare entry. */
+  head: string | null;
+  /** The full ref (`refs/heads/<name>`), or null when detached/bare. */
+  branch: string | null;
+  detached: boolean;
+  bare: boolean;
+  /** git will not prune or auto-remove it. */
+  locked: boolean;
   /** git reports its working tree missing — safe to free with `git worktree prune`. */
   prunable: boolean;
 }
 
-/** The worktree (if any) registered in `repoPath` that has `branch` checked out, with git's
- *  `prunable` flag. Parses `git worktree list --porcelain`: records are blank-line separated, each
- *  carrying `worktree <path>` / `HEAD <sha>` / `branch refs/heads/<name>` (or `detached`) / an
- *  optional `prunable <reason>`. Returns null when no registered worktree holds the branch. */
-export function worktreeHoldingBranch(repoPath: string, branch: string): BranchHolder | null {
-  const target = `refs/heads/${branch}`;
-  for (const record of git(["worktree", "list", "--porcelain"], repoPath).split("\n\n")) {
+/** Parse `git worktree list --porcelain` into one record per worktree. Pure (no git call) so the
+ *  flag extraction is exhaustively testable. Records are blank-line separated; each carries
+ *  `worktree <path>`, an optional `HEAD <sha>`, one of `branch refs/heads/<name>` | `detached` |
+ *  `bare`, and optional `locked [<reason>]` / `prunable [<reason>]` lines. A block with no
+ *  `worktree` line (e.g. the trailing blank) yields no record. */
+export function parseWorktreePorcelain(output: string): WorktreeRecord[] {
+  const records: WorktreeRecord[] = [];
+  for (const block of output.split("\n\n")) {
     let path: string | null = null;
-    let onBranch = false;
+    let head: string | null = null;
+    let branch: string | null = null;
+    let detached = false;
+    let bare = false;
+    let locked = false;
     let prunable = false;
-    for (const line of record.split("\n")) {
+    for (const line of block.split("\n")) {
       if (line.startsWith("worktree ")) path = line.slice("worktree ".length);
-      else if (line.startsWith("branch ")) onBranch = line.slice("branch ".length) === target;
+      else if (line.startsWith("HEAD ")) head = line.slice("HEAD ".length);
+      else if (line.startsWith("branch ")) branch = line.slice("branch ".length);
+      else if (line === "detached") detached = true;
+      else if (line === "bare") bare = true;
+      else if (line === "locked" || line.startsWith("locked ")) locked = true;
       else if (line === "prunable" || line.startsWith("prunable ")) prunable = true;
     }
-    if (onBranch && path !== null) return { path, prunable };
+    if (path !== null) records.push({ path, head, branch, detached, bare, locked, prunable });
   }
-  return null;
+  return records;
+}
+
+/** Every worktree registered in `repoPath`. */
+export function listWorktrees(repoPath: string): WorktreeRecord[] {
+  return parseWorktreePorcelain(git(["worktree", "list", "--porcelain"], repoPath));
+}
+
+/** A worktree that currently has some branch checked out (path + git's `prunable` flag). */
+export interface BranchHolder {
+  path: string;
+  prunable: boolean;
+}
+
+/** The worktree (if any) registered in `repoPath` that has `branch` checked out, with git's
+ *  `prunable` flag; null when no registered worktree holds it. */
+export function worktreeHoldingBranch(repoPath: string, branch: string): BranchHolder | null {
+  const target = `refs/heads/${branch}`;
+  const rec = listWorktrees(repoPath).find((w) => w.branch === target);
+  return rec === undefined ? null : { path: rec.path, prunable: rec.prunable };
 }
 
 /** Free `branch` so a subsequent `ensureWorktree` add can re-take it — WITHOUT ever force-removing a
