@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defineCommand } from "citty";
@@ -75,7 +75,8 @@ export interface RunArgs {
   "accept-head"?: boolean;
   inspect?: boolean;
   "in-place"?: boolean;
-  /** Discard an existing checkpoint instead of refusing (ENG-382 Task 4 — not yet wired here). */
+  /** Discard an existing checkpoint instead of refusing (ENG-382 Task 4: refuse-guard escape only —
+   *  the resume-gate `--fresh` semantics, reconcile + carry-over, are ENG-385). */
   fresh?: boolean;
 }
 
@@ -105,6 +106,10 @@ export const runCommand = defineCommand({
       type: "boolean",
       description:
         "Work on a branch in the repo root instead of a worktree (disposable single-use checkout only)",
+    },
+    fresh: {
+      type: "boolean",
+      description: "Discard an existing checkpoint for this ticket and start over",
     },
   },
   run: (ctx) => guard("run", () => runImpl({ args: ctx.args as unknown as RunArgs })),
@@ -216,6 +221,13 @@ export async function runImpl(
     const explicitDb = !!(args.db && args.db.length > 0);
     const checkpointDir = parkDir(profile.slug, ident);
     const dbPath = explicitDb ? (args.db as string) : join(checkpointDir, "run.db");
+
+    // --fresh discards the whole checkpoint dir (run.db + -wal/-shm + sidecars) BEFORE the
+    // refuse-guard below, so a fresh run starts with no orphaned WAL/SHM to reattach to the new
+    // run.db. Live-location only (explicitDb bypasses both the guard and this deletion).
+    if (!explicitDb && args.fresh && existsSync(checkpointDir)) {
+      rmSync(checkpointDir, { recursive: true, force: true }); // whole dir: run.db + -wal/-shm + sidecars
+    }
 
     // Refuse to clobber an existing checkpoint (live-location only). --fresh discards it (Task 4).
     if (!explicitDb && existsSync(dbPath)) {

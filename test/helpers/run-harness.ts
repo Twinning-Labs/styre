@@ -499,7 +499,8 @@ export interface FreshTicketRun {
  *  `opts.reuseStateOf` reuses a prior run's `XDG_STATE_HOME` (not its git repo/profile — those
  *  don't matter for the refuse-guard, which throws before ever touching them) so the refuse-guard
  *  sees the same on-disk checkpoint the first call created. `opts.fresh` is threaded through to
- *  `args.fresh` for later (`--fresh`) tests; `runImpl` doesn't act on it yet (ENG-382 Task 4). */
+ *  `args.fresh`; `runImpl` discards the whole checkpoint dir before the refuse-guard when set
+ *  (ENG-382 Task 4 — refuse-guard escape only; resume-gate `--fresh` semantics are ENG-385). */
 export async function runFreshTicket(opts?: {
   reuseStateOf?: FreshTicketRun;
   fresh?: boolean;
