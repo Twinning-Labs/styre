@@ -281,13 +281,18 @@ export async function resumeRun(
     await assertInPlaceIdentity(project.target_repo, profile);
   }
 
+  // Mint the resumed run's worktree root once (in-place reuses the repo root) so the stale-worktree
+  // reconcile and the dispatch registry below share it — and reconcile knows the real new target.
+  const worktreeRoot = inPlace ? project.target_repo : mkdtempSync(join(tmpdir(), "styre-wt-"));
+  const targetWorktreePath = inPlace ? project.target_repo : join(worktreeRoot, ticket.ident);
+
   // --- Stale-worktree cleanup (Fix B → reconcileWorktree, ENG-381) ---
   // The parked/escalated run left its worktree checked out; git refuses `worktree add -B <branch>`
   // while the branch is held. reconcileWorktree removes THIS ticket's own prior worktree and prunes
   // dangling refs, refusing only a live/foreign holder it can't prove stale (never a blind force-
   // remove). In-place: the repo root IS the worktree, so there is nothing separate to reconcile.
   if (!inPlace && staleWorktreePath) {
-    reconcileWorktree(project.target_repo, branch, staleWorktreePath);
+    reconcileWorktree(project.target_repo, branch, staleWorktreePath, targetWorktreePath);
   }
 
   // Worktree mode: the worktree above is gone (wiped/rebuilt fresh below) — any deps a succeeded
@@ -324,8 +329,7 @@ export async function resumeRun(
         agentConfig: runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG,
         profile,
         inPlace,
-        // worktreeRoot is unused in-place (any value is inert) — avoid minting a tmpdir for it.
-        worktreeRoot: inPlace ? project.target_repo : mkdtempSync(join(tmpdir(), "styre-wt-")),
+        worktreeRoot, // minted once above (in-place = repo root), shared with the reconcile
         resumeContext,
       });
 

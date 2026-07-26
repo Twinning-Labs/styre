@@ -54,7 +54,7 @@ export function ensureWorktree(repoPath: string, branch: string, worktreePath: s
     // it when safe (prunable) and retry once; reconcileWorktree REFUSES a live/foreign holder rather
     // than destroy it. Any other add failure (no holder → a real git error) re-throws unchanged.
     if (worktreeHoldingBranch(repoPath, branch) === null) throw err;
-    reconcileWorktree(repoPath, branch);
+    reconcileWorktree(repoPath, branch, undefined, worktreePath);
     git(["worktree", "add", "-B", branch, worktreePath], repoPath);
   }
 }
@@ -151,10 +151,23 @@ export function worktreeHoldingBranch(repoPath: string, branch: string): BranchH
   return rec === undefined ? null : { path: rec.path, prunable: rec.prunable };
 }
 
+/** The disposition of a `reconcileWorktree` call. */
+export interface ReconcileResult {
+  /** Worktree paths this call freed (the recorded stale path if removed, plus any pruned holder). */
+  freed: string[];
+  /** `"in-place"` when the target IS the repo root (no separate worktree to reconcile), else null. */
+  skipped: "in-place" | null;
+}
+
 /** Free `branch` so a subsequent `ensureWorktree` add can re-take it — WITHOUT ever force-removing a
  *  worktree styre can't prove is stale. The branch is deterministic per ticket (`<prefix>/<ident>`),
  *  so a blind `git worktree remove --force` on whatever holds it could destroy a live parallel run's
- *  uncommitted work (adversarial review, ENG-380). Two safe moves only:
+ *  uncommitted work (adversarial review, ENG-380).
+ *
+ *  In-place (the target worktree IS the repo root) has no separate worktree to reconcile — signalled
+ *  either by `newWorktreeRoot === repoPath` (fresh run) or `staleWorktreePath === repoPath` (resume of
+ *  a same-container run); the primitive owns that skip so no caller can misfire it. Otherwise, two
+ *  safe moves only:
  *    1. If `staleWorktreePath` is given — the ticket's OWN prior worktree, recorded on resume —
  *       remove it; it is provably this ticket's, and we are resuming/replacing it.
  *    2. `git worktree prune`, which frees ONLY holders whose working dir is already gone (prunable).
@@ -164,15 +177,24 @@ export function worktreeHoldingBranch(repoPath: string, branch: string): BranchH
 export function reconcileWorktree(
   repoPath: string,
   branch: string,
-  staleWorktreePath?: string,
-): void {
+  staleWorktreePath: string | undefined,
+  newWorktreeRoot: string,
+): ReconcileResult {
+  if (newWorktreeRoot === repoPath || staleWorktreePath === repoPath) {
+    return { freed: [], skipped: "in-place" };
+  }
+  const freed: string[] = [];
   if (staleWorktreePath !== undefined) {
     try {
       removeWorktree(repoPath, staleWorktreePath);
+      freed.push(staleWorktreePath);
     } catch {
       // already gone / never registered — the prune below clears any dangling ref
     }
   }
+  // A prunable holder is about to be freed by `prune` — record it before it disappears.
+  const prunableHolder = worktreeHoldingBranch(repoPath, branch);
+  if (prunableHolder?.prunable) freed.push(prunableHolder.path);
   git(["worktree", "prune"], repoPath);
   const holder = worktreeHoldingBranch(repoPath, branch);
   if (holder !== null && !holder.prunable) {
@@ -181,6 +203,7 @@ export function reconcileWorktree(
         `free it with 'git worktree remove ${holder.path}', or re-run this ticket with --fresh.`,
     );
   }
+  return { freed, skipped: null };
 }
 
 /** The current commit sha of `branch` in `repoPath`, or null if the branch/ref is absent. */

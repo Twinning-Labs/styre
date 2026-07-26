@@ -532,7 +532,7 @@ test("ensureWorktree REFUSES a live (non-prunable) holder and never force-remove
 test("reconcileWorktree frees the recorded stale worktree (its own prior) so the branch can be re-added", () => {
   const repo = makeRepo();
   const stale = addWorktree(repo, "feat/STYRE-9", "stale"); // dir still exists (not prunable)
-  reconcileWorktree(repo, "feat/STYRE-9", stale);
+  reconcileWorktree(repo, "feat/STYRE-9", stale, freshTarget());
   expect(worktreeHoldingBranch(repo, "feat/STYRE-9")).toBeNull();
   const fresh = join(mkdtempSync(join(tmpdir(), "styre-wt-fresh3-")), "STYRE-9");
   roots.push(dirname(fresh));
@@ -543,7 +543,9 @@ test("reconcileWorktree frees the recorded stale worktree (its own prior) so the
 test("reconcileWorktree WITHOUT a recorded path refuses a non-prunable holder (never force-removes)", () => {
   const repo = makeRepo();
   const foreign = addWorktree(repo, "feat/foreign", "foreign");
-  expect(() => reconcileWorktree(repo, "feat/foreign")).toThrow(/checked out at/);
+  expect(() => reconcileWorktree(repo, "feat/foreign", undefined, freshTarget())).toThrow(
+    /checked out at/,
+  );
   expect(existsSync(join(foreign, "README.md"))).toBe(true);
 });
 
@@ -553,8 +555,49 @@ test("reconcileWorktree refuses a LOCKED (non-prunable) holder rather than force
   const repo = makeRepo();
   const locked = addWorktree(repo, "feat/locked", "locked");
   Bun.spawnSync(["git", "worktree", "lock", locked], { cwd: repo });
-  expect(() => reconcileWorktree(repo, "feat/locked")).toThrow(/checked out at/);
+  expect(() => reconcileWorktree(repo, "feat/locked", undefined, freshTarget())).toThrow(
+    /checked out at/,
+  );
   expect(existsSync(join(locked, "README.md"))).toBe(true);
+});
+
+// A throwaway non-repo target path for the reconcileWorktree `newWorktreeRoot` arg.
+function freshTarget(): string {
+  const dir = mkdtempSync(join(tmpdir(), "styre-wt-target-"));
+  roots.push(dir);
+  return join(dir, "target");
+}
+
+test("reconcileWorktree returns {skipped:'in-place'} when the new target IS the repo root", () => {
+  const repo = makeRepo();
+  expect(reconcileWorktree(repo, "feat/x", undefined, repo)).toEqual({
+    skipped: "in-place",
+    freed: [],
+  });
+});
+
+test("reconcileWorktree returns {skipped:'in-place'} when the recorded stale path IS the repo root", () => {
+  const repo = makeRepo();
+  expect(reconcileWorktree(repo, "feat/x", repo, freshTarget())).toEqual({
+    skipped: "in-place",
+    freed: [],
+  });
+});
+
+test("reconcileWorktree reports the freed stale worktree path in its result", () => {
+  const repo = makeRepo();
+  const stale = addWorktree(repo, "feat/STYRE-42", "freed");
+  const res = reconcileWorktree(repo, "feat/STYRE-42", stale, freshTarget());
+  expect(res.skipped).toBeNull();
+  expect(res.freed).toContain(stale);
+});
+
+test("reconcileWorktree on an unheld branch returns an empty no-op result", () => {
+  const repo = makeRepo();
+  expect(reconcileWorktree(repo, "feat/unheld", undefined, freshTarget())).toEqual({
+    skipped: null,
+    freed: [],
+  });
 });
 
 test("parseWorktreePorcelain: extracts path/head/branch and the detached/bare/locked/prunable flags", () => {
@@ -629,6 +672,6 @@ test("worktreeHoldingBranch matches the MAIN worktree; reconcileWorktree refuses
   const holder = worktreeHoldingBranch(repo, "main");
   expect(holder).not.toBeNull();
   expect(holder?.prunable).toBe(false);
-  expect(() => reconcileWorktree(repo, "main")).toThrow(/checked out at/);
+  expect(() => reconcileWorktree(repo, "main", undefined, freshTarget())).toThrow(/checked out at/);
   expect(existsSync(join(repo, "README.md"))).toBe(true); // the main checkout is untouched
 });
