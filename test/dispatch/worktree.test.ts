@@ -544,3 +544,22 @@ test("reconcileWorktree WITHOUT a recorded path refuses a non-prunable holder (n
   expect(() => reconcileWorktree(repo, "feat/foreign")).toThrow(/checked out at/);
   expect(existsSync(join(foreign, "README.md"))).toBe(true);
 });
+
+test("reconcileWorktree refuses a LOCKED (non-prunable) holder rather than force-removing it", () => {
+  // `locked` is a distinct porcelain line the parser deliberately ignores → prunable stays false →
+  // refuse. (A locked worktree can't be pruned either, so refusing is the only safe outcome.)
+  const repo = makeRepo();
+  const locked = addWorktree(repo, "feat/locked", "locked");
+  Bun.spawnSync(["git", "worktree", "lock", locked], { cwd: repo });
+  expect(() => reconcileWorktree(repo, "feat/locked")).toThrow(/checked out at/);
+  expect(existsSync(join(locked, "README.md"))).toBe(true);
+});
+
+test("worktreeHoldingBranch matches the MAIN worktree; reconcileWorktree refuses to remove it", () => {
+  const repo = makeRepo(); // HEAD is on `main`
+  const holder = worktreeHoldingBranch(repo, "main");
+  expect(holder).not.toBeNull();
+  expect(holder?.prunable).toBe(false);
+  expect(() => reconcileWorktree(repo, "main")).toThrow(/checked out at/);
+  expect(existsSync(join(repo, "README.md"))).toBe(true); // the main checkout is untouched
+});
