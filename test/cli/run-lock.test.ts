@@ -34,3 +34,12 @@ test("acquire returns null when a LIVE lock is held by a different pid", () => {
   expect(runLockStatus(dir)?.self).toBe(false);
   rmSync(dir, { recursive: true, force: true });
 });
+
+test("malformed/empty lock file is reclaimed by acquire", () => {
+  const dir = tmp();
+  writeFileSync(join(dir, "run.lock"), ""); // empty/malformed
+  expect(runLockStatus(dir)).toBeNull(); // malformed → stale → null
+  const lock = acquireRunLock(dir); // reclaims the malformed lock
+  expect(lock?.pid).toBe(process.pid);
+  rmSync(dir, { recursive: true, force: true });
+});

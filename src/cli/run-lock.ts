@@ -13,12 +13,21 @@ function isAlive(pid: number): boolean {
   }
 }
 
+/** Read the pid from a lock file, or return null on any read error (ENOENT race) or malformed content. */
+function readPid(file: string): number | null {
+  try {
+    const pid = Number.parseInt(readFileSync(file, "utf8").trim(), 10);
+    return Number.isInteger(pid) ? pid : null;
+  } catch {
+    return null; // ENOENT, permission denied, or other read error → treat as absent/stale
+  }
+}
+
 /** The lock's live owner, or null when the lock is absent OR its pid is dead/malformed (stale). */
 export function runLockStatus(dir: string): { pid: number; self: boolean } | null {
   const file = join(dir, "run.lock");
-  if (!existsSync(file)) return null;
-  const pid = Number.parseInt(readFileSync(file, "utf8").trim(), 10);
-  if (!Number.isInteger(pid) || !isAlive(pid)) return null;
+  const pid = readPid(file);
+  if (pid === null || !isAlive(pid)) return null;
   return { pid, self: pid === process.pid };
 }
 
@@ -33,9 +42,9 @@ export function acquireRunLock(dir: string): RunLock | null {
       return { dir, pid: process.pid };
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      const pid = Number.parseInt(readFileSync(file, "utf8").trim(), 10);
-      if (Number.isInteger(pid) && isAlive(pid)) return null; // a live owner → the ticket is locked
-      rmSync(file, { force: true }); // stale (dead/malformed) → reclaim and retry the exclusive create
+      const pid = readPid(file); // ENOENT race-safe: returns null on read error
+      if (pid !== null && isAlive(pid)) return null; // a live owner → the ticket is locked
+      rmSync(file, { force: true }); // stale (dead/malformed/ENOENT) → reclaim and retry the exclusive create
     }
   }
 }
@@ -43,7 +52,6 @@ export function acquireRunLock(dir: string): RunLock | null {
 /** Release the lock iff it still holds our pid (never clobbers another process's lock). */
 export function releaseRunLock(lock: RunLock): void {
   const file = join(lock.dir, "run.lock");
-  if (!existsSync(file)) return;
-  const pid = Number.parseInt(readFileSync(file, "utf8").trim(), 10);
+  const pid = readPid(file); // ENOENT race-safe: returns null on read error
   if (pid === lock.pid) rmSync(file, { force: true });
 }
