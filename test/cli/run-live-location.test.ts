@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parkDir } from "../../src/cli/park.ts";
 import { runFreshTicket } from "../helpers/run-harness.ts";
@@ -44,5 +44,28 @@ test("--fresh discards an existing checkpoint (whole dir) and starts over", asyn
   // what first left in place. first.cleanup() must run too, to restore the env to its true
   // pre-test value and remove the shared stateRoot (it's the one that owns it).
   second.cleanup();
+  first.cleanup();
+});
+
+test("--fresh refuses (and does NOT delete) when a live foreign run.lock holds the checkpoint", async () => {
+  const first = await runFreshTicket();
+  expect(existsSync(first.dbPath)).toBe(true);
+  // Simulate another live 'styre run' journaling this ticket right now: a live (not our own) pid
+  // owns the lock. process.ppid is guaranteed alive for the duration of this test process.
+  writeFileSync(join(first.checkpointDir, "run.lock"), String(process.ppid));
+  await expect(runFreshTicket({ reuseStateOf: first, fresh: true })).rejects.toThrow(/in progress/);
+  expect(existsSync(first.dbPath)).toBe(true); // NOT deleted — the live run's checkpoint survives
+  first.cleanup();
+});
+
+test("a second concurrent (non-fresh) run refuses while a live run.lock is held (AC#3 wiring)", async () => {
+  const first = await runFreshTicket();
+  // Remove run.db so the earlier "checkpoint already exists" guard doesn't fire first — this test
+  // targets the run-lock collision specifically (AC#3: two concurrent `run <same-ticket>` → the
+  // second refuses because the lock is held), not the separate "checkpoint exists" refuse.
+  rmSync(first.dbPath, { force: true });
+  writeFileSync(join(first.checkpointDir, "run.lock"), String(process.ppid)); // live, foreign owner
+  await expect(runFreshTicket({ reuseStateOf: first })).rejects.toThrow(/already in progress/);
+  expect(existsSync(join(first.checkpointDir, "run.lock"))).toBe(true); // acquireRunLock never clobbered it
   first.cleanup();
 });

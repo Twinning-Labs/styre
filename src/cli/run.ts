@@ -38,7 +38,7 @@ import {
 import { guard } from "./output.ts";
 import { finishRunResult, parkDir } from "./park.ts";
 import { formatMissingTools, preflightToolchain } from "./preflight.ts";
-import { acquireRunLock, releaseRunLock } from "./run-lock.ts";
+import { acquireRunLock, releaseRunLock, runLockStatus } from "./run-lock.ts";
 
 /** Exit codes this command can produce: 0 success · 1 operational stop (blocked/no-progress) ·
  *  64 usage · 65 resume-refused · 69 toolchain missing · 70 internal · 75 parked · 78 config.
@@ -225,7 +225,19 @@ export async function runImpl(
     // --fresh discards the whole checkpoint dir (run.db + -wal/-shm + sidecars) BEFORE the
     // refuse-guard below, so a fresh run starts with no orphaned WAL/SHM to reattach to the new
     // run.db. Live-location only (explicitDb bypasses both the guard and this deletion).
+    //
+    // Guarded by a lock READ (not acquireRunLock — the lock file lives inside the dir we're about
+    // to delete, so we can't acquire it first): a LIVE, non-self owner means another `styre run
+    // <ident>` is journaling to this checkpoint right now, and deleting the dir out from under it
+    // would destroy its open run.db + lock. A null/dead/self owner is safe to discard.
     if (!explicitDb && args.fresh && existsSync(checkpointDir)) {
+      const owner = runLockStatus(checkpointDir);
+      if (owner !== null && !owner.self) {
+        throw usageError(
+          `another 'styre run ${ident}' is in progress (${checkpointDir}/run.lock)`,
+          "Wait for it to finish, or remove the stale lock if that process is gone.",
+        );
+      }
       rmSync(checkpointDir, { recursive: true, force: true }); // whole dir: run.db + -wal/-shm + sidecars
     }
 
