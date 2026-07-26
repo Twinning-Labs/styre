@@ -9,6 +9,7 @@ import { getTicket, insertTicket } from "../db/repos/ticket.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { branchPrefixFor } from "../integrations/ticket-source.ts";
+import type { IngestedTicket } from "../integrations/ticket-source.ts";
 import { type TelemetrySink, noopSink } from "../telemetry/emit.ts";
 import { createTelemetryEmitter } from "../telemetry/emitter.ts";
 import { tick } from "./loop.ts";
@@ -136,7 +137,10 @@ export async function driveToTerminal(
 }
 
 /** Ingest ONE ticket (read from the tracker) into the SoT, then drive it to a terminal. The single
- *  Linear read happens here, at trigger — never in the control loop. */
+ *  Linear read happens here, at trigger — never in the control loop. When `deps.ingested` is
+ *  already supplied (the caller hoisted the tracker read to resolve the ident before minting the
+ *  DB — ENG-382), that fetch is reused instead of re-reading the tracker, keeping the read count
+ *  at exactly one per run. */
 export async function runTicket(deps: {
   db: Database;
   profile: Profile;
@@ -144,9 +148,10 @@ export async function runTicket(deps: {
   ports: ProjectorPorts;
   registry: StepRegistry;
   ticketRef: string;
+  ingested?: IngestedTicket;
   emit?: TelemetrySink;
 }): Promise<RunResult & { ticketId: number; summary: string }> {
-  const ingested = await deps.ports.issueTracker.fetchTicket(deps.ticketRef);
+  const ingested = deps.ingested ?? (await deps.ports.issueTracker.fetchTicket(deps.ticketRef));
   const projectId = insertProject(deps.db, {
     slug: deps.profile.slug,
     targetRepo: deps.profile.targetRepo,

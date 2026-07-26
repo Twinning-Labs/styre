@@ -691,3 +691,42 @@ test("worktreeHoldingBranch matches the MAIN worktree; reconcileWorktree refuses
   expect(() => reconcileWorktree(repo, "main", undefined, freshTarget())).toThrow(/checked out at/);
   expect(existsSync(join(repo, "README.md"))).toBe(true); // the main checkout is untouched
 });
+
+// --- ENG-382: reconcileWorktree pid-liveness + styre-ownership upgrade --------------------------
+
+test("reconcile frees a styre-owned non-prunable holder when the owning run lock is DEAD", () => {
+  const repo = makeRepo();
+  addWorktree(repo, "feat/STYRE-50", "deadowner"); // path under styre-wt-*, dir exists → not prunable
+  const ckpt = mkdtempSync(join(tmpdir(), "styre-ckpt-"));
+  roots.push(ckpt);
+  writeFileSync(join(ckpt, "run.lock"), "999999999"); // dead pid → stale
+  const res = reconcileWorktree(repo, "feat/STYRE-50", undefined, freshTarget(), ckpt);
+  expect(res.skipped).toBeNull();
+  expect(worktreeHoldingBranch(repo, "feat/STYRE-50")).toBeNull(); // freed
+});
+
+test("reconcile REFUSES a holder when a DIFFERENT live run owns the ticket lock", () => {
+  const repo = makeRepo();
+  const held = addWorktree(repo, "feat/STYRE-51", "liveowner");
+  const ckpt = mkdtempSync(join(tmpdir(), "styre-ckpt-"));
+  roots.push(ckpt);
+  writeFileSync(join(ckpt, "run.lock"), String(process.ppid)); // alive, not us
+  expect(() => reconcileWorktree(repo, "feat/STYRE-51", undefined, freshTarget(), ckpt)).toThrow(
+    /checked out at/,
+  );
+  expect(existsSync(join(held, "README.md"))).toBe(true); // not force-removed
+});
+
+test("reconcile REFUSES a FOREIGN (non-styre-wt) non-prunable holder even with a checkpointDir + no lock", () => {
+  const repo = makeRepo();
+  const dir = mkdtempSync(join(tmpdir(), "human-wt-")); // NOT under styre-wt-*
+  roots.push(dir);
+  const wt = join(dir, "held");
+  Bun.spawnSync(["git", "worktree", "add", "-b", "feat/HUMAN-1", wt], { cwd: repo });
+  const ckpt = mkdtempSync(join(tmpdir(), "styre-ckpt-"));
+  roots.push(ckpt); // no run.lock → no owner
+  expect(() => reconcileWorktree(repo, "feat/HUMAN-1", undefined, freshTarget(), ckpt)).toThrow(
+    /checked out at/,
+  );
+  expect(existsSync(join(wt, "README.md"))).toBe(true); // a human worktree is never force-removed
+});

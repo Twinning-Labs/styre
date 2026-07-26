@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { finishRunResult, parkDir, resumeRun } from "../../src/cli/park.ts";
+import { runImpl } from "../../src/cli/run.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import { driveToTerminal } from "../../src/daemon/run-ticket.ts";
@@ -430,4 +431,159 @@ export function advanceBranchHead(parked: ParkedRunResult): void {
   });
   if (!updateRef.success)
     throw new Error(`advanceBranchHead: update-ref failed: ${updateRef.stderr.toString()}`);
+}
+
+const FRESH_SLUG = "test-project";
+const FRESH_IDENT = "ENG-1";
+
+/** Build a real temp git repo with an initial commit (mirrors git-project.ts's private `gitRepo`
+ *  helper — kept local here so this module doesn't need to export that helper elsewhere). Needed
+ *  because `runFreshTicket` drives the real `provision` handler, which does `ensureWorktree` on
+ *  `profile.targetRepo` before it can trivially no-op on an empty `components: []` profile. */
+function freshGitRepo(): string {
+  const root = mkdtempSync(join(tmpdir(), "styre-fresh-repo-"));
+  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
+  run(["init", "-b", "main"]);
+  run(["config", "user.email", "t@s.dev"]);
+  run(["config", "user.name", "T"]);
+  writeFileSync(join(root, "README.md"), "x");
+  run(["add", "-A"]);
+  run(["commit", "-m", "init"]);
+  return root;
+}
+
+/** A FakeAgentRunner that reports a session-limit failure on its very first invocation — the same
+ *  script `runParkedTicket` uses. `run-dispatch.ts`'s park-detection is stage-agnostic (any
+ *  "dispatch" stepType handler routes a `cause: "session-limit"` result through `ParkSignal`), so
+ *  this reliably parks a FRESH ticket after `provision` (a no-op with `components: []`) at its
+ *  first real dispatch (`design:dispatch`) — driving to a terminal in two ticks without needing to
+ *  script the full plan/implement/review sidecar protocol. */
+function sessionLimitRunner(): FakeAgentRunner {
+  return new FakeAgentRunner(() => ({
+    completed: false,
+    exitCode: 1,
+    stdout: "partial work from session-limit",
+    stderr: "You have reached your session limit · resets tomorrow",
+    timedOut: false,
+    costUsd: null,
+    tokensIn: null,
+    tokensOut: null,
+    cause: "session-limit" as const,
+    resetAt: "tomorrow",
+  }));
+}
+
+export interface FreshTicketRun {
+  /** The durable checkpoint dir: parkDir(slug, ident). */
+  checkpointDir: string;
+  /** join(checkpointDir, "run.db") — the live-location SoT path. */
+  dbPath: string;
+  /** The XDG_STATE_HOME used for this run — reuse via `reuseStateOf` to hit the same checkpoint. */
+  stateRoot: string;
+  /** Best-effort removal of every temp dir this call created (idempotent). */
+  cleanup: () => void;
+}
+
+/** Drive the REAL `runImpl` (src/cli/run.ts) to a terminal, with fake ports/runner/preflight
+ *  injected via its test seam, so the shipped live-location journaling + refuse-guard + run-lock
+ *  are all exercised for real — unlike `runParkedTicket`, which drives `driveToTerminal` directly
+ *  and bypasses `runImpl` entirely.
+ *
+ *  Clears the three pre-DB gates `runImpl` runs before it ever reaches the checkpoint:
+ *   - Gate 1/2 (profile load + assertResolved + preflightToolchain): a real schemaVersion-3
+ *     profile.json with `components: []` (trivially resolved/preflighted) pointed at a real temp
+ *     git repo (the `provision` handler still does `ensureWorktree` against it).
+ *   - Gate 3 (agent-CLI probe): `deps.preflight` always reports `ok: true` so the real `claude`
+ *     binary is never probed.
+ *
+ *  `opts.reuseStateOf` reuses a prior run's `XDG_STATE_HOME` (not its git repo/profile — those
+ *  don't matter for the refuse-guard, which throws before ever touching them) so the refuse-guard
+ *  sees the same on-disk checkpoint the first call created. `opts.fresh` is threaded through to
+ *  `args.fresh`; `runImpl` discards the whole checkpoint dir before the refuse-guard when set
+ *  (ENG-382 Task 4 — refuse-guard escape only; resume-gate `--fresh` semantics are ENG-385). */
+export async function runFreshTicket(opts?: {
+  reuseStateOf?: FreshTicketRun;
+  fresh?: boolean;
+}): Promise<FreshTicketRun> {
+  const prevEnv = {
+    state: process.env.XDG_STATE_HOME,
+    config: process.env.XDG_CONFIG_HOME,
+    telemetry: process.env.STYRE_TELEMETRY,
+  };
+  const ownsStateRoot = opts?.reuseStateOf === undefined;
+  const stateRoot =
+    opts?.reuseStateOf?.stateRoot ?? mkdtempSync(join(tmpdir(), "styre-fresh-state-"));
+  // Isolated + always-empty, so discoverRuntimeConfig's convention lookup never picks up a real
+  // operator's ~/.config/styre/config.json (issueTracker/agent overrides that would be irrelevant
+  // anyway since ports/runner are injected, but reading them would be non-hermetic).
+  const configRoot = mkdtempSync(join(tmpdir(), "styre-fresh-config-"));
+  const repoDir = freshGitRepo();
+  const profileDir = mkdtempSync(join(tmpdir(), "styre-fresh-profile-"));
+  const profilePath = join(profileDir, "profile.json");
+  writeFileSync(
+    profilePath,
+    JSON.stringify({
+      slug: FRESH_SLUG,
+      targetRepo: repoDir,
+      defaultBranch: "main",
+      checksSystem: "none",
+      components: [],
+    }),
+  );
+
+  process.env.XDG_STATE_HOME = stateRoot;
+  process.env.XDG_CONFIG_HOME = configRoot;
+  process.env.STYRE_TELEMETRY = "0";
+
+  // NOTE: unlike runParkedTicket, env is intentionally left pointed at this run's stateRoot/
+  // configRoot on the SUCCESS path — the caller (e.g. the run-live-location tests) computes
+  // parkDir() itself right after this resolves, and that must still read the temp XDG_STATE_HOME
+  // this call set, not a restored real one. `cleanup()` below is what restores it (and removes the
+  // temp dirs) — the caller is responsible for calling it once done with the returned paths.
+  const localCleanup = () => {
+    const restore = (k: string, v: string | undefined) => {
+      if (v === undefined) Reflect.deleteProperty(process.env, k);
+      else process.env[k] = v;
+    };
+    restore("XDG_STATE_HOME", prevEnv.state);
+    restore("XDG_CONFIG_HOME", prevEnv.config);
+    restore("STYRE_TELEMETRY", prevEnv.telemetry);
+    rmSync(configRoot, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+    rmSync(profileDir, { recursive: true, force: true });
+    if (ownsStateRoot) rmSync(stateRoot, { recursive: true, force: true });
+  };
+
+  try {
+    const ports = {
+      issueTracker: fakeIssueTracker({
+        ticket: {
+          ident: FRESH_IDENT,
+          title: "Fresh harness ticket",
+          description: "body",
+          typeLabel: "Feature",
+          externalId: "uuid-fresh-harness",
+          url: null,
+        },
+      }),
+      forge: fakeForge(),
+    };
+    await runImpl(
+      { args: { ticket: FRESH_IDENT, profile: profilePath, fresh: opts?.fresh } },
+      { ports, runner: sessionLimitRunner(), preflight: () => ({ ok: true, version: null }) },
+    );
+  } catch (err) {
+    // The refuse-guard (and any other early throw) rejects before returning a `cleanup` handle to
+    // the caller — clean up (env + temp dirs) here instead, so a failed call never leaks either.
+    localCleanup();
+    throw err;
+  }
+
+  const checkpointDir = parkDir(FRESH_SLUG, FRESH_IDENT); // reads the still-live XDG_STATE_HOME
+  return {
+    checkpointDir,
+    dbPath: join(checkpointDir, "run.db"),
+    stateRoot,
+    cleanup: localCleanup,
+  };
 }
