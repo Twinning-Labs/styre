@@ -33,7 +33,7 @@ import { listByStatus } from "../db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { resetProvision } from "../dispatch/provision.ts";
-import { branchHeadSha, removeWorktree } from "../dispatch/worktree.ts";
+import { branchHeadSha, reconcileWorktree } from "../dispatch/worktree.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
 import { nowUtc } from "../util/time.ts";
@@ -281,22 +281,13 @@ export async function resumeRun(
     await assertInPlaceIdentity(project.target_repo, profile);
   }
 
-  // --- Stale-worktree cleanup (Fix B) ---
-  // The parked run left its worktree checked out. git will refuse `worktree add -B <branch>`
-  // if the branch is already checked out in another worktree. Remove it best-effort.
-  // In-place: there is no separate worktree — the repo root IS the worktree — so there is
-  // nothing stale to remove (and `removeWorktree` already no-ops on worktreePath===repoPath;
-  // skipping here also avoids the harmless-but-pointless `git worktree prune`).
-  if (!inPlace) {
-    if (staleWorktreePath) {
-      try {
-        removeWorktree(project.target_repo, staleWorktreePath);
-      } catch {
-        // Already gone / never registered — fine; cleanup must not abort the resume.
-      }
-      // Belt-and-suspenders: prune dangling worktree refs in git's internal tracking.
-      Bun.spawnSync(["git", "worktree", "prune"], { cwd: project.target_repo });
-    }
+  // --- Stale-worktree cleanup (Fix B → reconcileWorktree, ENG-381) ---
+  // The parked/escalated run left its worktree checked out; git refuses `worktree add -B <branch>`
+  // while the branch is held. reconcileWorktree removes THIS ticket's own prior worktree and prunes
+  // dangling refs, refusing only a live/foreign holder it can't prove stale (never a blind force-
+  // remove). In-place: the repo root IS the worktree, so there is nothing separate to reconcile.
+  if (!inPlace && staleWorktreePath) {
+    reconcileWorktree(project.target_repo, branch, staleWorktreePath);
   }
 
   // Worktree mode: the worktree above is gone (wiped/rebuilt fresh below) — any deps a succeeded
