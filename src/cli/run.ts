@@ -1,19 +1,22 @@
 import { randomUUID } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defineCommand } from "citty";
+import type { AgentCliPreflight } from "../agent/preflight.ts";
 import { preflightAgentCli } from "../agent/preflight.ts";
 import { resolveAgentRunner } from "../agent/resolve.ts";
+import type { AgentRunner } from "../agent/runner.ts";
+import type { AgentConfig } from "../config/agent-config.ts";
 import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { discoverRuntimeConfig, loadProfileByConvention, slugForCwd } from "../config/discover.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
+import type { ProjectorPorts } from "../daemon/projector.ts";
 import { realRecoverDeps, recover } from "../daemon/recover.ts";
 import { runTicket } from "../daemon/run-ticket.ts";
 import { openDb } from "../db/client.ts";
 import { migrate } from "../db/migrate.ts";
 import { getRun, insertRun } from "../db/repos/run.ts";
-import { getTicket } from "../db/repos/ticket.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
@@ -35,6 +38,7 @@ import {
 import { guard } from "./output.ts";
 import { finishRunResult, parkDir } from "./park.ts";
 import { formatMissingTools, preflightToolchain } from "./preflight.ts";
+import { acquireRunLock, releaseRunLock } from "./run-lock.ts";
 
 /** Exit codes this command can produce: 0 success · 1 operational stop (blocked/no-progress) ·
  *  64 usage · 65 resume-refused · 69 toolchain missing · 70 internal · 75 parked · 78 config.
@@ -71,6 +75,8 @@ export interface RunArgs {
   "accept-head"?: boolean;
   inspect?: boolean;
   "in-place"?: boolean;
+  /** Discard an existing checkpoint instead of refusing (ENG-382 Task 4 — not yet wired here). */
+  fresh?: boolean;
 }
 
 export const runCommand = defineCommand({
@@ -106,7 +112,12 @@ export const runCommand = defineCommand({
 
 export async function runImpl(
   { args }: { args: RunArgs },
-  deps?: { analyticsClient?: AnalyticsClient },
+  deps?: {
+    analyticsClient?: AnalyticsClient;
+    ports?: ProjectorPorts;
+    runner?: AgentRunner;
+    preflight?: (config: AgentConfig) => AgentCliPreflight;
+  },
 ): Promise<void> {
   // Hoisted so the single catch can emit `cliError` for throws that happen BEFORE analytics is
   // built (bad/absent profile, "not a git repo" usage error, config-discovery errors). When
@@ -192,79 +203,105 @@ export async function runImpl(
     // version — BEFORE any DB/dispatch, so a missing binary never reaches the provider spawn and
     // gets mislabeled cause:"transient" and retried 3x (ENG-326).
     const agentConfig = runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG;
-    const cliPreflight = preflightAgentCli(agentConfig);
+    const cliPreflight = (deps?.preflight ?? preflightAgentCli)(agentConfig);
     if (!cliPreflight.ok) throw agentCliError(cliPreflight);
     if (cliPreflight.unauthHint) process.stderr.write(`run: ${cliPreflight.unauthHint}\n`);
 
-    const dbPath =
-      args.db && args.db.length > 0
-        ? args.db
-        : join(mkdtempSync(join(tmpdir(), "styre-run-")), "run.db");
-    migrate(dbPath);
-    const db = openDb(dbPath);
-    recover(db, realRecoverDeps());
+    // Ports first (no DB dependency), then the single tracker read so we know the ident BEFORE
+    // creating the DB — the SoT must live at the durable checkpoint from the first write.
+    const ports = deps?.ports ?? makeProjectorPorts(runtimeConfig, profile);
+    const ingested = await ports.issueTracker.fetchTicket(args.ticket);
+    const ident = ingested.ident;
 
-    const ports = makeProjectorPorts(runtimeConfig, profile);
-    // Mint the run identity before any telemetry emit. Guard on getRun===null so a reused --db
-    // (non-ephemeral) doesn't insert a second run row.
-    if (getRun(db) === null) {
-      insertRun(db, {
-        runId: randomUUID(),
-        startedAt: nowUtc(),
-        provider: agentConfig.provider,
-      });
-    }
-    const runner = resolveAgentRunner(agentConfig);
-    const registry = buildDispatchRegistry({
-      runner,
-      agentConfig,
-      profile,
-      worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-")),
-      inPlace: (args["in-place"] as boolean | undefined) ?? false,
-    });
+    const explicitDb = !!(args.db && args.db.length > 0);
+    const checkpointDir = parkDir(profile.slug, ident);
+    const dbPath = explicitDb ? (args.db as string) : join(checkpointDir, "run.db");
 
-    a.runStarted({
-      projectId: profile.analyticsId ?? "",
-      resumed: false,
-      tracker: runtimeConfig.issueTracker,
-      forge: runtimeConfig.forge,
-    });
-
-    const out = await runTicket({
-      db,
-      profile,
-      runtimeConfig,
-      ports,
-      registry,
-      ticketRef: args.ticket,
-      emit: stdoutSink,
-    });
-
-    a.runCompleted(
-      buildSummary(db, out.ticketId, out, runtimeConfig.pricing) as Extract<
-        TelemetryEvent,
-        { type: "summary" }
-      >,
-      Date.now() - startedAt,
-      {
-        complexityGrading: runtimeConfig.complexityGrading,
-        onPlanDefect: runtimeConfig.onPlanDefect,
-      },
-    );
-
-    console.error(out.summary); // human summary → stderr; stdout carries only NDJSON telemetry
-    const ident = getTicket(db, out.ticketId)?.ident ?? args.ticket;
-    if (out.outcome === "parked" && out.park) {
-      // Print resume-hint before finishRunResult (which does dumpPark + sets exitCode).
-      // parkDir gives the path without touching the DB.
-      const dir = parkDir(profile.slug, ident);
-      console.error(
-        `Parked: ${out.park.cause}${out.park.resetAt ? ` (resets ${out.park.resetAt})` : ""}.\n` +
-          `Resume with: styre run --resume ${ident} ${args.profile ? `--profile ${args.profile}` : `--slug ${slug}`}\n` +
-          `Dump: ${dir}`,
+    // Refuse to clobber an existing checkpoint (live-location only). --fresh discards it (Task 4).
+    if (!explicitDb && existsSync(dbPath)) {
+      throw usageError(
+        `a checkpoint already exists for ${ident} at ${checkpointDir}`,
+        `Resume it with 'styre run --resume ${ident}', or discard it with 'styre run ${ident} --fresh'.`,
       );
     }
-    finishRunResult(db, dbPath, profile.slug, ident, out);
+    if (!explicitDb) mkdirSync(checkpointDir, { recursive: true });
+
+    const lock = explicitDb ? null : acquireRunLock(checkpointDir);
+    if (!explicitDb && lock === null) {
+      throw usageError(
+        `another 'styre run ${ident}' is already in progress (${checkpointDir}/run.lock)`,
+        "Wait for it to finish, or remove the stale lock if that process is gone.",
+      );
+    }
+    try {
+      migrate(dbPath);
+      const db = openDb(dbPath);
+      recover(db, realRecoverDeps());
+      // Mint the run identity before any telemetry emit. Guard on getRun===null so a reused --db
+      // (non-ephemeral) doesn't insert a second run row.
+      if (getRun(db) === null) {
+        insertRun(db, {
+          runId: randomUUID(),
+          startedAt: nowUtc(),
+          provider: agentConfig.provider,
+        });
+      }
+      const runner = deps?.runner ?? resolveAgentRunner(agentConfig);
+      const registry = buildDispatchRegistry({
+        runner,
+        agentConfig,
+        profile,
+        worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-")),
+        inPlace: (args["in-place"] as boolean | undefined) ?? false,
+      });
+
+      a.runStarted({
+        projectId: profile.analyticsId ?? "",
+        resumed: false,
+        tracker: runtimeConfig.issueTracker,
+        forge: runtimeConfig.forge,
+      });
+
+      const out = await runTicket({
+        db,
+        profile,
+        runtimeConfig,
+        ports,
+        registry,
+        ticketRef: args.ticket,
+        ingested,
+        emit: stdoutSink,
+      });
+
+      a.runCompleted(
+        buildSummary(db, out.ticketId, out, runtimeConfig.pricing) as Extract<
+          TelemetryEvent,
+          { type: "summary" }
+        >,
+        Date.now() - startedAt,
+        {
+          complexityGrading: runtimeConfig.complexityGrading,
+          onPlanDefect: runtimeConfig.onPlanDefect,
+        },
+      );
+
+      console.error(out.summary); // human summary → stderr; stdout carries only NDJSON telemetry
+      // `ident` was resolved from the single fetchTicket read above the DB-creation block — it is
+      // the same ident insertTicket seeded the ticket row with, so no re-read from the DB is needed.
+      if (out.outcome === "parked" && out.park) {
+        // Print resume-hint before finishRunResult (which does dumpPark + sets exitCode).
+        // parkDir gives the path without touching the DB.
+        const dir = parkDir(profile.slug, ident);
+        console.error(
+          `Parked: ${out.park.cause}${out.park.resetAt ? ` (resets ${out.park.resetAt})` : ""}.\n` +
+            `Resume with: styre run --resume ${ident} ${args.profile ? `--profile ${args.profile}` : `--slug ${slug}`}\n` +
+            `Dump: ${dir}`,
+        );
+      }
+      finishRunResult(db, dbPath, profile.slug, ident, out);
+    } finally {
+      if (lock) releaseRunLock(lock);
+    }
   } catch (err) {
     const code = err instanceof StyreError ? err.code : EXIT.INTERNAL;
     // Reached only when we threw before config could be resolved (unparseable config, or a failure
