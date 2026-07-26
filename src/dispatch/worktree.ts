@@ -168,15 +168,16 @@ export interface ReconcileResult {
  *  In-place (the target worktree IS the repo root) has no separate worktree to reconcile — signalled
  *  either by `newWorktreePath === repoPath` (fresh run) or `staleWorktreePath === repoPath` (resume of
  *  a same-container run); the primitive owns that skip so no caller can misfire it. Otherwise:
+ *    0. `checkpointDir` (ENG-382): if a DIFFERENT live run owns the ticket's run lock
+ *       (`runLockStatus`), refuse outright BEFORE any git mutation — touch nothing, not even
+ *       `worktree prune` — so a live parallel run's worktree is never at risk.
  *    1. If `staleWorktreePath` is given — the ticket's OWN prior worktree, recorded on resume —
  *       remove it; it is provably this ticket's, and we are resuming/replacing it.
  *    2. `git worktree prune`, which frees ONLY holders whose working dir is already gone (prunable).
- *  If a NON-prunable worktree still holds the branch afterward, `checkpointDir` (ENG-382) decides:
- *  a DIFFERENT live run owning the ticket's run lock (`runLockStatus`) → refuse outright (touch
- *  nothing); else, with no lock context (`checkpointDir` undefined) → refuse (ENG-381 prunable-only
- *  behaviour, no way to prove staleness); else a styre-owned leftover (`/styre-wt-` path, no live
- *  owner) → free it; else (a human's own `git worktree add`, foreign path) → refuse, never
- *  force-remove. The same different-live-owner check also gates move 1's force-remove above. */
+ *  If a NON-prunable worktree still holds the branch afterward: with no lock context (`checkpointDir`
+ *  undefined) → refuse (ENG-381 prunable-only behaviour, no way to prove staleness); else a
+ *  styre-owned leftover (`/styre-wt-` path, no live owner) → free it; else (a human's own
+ *  `git worktree add`, foreign path) → refuse, never force-remove. */
 export function reconcileWorktree(
   repoPath: string,
   branch: string,
@@ -195,7 +196,22 @@ export function reconcileWorktree(
     return s !== null && !s.self;
   })();
 
-  if (staleWorktreePath !== undefined && !foreignLive) {
+  // Touch NOTHING when a different live run owns the ticket: refuse BEFORE any git mutation —
+  // including `worktree prune` — rather than after. Behaviour-equivalent either way (prune only
+  // ever reaps ALREADY-dead worktrees, never the live holder), but this ordering matches the
+  // invariant literally instead of just in effect.
+  if (foreignLive) {
+    const holder = worktreeHoldingBranch(repoPath, branch);
+    if (holder !== null) {
+      throw new Error(
+        `branch ${branch} is checked out at ${holder.path} by a worktree styre can't safely remove; ` +
+          `free it with 'git worktree remove ${holder.path}', then re-run.`,
+      );
+    }
+    return { freed: [], skipped: null };
+  }
+
+  if (staleWorktreePath !== undefined) {
     try {
       removeWorktree(repoPath, staleWorktreePath); // the ticket's own recorded prior worktree
       freed.push(staleWorktreePath);
@@ -210,10 +226,11 @@ export function reconcileWorktree(
 
   const holder = worktreeHoldingBranch(repoPath, branch);
   if (holder !== null && !holder.prunable) {
-    // Free ONLY a styre-owned leftover with no live owner. A concurrent live run, an unknown lock
-    // context, or a human's own `git worktree add` (non-styre path) → refuse, never force-remove.
+    // Free ONLY a styre-owned leftover with no live owner. An unknown lock context, or a human's
+    // own `git worktree add` (non-styre path) → refuse, never force-remove. (The different-live-
+    // owner case is handled above, before any mutation.)
     const styreOwned = holder.path.includes("/styre-wt-");
-    if (foreignLive || checkpointDir === undefined || !styreOwned) {
+    if (checkpointDir === undefined || !styreOwned) {
       throw new Error(
         `branch ${branch} is checked out at ${holder.path} by a worktree styre can't safely remove; ` +
           `free it with 'git worktree remove ${holder.path}', then re-run.`,
