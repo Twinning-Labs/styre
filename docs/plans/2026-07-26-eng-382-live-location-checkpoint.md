@@ -4,17 +4,26 @@
 
 **Goal:** Make a fresh `styre run` journal its SoT directly to the durable per-ticket checkpoint (`~/.local/state/styre/<slug>/<ident>/run.db`) from the start — so a crash/escalation/block leaves a resumable checkpoint with no orphaned temp DB — guarded by a per-ticket run lock, a refuse-on-existing-checkpoint guard with a `--fresh` escape, and find-or-create DB inserts.
 
-**Architecture:** Today a fresh run journals to a throwaway temp DB (`run.ts:199-202`) and only a `parked` outcome copies it to the checkpoint (`dumpPark`, `park.ts:104-136`); every other halt orphans the temp DB. This plan hoists the ticket→ident resolution ahead of DB creation so the run opens its DB *at* `parkDir(slug, ident)/run.db`, deletes `dumpPark`'s copy machinery (the WAL fold is retained), adds a lockfile in the checkpoint dir to prevent two concurrent runs of one ticket, refuses to clobber an existing checkpoint (with `--fresh` to discard it), makes the project/ticket inserts idempotent so re-entry can't UNIQUE-crash, and upgrades ENG-381's prunable-only `reconcileWorktree` gate to free a worktree whose owning run is provably dead (via the lock).
+**Architecture:** Today a fresh run journals to a throwaway temp DB (`run.ts:199-202`) and only a `parked` outcome copies it to the checkpoint (`dumpPark`, `park.ts:104-136`); every other halt orphans the temp DB. This plan hoists the ticket→ident resolution ahead of DB creation so the run opens its DB *at* `parkDir(slug, ident)/run.db`, adds a lockfile in the checkpoint dir to prevent two concurrent runs of one ticket, refuses to clobber an existing checkpoint (with `--fresh` to discard it), makes the project/ticket inserts idempotent so re-entry can't UNIQUE-crash, and upgrades ENG-381's prunable-only `reconcileWorktree` gate to free a *styre-owned* worktree whose owning run is provably dead (via the lock). `dumpPark` is **retained** (see Review revision B1).
 
 **Tech Stack:** Bun + TypeScript; `bun:sqlite` (WAL journal mode); biome (`bun run lint`); `bun test`. No new dependencies.
+
+## Review revisions (rev 2, after independent plan review)
+
+- **B1** — `dumpPark`'s copy machinery is **retained**, not deleted. Its `if (dbPath !== destPath)` guard (`park.ts:119`) already skips the copy for live-location runs (`dbPath === destPath`) and keeps it for `--db`/test runs whose SoT lives in a temp DB — `copyFileSync` is the ONLY thing that materializes `run.db` at the checkpoint for them (used by `runParkedTicket`, `run-harness.ts:59-61,128`). The design doc §6's "deletes dumpPark's copy machinery" was an over-simplification; the guarded copy stays. So `_dbPath`/`dbPath` is **not** vestigial.
+- **B2** — the reconcile pid-liveness gate adds a **styre-ownership** check (a holder is freed only when a live lock is absent AND the path is under a `styre-wt-*` root); a human's foreign worktree (no lock, non-styre path) is refused, never force-removed.
+- **S1** — `runImpl` gains `ports?`/`runner?` test seams so the shipped fresh-path (refuse-guard, lock, journaling) is tested against real code, not a duplicated harness body.
+- **S2** — `acquireRunLock` is an atomic `O_EXCL` (`flag: "wx"`) create with stale-reclaim.
+- **S3** — hoisting `fetchTicket` moves a tracker-read failure ahead of `runStarted` — an intentional, flagged ordering change.
+- **N4** — get-or-create returns the existing id and does not update columns on conflict (documented).
 
 ## Global Constraints
 
 - Every task ends `bun run lint` + `bun test` green.
 - No new runtime dependencies; use `node:fs` primitives already imported in the touched files.
 - Follow existing repo patterns: repo helpers are plain functions taking `db: Database`; tests use real temp git repos + `makeTestDb`/`gitRepoWithProject` and override `XDG_STATE_HOME` to redirect the state dir.
-- `--db <path>` stays a full test/override escape: when set, it bypasses live-location journaling, the refuse-guard, and the lock (the caller manages the DB).
-- Preserve the ENG-381 reconcile invariant: a live / non-prunable / foreign worktree is NEVER force-removed.
+- `--db <path>` stays a full test/override escape: when set, it bypasses live-location journaling, the refuse-guard, and the lock (the caller manages the DB). `dumpPark` still copies such a run's temp DB to the checkpoint on park.
+- Preserve the ENG-381 reconcile invariant: a live / foreign / non-styre-owned worktree is NEVER force-removed.
 - **Out of scope (do NOT implement):** outcome-enum/exit-code/telemetry changes (ENG-384); `pauseTicket`/blocked-no-progress routing (ENG-383); the full `--resume` gate and `--fresh`'s resume-gate semantics (ENG-385). `--fresh` here is ONLY the refuse-guard escape (discard checkpoint → fresh run).
 
 ---
@@ -67,7 +76,7 @@ test("insertTicket is find-or-create on (project_id, ident): same ident returns 
 Run: `bun test test/db/repos/find-or-create.test.ts`
 Expected: FAIL — `getBySlug`/`getByIdent` are not exported (import error), and today's `insertProject` would throw a UNIQUE error on the duplicate slug.
 
-- [ ] **Step 3: Add the natural-key readers + get-or-create in `project.ts`**
+- [ ] **Step 3: Add the natural-key reader + get-or-create in `project.ts`**
 
 In `src/db/repos/project.ts`, add after `getProject` (`project.ts:27-29`):
 ```ts
@@ -81,8 +90,12 @@ export function insertProject(
   db: Database,
   p: { slug: string; targetRepo: string; defaultBranch?: string },
 ): number {
+  // Get-or-create: returns the EXISTING row's id and does NOT update target_repo/default_branch on
+  // conflict. Defense-in-depth for --db reuse; a genuine two-repos-same-slug collision is kept, not
+  // surfaced (a minor divergence from design §6b's "surface" wording; slug is frozen at setup so a
+  // real collision is not expected).
   const existing = getBySlug(db, p.slug);
-  if (existing !== null) return existing.id; // find-or-create: never a UNIQUE crash on re-entry
+  if (existing !== null) return existing.id;
   const now = nowUtc();
   const res = db
     .query(
@@ -106,10 +119,12 @@ export function getByIdent(db: Database, projectId: number, ident: string): Tick
   );
 }
 ```
-Change `insertTicket` (`ticket.ts:22-62`) to check first — add at the top of the body, before `const now = nowUtc();`:
+Change `insertTicket` (`ticket.ts:22-62`) — add at the top of the body, before `const now = nowUtc();`:
 ```ts
+  // Get-or-create on (project_id, ident): returns the existing id; does NOT update title/description
+  // on conflict. (Same defense-in-depth rationale as insertProject.)
   const existing = getByIdent(db, t.projectId, t.ident);
-  if (existing !== null) return existing.id; // find-or-create on (project_id, ident)
+  if (existing !== null) return existing.id;
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
@@ -131,19 +146,19 @@ git commit -m "feat(db): find-or-create insertProject/insertTicket with natural-
 
 ---
 
-### Task 2: Per-ticket run lock
+### Task 2: Per-ticket run lock (atomic)
 
 **Files:**
 - Create: `src/cli/run-lock.ts`
 - Test: `test/cli/run-lock.test.ts` (create)
 
 **Interfaces:**
-- Consumes: `node:fs` (`existsSync`, `readFileSync`, `writeFileSync`, `mkdirSync`, `rmSync`); the `process.kill(pid, 0)` liveness idiom (mirrors `recover.ts:38`).
+- Consumes: `node:fs` (`existsSync`, `readFileSync`, `writeFileSync` with `flag: "wx"`, `mkdirSync`, `rmSync`); the `process.kill(pid, 0)` liveness idiom (mirrors `recover.ts:38`).
 - Produces:
   - `type RunLock = { dir: string; pid: number }`
-  - `runLockStatus(dir: string): { pid: number; self: boolean } | null` — null when the lock is absent OR its pid is dead (stale); `self=true` when held by THIS process.
-  - `acquireRunLock(dir: string): RunLock | null` — writes `dir/run.lock` with `process.pid` and returns the handle; returns `null` when a LIVE lock is already held by a different process. A stale (dead-pid) lock is overwritten.
-  - `releaseRunLock(lock: RunLock): void` — removes `dir/run.lock` iff it still holds `lock.pid` (never deletes another process's lock).
+  - `runLockStatus(dir: string): { pid: number; self: boolean } | null` — null when the lock is absent OR its pid is dead (stale); `self=true` when held by THIS process. (Used by reconcile in Task 5.)
+  - `acquireRunLock(dir: string): RunLock | null` — **atomic** `O_EXCL` create of `dir/run.lock` with `process.pid`; returns `null` when a LIVE lock is already held by another process; a stale (dead-pid) lock is reclaimed.
+  - `releaseRunLock(lock: RunLock): void` — removes `dir/run.lock` iff it still holds `lock.pid`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -155,9 +170,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireRunLock, releaseRunLock, runLockStatus } from "../../src/cli/run-lock.ts";
 
-function tmp(): string {
-  return mkdtempSync(join(tmpdir(), "styre-lock-"));
-}
+const tmp = () => mkdtempSync(join(tmpdir(), "styre-lock-"));
 
 test("acquire writes our pid; status reports self; release removes it", () => {
   const dir = tmp();
@@ -171,20 +184,17 @@ test("acquire writes our pid; status reports self; release removes it", () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("a stale (dead-pid) lock is treated as absent and can be re-acquired", () => {
+test("a stale (dead-pid) lock is reclaimed by acquire", () => {
   const dir = tmp();
   writeFileSync(join(dir, "run.lock"), "999999999"); // a pid that cannot be alive
   expect(runLockStatus(dir)).toBeNull(); // dead → stale → null
-  const lock = acquireRunLock(dir); // overwrites the stale lock
+  const lock = acquireRunLock(dir); // reclaims the stale lock
   expect(lock?.pid).toBe(process.pid);
   rmSync(dir, { recursive: true, force: true });
 });
 
 test("acquire returns null when a LIVE lock is held by a different pid", () => {
   const dir = tmp();
-  writeFileSync(join(dir, "run.lock"), String(process.pid + 0)); // our own pid → live, but different-owner path:
-  // simulate a different live process by writing the current pid then asserting status.self, then a foreign-live case:
-  rmSync(join(dir, "run.lock"));
   writeFileSync(join(dir, "run.lock"), String(process.ppid)); // parent pid: alive, not us
   expect(acquireRunLock(dir)).toBeNull();
   expect(runLockStatus(dir)?.self).toBe(false);
@@ -197,7 +207,7 @@ test("acquire returns null when a LIVE lock is held by a different pid", () => {
 Run: `bun test test/cli/run-lock.test.ts`
 Expected: FAIL — module `src/cli/run-lock.ts` does not exist.
 
-- [ ] **Step 3: Write the implementation**
+- [ ] **Step 3: Write the implementation (atomic acquire)**
 
 Create `src/cli/run-lock.ts`:
 ```ts
@@ -216,23 +226,31 @@ function isAlive(pid: number): boolean {
   }
 }
 
-/** The lock's live owner, or null when the lock is absent OR its pid is dead (stale). */
+/** The lock's live owner, or null when the lock is absent OR its pid is dead/malformed (stale). */
 export function runLockStatus(dir: string): { pid: number; self: boolean } | null {
   const file = join(dir, "run.lock");
   if (!existsSync(file)) return null;
   const pid = Number.parseInt(readFileSync(file, "utf8").trim(), 10);
-  if (!Number.isInteger(pid) || !isAlive(pid)) return null; // malformed or dead → stale
+  if (!Number.isInteger(pid) || !isAlive(pid)) return null;
   return { pid, self: pid === process.pid };
 }
 
-/** Take the per-ticket run lock in `dir`. Returns null when a LIVE lock is held by another process;
- *  a stale (dead-pid) or absent lock is (over)written with our pid. */
+/** Take the per-ticket run lock in `dir` via an atomic O_EXCL create. On collision: reclaim a stale
+ *  (dead-pid) lock and retry; return null when a LIVE lock is held by another process. */
 export function acquireRunLock(dir: string): RunLock | null {
-  const held = runLockStatus(dir);
-  if (held !== null && !held.self) return null; // a different live process owns it
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "run.lock"), String(process.pid));
-  return { dir, pid: process.pid };
+  const file = join(dir, "run.lock");
+  for (;;) {
+    try {
+      writeFileSync(file, String(process.pid), { flag: "wx" }); // O_EXCL — fails if it already exists
+      return { dir, pid: process.pid };
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      const pid = Number.parseInt(readFileSync(file, "utf8").trim(), 10);
+      if (Number.isInteger(pid) && isAlive(pid)) return null; // a live owner → the ticket is locked
+      rmSync(file, { force: true }); // stale (dead/malformed) → reclaim and retry the exclusive create
+    }
+  }
 }
 
 /** Release the lock iff it still holds our pid (never clobbers another process's lock). */
@@ -254,40 +272,42 @@ Expected: PASS.
 Run: `bun test && bun run lint`
 ```bash
 git add src/cli/run-lock.ts test/cli/run-lock.test.ts
-git commit -m "feat(cli): per-ticket run lock (pid-liveness, stale-tolerant) (ENG-382)"
+git commit -m "feat(cli): atomic per-ticket run lock (O_EXCL, stale-reclaim) (ENG-382)"
 ```
 
 ---
 
-### Task 3: Live-location checkpoint + ident-ordering + refuse-guard (delete dumpPark copy)
+### Task 3: Live-location checkpoint + ident-ordering + refuse-guard (+ runImpl test seam)
 
 **Files:**
 - Modify: `src/daemon/run-ticket.ts:140-172` (accept a pre-fetched `ingested` to avoid a double tracker fetch)
-- Modify: `src/cli/run.ts:199-241` (resolve ident before DB creation; journal to `parkDir`; refuse-guard; acquire/release lock; pass `ingested`)
-- Modify: `src/cli/park.ts:104-136` (delete `dumpPark`'s copy machinery + `priorRunIdAt`; keep the WAL fold)
-- Remove: `test/cli/dump-park-warning.test.ts` (asserts the deleted overwrite warning)
+- Modify: `src/cli/run.ts:107-224` (`runImpl` gains `ports?`/`runner?` seams; resolve ident before DB creation; journal to `parkDir`; refuse-guard; acquire/release lock; pass `ingested`)
+- Modify: `test/helpers/run-harness.ts` (add `runFreshTicket` that drives the REAL `runImpl`)
 - Test: `test/cli/run-live-location.test.ts` (create)
+- **Do NOT touch `park.ts`/`dumpPark` in this task** (Review revision B1 — the copy is retained).
 
 **Interfaces:**
-- Consumes: `parkDir` (`park.ts:75-77`), `acquireRunLock`/`releaseRunLock` (Task 2), `insertProject`/`insertTicket` find-or-create (Task 1), `IngestedTicket` (`src/integrations/ticket-source.ts:6`), `makeProjectorPorts`.
-- Produces: `runTicket` deps gain `ingested?: IngestedTicket` — when present, `runTicket` skips its own `fetchTicket`. Fresh runs write `run.db` at `parkDir(profile.slug, ingested.ident)`.
+- Consumes: `parkDir` (`park.ts:75-77`), `acquireRunLock`/`releaseRunLock` (Task 2), `insertProject`/`insertTicket` find-or-create (Task 1), `IngestedTicket` (`src/integrations/ticket-source.ts:6`), `makeProjectorPorts`, `resolveAgentRunner`.
+- Produces:
+  - `runTicket` deps gain `ingested?: IngestedTicket` — when present, `runTicket` skips its own `fetchTicket`.
+  - `runImpl` deps gain `ports?: ProjectorPorts` and `runner?: AgentRunner` (types imported from their existing modules) — used when provided, else built as today. Fresh runs write `run.db` at `parkDir(profile.slug, ingested.ident)`.
 
-**Decision — ident-ordering (design decision #1):** `ident` is only known after `fetchTicket`. Hoist that single tracker read into `run.ts` (the read already happens once per run; we move it earlier and pass the result down, so there is still exactly ONE `fetchTicket` call). `runTicket` accepts an optional `ingested` and uses it when provided.
+**Decision — ident-ordering (design decision #1):** `ident` is only known after `fetchTicket`. Hoist that single tracker read into `run.ts` (still exactly ONE `fetchTicket` per run; we move it earlier and pass the result down). **S3 note:** this moves a tracker-read failure to *before* `a.runStarted(...)` fires (`run.ts:226-231`) — an intentional, flagged ordering change; the run simply fails earlier with a `cliError`. Broader telemetry-outcome semantics are ENG-384 scope.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `test/cli/run-live-location.test.ts`. It drives a fresh run to completion with a fake tracker + fake agent, `XDG_STATE_HOME` redirected, and asserts the SoT lives at `parkDir` (not a temp dir) and that a second run refuses. Model it on `test/helpers/run-harness.ts` (`runParkedTicket` sets `XDG_STATE_HOME`, builds `gitRepoWithProject`, drives a `FakeAgentRunner`; `PARK_SLUG="test-project"`, `PARK_IDENT="ENG-1"`).
+Create `test/cli/run-live-location.test.ts`. It drives the REAL `runImpl` (via the new seam) with a fake tracker + fake runner, `XDG_STATE_HOME` redirected, and asserts the SoT lives at `parkDir` and that a second run refuses. Use the new `runFreshTicket` harness helper.
 ```ts
 import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { parkDir } from "../../src/cli/park.ts";
-import { runFreshTicket } from "../helpers/run-harness.ts"; // NEW harness helper (Step 2)
+import { runFreshTicket } from "../helpers/run-harness.ts";
 
 test("a fresh run journals its SoT to parkDir/run.db, not a temp dir", async () => {
-  const run = await runFreshTicket(); // drives to a terminal, returns { checkpointDir, dbPath, exitCode, _tempDirs }
+  const run = await runFreshTicket(); // drives real runImpl to a terminal; returns { checkpointDir, dbPath, cleanup }
   expect(run.dbPath).toBe(join(parkDir("test-project", "ENG-1"), "run.db"));
-  expect(existsSync(run.dbPath)).toBe(true); // checkpoint is the live SoT
+  expect(existsSync(run.dbPath)).toBe(true);
   run.cleanup();
 });
 
@@ -297,32 +317,41 @@ test("a second fresh run on an existing checkpoint refuses (usage error), does n
   first.cleanup();
 });
 ```
-Add `runFreshTicket` to `test/helpers/run-harness.ts` mirroring `runParkedTicket` but driving the fake agent to a NON-parked terminal (pr-ready) and calling the real `runImpl`/`run.ts` fresh path with a `--db`-less config so it journals to `parkDir`; expose `checkpointDir`, `dbPath`, `exitCode`, `cleanup`, and a `reuseStateOf` option that points `XDG_STATE_HOME` at a prior run's state dir.
+Add `runFreshTicket(opts?)` to `test/helpers/run-harness.ts`. Unlike `runParkedTicket` (which drives `driveToTerminal` directly to force a park), `runFreshTicket` calls the **real** `runImpl({ args }, { ports, runner })`: set `XDG_STATE_HOME` to a temp dir, build a real git repo + profile (reuse `gitRepoWithProject`/`gitRepo` helpers), construct fake `ports` (a fake `issueTracker.fetchTicket` returning `ident: "ENG-1"` + a fake `forge`) and a `FakeAgentRunner` that drives to a non-parked terminal, then invoke `runImpl({ args: { ticket: "ENG-1", slug: "test-project", … } }, { ports, runner })`. Return `{ checkpointDir: parkDir("test-project","ENG-1"), dbPath: join(checkpointDir,"run.db"), cleanup }`. `reuseStateOf` points `XDG_STATE_HOME` at a prior run's state dir so the refuse-guard sees the existing checkpoint.
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `bun test test/cli/run-live-location.test.ts`
-Expected: FAIL — `runFreshTicket` unexported; the fresh path still mints a temp DB so `dbPath` is under `styre-run-*`, not `parkDir`.
+Expected: FAIL — `runFreshTicket` unexported; `runImpl` has no `ports`/`runner` seam; the fresh path still mints a temp DB so `dbPath` is under `styre-run-*`.
 
 - [ ] **Step 3: `runTicket` accepts a pre-fetched `ingested`**
 
-In `src/daemon/run-ticket.ts`, add `ingested?: IngestedTicket;` to the deps object type (`run-ticket.ts:140-148`) and import the type (`import type { IngestedTicket } from "../integrations/ticket-source.ts";`). Change line 149:
+In `src/daemon/run-ticket.ts`, add `import type { IngestedTicket } from "../integrations/ticket-source.ts";` and add `ingested?: IngestedTicket;` to the deps object type (`run-ticket.ts:140-148`). Change line 149:
 ```ts
   const ingested = deps.ingested ?? (await deps.ports.issueTracker.fetchTicket(deps.ticketRef));
 ```
-(Everything downstream — `insertProject`/`insertTicket` using `ingested.*` — is unchanged.)
+(Downstream `insertProject`/`insertTicket` using `ingested.*` are unchanged.)
 
-- [ ] **Step 4: `run.ts` — resolve ident first, journal to parkDir, refuse-guard, lock**
+- [ ] **Step 4: `runImpl` — add seams; resolve ident first; journal to parkDir; refuse-guard; lock**
 
-In `src/cli/run.ts`, replace the block at `run.ts:199-224` (temp-DB mint → registry). New shape:
+In `src/cli/run.ts`:
+- Extend the seam (`run.ts:107-110`):
+```ts
+export async function runImpl(
+  { args }: { args: RunArgs },
+  deps?: { analyticsClient?: AnalyticsClient; ports?: ProjectorPorts; runner?: AgentRunner },
+): Promise<void> {
+```
+  (Import `AgentRunner` from its module; `ProjectorPorts` is already imported.)
+- Replace the block at `run.ts:199-224` (temp-DB mint → registry) with:
 ```ts
     // Ports first (no DB dependency), then the single tracker read so we know the ident BEFORE
     // creating the DB — the SoT must live at the durable checkpoint from the first write.
-    const ports = makeProjectorPorts(runtimeConfig, profile);
+    const ports = deps?.ports ?? makeProjectorPorts(runtimeConfig, profile);
     const ingested = await ports.issueTracker.fetchTicket(args.ticket);
     const ident = ingested.ident;
 
-    const explicitDb = args.db && args.db.length > 0;
+    const explicitDb = !!(args.db && args.db.length > 0);
     const checkpointDir = parkDir(profile.slug, ident);
     const dbPath = explicitDb ? (args.db as string) : join(checkpointDir, "run.db");
 
@@ -335,7 +364,6 @@ In `src/cli/run.ts`, replace the block at `run.ts:199-224` (temp-DB mint → reg
     }
     if (!explicitDb) mkdirSync(checkpointDir, { recursive: true });
 
-    // Per-ticket lock: refuse a second concurrent run of the same ticket (live-location only).
     const lock = explicitDb ? null : acquireRunLock(checkpointDir);
     if (!explicitDb && lock === null) {
       throw usageError(
@@ -347,59 +375,47 @@ In `src/cli/run.ts`, replace the block at `run.ts:199-224` (temp-DB mint → reg
       migrate(dbPath);
       const db = openDb(dbPath);
       recover(db, realRecoverDeps());
-      // ... (run-identity guard, registry, runStarted, runTicket, runCompleted, finishRunResult) ...
+      if (getRun(db) === null) {
+        insertRun(db, { runId: randomUUID(), startedAt: nowUtc(), provider: agentConfig.provider });
+      }
+      const runner = deps?.runner ?? resolveAgentRunner(agentConfig);
+      const registry = buildDispatchRegistry({
+        runner,
+        agentConfig,
+        profile,
+        worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-")),
+        inPlace: (args["in-place"] as boolean | undefined) ?? false,
+      });
+      a.runStarted({ /* unchanged, run.ts:226-231 */ });
+      const out = await runTicket({ db, profile, runtimeConfig, ports, registry, ticketRef: args.ticket, ingested, emit: stdoutSink });
+      // ... unchanged: runCompleted (run.ts:243-253), summary + parked-hint (run.ts:255-266),
+      //     finishRunResult(db, dbPath, profile.slug, ident, out) (run.ts:267) ...
     } finally {
       if (lock) releaseRunLock(lock);
     }
 ```
 Notes for the implementer:
-- Wrap the existing body from `run.ts:207` (`const ports = ...` is now hoisted; keep the run-identity guard at `:210-216`, registry `:218-224`, `runStarted`, `runTicket`, `runCompleted`, the parked-hint block `:257-266`, and `finishRunResult` `:267`) inside the `try`, and release the lock in `finally`.
-- Pass the pre-fetched ticket into `runTicket`: add `ingested,` to the `runTicket({...})` args (`run.ts:233-241`). This keeps `fetchTicket` at exactly one call.
-- Add imports to `run.ts`: `existsSync`, `mkdirSync` from `node:fs`; `acquireRunLock`, `releaseRunLock` from `./run-lock.ts`; `parkDir` is already imported from `./park.ts` (`run.ts:36`). `usageError` is already imported (`run.ts` errors import).
-- Remove the now-unused `mkdtempSync(join(tmpdir(), "styre-run-"))`; `mkdtempSync`/`tmpdir` are still used for `worktreeRoot` (`run.ts:222`), so keep those imports.
+- The `ports` at `run.ts:207` is now hoisted above the DB block; delete the old duplicate.
+- Keep the run-identity guard, `runStarted`, `runCompleted`, the parked-hint block, and `finishRunResult` — moved inside the `try`, lock released in `finally`.
+- Add `ingested,` to the `runTicket({...})` call so `fetchTicket` runs exactly once.
+- Add imports to `run.ts`: `existsSync`, `mkdirSync` from `node:fs`; `acquireRunLock`, `releaseRunLock` from `./run-lock.ts`; `AgentRunner` from its module. `parkDir`, `usageError`, `mkdtempSync`, `tmpdir`, `join` are already imported.
+- Remove the old temp-DB `mkdtempSync(join(tmpdir(), "styre-run-"))`; those imports remain used by `worktreeRoot`.
 
-- [ ] **Step 5: Delete `dumpPark`'s copy machinery**
+- [ ] **Step 5: `dumpPark` is UNCHANGED (do not delete anything)**
 
-The fresh SoT now already lives at `parkDir/run.db`, so `dumpPark` never needs to copy. In `src/cli/park.ts`, simplify `dumpPark` (`park.ts:104-136`) to fold WAL + write the transcript sidecar in place:
-```ts
-export function dumpPark(db: Database, _dbPath: string, slug: string, ident: string, park: ParkInfo): string {
-  const dir = parkDir(slug, ident);
-  mkdirSync(dir, { recursive: true });
-  db.exec("PRAGMA wal_checkpoint(TRUNCATE);"); // fold WAL into the single run.db before close
-  db.close();
-  writeFileSync(
-    join(dir, "transcript.json"),
-    JSON.stringify({
-      dispatchId: park.dispatchId,
-      cause: park.cause,
-      resetAt: park.resetAt,
-      transcript: park.transcript,
-    }),
-  );
-  return dir;
-}
-```
-Delete `priorRunIdAt` (`park.ts:79-96`) and drop the now-unused imports (`copyFileSync`, `Database`-for-readonly-open if unused elsewhere, `getRun` if unused elsewhere — verify with the compiler/lint). `finishRunResult` (`park.ts:58-72`) is unchanged (it still calls `dumpPark` for `parked`; `_dbPath` kept for signature stability with its one caller).
+Confirm `src/cli/park.ts` `dumpPark` (`park.ts:104-136`), `priorRunIdAt` (`park.ts:79-96`), the `Database` import, `getRun`, `copyFileSync`, and `test/cli/dump-park-warning.test.ts` are all left intact. The existing `if (dbPath !== destPath)` guard (`park.ts:119`) is exactly what makes this correct: for a live-location run `dbPath === parkDir/run.db === destPath` so the copy is skipped (the SoT is already there); for a `--db`/harness run `dbPath` is a temp file so the copy still materializes `run.db` at the checkpoint. **No park.ts change in this ticket.** (Design §6's "deletes dumpPark's copy machinery" was an over-simplification — the guarded copy is retained.)
 
-- [ ] **Step 6: Remove the obsolete overwrite-warning test**
+- [ ] **Step 6: Run tests to verify GREEN**
 
-`test/cli/dump-park-warning.test.ts` asserts the `overwriting parked run …` stderr line that only the deleted copy path produced. Delete the file:
-```bash
-git rm test/cli/dump-park-warning.test.ts
-```
+Run: `bun test test/cli/run-live-location.test.ts test/cli/park.test.ts test/cli/park-resume-e2e.test.ts test/cli/dump-park-warning.test.ts && bun run lint`
+Expected: PASS. The new test sees `dbPath === parkDir/run.db`; the second run rejects with the refuse-guard message; `park-resume-e2e` and `dump-park-warning` stay green because `dumpPark`'s temp→checkpoint copy is untouched.
 
-- [ ] **Step 7: Run tests to verify GREEN**
-
-Run: `bun test test/cli/run-live-location.test.ts test/cli/park.test.ts test/cli/park-resume-e2e.test.ts && bun run lint`
-Expected: PASS. The new test sees `dbPath === parkDir/run.db`; the second run rejects with the refuse-guard message; resume-e2e still resumes (its dump now IS the live file — `dbPath === destPath`, which the old copy already skipped).
-
-- [ ] **Step 8: Full suite + commit**
+- [ ] **Step 7: Full suite + commit**
 
 Run: `bun test && bun run lint`
 ```bash
-git add src/cli/run.ts src/daemon/run-ticket.ts src/cli/park.ts test/helpers/run-harness.ts test/cli/run-live-location.test.ts
-git rm test/cli/dump-park-warning.test.ts
-git commit -m "feat(run): journal to the live checkpoint dir + refuse-guard + run lock; drop dumpPark copy (ENG-382)"
+git add src/cli/run.ts src/daemon/run-ticket.ts test/helpers/run-harness.ts test/cli/run-live-location.test.ts
+git commit -m "feat(run): journal to the live checkpoint dir + refuse-guard + run lock + runImpl test seams (ENG-382)"
 ```
 
 ---
@@ -420,9 +436,8 @@ test("--fresh discards an existing checkpoint (whole dir) and starts over", asyn
   const first = await runFreshTicket();
   expect(existsSync(first.dbPath)).toBe(true);
   const second = await runFreshTicket({ reuseStateOf: first, fresh: true }); // must NOT reject
-  expect(existsSync(second.dbPath)).toBe(true); // a brand-new checkpoint exists
-  // no orphaned -wal from the discarded run reattached:
-  expect(existsSync(`${first.dbPath}-wal`)).toBe(false);
+  expect(existsSync(second.dbPath)).toBe(true);
+  expect(existsSync(`${first.dbPath}-wal`)).toBe(false); // no orphaned -wal reattaches
   second.cleanup();
 });
 ```
@@ -448,7 +463,7 @@ Add `fresh?: boolean;` to `RunArgs` (`run.ts:64-74`). Then, in the Task-3 block,
       rmSync(checkpointDir, { recursive: true, force: true }); // whole dir: run.db + -wal/-shm + sidecars
     }
 ```
-Add `rmSync` to the `node:fs` import. (With the dir gone, the refuse-guard's `existsSync(dbPath)` is false and the run proceeds.)
+Add `rmSync` to the `node:fs` import.
 
 - [ ] **Step 4: Run to verify GREEN**
 
@@ -465,115 +480,132 @@ git commit -m "feat(run): --fresh discards an existing checkpoint (whole dir) an
 
 ---
 
-### Task 5: reconcileWorktree pid-liveness upgrade
+### Task 5: reconcileWorktree pid-liveness + styre-ownership upgrade
 
 **Files:**
-- Modify: `src/dispatch/worktree.ts:177-207` (add a `checkpointDir?` param; free a non-prunable holder whose owning run is provably dead; gate the recorded-stale force-remove on dead-owner)
-- Modify: `src/cli/park.ts:286-296` (pass the resumed ticket's `checkpointDir`)
-- Modify: `src/dispatch/worktree.ts:51-59` (ensureWorktree passes no checkpointDir → unchanged prunable-only behaviour)
+- Modify: `src/dispatch/worktree.ts:177-207` (add a `checkpointDir?` param; free a non-prunable holder only when it is styre-owned AND no live run owns it; gate the recorded-stale force-remove on no-different-live-owner)
+- Modify: `src/cli/park.ts:290` (pass the resumed ticket's `checkpointDir`)
 - Test: `test/dispatch/worktree.test.ts` (extend the reconcile suite)
 
 **Interfaces:**
 - Consumes: `runLockStatus` from `src/cli/run-lock.ts` (Task 2).
-- Produces: `reconcileWorktree(repoPath, branch, staleWorktreePath, newWorktreePath, checkpointDir?): ReconcileResult`. New rule: a non-prunable holder is freed when `checkpointDir` is given AND `runLockStatus(checkpointDir)` is `null` (no live owner) — i.e. the run that made this worktree is dead. A holder with a LIVE, non-self lock → still refuse. The recorded-stale force-remove is likewise skipped when a different-live lock owns the checkpoint. Absent `checkpointDir` → ENG-381 prunable-only behaviour (unchanged).
+- Produces: `reconcileWorktree(repoPath, branch, staleWorktreePath, newWorktreePath, checkpointDir?): ReconcileResult`.
 
-- [ ] **Step 1: Write the failing tests** (append to `test/dispatch/worktree.test.ts`, reusing `makeRepo`/`addWorktree`/`freshTarget`/`roots`)
+**Gate rule for a NON-prunable holder (Review revision B2):**
+- If a DIFFERENT live run owns the ticket (`runLockStatus(checkpointDir)` alive and not self) → **refuse** the whole reconcile (concurrent live run — touch nothing).
+- Else if `checkpointDir` is undefined → **refuse** (no lock context to prove staleness — ENG-381 prunable-only behaviour).
+- Else if the holder's path is styre-owned (contains `/styre-wt-` — worktree roots are `mkdtempSync(tmpdir(),"styre-wt-")`) → **free** it (a stale styre leftover, no live owner).
+- Else (a human's `git worktree add`, non-styre path) → **refuse**, never force-remove.
+The same different-live-owner check also gates the recorded-stale force-remove.
+
+- [ ] **Step 1: Write the failing tests** (append to `test/dispatch/worktree.test.ts`; add `writeFileSync` to the `node:fs` import if absent)
 ```ts
-import { mkdtempSync, writeFileSync } from "node:fs"; // (mkdtempSync already imported; add writeFileSync if absent)
-
-test("reconcileWorktree frees a non-prunable holder whose owning run lock is DEAD (checkpointDir given)", () => {
+test("reconcile frees a styre-owned non-prunable holder when the owning run lock is DEAD", () => {
   const repo = makeRepo();
-  const held = addWorktree(repo, "feat/STYRE-50", "deadowner"); // dir exists → not prunable
-  const checkpointDir = mkdtempSync(join(tmpdir(), "styre-ckpt-"));
-  roots.push(checkpointDir);
-  writeFileSync(join(checkpointDir, "run.lock"), "999999999"); // dead pid
-  const res = reconcileWorktree(repo, "feat/STYRE-50", undefined, freshTarget(), checkpointDir);
+  addWorktree(repo, "feat/STYRE-50", "deadowner"); // path under styre-wt-*, dir exists → not prunable
+  const ckpt = mkdtempSync(join(tmpdir(), "styre-ckpt-"));
+  roots.push(ckpt);
+  writeFileSync(join(ckpt, "run.lock"), "999999999"); // dead pid → stale
+  const res = reconcileWorktree(repo, "feat/STYRE-50", undefined, freshTarget(), ckpt);
   expect(res.skipped).toBeNull();
   expect(worktreeHoldingBranch(repo, "feat/STYRE-50")).toBeNull(); // freed
 });
 
-test("reconcileWorktree still REFUSES a non-prunable holder whose owning run lock is ALIVE (not us)", () => {
+test("reconcile REFUSES a holder when a DIFFERENT live run owns the ticket lock", () => {
   const repo = makeRepo();
   const held = addWorktree(repo, "feat/STYRE-51", "liveowner");
-  const checkpointDir = mkdtempSync(join(tmpdir(), "styre-ckpt-"));
-  roots.push(checkpointDir);
-  writeFileSync(join(checkpointDir, "run.lock"), String(process.ppid)); // a live, non-self pid
-  expect(() =>
-    reconcileWorktree(repo, "feat/STYRE-51", undefined, freshTarget(), checkpointDir),
-  ).toThrow(/checked out at/);
+  const ckpt = mkdtempSync(join(tmpdir(), "styre-ckpt-"));
+  roots.push(ckpt);
+  writeFileSync(join(ckpt, "run.lock"), String(process.ppid)); // alive, not us
+  expect(() => reconcileWorktree(repo, "feat/STYRE-51", undefined, freshTarget(), ckpt)).toThrow(
+    /checked out at/,
+  );
   expect(existsSync(join(held, "README.md"))).toBe(true); // not force-removed
+});
+
+test("reconcile REFUSES a FOREIGN (non-styre-wt) non-prunable holder even with a checkpointDir + no lock", () => {
+  const repo = makeRepo();
+  const dir = mkdtempSync(join(tmpdir(), "human-wt-")); // NOT under styre-wt-*
+  roots.push(dir);
+  const wt = join(dir, "held");
+  Bun.spawnSync(["git", "worktree", "add", "-b", "feat/HUMAN-1", wt], { cwd: repo });
+  const ckpt = mkdtempSync(join(tmpdir(), "styre-ckpt-"));
+  roots.push(ckpt); // no run.lock → no owner
+  expect(() => reconcileWorktree(repo, "feat/HUMAN-1", undefined, freshTarget(), ckpt)).toThrow(
+    /checked out at/,
+  );
+  expect(existsSync(join(wt, "README.md"))).toBe(true); // a human worktree is never force-removed
 });
 ```
 
 - [ ] **Step 2: Run to verify FAIL**
 
 Run: `bun test test/dispatch/worktree.test.ts`
-Expected: FAIL — the 5th param is ignored today, so the dead-owner case refuses instead of freeing (`res` undefined / throw).
+Expected: FAIL — the 5th param is ignored today; the dead-owner case refuses (should free). The existing ENG-381 4-arg refuse tests must stay green.
 
-- [ ] **Step 3: Implement the pid-liveness gate**
+- [ ] **Step 3: Implement the gate**
 
-In `src/dispatch/worktree.ts`, import `runLockStatus` (`import { runLockStatus } from "../cli/run-lock.ts";`). Change the signature (`worktree.ts:177-182`) to add `checkpointDir?: string`. Replace the prunable-only refuse block (`worktree.ts:196-205`) so a non-prunable holder is also freed when its owning run is dead:
+In `src/dispatch/worktree.ts`: `import { runLockStatus } from "../cli/run-lock.ts";`. Add `checkpointDir?: string` to the signature (`worktree.ts:177-182`). Replace the recorded-stale removal + refuse block (`worktree.ts:187-205`) with:
 ```ts
-  const prunableHolder = worktreeHoldingBranch(repoPath, branch);
-  if (prunableHolder?.prunable) freed.push(prunableHolder.path);
-  git(["worktree", "prune"], repoPath);
-  const holder = worktreeHoldingBranch(repoPath, branch);
-  if (holder !== null && !holder.prunable) {
-    // Non-prunable (working dir present). Free it ONLY if we can prove the run that made it is dead
-    // (its checkpoint lock is absent/stale). A live, non-self owner → refuse (never destroy live work).
-    const ownerAlive = checkpointDir !== undefined && runLockStatus(checkpointDir) !== null;
-    if (checkpointDir === undefined || ownerAlive) {
-      throw new Error(
-        `branch ${branch} is checked out at ${holder.path} by a worktree styre can't safely remove; ` +
-          `free it with 'git worktree remove ${holder.path}', then re-run.`,
-      );
-    }
-    removeWorktree(repoPath, holder.path); // owner is provably dead → safe to force-remove
-    git(["worktree", "prune"], repoPath);
-    freed.push(holder.path);
-  }
-  return { freed, skipped: null };
-```
-Gate the recorded-stale force-remove (`worktree.ts:187-194`) too — wrap it so it is skipped when a DIFFERENT live owner holds the checkpoint:
-```ts
-  const foreignLive =
-    checkpointDir !== undefined &&
-    (() => {
-      const s = runLockStatus(checkpointDir);
-      return s !== null && !s.self;
-    })();
+  // A DIFFERENT live run owning this ticket's checkpoint means we must touch nothing.
+  const foreignLive = (() => {
+    if (checkpointDir === undefined) return false;
+    const s = runLockStatus(checkpointDir);
+    return s !== null && !s.self;
+  })();
+
   if (staleWorktreePath !== undefined && !foreignLive) {
     try {
-      removeWorktree(repoPath, staleWorktreePath);
+      removeWorktree(repoPath, staleWorktreePath); // the ticket's own recorded prior worktree
       freed.push(staleWorktreePath);
     } catch {
       // already gone / never registered — the prune below clears any dangling ref
     }
   }
+
+  const prunableHolder = worktreeHoldingBranch(repoPath, branch);
+  if (prunableHolder?.prunable) freed.push(prunableHolder.path);
+  git(["worktree", "prune"], repoPath);
+
+  const holder = worktreeHoldingBranch(repoPath, branch);
+  if (holder !== null && !holder.prunable) {
+    // Free ONLY a styre-owned leftover with no live owner. A concurrent live run, an unknown lock
+    // context, or a human's own `git worktree add` (non-styre path) → refuse, never force-remove.
+    const styreOwned = holder.path.includes("/styre-wt-");
+    if (foreignLive || checkpointDir === undefined || !styreOwned) {
+      throw new Error(
+        `branch ${branch} is checked out at ${holder.path} by a worktree styre can't safely remove; ` +
+          `free it with 'git worktree remove ${holder.path}', then re-run.`,
+      );
+    }
+    removeWorktree(repoPath, holder.path);
+    git(["worktree", "prune"], repoPath);
+    freed.push(holder.path);
+  }
+  return { freed, skipped: null };
 ```
-(On a normal resume the resuming process holds the lock → `self` is true → `foreignLive` false → the recorded stale path is freed as before. Only a concurrent DIFFERENT live run blocks it.)
 
 - [ ] **Step 4: park.ts passes the checkpointDir**
 
-In `src/cli/park.ts`, at the reconcile call (`park.ts:290`), pass the resumed ticket's checkpoint dir (the resume already computes `dir = parkDir(profile.slug, args.resume)` at `park.ts:200`):
+In `src/cli/park.ts`, at the reconcile call (`park.ts:290`), pass the resumed ticket's checkpoint dir (`dir = parkDir(profile.slug, args.resume)`, already computed at `park.ts:200`):
 ```ts
   if (!inPlace && staleWorktreePath) {
     reconcileWorktree(project.target_repo, branch, staleWorktreePath, targetWorktreePath, dir);
   }
 ```
-`ensureWorktree`'s call (`worktree.ts:57`) stays 4-arg (no `checkpointDir`) → prunable-only, unchanged.
+`ensureWorktree`'s call (`worktree.ts:57`) stays 4-arg (no `checkpointDir`) → refuses non-prunable holders exactly as ENG-381 did.
 
 - [ ] **Step 5: Run to verify GREEN + all ENG-381 reconcile tests stay green**
 
 Run: `bun test test/dispatch/worktree.test.ts test/cli/park-resume-e2e.test.ts && bun run lint`
-Expected: PASS — the two new cases plus the existing ENG-381 reconcile suite (prunable recovery, live refusal, locked/main refusal, ReconcileResult).
+Expected: PASS — the three new cases plus the existing ENG-381 reconcile suite (the 4-arg refuse cases stay green because `checkpointDir` is undefined → refuse; prunable recovery unaffected).
 
 - [ ] **Step 6: Full suite + commit**
 
 Run: `bun test && bun run lint`
 ```bash
 git add src/dispatch/worktree.ts src/cli/park.ts test/dispatch/worktree.test.ts
-git commit -m "feat(worktree): reconcile frees a dead-owner worktree via the run lock; gate recorded-stale force-remove (ENG-382)"
+git commit -m "feat(worktree): reconcile frees a dead-owner styre worktree via the run lock; refuse foreign/live (ENG-382)"
 ```
 
 ---
@@ -582,21 +614,21 @@ git commit -m "feat(worktree): reconcile frees a dead-owner worktree via the run
 
 **Spec coverage (ENG-382 ticket + design §6/§7 ticket 2):**
 - Live-location journaling to `parkDir/run.db` → Task 3. ✓
-- Per-ticket lock → Task 2 (+ wired in Task 3). ✓
+- Per-ticket lock (atomic) → Task 2 (+ wired in Task 3). ✓
 - Refuse-guard on `run.db` presence → Task 3. ✓
 - `--fresh` whole-dir delete → Task 4. ✓
 - Find-or-create inserts → Task 1. ✓
-- Delete `dumpPark` copy machinery → Task 3 Step 5. ✓
-- reconcile prunable→pid-liveness + gated recorded-stale → Task 5. ✓
-- Keep ENG-381 reconcile tests green → Task 5 Step 5. ✓
-- AC "crash leaves a resumable checkpoint" — implied by live-location (the SoT is already at `parkDir`); an explicit crash test is deferred to the ENG-385 resume-gate suite (noted as residual).
+- `dumpPark` copy machinery → **retained** (B1); the guarded copy serves `--db`/harness runs, skipped for live-location. ✓
+- reconcile prunable→pid-liveness + styre-ownership + gated recorded-stale → Task 5. ✓
+- Keep ENG-381 reconcile tests green → Task 5 Step 5 (4-arg calls → `checkpointDir` undefined → refuse). ✓
+- AC "crash leaves a resumable checkpoint" — implied by live-location (the SoT is already at `parkDir`); an explicit crash-then-resume test belongs to the ENG-385 resume-gate suite (noted).
 
-**Placeholder scan:** every code step carries real code; test steps carry real assertions. The one soft spot is the `runFreshTicket` harness helper (Task 3 Step 1) — it is specified by behaviour + the exact `runParkedTicket` pattern it mirrors, but its body is not fully transcribed; the implementer must write it against `run-harness.ts`. Flagged, not hidden.
+**Placeholder scan:** every code step carries real code; the fresh-path is tested against the REAL `runImpl` via the `ports`/`runner` seam (S1), so no duplicated-harness gap remains. The one authored-by-implementer piece is `runFreshTicket`'s body — specified by its exact inputs (real `runImpl`, fake `ports`/`runner`, `XDG_STATE_HOME`, `reuseStateOf`), grounded in the existing `run-harness.ts`/`gitRepoWithProject` helpers.
 
-**Type consistency:** `RunLock`/`runLockStatus`/`acquireRunLock`/`releaseRunLock` names are used identically in Tasks 2, 3, 5. `checkpointDir?: string` is the added reconcile param in Task 5; `ingested?: IngestedTicket` the added runTicket dep in Task 3. `getBySlug`/`getByIdent` consistent across Tasks 1 and (potentially) elsewhere.
+**Type consistency:** `RunLock`/`runLockStatus`/`acquireRunLock`/`releaseRunLock` used identically in Tasks 2, 3, 5. `checkpointDir?: string` is the added reconcile param (Task 5). `ingested?: IngestedTicket` (runTicket) and `ports?`/`runner?` (runImpl) are the added seams (Task 3). `getBySlug`/`getByIdent` consistent across Task 1 and their callers.
 
-## Residual open questions (for the plan review)
+## Residual open questions — all resolved
 
-1. **Concurrency of the refuse-guard vs the lock.** The refuse-guard (checkpoint exists → refuse) already blocks the common "run the same ticket twice" case; the lock is the belt-and-suspenders for a true race (two runs between the `existsSync` check and the first write). Is the lock worth its complexity in ENG-382, or could it be deferred? (Design §6a says required; I kept it.)
-2. **`runFreshTicket` harness reuse.** Whether to generalize `runParkedTicket` (which forces a session-limit park) into a shared driver with a terminal-outcome knob, vs. a separate helper. Left to the implementer; either is fine.
-3. **`_dbPath` param of `dumpPark`/`finishRunResult`** is now vestigial (always equals `parkDir/run.db` for live-location). Kept for signature stability; a follow-up could drop it. Not done here to avoid touching `finishRunResult`'s callers mid-ticket.
+- **Q1 (lock worth its complexity?)** — RESOLVED: the lock is load-bearing for Task 5's B2 gate (it's how reconcile proves a worktree's owning run is dead vs. a concurrent live run). It stays.
+- **Q2 (harness duplication?)** — RESOLVED by S1: `runImpl` gains `ports`/`runner` seams and `runFreshTicket` drives the real `runImpl`, so the shipped fresh-path is tested directly (no duplicated driver).
+- **Q3 (`_dbPath`/`dbPath` vestigial?)** — RESOLVED by B1: `dumpPark` is retained and still uses `dbPath` (the `dbPath !== destPath` copy guard), so the parameter is load-bearing, not vestigial.
