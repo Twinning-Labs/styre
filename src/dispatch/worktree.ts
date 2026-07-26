@@ -165,7 +165,7 @@ export interface ReconcileResult {
  *  uncommitted work (adversarial review, ENG-380).
  *
  *  In-place (the target worktree IS the repo root) has no separate worktree to reconcile — signalled
- *  either by `newWorktreeRoot === repoPath` (fresh run) or `staleWorktreePath === repoPath` (resume of
+ *  either by `newWorktreePath === repoPath` (fresh run) or `staleWorktreePath === repoPath` (resume of
  *  a same-container run); the primitive owns that skip so no caller can misfire it. Otherwise, two
  *  safe moves only:
  *    1. If `staleWorktreePath` is given — the ticket's OWN prior worktree, recorded on resume —
@@ -178,9 +178,9 @@ export function reconcileWorktree(
   repoPath: string,
   branch: string,
   staleWorktreePath: string | undefined,
-  newWorktreeRoot: string,
+  newWorktreePath: string,
 ): ReconcileResult {
-  if (newWorktreeRoot === repoPath || staleWorktreePath === repoPath) {
+  if (newWorktreePath === repoPath || staleWorktreePath === repoPath) {
     return { freed: [], skipped: "in-place" };
   }
   const freed: string[] = [];
