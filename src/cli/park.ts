@@ -293,6 +293,10 @@ export async function resumeRun(
   // `dir` (this ticket's checkpoint dir) lets it consult the run lock: a DIFFERENT live run owning
   // the ticket → refuse outright; a dead-owner styre worktree → free it. In-place: the repo root IS
   // the worktree, so there is nothing separate to reconcile.
+  //
+  // NOTE: `resumeRun` itself acquires no per-ticket run lock (unlike `runImpl`'s fresh-run path) —
+  // concurrent `--resume` of the SAME ticket is not mutually excluded here; that hardening is
+  // ENG-385 scope.
   if (!inPlace && staleWorktreePath) {
     reconcileWorktree(project.target_repo, branch, staleWorktreePath, targetWorktreePath, dir);
   }
