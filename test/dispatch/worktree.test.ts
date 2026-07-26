@@ -11,14 +11,18 @@ import {
   discardPaths,
   ensureWorktree,
   fileContentAt,
+  listWorktrees,
+  parseWorktreePorcelain,
   pendingChanges,
   pendingEntries,
   readDiscardedSources,
+  reconcileWorktree,
   removeWorktree,
   stagedIndexEmpty,
   sweepScratch,
   undoAttempt,
   worktreeHasChanges,
+  worktreeHoldingBranch,
 } from "../../src/dispatch/worktree.ts";
 
 const roots: string[] = [];
@@ -480,4 +484,210 @@ test("sweepScratch is a no-op (returns []) with no drawer, and skips .git and no
   expect(existsSync(join(root, ".git", "styre_scratch"))).toBe(true); // never descended into
   expect(existsSync(join(root, "node_modules", "dep", "styre_scratch"))).toBe(true);
   rmSync(root, { recursive: true, force: true });
+});
+
+// --- ENG-381: worktreeHoldingBranch / ensureWorktree branch guard / reconcileWorktree -----------
+
+/** Register a worktree on `branch` under a fresh tmp dir; return its path (dir tracked for cleanup). */
+function addWorktree(repo: string, branch: string, tag: string): string {
+  const dir = mkdtempSync(join(tmpdir(), `styre-wt-${tag}-`));
+  roots.push(dir);
+  const wt = join(dir, "held");
+  const res = Bun.spawnSync(["git", "worktree", "add", "-b", branch, wt], { cwd: repo });
+  if (!res.success) throw new Error(`worktree add: ${res.stderr.toString()}`);
+  return wt;
+}
+
+test("worktreeHoldingBranch reports the holder and its prunable flag; null when absent", () => {
+  const repo = makeRepo();
+  const wt = addWorktree(repo, "feat/hold", "hold");
+  const live = worktreeHoldingBranch(repo, "feat/hold");
+  expect(live).not.toBeNull();
+  expect(live?.prunable).toBe(false);
+  expect(worktreeHoldingBranch(repo, "feat/absent")).toBeNull();
+  // Reap the working dir WITHOUT telling git → git marks the (still-registered) worktree prunable.
+  rmSync(dirname(wt), { recursive: true, force: true });
+  expect(worktreeHoldingBranch(repo, "feat/hold")?.prunable).toBe(true);
+});
+
+test("ensureWorktree frees a PRUNABLE leftover holding the branch and re-creates it (the STYRE-7 bug)", () => {
+  const repo = makeRepo();
+  const gone = addWorktree(repo, "feat/STYRE-7", "gone");
+  rmSync(dirname(gone), { recursive: true, force: true }); // reaped → prunable, branch still registered
+  const fresh = join(mkdtempSync(join(tmpdir(), "styre-wt-fresh-")), "STYRE-7");
+  roots.push(dirname(fresh));
+  ensureWorktree(repo, "feat/STYRE-7", fresh); // today throws "already used by worktree"
+  expect(existsSync(join(fresh, "README.md"))).toBe(true);
+});
+
+test("ensureWorktree REFUSES a live (non-prunable) holder and never force-removes it", () => {
+  const repo = makeRepo();
+  const live = addWorktree(repo, "feat/live", "live");
+  const fresh = join(mkdtempSync(join(tmpdir(), "styre-wt-fresh2-")), "held");
+  roots.push(dirname(fresh));
+  expect(() => ensureWorktree(repo, "feat/live", fresh)).toThrow(/checked out at/);
+  expect(existsSync(join(live, "README.md"))).toBe(true); // the live worktree is untouched
+});
+
+test("reconcileWorktree frees the recorded stale worktree (its own prior) so the branch can be re-added", () => {
+  const repo = makeRepo();
+  const stale = addWorktree(repo, "feat/STYRE-9", "stale"); // dir still exists (not prunable)
+  reconcileWorktree(repo, "feat/STYRE-9", stale, freshTarget());
+  expect(worktreeHoldingBranch(repo, "feat/STYRE-9")).toBeNull();
+  const fresh = join(mkdtempSync(join(tmpdir(), "styre-wt-fresh3-")), "STYRE-9");
+  roots.push(dirname(fresh));
+  ensureWorktree(repo, "feat/STYRE-9", fresh);
+  expect(existsSync(join(fresh, "README.md"))).toBe(true);
+});
+
+test("reconcileWorktree WITHOUT a recorded path refuses a non-prunable holder (never force-removes)", () => {
+  const repo = makeRepo();
+  const foreign = addWorktree(repo, "feat/foreign", "foreign");
+  let msg = "";
+  try {
+    reconcileWorktree(repo, "feat/foreign", undefined, freshTarget());
+  } catch (e) {
+    msg = (e as Error).message;
+  }
+  expect(msg).toMatch(/checked out at/);
+  expect(msg).toContain("git worktree remove"); // actionable remedy
+  expect(msg).not.toContain("--fresh"); // no non-existent flag (that's ENG-385)
+  expect(existsSync(join(foreign, "README.md"))).toBe(true);
+});
+
+test("reconcileWorktree refuses a LOCKED (non-prunable) holder rather than force-removing it", () => {
+  // `locked` is a distinct porcelain line the parser deliberately ignores → prunable stays false →
+  // refuse. (A locked worktree can't be pruned either, so refusing is the only safe outcome.)
+  const repo = makeRepo();
+  const locked = addWorktree(repo, "feat/locked", "locked");
+  Bun.spawnSync(["git", "worktree", "lock", locked], { cwd: repo });
+  expect(() => reconcileWorktree(repo, "feat/locked", undefined, freshTarget())).toThrow(
+    /checked out at/,
+  );
+  expect(existsSync(join(locked, "README.md"))).toBe(true);
+});
+
+// A throwaway non-repo target path for the reconcileWorktree `newWorktreeRoot` arg.
+function freshTarget(): string {
+  const dir = mkdtempSync(join(tmpdir(), "styre-wt-target-"));
+  roots.push(dir);
+  return join(dir, "target");
+}
+
+test("reconcileWorktree returns {skipped:'in-place'} when the new target IS the repo root", () => {
+  const repo = makeRepo();
+  expect(reconcileWorktree(repo, "feat/x", undefined, repo)).toEqual({
+    skipped: "in-place",
+    freed: [],
+  });
+});
+
+test("reconcileWorktree returns {skipped:'in-place'} when the recorded stale path IS the repo root", () => {
+  const repo = makeRepo();
+  expect(reconcileWorktree(repo, "feat/x", repo, freshTarget())).toEqual({
+    skipped: "in-place",
+    freed: [],
+  });
+});
+
+test("reconcileWorktree reports the freed stale worktree path in its result", () => {
+  const repo = makeRepo();
+  const stale = addWorktree(repo, "feat/STYRE-42", "freed");
+  const res = reconcileWorktree(repo, "feat/STYRE-42", stale, freshTarget());
+  expect(res.skipped).toBeNull();
+  expect(res.freed).toContain(stale);
+});
+
+test("reconcileWorktree on an unheld branch returns an empty no-op result", () => {
+  const repo = makeRepo();
+  expect(reconcileWorktree(repo, "feat/unheld", undefined, freshTarget())).toEqual({
+    skipped: null,
+    freed: [],
+  });
+});
+
+test("reconcileWorktree reports a pruned prunable holder in freed (no recorded stale path)", () => {
+  const repo = makeRepo();
+  const gone = addWorktree(repo, "feat/STYRE-99", "gonefreed");
+  rmSync(dirname(gone), { recursive: true, force: true }); // reap → git marks it prunable
+  const res = reconcileWorktree(repo, "feat/STYRE-99", undefined, freshTarget());
+  expect(res.skipped).toBeNull();
+  expect(res.freed).toHaveLength(1);
+  expect(res.freed[0]).toContain("gonefreed"); // the reaped worktree that prune freed
+});
+
+test("parseWorktreePorcelain: extracts path/head/branch and the detached/bare/locked/prunable flags", () => {
+  const out = [
+    "worktree /repo",
+    "HEAD aaaa111",
+    "branch refs/heads/main",
+    "",
+    "worktree /wt/feat",
+    "HEAD bbbb222",
+    "branch refs/heads/feat/STYRE-7",
+    "",
+    "worktree /wt/detached",
+    "HEAD cccc333",
+    "detached",
+    "",
+    "worktree /bare",
+    "bare",
+    "",
+    "worktree /wt/locked",
+    "HEAD dddd444",
+    "branch refs/heads/feat/locked",
+    "locked being-worked-on",
+    "",
+    "worktree /wt/gone",
+    "HEAD eeee555",
+    "branch refs/heads/feat/gone",
+    "prunable gitdir file points to non-existent location",
+  ].join("\n");
+  const recs = parseWorktreePorcelain(out);
+  expect(recs).toHaveLength(6);
+  const byPath = Object.fromEntries(recs.map((r) => [r.path, r]));
+  expect(byPath["/repo"]).toMatchObject({
+    head: "aaaa111",
+    branch: "refs/heads/main",
+    detached: false,
+    prunable: false,
+  });
+  expect(byPath["/wt/feat"]?.branch).toBe("refs/heads/feat/STYRE-7"); // branch name with a slash
+  expect(byPath["/wt/detached"]).toMatchObject({ branch: null, detached: true });
+  expect(byPath["/bare"]).toMatchObject({ bare: true, branch: null, head: null });
+  expect(byPath["/wt/locked"]).toMatchObject({ locked: true, prunable: false });
+  expect(byPath["/wt/gone"]?.prunable).toBe(true);
+});
+
+test("parseWorktreePorcelain: a bare `locked`/`prunable` line (no trailing reason) still sets the flag", () => {
+  const recs = parseWorktreePorcelain(
+    "worktree /wt/a\nHEAD abc\nbranch refs/heads/a\nlocked\n\nworktree /wt/b\nHEAD def\nbranch refs/heads/b\nprunable",
+  );
+  expect(recs[0]).toMatchObject({ locked: true, prunable: false });
+  expect(recs[1]).toMatchObject({ prunable: true, locked: false });
+});
+
+test("parseWorktreePorcelain: a trailing blank line yields no phantom record", () => {
+  expect(
+    parseWorktreePorcelain("worktree /repo\nHEAD abc\nbranch refs/heads/main\n\n"),
+  ).toHaveLength(1);
+  expect(parseWorktreePorcelain("")).toEqual([]);
+});
+
+test("listWorktrees returns a record per registered worktree of a real repo", () => {
+  const repo = makeRepo();
+  addWorktree(repo, "feat/lw", "lw");
+  const recs = listWorktrees(repo);
+  expect(recs.length).toBeGreaterThanOrEqual(2); // main + the added worktree
+  expect(recs.some((r) => r.branch === "refs/heads/feat/lw")).toBe(true);
+  expect(recs.some((r) => r.branch === "refs/heads/main")).toBe(true);
+});
+
+test("worktreeHoldingBranch matches the MAIN worktree; reconcileWorktree refuses to remove it", () => {
+  const repo = makeRepo(); // HEAD is on `main`
+  const holder = worktreeHoldingBranch(repo, "main");
+  expect(holder).not.toBeNull();
+  expect(holder?.prunable).toBe(false);
+  expect(() => reconcileWorktree(repo, "main", undefined, freshTarget())).toThrow(/checked out at/);
+  expect(existsSync(join(repo, "README.md"))).toBe(true); // the main checkout is untouched
 });

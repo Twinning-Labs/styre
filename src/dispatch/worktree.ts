@@ -46,7 +46,17 @@ export function ensureWorktree(repoPath: string, branch: string, worktreePath: s
   if (existsSync(join(worktreePath, ".git"))) {
     return;
   }
-  git(["worktree", "add", "-B", branch, worktreePath], repoPath);
+  try {
+    git(["worktree", "add", "-B", branch, worktreePath], repoPath);
+  } catch (err) {
+    // The add fails when `branch` is still held by a leftover worktree — a non-`done` run that never
+    // freed it (the "worktree already used by worktree" collision, ENG-381). If a holder exists, free
+    // it when safe (prunable) and retry once; reconcileWorktree REFUSES a live/foreign holder rather
+    // than destroy it. Any other add failure (no holder → a real git error) re-throws unchanged.
+    if (worktreeHoldingBranch(repoPath, branch) === null) throw err;
+    reconcileWorktree(repoPath, branch, undefined, worktreePath);
+    git(["worktree", "add", "-B", branch, worktreePath], repoPath);
+  }
 }
 
 export function worktreeHasChanges(worktreePath: string): boolean {
@@ -75,6 +85,125 @@ export function commitWorktree(
 export function removeWorktree(repoPath: string, worktreePath: string): void {
   if (worktreePath === repoPath) return; // in-place: never remove the repo root
   git(["worktree", "remove", "--force", worktreePath], repoPath);
+}
+
+/** One worktree registered in a repo, as reported by `git worktree list --porcelain`. */
+export interface WorktreeRecord {
+  /** The worktree's path as git records it. */
+  path: string;
+  /** The checked-out commit, or null for a bare entry. */
+  head: string | null;
+  /** The full ref (`refs/heads/<name>`), or null when detached/bare. */
+  branch: string | null;
+  detached: boolean;
+  bare: boolean;
+  /** git will not prune or auto-remove it. */
+  locked: boolean;
+  /** git reports its working tree missing — safe to free with `git worktree prune`. */
+  prunable: boolean;
+}
+
+/** Parse `git worktree list --porcelain` into one record per worktree. Pure (no git call) so the
+ *  flag extraction is exhaustively testable. Records are blank-line separated; each carries
+ *  `worktree <path>`, an optional `HEAD <sha>`, one of `branch refs/heads/<name>` | `detached` |
+ *  `bare`, and optional `locked [<reason>]` / `prunable [<reason>]` lines. A block with no
+ *  `worktree` line (e.g. the trailing blank) yields no record. */
+export function parseWorktreePorcelain(output: string): WorktreeRecord[] {
+  const records: WorktreeRecord[] = [];
+  for (const block of output.split("\n\n")) {
+    let path: string | null = null;
+    let head: string | null = null;
+    let branch: string | null = null;
+    let detached = false;
+    let bare = false;
+    let locked = false;
+    let prunable = false;
+    for (const line of block.split("\n")) {
+      if (line.startsWith("worktree ")) path = line.slice("worktree ".length);
+      else if (line.startsWith("HEAD ")) head = line.slice("HEAD ".length);
+      else if (line.startsWith("branch ")) branch = line.slice("branch ".length);
+      else if (line === "detached") detached = true;
+      else if (line === "bare") bare = true;
+      else if (line === "locked" || line.startsWith("locked ")) locked = true;
+      else if (line === "prunable" || line.startsWith("prunable ")) prunable = true;
+    }
+    if (path !== null) records.push({ path, head, branch, detached, bare, locked, prunable });
+  }
+  return records;
+}
+
+/** Every worktree registered in `repoPath`. */
+export function listWorktrees(repoPath: string): WorktreeRecord[] {
+  return parseWorktreePorcelain(git(["worktree", "list", "--porcelain"], repoPath));
+}
+
+/** A worktree that currently has some branch checked out (path + git's `prunable` flag). */
+export interface BranchHolder {
+  path: string;
+  prunable: boolean;
+}
+
+/** The worktree (if any) registered in `repoPath` that has `branch` checked out, with git's
+ *  `prunable` flag; null when no registered worktree holds it. */
+export function worktreeHoldingBranch(repoPath: string, branch: string): BranchHolder | null {
+  const target = `refs/heads/${branch}`;
+  const rec = listWorktrees(repoPath).find((w) => w.branch === target);
+  return rec === undefined ? null : { path: rec.path, prunable: rec.prunable };
+}
+
+/** The disposition of a `reconcileWorktree` call. */
+export interface ReconcileResult {
+  /** Worktree paths this call freed (the recorded stale path if removed, plus any pruned holder). */
+  freed: string[];
+  /** `"in-place"` when the target IS the repo root (no separate worktree to reconcile), else null. */
+  skipped: "in-place" | null;
+}
+
+/** Free `branch` so a subsequent `ensureWorktree` add can re-take it — WITHOUT ever force-removing a
+ *  worktree styre can't prove is stale. The branch is deterministic per ticket (`<prefix>/<ident>`),
+ *  so a blind `git worktree remove --force` on whatever holds it could destroy a live parallel run's
+ *  uncommitted work (adversarial review, ENG-380).
+ *
+ *  In-place (the target worktree IS the repo root) has no separate worktree to reconcile — signalled
+ *  either by `newWorktreePath === repoPath` (fresh run) or `staleWorktreePath === repoPath` (resume of
+ *  a same-container run); the primitive owns that skip so no caller can misfire it. Otherwise, two
+ *  safe moves only:
+ *    1. If `staleWorktreePath` is given — the ticket's OWN prior worktree, recorded on resume —
+ *       remove it; it is provably this ticket's, and we are resuming/replacing it.
+ *    2. `git worktree prune`, which frees ONLY holders whose working dir is already gone (prunable).
+ *  If a NON-prunable worktree still holds the branch afterward (a live or foreign checkout), refuse —
+ *  never force-remove it. Prunable-only for now; full process-liveness arrives with the run lock
+ *  (ENG-382). */
+export function reconcileWorktree(
+  repoPath: string,
+  branch: string,
+  staleWorktreePath: string | undefined,
+  newWorktreePath: string,
+): ReconcileResult {
+  if (newWorktreePath === repoPath || staleWorktreePath === repoPath) {
+    return { freed: [], skipped: "in-place" };
+  }
+  const freed: string[] = [];
+  if (staleWorktreePath !== undefined) {
+    try {
+      removeWorktree(repoPath, staleWorktreePath);
+      freed.push(staleWorktreePath);
+    } catch {
+      // already gone / never registered — the prune below clears any dangling ref
+    }
+  }
+  // A prunable holder is about to be freed by `prune` — record it before it disappears.
+  const prunableHolder = worktreeHoldingBranch(repoPath, branch);
+  if (prunableHolder?.prunable) freed.push(prunableHolder.path);
+  git(["worktree", "prune"], repoPath);
+  const holder = worktreeHoldingBranch(repoPath, branch);
+  if (holder !== null && !holder.prunable) {
+    throw new Error(
+      `branch ${branch} is checked out at ${holder.path} by a worktree styre can't safely remove; ` +
+        `free it with 'git worktree remove ${holder.path}', then re-run.`,
+    );
+  }
+  return { freed, skipped: null };
 }
 
 /** The current commit sha of `branch` in `repoPath`, or null if the branch/ref is absent. */
