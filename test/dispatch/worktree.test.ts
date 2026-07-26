@@ -588,6 +588,7 @@ test("parseWorktreePorcelain: extracts path/head/branch and the detached/bare/lo
   expect(recs).toHaveLength(6);
   const byPath = Object.fromEntries(recs.map((r) => [r.path, r]));
   expect(byPath["/repo"]).toMatchObject({
+    head: "aaaa111",
     branch: "refs/heads/main",
     detached: false,
     prunable: false,
@@ -597,6 +598,14 @@ test("parseWorktreePorcelain: extracts path/head/branch and the detached/bare/lo
   expect(byPath["/bare"]).toMatchObject({ bare: true, branch: null, head: null });
   expect(byPath["/wt/locked"]).toMatchObject({ locked: true, prunable: false });
   expect(byPath["/wt/gone"]?.prunable).toBe(true);
+});
+
+test("parseWorktreePorcelain: a bare `locked`/`prunable` line (no trailing reason) still sets the flag", () => {
+  const recs = parseWorktreePorcelain(
+    "worktree /wt/a\nHEAD abc\nbranch refs/heads/a\nlocked\n\nworktree /wt/b\nHEAD def\nbranch refs/heads/b\nprunable",
+  );
+  expect(recs[0]).toMatchObject({ locked: true, prunable: false });
+  expect(recs[1]).toMatchObject({ prunable: true, locked: false });
 });
 
 test("parseWorktreePorcelain: a trailing blank line yields no phantom record", () => {
