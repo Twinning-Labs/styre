@@ -286,13 +286,15 @@ export async function resumeRun(
   const worktreeRoot = inPlace ? project.target_repo : mkdtempSync(join(tmpdir(), "styre-wt-"));
   const targetWorktreePath = inPlace ? project.target_repo : join(worktreeRoot, ticket.ident);
 
-  // --- Stale-worktree cleanup (Fix B → reconcileWorktree, ENG-381) ---
+  // --- Stale-worktree cleanup (Fix B → reconcileWorktree, ENG-381; pid-liveness, ENG-382) ---
   // The parked/escalated run left its worktree checked out; git refuses `worktree add -B <branch>`
   // while the branch is held. reconcileWorktree removes THIS ticket's own prior worktree and prunes
-  // dangling refs, refusing only a live/foreign holder it can't prove stale (never a blind force-
-  // remove). In-place: the repo root IS the worktree, so there is nothing separate to reconcile.
+  // dangling refs, refusing a live/foreign holder it can't prove stale (never a blind force-remove).
+  // `dir` (this ticket's checkpoint dir) lets it consult the run lock: a DIFFERENT live run owning
+  // the ticket → refuse outright; a dead-owner styre worktree → free it. In-place: the repo root IS
+  // the worktree, so there is nothing separate to reconcile.
   if (!inPlace && staleWorktreePath) {
-    reconcileWorktree(project.target_repo, branch, staleWorktreePath, targetWorktreePath);
+    reconcileWorktree(project.target_repo, branch, staleWorktreePath, targetWorktreePath, dir);
   }
 
   // Worktree mode: the worktree above is gone (wiped/rebuilt fresh below) — any deps a succeeded

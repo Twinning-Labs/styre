@@ -1,5 +1,6 @@
 import { type Dirent, existsSync, lstatSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join, relative } from "node:path";
+import { runLockStatus } from "../cli/run-lock.ts";
 
 /** Run git in `cwd`, returning trimmed stdout; throws on failure. */
 function git(args: string[], cwd: string): string {
@@ -166,42 +167,61 @@ export interface ReconcileResult {
  *
  *  In-place (the target worktree IS the repo root) has no separate worktree to reconcile — signalled
  *  either by `newWorktreePath === repoPath` (fresh run) or `staleWorktreePath === repoPath` (resume of
- *  a same-container run); the primitive owns that skip so no caller can misfire it. Otherwise, two
- *  safe moves only:
+ *  a same-container run); the primitive owns that skip so no caller can misfire it. Otherwise:
  *    1. If `staleWorktreePath` is given — the ticket's OWN prior worktree, recorded on resume —
  *       remove it; it is provably this ticket's, and we are resuming/replacing it.
  *    2. `git worktree prune`, which frees ONLY holders whose working dir is already gone (prunable).
- *  If a NON-prunable worktree still holds the branch afterward (a live or foreign checkout), refuse —
- *  never force-remove it. Prunable-only for now; full process-liveness arrives with the run lock
- *  (ENG-382). */
+ *  If a NON-prunable worktree still holds the branch afterward, `checkpointDir` (ENG-382) decides:
+ *  a DIFFERENT live run owning the ticket's run lock (`runLockStatus`) → refuse outright (touch
+ *  nothing); else, with no lock context (`checkpointDir` undefined) → refuse (ENG-381 prunable-only
+ *  behaviour, no way to prove staleness); else a styre-owned leftover (`/styre-wt-` path, no live
+ *  owner) → free it; else (a human's own `git worktree add`, foreign path) → refuse, never
+ *  force-remove. The same different-live-owner check also gates move 1's force-remove above. */
 export function reconcileWorktree(
   repoPath: string,
   branch: string,
   staleWorktreePath: string | undefined,
   newWorktreePath: string,
+  checkpointDir?: string,
 ): ReconcileResult {
   if (newWorktreePath === repoPath || staleWorktreePath === repoPath) {
     return { freed: [], skipped: "in-place" };
   }
   const freed: string[] = [];
-  if (staleWorktreePath !== undefined) {
+  // A DIFFERENT live run owning this ticket's checkpoint means we must touch nothing.
+  const foreignLive = (() => {
+    if (checkpointDir === undefined) return false;
+    const s = runLockStatus(checkpointDir);
+    return s !== null && !s.self;
+  })();
+
+  if (staleWorktreePath !== undefined && !foreignLive) {
     try {
-      removeWorktree(repoPath, staleWorktreePath);
+      removeWorktree(repoPath, staleWorktreePath); // the ticket's own recorded prior worktree
       freed.push(staleWorktreePath);
     } catch {
       // already gone / never registered — the prune below clears any dangling ref
     }
   }
-  // A prunable holder is about to be freed by `prune` — record it before it disappears.
+
   const prunableHolder = worktreeHoldingBranch(repoPath, branch);
   if (prunableHolder?.prunable) freed.push(prunableHolder.path);
   git(["worktree", "prune"], repoPath);
+
   const holder = worktreeHoldingBranch(repoPath, branch);
   if (holder !== null && !holder.prunable) {
-    throw new Error(
-      `branch ${branch} is checked out at ${holder.path} by a worktree styre can't safely remove; ` +
-        `free it with 'git worktree remove ${holder.path}', then re-run.`,
-    );
+    // Free ONLY a styre-owned leftover with no live owner. A concurrent live run, an unknown lock
+    // context, or a human's own `git worktree add` (non-styre path) → refuse, never force-remove.
+    const styreOwned = holder.path.includes("/styre-wt-");
+    if (foreignLive || checkpointDir === undefined || !styreOwned) {
+      throw new Error(
+        `branch ${branch} is checked out at ${holder.path} by a worktree styre can't safely remove; ` +
+          `free it with 'git worktree remove ${holder.path}', then re-run.`,
+      );
+    }
+    removeWorktree(repoPath, holder.path);
+    git(["worktree", "prune"], repoPath);
+    freed.push(holder.path);
   }
   return { freed, skipped: null };
 }
