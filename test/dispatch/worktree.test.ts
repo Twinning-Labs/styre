@@ -600,6 +600,16 @@ test("reconcileWorktree on an unheld branch returns an empty no-op result", () =
   });
 });
 
+test("reconcileWorktree reports a pruned prunable holder in freed (no recorded stale path)", () => {
+  const repo = makeRepo();
+  const gone = addWorktree(repo, "feat/STYRE-99", "gonefreed");
+  rmSync(dirname(gone), { recursive: true, force: true }); // reap → git marks it prunable
+  const res = reconcileWorktree(repo, "feat/STYRE-99", undefined, freshTarget());
+  expect(res.skipped).toBeNull();
+  expect(res.freed).toHaveLength(1);
+  expect(res.freed[0]).toContain("gonefreed"); // the reaped worktree that prune freed
+});
+
 test("parseWorktreePorcelain: extracts path/head/branch and the detached/bare/locked/prunable flags", () => {
   const out = [
     "worktree /repo",
