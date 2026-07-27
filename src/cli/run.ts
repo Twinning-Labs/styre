@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defineCommand } from "citty";
+import { branchNameFor } from "../agent/branch.ts";
 import type { AgentCliPreflight } from "../agent/preflight.ts";
 import { preflightAgentCli } from "../agent/preflight.ts";
 import { resolveAgentRunner } from "../agent/resolve.ts";
@@ -20,7 +21,9 @@ import { getRun, insertRun } from "../db/repos/run.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
+import { reconcileWorktree } from "../dispatch/worktree.ts";
 import { assertSlackConfigured } from "../integrations/notifier.ts";
+import { branchPrefixFor } from "../integrations/ticket-source.ts";
 import type { AnalyticsClient } from "../telemetry/analytics/client.ts";
 import { type Analytics, createAnalytics } from "../telemetry/analytics/index.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
@@ -238,6 +241,21 @@ export async function runImpl(
           "Wait for it to finish, or remove the stale lock if that process is gone.",
         );
       }
+      // Free a styre-owned holder (the common post-park leftover: the worktree dir still present,
+      // lock already released) via the liveness gate BEFORE the whole-dir delete — ensureWorktree's
+      // later prunable-only retry would refuse a non-prunable one (ENG-385).
+      const freshBranch = branchNameFor({
+        ident: ingested.ident,
+        branch_name: null,
+        branch_prefix: branchPrefixFor(ingested.typeLabel),
+      });
+      reconcileWorktree(
+        profile.targetRepo,
+        freshBranch,
+        undefined,
+        join(checkpointDir, "wt"),
+        checkpointDir,
+      );
       rmSync(checkpointDir, { recursive: true, force: true }); // whole dir: run.db + -wal/-shm + sidecars
     }
 

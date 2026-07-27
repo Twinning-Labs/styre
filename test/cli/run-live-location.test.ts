@@ -1,7 +1,13 @@
 import { expect, test } from "bun:test";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { parkDir } from "../../src/cli/park.ts";
+import { runImpl } from "../../src/cli/run.ts";
+import { worktreeHoldingBranch } from "../../src/dispatch/worktree.ts";
+import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
+import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import { runFreshTicket } from "../helpers/run-harness.ts";
 
 test("a fresh run journals its SoT to parkDir/run.db, not a temp dir", async () => {
@@ -68,4 +74,127 @@ test("a second concurrent (non-fresh) run refuses while a live run.lock is held 
   await expect(runFreshTicket({ reuseStateOf: first })).rejects.toThrow(/already in progress/);
   expect(existsSync(join(first.checkpointDir, "run.lock"))).toBe(true); // acquireRunLock never clobbered it
   first.cleanup();
+});
+
+test("--fresh reconciles a non-prunable, styre-owned leftover worktree (the common post-park state) instead of aborting at ensureWorktree", async () => {
+  // `runFreshTicket` mints a NEW repo per call, so it can't reproduce a leftover worktree still
+  // sitting in the SAME repo the fresh run will provision into. Drive `runImpl` directly, on a repo
+  // we control, so we can plant that leftover before invoking --fresh.
+  const SLUG = "test-project";
+  const IDENT = "ENG-1";
+  const prevEnv = {
+    state: process.env.XDG_STATE_HOME,
+    config: process.env.XDG_CONFIG_HOME,
+    telemetry: process.env.STYRE_TELEMETRY,
+  };
+  const stateRoot = mkdtempSync(join(tmpdir(), "styre-fresh-state-"));
+  const configRoot = mkdtempSync(join(tmpdir(), "styre-fresh-config-"));
+  const repoDir = mkdtempSync(join(tmpdir(), "styre-fresh-repo-"));
+  const profileDir = mkdtempSync(join(tmpdir(), "styre-fresh-profile-"));
+  // A parent dir separate from repoDir/profileDir/etc — cleaned up alongside them.
+  const leftoverParent = mkdtempSync(join(tmpdir(), "styre-wt-leftover-"));
+
+  const git = (args: string[]) => {
+    const res = Bun.spawnSync(["git", ...args], { cwd: repoDir });
+    if (!res.success) throw new Error(`git ${args.join(" ")} failed: ${res.stderr.toString()}`);
+  };
+  git(["init", "-b", "main"]);
+  git(["config", "user.email", "t@s.dev"]);
+  git(["config", "user.name", "T"]);
+  writeFileSync(join(repoDir, "README.md"), "x");
+  git(["add", "-A"]);
+  git(["commit", "-m", "init"]);
+
+  // Plant a NON-PRUNABLE, styre-owned leftover: a real worktree holding the ticket's branch
+  // (feat/ENG-1, from typeLabel "Feature"), its dir still present on disk — the COMMON state left
+  // behind by a gracefully parked run (lock released, worktree never torn down). A path under
+  // `/styre-wt-*` is what reconcileWorktree treats as styre-owned (see worktree.ts).
+  const leftover = join(leftoverParent, "held");
+  const addRes = Bun.spawnSync(["git", "worktree", "add", "-b", "feat/ENG-1", leftover], {
+    cwd: repoDir,
+  });
+  expect(addRes.success).toBe(true);
+  expect(worktreeHoldingBranch(repoDir, "feat/ENG-1")).not.toBeNull();
+  expect(worktreeHoldingBranch(repoDir, "feat/ENG-1")?.prunable).toBe(false); // dir present → non-prunable
+
+  const profilePath = join(profileDir, "profile.json");
+  writeFileSync(
+    profilePath,
+    JSON.stringify({
+      slug: SLUG,
+      targetRepo: repoDir,
+      defaultBranch: "main",
+      checksSystem: "none",
+      components: [],
+    }),
+  );
+
+  process.env.XDG_STATE_HOME = stateRoot;
+  process.env.XDG_CONFIG_HOME = configRoot;
+  process.env.STYRE_TELEMETRY = "0";
+
+  // A leftover checkpoint dir from a prior parked run: present on disk (so the --fresh block's
+  // `existsSync(checkpointDir)` guard fires), no run.lock (the owner released it on park) — the
+  // gracefully-parked post-park state.
+  const checkpointDir = parkDir(SLUG, IDENT);
+  mkdirSync(checkpointDir, { recursive: true });
+  writeFileSync(join(checkpointDir, "run.db"), "stale");
+
+  const ports = {
+    issueTracker: fakeIssueTracker({
+      ticket: {
+        ident: IDENT,
+        title: "Fresh harness ticket",
+        description: "body",
+        typeLabel: "Feature",
+        externalId: "uuid-fresh-harness",
+        url: null,
+      },
+    }),
+    forge: fakeForge(),
+  };
+
+  try {
+    // Must SUCCEED (frees the leftover via the liveness gate, then starts fresh) — not abort at
+    // ensureWorktree's prunable-only refuse.
+    await runImpl(
+      { args: { ticket: IDENT, profile: profilePath, fresh: true } },
+      {
+        ports,
+        runner: new FakeAgentRunner(() => ({
+          completed: false,
+          exitCode: 1,
+          stdout: "partial work from session-limit",
+          stderr: "You have reached your session limit · resets tomorrow",
+          timedOut: false,
+          costUsd: null,
+          tokensIn: null,
+          tokensOut: null,
+          cause: "session-limit" as const,
+          resetAt: "tomorrow",
+        })),
+        preflight: () => ({ ok: true, version: null }),
+      },
+    );
+
+    // A real fresh checkpoint was journaled (not the stale placeholder).
+    const dbPath = join(checkpointDir, "run.db");
+    expect(existsSync(dbPath)).toBe(true);
+    expect(existsSync(join(dbPath, "..", "run.lock"))).toBe(false); // released on park
+    // The original leftover holder no longer owns the branch — reconcileWorktree freed it.
+    expect(existsSync(leftover)).toBe(false);
+  } finally {
+    const restore = (k: string, v: string | undefined) => {
+      if (v === undefined) Reflect.deleteProperty(process.env, k);
+      else process.env[k] = v;
+    };
+    restore("XDG_STATE_HOME", prevEnv.state);
+    restore("XDG_CONFIG_HOME", prevEnv.config);
+    restore("STYRE_TELEMETRY", prevEnv.telemetry);
+    rmSync(stateRoot, { recursive: true, force: true });
+    rmSync(configRoot, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+    rmSync(profileDir, { recursive: true, force: true });
+    rmSync(leftoverParent, { recursive: true, force: true });
+  }
 });
