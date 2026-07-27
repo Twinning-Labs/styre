@@ -1,56 +1,50 @@
-# ENG-386 Housekeeping — `styre ls` + `styre clean` Implementation Plan
+# ENG-386 Housekeeping — `styre ls` + `styre clean` Implementation Plan (rev 2)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add the two operator-facing housekeeping commands that complete the ENG-380 pause/resume epic: `styre ls` (list paused checkpoints) and `styre clean <ident> | --all` (reap a checkpoint + its worktree — the explicit, and only, producer of ticket status `abandoned` — and sweep stale `pr-ready` worktree leaks).
+**Goal:** Add the two operator-facing housekeeping commands that complete the ENG-380 epic: `styre ls` (list styre's leftover efforts) and `styre clean <ident> | --all [--purge]` (reap those leftovers on disk, optionally deleting the branch/PR too). **`clean` never changes ticket status** and makes **no** assumption about a PR's fate.
 
-**Architecture:** A shared read-only enumeration substrate (`listCheckpoints`) walks the state dir (`~/.local/state/styre/<slug>/<ident>/run.db`) and classifies each checkpoint by inspecting its `run.db` (single-ticket SoT) plus its sidecar files and run-lock. `ls` renders the paused subset; `clean` reaps via the existing liveness-gated `reconcileWorktree` primitive, then deletes the checkpoint dir. Stale-`pr-ready` detection uses git ancestry (`git merge-base --is-ancestor <branch> <defaultBranch>`) — a precise "the PR merged" signal — because no forge merged-state API exists.
+**Architecture:** A shared read-only enumeration substrate (`listCheckpoints`) walks the state dir (`~/.local/state/styre/<slug>/<ident>/run.db`) and classifies each leftover *effort* by inspecting its `run.db` (single-ticket SoT) + sidecar files + run-lock. `ls` renders the resumable subset (+ a preview of finished leftovers). `clean` reaps an effort's disk artifacts (worktree via the liveness-gated `reconcileWorktree`, then the checkpoint dir); `--all` bulk-reaps only *finished* efforts and protects resumable ones (Scope B); `--purge` additionally deletes the local + remote branch (closing the PR), and is a silent no-op when there is no branch/PR.
 
 **Tech Stack:** Bun + TypeScript, `citty` subcommands, `bun:sqlite`, existing `src/dispatch/worktree.ts` / `src/cli/run-lock.ts` / `src/db/repos/*` helpers. No new runtime dependencies.
 
+## What changed from rev 1 (why this rev exists)
+
+The independent review + operator feedback rejected two premises rev 1 was built on:
+1. **`clean` does NOT abandon the ticket.** Reaping styre's *effort* on a ticket ≠ the *ticket* being a dead end. So rev 1's `setTicketStatus(…,"abandoned")` is **removed entirely** — not just because it was a no-op (it wrote to a db it then deleted), but because it was conceptually wrong. In this epic **nothing produces the `abandoned` ticket status** (design §3.5, revised).
+2. **No merge-state / age "staleness" heuristic.** styre is a one-shot binary with no PR polling, and the project **squash-merges** (so `git merge-base --is-ancestor` — rev 1's Task 4 — is always false for merged PRs and would silently reap nothing). Removed. `--all` reaps by the effort's own terminal *kind* (Scope B), which styre knows locally.
+3. **New `--purge`** covers the operator's real need (fully reset a ticket to re-run it): opt-in deletion of the local + remote branch. The deeper root cause (a plain push can't overwrite a leftover remote branch on re-run) is split out to **ENG-387** (force-with-lease), not built here.
+
 ## Global Constraints
 
-- **No schema change.** `abandoned` is already a valid `ticket.status` (`schema.sql:104-105` CHECK `('active','waiting','abandoned','done')`); `setTicketStatus` writes it with no new validation. Reuse existing repos.
-- **Gates:** every task ends with `bun test`, `bun run lint` (biome), AND `bun run typecheck` (`tsc --noEmit`) all green. Typecheck is a real CI gate.
-- **No new runtime dependencies.** Use `node:fs`, `bun:sqlite`, and existing helpers only.
-- **Never blind-force-remove a worktree.** All worktree freeing goes through `reconcileWorktree` (liveness-gated). `clean` must refuse to touch a checkpoint whose `run.lock` is held by a *live, non-self* process (`runLockStatus`), mirroring the resume refuse.
-- **Read-only enumeration must never throw on a bad checkpoint.** A malformed / half-written / schema-drifted `run.db` is skipped (best-effort), matching `priorRunIdAt`'s idiom (`park.ts:85-100`).
-- **Output style:** human-readable text via the `src/cli/output.ts` `formatMessage(cmd, headline, detail?, recovery?)` house style. `ls`/`clean` are NOT telemetry-emitting runs, so their human output goes to **stdout** (unlike `run`, whose stdout is reserved for NDJSON). Errors/refusals go through `guard()` to stderr as today.
-- **Command wiring:** each command is a `citty` `defineCommand` in its own file under `src/cli/`, body wrapped in `guard("<cmd>", ...)`, registered in `src/index.ts`'s `subCommands`. Args are a hand-typed interface cast from `ctx.args` (the `migrate.ts` pattern).
+- **`clean` never changes ticket status.** No `setTicketStatus` anywhere. `abandoned` gets no producer (design §3.5).
+- **By default `clean` never touches branches or the PR.** The remote branch *is* the PR; deleting it is the opt-in `--purge` action only.
+- **`--purge` is idempotent / silent-pass.** Deleting a local branch that doesn't exist, or a remote branch/PR that doesn't exist, is a **silent success**, never an error.
+- **No schema change; no new runtime dependencies.** Use `node:fs`, `bun:sqlite`, existing helpers.
+- **Never blind-force-remove a worktree.** All worktree freeing goes through `reconcileWorktree` (liveness-gated). `clean` refuses to touch an effort whose `run.lock` is held by a *live, non-self* process (`runLockStatus`), before any deletion.
+- **Read-only enumeration never throws on a bad checkpoint.** A malformed/half-written/schema-drifted `run.db` is skipped (best-effort, `priorRunIdAt` idiom, `park.ts:85-100`).
+- **Gates:** every task ends with `bun test`, `bun run lint`, AND `bun run typecheck` all green (typecheck is a real CI gate).
+- **Output:** human text via `src/cli/output.ts` `formatMessage`; `ls`/`clean` write results to **stdout** (they are not telemetry runs, whose stdout is reserved for NDJSON — `run.ts:163,330`). Errors/refusals go through `guard()` to stderr.
+- **Wiring:** each command is a `citty` `defineCommand` in its own file, body wrapped in `guard("<cmd>", …)`, registered in `src/index.ts` `subCommands`; args a hand-typed interface cast from `ctx.args` (the `migrate.ts` pattern).
 
----
+## Resolved decisions (were open in rev 1)
 
-## Decisions folded into this plan (flagged for review)
+1. **Staleness heuristic:** REMOVED. `--all` = Scope B (kind-based), no merge/age guessing.
+2. **`--all` scope:** **Scope B** — reap finished/handed-off leftovers (`pr-ready`/`done`/`other`), skip resumable pauses (`needs_you`/`budget`) and live runs.
+3. **`ls` content:** resumable pauses (with resume hints) + a second "finished leftovers" section previewing what `clean --all` reaps.
+4. **`abandoned`:** no producer; `clean` exits 0 on success (no terminal give-up semantics).
+5. **`--purge`:** single-ident only. `--all --purge` is a **usage error** (it won't mass-close PRs).
 
-These are design judgments the plan commits to; the design doc §12 left the first open. Each is called out so the plan review and the human can veto before Task 4.
+## Ground truth (verified against source)
 
-1. **Stale-`pr-ready` criterion = merged-into-default (git ancestry), not age.** `git merge-base --is-ancestor <branch> <defaultBranch>` is exact: if the branch is an ancestor of the default branch the PR *did* merge, so its retained worktree is provably safe to reap. Age alone (dir mtime) would risk reaping a still-open PR that is slow in review. No forge merged-state API exists (`ForgePort` has only `push`/`ensurePr`/`addPrComment`), so ancestry is the best available signal and needs only one new local git call. **Alternative:** age-based sweep. **Recommendation: ancestry.**
-2. **`styre clean --all` sweeps stale `pr-ready` leaks ONLY — it never mass-abandons paused work.** Design §3.5.1 makes abandonment a per-pause human judgment ("a pause they judge hopeless"). A single flag that abandons every paused ticket contradicts that. So `--all` reaps only merged `pr-ready` worktrees; paused checkpoints are abandoned one at a time via `clean <ident>`. **Alternative:** `--all` also abandons every paused checkpoint. **Recommendation: pr-ready-only.**
-3. **`styre ls` also surfaces the stale-`pr-ready` leaks it would reap, in a second section.** So the operator previews `clean --all` before running it. The primary section is paused checkpoints (per the AC); the secondary "stale worktrees" section is advisory. **Alternative:** `ls` shows paused only. **Recommendation: include the preview section.**
-4. **`clean <ident>` sets `abandoned` in the checkpoint SoT and then reaps the dir; it does NOT project `abandoned` to the issue tracker.** Tracker projection of the terminal is out of scope (design §10 doesn't call for it; it's a future seam). The local `abandoned` write satisfies "the one explicit producer of the status" and lets `clean` exit `1` (the abandoned exit code) for scripts. A checkpoint whose ticket is already `done` is reaped (worktree + dir) WITHOUT rewriting status to `abandoned` (that would be a lie). **Recommendation: as stated.**
-
----
-
-## Ground truth the tasks rely on (verified against source)
-
-- **Every run journals to `parkDir/run.db`** (live-location, ENG-382) and `finishRunResult` never deletes the dir — so the state dir accumulates `run.db` for paused, `pr-ready`, AND `done` runs. Enumeration must classify all of them.
-- **Pause reason storage differs by kind:**
-  - `needs_you` → `pauseTicket` sets ticket `waiting` + a pending `human_resume` signal whose `reason` is the honest-note (`pause-ticket.ts:13-19`; `run-ticket.ts:113-114,136-154`). Reason = that signal's `reason`.
-  - `budget` → `dumpPark` writes `transcript.json` `{ dispatchId, cause, resetAt, ... }` (`park.ts:130-135`); ticket status is left as-is (NOT `waiting`), no signal. Reason ≈ `"out of budget"` + `resetAt`.
-  - `pr-ready` (leak) → ticket `stage === "merge"` && `status !== "done"` && a pending `human_merge_approval` signal (`run-ticket.ts:115`). No `transcript.json`, no `human_resume`.
-  - `done` → ticket `status === "done"`.
-- **Signatures** (exact): `parkDir(slug, ident)` (`park.ts:79`), `stateDir()` (`config/paths.ts:5`), `runLockStatus(dir): {pid, self} | null` (`run-lock.ts:27`), `listPending(db, ticketId): SignalRow[]` and `SignalRow.{signal_type,reason,requested_at}` (`signal.ts:4-33`), `getTicket(db,id)` / `setTicketStatus(db,id,status)` / `TicketRow.{ident,stage,status,branch_name,branch_prefix,type_label}` (`ticket.ts`), `branchNameFor({ident,branch_name,branch_prefix})` (`branch.ts:3`), `reconcileWorktree(repoPath,branch,staleWorktreePath|undefined,newWorktreePath,checkpointDir?): {freed,skipped}` (`worktree.ts:181`), `getLatestWorktreePath(db,ticketId): string|null` (`dispatch.ts:190`), `listWorktrees(repoPath): WorktreeRecord[]` and `WorktreeRecord.{path,branch,prunable}` (`worktree.ts:112,137`), `branchHeadSha(repoPath,branch)` (`worktree.ts:247`), module-private `git(args,cwd)` (`worktree.ts:6`, throws on non-zero). Profile via `loadProfileByConvention(slug)` / `slugForCwd()` (`config/discover.ts:33,48`); `Profile.{slug,targetRepo,defaultBranch}` (`profile.ts:116`).
-
----
-
-## File Structure
-
-- **Create `src/cli/checkpoints.ts`** — the read-only enumeration substrate. `Checkpoint` type + `classifyCheckpointDb(db)` (pure-ish, testable) + `listCheckpoints(root?)` (the walk). One responsibility: turn the state dir into a typed list. Consumed by both `ls` and `clean`.
-- **Create `src/cli/ls.ts`** — `lsCommand` + `lsImpl`: render the paused subset (+ stale-worktree preview) to stdout.
-- **Create `src/cli/clean.ts`** — `cleanCommand` + `cleanImpl`: single-ident reap (→ `abandoned`) and `--all` stale-`pr-ready` sweep. Owns the reap primitive `reapCheckpoint(...)`.
-- **Modify `src/index.ts`** — register `ls` + `clean` in `subCommands`.
-- **Modify `src/dispatch/worktree.ts`** — add `isBranchMergedInto(repoPath, branch, base): boolean` (git ancestry; a non-throwing exit-code git call).
-- **Tests:** `test/cli/checkpoints.test.ts`, `test/cli/ls.test.ts`, `test/cli/clean.test.ts`.
+- Every run journals to `parkDir/run.db` and `finishRunResult` never deletes the dir (`park.ts:62-76`), so the state dir accumulates `run.db` for `needs_you`, `budget`, `pr-ready`, AND `done` efforts.
+- Terminal classification (`run-ticket.ts:108-154`, `park.ts` `finishRunResult`/`dumpPark`):
+  - `needs_you` → pending `human_resume` signal (`reason` = honest-note) + ticket `waiting`.
+  - `budget` → `dumpPark` writes `transcript.json` `{cause,resetAt,…}`; NO signal, ticket not `waiting`.
+  - `pr-ready` → ticket `stage==="merge"` && `status!=="done"` && pending `human_merge_approval`; process exits (no daemon).
+  - `done` → ticket `status==="done"`.
+- Re-run branch handling: `ensureWorktree` uses `git worktree add -B <branch>` (`worktree.ts:51,59`) — a stale **local** branch is force-reset, never a blocker. The push is a plain `git push origin <branch>` (`github.ts:106`) — a stale **remote** branch blocks a divergent redo (→ ENG-387).
+- Signatures (exact): `parkDir` (`park.ts:79`), `stateDir()` (`config/paths.ts:5`), `runLockStatus(dir):{pid,self}|null` (`run-lock.ts:27`), `listPending`/`SignalRow.{signal_type,reason}` (`signal.ts:4-31`), `getTicket`/`TicketRow.{ident,stage,status,branch_name,branch_prefix}` (`ticket.ts`), `branchNameFor({ident,branch_name,branch_prefix})` (`branch.ts:3`), `reconcileWorktree(repoPath,branch,stale?|undefined,newWorktreePath,checkpointDir?):{freed,skipped}` (`worktree.ts:181`), `getLatestWorktreePath(db,ticketId)` (`dispatch.ts:190`), `Profile.{slug,targetRepo,defaultBranch}` (`profile.ts:116`), `loadProfileByConvention(slug)`/`slugForCwd()` (`config/discover.ts:33,48`), `guard`/`formatMessage` (`output.ts:4,30`), `openDb` (`client.ts:4`), `migrate` (`db/migrate.ts`). `subCommands` map at `index.ts:25`.
 
 ---
 
@@ -58,10 +52,11 @@ These are design judgments the plan commits to; the design doc §12 left the fir
 
 **Files:**
 - Create: `src/cli/checkpoints.ts`
+- Create: `test/helpers/checkpoint.ts` (the shared `seedCheckpoint` fixture — extracted so Tasks 2–5 reuse it)
 - Test: `test/cli/checkpoints.test.ts`
 
 **Interfaces:**
-- Consumes: `stateDir()` (`config/paths.ts`), `runLockStatus` (`run-lock.ts`), `listPending`/`SignalRow` (`signal.ts`), `getTicket`/`TicketRow` (`ticket.ts`), `branchNameFor` (`branch.ts`), `bun:sqlite` `Database`, `node:fs` (`readdirSync`, `statSync`, `existsSync`, `readFileSync`).
+- Consumes: `stateDir`, `runLockStatus`, `listPending`/`SignalRow`, `getTicket`/`TicketRow`, `branchNameFor`, `bun:sqlite` `Database`, `node:fs`.
 - Produces:
   ```ts
   export type CheckpointKind = "needs_you" | "budget" | "pr-ready" | "done" | "other";
@@ -74,40 +69,36 @@ These are design judgments the plan commits to; the design doc §12 left the fir
     status: string;         // ticket.status
     stage: string;          // ticket.stage
     branch: string;         // branchNameFor(ticket)
-    kind: CheckpointKind;
-    reason: string | null;  // honest-note (needs_you) / "out of budget…" / "PR open, awaiting merge" / null
+    kind: CheckpointKind;   // the design §5 "reason"
+    note: string | null;    // the design §5 "honest-note" (needs_you detail / "out of budget…" / null)
     ageMs: number;          // now - run.db mtime
     live: boolean;          // runLockStatus(dir) is a live, non-self process
   }
-  export function classifyCheckpointDb(db: Database): { ticketId: number; status: string; stage: string; branch: string; kind: CheckpointKind; reason: string | null } | null;
+  export function classifyCheckpointDb(db: Database, dir: string):
+    { ticketId: number; status: string; stage: string; branch: string; kind: CheckpointKind; note: string | null } | null;
   export function listCheckpoints(root?: string): Checkpoint[];
   ```
-  `listCheckpoints` walks `root ?? stateDir()`: for each entry that is a directory (skip files such as the top-level `styre.db`), treat it as a `<slug>` dir; for each sub-entry that is a directory containing `run.db`, build one `Checkpoint`. Any unreadable / malformed `run.db` is skipped (never throws). Ordering: newest-first by `ageMs` ascending is applied by callers, not here (return in walk order).
+  `listCheckpoints` walks `root ?? stateDir()`: each directory entry is a `<slug>`; each sub-dir containing `run.db` is one effort. Unreadable/malformed `run.db` → skipped (never throws). Returned in walk order (callers sort).
 
-- [ ] **Step 1: Write the failing test — classification of the three pause kinds + done**
+- [ ] **Step 1: Write `test/helpers/checkpoint.ts` (fixture) then the failing test**
 
-Use the real harness to produce genuine checkpoints under a temp `XDG_STATE_HOME`, then enumerate. `test/helpers/run-harness.ts` provides `runNeedsYouTicket()` (pending `human_resume`), `runParkedTicket()` (budget park with `transcript.json`), and `runFreshTicket()` (a live-location checkpoint you can drive). In `test/cli/checkpoints.test.ts`:
-
+`test/helpers/checkpoint.ts`:
 ```ts
-import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { migrate } from "../../src/db/migrate.ts";
 import { openDb } from "../../src/db/client.ts";
+import { migrate } from "../../src/db/migrate.ts";
 import { insertProject } from "../../src/db/repos/project.ts";
-import { insertTicket, setTicketStage, setTicketStatus } from "../../src/db/repos/ticket.ts";
-import { insertPending } from "../../src/db/repos/signal.ts";
-import { listCheckpoints } from "../../src/cli/checkpoints.ts";
+import { insertTicket } from "../../src/db/repos/ticket.ts";
 
-// Build a checkpoint dir <root>/<slug>/<ident>/run.db with a single ticket in a chosen shape.
-function seedCheckpoint(
+/** Build <root>/<slug>/<ident>/run.db with a single ticket, shaped by `shape`. Returns the dir. */
+export function seedCheckpoint(
   root: string,
   slug: string,
   ident: string,
   shape: (db: Database, ticketId: number) => void,
-): void {
+): string {                       // ← real return type (rev 1's `: void` tripped typecheck)
   const dir = join(root, slug, ident);
   mkdirSync(dir, { recursive: true });
   const dbPath = join(dir, "run.db");
@@ -120,11 +111,21 @@ function seedCheckpoint(
   return dir;
 }
 ```
-*(Confirm the exact `insertProject`/`insertTicket` signatures in `src/db/repos/project.ts` / `ticket.ts` when writing — mirror what `test/helpers/db.ts` / `git-project.ts` already pass. If they differ, use the harness's `runNeedsYouTicket`/`runParkedTicket` instead of hand-seeding.)*
+*(Confirm `insertProject`/`insertTicket` arg shapes against `src/db/repos/project.ts` / `ticket.ts` — the review verified `insertProject(db,{slug,targetRepo,defaultBranch})` and `insertTicket(db,{projectId,ident,title})`. If they differ, mirror `test/helpers/git-project.ts`.)*
 
+`test/cli/checkpoints.test.ts`:
 ```ts
+import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { setTicketStage, setTicketStatus } from "../../src/db/repos/ticket.ts";
+import { insertPending } from "../../src/db/repos/signal.ts";
+import { listCheckpoints } from "../../src/cli/checkpoints.ts";
+import { seedCheckpoint } from "../helpers/checkpoint.ts";
+
 describe("listCheckpoints", () => {
-  test("classifies needs_you, budget, pr-ready, and done checkpoints", () => {
+  test("classifies needs_you, pr-ready, and done efforts", () => {
     const root = mkdtempSync(join(tmpdir(), "styre-ckpt-"));
     try {
       seedCheckpoint(root, "proj", "ENG-1", (db, id) => {
@@ -139,12 +140,11 @@ describe("listCheckpoints", () => {
 
       const found = listCheckpoints(root);
       const by = (ident: string) => found.find((c) => c.ident === ident);
-
       expect(by("ENG-1")?.kind).toBe("needs_you");
-      expect(by("ENG-1")?.reason).toBe("needs you: composer not installed");
+      expect(by("ENG-1")?.note).toBe("needs you: composer not installed");
       expect(by("ENG-2")?.kind).toBe("pr-ready");
       expect(by("ENG-3")?.kind).toBe("done");
-      expect(found.every((c) => c.live === false)).toBe(true); // no live locks in the temp tree
+      expect(found.every((c) => c.live === false)).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -152,28 +152,32 @@ describe("listCheckpoints", () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify FAIL**
-
-Run: `bun test test/cli/checkpoints.test.ts`
-Expected: FAIL — `listCheckpoints` / `src/cli/checkpoints.ts` does not exist.
+- [ ] **Step 2: Run to verify FAIL** — `src/cli/checkpoints.ts` does not exist.
 
 - [ ] **Step 3: Implement `src/cli/checkpoints.ts`**
 
+Classification order (matches real `driveToTerminal` precedence): `done` (status) → `needs_you` (pending `human_resume`) → `pr-ready` (`stage==="merge" && status!=="done" && pending human_merge_approval`) → `budget` (`transcript.json` present) → `other`.
 ```ts
 import { Database } from "bun:sqlite";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { branchNameFor } from "../agent/branch.ts";
 import { stateDir } from "../config/paths.ts";
-import { getTicket } from "../db/repos/ticket.ts";
 import { listPending } from "../db/repos/signal.ts";
+import { getTicket } from "../db/repos/ticket.ts";
 import { runLockStatus } from "./run-lock.ts";
 
 export type CheckpointKind = "needs_you" | "budget" | "pr-ready" | "done" | "other";
-export interface Checkpoint { /* …as declared in Interfaces… */ }
+export interface Checkpoint { /* …as declared above… */ }
 
 function singleTicketId(db: Database): number | null {
   return db.query<{ id: number }, []>("SELECT id FROM ticket ORDER BY id LIMIT 1").get()?.id ?? null;
+}
+function budgetNote(dir: string): string {
+  try {
+    const j = JSON.parse(readFileSync(join(dir, "transcript.json"), "utf8")) as { resetAt?: string | null };
+    return j.resetAt ? `out of budget (resets ${j.resetAt})` : "out of budget";
+  } catch { return "out of budget"; }
 }
 
 export function classifyCheckpointDb(db: Database, dir: string) {
@@ -186,53 +190,33 @@ export function classifyCheckpointDb(db: Database, dir: string) {
   const humanResume = pending.find((s) => s.signal_type === "human_resume");
   const prReady = t.stage === "merge" && t.status !== "done"
     && pending.some((s) => s.signal_type === "human_merge_approval");
-
-  let kind: CheckpointKind;
-  let reason: string | null;
-  if (t.status === "done") { kind = "done"; reason = null; }
-  else if (humanResume) { kind = "needs_you"; reason = humanResume.reason; }
-  else if (prReady) { kind = "pr-ready"; reason = "PR open, awaiting merge"; }
-  else if (existsSync(join(dir, "transcript.json"))) {
-    kind = "budget";
-    reason = budgetReasonFrom(join(dir, "transcript.json"));
-  } else { kind = "other"; reason = null; }
-
-  return { ticketId, status: t.status, stage: t.stage, branch, kind, reason };
-}
-
-function budgetReasonFrom(transcriptPath: string): string {
-  try {
-    const j = JSON.parse(readFileSync(transcriptPath, "utf8")) as { resetAt?: string | null };
-    return j.resetAt ? `out of budget (resets ${j.resetAt})` : "out of budget";
-  } catch {
-    return "out of budget";
-  }
+  let kind: CheckpointKind; let note: string | null;
+  if (t.status === "done") { kind = "done"; note = null; }
+  else if (humanResume) { kind = "needs_you"; note = humanResume.reason; }
+  else if (prReady) { kind = "pr-ready"; note = "PR open, awaiting merge"; }
+  else if (existsSync(join(dir, "transcript.json"))) { kind = "budget"; note = budgetNote(dir); }
+  else { kind = "other"; note = null; }
+  return { ticketId, status: t.status, stage: t.stage, branch, kind, note };
 }
 
 export function listCheckpoints(root: string = stateDir()): Checkpoint[] {
   const out: Checkpoint[] = [];
   let slugs: string[];
-  try { slugs = readdirSync(root); } catch { return out; } // no state dir yet
+  try { slugs = readdirSync(root); } catch { return out; }
   const now = Date.now();
   for (const slug of slugs) {
     const slugDir = join(root, slug);
     let idents: string[];
-    try {
-      if (!statSync(slugDir).isDirectory()) continue;
-      idents = readdirSync(slugDir);
-    } catch { continue; }
+    try { if (!statSync(slugDir).isDirectory()) continue; idents = readdirSync(slugDir); } catch { continue; }
     for (const ident of idents) {
       const dir = join(slugDir, ident);
       const dbPath = join(dir, "run.db");
       if (!existsSync(dbPath)) continue;
       let cls: ReturnType<typeof classifyCheckpointDb> = null;
-      try {
-        const db = new Database(dbPath, { readonly: true });
-        try { cls = classifyCheckpointDb(db, dir); } finally { db.close(); }
-      } catch { continue; } // unreadable / malformed → skip
+      try { const db = new Database(dbPath, { readonly: true }); try { cls = classifyCheckpointDb(db, dir); } finally { db.close(); } }
+      catch { continue; }
       if (cls === null) continue;
-      let ageMs = 0;
-      try { ageMs = now - statSync(dbPath).mtimeMs; } catch { ageMs = 0; }
+      let ageMs = 0; try { ageMs = now - statSync(dbPath).mtimeMs; } catch { ageMs = 0; }
       const lock = runLockStatus(dir);
       out.push({ slug, ident, dir, dbPath, ...cls, ageMs, live: lock !== null && !lock.self });
     }
@@ -240,16 +224,12 @@ export function listCheckpoints(root: string = stateDir()): Checkpoint[] {
   return out;
 }
 ```
-*(Finalize the `Checkpoint` interface body to match. `classifyCheckpointDb` takes `dir` for the `transcript.json` probe — adjust the exported signature in Interfaces accordingly, or split the fs-probe out if the reviewer prefers a pure DB classifier; keep the DB reads pure and the fs read thin.)*
 
-- [ ] **Step 4: Run GREEN + full gates**
-
-Run: `bun test test/cli/checkpoints.test.ts` → PASS. Then `bun test`, `bun run lint`, `bun run typecheck` → all green.
+- [ ] **Step 4: Run GREEN + full gates** (`bun test test/cli/checkpoints.test.ts`, then `bun test`, `bun run lint`, `bun run typecheck`).
 
 - [ ] **Step 5: Commit**
-
 ```bash
-git add src/cli/checkpoints.ts test/cli/checkpoints.test.ts
+git add src/cli/checkpoints.ts test/helpers/checkpoint.ts test/cli/checkpoints.test.ts
 git commit -m "feat(housekeeping): listCheckpoints enumeration substrate (ENG-386)"
 ```
 
@@ -257,207 +237,111 @@ git commit -m "feat(housekeeping): listCheckpoints enumeration substrate (ENG-38
 
 ### Task 2: `styre ls`
 
-**Files:**
-- Create: `src/cli/ls.ts`
-- Modify: `src/index.ts` (register `ls`)
-- Test: `test/cli/ls.test.ts`
+**Files:** Create `src/cli/ls.ts`; Modify `src/index.ts`; Test `test/cli/ls.test.ts`.
 
-**Interfaces:**
-- Consumes: `listCheckpoints`/`Checkpoint` (Task 1), `guard` (`output.ts`).
-- Produces: `lsCommand` (citty) + `export async function lsImpl(opts?: { root?: string }): Promise<void>` writing a human table to **stdout**. Paused section = checkpoints with `kind` in `{needs_you, budget}`, newest-first (`ageMs` ascending); stale section = `kind === "pr-ready"`. Empty state prints a friendly line. Each paused row: `<ident>  <reason>  <age>` and a `resume: styre run --resume <ident> --slug <slug>` hint. `age` rendered via a small `humanAge(ms)` helper (e.g. `3h`, `2d`).
+**Interfaces:** Consumes `listCheckpoints`/`Checkpoint`, `guard`. Produces `lsCommand` + `export async function lsImpl(opts?: { root?: string }): Promise<void>` writing to **stdout**. Resumable section = `kind ∈ {needs_you, budget}`, newest-first (`ageMs` asc), each with a `resume: styre run --resume <ident> --slug <slug>` hint (matches `run.ts:95,102,339`). Finished-leftovers section = `kind ∈ {pr-ready, done, other}`. `humanAge(ms)` helper renders `12m`/`3h`/`2d`.
 
-- [ ] **Step 1: Write the failing test**
-
-```ts
-import { describe, expect, test } from "bun:test";
-// …seedCheckpoint helper as in Task 1 (extract to test/helpers if duplicated)…
-import { lsImpl } from "../../src/cli/ls.ts";
-
-test("ls lists paused checkpoints with reason and resume hint", async () => {
-  const root = mkdtempSync(join(tmpdir(), "styre-ls-"));
-  const out: string[] = [];
-  const orig = process.stdout.write.bind(process.stdout);
-  (process.stdout.write as unknown) = (s: string) => { out.push(String(s)); return true; };
-  try {
-    seedCheckpoint(root, "proj", "ENG-1", (db, id) => {
-      setTicketStatus(db, id, "waiting");
-      insertPending(db, { ticketId: id, signalType: "human_resume", reason: "needs you: composer not installed" });
-    });
-    await lsImpl({ root });
-    const text = out.join("");
-    expect(text).toContain("ENG-1");
-    expect(text).toContain("needs you: composer not installed");
-    expect(text).toContain("styre run --resume ENG-1");
-  } finally {
-    (process.stdout.write as unknown) = orig;
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-```
-*(Mirror the stdout-capture idiom used by existing CLI tests, e.g. `test/cli/setup.test.ts`; restore in `finally`.)*
-
-- [ ] **Step 2: Run to verify FAIL** — `src/cli/ls.ts` does not exist.
-
-- [ ] **Step 3: Implement `src/cli/ls.ts` + register in `src/index.ts`**
-
-```ts
-import { defineCommand } from "citty";
-import { listCheckpoints } from "./checkpoints.ts";
-import { guard } from "./output.ts";
-
-function humanAge(ms: number): string {
-  const m = Math.floor(ms / 60000);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  return `${Math.floor(h / 24)}d`;
-}
-
-export async function lsImpl(opts: { root?: string } = {}): Promise<void> {
-  const all = listCheckpoints(opts.root);
-  const paused = all
-    .filter((c) => c.kind === "needs_you" || c.kind === "budget")
-    .sort((a, b) => a.ageMs - b.ageMs);
-  const stale = all.filter((c) => c.kind === "pr-ready");
-
-  const lines: string[] = [];
-  if (paused.length === 0) lines.push("No paused checkpoints.");
-  else {
-    lines.push("Paused checkpoints:");
-    for (const c of paused) {
-      lines.push(`  ${c.ident}  [${c.kind}, ${humanAge(c.ageMs)}]  ${c.reason ?? ""}`.trimEnd());
-      lines.push(`    resume: styre run --resume ${c.ident} --slug ${c.slug}`);
-    }
-  }
-  if (stale.length > 0) {
-    lines.push("");
-    lines.push("Stale pr-ready worktrees (reap with `styre clean --all`):");
-    for (const c of stale) lines.push(`  ${c.ident}  [${humanAge(c.ageMs)}]  ${c.reason ?? ""}`.trimEnd());
-  }
-  process.stdout.write(`${lines.join("\n")}\n`);
-}
-
-export const lsCommand = defineCommand({
-  meta: { name: "ls", description: "List paused checkpoints (ticket, reason, age, resume hint)." },
-  run: () => guard("ls", () => lsImpl()),
-});
-```
-Register in `src/index.ts`: `import { lsCommand } from "./cli/ls.ts";` and add `ls: lsCommand,` to `subCommands`.
-
-- [ ] **Step 4: Run GREEN + full gates** (`bun test test/cli/ls.test.ts`, then `bun test`, `bun run lint`, `bun run typecheck`).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/cli/ls.ts src/index.ts test/cli/ls.test.ts
-git commit -m "feat(housekeeping): styre ls lists paused checkpoints (ENG-386)"
-```
+- [ ] **Step 1: Write the failing test** — seed a `needs_you` effort under a temp `root`, capture `process.stdout.write` (restore in `finally`, per `test/cli/setup.test.ts`), assert the output contains the ident, the honest-note, and `styre run --resume ENG-1`.
+- [ ] **Step 2: Run FAIL** — `src/cli/ls.ts` absent.
+- [ ] **Step 3: Implement** `lsImpl` (columns: `ident  [kind, age]  note` + resume hint per resumable row; a "Stale/finished leftovers (reap with `styre clean --all`)" section for the rest; "No paused efforts." when empty) and register `ls: lsCommand` in `index.ts`.
+- [ ] **Step 4: GREEN + full gates.**
+- [ ] **Step 5: Commit** `feat(housekeeping): styre ls lists resumable efforts + leftover preview (ENG-386)`.
 
 ---
 
-### Task 3: `styre clean <ident>` — targeted reap → `abandoned`
+### Task 3: `styre clean <ident>` — reap one effort's disk artifacts (no status change)
 
-**Files:**
-- Create: `src/cli/clean.ts`
-- Modify: `src/index.ts` (register `clean`)
-- Test: `test/cli/clean.test.ts`
+**Files:** Create `src/cli/clean.ts`; Modify `src/index.ts`; Test `test/cli/clean.test.ts`.
 
-**Interfaces:**
-- Consumes: `parkDir` (`park.ts`), `runLockStatus` (`run-lock.ts`), `reconcileWorktree`/`getLatestWorktreePath`, `branchNameFor`, `getTicket`/`setTicketStatus`, profile loaders (`loadProfileByConvention`/`slugForCwd` from `config/discover.ts`), `StyreError`/`EXIT` (`errors.ts`), `guard`.
-- Produces: `cleanCommand` (citty; positional `ident?`, boolean `--all`, optional `--slug`/`--profile`) + `cleanImpl(args)`. This task implements the **single-ident** path and the shared `reapCheckpoint(db|null, targetRepo, checkpoint)` helper (frees worktree + deletes dir). `--all` is Task 4.
-- `reapCheckpoint(targetRepo, c)`: `reconcileWorktree(targetRepo, c.branch, getLatestWorktreePath(db, c.ticketId) ?? undefined, join(c.dir, "wt"), c.dir)` then `rmSync(c.dir, { recursive: true, force: true })`. (The `join(c.dir,"wt")` sentinel is a non-repo path used only for reconcile's in-place `=== repoPath` check — same idiom as ENG-385 Task 4.)
+**Interfaces:** Consumes `parkDir`, `runLockStatus`, `reconcileWorktree`/`getLatestWorktreePath`, `branchNameFor`, `getTicket`, profile loaders, `StyreError`/`EXIT`, `guard`. Produces `cleanCommand` (positional `ident?`, booleans `all`/`purge`, string `slug`/`profile`) + `cleanImpl(args, opts?)`. This task implements the **single-ident** path and the shared `reapEffort(targetRepo, c: Checkpoint | {branch;dir;ticketId;dbPath})` helper.
 
-Single-ident `cleanImpl` flow:
-1. Resolve `slug` (`args.slug ?? slugForCwd()`), `profile` (`loadProfileByConvention(slug)`), `targetRepo`.
-2. `dir = parkDir(slug, ident)`; if `!existsSync(join(dir,"run.db"))` → `StyreError` "no checkpoint for `<ident>`" (exit `EXIT.USAGE` 64).
-3. `const lock = runLockStatus(dir); if (lock && !lock.self)` → `StyreError` refuse "a run is in progress (pid …)" (exit 65, mirror the resume refuse code) — do NOT reap a live run.
-4. Open the db read-write (`openDb(join(dir,"run.db"))`), `id = singleTicketId(db)`, `t = getTicket(db,id)`; if `t.status !== "done"` `setTicketStatus(db, id, "abandoned")`; read `getLatestWorktreePath(db,id)` (for reconcile) BEFORE closing; `db.close()`.
-5. `reapCheckpoint(targetRepo, {…branch, dir, ticketId})` (reconcile + rmSync).
-6. Print confirmation to stdout; set `process.exitCode = 1` (abandoned) only when a non-done ticket was abandoned — otherwise 0 (a done-checkpoint gc). *(Flag in review: is exit 1 desired for a manual clean, or always 0? Recommend exit 1 to match `abandoned`'s terminal code, but this is worth confirming.)*
+`reapEffort(targetRepo, c)`: read `stale = <the effort's recorded worktree>` (open the db read-only for `getLatestWorktreePath(db, c.ticketId)`, or reuse an already-open handle), then `reconcileWorktree(targetRepo, c.branch, stale ?? undefined, join(c.dir,"wt"), c.dir)` (the `join(c.dir,"wt")` sentinel is a non-repo path used only for reconcile's in-place `=== repoPath` check — verified inert, same idiom as ENG-385 Task 4), then `rmSync(c.dir, { recursive: true, force: true })`.
 
-- [ ] **Step 1: Write the failing test — clean abandons + frees worktree + deletes dir**
+Single-ident `cleanImpl` flow (NO `setTicketStatus` anywhere):
+1. Resolve `slug` (`args.slug ?? slugForCwd()`), `profile` (`opts?.profile ?? loadProfileByConvention(slug)`), `targetRepo = opts?.targetRepo ?? profile.targetRepo`, `root = opts?.root` (defaults inside `parkDir`/`stateDir`).
+2. `dir = parkDir(slug, ident)`; if `!existsSync(join(dir,"run.db"))` → `StyreError` "no styre effort on `<ident>`" (exit `EXIT.USAGE` 64).
+3. `const lock = runLockStatus(dir); if (lock && !lock.self)` → `StyreError` "a run is in progress (pid …); refusing to clean" (exit 65) — before any deletion.
+4. Build the `Checkpoint` for `dir` (reuse `classifyCheckpointDb` or a thin read for `branch`/`ticketId`), then `reapEffort(targetRepo, c)`.
+5. Print `styre clean: reaped <ident> (freed worktree, removed checkpoint)` to stdout; exit 0.
 
-Build a checkpoint whose ticket is `waiting` and a real styre-owned worktree holding its branch (mirror `test/cli/run-live-location.test.ts`'s non-prunable-leftover construction: a temp git repo as `targetRepo`, `git worktree add -B <branch>` into a `mkdtempSync(…, "styre-wt-")` path). Assert after `cleanImpl({ ident, slug, root })`: the worktree is gone from `listWorktrees(targetRepo)`, the checkpoint dir no longer exists, and (re-reading before deletion via a spy, or asserting exit code) the ticket was set `abandoned`. Also a **refuse** test: seed a live `run.lock` (`writeFileSync(join(dir,"run.lock"), String(process.ppid))`) → `cleanImpl` refuses (exit 65), worktree + dir untouched.
+*(Test seam: add explicit `opts?: { root?: string; targetRepo?: string; profile?: Profile }` to `cleanImpl` — do NOT claim to "mirror `runImpl`", which has no such params (review nit). Inject a temp state root + a real temp git `targetRepo`.)*
 
-*(The test must inject the state root + targetRepo. Add optional `root?`/`targetRepo?` seams to `cleanImpl` args exactly as `runImpl` exposes test seams — see `run.ts` `runImpl` optional params — rather than mutating `process.env`. Confirm the cleanest seam when writing; prefer an explicit `root`/`profile` override param over env mutation.)*
-
-- [ ] **Step 2: Run to verify FAIL** — `src/cli/clean.ts` does not exist.
-
-- [ ] **Step 3: Implement `src/cli/clean.ts` (single-ident path) + register.**
-
-Follow the flow above. `cleanCommand` args: `ident: { type: "positional", required: false }`, `all: { type: "boolean" }`, `slug: { type: "string" }`, `profile: { type: "string" }`. `run: (ctx) => guard("clean", () => cleanImpl(ctx.args as unknown as CleanArgs))`. If neither `ident` nor `--all` → `StyreError` usage (exit 64). Register `clean: cleanCommand` in `src/index.ts`.
-
-- [ ] **Step 4: Run GREEN + full gates.**
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/cli/clean.ts src/index.ts test/cli/clean.test.ts
-git commit -m "feat(housekeeping): styre clean <ident> reaps a checkpoint to abandoned (ENG-386)"
-```
+- [ ] **Step 1: Failing test** — a `needs_you`/`pr-ready` effort under temp `root`, with a real styre-owned worktree holding its branch in a temp git `targetRepo` (`git worktree add -B <branch>` into a `mkdtempSync(…, "styre-wt-")` path — mirror `test/cli/run-live-location.test.ts`). After `cleanImpl({ ident, slug }, { root, targetRepo })`: worktree gone from `listWorktrees(targetRepo)` AND checkpoint dir gone. Plus a **refuse** test: seed a live `run.lock` (`writeFileSync(join(dir,"run.lock"), String(process.ppid))`) → refuses (exit 65), worktree + dir untouched.
+- [ ] **Step 2: Run FAIL** — `src/cli/clean.ts` absent.
+- [ ] **Step 3: Implement** the single-ident path + `reapEffort`; register `clean: cleanCommand`. If neither `ident` nor `--all` → `StyreError` usage (64). If `args.all && args.purge` → `StyreError` "--purge targets a single effort" (64) — the Task 5 guard, added now so the arg contract is complete.
+- [ ] **Step 4: GREEN + full gates.**
+- [ ] **Step 5: Commit** `feat(housekeeping): styre clean <ident> reaps one effort's disk artifacts (ENG-386)`.
 
 ---
 
-### Task 4: Stale `pr-ready` reap + `styre clean --all`
+### Task 4: `styre clean --all` — Scope B (reap finished leftovers, protect resumable + live)
 
-**Files:**
-- Modify: `src/dispatch/worktree.ts` (add `isBranchMergedInto`)
-- Modify: `src/cli/clean.ts` (the `--all` branch)
-- Test: `test/cli/clean.test.ts` (extend), `test/dispatch/worktree*.test.ts` (extend, for `isBranchMergedInto`)
+**Files:** Modify `src/cli/clean.ts`; Test `test/cli/clean.test.ts` (extend).
+
+**Interfaces:** `cleanImpl` `--all` branch: `listCheckpoints(root)`, keep `kind ∈ {pr-ready, done, other}` AND `!live`, `reapEffort(targetRepo, c)` each. Skip `needs_you`/`budget` (resumable) and any `live`. Report `reaped N finished leftover(s); kept M resumable (clean them by name)`. Exit 0. NO merge/age heuristic.
+
+- [ ] **Step 1: Failing test** — seed three efforts under one `root`+`targetRepo`: a `pr-ready` (with worktree), a `done` (with worktree), and a `needs_you` (with worktree). `cleanImpl({ all: true, slug }, { root, targetRepo })` → the `pr-ready` and `done` worktrees + dirs are gone; the `needs_you` worktree + dir **survive**. Assert the counts line.
+- [ ] **Step 2: Run FAIL.**
+- [ ] **Step 3: Implement** the `--all` branch.
+- [ ] **Step 4: GREEN + full gates.**
+- [ ] **Step 5: Commit** `feat(housekeeping): styre clean --all reaps finished leftovers, protects resumable (ENG-386)`.
+
+---
+
+### Task 5: `--purge` — also delete the local + remote branch (silent when absent)
+
+**Files:** Modify `src/dispatch/worktree.ts` (add branch-delete helpers); Modify `src/cli/clean.ts` (`--purge` after reap); Test `test/cli/clean.test.ts` (extend), `test/dispatch/*worktree*.test.ts` (extend).
 
 **Interfaces:**
-- Produces: `export function isBranchMergedInto(repoPath: string, branch: string, base: string): boolean` — true iff `branch` is an ancestor of `base` (the PR merged). Implemented with a non-throwing exit-code git call (`git merge-base --is-ancestor <branch> <base>`; exit 0 → true, 1 → false, other → false). The existing `git()` throws on non-zero, so add a small local `gitExitCode(args, cwd): number` (via `Bun.spawnSync(...).exitCode`) or inline it — do NOT reuse `git()` here.
-- `cleanImpl` `--all` branch: `listCheckpoints(root)`, filter `kind === "pr-ready"`, keep those where `isBranchMergedInto(targetRepo, c.branch, profile.defaultBranch)`, and `reapCheckpoint(targetRepo, c)` each. Report `reaped N stale pr-ready worktree(s)` (and how many merged-checks were skipped as still-open). `--all` never abandons and never touches paused checkpoints (Decision 2). Exit 0.
+- Produces in `worktree.ts`:
+  ```ts
+  /** Delete the local branch if it exists; a missing branch is a silent success. */
+  export function deleteLocalBranch(repoPath: string, branch: string): void {
+    Bun.spawnSync(["git", "branch", "-D", branch], { cwd: repoPath }); // ignore exit (absent = fine)
+  }
+  /** Delete the remote branch (closing its PR) if it exists; a missing remote ref is a silent
+   *  success. A real failure (auth/network) is surfaced as a non-fatal warning, never thrown —
+   *  the effort reap has already succeeded. */
+  export function deleteRemoteBranch(repoPath: string, branch: string): void {
+    const res = Bun.spawnSync(["git", "push", "origin", "--delete", branch], { cwd: repoPath });
+    if (res.exitCode === 0) return;
+    const err = res.stderr.toString();
+    if (/remote ref does not exist|not found|does not exist/i.test(err)) return; // silent no-op
+    process.stderr.write(`styre clean: could not delete remote branch ${branch}: ${err.trim()}\n`);
+  }
+  ```
+- `cleanImpl` (single-ident path only): after `reapEffort` succeeds, if `args.purge` → `deleteLocalBranch(targetRepo, c.branch)` then `deleteRemoteBranch(targetRepo, c.branch)`. (`--all --purge` is already rejected in Task 3.) Order matters: the worktree is freed by `reapEffort` first, so the local branch is no longer checked out and `-D` succeeds.
 
-- [ ] **Step 1: Write the failing test — `isBranchMergedInto`**
-
-In a temp git repo: create `main`, branch `feat/x`, commit on it, `git checkout main && git merge --no-ff feat/x` → `isBranchMergedInto(repo, "feat/x", "main")` is `true`. A second branch `feat/y` with an unmerged commit → `false`. A non-existent branch → `false`.
-
-- [ ] **Step 2: Run FAIL** — `isBranchMergedInto` undefined.
-
-- [ ] **Step 3: Implement `isBranchMergedInto` in `worktree.ts`.**
-
-```ts
-/** True iff `branch` is an ancestor of `base` — i.e. the branch's work is already merged into
- *  `base`, so a worktree still holding it is safe to reap. Non-throwing: a missing branch or any
- *  git error is treated as "not merged" (false). */
-export function isBranchMergedInto(repoPath: string, branch: string, base: string): boolean {
-  const res = Bun.spawnSync(["git", "merge-base", "--is-ancestor", branch, base], { cwd: repoPath });
-  return res.exitCode === 0;
-}
-```
-
-- [ ] **Step 4: Write the failing test — `clean --all` reaps merged, skips unmerged**
-
-Two `pr-ready` checkpoints (`stage="merge"`, pending `human_merge_approval`), each with a real styre-owned worktree in the same `targetRepo`; one branch merged into `main`, one not. `cleanImpl({ all: true, slug, root, targetRepo })` → the merged one's worktree + dir are gone; the unmerged one's worktree + dir remain; no paused checkpoint is touched (add a `needs_you` checkpoint and assert it survives).
-
-- [ ] **Step 5: Run FAIL → Implement the `--all` branch in `cleanImpl` → GREEN.**
-
+- [ ] **Step 1: Failing test — `deleteLocalBranch`/`deleteRemoteBranch` silent-pass + effect.** In a temp git repo with a bare "origin" remote (`git init --bare` + `git remote add origin` + push): (a) delete an existing local+remote branch → both gone; (b) delete a branch that exists in neither → **no throw, no error output** (silent). Assert the remote ref list before/after.
+- [ ] **Step 2: Run FAIL** — helpers absent.
+- [ ] **Step 3: Implement** the two helpers in `worktree.ts`.
+- [ ] **Step 4: Failing test — `clean <ident> --purge`.** An effort whose branch exists locally + on a bare origin, with a styre-owned worktree. `cleanImpl({ ident, slug, purge: true }, { root, targetRepo })` → worktree + checkpoint gone AND local + remote branch gone. A second case: same but with NO branch anywhere → `--purge` still reaps the effort and does not error (silent-pass). Assert `--all --purge` throws a usage error (exit 64).
+- [ ] **Step 5: Run FAIL → Implement the `--purge` tail in `cleanImpl` → GREEN.**
 - [ ] **Step 6: Full gates + commit**
-
 ```bash
 git add src/dispatch/worktree.ts src/cli/clean.ts test/cli/clean.test.ts test/dispatch/*worktree*.test.ts
-git commit -m "feat(housekeeping): styre clean --all reaps stale (merged) pr-ready worktrees (ENG-386)"
+git commit -m "feat(housekeeping): styre clean --purge deletes local+remote branch, silent when absent (ENG-386)"
 ```
 
 ---
 
 ## Self-Review
 
-**Spec coverage (ENG-386 AC + design §5/§10/§11 ticket 6):**
-- `styre ls` lists paused runs with reason + resume hint → Task 2. ✓ (+ stale preview, Decision 3)
-- `styre clean <ident>` abandons the ticket + frees its worktree → Task 3. ✓
-- `styre clean --all` sweeps → Task 4 (stale pr-ready, Decision 2). ✓
-- Stale `pr-ready` worktrees reaped → Task 4 (merged-into-default, Decision 1). ✓
-- `abandoned` gets its single explicit producer → Task 3 `setTicketStatus(…, "abandoned")`. ✓
-- `bun run lint` + `bun test` (+ `typecheck`) green → every task's gate. ✓
+**Spec coverage (ENG-386 AC + design §5/§10, revised):**
+- `styre ls` lists resumable efforts + reason + resume hint → Task 2. ✓ (+ leftover preview)
+- `styre clean <ident>` frees its worktree (+ checkpoint), NO status change → Task 3. ✓
+- `styre clean --all` sweeps finished leftovers, protects resumable → Task 4 (Scope B). ✓
+- `styre clean <ident> --purge` deletes local+remote branch, silent when absent → Task 5. ✓
+- `abandoned` gets NO producer (design §3.5 revised) → nothing sets ticket status. ✓
+- No merge/age heuristic (squash-merge finding) → removed; ENG-387 owns the push-side fix. ✓
+- `bun run lint` + `bun test` + `typecheck` green → every task's gate. ✓
 
-**Placeholder scan:** the "confirm when writing" notes (exact `insertProject`/`insertTicket` seed signatures in Task 1; the `cleanImpl` test-seam shape in Task 3; the `Checkpoint` interface body) each cite their source file and a concrete fallback (use the harness; mirror `runImpl`'s optional params) — grounded, not TBDs. All code steps carry real code.
+**Placeholder scan:** the "confirm when writing" notes (seed helper arg shapes vs `project.ts`/`ticket.ts`; the `cleanImpl` `opts` seam) cite their source + a concrete fallback — grounded, not TBDs. Rev-1 defects fixed: `seedCheckpoint` returns `string`; the seam note no longer claims a nonexistent `runImpl` precedent; `kind`/`note` field names disambiguate design §5's "reason"/"honest-note".
 
-**Type consistency:** `Checkpoint`/`CheckpointKind` defined in Task 1 and consumed unchanged by Tasks 2–4; `reapCheckpoint`/`cleanImpl` introduced in Task 3 and extended in Task 4; `isBranchMergedInto` added in Task 4 with the signature Task 4's `--all` uses. `reconcileWorktree` 5-arg form and `branchNameFor({ident,branch_name,branch_prefix})` match their real signatures (verified).
+**Type consistency:** `Checkpoint`/`CheckpointKind` defined in Task 1, consumed unchanged by 2–5; `reapEffort` introduced in Task 3, reused in 4–5; `deleteLocalBranch`/`deleteRemoteBranch` added in Task 5 with the signatures the `--purge` tail calls. `reconcileWorktree` 5-arg + `branchNameFor({ident,branch_name,branch_prefix})` match real signatures (verified).
 
-## Residual open questions (for the human)
+## Residual notes (for the human)
 
-- **Decision 1–4 above** — the flagged choices (merged-vs-age staleness; `--all` scope; `ls` stale-preview section; `clean` exit code + not projecting `abandoned` to the tracker).
-- **`done` checkpoint garbage** — every `done` run also leaves a `run.db` in the state dir forever (live-location never deletes on success). This plan does NOT gc them (out of the AC's "stale pr-ready" wording). Worth a follow-up: `clean --all` (or a `--done` sweep) could also reap merged/`done` checkpoint dirs. Flagged, not built.
-- **`interrupted` pauses** — a crashed live-location run leaves `run.db` with no `human_resume`, no `transcript.json`, ticket not `done` → classified `"other"` by Task 1, so `ls` won't show it as paused. If interrupted checkpoints should appear in `ls`, Task 1 needs an explicit `interrupted` heuristic (e.g. a `running` step present). Noted; not built (matches the epic's "interrupted has no automated fixture" caveat).
+- **`clean` needs no `migrate()` before opening a checkpoint db** — Task 3/5 open read-only for `getLatestWorktreePath`/classification; enumeration already best-effort-skips a schema-drifted db. (Resume migrates first, `park.ts:224`, because it re-runs the run; clean does not.)
+- **`deleteRemoteBranch` uses the repo's configured git auth.** In the local-operator model that is the same credential a run's push uses. A real auth failure is a non-fatal warning (the reap already happened), not an error — matches the "silent pass" intent for the common no-PR case without hiding a genuine auth problem.
+- **Done-checkpoint accumulation** — `--all` now reaps `done`/`other` leftovers too (not just `pr-ready`), so the state dir no longer grows unbounded on success. Resumable pauses are the only kind `--all` leaves behind.
