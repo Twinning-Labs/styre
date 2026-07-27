@@ -4,8 +4,13 @@ import { StepRegistry } from "../../src/daemon/step-registry.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { insertFinding } from "../../src/db/repos/review-finding.ts";
+import { hasPendingHumanResume } from "../../src/db/repos/signal.ts";
 import { getTicket, setTicketStage, setTicketTrack } from "../../src/db/repos/ticket.ts";
-import { getById as getUnit, insertWorkUnit } from "../../src/db/repos/work-unit.ts";
+import {
+  getById as getUnit,
+  insertWorkUnit,
+  setStatus as setUnitStatus,
+} from "../../src/db/repos/work-unit.ts";
 import {
   getByKey,
   insertPending,
@@ -280,4 +285,32 @@ test("design:review step with blocking plan finding → outcome loopback and sta
   // Verdict: blocking plan finding → redesign loopback back to design.
   expect(outcome).toEqual({ kind: "loopback", stepKey: "design:review" });
   expect(ticket?.stage).toBe("design");
+});
+
+test("a blocked descriptor pauses the ticket via pauseTicket (waiting + pending human_resume) and returns paused-noprogress", async () => {
+  const { db, ticketId } = makeTestDb();
+  // implement stage with a unit that is neither actionable nor verified → resolver returns
+  // 'blocked' (control-loop §8-P1). advanceOneStep must route it through `pauseTicket` — NOT
+  // return a bare descriptor — so it becomes a legible, resumable paused(needs_you) checkpoint.
+  setTicketStage(db, ticketId, "implement");
+  const unit = insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    verifyCheckTypes: ["test"],
+  });
+  setUnitStatus(db, unit.id, "blocked");
+
+  const registry = new StepRegistry();
+  const outcome = await advanceOneStep(db, ticketId, registry);
+  const ticket = getTicket(db, ticketId);
+  const paused = hasPendingHumanResume(db, ticketId);
+  db.close();
+
+  expect(outcome).toEqual({
+    kind: "paused-noprogress",
+    reason: "no actionable unit and not all units verified",
+  });
+  expect(ticket?.status).toBe("waiting");
+  expect(paused).toBe(true); // pauseTicket's pending human_resume signal fired
 });

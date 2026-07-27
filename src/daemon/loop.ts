@@ -27,24 +27,24 @@ export async function tick(
     config?: RuntimeConfig;
     ports?: ProjectorPorts;
   },
-): Promise<{ advanced: number; blocked: boolean; parked?: ParkInfo }> {
+): Promise<{ advanced: number; parked?: ParkInfo }> {
   const max = opts?.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
   const ids = readyTicketIds(db).slice(0, max);
   let advanced = 0;
-  // A 'blocked' resolver outcome makes no state change and raises no signal, so it is NOT progress:
-  // count it separately so the driver can terminate instead of spinning to the iteration cap
-  // (control-loop §8-P1: never a dead end).
-  let blocked = false;
   let parked: ParkInfo | undefined;
   for (const id of ids) {
     const outcome = await advanceOneStep(db, id, registry, { config: opts?.config });
-    if (outcome.kind === "blocked") blocked = true;
-    else if (outcome.kind === "parked")
+    if (outcome.kind === "parked") {
       parked = outcome.park; // `styre run` is single-ticket so at most one park per drive is possible; multi-ticket daemon park handling is future work
-    else advanced++;
+    } else if (outcome.kind === "paused-noprogress") {
+      // dead-end: not an advance, not parked — driveToTerminal's hasPendingHumanResume catches
+      // the pause next iteration (control-loop §8-P1: never a dead end).
+    } else {
+      advanced++;
+    }
   }
   if (opts?.ports) {
     await drainOutbox(db, opts.ports);
   }
-  return { advanced, blocked, parked };
+  return { advanced, parked };
 }

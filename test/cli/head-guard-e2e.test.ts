@@ -41,7 +41,7 @@ test("park → resume → park → resume never exhausts maxAttempts (no attempt
   const parked = await runParkedTicket();
   // resume into a runner that parks AGAIN — exit 75
   const second = await resumeParkedTicket(parked, { parkAgain: true });
-  expect(second.result.outcome).toBe("parked");
+  expect(second.result.outcome).toBe("paused");
   // resume a second time into a success runner — should complete
   const third = await resumeParkedTicket(parked, {});
   expect(third.result.outcome === "pr-ready" || third.result.outcome === "done").toBe(true);

@@ -40,7 +40,8 @@ test("a session-limit park sets status=waiting, leaves the step running, appends
     ports: undefined as never, // no projector needed for this path
     profile: { checksSystem: "none" },
   });
-  expect(result.outcome).toBe("parked");
+  expect(result.outcome).toBe("paused");
+  expect(result.reason).toBe("budget");
   expect(result.park?.cause).toBe("session-limit");
   expect(getTicket(db, ticketId)?.status).toBe("waiting");
   const runningSteps = listByStatus(db, "running");

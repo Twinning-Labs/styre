@@ -1,23 +1,27 @@
-import type { RunOutcome } from "../daemon/run-ticket.ts";
+import type { PauseReason, RunOutcome } from "../daemon/run-ticket.ts";
 import { EXIT } from "./errors.ts";
 
 /** The user-facing sentence for a terminal outcome (presentation layer, NOT a state rename).
- *  `escalated` is a distinct outcome from `blocked`: the run explicitly handed the ticket to a
- *  human (pending `human_resume`), rather than hitting a resolver dead-end (ENG-353). */
-export function outcomeSentence(o: RunOutcome): string {
+ *  `paused` covers every resumable stop — `reason` names WHY (budget / needs_you / interrupted).
+ *  `abandoned` is reserved for a genuine terminal give-up (ENG-386); no path in this codebase
+ *  currently emits it. */
+export function outcomeSentence(o: RunOutcome, reason?: PauseReason): string {
   switch (o) {
     case "pr-ready":
       return "Opened the PR — ready for your review. Waiting on CI + merge approval.";
     case "done":
       return "Merged and released.";
-    case "parked":
-      return "Paused — ran out of budget; resume anytime.";
-    case "blocked":
-      return "Stopped — no actionable work remains.";
-    case "no-progress":
-      return "Stopped — couldn't make progress.";
-    case "escalated":
-      return "Escalated — a human needs to unblock this; re-run once it's resolved.";
+    case "abandoned":
+      return "Stopped — couldn't make progress and there's nothing specific to fix; rethink the ticket and start fresh.";
+    case "paused":
+      switch (reason) {
+        case "budget":
+          return "Paused — out of budget; resume anytime.";
+        case "interrupted":
+          return "Paused — interrupted; resume to continue.";
+        default: // needs_you
+          return "Paused — needs you to unblock it, then resume.";
+      }
   }
 }
 
@@ -26,11 +30,9 @@ export function exitCodeForOutcome(o: RunOutcome): number {
     case "pr-ready":
     case "done":
       return EXIT.OK;
-    case "parked":
-    case "escalated":
-      return EXIT.TEMPFAIL;
-    case "blocked":
-    case "no-progress":
-      return EXIT.OPERATIONAL;
+    case "paused":
+      return EXIT.TEMPFAIL; // 75 — resumable, every reason
+    case "abandoned":
+      return EXIT.OPERATIONAL; // 1 — genuine terminal
   }
 }

@@ -2,9 +2,9 @@ import { expect, test } from "bun:test";
 import { runCompletedProperties } from "../../src/telemetry/analytics/properties.ts";
 import type { TelemetryEvent } from "../../src/telemetry/events.ts";
 
-// run_completed maps the exported buildSummary output; assert the mapping for a parked run.
+// run_completed maps the exported buildSummary output; assert the mapping for a paused(budget) run.
 type SummaryEvent = Extract<TelemetryEvent, { type: "summary" }>;
-const parked: SummaryEvent = {
+const paused: SummaryEvent = {
   schema_version: 2,
   type: "summary",
   run_id: "r1",
@@ -13,7 +13,7 @@ const parked: SummaryEvent = {
   provider: "claude",
   started_at: "t0",
   ended_at: "t1",
-  outcome: "parked",
+  outcome: "paused",
   stage: "implement",
   status: "running",
   ticks: 12,
@@ -40,13 +40,16 @@ const parked: SummaryEvent = {
   escalation_reasons: [],
 };
 
-test("parked run maps to failure_bucket=parked-credits and the right buckets", () => {
-  const props = runCompletedProperties(parked, 7 * 60_000, {
+test("paused run maps outcome through and the right buckets", () => {
+  const props = runCompletedProperties(paused, 7 * 60_000, {
     complexityGrading: false,
     onPlanDefect: "escalate",
   });
-  expect(props.outcome).toBe("parked");
-  expect(props.failure_bucket).toBe("parked-credits");
+  expect(props.outcome).toBe("paused");
+  // failureBucket still keys off the old "parked" string literal — re-keying it to paused+reason
+  // (e.g. "parked-credits" for a budget pause) is ENG-383/384 Task 3's job; for now it falls
+  // through to the escalation_reasons keyword scan, which is empty here → "unknown".
+  expect(props.failure_bucket).toBe("unknown");
   expect(props.terminal_stage).toBe("implement");
   expect(props.duration_bucket).toBe("5-15m");
   expect(props.first_time_ci_pass).toBe(false);

@@ -312,7 +312,7 @@ export async function runImpl(
       console.error(out.summary); // human summary → stderr; stdout carries only NDJSON telemetry
       // `ident` was resolved from the single fetchTicket read above the DB-creation block — it is
       // the same ident insertTicket seeded the ticket row with, so no re-read from the DB is needed.
-      if (out.outcome === "parked" && out.park) {
+      if (out.outcome === "paused" && out.reason === "budget" && out.park) {
         // Print resume-hint before finishRunResult (which does dumpPark + sets exitCode).
         // parkDir gives the path without touching the DB.
         const dir = parkDir(profile.slug, ident);

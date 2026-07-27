@@ -17,6 +17,7 @@ import {
 } from "./checks-gate-verdict.ts";
 import { type ChecksVerdictResult, applyChecksVerdict } from "./checks-verdict.ts";
 import { applyFailurePolicy } from "./failure-policy.ts";
+import { pauseTicket } from "./pause-ticket.ts";
 import { enqueueStageProjection } from "./projector.ts";
 import { nextStepKey } from "./resolver.ts";
 import { type ReviewVerdictResult, applyReviewVerdict } from "./review-verdict.ts";
@@ -37,7 +38,7 @@ export type AdvanceOutcome =
   | { kind: "stepped"; stepKey: string }
   | { kind: "waiting"; signalType: string }
   | { kind: "done" }
-  | { kind: "blocked"; reason: string }
+  | { kind: "paused-noprogress"; reason: string }
   | { kind: "retry"; stepKey: string }
   | { kind: "loopback"; stepKey: string }
   | { kind: "escalated"; stepKey: string }
@@ -85,7 +86,12 @@ export async function advanceOneStep(
     }
 
     if (d.kind === "blocked") {
-      return { kind: "blocked", reason: d.reason };
+      pauseTicket(
+        db,
+        ticketId,
+        `no next move on this plan (${d.reason}) — edit the plan/code, then resume`,
+      );
+      return { kind: "paused-noprogress", reason: d.reason }; // NOT "advanced"; NOT the tick blocked flag
     }
 
     if (d.kind === "escalate") {

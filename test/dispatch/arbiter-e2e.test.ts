@@ -1327,10 +1327,12 @@ test("Flow 8 — LIVENESS: a pure-code-wrong round where the re-implement commit
   const gateStep = getByKey(db, ticketId, "verify:checks-gate");
   db.close();
 
-  // The FIX: a clean, bounded escalate (`waiting` + `human_resume`) — NEVER `no-progress`. The gate
-  // step's own `attempt` freezes below GATE_ROUND_CAP (proving this is NOT the gate's own cap check
-  // catching it — the resolver detects the stuck replay before the cap is ever reached).
-  expect(r.outcome).toBe("escalated");
+  // The FIX: a clean, bounded pause (`waiting` + `human_resume`) — NEVER a stuck iteration-cap
+  // grind. The gate step's own `attempt` freezes below GATE_ROUND_CAP (proving this is NOT the
+  // gate's own cap check catching it — the resolver detects the stuck replay before the cap is
+  // ever reached).
+  expect(r.outcome).toBe("paused");
+  expect(r.reason).toBe("needs_you");
   expect(ticket?.status).toBe("waiting");
   expect(pending.some((s) => s.signal_type === "human_resume")).toBe(true);
   expect(gateStep?.attempt ?? 0).toBeLessThan(3); // GATE_ROUND_CAP — never reached; not a cap escalate
