@@ -373,7 +373,11 @@ liveness; 3 and 4 land together (the outcome enum must gain its values with the 
 
 ## 12. Open questions
 
-- **`budget` resume** — block until reset time (proposed), or resume-and-immediately-re-pause?
+- **`budget` resume** — ✎ RESOLVED (ENG-385): **always-allow (resume-and-re-pause).** A reset-time
+  block is unimplementable — `resetAt` is free text scraped from the CLI death message
+  (`claude.ts:68`/`codex.ts:111` → `"tomorrow"`, `"at 10pm (America/Chicago)"`), not an ISO
+  timestamp, so `now < resetAt` can't be computed. A budget resume proceeds; if still out of budget
+  it simply parks again (cheap re-pause).
 - **§3.5.2 honesty-abandon threshold** — what precisely counts as "nothing actionable" for an
   idle-stall `no-progress`? (Proposed: no diagnosable cause *and* the resolver still yields no unit
   after a re-plan — i.e., prove it's opaque before abandoning; otherwise stay `paused`.)
