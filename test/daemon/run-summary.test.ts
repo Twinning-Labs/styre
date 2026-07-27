@@ -38,7 +38,8 @@ test("formatRunSummary: a loopback event renders route + signature, not the bare
   });
 
   const s = formatRunSummary(db, ticketId, {
-    outcome: "parked",
+    outcome: "paused",
+    reason: "budget",
     iterations: 3,
     stage: "design",
     status: "waiting",
@@ -65,40 +66,43 @@ test("formatRunSummary: pr-ready suppresses the 'Waiting on:' line even with a p
   expect(s).not.toContain("Waiting on:");
 });
 
-test("formatRunSummary: an escalation reports `escalated`, names the reason, hides internal vocab", () => {
+test("formatRunSummary: a paused(needs_you) run names the reason, hides internal vocab", () => {
   const { db, ticketId } = makeTestDb();
   insertPending(db, { ticketId, signalType: "human_resume" });
   appendEvent(db, { ticketId, kind: "escalated", reason: "step 'design:extract' failed" });
 
   const s = formatRunSummary(db, ticketId, {
-    outcome: "escalated",
+    outcome: "paused",
+    reason: "needs_you",
     iterations: 3,
     stage: "design",
     status: "waiting",
   });
   db.close();
 
-  expect(s).toContain("Escalated — a human needs to unblock this; re-run once it's resolved.");
+  expect(s).toContain("Paused — needs you to unblock it, then resume.");
   expect(s).toContain("Reason: step 'design:extract' failed");
-  // The blocked sentence and the raw internal signal name must NOT appear for an escalation.
-  expect(s).not.toContain("Stopped — no actionable work remains.");
+  // The raw internal signal name must NOT appear alongside the Reason line.
   expect(s).not.toContain("Waiting on: human_resume");
   // No internal detector vocabulary, no stack frames.
   expect(s).not.toContain("no-progress");
   expect(s).not.toMatch(/\bat .*\(.*:\d+:\d+\)/);
 });
 
-test("formatRunSummary: a resolver dead-end still reports `blocked` (distinct from an escalation)", () => {
+test("formatRunSummary: paused(needs_you) with no escalated event on record prints no Reason line", () => {
   const { db, ticketId } = makeTestDb();
-  // No pending human_resume, no escalated event → a genuine dead-end.
+  // A resolver dead-end (formerly a distinct `blocked` outcome) now collapses into paused(needs_you)
+  // via `pauseTicket` — same as an explicit escalation. This exercises the fallback when the event
+  // log has no matching `escalated` row to name a reason from.
   const s = formatRunSummary(db, ticketId, {
-    outcome: "blocked",
+    outcome: "paused",
+    reason: "needs_you",
     iterations: 2,
     stage: "implement",
     status: "active",
   });
   db.close();
 
-  expect(s).toContain("Stopped — no actionable work remains.");
-  expect(s).not.toContain("Escalated");
+  expect(s).toContain("Paused — needs you to unblock it, then resume.");
+  expect(s).not.toContain("Reason:");
 });

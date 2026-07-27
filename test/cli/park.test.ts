@@ -40,15 +40,16 @@ async function succeed(db: Parameters<typeof runStep>[0], ticketId: number, step
   });
 }
 
-test("finishRunResult does not throw for blocked; sets exit 1 and closes db", () => {
+test("finishRunResult does not throw for paused(needs_you); sets exit 75 and closes db (non-dump, plain-close tail)", () => {
   const { db, ticketId } = makeTestDb();
   process.exitCode = 0;
   expect(() =>
     finishRunResult(db, "/tmp/does-not-matter.db", "test-project", "ENG-1", {
-      outcome: "blocked",
+      outcome: "paused",
+      reason: "needs_you",
     }),
   ).not.toThrow();
-  expect(process.exitCode).toBe(1);
+  expect(process.exitCode).toBe(75);
   expect(() => db.query("SELECT 1").get()).toThrow(); // closed db throws on use
   void ticketId;
 });

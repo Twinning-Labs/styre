@@ -14,12 +14,15 @@ import { type TelemetrySink, noopSink } from "../telemetry/emit.ts";
 import { createTelemetryEmitter } from "../telemetry/emitter.ts";
 import { tick } from "./loop.ts";
 import { createNotifier } from "./notify.ts";
+import { pauseTicket } from "./pause-ticket.ts";
 import { type ProjectorPorts, drainOutbox } from "./projector.ts";
 import type { StepRegistry } from "./step-registry.ts";
 
-export type RunOutcome = "pr-ready" | "done" | "blocked" | "no-progress" | "parked" | "escalated";
+export type RunOutcome = "pr-ready" | "done" | "paused" | "abandoned";
+export type PauseReason = "budget" | "needs_you" | "interrupted";
 export interface RunResult {
   outcome: RunOutcome;
+  reason?: PauseReason; // set iff outcome === "paused"
   iterations: number;
   stage: string;
   status: string;
@@ -91,7 +94,7 @@ export async function driveToTerminal(
     return result;
   };
   let idle = 0;
-  let last = { stage: "", status: "" };
+  let last = { iterations: 0, stage: "", status: "" };
   for (let i = 1; i <= cap; i++) {
     const r = await tick(db, registry, {
       config: opts.config,
@@ -101,14 +104,14 @@ export async function driveToTerminal(
     notifier.sweepNew(db, opts.ticketId);
     const t = getTicket(db, opts.ticketId);
     if (!t) throw new Error(`driveToTerminal: ticket ${opts.ticketId} not found`);
-    last = { stage: t.stage, status: t.status };
+    last = { iterations: i, stage: t.stage, status: t.status };
     const pending = listPending(db, opts.ticketId);
 
     if (r.parked)
-      return await finish({ outcome: "parked", iterations: i, ...last, park: r.parked });
-    if (t.status === "done") return await finish({ outcome: "done", iterations: i, ...last });
+      return await finish({ outcome: "paused", reason: "budget", park: r.parked, ...last });
+    if (t.status === "done") return await finish({ outcome: "done", ...last });
     if (hasPendingHumanResume(db, opts.ticketId))
-      return await finish({ outcome: "escalated", iterations: i, ...last });
+      return await finish({ outcome: "paused", reason: "needs_you", ...last });
     if (t.stage === "merge" && pending.some((s) => s.signal_type === "human_merge_approval")) {
       const pr = getDeliveredPayload(db, opts.ticketId, "external_pr_result");
       const sha = getLatestForTicket(db, opts.ticketId)?.branch_head_sha ?? null;
@@ -120,20 +123,35 @@ export async function driveToTerminal(
         checksSystem: opts.profile.checksSystem,
         read,
       });
-      return await finish({ outcome: "pr-ready", iterations: i, ...last });
+      return await finish({ outcome: "pr-ready", ...last });
     }
-    // A resolver dead-end ('blocked': no actionable unit and not all verified) is terminal, not a
-    // stall to grind on — surface it immediately rather than spinning to the iteration cap.
-    if (r.blocked) return await finish({ outcome: "blocked", iterations: i, ...last });
+    // (the old `if (r.blocked) return await finish({ outcome: "blocked" })` dead-end is DELETED —
+    // blocked now routes through pauseTicket in advance.ts and is caught by the
+    // hasPendingHumanResume check above.)
 
     if (r.advanced === 0) {
       idle += 1;
-      if (idle >= IDLE_CAP) return await finish({ outcome: "no-progress", iterations: i, ...last });
+      if (idle >= IDLE_CAP) {
+        // idle-stall: repeated zero-advance with nothing pending. DECISION (this ticket, reversing
+        // design §3.5.2): pause as needs_you — NOT auto-abandon — so the human can edit + resume.
+        pauseTicket(
+          db,
+          opts.ticketId,
+          "stalled with no progress — edit the ticket and resume, or 'styre clean' to drop",
+        );
+        return await finish({ outcome: "paused", reason: "needs_you", ...last });
+      }
     } else {
       idle = 0;
     }
   }
-  return await finish({ outcome: "no-progress", iterations: cap, ...last });
+  // iteration-cap: was advancing but ran out of the tick budget — genuinely resumable.
+  pauseTicket(
+    db,
+    opts.ticketId,
+    `hit the ${DEFAULT_CAP}-tick iteration budget; resume to continue`,
+  );
+  return await finish({ outcome: "paused", reason: "needs_you", ...last });
 }
 
 /** Ingest ONE ticket (read from the tracker) into the SoT, then drive it to a terminal. The single
@@ -211,11 +229,11 @@ export function formatRunSummary(db: Database, ticketId: number, result: RunResu
   const pr = getDeliveredPayload(db, ticketId, "external_pr_result");
   const prUrl = typeof pr?.url === "string" ? pr.url : undefined;
   const pending = listPending(db, ticketId).map((s) => s.signal_type);
-  const lines: string[] = [outcomeSentence(result.outcome)];
+  const lines: string[] = [outcomeSentence(result.outcome, result.reason)];
   if (prUrl) lines.push(`PR: ${prUrl}`);
-  if (result.outcome === "escalated") {
+  if (result.outcome === "paused" && result.reason === "needs_you") {
     // Name WHY (the latest escalated event's reason); the pending `human_resume` signal name is
-    // internal vocabulary and is intentionally not printed for an escalation.
+    // internal vocabulary and is intentionally not printed for a needs_you pause.
     const reason = [...events].reverse().find((e) => e.kind === "escalated")?.reason;
     if (reason) lines.push(`Reason: ${reason}`);
   } else if (pending.length > 0 && result.outcome !== "pr-ready" && result.outcome !== "done") {

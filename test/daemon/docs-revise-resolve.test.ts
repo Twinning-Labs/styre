@@ -153,7 +153,7 @@ test("A (the crux): a real docs edit reaches review — no 'no handler registere
 
   // The crux: pre-fix this either threw "no handler registered for 'docs:revise'" (driveToTerminal
   // would have rejected) or silently wedged spinning to the iteration cap. Neither happened.
-  expect(result.outcome).not.toBe("no-progress");
+  expect(result.outcome === "paused" && result.reason === "needs_you").toBe(false);
   expect(result.iterations).toBeLessThan(cap);
 
   // Reached stage='review': the resolver's implement→review transition fired.
@@ -203,8 +203,10 @@ test("B: an offense (source edit) during docs:revise never wedges silently — r
     cap,
   });
 
-  // Escalated, not silently wedged: 'escalated' (a human_resume pending signal), never 'no-progress'.
-  expect(result.outcome).toBe("escalated");
+  // Escalated, not silently wedged: paused(needs_you) with a human_resume pending signal, never a
+  // stuck iteration-cap grind.
+  expect(result.outcome).toBe("paused");
+  expect(result.reason).toBe("needs_you");
   expect(result.iterations).toBeLessThan(cap);
 
   const ticket = getTicket(db, ticketId);
@@ -249,7 +251,7 @@ test("C: a no-op docs:revise dispatch (no changes) still advances to review", as
     cap,
   });
 
-  expect(result.outcome).not.toBe("no-progress");
+  expect(result.outcome === "paused" && result.reason === "needs_you").toBe(false);
   expect(result.iterations).toBeLessThan(cap);
 
   const docsStep = getByKey(db, ticketId, "docs:revise");

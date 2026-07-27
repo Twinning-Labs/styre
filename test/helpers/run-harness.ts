@@ -113,10 +113,10 @@ export async function runParkedTicket(): Promise<ParkedRunResult> {
       profile,
     });
 
-    if (result.outcome !== "parked" || !result.park) {
+    if (result.outcome !== "paused" || result.reason !== "budget" || !result.park) {
       db.close();
       throw new Error(
-        `runParkedTicket: expected 'parked' outcome, got '${result.outcome}'. Check FakeAgentRunner.`,
+        `runParkedTicket: expected a paused(budget) outcome, got '${result.outcome}'${result.reason ? `(${result.reason})` : ""}. Check FakeAgentRunner.`,
       );
     }
 
@@ -309,13 +309,14 @@ export async function resumeParkedTicket(
 
     // resumeRun doesn't return RunResult directly; reconstruct a minimal result for backward
     // compat with the test assertions.
-    // exitCode 75 = parked again; 65 = refused (HEAD guard); 0 = pr-ready or inspect-no-op.
+    // exitCode 75 = parked again (budget); 65 = refused (HEAD guard); 0 = pr-ready or inspect-no-op.
     // NOTE: exit-65 maps to "refused" — NOT a durable RunOutcome — use exitCode to assert it.
     const exitCode = process.exitCode;
     const outcome: HarnessOutcome =
-      exitCode === 75 ? "parked" : exitCode === 65 ? "refused" : "pr-ready";
+      exitCode === 75 ? "paused" : exitCode === 65 ? "refused" : "pr-ready";
     const result: Omit<RunResult, "outcome"> & { outcome: HarnessOutcome } = {
       outcome,
+      reason: outcome === "paused" ? "budget" : undefined,
       iterations: 0,
       stage: "released",
       status: "done",

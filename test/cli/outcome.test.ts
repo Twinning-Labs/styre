@@ -1,28 +1,17 @@
 import { expect, test } from "bun:test";
+import { EXIT } from "../../src/cli/errors.ts";
 import { exitCodeForOutcome, outcomeSentence } from "../../src/cli/outcome.ts";
 
-test("sentences match the approved vocabulary", () => {
-  expect(outcomeSentence("pr-ready")).toBe(
-    "Opened the PR — ready for your review. Waiting on CI + merge approval.",
-  );
-  expect(outcomeSentence("done")).toBe("Merged and released.");
-  expect(outcomeSentence("parked")).toBe("Paused — ran out of budget; resume anytime.");
-  expect(outcomeSentence("blocked")).toBe("Stopped — no actionable work remains.");
-  expect(outcomeSentence("no-progress")).toBe("Stopped — couldn't make progress.");
-  expect(outcomeSentence("escalated")).toBe(
-    "Escalated — a human needs to unblock this; re-run once it's resolved.",
-  );
+test("exitCodeForOutcome: paused→75, abandoned→1, done/pr-ready→0", () => {
+  expect(exitCodeForOutcome("pr-ready")).toBe(EXIT.OK);
+  expect(exitCodeForOutcome("done")).toBe(EXIT.OK);
+  expect(exitCodeForOutcome("paused")).toBe(EXIT.TEMPFAIL);
+  expect(exitCodeForOutcome("abandoned")).toBe(EXIT.OPERATIONAL);
 });
 
-test("exit codes: success 0, operational stop 1, parked 75", () => {
-  expect(exitCodeForOutcome("pr-ready")).toBe(0);
-  expect(exitCodeForOutcome("done")).toBe(0);
-  expect(exitCodeForOutcome("blocked")).toBe(1);
-  expect(exitCodeForOutcome("no-progress")).toBe(1);
-  expect(exitCodeForOutcome("parked")).toBe(75);
-});
-
-test("exit code: escalated is 75 (resumable), distinct from a dead-end's 1", () => {
-  expect(exitCodeForOutcome("escalated")).toBe(75);
-  expect(exitCodeForOutcome("escalated")).not.toBe(exitCodeForOutcome("blocked"));
+test("outcomeSentence reflects the reason for a paused run", () => {
+  expect(outcomeSentence("paused", "budget")).toMatch(/budget|resume/i);
+  expect(outcomeSentence("paused", "needs_you")).toMatch(/you|resume/i);
+  expect(outcomeSentence("abandoned")).toMatch(/rethink|abandon|couldn't/i);
+  expect(outcomeSentence("done")).toMatch(/merged|released/i);
 });

@@ -81,6 +81,10 @@ const SummaryEvent = z.object({
   started_at: z.string(),
   ended_at: z.string(),
   outcome: z.string(),
+  // Set iff outcome === "paused" (RunResult.reason — see src/daemon/run-ticket.ts): disambiguates
+  // budget/needs_you/interrupted so failureBucket can key on it (a budget pause's escalation
+  // reasons, if any, carry no useful signal — see src/telemetry/analytics/properties.ts).
+  reason: z.string().optional(),
   stage: z.string(),
   status: z.string(),
   ticks: z.number(),

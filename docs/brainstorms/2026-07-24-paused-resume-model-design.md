@@ -148,15 +148,16 @@ With no automatic backstop, the `detail` string must state *what a resume actual
 `status IN ('active','waiting','abandoned','done')` — ✎ no schema change, and no new `exhausted`
 value is introduced). It is reached in exactly two ways, **never** by an automatic resume counter:
 1. **Explicit:** the operator runs `styre clean <ident>` (§5) on a pause they judge hopeless.
-2. ✎ **Honesty-at-pause:** when styre has *nothing actionable to hand the human* — a genuinely opaque
-   dead-end with no diagnosable cause **and** no re-plannable state — `pause` marks `abandoned`
-   directly rather than dangle a resume that cannot help ("couldn't make progress, nothing specific
-   to fix — transcript attached; edit and start fresh, or drop it"). This is decided **once, at pause
-   time**, by note-actionability — not by counting resumes.
+2. ✎ **Honesty-at-pause — DEFERRED (explicit-only in ENG-386).** The original idea: when styre has
+   *nothing actionable to hand the human*, `pause` marks `abandoned` directly. But reliably judging
+   "nothing actionable" needs the ENG-385 re-plan (both dead-ends look like "no next move" at pause
+   time), so the ENG-383 build routes *both* `no-progress` cases to `paused(needs_you)` and leaves
+   `abandoned` reachable only via the explicit `styre clean` route (ENG-386). The auto-honesty-abandon
+   is deferred, not deleted — revisit once the resume re-plan (ENG-385) exists.
 
 ✎ *`no-progress` is two cases (`run-ticket.ts:128-135`): an **iteration-cap** (resume grants a fresh
-tick budget — genuinely resumable, closer to `budget`) vs an **idle-stall** (resume re-idles — the
-prime candidate for the §3.5.2 honesty-abandon). `detail` must distinguish them.*
+tick budget) vs an **idle-stall** (resume re-idles). ENG-383 routes both to `paused(needs_you)` with
+`detail` strings that distinguish them; neither auto-abandons (per the deferral above).*
 
 `pr-ready` and `done` are unchanged and are **not** pauses.
 

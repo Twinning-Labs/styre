@@ -50,16 +50,16 @@ test("tick advances nothing when there are no ready tickets", async () => {
   expect(summary.advanced).toBe(0);
 });
 
-test("tick surfaces a resolver dead-end as blocked, not as progress", async () => {
+test("tick surfaces a resolver dead-end as paused-noprogress, not as progress", async () => {
   const { db, ticketId } = makeTestDb();
   // implement stage with a unit that is neither actionable nor verified → resolver returns 'blocked'
-  // (control-loop §8-P1). It must be reported as blocked, NOT counted as an advance — otherwise the
-  // driver's stall guard never fires and it spins to the iteration cap.
+  // (control-loop §8-P1), which advanceOneStep routes through pauseTicket as 'paused-noprogress'. It
+  // must NOT be counted as an advance — otherwise the driver's stall guard never fires and it spins
+  // to the iteration cap.
   setTicketStage(db, ticketId, "implement");
   const u = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", verifyCheckTypes: ["test"] });
   setUnitStatus(db, u.id, "blocked");
   const summary = await tick(db, registry());
   db.close();
-  expect(summary.blocked).toBe(true);
   expect(summary.advanced).toBe(0);
 });
