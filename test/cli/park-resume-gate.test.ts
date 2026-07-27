@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openDb } from "../../src/db/client.ts";
 import { hasPendingHumanResume } from "../../src/db/repos/signal.ts";
@@ -29,5 +30,19 @@ test("resuming a budget checkpoint proceeds normally (no reason gate on budget r
   // Budget checkpoints carry no human_resume signal — resume should dispatch/proceed, never refuse.
   expect(resumed.result.outcome).not.toBe("refused");
   expect(resumed.ran).toBe(true);
+  cleanupParkedRun(parked);
+});
+
+test("resuming a ticket whose checkpoint dir has a live foreign run.lock refuses (exit 65) without dispatching", async () => {
+  const parked = await runParkedTicket();
+  // Seed a live foreign lock in the checkpoint dir — process.ppid is a real, live pid (the test
+  // runner's parent), so acquireRunLock's stale-reclaim does NOT fire; the lock must be honored.
+  writeFileSync(join(parked.dumpDir, "run.lock"), String(process.ppid));
+
+  const resumed = await resumeParkedTicket(parked);
+  expect(resumed.exitCode).toBe(65);
+  expect(resumed.result.outcome).toBe("refused");
+  expect(resumed.ran).toBe(false); // must not dispatch — the lock holder owns the run
+
   cleanupParkedRun(parked);
 });

@@ -41,6 +41,7 @@ import { nowUtc } from "../util/time.ts";
 import { agentCliError, usageError } from "./errors.ts";
 import { exitCodeForOutcome } from "./outcome.ts";
 import { formatMessage } from "./output.ts";
+import { acquireRunLock, releaseRunLock } from "./run-lock.ts";
 
 /**
  * Handle the terminal result of a `styre run` after `runTicket`/`driveToTerminal` returns.
@@ -208,168 +209,181 @@ export async function resumeRun(
       "Check the ticket ident, or start fresh: styre run <ticket>.",
     );
   }
-  migrate(dbPath);
-  const db = openDb(dbPath);
-  ensureRunTable(db); // pre-upgrade parks (v1) have no run table; migrate() won't add it
-  if (getRun(db) === null) {
-    // Pre-upgrade park: no identity was ever minted — assign a fresh one for the resumed portion.
-    insertRun(db, {
-      runId: randomUUID(),
-      startedAt: nowUtc(),
-      provider: (runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG).provider,
-    });
-  }
-  markResumed(db); // same logical run for a v2 park; resumed=1, attempt++
-  const ticketId = onlyTicketId(db);
-  const ticket = getTicket(db, ticketId);
-  if (!ticket) throw new Error("resume: ticket vanished");
-  const project = getProject(db, ticket.project_id);
-  if (!project) throw new Error("resume: project missing");
-  // Same-container in-place derivation: no schema/dump change — the persisted worktree_path on
-  // the latest dispatch IS the signal. In-place there is no separate worktree to wipe/re-mint,
-  // and the deps installed by `provision` persist in the repo root across the park.
-  const staleWorktreePath = getLatestWorktreePath(db, ticketId);
-  const inPlace = staleWorktreePath === project.target_repo;
-  const branch = branchNameFor(ticket);
-  const parkedStep =
-    listByStatus(db, "running").find((s) => s.ticket_id === ticketId) ??
-    listByStatus(db, "failed").find((s) => s.ticket_id === ticketId) ??
-    null;
-
-  const recorded = headBaseline(db, ticketId);
-  const current = branchHeadSha(project.target_repo, branch);
-  const moved = recorded !== null && current !== null && recorded !== current;
-
-  if (args.inspect) {
+  // Acquire the per-ticket run lock before any db is opened (fresh path parity, run.ts:253) —
+  // two concurrent `--resume` of the same ticket would otherwise open the same live-location
+  // run.db and corrupt it. Taken before migrate/openDb so a held lock has nothing to close.
+  const lock = acquireRunLock(dir);
+  if (lock === null) {
     process.stderr.write(
-      `resume --inspect ${ticket.ident}\n  recorded base: ${recorded ?? "(none)"}\n  current head:  ${current ?? "(none)"}${moved ? "  [MOVED]" : ""}\n  would re-dispatch step: ${parkedStep?.step_key ?? "(none)"}\n  (no changes made)\n`,
+      `resume refused: another 'styre run ${args.resume}' is already in progress (${dir}/run.lock).\n  Wait for it to finish, or remove the stale lock if that process is gone.\n`,
     );
-    db.close();
+    process.exitCode = 65; // EXIT.RESUME_REFUSED — no db opened yet, nothing to close
     return;
   }
-
-  if (moved && !args.acceptHead) {
-    process.stderr.write(
-      `resume refused: branch HEAD moved since the parked attempt.\n  recorded base: ${recorded}\n  current head:  ${current}\n  would re-dispatch: ${parkedStep?.step_key ?? "(none)"}\n  Re-run with --accept-head to resume against the new HEAD (drops stale transcript),\n  or --inspect to review, or 'styre run ${ticket.ident}' to start fresh.\n`,
-    );
-    db.close();
-    process.exitCode = 65;
-    return;
-  }
-
-  // Fail fast (no retry burn) if the configured agent CLI is missing or below its supported
-  // version — resume dispatches the CLI too (resolveAgentRunner below), and a resume often runs
-  // later / on another machine where the CLI may have changed since the park (ENG-326). Placed
-  // after the --inspect and resume-refused early-returns so those stay tool-independent, and
-  // before any repo mutation or dispatch. Injectable so fake-driven resume tests skip the live CLI.
-  const cliPreflight = (deps?.preflight ?? preflightAgentCli)(
-    runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG,
-  );
-  if (!cliPreflight.ok) {
-    db.close();
-    throw agentCliError(cliPreflight);
-  }
-  if (cliPreflight.unauthHint) process.stderr.write(`resume: ${cliPreflight.unauthHint}\n`);
-
-  // Defense-in-depth (whole-branch review I-2 / Task 3 F1): `assertInPlaceSafe` is NOT reusable on
-  // resume (HEAD legitimately sits on the styre branch mid-run in the supported same-container
-  // path, and the run's own in-progress commits legitimately dirty the tree), so resume drives
-  // `ensureWorktree`'s `checkout -B` with no dirty-tree gate at all. Marker PRESENCE (language-
-  // agnostic — unlike the python-only identity probe below) IS the resume gate: a reused park dir
-  // whose `target_repo` path happens to collide with a foreign checkout would otherwise let resume
-  // hijack it with zero disposability check for a non-python repo. The IDENTITY probe is also
-  // reusable: in a foreign checkout the active env's `<pkg>` won't resolve under the repo root, so
-  // it fails fast BEFORE the stale-worktree cleanup / dispatch below ever mutates the repo.
-  if (inPlace) {
-    profile.targetRepo = project.target_repo; // re-apply the discovered override — forge ports read profile.targetRepo
-    const { assertInPlaceMarker, assertInPlaceIdentity } = await import("../dispatch/in-place.ts");
-    assertInPlaceMarker(project.target_repo); // language-agnostic disposability re-check before checkout -B
-    await assertInPlaceIdentity(project.target_repo, profile);
-  }
-
-  // Mint the resumed run's worktree root once (in-place reuses the repo root) so the stale-worktree
-  // reconcile and the dispatch registry below share it — and reconcile knows the real new target.
-  const worktreeRoot = inPlace ? project.target_repo : mkdtempSync(join(tmpdir(), "styre-wt-"));
-  const targetWorktreePath = inPlace ? project.target_repo : join(worktreeRoot, ticket.ident);
-
-  // --- Stale-worktree cleanup (Fix B → reconcileWorktree, ENG-381; pid-liveness, ENG-382) ---
-  // The parked/escalated run left its worktree checked out; git refuses `worktree add -B <branch>`
-  // while the branch is held. reconcileWorktree removes THIS ticket's own prior worktree and prunes
-  // dangling refs, refusing a live/foreign holder it can't prove stale (never a blind force-remove).
-  // `dir` (this ticket's checkpoint dir) lets it consult the run lock: a DIFFERENT live run owning
-  // the ticket → refuse outright; a dead-owner styre worktree → free it. In-place: the repo root IS
-  // the worktree, so there is nothing separate to reconcile.
-  //
-  // NOTE: `resumeRun` itself acquires no per-ticket run lock (unlike `runImpl`'s fresh-run path) —
-  // concurrent `--resume` of the SAME ticket is not mutually excluded here; that hardening is
-  // ENG-385 scope.
-  if (!inPlace && staleWorktreePath) {
-    reconcileWorktree(project.target_repo, branch, staleWorktreePath, targetWorktreePath, dir);
-  }
-
-  // Worktree mode: the worktree above is gone (wiped/rebuilt fresh below) — any deps a succeeded
-  // `provision` step installed are gone with it. Re-arm provision so it re-runs before the next
-  // verify. In-place: the repo root is never wiped, so the deps persist — resetting here would
-  // needlessly discard the reuse payoff (re-running provision for no reason).
-  if (!inPlace) {
-    resetProvisionForResume(db, ticketId);
-  }
-
-  // Consume any pending human_resume BEFORE driveToTerminal — else hasPendingHumanResume
-  // (run-ticket.ts:113) fires on the first tick and instantly re-pauses. Budget/interrupted
-  // checkpoints have no such signal and fall through untouched. (No reset-time gate — resetAt is
-  // free text, see the plan header; a still-out-of-budget run simply re-pauses.)
-  for (const s of listPending(db, ticketId).filter((s) => s.signal_type === "human_resume")) {
-    markConsumed(db, s.id);
-  }
-
-  setTicketStatus(db, ticketId, "active");
-  let resumeContext: { stepKey: string; transcript: string } | undefined;
-  if (moved && args.acceptHead) {
-    appendEvent(db, { ticketId, kind: "resumed", reason: `accept-head:${current}` });
-    // carryover dropped: the operator changed the base, so the transcript is untrustworthy
-  } else {
-    if (parkedStep && existsSync(join(dir, "transcript.json"))) {
-      const tj = JSON.parse(readFileSync(join(dir, "transcript.json"), "utf8")) as {
-        transcript: string;
-      };
-      resumeContext = { stepKey: parkedStep.step_key, transcript: tj.transcript };
-    }
-    appendEvent(db, { ticketId, kind: "resumed", reason: "resume" });
-  }
-
-  recover(db, realRecoverDeps()); // resets the interrupted 'running' step → pending
-
-  const ports: ProjectorPorts = deps?.ports ?? makeProjectorPorts(runtimeConfig, profile);
-
-  const registry: StepRegistry = deps?.buildRegistry
-    ? deps.buildRegistry(resumeContext)
-    : buildDispatchRegistry({
-        runner: resolveAgentRunner(runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG),
-        agentConfig: runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG,
-        profile,
-        inPlace,
-        worktreeRoot, // minted once above (in-place = repo root), shared with the reconcile
-        resumeContext,
+  try {
+    migrate(dbPath);
+    const db = openDb(dbPath);
+    ensureRunTable(db); // pre-upgrade parks (v1) have no run table; migrate() won't add it
+    if (getRun(db) === null) {
+      // Pre-upgrade park: no identity was ever minted — assign a fresh one for the resumed portion.
+      insertRun(db, {
+        runId: randomUUID(),
+        startedAt: nowUtc(),
+        provider: (runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG).provider,
       });
+    }
+    markResumed(db); // same logical run for a v2 park; resumed=1, attempt++
+    const ticketId = onlyTicketId(db);
+    const ticket = getTicket(db, ticketId);
+    if (!ticket) throw new Error("resume: ticket vanished");
+    const project = getProject(db, ticket.project_id);
+    if (!project) throw new Error("resume: project missing");
+    // Same-container in-place derivation: no schema/dump change — the persisted worktree_path on
+    // the latest dispatch IS the signal. In-place there is no separate worktree to wipe/re-mint,
+    // and the deps installed by `provision` persist in the repo root across the park.
+    const staleWorktreePath = getLatestWorktreePath(db, ticketId);
+    const inPlace = staleWorktreePath === project.target_repo;
+    const branch = branchNameFor(ticket);
+    const parkedStep =
+      listByStatus(db, "running").find((s) => s.ticket_id === ticketId) ??
+      listByStatus(db, "failed").find((s) => s.ticket_id === ticketId) ??
+      null;
 
-  const result = await driveToTerminal(db, registry, {
-    ticketId,
-    config: runtimeConfig,
-    ports,
-    profile,
-    emit: stdoutSink,
-  });
-  process.stderr.write(`${formatRunSummary(db, ticketId, result)}\n`);
+    const recorded = headBaseline(db, ticketId);
+    const current = branchHeadSha(project.target_repo, branch);
+    const moved = recorded !== null && current !== null && recorded !== current;
 
-  if (result.outcome === "paused" && result.reason === "budget" && result.park) {
-    dumpPark(db, dbPath, profile.slug, ticket.ident, result.park); // re-dump (closes db)
-    process.stderr.write(
-      `${formatMessage("run", `Parked again: ${result.park.cause}. Dump: ${dir}`)}\n`,
+    if (args.inspect) {
+      process.stderr.write(
+        `resume --inspect ${ticket.ident}\n  recorded base: ${recorded ?? "(none)"}\n  current head:  ${current ?? "(none)"}${moved ? "  [MOVED]" : ""}\n  would re-dispatch step: ${parkedStep?.step_key ?? "(none)"}\n  (no changes made)\n`,
+      );
+      db.close();
+      return;
+    }
+
+    if (moved && !args.acceptHead) {
+      process.stderr.write(
+        `resume refused: branch HEAD moved since the parked attempt.\n  recorded base: ${recorded}\n  current head:  ${current}\n  would re-dispatch: ${parkedStep?.step_key ?? "(none)"}\n  Re-run with --accept-head to resume against the new HEAD (drops stale transcript),\n  or --inspect to review, or 'styre run ${ticket.ident}' to start fresh.\n`,
+      );
+      db.close();
+      process.exitCode = 65;
+      return;
+    }
+
+    // Fail fast (no retry burn) if the configured agent CLI is missing or below its supported
+    // version — resume dispatches the CLI too (resolveAgentRunner below), and a resume often runs
+    // later / on another machine where the CLI may have changed since the park (ENG-326). Placed
+    // after the --inspect and resume-refused early-returns so those stay tool-independent, and
+    // before any repo mutation or dispatch. Injectable so fake-driven resume tests skip the live CLI.
+    const cliPreflight = (deps?.preflight ?? preflightAgentCli)(
+      runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG,
     );
-    process.exitCode = exitCodeForOutcome("paused"); // 75
-    return;
+    if (!cliPreflight.ok) {
+      db.close();
+      throw agentCliError(cliPreflight);
+    }
+    if (cliPreflight.unauthHint) process.stderr.write(`resume: ${cliPreflight.unauthHint}\n`);
+
+    // Defense-in-depth (whole-branch review I-2 / Task 3 F1): `assertInPlaceSafe` is NOT reusable on
+    // resume (HEAD legitimately sits on the styre branch mid-run in the supported same-container
+    // path, and the run's own in-progress commits legitimately dirty the tree), so resume drives
+    // `ensureWorktree`'s `checkout -B` with no dirty-tree gate at all. Marker PRESENCE (language-
+    // agnostic — unlike the python-only identity probe below) IS the resume gate: a reused park dir
+    // whose `target_repo` path happens to collide with a foreign checkout would otherwise let resume
+    // hijack it with zero disposability check for a non-python repo. The IDENTITY probe is also
+    // reusable: in a foreign checkout the active env's `<pkg>` won't resolve under the repo root, so
+    // it fails fast BEFORE the stale-worktree cleanup / dispatch below ever mutates the repo.
+    if (inPlace) {
+      profile.targetRepo = project.target_repo; // re-apply the discovered override — forge ports read profile.targetRepo
+      const { assertInPlaceMarker, assertInPlaceIdentity } = await import(
+        "../dispatch/in-place.ts"
+      );
+      assertInPlaceMarker(project.target_repo); // language-agnostic disposability re-check before checkout -B
+      await assertInPlaceIdentity(project.target_repo, profile);
+    }
+
+    // Mint the resumed run's worktree root once (in-place reuses the repo root) so the stale-worktree
+    // reconcile and the dispatch registry below share it — and reconcile knows the real new target.
+    const worktreeRoot = inPlace ? project.target_repo : mkdtempSync(join(tmpdir(), "styre-wt-"));
+    const targetWorktreePath = inPlace ? project.target_repo : join(worktreeRoot, ticket.ident);
+
+    // --- Stale-worktree cleanup (Fix B → reconcileWorktree, ENG-381; pid-liveness, ENG-382) ---
+    // The parked/escalated run left its worktree checked out; git refuses `worktree add -B <branch>`
+    // while the branch is held. reconcileWorktree removes THIS ticket's own prior worktree and prunes
+    // dangling refs, refusing a live/foreign holder it can't prove stale (never a blind force-remove).
+    // `dir` (this ticket's checkpoint dir) lets it consult the run lock: a DIFFERENT live run owning
+    // the ticket → refuse outright; a dead-owner styre worktree → free it. In-place: the repo root IS
+    // the worktree, so there is nothing separate to reconcile.
+    if (!inPlace && staleWorktreePath) {
+      reconcileWorktree(project.target_repo, branch, staleWorktreePath, targetWorktreePath, dir);
+    }
+
+    // Worktree mode: the worktree above is gone (wiped/rebuilt fresh below) — any deps a succeeded
+    // `provision` step installed are gone with it. Re-arm provision so it re-runs before the next
+    // verify. In-place: the repo root is never wiped, so the deps persist — resetting here would
+    // needlessly discard the reuse payoff (re-running provision for no reason).
+    if (!inPlace) {
+      resetProvisionForResume(db, ticketId);
+    }
+
+    // Consume any pending human_resume BEFORE driveToTerminal — else hasPendingHumanResume
+    // (run-ticket.ts:113) fires on the first tick and instantly re-pauses. Budget/interrupted
+    // checkpoints have no such signal and fall through untouched. (No reset-time gate — resetAt is
+    // free text, see the plan header; a still-out-of-budget run simply re-pauses.)
+    for (const s of listPending(db, ticketId).filter((s) => s.signal_type === "human_resume")) {
+      markConsumed(db, s.id);
+    }
+
+    setTicketStatus(db, ticketId, "active");
+    let resumeContext: { stepKey: string; transcript: string } | undefined;
+    if (moved && args.acceptHead) {
+      appendEvent(db, { ticketId, kind: "resumed", reason: `accept-head:${current}` });
+      // carryover dropped: the operator changed the base, so the transcript is untrustworthy
+    } else {
+      if (parkedStep && existsSync(join(dir, "transcript.json"))) {
+        const tj = JSON.parse(readFileSync(join(dir, "transcript.json"), "utf8")) as {
+          transcript: string;
+        };
+        resumeContext = { stepKey: parkedStep.step_key, transcript: tj.transcript };
+      }
+      appendEvent(db, { ticketId, kind: "resumed", reason: "resume" });
+    }
+
+    recover(db, realRecoverDeps()); // resets the interrupted 'running' step → pending
+
+    const ports: ProjectorPorts = deps?.ports ?? makeProjectorPorts(runtimeConfig, profile);
+
+    const registry: StepRegistry = deps?.buildRegistry
+      ? deps.buildRegistry(resumeContext)
+      : buildDispatchRegistry({
+          runner: resolveAgentRunner(runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG),
+          agentConfig: runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG,
+          profile,
+          inPlace,
+          worktreeRoot, // minted once above (in-place = repo root), shared with the reconcile
+          resumeContext,
+        });
+
+    const result = await driveToTerminal(db, registry, {
+      ticketId,
+      config: runtimeConfig,
+      ports,
+      profile,
+      emit: stdoutSink,
+    });
+    process.stderr.write(`${formatRunSummary(db, ticketId, result)}\n`);
+
+    if (result.outcome === "paused" && result.reason === "budget" && result.park) {
+      dumpPark(db, dbPath, profile.slug, ticket.ident, result.park); // re-dump (closes db)
+      process.stderr.write(
+        `${formatMessage("run", `Parked again: ${result.park.cause}. Dump: ${dir}`)}\n`,
+      );
+      process.exitCode = exitCodeForOutcome("paused"); // 75
+      return;
+    }
+    db.close();
+    process.exitCode = exitCodeForOutcome(result.outcome); // 0 pr-ready/done · 75 paused · 1 abandoned
+  } finally {
+    releaseRunLock(lock);
   }
-  db.close();
-  process.exitCode = exitCodeForOutcome(result.outcome); // 0 pr-ready/done · 75 paused · 1 abandoned
 }
