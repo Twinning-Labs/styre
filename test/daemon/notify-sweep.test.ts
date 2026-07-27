@@ -42,36 +42,30 @@ test("sweepNew enqueues escalated+parked at 'escalations', adds transition/loopb
   db2.close();
 });
 
-test("notifyTerminal enqueues pr-ready(success) and no-progress(high); skips parked", () => {
+test("notifyTerminal enqueues pr-ready(success) and done(success); skips paused and abandoned", () => {
   const { db, ticketId } = makeTestDb();
   const n = createNotifier(cfg("escalations"));
   n.notifyTerminal(db, ticketId, "pr-ready");
-  n.notifyTerminal(db, ticketId, "no-progress");
-  n.notifyTerminal(db, ticketId, "parked");
+  n.notifyTerminal(db, ticketId, "done");
+  n.notifyTerminal(db, ticketId, "paused");
+  n.notifyTerminal(db, ticketId, "abandoned");
   const got = payloads(db);
   db.close();
   expect(got).toEqual([
     { event: "PR ready to merge", severity: "success" },
-    { event: "Stopped — couldn't make progress.", severity: "high" },
+    { event: "released", severity: "success" },
   ]);
 });
 
-test("terminal notify: dead-end blocked pings; an escalation (escalated) does not (already evented)", () => {
-  // A resolver dead-end → the "Stopped — no actionable work remains." ping.
+test("terminal notify: a paused outcome never double-pings (already evented via the swept escalated/parked event)", () => {
+  // pauseTicket (needs_you) and the budget-park path each append their own event_log row, which
+  // sweepNew already turned into a delivered notification before the terminal fires.
   const a = makeTestDb();
-  createNotifier(cfg("escalations")).notifyTerminal(a.db, a.ticketId, "blocked");
-  const aPayloads = payloads(a.db);
+  insertPending(a.db, { ticketId: a.ticketId, signalType: "human_resume", reason: "boom" });
+  createNotifier(cfg("escalations")).notifyTerminal(a.db, a.ticketId, "paused");
+  const aCount = payloads(a.db).length;
   a.db.close();
-  expect(aPayloads).toEqual([{ event: "Stopped — no actionable work remains.", severity: "high" }]);
-
-  // An escalation now arrives as `escalated` → NO terminal ping (the swept `escalated` event is
-  // the notification). The pending human_resume no longer routes through the blocked branch.
-  const b = makeTestDb();
-  insertPending(b.db, { ticketId: b.ticketId, signalType: "human_resume", reason: "boom" });
-  createNotifier(cfg("escalations")).notifyTerminal(b.db, b.ticketId, "escalated");
-  const bCount = payloads(b.db).length;
-  b.db.close();
-  expect(bCount).toBe(0);
+  expect(aCount).toBe(0);
 });
 
 test("disabled notifier enqueues nothing", () => {

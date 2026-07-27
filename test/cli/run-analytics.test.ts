@@ -14,6 +14,7 @@ const paused: SummaryEvent = {
   started_at: "t0",
   ended_at: "t1",
   outcome: "paused",
+  reason: "budget",
   stage: "implement",
   status: "running",
   ticks: 12,
@@ -46,10 +47,9 @@ test("paused run maps outcome through and the right buckets", () => {
     onPlanDefect: "escalate",
   });
   expect(props.outcome).toBe("paused");
-  // failureBucket still keys off the old "parked" string literal — re-keying it to paused+reason
-  // (e.g. "parked-credits" for a budget pause) is ENG-383/384 Task 3's job; for now it falls
-  // through to the escalation_reasons keyword scan, which is empty here → "unknown".
-  expect(props.failure_bucket).toBe("unknown");
+  // failureBucket keys off summary.reason: a budget pause buckets as "parked-credits" regardless
+  // of (here, empty) escalation reasons — see src/telemetry/analytics/properties.ts.
+  expect(props.failure_bucket).toBe("parked-credits");
   expect(props.terminal_stage).toBe("implement");
   expect(props.duration_bucket).toBe("5-15m");
   expect(props.first_time_ci_pass).toBe(false);

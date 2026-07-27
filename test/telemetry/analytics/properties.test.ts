@@ -62,17 +62,22 @@ test("bucket and durationBucket map to coarse strings", () => {
   expect(durationBucket(90 * 60_000)).toBe(">60m");
 });
 
-test("failureBucket: success → null; parked → parked-credits; keyword maps blocked", () => {
-  expect(failureBucket("pr-ready", [])).toBeNull();
-  expect(failureBucket("parked", [])).toBe("parked-credits");
-  expect(failureBucket("no-progress", [])).toBe("no-progress");
-  expect(failureBucket("blocked", ["plan defect found in design"])).toBe("plan-defect");
-  expect(failureBucket("blocked", ["something weird"])).toBe("unknown");
-  // An escalation classifies by its reason keywords (reasons are populated).
-  expect(failureBucket("escalated", ["blocking plan-defect found in review"])).toBe("plan-defect");
-  expect(failureBucket("escalated", ["step 'design:extract' failed"])).toBe("unknown");
-  // A resolver dead-end carries no escalation reasons → unknown.
-  expect(failureBucket("blocked", [])).toBe("unknown");
+test("failureBucket: success → null; paused(budget) → parked-credits; abandoned → no-progress; keyword maps paused(needs_you)", () => {
+  expect(failureBucket("pr-ready", undefined, [])).toBeNull();
+  expect(failureBucket("done", undefined, [])).toBeNull();
+  // A budget pause keys off `reason`, regardless of (empty) escalation reasons.
+  expect(failureBucket("paused", "budget", [])).toBe("parked-credits");
+  // abandoned is a reserved/unemitted outcome this ticket, but the bucket is pinned anyway.
+  expect(failureBucket("abandoned", undefined, [])).toBe("no-progress");
+  // A needs_you pause classifies by its escalation reason keywords (reasons are populated).
+  expect(failureBucket("paused", "needs_you", ["plan defect found in design"])).toBe("plan-defect");
+  expect(failureBucket("paused", "needs_you", ["something weird"])).toBe("unknown");
+  expect(failureBucket("paused", "needs_you", ["blocking plan-defect found in review"])).toBe(
+    "plan-defect",
+  );
+  expect(failureBucket("paused", "needs_you", ["step 'design:extract' failed"])).toBe("unknown");
+  // A needs_you pause with no escalation reasons carries no signal → unknown.
+  expect(failureBucket("paused", "needs_you", [])).toBe("unknown");
 });
 
 test("run_completed derives first_time_ci_pass and autonomous_fix from dispatch_outcomes", () => {
@@ -106,7 +111,11 @@ test("ALLOW-LIST GUARD: every builder emits only allow-listed keys", () => {
     }),
     runStartedProperties({ projectId: "p", resumed: false, tracker: "linear", forge: "github" }),
     runCompletedProperties(
-      summary({ outcome: "escalated", escalation_reasons: ["budget exhausted"] }),
+      summary({
+        outcome: "paused",
+        reason: "needs_you",
+        escalation_reasons: ["budget exhausted"],
+      }),
       5000,
       { complexityGrading: true, onPlanDefect: "redesign" },
     ),

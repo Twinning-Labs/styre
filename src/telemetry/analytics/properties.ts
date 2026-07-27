@@ -57,13 +57,20 @@ export function durationBucket(ms: number): string {
   return ">60m";
 }
 
-/** Map outcome + free-text escalation reasons to a FIXED enum. The raw text never leaves here. */
-export function failureBucket(outcome: string, escalationReasons: string[]): string | null {
+/** Map outcome + reason + free-text escalation reasons to a FIXED enum. The raw text never leaves
+ *  here. `reason` disambiguates a `paused` outcome (budget vs needs_you/interrupted); a budget
+ *  pause buckets directly (its escalation reasons, if any, carry no useful signal). An `abandoned`
+ *  run buckets directly too. A `needs_you` pause (or a paused run whose reason is absent/other)
+ *  falls through to the keyword ladder over the escalation reasons, exactly as before. */
+export function failureBucket(
+  outcome: string,
+  reason: string | null | undefined,
+  escalationReasons: string[],
+): string | null {
   if (outcome === "pr-ready" || outcome === "done") return null;
-  if (outcome === "parked") return "parked-credits";
-  if (outcome === "no-progress") return "no-progress";
-  // escalated (reasons populated) or a resolver dead-end blocked (no reasons → "unknown"):
-  // classify by keyword against the joined reasons (the raw text never leaves here).
+  if (outcome === "paused" && reason === "budget") return "parked-credits";
+  if (outcome === "abandoned") return "no-progress";
+  // classify by keyword against the joined escalation reasons (the raw text never leaves here).
   const hay = escalationReasons.join(" ").toLowerCase();
   if (/budget|token|limit|exhaust/.test(hay)) return "budget-exhausted";
   if (/plan/.test(hay)) return "plan-defect";
@@ -125,7 +132,7 @@ export function runCompletedProperties(
     duration_bucket: durationBucket(durationMs),
     first_time_ci_pass: success && !hadRed,
     autonomous_fix: success && hadRed && summary.escalation_count === 0,
-    failure_bucket: failureBucket(summary.outcome, summary.escalation_reasons),
+    failure_bucket: failureBucket(summary.outcome, summary.reason, summary.escalation_reasons),
     complexity_grading: config.complexityGrading,
     on_plan_defect: config.onPlanDefect,
   };

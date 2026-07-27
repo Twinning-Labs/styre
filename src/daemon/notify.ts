@@ -30,21 +30,19 @@ function eventDecision(
   }
 }
 
-/** Map a terminal outcome → (severity, event) or null. `parked` and `escalated` are intentionally
- *  null: their notification already went out as a swept event. `blocked` (a resolver dead-end) is
- *  handled separately in `notifyTerminal` (an unconditional dead-end ping). */
+/** Map a terminal RunOutcome (src/daemon/run-ticket.ts) → (severity, event) or null. `paused` is
+ *  intentionally null regardless of reason: both `pauseTicket` (needs_you) and the budget-park path
+ *  (advance.ts) append an event_log row (`escalated` / `parked` respectively) that `sweepNew` already
+ *  turned into a notification before the terminal fires — a terminal ping here would double it.
+ *  `abandoned` is reserved/unemitted by any driveToTerminal path this ticket; null is the safe default. */
 function terminalDecision(outcome: string): { severity: NotifySeverity; event: string } | null {
   switch (outcome) {
     case "pr-ready":
       return { severity: "success", event: "PR ready to merge" };
     case "done":
       return { severity: "success", event: "released" };
-    case "no-progress":
-      return { severity: "high", event: "Stopped — couldn't make progress." };
-    case "escalated":
-      return null; // already notified via the swept `escalated` event; a terminal ping would double
     default:
-      return null; // blocked (handled above), parked (swept)
+      return null; // paused (swept via escalated/parked), abandoned (unemitted)
   }
 }
 
@@ -99,17 +97,6 @@ export function createNotifier(config: RuntimeConfig): {
     },
     notifyTerminal(db, ticketId, outcome) {
       if (!enabled) return;
-      if (outcome === "blocked") {
-        // A resolver dead-end. (Escalations report `escalated`, not `blocked`, and are notified via
-        // their swept `escalated` event — see terminalDecision.) Post the terminal dead-end ping.
-        post(
-          db,
-          ticketId,
-          `notify:${ticketId}:term:blocked`,
-          buildMsg(db, ticketId, "Stopped — no actionable work remains.", "high"),
-        );
-        return;
-      }
       const d = terminalDecision(outcome);
       if (!d) return;
       post(

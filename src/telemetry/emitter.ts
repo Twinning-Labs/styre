@@ -163,6 +163,7 @@ export function buildSummary(
     started_at: ctx.startedAt,
     ended_at: nowUtc(),
     outcome: result.outcome,
+    reason: result.reason,
     stage: result.stage,
     status: result.status,
     ticks: result.iterations,
