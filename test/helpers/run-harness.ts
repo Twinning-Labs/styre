@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
@@ -10,6 +10,7 @@ import { driveToTerminal } from "../../src/daemon/run-ticket.ts";
 import type { RunOutcome, RunResult } from "../../src/daemon/run-ticket.ts";
 import { openDb } from "../../src/db/client.ts";
 import { migrate } from "../../src/db/migrate.ts";
+import { hasPendingHumanResume } from "../../src/db/repos/signal.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import type { ParkInfo } from "../../src/engine/park-signal.ts";
@@ -24,7 +25,10 @@ const PARK_IDENT = "ENG-1";
 export interface ParkedRunResult {
   slug: string;
   ident: string;
-  park: ParkInfo;
+  ticketId: number;
+  /** Present for a paused(budget) park; absent for a needs_you park (no ParkInfo is produced on
+   *  that path — see runNeedsYouTicket). */
+  park?: ParkInfo;
   exitCode: number;
   result: RunResult;
   /** The resolved dump directory path (captured while XDG_STATE_HOME is still set) */
@@ -131,7 +135,138 @@ export async function runParkedTicket(): Promise<ParkedRunResult> {
     return {
       slug: PARK_SLUG,
       ident: PARK_IDENT,
+      ticketId,
       park: result.park,
+      exitCode: process.exitCode, // observed — not hardcoded
+      result,
+      dumpDir,
+      // stateRoot and repoPath must survive until the caller is fully done with the parked run.
+      _tempDirs: [stateRoot, repoPath],
+    };
+  } finally {
+    // Restore XDG_STATE_HOME so the global side-effect doesn't leak to subsequent tests.
+    if (prevXdgStateHome === undefined) {
+      process.env.XDG_STATE_HOME = undefined;
+    } else {
+      process.env.XDG_STATE_HOME = prevXdgStateHome;
+    }
+    // worktreeRoot is no longer needed once driveToTerminal has returned.
+    rmSync(worktreeRoot, { recursive: true, force: true });
+  }
+}
+
+/** Drive a ticket to a `paused(needs_you)` checkpoint — a pending `human_resume` signal — using
+ *  the same `gitRepoWithProject` + `finishRunResult` scaffolding as `runParkedTicket`, but with a
+ *  `FakeAgentRunner` that deterministically FAILS every dispatch (`completed: true, exitCode: 1`)
+ *  so `implement:wu1:dispatch` retries to `DEFAULT_MAX_ATTEMPTS` (3) and `applyFailurePolicy`
+ *  escalates, inserting the pending `human_resume` (failure-policy.ts:72's `step.attempt >=
+ *  maxAttempts` guard fires ahead of any step-type-specific branch, so the exact escalate trigger
+ *  taken underneath doesn't matter — every branch converges on that same cap).
+ *
+ *  Unlike a budget park, `driveToTerminal` produces no `ParkInfo` for a needs_you pause, so
+ *  `finishRunResult` (whose dump branch is gated on `reason === "budget" && park`) only closes the
+ *  db and sets `process.exitCode`; it does NOT copy the db to the durable dump dir (per its own doc
+ *  comment: "dumping a needs_you pause is ENG-385's job"). This harness does that copy itself —
+ *  WAL-checkpoint then copy, mirroring `dumpPark` minus the ParkInfo-only transcript.json (a
+ *  needs_you pause carries no transcript) — so `resumeParkedTicket`/`resumeRun` can reopen the
+ *  checkpoint at the conventional `dumpDir/run.db` path. */
+export async function runNeedsYouTicket(): Promise<ParkedRunResult> {
+  // Capture and override XDG_STATE_HOME so parkDir resolves to a temp dir, not ~/.local/state.
+  const prevXdgStateHome = process.env.XDG_STATE_HOME;
+  const stateRoot = mkdtempSync(join(tmpdir(), "styre-needsyou-state-"));
+  process.env.XDG_STATE_HOME = stateRoot;
+
+  // Reset process.exitCode to 0 so we can observe what finishRunResult sets it to.
+  process.exitCode = 0;
+
+  // A real git repo + on-disk SQLite DB seeded with ticket ENG-1 at stage='implement' + work_unit.
+  const { db, ticketId, repoPath } = gitRepoWithProject();
+  const dbPath = db.filename; // bun:sqlite exposes the file path
+
+  const profile = parseProfile({
+    slug: PARK_SLUG,
+    targetRepo: repoPath,
+    defaultBranch: "main",
+    checksSystem: "none",
+  });
+
+  // failing runner: a non-zero exit trips dispatch-failed → retry → escalate at the cap.
+  const failing = new FakeAgentRunner(() => ({
+    completed: true,
+    exitCode: 1,
+    stdout: "{}",
+    stderr: "boom",
+    timedOut: false,
+    costUsd: null,
+    tokensIn: null,
+    tokensOut: null,
+  }));
+
+  // worktreeRoot is only needed during driveToTerminal; cleaned up in the finally below.
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-wt-needsyou-"));
+  const registry = buildDispatchRegistry({
+    runner: failing,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile,
+    worktreeRoot,
+  });
+
+  const ports = {
+    issueTracker: fakeIssueTracker({
+      ticket: {
+        ident: PARK_IDENT,
+        title: "Harness ticket",
+        description: "body",
+        typeLabel: "Feature",
+        externalId: "uuid-harness",
+        url: null,
+      },
+    }),
+    forge: fakeForge(),
+    checks: fakeChecks("passing"),
+  };
+
+  try {
+    const result = await driveToTerminal(db, registry, {
+      ticketId,
+      config: DEFAULT_RUNTIME_CONFIG,
+      ports,
+      profile,
+    });
+
+    if (result.outcome !== "paused" || result.reason !== "needs_you") {
+      db.close();
+      throw new Error(
+        `runNeedsYouTicket: expected a paused(needs_you) outcome, got '${result.outcome}'${result.reason ? `(${result.reason})` : ""}. Check FakeAgentRunner.`,
+      );
+    }
+    if (!hasPendingHumanResume(db, ticketId)) {
+      db.close();
+      throw new Error(
+        "runNeedsYouTicket: expected a pending human_resume signal after escalation, found none.",
+      );
+    }
+
+    // Capture the dump dir while XDG_STATE_HOME is still set (the manual copy below will write
+    // here; the finally block restores XDG_STATE_HOME, so we must snapshot the path now).
+    const dumpDir = parkDir(PARK_SLUG, PARK_IDENT);
+
+    // Fold the WAL into the main file before finishRunResult closes the db, so the copy below
+    // (taken after close) is complete — mirrors dumpPark's own wal_checkpoint before its copy.
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+
+    // Use the shared finishRunResult (same code path as run.ts) — for needs_you it only closes the
+    // db and sets process.exitCode = 75 (see this function's doc comment for why it doesn't dump).
+    finishRunResult(db, dbPath, PARK_SLUG, PARK_IDENT, result);
+
+    // Persist the checkpoint at the conventional dumpDir/run.db location ourselves.
+    mkdirSync(dumpDir, { recursive: true });
+    copyFileSync(dbPath, join(dumpDir, "run.db"));
+
+    return {
+      slug: PARK_SLUG,
+      ident: PARK_IDENT,
+      ticketId,
       exitCode: process.exitCode, // observed — not hardcoded
       result,
       dumpDir,

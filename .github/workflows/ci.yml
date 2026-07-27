@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `edited` so a title/body change re-runs both jobs — the pr-title
+    # Conventional-Commits lint must re-evaluate when the title is fixed
+    # (default types omit `edited`, so a title-only edit otherwise never re-checks).
+    types: [opened, synchronize, reopened, edited]
 
 jobs:
   check:
