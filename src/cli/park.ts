@@ -28,6 +28,7 @@ import { getLatestForTicket, getLatestWorktreePath } from "../db/repos/dispatch.
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { getProject } from "../db/repos/project.ts";
 import { ensureRunTable, getRun, insertRun, markResumed } from "../db/repos/run.ts";
+import { listPending, markConsumed } from "../db/repos/signal.ts";
 import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
 import { listByStatus } from "../db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
@@ -309,6 +310,14 @@ export async function resumeRun(
   // needlessly discard the reuse payoff (re-running provision for no reason).
   if (!inPlace) {
     resetProvisionForResume(db, ticketId);
+  }
+
+  // Consume any pending human_resume BEFORE driveToTerminal — else hasPendingHumanResume
+  // (run-ticket.ts:113) fires on the first tick and instantly re-pauses. Budget/interrupted
+  // checkpoints have no such signal and fall through untouched. (No reset-time gate — resetAt is
+  // free text, see the plan header; a still-out-of-budget run simply re-pauses.)
+  for (const s of listPending(db, ticketId).filter((s) => s.signal_type === "human_resume")) {
+    markConsumed(db, s.id);
   }
 
   setTicketStatus(db, ticketId, "active");
