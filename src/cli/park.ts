@@ -231,7 +231,10 @@ export async function resumeRun(
   const staleWorktreePath = getLatestWorktreePath(db, ticketId);
   const inPlace = staleWorktreePath === project.target_repo;
   const branch = branchNameFor(ticket);
-  const parkedStep = listByStatus(db, "running").find((s) => s.ticket_id === ticketId) ?? null;
+  const parkedStep =
+    listByStatus(db, "running").find((s) => s.ticket_id === ticketId) ??
+    listByStatus(db, "failed").find((s) => s.ticket_id === ticketId) ??
+    null;
 
   const recorded = headBaseline(db, ticketId);
   const current = branchHeadSha(project.target_repo, branch);

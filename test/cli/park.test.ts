@@ -192,3 +192,69 @@ test("resumeRun wires resetProvisionForResume into the resume path (S4)", async 
     rmSync(repoPath, { recursive: true, force: true });
   }
 });
+
+test("resumeRun --inspect names a failed step, not (none), when no step is 'running'", async () => {
+  // Build a parked-run dump whose only stepped work is a FAILED step (an escalated attempt —
+  // no 'running' step exists). `--inspect` must still name it as the re-dispatch target,
+  // not print "would re-dispatch step: (none)" (parkedStep today only looks at 'running').
+  const stateRoot = mkdtempSync(join(tmpdir(), "styre-park-inspect-state-"));
+  const prevXdgStateHome = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = stateRoot;
+  const repoPath = gitRepo();
+  const slug = "inspect-test";
+  const ident = "ENG-10";
+
+  const logs: string[] = [];
+  const origStderrWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string) => {
+    logs.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+
+  try {
+    const dir = parkDir(slug, ident);
+    mkdirSync(dir, { recursive: true });
+    const dbPath = join(dir, "run.db");
+    migrate(dbPath);
+    const seedDb = openDb(dbPath);
+    const projectId = insertProject(seedDb, { slug, targetRepo: repoPath });
+    const ticketId = insertTicket(seedDb, { projectId, ident });
+    setTicketStage(seedDb, ticketId, "implement");
+    await expect(
+      runStep(seedDb, {
+        ticketId,
+        stepKey: "implement",
+        stepType: "implement",
+        effectful: true,
+        execute: () => {
+          throw new Error("boom");
+        },
+      }),
+    ).rejects.toThrow("boom");
+    expect(getByKey(seedDb, ticketId, "implement")?.status).toBe("failed");
+    seedDb.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    seedDb.close();
+
+    const profile = parseProfile({
+      slug,
+      targetRepo: repoPath,
+      defaultBranch: "main",
+      checksSystem: "none",
+    });
+
+    await resumeRun({ resume: ident, inspect: true }, profile, DEFAULT_RUNTIME_CONFIG);
+
+    const output = logs.join("");
+    expect(output).toContain("would re-dispatch step: implement");
+    expect(output).not.toContain("would re-dispatch step: (none)");
+  } finally {
+    process.stderr.write = origStderrWrite;
+    if (prevXdgStateHome === undefined) {
+      process.env.XDG_STATE_HOME = undefined;
+    } else {
+      process.env.XDG_STATE_HOME = prevXdgStateHome;
+    }
+    rmSync(stateRoot, { recursive: true, force: true });
+    rmSync(repoPath, { recursive: true, force: true });
+  }
+});
