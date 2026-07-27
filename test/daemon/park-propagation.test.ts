@@ -11,6 +11,8 @@ import { getTicket } from "../../src/db/repos/ticket.ts";
 import { listByStatus } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
+import { runCompletedProperties } from "../../src/telemetry/analytics/properties.ts";
+import { buildSummary } from "../../src/telemetry/emitter.ts";
 import { gitRepoWithProject } from "../helpers/git-project.ts";
 
 test("a session-limit park sets status=waiting, leaves the step running, appends a 'parked' event, and burns no attempt", async () => {
@@ -50,5 +52,17 @@ test("a session-limit park sets status=waiting, leaves the step running, appends
   // so the step's attempt count reflects only real executions (0 here: no real attempt completed).
   expect(runningSteps[0]?.attempt).toBe(0);
   expect(listEvents(db, ticketId).some((e) => e.kind === "parked")).toBe(true);
+
+  // E2E: this real budget-parked result, run through the actual buildSummary → failureBucket chain
+  // (not a hand-built summary literal), must bucket as "parked-credits" — pins the mapping end to end
+  // so a future regression dropping `reason` off the summary can't silently degrade to "unknown".
+  const summary = buildSummary(db, ticketId, result);
+  if (summary.type !== "summary") throw new Error(`expected summary, got ${summary.type}`);
+  const props = runCompletedProperties(summary, 1000, {
+    complexityGrading: false,
+    onPlanDefect: "escalate",
+  });
+  expect(props.failure_bucket).toBe("parked-credits");
+
   db.close();
 });
