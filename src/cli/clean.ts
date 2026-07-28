@@ -5,6 +5,7 @@ import { defineCommand } from "citty";
 import { loadProfileByConvention, slugForCwd } from "../config/discover.ts";
 import { getLatestWorktreePath } from "../db/repos/dispatch.ts";
 import type { Profile } from "../dispatch/profile.ts";
+import { loadProfile } from "../dispatch/profile.ts";
 import { reconcileWorktree } from "../dispatch/worktree.ts";
 import { classifyCheckpointDb } from "./checkpoints.ts";
 import { EXIT, StyreError, usageError } from "./errors.ts";
@@ -65,15 +66,27 @@ export async function cleanImpl(
   }
   const ident = args.ident;
 
-  const slug = args.slug ?? slugForCwd();
-  if (!slug) {
-    throw usageError(
-      "styre clean: could not determine the project slug",
-      "cd into the target repo, or pass --slug.",
-    );
+  // Mirrors run.ts's profile/slug resolution (--profile now loads via loadProfile instead of
+  // being silently ignored), while staying lazy about loadProfileByConvention so the opts test
+  // seam (opts?.targetRepo) can still short-circuit it without a profile on disk — same as before.
+  let profile: Profile | undefined = opts?.profile;
+  let slug: string;
+  if (profile) {
+    slug = args.slug ?? profile.slug;
+  } else if (args.profile) {
+    profile = loadProfile(args.profile);
+    slug = args.slug ?? profile.slug;
+  } else {
+    const derived = args.slug ?? slugForCwd();
+    if (!derived) {
+      throw usageError(
+        "styre clean: could not determine the project slug",
+        "cd into the target repo, or pass --slug.",
+      );
+    }
+    slug = derived;
   }
-  const targetRepo =
-    opts?.targetRepo ?? (opts?.profile ?? loadProfileByConvention(slug)).targetRepo;
+  const targetRepo = opts?.targetRepo ?? (profile ?? loadProfileByConvention(slug)).targetRepo;
 
   const dir = opts?.root ? join(opts.root, slug, ident) : parkDir(slug, ident);
   const dbPath = join(dir, "run.db");
