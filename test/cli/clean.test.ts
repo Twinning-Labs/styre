@@ -1,3 +1,4 @@
+import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -51,6 +52,32 @@ function seedPrReadyEffort(
   return { dir: join(root, slug, ident), branch, leftover, wtParent };
 }
 
+/** Seed a checkpoint at <root>/<slug>/<ident> plus a real styre-owned worktree in `repoDir`
+ *  holding its branch, recorded as the effort's latest dispatch worktree_path. Generalizes
+ *  `seedPrReadyEffort` for `--all`'s multi-kind fixture (ENG-386 Task 4). */
+function seedEffortWithWorktree(
+  root: string,
+  repoDir: string,
+  slug: string,
+  ident: string,
+  shape: (db: Database, ticketId: number) => void,
+): { dir: string; branch: string; leftover: string; wtParent: string } {
+  const branch = `feat/${ident}`;
+  const wtParent = mkdtempSync(join(tmpdir(), "styre-wt-"));
+  const leftover = join(wtParent, "held");
+  const addRes = Bun.spawnSync(["git", "worktree", "add", "-b", branch, leftover], {
+    cwd: repoDir,
+  });
+  if (!addRes.success) throw new Error(`git worktree add failed: ${addRes.stderr.toString()}`);
+
+  seedCheckpoint(root, slug, ident, (db, ticketId) => {
+    insertDispatch(db, { ticketId, dispatchId: "d1", seq: 1, worktreePath: leftover });
+    shape(db, ticketId);
+  });
+
+  return { dir: join(root, slug, ident), branch, leftover, wtParent };
+}
+
 describe("cleanImpl", () => {
   test("reap: frees the worktree and removes the checkpoint dir for a pr-ready effort", async () => {
     const root = mkdtempSync(join(tmpdir(), "styre-clean-state-"));
@@ -96,6 +123,68 @@ describe("cleanImpl", () => {
       rmSync(root, { recursive: true, force: true });
       rmSync(repoDir, { recursive: true, force: true });
       rmSync(wtParent, { recursive: true, force: true });
+    }
+  });
+
+  test("--all: reaps pr-ready and done leftovers, protects needs_you and interrupted", async () => {
+    const root = mkdtempSync(join(tmpdir(), "styre-clean-state-"));
+    const repoDir = makeTargetRepo();
+    const slug = "proj";
+
+    const prReady = seedEffortWithWorktree(root, repoDir, slug, "ENG-20", (db, ticketId) => {
+      setTicketStatus(db, ticketId, "waiting");
+      setTicketStage(db, ticketId, "merge");
+      insertPending(db, { ticketId, signalType: "human_merge_approval" });
+    });
+    const done = seedEffortWithWorktree(root, repoDir, slug, "ENG-21", (db, ticketId) => {
+      setTicketStatus(db, ticketId, "done");
+    });
+    const needsYou = seedEffortWithWorktree(root, repoDir, slug, "ENG-22", (db, ticketId) => {
+      setTicketStatus(db, ticketId, "waiting");
+      insertPending(db, { ticketId, signalType: "human_resume", reason: "needs you" });
+    });
+    const interrupted = seedEffortWithWorktree(root, repoDir, slug, "ENG-23", () => {
+      // active, no signal, no transcript → interrupted (same as checkpoints.test.ts's ENG-4)
+    });
+
+    const written: string[] = [];
+    const origWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((s: string) => {
+      written.push(s);
+      return true;
+    }) as typeof process.stdout.write;
+
+    try {
+      await cleanImpl({ all: true, slug }, { root, targetRepo: repoDir });
+
+      expect(
+        listWorktrees(repoDir).find((w) => w.branch === `refs/heads/${prReady.branch}`),
+      ).toBeUndefined();
+      expect(existsSync(prReady.dir)).toBe(false);
+      expect(
+        listWorktrees(repoDir).find((w) => w.branch === `refs/heads/${done.branch}`),
+      ).toBeUndefined();
+      expect(existsSync(done.dir)).toBe(false);
+
+      expect(
+        listWorktrees(repoDir).find((w) => w.branch === `refs/heads/${needsYou.branch}`),
+      ).not.toBeUndefined();
+      expect(existsSync(needsYou.dir)).toBe(true);
+      expect(
+        listWorktrees(repoDir).find((w) => w.branch === `refs/heads/${interrupted.branch}`),
+      ).not.toBeUndefined();
+      expect(existsSync(interrupted.dir)).toBe(true);
+
+      const out = written.join("");
+      expect(out).toContain("reaped 2");
+      expect(out).toContain("kept 2");
+    } finally {
+      process.stdout.write = origWrite;
+      rmSync(root, { recursive: true, force: true });
+      rmSync(repoDir, { recursive: true, force: true });
+      for (const e of [prReady, done, needsYou, interrupted]) {
+        rmSync(e.wtParent, { recursive: true, force: true });
+      }
     }
   });
 });

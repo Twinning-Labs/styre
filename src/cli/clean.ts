@@ -7,7 +7,7 @@ import { getLatestWorktreePath } from "../db/repos/dispatch.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
 import { reconcileWorktree } from "../dispatch/worktree.ts";
-import { classifyCheckpointDb } from "./checkpoints.ts";
+import { classifyCheckpointDb, listCheckpoints } from "./checkpoints.ts";
 import { EXIT, StyreError, usageError } from "./errors.ts";
 import { guard } from "./output.ts";
 import { parkDir } from "./park.ts";
@@ -60,15 +60,11 @@ export async function cleanImpl(
   if (args.all && args.purge) {
     throw usageError("--purge targets a single effort; name an ident");
   }
-  if (!args.ident) {
-    // `--all` execution is ENG-386 Task 4's job — this task wires the guards + single-ident path.
-    throw usageError("styre clean --all is not yet implemented");
-  }
-  const ident = args.ident;
 
   // Mirrors run.ts's profile/slug resolution (--profile now loads via loadProfile instead of
   // being silently ignored), while staying lazy about loadProfileByConvention so the opts test
   // seam (opts?.targetRepo) can still short-circuit it without a profile on disk — same as before.
+  // Shared by both the single-ident and `--all` paths.
   let profile: Profile | undefined = opts?.profile;
   let slug: string;
   if (profile) {
@@ -87,6 +83,42 @@ export async function cleanImpl(
     slug = derived;
   }
   const targetRepo = opts?.targetRepo ?? (profile ?? loadProfileByConvention(slug)).targetRepo;
+
+  if (args.all) {
+    // Scope to this project's slug — the state dir may hold multiple projects, but `targetRepo`
+    // was resolved from a single profile, so reaping another slug's effort here would be wrong.
+    const scoped = listCheckpoints(opts?.root).filter((c) => c.slug === slug);
+    const finished = scoped.filter((c) => (c.kind === "pr-ready" || c.kind === "done") && !c.live);
+    const kept = scoped.length - finished.length;
+
+    let reaped = 0;
+    const failures: { ident: string; error: unknown }[] = [];
+    for (const c of finished) {
+      try {
+        reapEffort(targetRepo, {
+          branch: c.branch,
+          dir: c.dir,
+          ticketId: c.ticketId,
+          dbPath: c.dbPath,
+        });
+        reaped++;
+      } catch (e) {
+        failures.push({ ident: c.ident, error: e });
+      }
+    }
+
+    process.stdout.write(
+      `styre clean: reaped ${reaped} finished leftover(s); kept ${kept} resumable/unknown; ${failures.length} failed\n`,
+    );
+    for (const f of failures) {
+      const msg = f.error instanceof Error ? f.error.message : String(f.error);
+      process.stderr.write(`styre clean: failed to reap ${f.ident}: ${msg}\n`);
+    }
+    return;
+  }
+
+  const ident = args.ident;
+  if (!ident) throw usageError("clean: name an effort's ident, or pass --all");
 
   const dir = opts?.root ? join(opts.root, slug, ident) : parkDir(slug, ident);
   const dbPath = join(dir, "run.db");
