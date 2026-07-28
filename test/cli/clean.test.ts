@@ -178,6 +178,7 @@ describe("cleanImpl", () => {
       const out = written.join("");
       expect(out).toContain("reaped 2");
       expect(out).toContain("kept 2");
+      expect(out).toContain("0 failed");
     } finally {
       process.stdout.write = origWrite;
       rmSync(root, { recursive: true, force: true });

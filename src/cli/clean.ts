@@ -94,6 +94,18 @@ export async function cleanImpl(
     let reaped = 0;
     const failures: { ident: string; error: unknown }[] = [];
     for (const c of finished) {
+      // Re-check the lock immediately before reaping: a run can go live between the
+      // `listCheckpoints` snapshot above and this iteration, and reconcileWorktree's internal
+      // foreign-live check doesn't cover the narrow window where a run has acquired its lock but
+      // not yet re-created its worktree. Mirrors the single-ident refuse gate above.
+      const lock = runLockStatus(c.dir);
+      if (lock && !lock.self) {
+        failures.push({
+          ident: c.ident,
+          error: new Error("a run went live during the sweep; skipped"),
+        });
+        continue;
+      }
       try {
         reapEffort(targetRepo, {
           branch: c.branch,
