@@ -6,7 +6,7 @@ import { loadProfileByConvention, slugForCwd } from "../config/discover.ts";
 import { getLatestWorktreePath } from "../db/repos/dispatch.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
-import { reconcileWorktree } from "../dispatch/worktree.ts";
+import { deleteLocalBranch, deleteRemoteBranch, reconcileWorktree } from "../dispatch/worktree.ts";
 import { classifyCheckpointDb, listCheckpoints } from "./checkpoints.ts";
 import { EXIT, StyreError, usageError } from "./errors.ts";
 import { guard } from "./output.ts";
@@ -159,6 +159,11 @@ export async function cleanImpl(
   }
 
   reapEffort(targetRepo, { branch: cls.branch, dir, ticketId: cls.ticketId, dbPath });
+
+  if (args.purge) {
+    deleteLocalBranch(targetRepo, cls.branch);
+    deleteRemoteBranch(targetRepo, cls.branch);
+  }
 
   process.stdout.write(`styre clean: reaped ${ident} (freed worktree, removed checkpoint)\n`);
 }

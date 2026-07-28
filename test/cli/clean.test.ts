@@ -26,6 +26,27 @@ function makeTargetRepo(): string {
   return repoDir;
 }
 
+/** Like `makeTargetRepo`, but with a separate BARE `origin` remote wired up — for `--purge`
+ *  coverage, which needs a real `git push origin --delete` / `git ls-remote` round trip
+ *  (ENG-386 Task 5). Returns both repo dirs; caller is responsible for cleaning up `origin` too. */
+function makeTargetRepoWithOrigin(): { repoDir: string; originDir: string } {
+  const repoDir = makeTargetRepo();
+  const originDir = mkdtempSync(join(tmpdir(), "styre-clean-origin-"));
+  const git = (args: string[], cwd: string) => {
+    const res = Bun.spawnSync(["git", ...args], { cwd });
+    if (!res.success) throw new Error(`git ${args.join(" ")} failed: ${res.stderr.toString()}`);
+  };
+  git(["init", "--bare", "-b", "main"], originDir);
+  git(["remote", "add", "origin", originDir], repoDir);
+  git(["push", "origin", "main"], repoDir);
+  return { repoDir, originDir };
+}
+
+function remoteHasBranch(repoDir: string, branch: string): boolean {
+  const res = Bun.spawnSync(["git", "ls-remote", "--heads", "origin", branch], { cwd: repoDir });
+  return res.success && res.stdout.toString().trim() !== "";
+}
+
 /** Seed a pr-ready checkpoint at <root>/<slug>/<ident> plus a real styre-owned worktree in
  *  `repoDir` holding its branch, recorded as the effort's latest dispatch worktree_path. */
 function seedPrReadyEffort(
@@ -50,6 +71,21 @@ function seedPrReadyEffort(
   });
 
   return { dir: join(root, slug, ident), branch, leftover, wtParent };
+}
+
+/** Like `seedPrReadyEffort`, but also pushes the branch to `origin` — for `--purge` coverage
+ *  (ENG-386 Task 5), which needs a real local+remote branch to delete. */
+function seedPrReadyEffortWithRemoteBranch(
+  root: string,
+  repoDir: string,
+  slug: string,
+  ident: string,
+): { dir: string; branch: string; leftover: string; wtParent: string } {
+  const seeded = seedPrReadyEffort(root, repoDir, slug, ident);
+  const push = Bun.spawnSync(["git", "push", "origin", seeded.branch], { cwd: repoDir });
+  if (!push.success)
+    throw new Error(`git push origin ${seeded.branch} failed: ${push.stderr.toString()}`);
+  return seeded;
 }
 
 /** Seed a checkpoint at <root>/<slug>/<ident> plus a real styre-owned worktree in `repoDir`
@@ -186,6 +222,81 @@ describe("cleanImpl", () => {
       for (const e of [prReady, done, needsYou, interrupted]) {
         rmSync(e.wtParent, { recursive: true, force: true });
       }
+    }
+  });
+
+  test("--purge: reaps the effort AND deletes the local + remote branch", async () => {
+    const root = mkdtempSync(join(tmpdir(), "styre-clean-state-"));
+    const { repoDir, originDir } = makeTargetRepoWithOrigin();
+    const slug = "proj";
+    const ident = "ENG-30";
+    const { dir, branch, wtParent } = seedPrReadyEffortWithRemoteBranch(root, repoDir, slug, ident);
+
+    try {
+      expect(remoteHasBranch(repoDir, branch)).toBe(true);
+
+      await cleanImpl({ ident, slug, purge: true }, { root, targetRepo: repoDir });
+
+      expect(existsSync(dir)).toBe(false);
+      expect(
+        listWorktrees(repoDir).find((w) => w.branch === `refs/heads/${branch}`),
+      ).toBeUndefined();
+      const local = Bun.spawnSync(["git", "branch", "--list", branch], { cwd: repoDir });
+      expect(local.stdout.toString().trim()).toBe("");
+      expect(remoteHasBranch(repoDir, branch)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(repoDir, { recursive: true, force: true });
+      rmSync(originDir, { recursive: true, force: true });
+      rmSync(wtParent, { recursive: true, force: true });
+    }
+  });
+
+  test("--purge: with no branch anywhere, still reaps the effort and writes no error output", async () => {
+    const root = mkdtempSync(join(tmpdir(), "styre-clean-state-"));
+    const { repoDir, originDir } = makeTargetRepoWithOrigin();
+    const slug = "proj";
+    const ident = "ENG-31";
+    // Seed a checkpoint WITHOUT any worktree/branch — reapEffort must succeed on an
+    // already-branchless effort, and the --purge tail must be a true silent no-op.
+    const dir = join(root, slug, ident);
+    seedCheckpoint(root, slug, ident, (db, ticketId) => {
+      setTicketStatus(db, ticketId, "waiting");
+      setTicketStage(db, ticketId, "merge");
+      insertPending(db, { ticketId, signalType: "human_merge_approval" });
+    });
+
+    const written: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((s: string) => {
+      written.push(s.toString());
+      return true;
+    }) as typeof process.stderr.write;
+
+    try {
+      await cleanImpl({ ident, slug, purge: true }, { root, targetRepo: repoDir });
+      expect(existsSync(dir)).toBe(false);
+    } finally {
+      process.stderr.write = origWrite;
+      rmSync(root, { recursive: true, force: true });
+      rmSync(repoDir, { recursive: true, force: true });
+      rmSync(originDir, { recursive: true, force: true });
+    }
+    expect(written).toEqual([]);
+  });
+
+  test("--all --purge: rejected as a usage error (exit 64)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "styre-clean-state-"));
+    const repoDir = makeTargetRepo();
+    const slug = "proj";
+
+    try {
+      await expect(
+        cleanImpl({ all: true, purge: true, slug }, { root, targetRepo: repoDir }),
+      ).rejects.toMatchObject({ code: 64 });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(repoDir, { recursive: true, force: true });
     }
   });
 });
