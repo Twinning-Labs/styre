@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { cleanImpl } from "../../src/cli/clean.ts";
 import { insertDispatch } from "../../src/db/repos/dispatch.ts";
 import { insertPending } from "../../src/db/repos/signal.ts";
-import { setTicketStage, setTicketStatus } from "../../src/db/repos/ticket.ts";
+import { setBranch, setTicketStage, setTicketStatus } from "../../src/db/repos/ticket.ts";
 import { listWorktrees } from "../../src/dispatch/worktree.ts";
 import { seedCheckpoint } from "../helpers/checkpoint.ts";
 
@@ -283,6 +283,59 @@ describe("cleanImpl", () => {
       rmSync(originDir, { recursive: true, force: true });
     }
     expect(written).toEqual([]);
+  });
+
+  test("--purge: refuses to delete the default branch, local and remote, even for an explicit branch_name of 'main'", async () => {
+    const root = mkdtempSync(join(tmpdir(), "styre-clean-state-"));
+    const { repoDir, originDir } = makeTargetRepoWithOrigin();
+    // main was pushed to origin by makeTargetRepoWithOrigin while repoDir was checked out on
+    // main; move the primary worktree off main so `main` isn't "held" by repoDir itself — same
+    // shape as a real effort, whose default branch is never the styre worktree's own checkout.
+    const mv = Bun.spawnSync(["git", "checkout", "-b", "not-main"], { cwd: repoDir });
+    if (!mv.success) throw new Error(`git checkout -b not-main failed: ${mv.stderr.toString()}`);
+    const slug = "proj";
+    const ident = "ENG-40";
+    const branch = "main";
+
+    // A ticket with an explicit branch_name of "main" — e.g. misconfigured, or matching the
+    // profile's default branch — is exactly the case `branchNameFor` warns about (ENG-386 review).
+    const dir = seedCheckpoint(root, slug, ident, (db, ticketId) => {
+      setTicketStatus(db, ticketId, "waiting");
+      setTicketStage(db, ticketId, "merge");
+      insertPending(db, { ticketId, signalType: "human_merge_approval" });
+      setBranch(db, ticketId, branch);
+    });
+
+    const written: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((s: string) => {
+      written.push(s.toString());
+      return true;
+    }) as typeof process.stderr.write;
+
+    try {
+      expect(remoteHasBranch(repoDir, branch)).toBe(true);
+      const localBefore = Bun.spawnSync(["git", "branch", "--list", branch], { cwd: repoDir });
+      expect(localBefore.stdout.toString().trim()).not.toBe("");
+
+      await cleanImpl({ ident, slug, purge: true }, { root, targetRepo: repoDir });
+
+      // The reap (checkpoint dir) still happened — only the branch deletion was gated.
+      expect(existsSync(dir)).toBe(false);
+
+      const localAfter = Bun.spawnSync(["git", "branch", "--list", branch], { cwd: repoDir });
+      expect(localAfter.stdout.toString().trim()).not.toBe("");
+      expect(remoteHasBranch(repoDir, branch)).toBe(true);
+
+      const err = written.join("");
+      expect(err).toContain("refusing to --purge the default branch");
+      expect(err).toContain(branch);
+    } finally {
+      process.stderr.write = origWrite;
+      rmSync(root, { recursive: true, force: true });
+      rmSync(repoDir, { recursive: true, force: true });
+      rmSync(originDir, { recursive: true, force: true });
+    }
   });
 
   test("--all --purge: rejected as a usage error (exit 64)", async () => {

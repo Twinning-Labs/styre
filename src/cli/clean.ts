@@ -161,8 +161,21 @@ export async function cleanImpl(
   reapEffort(targetRepo, { branch: cls.branch, dir, ticketId: cls.ticketId, dbPath });
 
   if (args.purge) {
-    deleteLocalBranch(targetRepo, cls.branch);
-    deleteRemoteBranch(targetRepo, cls.branch);
+    // NEVER purge the profile's default branch: a ticket configured with an explicit
+    // branch_name equal to (or matching) the default branch would otherwise make `--purge`
+    // run `git push origin --delete <default>` — deleting the repo's default branch, which is
+    // irreversible. `profile` defaults its own `defaultBranch` to "main" (see Profile's zod
+    // schema); mirror that fallback here for the opts.targetRepo test seam, which can leave
+    // `profile` unresolved. The reap above has already happened — this only gates the deletion.
+    const defaultBranch = profile?.defaultBranch ?? "main";
+    if (cls.branch === defaultBranch) {
+      process.stderr.write(
+        `styre clean: refusing to --purge the default branch '${cls.branch}' (checkpoint + worktree already reaped)\n`,
+      );
+    } else {
+      deleteLocalBranch(targetRepo, cls.branch);
+      deleteRemoteBranch(targetRepo, cls.branch);
+    }
   }
 
   process.stdout.write(`styre clean: reaped ${ident} (freed worktree, removed checkpoint)\n`);
