@@ -62,9 +62,7 @@ export async function cleanImpl(
   }
 
   // Mirrors run.ts's profile/slug resolution (--profile now loads via loadProfile instead of
-  // being silently ignored), while staying lazy about loadProfileByConvention so the opts test
-  // seam (opts?.targetRepo) can still short-circuit it without a profile on disk — same as before.
-  // Shared by both the single-ident and `--all` paths.
+  // being silently ignored). Shared by both the single-ident and `--all` paths.
   let profile: Profile | undefined = opts?.profile;
   let slug: string;
   if (profile) {
@@ -82,7 +80,20 @@ export async function cleanImpl(
     }
     slug = derived;
   }
-  const targetRepo = opts?.targetRepo ?? (profile ?? loadProfileByConvention(slug)).targetRepo;
+  // Persist the convention-loaded profile into `profile` (rather than discarding it after reading
+  // only `.targetRepo`) so `profile.defaultBranch` — the repo's REAL default branch — is available
+  // to the --purge guard below. Only skip the disk load when the opts.targetRepo test seam is in
+  // play: tests pass `opts.targetRepo` deliberately WITHOUT a profile on disk, and loading there
+  // would throw.
+  if (!profile && !opts?.targetRepo) {
+    profile = loadProfileByConvention(slug);
+  }
+  const targetRepo = opts?.targetRepo ?? profile?.targetRepo;
+  if (targetRepo === undefined) {
+    // Unreachable: the block above guarantees `profile` is set whenever `opts?.targetRepo` is
+    // not — kept as a type-safe guard instead of a non-null assertion.
+    throw new Error("styre clean: could not resolve a target repo");
+  }
 
   if (args.all) {
     // Scope to this project's slug — the state dir may hold multiple projects, but `targetRepo`
@@ -164,8 +175,9 @@ export async function cleanImpl(
     // NEVER purge the profile's default branch: a ticket configured with an explicit
     // branch_name equal to (or matching) the default branch would otherwise make `--purge`
     // run `git push origin --delete <default>` — deleting the repo's default branch, which is
-    // irreversible. `profile` defaults its own `defaultBranch` to "main" (see Profile's zod
-    // schema); mirror that fallback here for the opts.targetRepo test seam, which can leave
+    // irreversible. `profile` is populated above (explicit --profile, or convention-loaded from
+    // disk), so `defaultBranch` here is the repo's ACTUAL default branch in the real CLI path;
+    // the `?? "main"` only covers the pure opts.targetRepo test seam, which intentionally leaves
     // `profile` unresolved. The reap above has already happened — this only gates the deletion.
     const defaultBranch = profile?.defaultBranch ?? "main";
     if (cls.branch === defaultBranch) {

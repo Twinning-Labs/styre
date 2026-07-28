@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanImpl } from "../../src/cli/clean.ts";
@@ -335,6 +335,93 @@ describe("cleanImpl", () => {
       rmSync(root, { recursive: true, force: true });
       rmSync(repoDir, { recursive: true, force: true });
       rmSync(originDir, { recursive: true, force: true });
+    }
+  });
+
+  test("--purge: refuses a real (non-'main') default branch resolved via the real CLI path (no opts.profile, no opts.targetRepo)", async () => {
+    // ENG-386 independent re-review (Critical): the common CLI path (no --profile flag) resolves
+    // `targetRepo` from `loadProfileByConvention(slug)` but used to read only `.targetRepo` off
+    // the loaded Profile and discard the object — leaving the module-level `profile` local
+    // undefined, so the --purge guard's `defaultBranch` fell back to the literal "main" even when
+    // the repo's real default branch (from the on-disk profile) was something else, e.g. 'master'.
+    // This test drives that exact path: no opts.profile, no opts.targetRepo — cleanImpl must
+    // resolve everything itself via a real profile.json under a temp XDG_CONFIG_HOME.
+    const root = mkdtempSync(join(tmpdir(), "styre-clean-state-"));
+    const { repoDir, originDir } = makeTargetRepoWithOrigin();
+    const slug = "proj-eng386-master";
+    const ident = "ENG-41";
+    const branch = "master";
+
+    // Give repoDir a real 'master' branch (distinct from its 'main' checkout) and push it to
+    // origin, mirroring a repo whose actual default branch is 'master'.
+    const git = (args: string[]) => {
+      const res = Bun.spawnSync(["git", ...args], { cwd: repoDir });
+      if (!res.success) throw new Error(`git ${args.join(" ")} failed: ${res.stderr.toString()}`);
+    };
+    git(["checkout", "-b", branch]);
+    git(["push", "origin", branch]);
+    // Move the primary worktree off 'master' so it isn't "held" by repoDir itself — same shape
+    // as the "explicit branch_name of 'main'" test above.
+    git(["checkout", "-b", "not-master"]);
+
+    // A real on-disk profile whose defaultBranch is 'master' — what `loadProfileByConvention`
+    // must resolve (and `cleanImpl` must PERSIST) for the guard to see the real default branch.
+    const configHome = mkdtempSync(join(tmpdir(), "styre-clean-config-"));
+    const profileDir = join(configHome, "styre", slug);
+    mkdirSync(profileDir, { recursive: true });
+    writeFileSync(
+      join(profileDir, "profile.json"),
+      JSON.stringify({ slug, targetRepo: repoDir, defaultBranch: branch }),
+    );
+
+    // A ticket with an explicit branch_name of "master", matching the profile's real default.
+    const dir = seedCheckpoint(root, slug, ident, (db, ticketId) => {
+      setTicketStatus(db, ticketId, "waiting");
+      setTicketStage(db, ticketId, "merge");
+      insertPending(db, { ticketId, signalType: "human_merge_approval" });
+      setBranch(db, ticketId, branch);
+    });
+
+    const written: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((s: string) => {
+      written.push(s.toString());
+      return true;
+    }) as typeof process.stderr.write;
+
+    const prevXdg = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = configHome;
+
+    try {
+      expect(remoteHasBranch(repoDir, branch)).toBe(true);
+      const localBefore = Bun.spawnSync(["git", "branch", "--list", branch], { cwd: repoDir });
+      expect(localBefore.stdout.toString().trim()).not.toBe("");
+
+      // No opts.profile, no opts.targetRepo: forces the real convention-load resolution path.
+      await cleanImpl({ ident, slug, purge: true }, { root });
+
+      // The reap (checkpoint dir) still happened — only the branch deletion was gated.
+      expect(existsSync(dir)).toBe(false);
+
+      const localAfter = Bun.spawnSync(["git", "branch", "--list", branch], { cwd: repoDir });
+      expect(localAfter.stdout.toString().trim()).not.toBe("");
+      expect(remoteHasBranch(repoDir, branch)).toBe(true);
+
+      const err = written.join("");
+      expect(err).toContain("refusing to --purge the default branch");
+      expect(err).toContain(branch);
+    } finally {
+      process.stderr.write = origWrite;
+      if (prevXdg === undefined) {
+        // biome-ignore lint/performance/noDelete: process.env must be unset via delete; assigning undefined leaves the string "undefined"
+        delete process.env.XDG_CONFIG_HOME;
+      } else {
+        process.env.XDG_CONFIG_HOME = prevXdg;
+      }
+      rmSync(root, { recursive: true, force: true });
+      rmSync(repoDir, { recursive: true, force: true });
+      rmSync(originDir, { recursive: true, force: true });
+      rmSync(configHome, { recursive: true, force: true });
     }
   });
 
