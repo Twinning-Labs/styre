@@ -1,6 +1,15 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.13.2] - 2026-07-29
+
+### Bug Fixes
+
+- **Notifications** now label paused runs as "paused — needs you" or "paused — out of budget" instead of the retired "escalated"/"parked" wording, so Slack and other notifier messages match the current pause/resume model.
+- Stderr messages for budget pauses, re-parking, and refused resumes no longer reference the old "Parked:/Dump:" language, and the resume-refused message now correctly points you to `styre run <ident> --fresh` when a checkpoint already exists.
+- `styre run --help` text for `--resume` and `--db` is corrected to describe actual current behavior.
+- Documentation across the README, CLAUDE.md, and the full architecture reference (exit codes, execution model, control loop, conventions, configuration, telemetry export, and glossary) is updated to describe the current `pr-ready | done | paused | abandoned` outcome model, replacing outdated references to `blocked | parked | escalated | no-progress`, and now documents `styre ls` and `styre clean`. This includes fixing a long-standing doc bug that claimed `styre notify` exits with code 2 (it actually exits 64).
+
 ## [0.13.1] - 2026-07-29
 
 ### Bug Fixes
