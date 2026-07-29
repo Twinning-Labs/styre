@@ -32,7 +32,7 @@ check spelling against this table.
 | `telemetry` | boolean | `true` | PostHog adoption analytics. On by default; also honored: `DO_NOT_TRACK` / `STYRE_TELEMETRY` env (a one-way veto). |
 | `pricing` | object | built-in price table | Price table + long-context tiers feeding the telemetry `cost_usd_estimated` estimate (see below). Deliberately a **separate top-level key**, not nested under the boolean `telemetry` above. |
 | `notifier` | `"none" \| "slack"` | `"none"` | Outbound notifier. `slack` requires `slack.channel` and `SLACK_BOT_TOKEN`; `assertSlackConfigured` fails loud at startup otherwise. |
-| `notify` | `"escalations" \| "transitions" \| "everything"` | `"escalations"` | Notification verbosity. `escalations` = escalated/parked only; `transitions` also sends stage transitions; `everything` also sends loopbacks (`src/daemon/notify.ts`). |
+| `notify` | `"escalations" \| "transitions" \| "everything"` | `"escalations"` | Notification verbosity. `escalations` = notify only on pause-class events (the run pausing, reason `needs_you` or `budget`); `transitions` also sends stage transitions; `everything` also sends loopbacks (`src/daemon/notify.ts`). |
 | `slack.channel` | string | absent | Target Slack channel; required when `notifier: "slack"`. |
 | `agent` | object | absent → Claude preset | The agent provider + per-tier models (see below). |
 | `implementDisposition` | `"reject" \| "discard"` | `"reject"` | How `implement` handles undeclared new files. `reject` is today's proven behavior; `discard` opts into the checks-style discard path. The escape hatch, not the norm. |
@@ -158,7 +158,7 @@ Error surfaces differ by path: the merge path wraps a malformed file as
 | Key | Type | Notes |
 |---|---|---|
 | `schemaVersion` | literal `3` | Bumped on breaking profile changes; older versions are rejected, not migrated. |
-| `slug` | string | Project slug; drives the profile/config path and the park dir. |
+| `slug` | string | Project slug; drives the profile/config path and the checkpoint dir. |
 | `targetRepo` | string | Absolute repo path. Overwritten in memory by `--in-place` to the discovered git root. |
 | `defaultBranch` | string (`"main"`) | Detected from `origin/HEAD` → current branch → `"main"`. PR base. |
 | `analyticsId` | string? | Stable random PostHog `project_id`; never encodes the slug/name. Generated at setup, preserved across `--force`/`--reprobe`. |

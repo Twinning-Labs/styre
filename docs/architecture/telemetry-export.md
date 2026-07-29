@@ -38,12 +38,12 @@
 - **Stable across every row a run emits** — every `event`/`dispatch`/`signal`/`summary`/`ci_handoff`
   object carries the same `run_id` for the lifetime of that run (`runCtx()` reads the one `run` row
   once and reuses it).
-- **Stable across `--resume`.** A parked-then-resumed run keeps its original `run_id` — resuming
+- **Stable across `--resume`.** A paused-then-resumed run keeps its original `run_id` — resuming
   does **not** mint a new one. What changes on resume is the `run` row's own bookkeeping columns,
   not the identifier: `markResumed()` sets `resumed = 1` and increments `attempt`. (These two
   columns live on the `run` table, not on the telemetry wire events themselves — a consumer that
-  needs "was this run resumed" reads the SQLite `run` row, not the stream. The one pre-v2-park edge
-  case — a DB parked before the `run` table existed — assigns a fresh `run_id` for the resumed
+  needs "was this run resumed" reads the SQLite `run` row, not the stream. The one pre-v2-pause edge
+  case — a DB paused before the `run` table existed — assigns a fresh `run_id` for the resumed
   portion, since no identity was ever minted to preserve; this is a one-time bridge, not the steady
   state.)
 - **Per-ephemeral-DB identity: reusing the same non-ephemeral `--db` path across separate (non-resume) `styre run` invocations reuses the first invocation's `run_id` (with `resumed` still 0).** Same `--db` = same run identity; different invocation without `--resume` = different run (new DB).
@@ -72,7 +72,9 @@ source). "Source" is the durable row or computation each field is read from
 
 One row per ticket-lifecycle happening: stage transition, loopback, escalation, resume, or a free
 note (`EventKind` in `src/db/repos/event-log.ts`: `transition | loopback | escalated | resumed |
-note | parked`).
+note | parked`). **`escalated` and `parked` here are internal `event_log.kind` wire names** — they
+predate and are distinct from the user-facing terminal `paused` outcome (§3.4); do not read them as
+that outcome.
 
 | Field | Type | Nullable | Source |
 |---|---|---|---|
@@ -173,7 +175,7 @@ dashboard rates (autonomous-fix ratio, first-time CI pass rate, unit cost per ti
 | `provider` | string | no | the run row's `provider` |
 | `started_at` | string | no | the run row's `started_at` |
 | `ended_at` | string | no | `nowUtc()` at summary-build time |
-| `outcome` | string | no | the run result's `outcome` |
+| `outcome` | string | no | the run result's `outcome` — one of `pr-ready \| done \| paused \| abandoned` (see below) |
 | `stage` | string | no | the run result's `stage` |
 | `status` | string | no | the run result's `status` |
 | `ticks` | number | no | the run result's `iterations` |
@@ -197,6 +199,16 @@ dashboard rates (autonomous-fix ratio, first-time CI pass rate, unit cost per ti
 | `cycle_count` | number | no | count of this ticket's `event` rows with `kind === "loopback"` |
 | `escalation_count` | number | no | count of this ticket's `event` rows with `kind === "escalated"` |
 | `escalation_reasons` | `string[]` | no | the `reason` of each escalated event (nulls filtered out) |
+
+**`outcome` value set:** `pr-ready \| done \| paused \| abandoned` — the four terminal outcomes of a
+run. `pr-ready` and `done` are successful completions; `abandoned` is a reserved terminal with no
+current styre producer (not emitted by any run today). `paused` is a **resumable** terminal outcome
+and carries a `reason`: `budget` (out of credits/session-limit), `needs_you` (a retry-exhausted or
+structural stop that needs a human), or `interrupted` (crash-only; reserved). **`escalation_count`/
+`escalation_reasons` above are named
+after the internal `event_log.kind === "escalated"` wire value**, not the `paused` outcome — a
+ticket with a non-zero `escalation_count` typically also finished (or will finish) this run's
+`summary.outcome` as `paused`, but the two are counted independently and must not be conflated.
 
 ### 3.5 `ci_handoff` — a one-shot best-effort CI read at PR-open
 
@@ -281,6 +293,9 @@ the column), and the projection-transport escalation raised during outbox drain.
 
 This field shipped in the `SCHEMA_VERSION 1→2` bump (originally reserved/always-null); populating it
 was a non-breaking change and required no further version bump.
+
+(As in §3.1: `escalated`/`parked` here are internal `event_log.kind` wire names, not the user-facing
+`paused` outcome — see §3.4.)
 
 ## 6. Compatibility
 
