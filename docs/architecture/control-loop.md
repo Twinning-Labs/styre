@@ -92,7 +92,7 @@ loop():                           # (commercial Control Plane: the multi-ticket 
       spawn_async(advance_one_step, ticket)
     await_any_completion_or(timeout=<poll interval>)
 ```
-`v_ready_tickets` already excludes paused projects and tickets parked on a pending signal. Workers
+`v_ready_tickets` already excludes paused projects and tickets paused on a pending signal. Workers
 run concurrently; the runner journals each result as it returns. **No worker touches SQLite.**
 
 ### 2.3 the resolver + interpreter split (`src/daemon/`)
@@ -714,8 +714,10 @@ discarded with `--fresh` — are in execution-model.md.)*
   `styre run --resume`) is the same path, not a separate flag — resume always **consumes** the
   pending signal (there is no `--after-fix`). *In the commercial Control Plane*, the paused ticket
   appears in the **needs-you inbox** and the operator can resume as-is (re-enter the paused step,
-  counters reset) or fix by hand then resume, as above. Worst case = *paused, with the whole story,
-  you decide* — never "stuck."
+  counters reset) or fix by hand then resume, as above. Giving up on the ticket entirely is a
+  human / issue-tracker decision, out of styre's scope — styre has no `abandon` command and never
+  produces that outcome itself. Worst case = *paused, with the whole story, you decide* — never
+  "stuck."
 
 ### 8.3 The atlas (Scope per P5; **first match** within a phase)
 
