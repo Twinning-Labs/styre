@@ -34,7 +34,9 @@ test("a drive that idles to a stall pauses (needs_you) and delivers the escalati
   expect(result.outcome).toBe("paused");
   expect(result.reason).toBe("needs_you");
   // The centerpiece guard: the terminal notify was DELIVERED (post-loop drain), not left pending.
-  expect(notifier.calls.some((c) => c.event === "escalated" && c.severity === "high")).toBe(true);
+  expect(
+    notifier.calls.some((c) => c.event === "paused — needs you" && c.severity === "high"),
+  ).toBe(true);
 });
 
 test("a drive that reaches pr-ready delivers the terminal 'PR ready to merge' notification (post-loop drain)", async () => {

@@ -28,7 +28,7 @@ test("sweepNew enqueues escalated+parked at 'escalations', adds transition/loopb
 
   createNotifier(cfg("escalations")).sweepNew(db, ticketId);
   let evs = payloads(db).map((p) => p.event);
-  expect(evs).toEqual(["escalated"]); // transition + loopback filtered out
+  expect(evs).toEqual(["paused — needs you"]); // transition + loopback filtered out
 
   // higher tier re-sweeps from scratch on a fresh notifier instance:
   const { db: db2, ticketId: t2 } = makeTestDb();
@@ -37,7 +37,7 @@ test("sweepNew enqueues escalated+parked at 'escalations', adds transition/loopb
   appendEvent(db2, { ticketId: t2, kind: "loopback" });
   createNotifier(cfg("everything")).sweepNew(db2, t2);
   evs = payloads(db2).map((p) => p.event);
-  expect(evs).toEqual(["escalated", "implement→verify", "loopback"]);
+  expect(evs).toEqual(["paused — needs you", "implement→verify", "loopback"]);
   db.close();
   db2.close();
 });
@@ -99,7 +99,7 @@ test("incremental sweep advances the watermark and never re-enqueues", () => {
   // did not re-enqueue it
   const escalatedRows = rows.filter((r) => {
     const msg = JSON.parse(r.payload_json as string) as { event: string };
-    return msg.event === "escalated";
+    return msg.event === "paused — needs you";
   });
   expect(escalatedRows.length).toBe(1);
 
