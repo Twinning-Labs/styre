@@ -191,11 +191,14 @@ it manually. Auto-merge is off at the substrate level.
 > OSS runner's job ends at PR-ready — it does not poll GitHub for the merge and does not advance
 > the ticket beyond that point. This mirrors the S9/S10 fencing in `control-loop.md`.
 
-**Pauses and session interruptions.** Every interruption Styre can hit — the loop exhausting its
-retry budget or reaching something it structurally cannot resolve autonomously (reason
-`needs_you`), running out of budget (reason `budget`), or a session getting interrupted mid-flight
-by out-of-credits or a session-limit hit (reason `interrupted`) — resolves to the same terminal
-outcome: `styre run` **pauses** and exits **75** (`EX_TEMPFAIL`) without burning a retry attempt.
+**Pauses and session interruptions.** Every interruption Styre can hit — running out of credits or
+hitting a session limit (reason `budget`), the loop exhausting its retry/tick budget or reaching
+something it structurally cannot resolve autonomously (reason `needs_you`), or a genuine crash,
+SIGINT, or power loss mid-flight (reason `interrupted`) — resolves to the same terminal outcome:
+`styre run` **pauses** and exits **75** (`EX_TEMPFAIL`) without burning a retry attempt. The
+`interrupted` reason is reserved for that crash case and is not currently emitted by any graceful
+`driveToTerminal` pause path — `styre ls` classifies a crashed run this way after the fact, but a
+crash itself simply leaves the checkpoint resumable rather than emitting the reason live.
 
 The checkpoint is not something written on the way out — it *is* the live journal. A run journals
 directly to `~/.local/state/styre/<slug>/<ident>/run.db` (`$XDG_STATE_HOME` when set) as it
