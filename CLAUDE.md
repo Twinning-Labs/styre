@@ -58,18 +58,22 @@ These are the load-bearing decisions. Code that violates them is wrong even if i
 
 ## Commands
 
-OSS binary — **four** subcommands (`src/index.ts`). Full flag/exit-code/env detail in `docs/architecture/runtime-parameters.md`.
+OSS binary — **six** subcommands (`clean, ls, migrate, notify, run, setup`) (`src/index.ts`). Full flag/exit-code/env detail in `docs/architecture/runtime-parameters.md`.
 - `styre setup <repo>` — probe the repo and write the project profile (`profile.json`).
 - `styre migrate` — bootstrap (create + migrate) the SQLite SoT.
-- `styre run <ticket>` — one-shot headless runner (the CI/cloud/fleet primitive; ephemeral per-run SQLite).
-  - On a session-limit / out-of-credits dispatch death, `run` parks: it dumps the SoT + transcript
-    to `$XDG_STATE_HOME/styre/<slug>/<ticket-ident>/` and exits `75` (`EX_TEMPFAIL`) without
-    burning a retry attempt. Resume with `styre run --resume <ticket> --profile <p>` (re-runs only
-    the interrupted step, carrying its partial context forward). If the branch HEAD moved since the
-    park, resume refuses (exit `65`); use `--accept-head` (resume against new HEAD, drops carryover)
-    or `--inspect` (diagnostics only, exit `0`). A missing repo toolchain aborts a fresh run with
-    exit `69` (`EX_TOOLCHAIN_MISSING`).
-- `styre notify --test` — send a test notification through the configured notifier (Slack). Diagnostic; exits `2` if invoked without `--test`.
+- `styre run <ticket>` — one-shot headless runner (the CI/cloud/fleet primitive; ephemeral per-run SQLite). Refuses if a checkpoint already exists for that ident, pointing at `--resume`/`--fresh`.
+  - On a session-limit / out-of-credits dispatch death, `run` **pauses** (reason `budget`): the SoT +
+    transcript are already at their live location, `$XDG_STATE_HOME/styre/<slug>/<ticket-ident>/`
+    (the checkpoint IS the live location — nothing is dumped), and the run exits `75`
+    (`EX_TEMPFAIL`) without burning a retry attempt. Every pause is resumable. Resume with `styre run
+    --resume <ticket> --profile <p>` (re-runs only the interrupted step, carrying its partial context
+    forward), or discard it and start over with `styre run <ticket> --fresh`. If the branch HEAD
+    moved since the run paused, resume refuses (exit `65`); use `--accept-head` (resume against new
+    HEAD, drops carryover) or `--inspect` (diagnostics only, exit `0`). A missing repo toolchain
+    aborts a fresh run with exit `69` (`EX_TOOLCHAIN_MISSING`).
+- `styre ls` — list paused/resumable efforts, finished leftovers (reapable via `styre clean --all`), and running efforts.
+- `styre clean <ident>` — reap one effort's disk artifacts (worktree + checkpoint); no ticket-status change; refuses a live run (exit `75`). `--all` reaps only provably-finished (`pr-ready`/`done`) efforts for the current project, skipping resumable pauses and live runs. `--purge` (single-ident only, rejects alongside `--all` at exit `64`) additionally deletes the local + remote branch (closes the PR).
+- `styre notify --test` — send a test notification through the configured notifier (Slack). Diagnostic; without `--test` it throws a usage error and exits `64` (`EX_USAGE`), not `2`.
 
 Stream contract: `styre run` writes **only NDJSON telemetry to stdout** and all human-readable output to **stderr**; `setup` and `migrate` print human output to stdout.
 
