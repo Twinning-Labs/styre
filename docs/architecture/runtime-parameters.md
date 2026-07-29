@@ -4,8 +4,8 @@ The complete CLI surface of the `styre` binary: every command, flag, exit code, 
 variable. Grounded in `src/index.ts`, `src/cli/`, and `src/config/`. When you change any of these,
 update this file in the same PR.
 
-The binary registers **four** subcommands (`src/index.ts` `subCommands`): `migrate`, `notify`,
-`run`, `setup`. There are no hidden or aliased subcommands.
+The binary registers **six** subcommands (`src/index.ts` `subCommands`): `clean`, `ls`, `migrate`,
+`notify`, `run`, `setup`. There are no hidden or aliased subcommands.
 
 Two global behaviors sit in front of the subcommands (`src/index.ts`):
 
@@ -18,7 +18,7 @@ Two global behaviors sit in front of the subcommands (`src/index.ts`):
 ## Stream contract
 
 - **`styre run` writes NDJSON telemetry — and only that — to stdout** (one JSON object per line).
-  Every human-readable byte (progress, summaries, warnings, park hints, resume diagnostics,
+  Every human-readable byte (progress, summaries, warnings, pause hints, resume diagnostics,
   missing-tool reports) goes to **stderr** (`src/cli/run.ts`, `src/cli/park.ts`). This is what makes
   `styre run … | jq` and machine consumption clean.
 - **`styre setup` and `styre migrate` print human output to stdout** via `console.log`
@@ -31,7 +31,9 @@ Do not assume a uniform stream policy across commands — only `run` reserves st
 ## `styre run [ticket]`
 
 Ingest one ticket and drive it to PR-ready, then exit (`src/cli/run.ts`). `ticket` is an optional
-positional (e.g. `ENG-123`); it is required on a fresh run and omitted when using `--resume`.
+positional (e.g. `ENG-123`); it is required on a fresh run and omitted when using `--resume`. A
+fresh `styre run <ticket>` **refuses** (exit `64`) when a checkpoint already exists for that ident —
+resume it with `--resume <ident>`, or discard it and start over with `styre run <ticket> --fresh`.
 
 | Flag | Type | Default | Effect |
 |---|---|---|---|
@@ -39,10 +41,11 @@ positional (e.g. `ENG-123`); it is required on a fresh run and omitted when usin
 | `--slug <name>` | string | derived from the cwd repo | Locate the profile + per-project config. |
 | `--config <path>` | string | discovered from `~/.config` | Pin the runtime config. **Hermetic**: when set, it is the *sole* source — global/per-project `config.json` are not merged. |
 | `--db <path>` | string | a fresh per-run temp DB (`os.tmpdir()/styre-run-*/run.db`) | SQLite state-of-truth for this run. |
-| `--resume <ident>` | string | — | Resume a parked run by ticket ident. |
+| `--resume <ident>` | string | — | Resume a paused run by ticket ident. |
 | `--accept-head` | boolean | off | On resume, proceed even though the branch HEAD moved (drops carried-forward context). |
 | `--inspect` | boolean | off | Print resume diagnostics to stderr and exit `0` without running. |
 | `--in-place` | boolean | off | Work on a branch in the **repo root** instead of an isolated worktree. Fresh-run only (on resume it is derived from the DB). Requires a disposable, single-use checkout — see below. |
+| `--fresh` | boolean | off | Discard an existing checkpoint for this ticket and reconcile the worktree, then start over. Fresh-run only. |
 
 No flag declares a default in citty; booleans are `undefined` when absent and coerced at the use
 site. There are no short aliases.
@@ -58,17 +61,86 @@ Use `--in-place` only in throwaway/CI checkouts you are willing to have rewritte
 
 ### Resume flow
 
-On a session-limit / out-of-credits dispatch death, a run **parks** (see exit `75`): it dumps the
-SoT + transcript under `$XDG_STATE_HOME/styre/<slug>/<ticket-ident>/` without consuming a retry
-attempt. Resume with:
+**The checkpoint is the live location.** A run journals directly to
+`$XDG_STATE_HOME/styre/<slug>/<ticket-ident>/run.db` (`~/.local/state` when unset) as it goes —
+there is no separate "dump" step. On a session-limit / out-of-credits interrupt, the run **pauses**
+(see exit `75`) with the checkpoint already holding the SoT + transcript, and no retry attempt is
+consumed. A crash leaves the same checkpoint in place, equally resumable. Resume with:
 
 ```sh
 styre run --resume <ticket-ident> --profile <p>
 ```
 
-Resume re-runs only the interrupted step, carrying its partial context forward. If the branch HEAD
-moved since the park, resume refuses with exit `65`; override with `--accept-head` (resume against
-the new HEAD, dropping carryover) or diagnose with `--inspect` (exit `0`).
+Resume re-runs only the interrupted step, carrying its partial context forward, and always consumes
+the pending signal (there is no `--after-fix` flag). If the branch HEAD moved since the pause,
+resume refuses with exit `65`; override with `--accept-head` (resume against the new HEAD, dropping
+carryover) or diagnose with `--inspect` (exit `0`). Resume also refuses with exit `65` under
+concurrent-resume lock contention — another `styre run --resume` already holds this checkpoint.
+
+---
+
+## `styre ls`
+
+List every styre effort's checkpoint across all projects under `$XDG_STATE_HOME/styre/`
+(`src/cli/ls.ts`). Takes no flags. Prints three sections, in order, to stdout:
+
+```
+Paused/resumable efforts:
+  <ident>  [<kind>, <age>]  <note>
+    resume: styre run --resume <ident> --slug <slug>
+
+Finished leftovers (reap per project with `styre clean --all`):
+  <slug>/<ident>  [<kind>, <age>]  <note>
+
+Running:
+  <ident>  [<kind>, <age>]
+```
+
+- **Paused/resumable efforts** — every checkpoint that is resumable and not currently live. Each row
+  is followed by its exact resume command (`--slug` included, since `ls` spans every project). An
+  empty list prints `No paused efforts.` instead of an empty section.
+- **Finished leftovers** — checkpoints classified `pr-ready` or `done` and not live: provably
+  finished, safe to reap with `styre clean --all`. Rows are slug-qualified (`<slug>/<ident>`) since
+  leftovers span every project. The section is omitted entirely when empty. Classification is by
+  checkpoint kind alone — there is **no merge-state check** (nothing confirms the PR actually
+  merged) and **no age-based staleness heuristic**.
+- **Running** — checkpoints currently live (an active `styre run` holds the lock). Live efforts
+  never appear as reapable, even if their classified kind would otherwise qualify. The section is
+  omitted entirely when empty.
+
+Age is rendered by `humanAge`: under 60 minutes as `"<m>m"`, under 24 hours as `"<h>h"`, otherwise
+`"<d>d"` (integer floors).
+
+---
+
+## `styre clean <ident>`
+
+Reap one styre effort's disk artifacts — free its worktree and delete its checkpoint dir
+(`src/cli/clean.ts`). **Clean never changes ticket status.** That's the issue tracker's job, driven
+by the merge itself: cleaning a run's disk state is not the same as abandoning the ticket.
+
+| Flag | Type | Default | Effect |
+|---|---|---|---|
+| `<ident>` | positional | — | Ticket ident to clean (e.g. `ENG-123`). Required unless `--all`. |
+| `--all` | boolean | off | Reap only the provably-finished (`pr-ready`/`done`) efforts for the current project; skips resumable pauses and live runs. Mutually exclusive with `<ident>`. |
+| `--purge` | boolean | off | Single-ident only — rejects alongside `--all` (exit `64`). After reaping, also deletes the local + remote branch (closes the PR). Opt-in; silent when there is no branch/PR. |
+| `--slug <name>` | string | derived from the cwd repo | Project slug to locate the profile. |
+| `--profile <path>` | string | discovered | Path to the project-profile JSON. |
+
+- **`styre clean <ident>`** — reaps that one effort's worktree + checkpoint. No ticket-status
+  change. Refuses a live run: **exit `75`** (a different, currently-running `styre run` owns this
+  checkpoint).
+- **`styre clean --all`** — scoped to the current project's slug; reaps only checkpoints classified
+  `pr-ready`/`done` and not live. Resumable pauses and live runs are skipped, not reaped. Same
+  classification rule as `ls`: kind-only, no merge-state check, no age-based staleness heuristic.
+- **`styre clean <ident> --purge`** — after reaping, additionally deletes the local + remote branch,
+  closing the PR. On the repo's **default branch**, `--purge` skips the branch/PR deletion — the
+  default branch is never deleted — but still reaps the disk state; it prints a stderr warning and
+  exits `0` (a soft skip, not a failure).
+
+Stream reminder: `clean` prints its summary to stdout (`reaped N finished leftover(s); kept M
+resumable/unknown; F failed` for `--all`; `reaped <ident> (freed worktree, removed checkpoint)` for
+a single ident) and failure detail to stderr.
 
 ---
 
@@ -128,22 +200,22 @@ convention, which is what lets a CI/fleet caller branch on them.
 
 | Code | Name | Meaning | Retryable? |
 |---|---|---|---|
-| `0` | success | The command did its job. For `run`: a PR is open and ready. Also returned by `--version`, `--help`, and `run --resume --inspect`. | — |
-| `1` | operational stop | The run ran cleanly but reached a dead end — `blocked` or `no-progress` (`exitCodeForOutcome`). Not a crash. | No — a human should look at it. |
-| `64` | usage (`EX_USAGE`) | CLI misuse — e.g. `styre notify` without `--test` (`usageError` → `EXIT.USAGE`). A misuse error, not a run failure. | No — correct the invocation. |
-| `65` | resume refused (`EX_DATAERR`) | `run --resume`, but the branch HEAD moved since the run parked, and `--accept-head` was not passed — so the carried-forward context no longer matches the branch. | Yes, deliberately — re-run with `--accept-head` (resume against the new HEAD, dropping carryover) or `--inspect` (diagnose, exits `0`). |
+| `0` | success | The command did its job. For `run`: a PR is open and ready (`done` / `pr-ready`). Also returned by `--version`, `--help`, `run --resume --inspect`, and a `styre clean --purge` soft-skip on the default branch. | — |
+| `1` | operational stop | `abandoned` — a reserved terminal outcome. **Not currently emitted by any run.** | No — a human should look at it. |
+| `64` | usage (`EX_USAGE`) | CLI misuse — e.g. `styre notify` without `--test`, `styre clean --all --purge`, or a fresh `styre run <ticket>` when a checkpoint already exists for that ident (`usageError` → `EXIT.USAGE`). A misuse error, not a run failure. | No — correct the invocation. |
+| `65` | resume refused (`EX_DATAERR`) | `run --resume`, refused because either the branch HEAD moved since the run paused and `--accept-head` was not passed, *or* concurrent-resume lock contention — another `styre run --resume` already holds this checkpoint. | Yes, deliberately — re-run with `--accept-head` (HEAD moved) or retry once the other resume releases the lock (contention), or `--inspect` (diagnose, exits `0`). |
 | `69` | toolchain missing (`EX_UNAVAILABLE`) | A required repo toolchain program (a build/test/check tool the profile depends on) is not installed on this machine. Detected by the fresh-run preflight *before any spend*; never raised on `--resume`/`--inspect`. | Yes, after you install the missing tool — the stderr report names it. |
 | `70` | internal (`EX_SOFTWARE`) | An unexpected crash or a violated internal invariant — anything that is not a `StyreError` reaching the error boundary. | No — this is a bug; please report it. |
-| `75` | parked / escalated (`EX_TEMPFAIL`) | Two outcomes share this code (`exitCodeForOutcome`). **Parked**: a session-limit / out-of-credits interrupt — the SoT + transcript are dumped and **no retry attempt is consumed**. **Escalated**: the loop bounded its retries and handed the ticket to a human — it writes **no** dump. | Parked: yes — `styre run --resume <ident> --profile <p>`. Escalated: not by `--resume` (no dump exists) — read the reason, change something, re-run. |
+| `75` | paused (`EX_TEMPFAIL`) | **Any** paused run (`exitCodeForOutcome`) — reason `budget`, `needs_you`, or `interrupted`. The checkpoint (SoT + transcript) is already on disk and **no retry attempt is consumed**. Also returned by `styre clean <ident>` when that ident is currently a live run — `clean` refuses rather than reaping. | Paused: yes — `styre run --resume <ident> --profile <p>`. `clean` on a live run: not as-is — wait for the run to finish or pause, then clean. |
 | `78` | config (`EX_CONFIG`) | A bad config/profile value, an unknown adapter, or an unresolved profile (`configError` → `EXIT.CONFIG`). | No — fix the value, or re-run `styre setup`. |
 
 **How to read them as a caller:**
 
 - **`0`** — done; for `run`, go merge the PR.
-- **`75`** — two cases behind one code, and they differ. A **parked** run is transient: back off and re-run the *same* ticket with `--resume`; a fleet scheduler should retry, not mark it failed. An **escalated** run wrote no dump, so `--resume` cannot pick it up — a human reads the reason on stderr, changes something, and starts a fresh run. Only a park prints a `Resume with: …` line, so branch on that, not on the bare `75`.
-- **`65`** — the world moved under a parked run; a human (or a policy) decides whether to accept the new HEAD (`--accept-head`) or investigate (`--inspect`).
+- **`75`** — any paused run, whatever the reason (`budget` / `needs_you` / `interrupted`): back off and re-run the *same* ticket with `--resume`; a fleet scheduler should retry, not mark it failed. The same code is also returned by `styre clean <ident>` when that ident is a live run — `clean` refused rather than reaping, so wait for the run to finish (or pause), then clean.
+- **`65`** — either the world moved under a paused run (branch HEAD advanced) or a concurrent `--resume` already holds this checkpoint; a human (or a policy) decides whether to accept the new HEAD (`--accept-head`), retry once the other resume finishes, or investigate (`--inspect`).
 - **`69`** — an environment/provisioning gap on this machine, not a problem with the ticket; fix the host toolchain and re-run.
-- **`1`** — an operational dead end (`blocked` / `no-progress`): the run finished without a crash but couldn't make progress. The ticket/plan needs a human before retrying.
+- **`1`** — reserved for `abandoned`. Not currently emitted by any run — cleaning a run's disk state (`styre clean`) is not the same as abandoning the ticket.
 - **`64` / `78`** — a misuse or a bad config value: the invocation or the config needs fixing, not a retry.
 - **`70`** — an internal error: a bug in Styre, not in the ticket or the host. Worth reporting.
 
@@ -162,7 +234,7 @@ defaults — a missing one fails at the point of use.
 | Variable | Read at | Effect | Fallback |
 |---|---|---|---|
 | `XDG_CONFIG_HOME` | `src/config/paths.ts` | Base for `<config>/styre/` — profiles + `config.json`. | `~/.config` |
-| `XDG_STATE_HOME` | `src/config/paths.ts` | Base for `<state>/styre/` — default DB, park dumps, telemetry id. | `~/.local/state` |
+| `XDG_STATE_HOME` | `src/config/paths.ts` | Base for `<state>/styre/` — default DB, run checkpoints, telemetry id. | `~/.local/state` |
 
 Only these two XDG variables are honored. `XDG_DATA_HOME` and `XDG_CACHE_HOME` are not read
 anywhere. See [`conventions.md`](conventions.md) for the full path layout.

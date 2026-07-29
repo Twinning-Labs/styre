@@ -43,9 +43,9 @@ import { finishRunResult, parkDir } from "./park.ts";
 import { formatMissingTools, preflightToolchain } from "./preflight.ts";
 import { acquireRunLock, releaseRunLock, runLockStatus } from "./run-lock.ts";
 
-/** Exit codes this command can produce: 0 success · 1 operational stop (blocked/no-progress) ·
- *  64 usage · 65 resume-refused · 69 toolchain missing · 70 internal · 75 parked · 78 config.
- *  See `./errors.ts` `EXIT` for the shared, cross-command scheme. */
+/** Exit codes this command can produce: 0 success · 1 abandoned (reserved terminal) ·
+ *  64 usage · 65 resume-refused · 69 toolchain missing · 70 internal · 75 paused (any reason) ·
+ *  78 config. See `./errors.ts` `EXIT` for the shared, cross-command scheme. */
 
 const MUST_HAVE = ["build", "test", "check"] as const;
 
@@ -98,8 +98,12 @@ export const runCommand = defineCommand({
         "Project slug to locate the profile + per-project config (default: derived from the cwd repo)",
     },
     config: { type: "string", description: "Path to a runtime config.json (optional)" },
-    db: { type: "string", description: "DB path (default: a fresh per-run temp DB)" },
-    resume: { type: "string", description: "Resume a parked run by ticket ident" },
+    db: {
+      type: "string",
+      description:
+        "DB path (default: the run's checkpoint at ~/.local/state/styre/<slug>/<ident>/run.db)",
+    },
+    resume: { type: "string", description: "Resume a paused run by ticket ident" },
     "accept-head": {
       type: "boolean",
       description: "Resume even though the branch HEAD moved (drops carryover)",
@@ -335,9 +339,9 @@ export async function runImpl(
         // parkDir gives the path without touching the DB.
         const dir = parkDir(profile.slug, ident);
         console.error(
-          `Parked: ${out.park.cause}${out.park.resetAt ? ` (resets ${out.park.resetAt})` : ""}.\n` +
+          `Paused — out of budget: ${out.park.cause}${out.park.resetAt ? ` (resets ${out.park.resetAt})` : ""}.\n` +
             `Resume with: styre run --resume ${ident} ${args.profile ? `--profile ${args.profile}` : `--slug ${slug}`}\n` +
-            `Dump: ${dir}`,
+            `Checkpoint: ${dir}`,
         );
       }
       finishRunResult(db, dbPath, profile.slug, ident, out);

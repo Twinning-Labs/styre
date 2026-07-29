@@ -100,23 +100,43 @@ styre run <TICKET-ID>
 styre migrate
 ```
 
-A fourth command, `styre notify --test`, sends a one-off test notification through the configured notifier (Slack) to verify your setup — a diagnostic, not part of the run loop.
+Two more for operating a fleet of runs — listing and reaping their on-disk state:
+
+```sh
+# List paused/resumable efforts, finished leftovers, and running efforts
+styre ls
+
+# Reap ONE finished effort's disk artifacts (worktree + checkpoint) — no ticket-status change
+styre clean <TICKET-ID>
+
+# Reap every pr-ready/done effort for the current project; skips resumable pauses and live runs
+styre clean --all
+
+# Also delete the local + remote branch (closes the PR) — single-ident only
+styre clean <TICKET-ID> --purge
+```
+
+A sixth command, `styre notify --test`, sends a one-off test notification through the configured notifier (Slack) to verify your setup — a diagnostic, not part of the run loop.
+
+`styre run` also takes flags for resuming a paused effort: `--resume <ident>` resumes it (re-running only the interrupted step, carrying its partial context forward); `--fresh` discards an existing checkpoint and starts over instead of refusing (a bare `styre run <ticket>` refuses when a checkpoint already exists for that ident); `--accept-head` resumes even though the branch HEAD moved (drops carried-forward context); `--inspect` prints resume diagnostics and exits without running.
 
 The full flag and environment-variable surface is documented in [`docs/architecture/runtime-parameters.md`](docs/architecture/runtime-parameters.md).
 
-### Exit codes
+### Outcomes & exit codes
+
+A run ends in one of four terminal outcomes: `pr-ready` | `done` | `paused` (carrying a `reason` — `budget` | `needs_you` | `interrupted`) | `abandoned` (reserved — not currently emitted by any run; cleaning a run's disk state with `styre clean` is not abandoning the ticket).
 
 The process exit code is the machine-readable error code (codes `64` and above follow `sysexits.h`):
 
 | Code | Meaning | Retryable? |
 |---|---|---|
-| `0` | success — for `run`, a PR is open and ready | — |
-| `1` | operational dead end — the run finished but couldn't make progress (blocked / no-progress) | no — a human should look |
-| `64` | usage / notifier-config (`styre notify` without `--test`) | no |
-| `65` | resume refused — the branch HEAD moved since the run parked | yes — `--accept-head` or `--inspect` |
+| `0` | success — `done` / `pr-ready` | — |
+| `1` | `abandoned` — a reserved terminal outcome; not currently emitted by any run | no — a human should look |
+| `64` | usage — CLI misuse, e.g. `styre notify` without `--test`, or `styre clean --all --purge` | no |
+| `65` | resume refused — either the branch HEAD moved since the run paused (without `--accept-head`), or concurrent-resume lock contention | yes — `--accept-head`, or retry once the other resume releases the lock |
 | `69` | a required repo toolchain program isn't installed on this machine | yes — install it, re-run |
 | `70` | internal error (an unexpected crash) | no — please report |
-| `75` | parked (session limit / out of credits — resumable) or escalated (handed to a human — not resumable) | parked only — `styre run --resume <ticket>` |
+| `75` | **any** `paused` run (reason `budget` / `needs_you` / `interrupted` — all resumable); also `styre clean <ident>` on a currently-live run (refuses rather than reaping) | paused: yes — `styre run --resume <ident>`. clean-on-live: wait for the run to finish or pause, then clean |
 | `78` | bad config / profile — an invalid value or unknown adapter | no — fix the config |
 
 Full meanings, `sysexits` names, and caller guidance: [runtime-parameters.md → Exit codes](docs/architecture/runtime-parameters.md#exit-codes-error-codes-and-their-meaning).
@@ -175,7 +195,7 @@ Every `config.json` and `profile.json` key, with the exact precedence rules, is 
 Styre follows the XDG Base Directory spec (macOS and Linux alike) and honors `XDG_CONFIG_HOME` and `XDG_STATE_HOME`:
 
 - `$XDG_CONFIG_HOME/styre/` (default `~/.config/styre/`) — `config.json` and per-project `profile.json`.
-- `$XDG_STATE_HOME/styre/` (default `~/.local/state/styre/`) — the SQLite DB, the telemetry id, and park dumps (`<slug>/<ticket-ident>/`).
+- `$XDG_STATE_HOME/styre/` (default `~/.local/state/styre/`) — the SQLite DB, the telemetry id, and per-effort checkpoints (`<slug>/<ticket-ident>/`) — the live location a run journals to, reaped by `styre clean`.
 - Per-run worktrees and scratch live under the OS temp dir and are cleaned up; the agent's worktree is its only writable surface.
 
 The full path layout, the `.styre-disposable` marker, `AGENTS.md` ingestion, and the `styre_scratch/` drawer are in [`docs/architecture/conventions.md`](docs/architecture/conventions.md).

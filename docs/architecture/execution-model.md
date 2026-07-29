@@ -65,12 +65,13 @@ consecutive-identical-failure guard and per-gate round caps — the concrete num
 
 **Human gates are narrow by design.** The only wired human gate is MERGE approval: `styre run`
 exits at PR-ready and the operator reviews the pull request and merges it personally. The second
-touch point is escalation: when the loop exhausts its retry budget or reaches something it
-structurally cannot decide (a `major` finding flagged as a deferral candidate, a persistent conflict
-the agent cannot resolve, an infrastructure outage), `styre run` exits nonzero — the run terminates
-with an error describing the escalation and the point it reached. The persistent
-[needs-you inbox](glossary.md#needs-you-inbox) (resume-after-fix / abandon) is the commercial
-Control Plane; in OSS, the exit code and state dump are the signal. Every other situation loops.
+touch point is the `needs_you` pause: when the loop exhausts its retry budget or reaches something
+it structurally cannot decide (a `major` finding flagged as a deferral candidate, a persistent
+conflict the agent cannot resolve, an infrastructure outage), `styre run` **pauses** (reason:
+`needs_you`) and exits **75** — the checkpoint holds the point it reached, and the operator resumes
+with `styre run --resume <ident>` once the underlying issue is fixed. The persistent
+[needs-you inbox](glossary.md#needs-you-inbox) is a feature of the commercial Control Plane; in OSS,
+the exit code and the checkpoint are the signal. Every other situation loops.
 
 ---
 
@@ -138,8 +139,8 @@ keeps advancing the ticket; the outbox rows wait until the service returns.
 
 Inbound facts — PR merged, human action — arrive as [signals](glossary.md#signal): the runner
 polls GitHub on an interval and delivers the results as structured rows in the `signal` table. The
-loop waits on a signal by parking the ticket (`status='waiting'`); when the awaited signal arrives,
-the resolver advances the ticket and the loop continues from where it parked. CI status is not a
+loop waits on a signal by setting the ticket to `status='waiting'`; when the awaited signal arrives,
+the resolver advances the ticket and the loop continues from where it left off. CI status is not a
 signal: it is a fact the runner *reports*, not one it waits on — see "The merge gate" below.
 
 ---
@@ -190,26 +191,41 @@ it manually. Auto-merge is off at the substrate level.
 > OSS runner's job ends at PR-ready — it does not poll GitHub for the merge and does not advance
 > the ticket beyond that point. This mirrors the S9/S10 fencing in `control-loop.md`.
 
-**Escalations and session interruptions.** When the loop exhausts its retry budget or reaches an
-escalation point it structurally cannot resolve autonomously, `styre run` **exits nonzero** — the
-run terminates with an error describing the escalation and the point it reached.
+**Pauses and session interruptions.** Every interruption Styre can hit — running out of credits or
+hitting a session limit (reason `budget`), the loop exhausting its retry/tick budget or reaching
+something it structurally cannot resolve autonomously (reason `needs_you`), or a genuine crash,
+SIGINT, or power loss mid-flight (reason `interrupted`) — resolves to the same terminal outcome:
+`styre run` **pauses** and exits **75** (`EX_TEMPFAIL`) without burning a retry attempt. The
+`interrupted` reason is reserved for that crash case and is not currently emitted by any graceful
+`driveToTerminal` pause path — `styre ls` classifies a crashed run this way after the fact, but a
+crash itself simply leaves the checkpoint resumable rather than emitting the reason live.
 
-When a session is interrupted mid-flight (out of credits, session-limit hit), the runner
-**parks**: it dumps the SQLite SoT and transcript to
-`$XDG_STATE_HOME/styre/<slug>/<ticket-ident>/` and exits **75** (`EX_TEMPFAIL`) without
-burning a retry attempt. Resume with:
+The checkpoint is not something written on the way out — it *is* the live journal. A run journals
+directly to `~/.local/state/styre/<slug>/<ident>/run.db` (`$XDG_STATE_HOME` when set) as it
+executes, so a pause simply leaves that database exactly where it already was: fully resumable, SoT
+and transcript included. Resume with:
 
 ```
-styre run --resume <ticket> --profile <p>
+styre run --resume <ident>
 ```
 
-Additional flags: `--accept-head` (resume against a branch HEAD that moved since the park, drops
-carryover context) and `--inspect` (diagnostics only, exits 0 without executing any steps).
+A bare `styre run <ticket>` **refuses** when a checkpoint already exists for that ticket ident,
+pointing the operator at `--resume` or `--fresh`. `--fresh` discards the existing checkpoint,
+reconciles the worktree, and starts the ticket over from scratch. `--accept-head` resumes against a
+branch HEAD that moved since the pause (dropping carryover context), and `--inspect` runs
+diagnostics only, exiting 0 without executing any steps.
 
-> **Commercial Control Plane only.** The persistent [needs-you inbox](glossary.md#needs-you-inbox),
-> `styre inbox`, and `styre abandon` are features of the commercial Control Plane — not OSS
-> commands. In run-only mode the exit code and state dump are the signal; the operator acts by
-> inspecting the dump and re-running with `styre run --resume`.
+`styre ls` lists every effort's checkpoint: paused/resumable efforts first (each row followed by its
+resume command, `styre run --resume <ident> --slug <slug>`), then finished leftovers ready to reap,
+then runs currently in flight. `styre clean <ident>` reaps one effort's disk artifacts (worktree +
+checkpoint) — it never changes ticket status, and it refuses a live run with exit **75**.
+`styre clean --all` reaps only the provably-finished (`pr-ready`/`done`) efforts for the current
+project, skipping resumable pauses and live runs.
+
+> **Commercial Control Plane only.** The persistent [needs-you inbox](glossary.md#needs-you-inbox)
+> is a feature of the commercial Control Plane — not an OSS command. In run-only mode the exit code
+> and the checkpoint are the signal; the operator acts by inspecting the checkpoint (or `styre ls`)
+> and re-running with `styre run --resume`.
 
 Every other situation — build failures, test regressions, review findings, flaky CI, merge
 conflicts, docs that need updating — the loop handles itself.

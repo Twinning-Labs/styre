@@ -9,16 +9,18 @@ import type { NotificationMessage, NotifySeverity } from "../integrations/notifi
 type Policy = RuntimeConfig["notify"];
 const RANK: Record<Policy, number> = { escalations: 0, transitions: 1, everything: 2 };
 
-/** Map an event_log kind → (severity, label) under the policy, or null if it shouldn't notify. */
+/** Map an event_log kind → (severity, label) under the policy, or null if it shouldn't notify.
+ *  `escalated` / `parked` are internal wire names (event_log.kind, unchanged); user-facing they're
+ *  both a "pause" — needing a human or waiting on budget, respectively. */
 function eventDecision(
   e: EventLogRow,
   policy: Policy,
 ): { severity: NotifySeverity; label: string } | null {
   switch (e.kind) {
     case "escalated":
-      return { severity: "high", label: "escalated" };
+      return { severity: "high", label: "paused — needs you" };
     case "parked":
-      return { severity: "high", label: "parked" };
+      return { severity: "high", label: "paused — out of budget" };
     case "transition":
       return RANK[policy] >= 1
         ? { severity: "info", label: `${e.from_stage ?? "?"}→${e.to_stage ?? "?"}` }
@@ -32,8 +34,9 @@ function eventDecision(
 
 /** Map a terminal RunOutcome (src/daemon/run-ticket.ts) → (severity, event) or null. `paused` is
  *  intentionally null regardless of reason: both `pauseTicket` (needs_you) and the budget-park path
- *  (advance.ts) append an event_log row (`escalated` / `parked` respectively) that `sweepNew` already
- *  turned into a notification before the terminal fires — a terminal ping here would double it.
+ *  (advance.ts) append an event_log row (internal wire names `escalated` / `parked` respectively,
+ *  unchanged) that `sweepNew` already turned into a pause notification before the terminal fires —
+ *  a terminal ping here would double it.
  *  `abandoned` is reserved/unemitted by any driveToTerminal path this ticket; null is the safe default. */
 function terminalDecision(outcome: string): { severity: NotifySeverity; event: string } | null {
   switch (outcome) {
@@ -42,7 +45,7 @@ function terminalDecision(outcome: string): { severity: NotifySeverity; event: s
     case "done":
       return { severity: "success", event: "released" };
     default:
-      return null; // paused (swept via escalated/parked), abandoned (unemitted)
+      return null; // paused (already swept as a pause notification), abandoned (unemitted)
   }
 }
 

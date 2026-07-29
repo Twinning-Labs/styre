@@ -43,7 +43,7 @@
 
 ## 1. Design goals
 
-1. **Recover, don't halt.** Any anomaly is absorbed, looped with feedback, or parked as a resumable
+1. **Recover, don't halt.** Any anomaly is absorbed, looped with feedback, or paused as a resumable
    wait — never a dead halt that strands a ticket.
 2. **Durable + replayable.** Crash anywhere resumes from the journal; effects are exactly-once.
 3. **Single-writer simplicity (B2).** One runner writes one SQLite file.
@@ -92,7 +92,7 @@ loop():                           # (commercial Control Plane: the multi-ticket 
       spawn_async(advance_one_step, ticket)
     await_any_completion_or(timeout=<poll interval>)
 ```
-`v_ready_tickets` already excludes paused projects and tickets parked on a pending signal. Workers
+`v_ready_tickets` already excludes paused projects and tickets paused on a pending signal. Workers
 run concurrently; the runner journals each result as it returns. **No worker touches SQLite.**
 
 ### 2.3 the resolver + interpreter split (`src/daemon/`)
@@ -106,9 +106,11 @@ switch descriptor.kind:
                     'running' → recover() owns it; 'failed' → apply_failure_policy, §8)
   'advance'       → write the stage transition (+ enqueue its projection in the same tx), recurse
   'mark-verified' → mark the work-unit verified, recurse
-  'wait'          → park on a signal (status='waiting'); the loop resumes on delivery (§7)
+  'wait'          → await a signal (status='waiting'); the loop resumes on delivery (§7) — the only
+                    current instance (merge approval) resolves to `pr-ready`, not a `paused` outcome
   'escalate'      → status='waiting' + raise human_resume + an 'escalated' event
-  'blocked'       → a structural dead-end (no actionable unit and not all verified)
+  'blocked'       → the run pauses (`paused`, reason `needs_you`) — no actionable unit and not all
+                    verified; routes through `pauseTicket` (see execution-model.md)
   'done'          → the ticket is complete
 ```
 Guards are **inline predicates inside `nextStepKey`**, not a separate `guard_holds`/`park_or_block`
@@ -188,7 +190,7 @@ correctness mechanism.
 
 Each step declares **Guard** (precondition to fire), **Input**, **Output** (postcondition + rows),
 **Tools** (agent steps) or **Commands/Capability** (runner-executed steps), **Model** (agent steps),
-and **Failure → route** (see the Loopback Atlas, §8). An unmet guard *parks or blocks*, it does not
+and **Failure → route** (see the Loopback Atlas, §8). An unmet guard *waits or pauses*, it does not
 fail.
 
 Capability frame (move 4) applies to every agent step: the **worktree is the only writable surface**;
@@ -444,7 +446,7 @@ and the gate has not passed at the branch HEAD, the resolver serves this cluster
 - **Guard:** the gate is `blamed` at HEAD (a `check-wrong` round) and `checks:reauthor` is not done.
 - **Output:** the blamed `ac_check` rewritten. Its verdict then re-serves the gate (pure check-wrong,
   all installed) or loops implement (mixed / rejected). `REAUTHOR_ESCALATE_CAP = 2` re-authors per AC,
-  then a no-progress escalation.
+  then the run pauses (`paused`, reason `needs_you`).
 - **Stuck-HEAD escalate:** a pure-code-wrong round that commits **nothing new** leaves HEAD frozen
   and `blamed` permanently true at that SHA; with `verify:checks-gate` already succeeded this round,
   nothing further can change the state, so the resolver escalates *now* (`kind: "escalate"`, "stuck")
@@ -521,7 +523,7 @@ and the gate has not passed at the branch HEAD, the resolver serves this cluster
 - **Input:** branch, base, and a PR title/description. The **description is written by a cheap AI**
   (smoother write-up) from facts the runner already has — the changed work-units, test results,
   review outcome. (Facts are assembled deterministically; only the prose is the cheap model's.)
-- **Output:** a PR exists; `response_ref` = PR number/url; **delivers the parked signal** so the
+- **Output:** a PR exists; `response_ref` = PR number/url; **delivers the awaited signal** so the
   workflow resumes with the PR ref (§5.3). Opening the PR is what makes the checks-system start.
 - **Capability:** create **one** PR for this branch.
 - **Idempotency:** **probe** — `gh pr view <branch>` → use the existing PR if present.
@@ -559,12 +561,12 @@ and the gate has not passed at the branch HEAD, the resolver serves this cluster
 > has done its job and exits — it does **not** wait for CI (S8 is a one-shot report, not a gate),
 > does **not** wait indefinitely for a human merge, does not maintain a persistent needs-you inbox,
 > and does not keep the branch current across a slow human approval. Everything in this S9 step — the
-> indefinite park in the **needs-you inbox**, polling GitHub for the merge, and the `[CL-STALE]`
+> indefinite wait in the **needs-you inbox**, polling GitHub for the merge, and the `[CL-STALE]`
 > keep-branch-current-while-waiting behavior — is the **commercial Control Plane**'s outer loop
 > (which still owns CI-watch, per S8 above). It is the design record for that plane; it is fenced,
 > not deleted.
 - **Guard:** PR exists (S7). CI status is no longer a precondition — it is reported, not gated.
-- **Behavior *(commercial Control Plane)*:** parks the work in the operator's **needs-you inbox** with
+- **Behavior *(commercial Control Plane)*:** pauses the work in the operator's **needs-you inbox** with
   full context (what changed, test/check results, review outcome). **No deadline** — waits indefinitely
   (optional gentle reminder). Detected by polling GitHub for the merge.
 - **Auto-merge fully off at cutover** — earned later, per ticket-class, via the learning layer.
@@ -615,7 +617,7 @@ drain_outbox():
 probe (CL-3):** re-run the effect and probe the external system for the change (comment already
 posted? PR already open? remote ref already at SHA? already merged?), using a key where one exists;
 probe-first guards no-native-key and irreversible effects (`pr_create`, `pr_merge`). Result-bearing
-effects (`pr_create`) park on a signal the drainer delivers with `response_ref` (§7).
+effects (`pr_create`) await a signal the drainer delivers with `response_ref` (§7).
 
 ---
 
@@ -663,8 +665,9 @@ CI is a one-shot t+0 read reported as `ci_handoff` telemetry on the merge path, 
 delivered signal, never a wait). PR-merged remains obtained by the runner *reaching out* on an
 interval (no inbound endpoint → GOAL-INSTALL), but that polling — and its indefinite wait —
 is entirely the commercial Control Plane's outer loop, §9; in OSS, `styre run` exits at PR-ready
-before any merge-watch begins. *(The OSS escalation/park semantics — exit nonzero, or park at
-exit 75 on a session interruption, resumable with `styre run --resume` — are in execution-model.md.)*
+before any merge-watch begins. *(The OSS pause semantics — `styre run` exits **75** for any `paused`
+outcome (reason `budget`, `needs_you`, or `interrupted`), resumable with `styre run --resume`, or
+discarded with `--fresh` — are in execution-model.md.)*
 
 ---
 
@@ -704,13 +707,17 @@ exit 75 on a session interruption, resumable with `styre run --resume` — are i
 - **Deferred (specified, not built):** a per-loop distinct counter (`K_DISTINCT`), the cross-loop
   **B2** escalation budget (3-consecutive / 20-total), and the **B3** spend/wall-clock ceiling. No
   code reads `dispatch.cost_usd` for control.
-- **What "escalate" *does* (post-escalation lifecycle):** the ticket parks (`status='waiting'`) on a
-  `human_resume` signal **with the full trace**. *In OSS*, `styre run` surfaces the escalation by
-  exiting nonzero with the trace (a session-interruption parks at exit 75; resume with `styre run
-  --resume`). *In the commercial Control Plane*, the parked ticket appears in the **needs-you inbox**
-  and the operator can: **(a) resume as-is** (re-enter the parked step, counters reset); **(b) fix by
-  hand then resume** (edit plan/code/config; the runner picks up the changed state); **(c) abandon**
-  (terminal). Worst case = *parked, with the whole story, you decide* — never "stuck."
+- **What "escalate" *does* (post-escalation lifecycle):** the run pauses (`status='waiting'`) on a
+  `human_resume` signal **with the full trace**. *In OSS*, `styre run` surfaces this as a pause: it
+  exits **75** with the trace, and is resumable with `styre run --resume`; `--fresh` discards the
+  checkpoint instead of resuming it. **Fix by hand then resume** (edit plan/code/config, then
+  `styre run --resume`) is the same path, not a separate flag — resume always **consumes** the
+  pending signal (there is no `--after-fix`). *In the commercial Control Plane*, the paused ticket
+  appears in the **needs-you inbox** and the operator can resume as-is (re-enter the paused step,
+  counters reset) or fix by hand then resume, as above. Giving up on the ticket entirely is a
+  human / issue-tracker decision, out of styre's scope — styre has no `abandon` command and never
+  produces that outcome itself. Worst case = *paused, with the whole story, you decide* — never
+  "stuck."
 
 ### 8.3 The atlas (Scope per P5; **first match** within a phase)
 
@@ -754,7 +761,8 @@ exit 75 on a session interruption, resumable with `styre run --resume` — are i
 > ENG-164: a transport death is now classified by cause. session-limit / out-of-credits →
 > `parked` (resumable, attempt NOT consumed); crash / timeout / unknown → `transient` retry as
 > before. The `parked` dispatch outcome + `event_log.kind='parked'` make a quota pause countable
-> separately from a real failure.
+> separately from a real failure. Both are internal wire names — the user-facing terminal outcome
+> is `paused`, reason `budget`.
 
 | V6 | across reviews | same finding (`finding_class_key`) persists N cold rounds | escalate (agent can't fix it) | — | fast |
 > **Checks (CI) rows removed (2026-07-18, report-not-gate).** The former P1/P2/P3 rows (checks red /
@@ -764,7 +772,7 @@ exit 75 on a session interruption, resumable with `styre run --resume` — are i
 | **Human merge** ||||||
 | H1 | S9 | operator requests changes | → S2b or S1 per feedback | operator | human-driven |
 | **External effects & infra** ||||||
-| X1 | outbox drainer | external effect fails past retry budget (GitHub/Linear outage) | escalate (infra); ticket parks | — | K_retry → escalate |
+| X1 | outbox drainer | external effect fails past retry budget (GitHub/Linear outage) | escalate (infra); ticket pauses | — | K_retry → escalate |
 | X2 | any | worktree/git corrupted (wedged index/merge, disk) | escalate (infra) | — | — |
 | **Cross-cutting terminators** ||||||
 | B0 | any step | `attempt >= 3` (`DEFAULT_MAX_ATTEMPTS`) | escalate (resumable wait) | — | **the implemented bound** |
@@ -789,7 +797,7 @@ is a deferred follow-up folded into S5 review, not this row.
 **→ implement** (unit or ticket scope — the code is wrong; most failures — including CM1's
 under-delivery, where the code is *missing* rather than wrong). **→ design / re-design**
 (plan scope — the plan is wrong; caught early at DV1, or late at V3). **→ escalate** (a resumable
-park — budget exhausted, or an inherently human case: R3/R4, V-def, V6, H1, X1/X2 (P3 removed with
+pause — budget exhausted, or an inherently human case: R3/R4, V-def, V6, H1, X1/X2 (P3 removed with
 the Checks (CI) rows, §8.3); **or an
 environment error, E1** — provision, always immediate, never bounded by attempt-count; in OSS the run
 exits with the trace, in the commercial Control Plane it surfaces in the needs-you inbox).

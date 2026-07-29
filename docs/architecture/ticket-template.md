@@ -171,11 +171,12 @@ document: it is effectively the grading rubric your AC phrasing is scored agains
 
 **`weak` and `vacuous` are the two that cost you a re-author round, and both are caused by an AC that
 names a *surface* rather than an *output*.** Two consecutive re-author rounds on the same AC and the
-ticket **escalates to a human** (`REAUTHOR_ESCALATE_CAP = 2`, `src/daemon/checks-verdict.ts:28`).
+ticket **pauses for a human** (`paused`, reason `needs_you`; `REAUTHOR_ESCALATE_CAP = 2`,
+`src/daemon/checks-verdict.ts:28`).
 
 > **The failure chain to memorise:** vague AC → surface-only check → classified `weak`/`vacuous` →
-> re-author → re-author → **escalate**. A woolly checkbox is not a small cost; it is the most common
-> way a ticket ends in a human's lap.
+> re-author → re-author → **pause**. A woolly checkbox is not a small cost; it is the most common
+> way a ticket ends up paused for a human.
 
 ### Every AC must be red→green expressible
 

@@ -75,7 +75,7 @@ export function finishRunResult(
   process.exitCode = exitCodeForOutcome(out.outcome); // 0 pr-ready/done · 75 paused · 1 abandoned
 }
 
-/** The durable dump dir for a parked run: ~/.local/state/styre/<project-stub>/<ticket-ident>/ */
+/** The durable dump dir for a paused run: ~/.local/state/styre/<project-stub>/<ticket-ident>/ */
 export function parkDir(slug: string, ident: string): string {
   return join(stateDir(), slug, ident);
 }
@@ -99,7 +99,7 @@ export function priorRunIdAt(destPath: string): string | null {
   }
 }
 
-/** Persist the parked run so `styre run --resume` can rehydrate it exactly:
+/** Persist the paused run so `styre run --resume` can rehydrate it exactly:
  *   - run.db: the SoT (checkpointed so the single file is self-contained), with the interrupted
  *     step left 'running' (recover() resets it on resume)
  *   - transcript.json: the dying dispatch's partial stdout, for advisory carryover
@@ -123,7 +123,7 @@ export function dumpPark(
   if (dbPath !== destPath) {
     const prior = priorRunIdAt(destPath);
     if (prior !== null && currentRunId !== null && prior !== currentRunId) {
-      process.stderr.write(`overwriting parked run ${prior} with ${currentRunId} for ${ident}\n`);
+      process.stderr.write(`overwriting paused run ${prior} with ${currentRunId} for ${ident}\n`);
     }
     copyFileSync(dbPath, destPath);
   }
@@ -139,7 +139,7 @@ export function dumpPark(
   return dir;
 }
 
-/** On resume, a fresh `worktreeRoot` is minted and the parked worktree is wiped (see the
+/** On resume, a fresh `worktreeRoot` is minted and the paused run's worktree is wiped (see the
  *  stale-worktree cleanup above) — so any deps a succeeded `provision` step installed are gone.
  *  But the journaled step is still 'succeeded', so the resolver's `done("provision")` gate would
  *  skip re-running it, and post-resume verify would run against an un-provisioned tree. Reset the
@@ -205,7 +205,7 @@ export async function resumeRun(
   const dbPath = join(dir, "run.db");
   if (!existsSync(dbPath)) {
     throw usageError(
-      `no parked run at ${dbPath}`,
+      `no paused run at ${dbPath}`,
       "Check the ticket ident, or start fresh: styre run <ticket>.",
     );
   }
@@ -263,7 +263,7 @@ export async function resumeRun(
 
     if (moved && !args.acceptHead) {
       process.stderr.write(
-        `resume refused: branch HEAD moved since the parked attempt.\n  recorded base: ${recorded}\n  current head:  ${current}\n  would re-dispatch: ${parkedStep?.step_key ?? "(none)"}\n  Re-run with --accept-head to resume against the new HEAD (drops stale transcript),\n  or --inspect to review, or 'styre run ${ticket.ident}' to start fresh.\n`,
+        `resume refused: branch HEAD moved since the run paused.\n  recorded base: ${recorded}\n  current head:  ${current}\n  would re-dispatch: ${parkedStep?.step_key ?? "(none)"}\n  Re-run with --accept-head to resume against the new HEAD (drops stale transcript),\n  or --inspect to review, or 'styre run ${ticket.ident} --fresh' to start fresh.\n`,
       );
       db.close();
       process.exitCode = 65;
@@ -308,7 +308,7 @@ export async function resumeRun(
     const targetWorktreePath = inPlace ? project.target_repo : join(worktreeRoot, ticket.ident);
 
     // --- Stale-worktree cleanup (Fix B → reconcileWorktree, ENG-381; pid-liveness, ENG-382) ---
-    // The parked/escalated run left its worktree checked out; git refuses `worktree add -B <branch>`
+    // The paused run left its worktree checked out; git refuses `worktree add -B <branch>`
     // while the branch is held. reconcileWorktree removes THIS ticket's own prior worktree and prunes
     // dangling refs, refusing a live/foreign holder it can't prove stale (never a blind force-remove).
     // `dir` (this ticket's checkpoint dir) lets it consult the run lock: a DIFFERENT live run owning
@@ -376,7 +376,7 @@ export async function resumeRun(
     if (result.outcome === "paused" && result.reason === "budget" && result.park) {
       dumpPark(db, dbPath, profile.slug, ticket.ident, result.park); // re-dump (closes db)
       process.stderr.write(
-        `${formatMessage("run", `Parked again: ${result.park.cause}. Dump: ${dir}`)}\n`,
+        `${formatMessage("run", `Paused again — out of budget: ${result.park.cause}. Checkpoint: ${dir}`)}\n`,
       );
       process.exitCode = exitCodeForOutcome("paused"); // 75
       return;
