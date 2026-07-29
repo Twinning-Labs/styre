@@ -106,9 +106,11 @@ switch descriptor.kind:
                     'running' → recover() owns it; 'failed' → apply_failure_policy, §8)
   'advance'       → write the stage transition (+ enqueue its projection in the same tx), recurse
   'mark-verified' → mark the work-unit verified, recurse
-  'wait'          → park on a signal (status='waiting'); the loop resumes on delivery (§7)
+  'wait'          → await a signal (status='waiting'); the loop resumes on delivery (§7) — the only
+                    current instance (merge approval) resolves to `pr-ready`, not a `paused` outcome
   'escalate'      → status='waiting' + raise human_resume + an 'escalated' event
-  'blocked'       → a structural dead-end (no actionable unit and not all verified)
+  'blocked'       → the run pauses (`paused`, reason `needs_you`) — no actionable unit and not all
+                    verified; routes through `pauseTicket` (see execution-model.md)
   'done'          → the ticket is complete
 ```
 Guards are **inline predicates inside `nextStepKey`**, not a separate `guard_holds`/`park_or_block`
@@ -444,7 +446,7 @@ and the gate has not passed at the branch HEAD, the resolver serves this cluster
 - **Guard:** the gate is `blamed` at HEAD (a `check-wrong` round) and `checks:reauthor` is not done.
 - **Output:** the blamed `ac_check` rewritten. Its verdict then re-serves the gate (pure check-wrong,
   all installed) or loops implement (mixed / rejected). `REAUTHOR_ESCALATE_CAP = 2` re-authors per AC,
-  then a no-progress escalation.
+  then the run pauses (`paused`, reason `needs_you`).
 - **Stuck-HEAD escalate:** a pure-code-wrong round that commits **nothing new** leaves HEAD frozen
   and `blamed` permanently true at that SHA; with `verify:checks-gate` already succeeded this round,
   nothing further can change the state, so the resolver escalates *now* (`kind: "escalate"`, "stuck")
@@ -663,8 +665,9 @@ CI is a one-shot t+0 read reported as `ci_handoff` telemetry on the merge path, 
 delivered signal, never a wait). PR-merged remains obtained by the runner *reaching out* on an
 interval (no inbound endpoint → GOAL-INSTALL), but that polling — and its indefinite wait —
 is entirely the commercial Control Plane's outer loop, §9; in OSS, `styre run` exits at PR-ready
-before any merge-watch begins. *(The OSS escalation/park semantics — exit nonzero, or park at
-exit 75 on a session interruption, resumable with `styre run --resume` — are in execution-model.md.)*
+before any merge-watch begins. *(The OSS pause semantics — `styre run` exits **75** for any `paused`
+outcome (reason `budget`, `needs_you`, or `interrupted`), resumable with `styre run --resume`, or
+discarded with `--fresh` — are in execution-model.md.)*
 
 ---
 
@@ -704,13 +707,15 @@ exit 75 on a session interruption, resumable with `styre run --resume` — are i
 - **Deferred (specified, not built):** a per-loop distinct counter (`K_DISTINCT`), the cross-loop
   **B2** escalation budget (3-consecutive / 20-total), and the **B3** spend/wall-clock ceiling. No
   code reads `dispatch.cost_usd` for control.
-- **What "escalate" *does* (post-escalation lifecycle):** the ticket parks (`status='waiting'`) on a
-  `human_resume` signal **with the full trace**. *In OSS*, `styre run` surfaces the escalation by
-  exiting nonzero with the trace (a session-interruption parks at exit 75; resume with `styre run
-  --resume`). *In the commercial Control Plane*, the parked ticket appears in the **needs-you inbox**
-  and the operator can: **(a) resume as-is** (re-enter the parked step, counters reset); **(b) fix by
-  hand then resume** (edit plan/code/config; the runner picks up the changed state); **(c) abandon**
-  (terminal). Worst case = *parked, with the whole story, you decide* — never "stuck."
+- **What "escalate" *does* (post-escalation lifecycle):** the run pauses (`status='waiting'`) on a
+  `human_resume` signal **with the full trace**. *In OSS*, `styre run` surfaces this as a pause: it
+  exits **75** with the trace, and is resumable with `styre run --resume`; `--fresh` discards the
+  checkpoint instead of resuming it. **Fix by hand then resume** (edit plan/code/config, then
+  `styre run --resume`) is the same path, not a separate flag — resume always **consumes** the
+  pending signal (there is no `--after-fix`). *In the commercial Control Plane*, the paused ticket
+  appears in the **needs-you inbox** and the operator can resume as-is (re-enter the paused step,
+  counters reset) or fix by hand then resume, as above. Worst case = *paused, with the whole story,
+  you decide* — never "stuck."
 
 ### 8.3 The atlas (Scope per P5; **first match** within a phase)
 
@@ -754,7 +759,8 @@ exit 75 on a session interruption, resumable with `styre run --resume` — are i
 > ENG-164: a transport death is now classified by cause. session-limit / out-of-credits →
 > `parked` (resumable, attempt NOT consumed); crash / timeout / unknown → `transient` retry as
 > before. The `parked` dispatch outcome + `event_log.kind='parked'` make a quota pause countable
-> separately from a real failure.
+> separately from a real failure. Both are internal wire names — the user-facing terminal outcome
+> is `paused`, reason `budget`.
 
 | V6 | across reviews | same finding (`finding_class_key`) persists N cold rounds | escalate (agent can't fix it) | — | fast |
 > **Checks (CI) rows removed (2026-07-18, report-not-gate).** The former P1/P2/P3 rows (checks red /
