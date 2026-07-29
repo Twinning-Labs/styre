@@ -1,6 +1,25 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.13.0] - 2026-07-29
+
+### Features
+
+- **`styre ls` shows leftover state on disk.** A new `styre ls` command lists resumable runs (paused waiting on you, out of budget, or interrupted) with resume hints, plus a preview of finished runs (PR-ready or done), and marks any run that's still live.
+- **`styre clean` reaps finished runs.** Use `styre clean <ident>` to remove one run's on-disk artifacts (worktree and checkpoint), or `styre clean --all` to sweep every provably-finished run for the current project; `clean` never touches ticket status, and it refuses to touch a run that's still in progress.
+- **`--purge` closes out the branch too.** Add `--purge` to `styre clean <ident>` to also delete the local and remote branch (closing its PR); it's opt-in, single-ident only, quietly does nothing if there's no branch or PR, and it will never delete your repo's default branch.
+- **Resuming a run now actually resumes it.** `styre run --resume` clears the pending "needs you" signal before continuing, so a resumed run picks up where it left off instead of immediately pausing again.
+- **`--inspect` reports the right step.** When inspecting a run dry-run, styre now correctly points at the failed step instead of showing `(none)`.
+- **Resuming the same ticket twice is blocked.** `styre run --resume` now takes a lock for the ticket, so a second concurrent resume of the same run is refused instead of corrupting state.
+- **`--fresh` no longer gets stuck on old worktrees.** `styre run --resume --fresh` now cleans up a leftover worktree from a previous run before discarding its checkpoint, instead of failing.
+- **A fresh run leaves a proper checkpoint on crash.** `styre run` now journals directly to the run's durable checkpoint from the start, so a crash, escalation, or block leaves behind a checkpoint you can resume — not an orphaned temp file.
+- **Re-running a ticket is safer.** `styre run` now refuses to start over a ticket that already has a checkpoint (with a hint to use `--resume` or `--fresh`), and holds a per-ticket lock while running so two runs can't collide on the same state.
+- **Pause outcomes are simpler and more consistent.** Runs that get stuck or blocked now pause with a clear, resumable "needs you" status instead of silently going into a handful of inconsistent dead-end states; exit code `75` is now used consistently for every kind of pause.
+
+### Bug Fixes
+
+- **Re-running a ticket no longer collides on its old branch.** styre now detects and frees a leftover worktree still holding a previous run's branch (fixing the "already used by worktree" failure on re-run), while refusing to touch a worktree that's still live or owned by something else.
+
 ## [0.12.0] - 2026-07-24
 
 ### Features
