@@ -75,17 +75,17 @@ test("run --resume / --inspect are NOT gated by the toolchain preflight (ungated
 
   // AC7: --resume must enter resumeRun (which errors on the absent dump) BEFORE the preflight, so a
   // missing tool must NOT produce exit 69. If the preflight were ever placed ahead of the resume
-  // early-return, this would exit 69 and never reach the "no parked run" error — so this pins the
+  // early-return, this would exit 69 and never reach the "no paused run" error — so this pins the
   // placement, not just the current behavior.
   await expect(invokeRun({ resume: "ENG-1", profile }, xdg, state)).rejects.toThrow(
-    /no parked run/,
+    /no paused run/,
   );
   expect(process.exitCode).not.toBe(69);
 
   // --inspect (a resume modifier) likewise bypasses the preflight — an inspect on a tool-less
   // machine must never be blocked by the toolchain check.
   await expect(invokeRun({ resume: "ENG-1", inspect: true, profile }, xdg, state)).rejects.toThrow(
-    /no parked run/,
+    /no paused run/,
   );
   expect(process.exitCode).not.toBe(69);
 });

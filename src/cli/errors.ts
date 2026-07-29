@@ -2,15 +2,16 @@
  *  `guard`) renders these once (headline + detail + recovery) and exits with `code`. Anything that
  *  is NOT a StyreError reaching the boundary is treated as an internal bug (EXIT.INTERNAL). */
 
-/** The exit-code space, shared across all four subcommands (sysexits-aligned). */
+/** The exit-code space, shared across six subcommands (`clean, ls, migrate, notify, run, setup`)
+ *  (sysexits-aligned). */
 export const EXIT = {
   OK: 0,
-  OPERATIONAL: 1, // blocked / no-progress: ran fine, dead-end a human should look at
+  OPERATIONAL: 1, // abandoned (reserved terminal; ran fine, no success)
   USAGE: 64, // EX_USAGE: CLI misuse
   RESUME_REFUSED: 65, // EX_DATAERR: resume refused, HEAD moved
   TOOLCHAIN_MISSING: 69, // EX_UNAVAILABLE: a required program is not installed
   INTERNAL: 70, // EX_SOFTWARE: unexpected crash / internal invariant
-  TEMPFAIL: 75, // parked (out of budget) and escalated (handed to a human) — both resumable-later
+  TEMPFAIL: 75, // any paused run (budget / needs_you / interrupted); also clean-on-live
   CONFIG: 78, // EX_CONFIG: bad config/profile value, unknown adapter, unresolved profile
 } as const;
 
