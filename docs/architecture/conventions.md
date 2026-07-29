@@ -14,7 +14,7 @@ treated as unset.
 | Function | Variable | Fallback | Holds |
 |---|---|---|---|
 | `configDir()` | `XDG_CONFIG_HOME` | `~/.config` | `<config>/styre/` — profiles + `config.json` |
-| `stateDir()` | `XDG_STATE_HOME` | `~/.local/state` | `<state>/styre/` — DB, park dumps, telemetry id |
+| `stateDir()` | `XDG_STATE_HOME` | `~/.local/state` | `<state>/styre/` — DB, checkpoints, telemetry id |
 
 `XDG_DATA_HOME` and `XDG_CACHE_HOME` are **not** read anywhere. Nothing Styre persists is classified
 as data or cache; ephemeral work goes to the OS temp dir instead (below).
@@ -35,19 +35,20 @@ as data or cache; ephemeral work goes to the OS temp dir instead (below).
 <state>/styre/
   styre.db                     # the SoT DB — only `styre migrate` (no --db) writes here
   telemetry.json               # anonymous analytics id + first-run notice latch
-  <slug>/<ticket-ident>/       # a park dump (see below)
+  <slug>/<ticket-ident>/       # a checkpoint (see below)
     run.db
     transcript.json
 ```
 
-The default DB lives here only for `styre migrate`; a `styre run` uses a fresh per-run temp DB
-unless you pass `--db`.
+The default DB lives here only for `styre migrate`. A `styre run` journals directly to its
+checkpoint (`<slug>/<ticket-ident>/run.db` above) unless you pass `--db` — the checkpoint IS the
+run's live location, not a temp file written only on pause.
 
 ---
 
 ## Slug derivation
 
-The slug names a project's config/profile subdirectory and its park directory
+The slug names a project's config/profile subdirectory and its checkpoint directory
 (`deriveSlug`, `src/config/slug.ts`):
 
 1. `git config --get remote.origin.url` in the repo.
@@ -98,13 +99,15 @@ human output on stderr (see [`runtime-parameters.md`](runtime-parameters.md)).
 
 ---
 
-## Park dumps
+## Checkpoints
 
-When a run parks (exit `75`), it dumps under `$XDG_STATE_HOME/styre/<slug>/<ticket-ident>/`
-(`src/cli/park.ts`): the run DB (`run.db`) and the agent transcript (`transcript.json`). `styre run
---resume <ident>` reads them back. The park dir uses the **profile's** slug; note that
-`styre run --slug X` steers config/profile lookup to slug `X` but the park dump still lands under the
-profile's own slug.
+A run journals directly to `$XDG_STATE_HOME/styre/<slug>/<ticket-ident>/` (`src/cli/park.ts`): the
+run DB (`run.db`, plus its WAL sidecar) and the agent transcript (`transcript.json`). This dir **is**
+the run's live location, not a dump written only when something goes wrong — a pause or crash simply
+leaves it there, resumable. `styre run --resume <ident>` reads it back; `styre clean <ident>` /
+`--all` / `--purge` reap exactly this checkpoint dir (worktree + checkpoint). The checkpoint dir uses
+the **profile's** slug; note that `styre run --slug X` steers config/profile lookup to slug `X` but
+the checkpoint still lands under the profile's own slug.
 
 ---
 

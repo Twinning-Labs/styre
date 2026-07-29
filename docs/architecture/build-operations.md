@@ -57,16 +57,27 @@ the *service-install* edge. The same TS core compiles to per-platform binaries.
     write the project profile (`profile.json`). Idempotent. *The developer hook.*
   - **`styre migrate`** — bootstraps and migrates the SQLite SoT under `$XDG_STATE_HOME/styre/`.
   - **`styre run <ticket>`** — a **one-shot runner**: execute ONE ticket to PR-ready and exit,
-    emitting NDJSON telemetry to stdout. Ephemeral per-run SQLite — the journal gives in-run
-    crash-resume; durable output = the git branch + telemetry stream.
-    - **Park on session interruption (exit 75):** if the run is interrupted (credits/limit), it parks:
-      dumps the SoT + transcript to `$XDG_STATE_HOME/styre/<slug>/<ticket-ident>/` and exits
-      `75` (EX_TEMPFAIL) without burning a retry. Resume with `styre run --resume <ticket> --profile <p>`
-      (re-runs only the interrupted step; `--accept-head` accepts a moved HEAD; `--inspect` is
-      diagnostics-only, exit `0`).
+    emitting NDJSON telemetry to stdout. Per-run SQLite journaled directly to its checkpoint path
+    (the checkpoint IS the live location, not a temp file) — the journal gives in-run crash-resume;
+    durable output = the git branch + telemetry stream.
+    - **Pause on interruption/budget/needs-you (exit 75):** if the run is interrupted (out of
+      credits/session limit), has exhausted its retries/ticks, or hits a structurally-unresolvable
+      loopback, it pauses: the SoT + transcript already live at
+      `$XDG_STATE_HOME/styre/<slug>/<ticket-ident>/` and it exits `75` (EX_TEMPFAIL) without burning a
+      retry. The run is resumed — never re-run from scratch — with
+      `styre run --resume <ticket> --profile <p>` (re-runs only the interrupted step; `--accept-head`
+      accepts a moved HEAD; `--inspect` is diagnostics-only, exit `0`).
+  - **`styre ls`** — lists every effort in three sections: paused/resumable efforts (each with its
+    `styre run --resume` hint), finished-but-uncleaned leftovers (reapable via `styre clean --all`),
+    and currently running efforts.
+  - **`styre clean <ident>` / `--all` / `--purge`** — reaps a run's disk state. `styre clean <ident>`
+    removes one effort's worktree + checkpoint (no ticket-status change; refuses a live run, exit
+    `75`). `styre clean --all` reaps only provably-finished (`pr-ready`/`done`) efforts for the current
+    project. `styre clean <ident> --purge` additionally deletes the local + remote branch, closing the
+    PR.
   - **`styre notify --test`** — a diagnostic that sends one test notification through the configured
     notifier (Slack). There is **no** OSS `status` / `config` / `logs` management CLI — the OSS binary
-    is exactly these four subcommands (`migrate` · `notify` · `run` · `setup`).
+    is exactly these six subcommands (`clean` · `ls` · `migrate` · `notify` · `run` · `setup`).
 
 - **Commercial Control Plane run modes** *(not part of the OSS binary — the persistent orchestration
   layer lives in the separate `control-plane` repo):*
@@ -74,8 +85,7 @@ the *service-install* edge. The same TS core compiles to per-platform binaries.
     (**launchd / systemd**), watches the SQLite queue, K-concurrency, one DB / all projects (CL-1).
     Orchestrates many `styre run` invocations for multi-ticket pickup, dependency-aware scheduling,
     and persistent supervision. **This command does NOT exist in the OSS binary.**
-  - **commercial management CLI:** `inbox` (resume/`--after-fix`/abandon) · `pause`/`resume` ·
-    `uninstall`.
+  - **commercial management CLI:** `inbox` (resume/abandon) · `pause`/`resume` · `uninstall`.
 
 ### 3.1 The install matrix (macOS · Linux · container)
 

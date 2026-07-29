@@ -6,6 +6,13 @@ term means in this codebase — no more. Definitions are grounded in the source 
 
 ---
 
+### abandoned
+
+one of the four terminal outcomes a run can reach (`pr-ready | done | paused | abandoned`). It has
+**no producer in styre** — reserved, not currently emitted by any run — and would exit `1` if it
+ever were. Cleaning a run's disk state (`styre clean`) is NOT abandoning the ticket. (build-operations.md
+§3; conventions.md)
+
 ### acceptance criterion / ac_check
 
 an `acceptance_criterion` row is one testable requirement derived from the ticket during the design
@@ -56,20 +63,32 @@ every route, its scope (unit / ticket / plan), and its escalation cap.
 
 ### needs-you inbox
 
-*(Commercial Control Plane.)* The persistent queue of tickets parked on a `human_resume` signal,
-requiring an operator action (resume / resume-after-fix / abandon). Backed by SQLite and surfaced
+*(Commercial Control Plane.)* The persistent queue of tickets **paused** on a `human_resume` signal
+(reason `needs_you`), requiring an operator action (resume / abandon). Backed by SQLite and surfaced
 via `styre inbox`; Linear is only the tracking mirror. `styre inbox` and `styre abandon` are
-commercial-plane commands, not part of the OSS core. In OSS run-only mode the equivalent
-behavior is: an escalation the loop cannot resolve makes `styre run` exit nonzero; a
-session-interruption (credits/limit exhausted) parks the run (exit code 75) and the operator
-resumes with `styre run --resume <ticket> --profile <p>` (with `--accept-head` or `--inspect`
-available). (minimal-loop.md §5; control-loop §7)
+commercial-plane commands, not part of the OSS core. In OSS run-only mode the equivalent behavior is:
+retry/tick exhaustion, or a loopback the loop cannot structurally resolve, pauses the run (reason
+`needs_you`, exit code 75); an out-of-credits/session-limit interruption likewise pauses the run
+(reason `budget`, exit code 75) — both resumable, never a bare nonzero-and-done. The operator resumes
+with `styre run --resume <ticket> --profile <p>` (with `--accept-head` or `--inspect` available).
+(minimal-loop.md §5; control-loop §7)
 
 ### next_step_key
 
 the routing key computed by the deterministic resolver to select the next step
 for a ticket. It is a pure function of the ticket's current `stage`, work-unit states, and the
 `workflow_step` journal. (minimal-loop.md §1; control-loop §2.3)
+
+### paused
+
+one of the four terminal outcomes a run can reach (`pr-ready | done | paused | abandoned`) when it
+cannot continue without an external event. Every pause carries an internal `reason`: `budget`
+(out-of-credits/session-limit), `needs_you` (retry/tick exhaustion, or a loopback the loop cannot
+structurally resolve), or `interrupted` (reserved for a hard crash — not currently emitted by a live
+run). Every `paused` reason exits `75` (EX_TEMPFAIL), and so does `styre clean <ident>` refusing a
+live run. The SoT + transcript already live at the run's checkpoint
+(`$XDG_STATE_HOME/styre/<slug>/<ident>/`) — pausing writes nothing extra; `styre run --resume <ident>`
+reads the checkpoint back and resumes. (conventions.md; build-operations.md §3)
 
 ### open-core seam (projector contract)
 
@@ -122,6 +141,23 @@ implement stage, so a ticket does not pass through a distinct `verify` stage (th
 in the vocabulary). There is no hardcoded stage for UI work (UI is a frontend work-unit with a visual
 verify check-type) and no legacy gerund stage vocabulary. (control-loop §2.3; README.md invariants;
 schema.sql)
+
+### styre clean
+
+the OSS command that reaps a run's on-disk state. `styre clean <ident>` reaps ONE effort's disk
+artifacts (worktree + checkpoint) — no ticket-status change; refuses a live run (exit `75`). `styre
+clean --all` reaps only provably-finished (`pr-ready`/`done`) efforts for the current project,
+skipping resumable pauses and live runs. `styre clean <ident> --purge` additionally deletes the local
++ remote branch (closing the PR) — opt-in, single-ident (rejects `--all --purge`, exit `64`), silent
+when there is no branch/PR; on the repo's default branch it skips the branch/PR deletion but still
+reaps disk state (stderr warning, exit `0`). (build-operations.md §3; conventions.md)
+
+### styre ls
+
+the OSS command that lists every effort in three sections, in order: `Paused/resumable efforts:`
+(each row followed by `resume: styre run --resume <ident> --slug <slug>`), `Finished leftovers (reap
+per project with \`styre clean --all\`):` (slug-qualified rows), and `Running:`. A live effort never
+appears as reapable. (build-operations.md §3)
 
 ### track (fast / full)
 
