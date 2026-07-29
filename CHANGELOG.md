@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.13.1] - 2026-07-29
+
+### Bug Fixes
+
+- **Fixed re-running a ticket with `--fresh` after it had already been pushed.** Previously, redoing a ticket's work diverged from what a prior run had already pushed to the remote branch, causing the push to fail as a rejected non-fast-forward update. styre now safely overwrites its own remote branch in this case, while still refusing to clobber changes pushed by someone else in the meantime.
+
 ## [0.13.0] - 2026-07-29
 
 ### Features
