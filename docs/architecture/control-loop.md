@@ -43,7 +43,7 @@
 
 ## 1. Design goals
 
-1. **Recover, don't halt.** Any anomaly is absorbed, looped with feedback, or parked as a resumable
+1. **Recover, don't halt.** Any anomaly is absorbed, looped with feedback, or paused as a resumable
    wait — never a dead halt that strands a ticket.
 2. **Durable + replayable.** Crash anywhere resumes from the journal; effects are exactly-once.
 3. **Single-writer simplicity (B2).** One runner writes one SQLite file.
@@ -190,7 +190,7 @@ correctness mechanism.
 
 Each step declares **Guard** (precondition to fire), **Input**, **Output** (postcondition + rows),
 **Tools** (agent steps) or **Commands/Capability** (runner-executed steps), **Model** (agent steps),
-and **Failure → route** (see the Loopback Atlas, §8). An unmet guard *parks or blocks*, it does not
+and **Failure → route** (see the Loopback Atlas, §8). An unmet guard *waits or pauses*, it does not
 fail.
 
 Capability frame (move 4) applies to every agent step: the **worktree is the only writable surface**;
@@ -523,7 +523,7 @@ and the gate has not passed at the branch HEAD, the resolver serves this cluster
 - **Input:** branch, base, and a PR title/description. The **description is written by a cheap AI**
   (smoother write-up) from facts the runner already has — the changed work-units, test results,
   review outcome. (Facts are assembled deterministically; only the prose is the cheap model's.)
-- **Output:** a PR exists; `response_ref` = PR number/url; **delivers the parked signal** so the
+- **Output:** a PR exists; `response_ref` = PR number/url; **delivers the awaited signal** so the
   workflow resumes with the PR ref (§5.3). Opening the PR is what makes the checks-system start.
 - **Capability:** create **one** PR for this branch.
 - **Idempotency:** **probe** — `gh pr view <branch>` → use the existing PR if present.
@@ -561,12 +561,12 @@ and the gate has not passed at the branch HEAD, the resolver serves this cluster
 > has done its job and exits — it does **not** wait for CI (S8 is a one-shot report, not a gate),
 > does **not** wait indefinitely for a human merge, does not maintain a persistent needs-you inbox,
 > and does not keep the branch current across a slow human approval. Everything in this S9 step — the
-> indefinite park in the **needs-you inbox**, polling GitHub for the merge, and the `[CL-STALE]`
+> indefinite wait in the **needs-you inbox**, polling GitHub for the merge, and the `[CL-STALE]`
 > keep-branch-current-while-waiting behavior — is the **commercial Control Plane**'s outer loop
 > (which still owns CI-watch, per S8 above). It is the design record for that plane; it is fenced,
 > not deleted.
 - **Guard:** PR exists (S7). CI status is no longer a precondition — it is reported, not gated.
-- **Behavior *(commercial Control Plane)*:** parks the work in the operator's **needs-you inbox** with
+- **Behavior *(commercial Control Plane)*:** pauses the work in the operator's **needs-you inbox** with
   full context (what changed, test/check results, review outcome). **No deadline** — waits indefinitely
   (optional gentle reminder). Detected by polling GitHub for the merge.
 - **Auto-merge fully off at cutover** — earned later, per ticket-class, via the learning layer.
@@ -617,7 +617,7 @@ drain_outbox():
 probe (CL-3):** re-run the effect and probe the external system for the change (comment already
 posted? PR already open? remote ref already at SHA? already merged?), using a key where one exists;
 probe-first guards no-native-key and irreversible effects (`pr_create`, `pr_merge`). Result-bearing
-effects (`pr_create`) park on a signal the drainer delivers with `response_ref` (§7).
+effects (`pr_create`) await a signal the drainer delivers with `response_ref` (§7).
 
 ---
 
@@ -772,7 +772,7 @@ discarded with `--fresh` — are in execution-model.md.)*
 | **Human merge** ||||||
 | H1 | S9 | operator requests changes | → S2b or S1 per feedback | operator | human-driven |
 | **External effects & infra** ||||||
-| X1 | outbox drainer | external effect fails past retry budget (GitHub/Linear outage) | escalate (infra); ticket parks | — | K_retry → escalate |
+| X1 | outbox drainer | external effect fails past retry budget (GitHub/Linear outage) | escalate (infra); ticket pauses | — | K_retry → escalate |
 | X2 | any | worktree/git corrupted (wedged index/merge, disk) | escalate (infra) | — | — |
 | **Cross-cutting terminators** ||||||
 | B0 | any step | `attempt >= 3` (`DEFAULT_MAX_ATTEMPTS`) | escalate (resumable wait) | — | **the implemented bound** |
@@ -797,7 +797,7 @@ is a deferred follow-up folded into S5 review, not this row.
 **→ implement** (unit or ticket scope — the code is wrong; most failures — including CM1's
 under-delivery, where the code is *missing* rather than wrong). **→ design / re-design**
 (plan scope — the plan is wrong; caught early at DV1, or late at V3). **→ escalate** (a resumable
-park — budget exhausted, or an inherently human case: R3/R4, V-def, V6, H1, X1/X2 (P3 removed with
+pause — budget exhausted, or an inherently human case: R3/R4, V-def, V6, H1, X1/X2 (P3 removed with
 the Checks (CI) rows, §8.3); **or an
 environment error, E1** — provision, always immediate, never bounded by attempt-count; in OSS the run
 exits with the trace, in the commercial Control Plane it surfaces in the needs-you inbox).
