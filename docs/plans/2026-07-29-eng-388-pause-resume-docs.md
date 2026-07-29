@@ -7,8 +7,10 @@
 unified pause/resume model and new CLI surface, after first fixing the one runtime surface that still
 emits retired vocabulary (the notifier label).
 
-**Architecture:** Code-first. Phase 0 fixes the live discrepancy (notifier labels) + the one stale
-`--help` string in the `styre` repo with TDD. Phase 1 updates the `styre` repo docs to match code.
+**Architecture:** Code-first. Phase 0 fixes the live discrepancies (notifier labels, plus the
+`run`/resume CLI output strings that still print "Parked:/Dump:" and one now-wrong resume-refused
+command) + the stale `--help`/comment text in the `styre` repo, TDD where tested. Phase 1 updates the
+`styre` repo docs to match code.
 Phase 2 mirrors the changes to the separate `styre.dev` Astro/Starlight repo (its own worktree,
 branch, and PR). Phases 0+1 land on branch `docs/eng-388-pause-resume-docs` (PR #1); Phase 2 lands on
 a `styre.dev` branch (PR #2).
@@ -105,21 +107,19 @@ change, no migration).
   `kind:"escalated"` → `label:"paused — needs you"`, `kind:"parked"` → `label:"paused — out of
   budget"`. Severity stays `"high"` for both.
 
-- [ ] **Step 1: Update the failing test.** In `test/daemon/notify-sweep.test.ts`, the assertion at
-  ~L31 reads `expect(evs).toEqual(["escalated"])`. Change the expected label to the new value. Find
-  the line that maps the swept `escalated` event to its label and assert `"paused — needs you"`. If
-  the test also covers a `parked` event's label, assert `"paused — out of budget"`. (Read the test
-  first; keep its structure, change only the expected label strings.)
-
-```ts
-// after: appendEvent(db, { ticketId, kind: "escalated", reason: "step failed" });
-expect(evs).toEqual(["paused — needs you"]); // was ["escalated"]
-```
+- [ ] **Step 1: Update the failing assertions.** In `test/daemon/notify-sweep.test.ts`, the
+  `"escalated"` label is asserted in **three** places — update ALL three (change only the expected
+  label string, keep the `kind:"escalated"` event fixtures and everything else):
+  - **L31** `expect(evs).toEqual(["escalated"])` → `expect(evs).toEqual(["paused — needs you"])`
+  - **L40** `expect(evs).toEqual(["escalated", "implement→verify", "loopback"])`
+    → `expect(evs).toEqual(["paused — needs you", "implement→verify", "loopback"])`
+  - **L100-104** the filter `msg.event === "escalated"` (asserted `.toBe(1)`) →
+    `msg.event === "paused — needs you"`
 
 - [ ] **Step 2: Run the test, watch it fail.**
 
 Run: `bun test test/daemon/notify-sweep.test.ts`
-Expected: FAIL — actual label is still `"escalated"`.
+Expected: FAIL — actual label is still `"escalated"` at all three assertions.
 
 - [ ] **Step 3: Implement the mapping.** In `src/daemon/notify.ts`, change the two labels in
   `eventDecision` (keep severity `"high"`):
@@ -138,9 +138,11 @@ Update the function's doc-comment above `eventDecision`/`terminalDecision` so an
 - [ ] **Step 4: Run tests, watch them pass.**
 
 Run: `bun test test/daemon/notify-sweep.test.ts test/daemon/notify-outbox.test.ts test/integrations/notifier.test.ts`
-Expected: PASS. (If `notify-outbox`/`notifier` fail, they asserted the old label downstream — update
-the expected label there too; do NOT change the `kind:"escalated"` event fixtures, only label
-expectations.)
+Expected: PASS. Note: `notify-outbox.test.ts` and `notifier.test.ts` do NOT change — they construct
+`NotificationMessage` objects directly (`event:"escalated"`) and bypass `eventDecision`, and
+`notify-outbox.test.ts:44` filters on `event_log.kind === "escalated"` (the unchanged DB enum). Only
+`notify-sweep.test.ts` exercises the mapping. If either other file fails, something unexpected changed —
+stop and investigate rather than editing fixtures.
 
 - [ ] **Step 5: Full gates + commit.**
 
@@ -154,45 +156,79 @@ git commit -m "fix(notify): pause-vocabulary labels for paused-run notifications
 
 ---
 
-### Task 2: Retire stale vocab in the one live `--help` string + code comments
+### Task 2: Retire stale vocab from ALL live CLI output strings + help + comments
 
-Mechanical string/comment edits (no behavior change, no TDD). The only *live user-facing* retired
-string is the `--resume` help text; the rest are comments that mislead readers.
+Beyond notifications, several `styre run`/resume paths still **print** retired vocab to the operator
+(stderr), and one prints a now-incorrect command. Rename the user-facing wording to the canonical
+pause/checkpoint vocabulary. **Vocabulary + one command-correctness fix only — do NOT change any
+control flow, the `dumpPark` copy logic, or any internal `event_log.kind`/`dispatch.outcome` value.**
+
+Mostly mechanical, but two of these strings may be asserted by tests — so this task IS test-gated:
+before editing, grep `test/` for the phrases; update any asserting test alongside the code; then run
+the full suite.
 
 **Files:**
-- Modify: `src/cli/run.ts` (L102 help string; comments L46-47), `src/cli/errors.ts` (L8 comment; the
-  `TEMPFAIL` member comment), `src/cli/outcome.ts` (header comment prose)
+- Modify: `src/cli/run.ts` (budget-pause message L337-341; `--resume` help L102; `--db` help L101;
+  comments L46-47), `src/cli/park.ts` (L126, L266, L379), `src/cli/errors.ts` (L5, L8, the `TEMPFAIL`
+  member comment), `src/cli/outcome.ts` (header prose)
+- Possibly modify: any `test/**` file asserting these exact strings (discovered in Step 1)
 
-- [ ] **Step 1: Fix the `--help` string.** `src/cli/run.ts:102`:
+- [ ] **Step 1: Inventory test assertions on these strings.**
+
+Run: `grep -rniE "parked:|parked again|overwriting parked|parked attempt|to start fresh|Dump:" test`
+For any hit that asserts a produced string (not an internal `dispatch.outcome`/`event_log`/
+`failure_bucket` value), note it — its expectation is updated in the same step it changes below.
+
+- [ ] **Step 2: Fix `run.ts` budget-pause output (L337-341).** Rename the printed wording (keep the
+  interpolated values and structure):
 
 ```ts
-    resume: { type: "string", description: "Resume a paused run by ticket ident" },
+        console.error(
+          `Paused — out of budget: ${out.park.cause}${out.park.resetAt ? ` (resets ${out.park.resetAt})` : ""}.\n` +
+            `Resume with: styre run --resume ${ident} ${args.profile ? `--profile ${args.profile}` : `--slug ${slug}`}\n` +
+            `Checkpoint: ${dir}`,
+        );
 ```
 
-- [ ] **Step 2: Fix the misleading comments** to the canonical vocabulary (do not change any code):
-  - `src/cli/run.ts:46-47` exit-code comment → use the canonical exit-code semantics (`75` = any
-    paused; `1` = abandoned reserved).
-  - `src/cli/errors.ts:8` (`OPERATIONAL` comment "blocked / no-progress") → "abandoned (reserved
-    terminal; ran fine, no success)".
-  - `src/cli/errors.ts` `TEMPFAIL` comment ("parked … escalated") → "any paused run (budget /
-    needs_you / interrupted); also clean-on-live".
-  - `src/cli/outcome.ts` header prose → ensure it describes the new outcomes (it largely does;
-    remove any residual old-model phrasing).
+- [ ] **Step 3: Fix `park.ts` output strings.**
+  - **L126** `overwriting parked run ${prior} with ${currentRunId} for ${ident}` →
+    `overwriting paused run ${prior} with ${currentRunId} for ${ident}`.
+  - **L266** resume-refused message: `since the parked attempt` → `since the run paused`; and the
+    hint `'styre run ${ticket.ident}' to start fresh` → **`'styre run ${ticket.ident} --fresh' to
+    start fresh`** (a bare `styre run` now REFUSES when a checkpoint exists — `run.ts:263-268`).
+  - **L379** `Parked again: ${result.park.cause}. Dump: ${dir}` →
+    `Paused again — out of budget: ${result.park.cause}. Checkpoint: ${dir}`.
 
-- [ ] **Step 3: Verify no live retired vocab remains in user-facing CLI strings.**
+- [ ] **Step 4: Fix the `--help` strings in `run.ts`.**
+  - **L102** `--resume`: `"Resume a paused run by ticket ident"` (was "parked run").
+  - **L101** `--db`: `"DB path (default: the run's checkpoint at ~/.local/state/styre/<slug>/<ident>/run.db)"`
+    (was "a fresh per-run temp DB" — stale; the checkpoint is the live location).
 
-Run: `grep -nE "parked|escalated|no-progress" src/cli/run.ts src/cli/errors.ts src/cli/outcome.ts`
-Expected: no matches in `description:`/user-facing strings; remaining hits (if any) are only inside
-comments that explicitly reference `event_log.kind` wire names — acceptable.
+- [ ] **Step 5: Fix the misleading comments** (no code change):
+  - `run.ts:46-47` exit-code comment → canonical semantics (`75` = any paused; `1` = abandoned reserved).
+  - `errors.ts:5` "shared across all four subcommands" → "six subcommands (`clean, ls, migrate,
+    notify, run, setup`)".
+  - `errors.ts:8` (`OPERATIONAL` "blocked / no-progress") → "abandoned (reserved terminal; ran fine,
+    no success)".
+  - `errors.ts` `TEMPFAIL` comment ("parked … escalated") → "any paused run (budget / needs_you /
+    interrupted); also clean-on-live".
+  - `outcome.ts` header prose → remove any residual old-model phrasing.
 
-- [ ] **Step 4: Gates + commit.**
+- [ ] **Step 6: Verify no live retired vocab remains** (case-insensitive, includes `park.ts`):
+
+Run: `grep -rniE "parked|escalated|no-progress|dump:" src/cli/run.ts src/cli/park.ts src/cli/errors.ts src/cli/outcome.ts`
+Expected: the only surviving hits are comments/identifiers that explicitly reference internal wire
+names (`event_log.kind`, `dispatch.outcome`, the `dumpPark`/`parkDir` function names, the
+`--slug`/park-dir path helpers) — never a user-facing printed string or `description:`.
+
+- [ ] **Step 7: Gates + commit.**
 
 Run: `bun test && bun run lint && bun run typecheck && bun run build`
 Expected: all green.
 
 ```bash
-git add src/cli/run.ts src/cli/errors.ts src/cli/outcome.ts
-git commit -m "docs(cli): retire parked/escalated wording from --help + code comments (ENG-388)"
+git add src/cli/run.ts src/cli/park.ts src/cli/errors.ts src/cli/outcome.ts
+git commit -m "fix(cli): pause/checkpoint wording in run/resume output; --fresh in resume hint (ENG-388)"
 ```
 
 ---

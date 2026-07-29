@@ -78,14 +78,22 @@ telemetry `outcome` property (`properties.ts:127` = `summary.outcome`). `failure
 on `reason` (`properties.ts:71-72`); its `parked-credits`/`no-progress` strings are **fixed analytics
 bucket labels**, not the outcome — leave.
 
-**Discrepancy — FIX IN CODE (Phase 0, before docs):**
+**Discrepancy — FIX IN CODE (Phase 0, before docs):** (corrected after plan review — the notifier
+label is NOT the only live surface; the `run`/resume CLI output strings also print retired vocab.)
 - **`src/daemon/notify.ts:19,21`** — the Slack/notifier labels are `"escalated"`/`"parked"`,
   rendered verbatim by `slack.ts:26-27`. A paused run shows "Paused…" in the terminal but
   "escalated"/"parked" in Slack — a live user-facing inconsistency. Fix: map the event kind → a new
   user-facing label (`escalated`→paused/needs-you, `parked`→paused/budget); keep the `event_log.kind`
-  DB enum unchanged (internal wire, no migration). Update `test/daemon/notify-sweep.test.ts` (asserts
-  `["escalated"]`).
-- **`src/cli/run.ts:102`** — the `--resume` `--help` text reads "Resume a **parked** run"; → "paused".
+  DB enum unchanged (internal wire, no migration). Update the three label assertions in
+  `test/daemon/notify-sweep.test.ts` (L31, L40, L100-104).
+- **`src/cli/run.ts:337-341`** — the budget-pause path prints `"Parked: … / Resume with: … / Dump:
+  <dir>"` to stderr. Rename to `"Paused — out of budget: … / Checkpoint: <dir>"`.
+- **`src/cli/park.ts:126,266,379`** — `"overwriting parked run …"`, `"Parked again: … Dump: …"`, and
+  the resume-refused `"since the parked attempt … 'styre run <ident>' to start fresh"`. Rename to
+  pause/checkpoint wording; **and fix the command** — a bare `styre run <ident>` now REFUSES when a
+  checkpoint exists, so the hint must be `styre run <ident> --fresh`.
+- **`src/cli/run.ts:102` / `run.ts:101`** — `--resume` help "Resume a **parked** run" → "paused";
+  `--db` help "a fresh per-run temp DB" → the durable checkpoint (the live location).
 
 **Intentional internal names — NO code change; docs describe as wire/internal:**
 - `event_log.kind` enum (`escalated`/`parked`), `dispatch.outcome:"parked"` (`run-dispatch.ts:168`),
@@ -184,10 +192,11 @@ Sidebar is inline in `astro.config.mjs` (L28-56) — only needs editing if a pag
 
 ## 4. Resolved decisions
 
-- **D1 — schema/telemetry enums.** The user-facing outcome and telemetry `outcome` already emit NEW
-  vocab live; the only live surface still emitting old vocab is the notifier label — **fixed in code**
-  (§1, Phase 0). `event_log.kind` / `dispatch.outcome` stay as internal wire names (no
-  rename/migration); docs describe them as distinct from user-facing outcomes.
+- **D1 — schema/telemetry enums.** The terminal outcome (`outcome.ts`) and telemetry `outcome`
+  property already emit NEW vocab live. The live surfaces still emitting old vocab are the notifier
+  label AND several `run`/resume CLI output strings — **all fixed in code** (§1, Phase 0).
+  `event_log.kind` / `dispatch.outcome` stay as internal wire names (no rename/migration); docs
+  describe them as distinct from user-facing outcomes.
 - **D2 — routing verb "escalate."** Keep. It names an internal route, not the terminal outcome; retire
   it only where it named the *outcome* (now `paused(needs_you)`).
 - **D3 — config enum values** (`onPlanDefect:"escalate"`, `notify:"escalations"`, `IssueState:"blocked"`).
