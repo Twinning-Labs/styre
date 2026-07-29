@@ -467,15 +467,8 @@ export function deleteRemoteBranch(repoPath: string, branch: string): void {
 export function pushBranch(repoPath: string, branch: string, expectedRemoteSha?: string): void {
   const args =
     expectedRemoteSha === undefined
-      ? ["-C", repoPath, "push", "origin", branch]
-      : [
-          "-C",
-          repoPath,
-          "push",
-          `--force-with-lease=${branch}:${expectedRemoteSha}`,
-          "origin",
-          branch,
-        ];
+      ? ["push", "origin", branch]
+      : ["push", `--force-with-lease=${branch}:${expectedRemoteSha}`, "origin", branch];
   const res = Bun.spawnSync(["git", ...args], { cwd: repoPath });
   if (!res.success) {
     const stderr = res.stderr.toString().trim();
