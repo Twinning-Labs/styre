@@ -8,6 +8,8 @@ import {
   changedFilesAt,
   changedFilesBetween,
   commitWorktree,
+  deleteLocalBranch,
+  deleteRemoteBranch,
   discardPaths,
   ensureWorktree,
   fileContentAt,
@@ -729,4 +731,69 @@ test("reconcile REFUSES a FOREIGN (non-styre-wt) non-prunable holder even with a
     /checked out at/,
   );
   expect(existsSync(join(wt, "README.md"))).toBe(true); // a human worktree is never force-removed
+});
+
+// --- ENG-386 Task 5: deleteLocalBranch / deleteRemoteBranch --------------------------------------
+
+/** A work repo with one commit on `main`, plus a separate BARE `origin` remote wired up. Net-new
+ *  infra: no existing test uses a bare origin (needed to exercise `git push origin --delete` and
+ *  `git ls-remote --heads origin` for real, rather than mocking git). */
+function makeRepoWithBareOrigin(): { repo: string; origin: string } {
+  const repo = makeRepo();
+  const origin = mkdtempSync(join(tmpdir(), "styre-origin-"));
+  roots.push(origin);
+  const run = (args: string[], cwd: string) => {
+    const res = Bun.spawnSync(["git", ...args], { cwd });
+    if (!res.success) throw new Error(`git ${args.join(" ")}: ${res.stderr.toString()}`);
+  };
+  run(["init", "--bare", "-b", "main"], origin);
+  run(["remote", "add", "origin", origin], repo);
+  run(["push", "origin", "main"], repo);
+  return { repo, origin };
+}
+
+function remoteHasBranch(repo: string, branch: string): boolean {
+  const res = Bun.spawnSync(["git", "ls-remote", "--heads", "origin", branch], { cwd: repo });
+  return res.success && res.stdout.toString().trim() !== "";
+}
+
+test("deleteLocalBranch + deleteRemoteBranch delete an existing local+remote branch", () => {
+  const { repo } = makeRepoWithBareOrigin();
+  const run = (args: string[]) => {
+    const res = Bun.spawnSync(["git", ...args], { cwd: repo });
+    if (!res.success) throw new Error(`git ${args.join(" ")}: ${res.stderr.toString()}`);
+  };
+  run(["checkout", "-b", "feat/ENG-386-x"]);
+  writeFileSync(join(repo, "purge.txt"), "x");
+  run(["add", "-A"]);
+  run(["commit", "-m", "purge branch commit"]);
+  run(["push", "origin", "feat/ENG-386-x"]);
+  run(["checkout", "main"]);
+
+  expect(remoteHasBranch(repo, "feat/ENG-386-x")).toBe(true);
+
+  deleteLocalBranch(repo, "feat/ENG-386-x");
+  deleteRemoteBranch(repo, "feat/ENG-386-x");
+
+  const local = Bun.spawnSync(["git", "branch", "--list", "feat/ENG-386-x"], { cwd: repo });
+  expect(local.stdout.toString().trim()).toBe("");
+  expect(remoteHasBranch(repo, "feat/ENG-386-x")).toBe(false);
+});
+
+test("deleteLocalBranch + deleteRemoteBranch on a branch absent everywhere: no throw, no stderr", () => {
+  const { repo } = makeRepoWithBareOrigin();
+  const written: string[] = [];
+  const origWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((s: string) => {
+    written.push(s.toString());
+    return true;
+  }) as typeof process.stderr.write;
+
+  try {
+    expect(() => deleteLocalBranch(repo, "feat/ENG-386-ghost")).not.toThrow();
+    expect(() => deleteRemoteBranch(repo, "feat/ENG-386-ghost")).not.toThrow();
+  } finally {
+    process.stderr.write = origWrite;
+  }
+  expect(written).toEqual([]);
 });

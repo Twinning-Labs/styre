@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 import { defineCommand, runMain } from "citty";
+import { cleanCommand } from "./cli/clean.ts";
+import { lsCommand } from "./cli/ls.ts";
 import { migrateCommand } from "./cli/migrate.ts";
 import { notifyCommand } from "./cli/notify.ts";
 import { runCommand } from "./cli/run.ts";
@@ -23,6 +25,8 @@ const main = defineCommand({
     description: "The open-source autonomous-SDLC execution core.",
   },
   subCommands: {
+    clean: cleanCommand,
+    ls: lsCommand,
     migrate: migrateCommand,
     notify: notifyCommand,
     run: runCommand,

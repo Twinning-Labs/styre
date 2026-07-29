@@ -142,22 +142,26 @@ With no automatic backstop, the `detail` string must state *what a resume actual
   resolver re-plans.
 - nothing actionable — see §3.5.
 
-### 3.5 `abandoned` — human/explicit, with one honesty case
+### 3.5 `abandoned` — has NO producer in styre (✎ revised in ENG-386)
 
-`abandoned` is an existing terminal ticket status (`schema.sql:104-105`:
-`status IN ('active','waiting','abandoned','done')` — ✎ no schema change, and no new `exhausted`
-value is introduced). It is reached in exactly two ways, **never** by an automatic resume counter:
-1. **Explicit:** the operator runs `styre clean <ident>` (§5) on a pause they judge hopeless.
-2. ✎ **Honesty-at-pause — DEFERRED (explicit-only in ENG-386).** The original idea: when styre has
-   *nothing actionable to hand the human*, `pause` marks `abandoned` directly. But reliably judging
-   "nothing actionable" needs the ENG-385 re-plan (both dead-ends look like "no next move" at pause
-   time), so the ENG-383 build routes *both* `no-progress` cases to `paused(needs_you)` and leaves
-   `abandoned` reachable only via the explicit `styre clean` route (ENG-386). The auto-honesty-abandon
-   is deferred, not deleted — revisit once the resume re-plan (ENG-385) exists.
+✎ **REVISED (ENG-386):** `abandoned` is an existing terminal *ticket* status (`schema.sql:104-105`:
+`status IN ('active','waiting','abandoned','done')` — no schema change). Earlier revisions of this
+doc made `styre clean <ident>` its explicit producer. **That was wrong and is dropped.** Cleaning
+styre's *effort* on a ticket is not the same as the *ticket* being a dead end — an operator may
+`clean` simply because they dislike what styre produced, while the ticket itself stays perfectly
+valid (re-run it, or take it over by hand). Marking the ticket `abandoned` because a *run's disk
+state* was reaped is a dangerous conflation of "this styre attempt" with "this work item."
 
-✎ *`no-progress` is two cases (`run-ticket.ts:128-135`): an **iteration-cap** (resume grants a fresh
-tick budget) vs an **idle-stall** (resume re-idles). ENG-383 routes both to `paused(needs_you)` with
-`detail` strings that distinguish them; neither auto-abandons (per the deferral above).*
+Therefore, in this epic **nothing in styre produces the `abandoned` ticket status.** `styre clean`
+(§5) reaps styre's disk leftovers and makes **no** ticket-status change. Deciding a *ticket* is dead
+is a human / issue-tracker action, out of scope here. The status value remains in the schema for a
+human or a future tracker-projection to set; it simply has no automatic writer.
+
+✎ *The old §3.5.2 "honesty-at-pause auto-abandon" was already deferred in ENG-383 (both `no-progress`
+dead-ends route to `paused(needs_you)`); it stays deferred. `no-progress` is two cases
+(`run-ticket.ts:132-154`): an **iteration-cap** (resume grants a fresh tick budget) vs an
+**idle-stall** (resume re-idles). ENG-383 routes both to `paused(needs_you)` with `detail` strings
+that distinguish them; neither auto-abandons.*
 
 `pr-ready` and `done` are unchanged and are **not** pauses.
 
@@ -194,8 +198,17 @@ Resume stays a **flag on `run`** (no new subcommand); a fresh `run` on an existi
 | `styre run <ident> --fresh` | Discard the checkpoint + reconcile the worktree, then start over. |
 | `styre run --resume <ident> --accept-head` | Resume though branch HEAD moved (exists, `park.ts:245-252`). |
 | `styre run --resume <ident> --inspect` | Print resume diagnostics, no run (exists). |
-| `styre ls` | List paused checkpoints: ticket, reason, age, honest-note, resume hint. *(separate)* |
-| `styre clean <ident> \| --all` | Reap checkpoint + worktree; the operator's route to `abandoned`. ✎ Also reaps stale `pr-ready` worktrees (§10). *(separate)* |
+| `styre ls` | List paused efforts: ticket, reason (`needs_you`/`budget`), age, honest-note, resume hint. Also previews the finished leftovers `clean --all` would reap. *(separate, ENG-386)* |
+| `styre clean <ident>` | ✎ Reap **one** styre effort's disk leftovers (worktree + checkpoint). **No ticket-status change** (§3.5). Refuses a live run. |
+| `styre clean --all` | ✎ Bulk-reap **finished/handed-off** leftovers only (`pr-ready`/`done`/other); **skips resumable pauses** (`needs_you`/`budget`) and live runs (Scope B). |
+| `styre clean <ident> --purge` | ✎ Effort reap **plus** delete the local + remote branch (`git push origin --delete`), which closes the PR. Opt-in and destructive; **silent pass** when there is no branch/PR to delete. Single-ident only (rejects `--all --purge`). |
+
+✎ **What `clean` does NOT do:** it never edits the ticket status, and by default never touches
+branches or the PR (the remote branch *is* the PR — deleting it is the opt-in `--purge` action). No
+merge-state / age "staleness" heuristic — styre is a one-shot binary with no PR-state polling, so it
+cannot know locally whether a PR merged; `--all` reaps by the effort's *own* terminal kind, not by
+guessing the PR's fate. The deeper "re-run a ticket cleanly over its own remote branch" fix lives in
+**ENG-387** (force-with-lease push), not here.
 
 No `--after-fix` flag — resume always consumes the pending signal, so it is implied (supersedes
 `minimal-loop.md:183-185`).
@@ -328,16 +341,22 @@ removal as today (`park.ts:277-282,290`).
 
 - ✎ **No automatic give-up / `exhausted` ceiling.** Rejected (rev 2): unreachable for `blocked`/
   `no-progress` (no step, no attempt increment — `resolver.ts:224`, `run-ticket.ts:128-135`), and a
-  special-case for the outcomes we are unifying. `abandoned` is human/explicit (§3.5).
+  special-case for the outcomes we are unifying. `abandoned` has no styre producer (§3.5, ✎ ENG-386).
 - ✎ **Automated resume is a future seam, not solved here.** If a fleet/cron ever resumes pauses
   unattended, the "resumed, re-paused identically, stop" judgment lives in the **resumer**, not the
   OSS core. Noted so it isn't mistaken for a gap.
 - A `ParkCause` taxonomy raising a `ParkSignal` — rejected in ENG-331 (the throw escapes
   `advanceOneStep` uncaught, losing the checkpoint). `reason` is recorded by a graceful `pauseTicket`.
-- ✎ **`pr-ready` worktree retention is unbounded** — a never-merged PR never reaches `released:project`
-  (`handlers.ts:1830-1840`), leaking its worktree (the most common terminal). Retained at pause (branch
-  legitimately alive for review), but **`styre clean` must reap stale `pr-ready` worktrees**
-  (age/merged-state heuristic). Housekeeping-ticket scope.
+- ✎ **`pr-ready` worktree retention is unbounded** — styre is a one-shot binary that exits at
+  `pr-ready` (`run-ticket.ts:115-126`); nothing polls the PR, and `released:project`'s worktree cleanup
+  (`handlers.ts:1830-1840`) only fires on a `merge → released` stage transition that a one-shot run
+  never performs. So **every** `pr-ready` run's worktree is retained forever (the branch is
+  legitimately alive for review), merged or not. `styre clean --all` reaps these finished leftovers by
+  kind (Scope B) — **not** by a merge-state/age "staleness" heuristic, since styre has no local
+  knowledge of the PR's fate (a forge query would be needed, and squash-merge defeats git-ancestry
+  detection). Reaping frees only the local worktree + checkpoint; the branch/PR are untouched unless
+  the operator opts into `--purge`. The separate "re-run cleanly over the leftover *remote* branch"
+  problem is **ENG-387** (force-with-lease push), not housekeeping.
 - Auto-resume of `budget` pauses on a timer — the gate only *permits* resume; a human/cron invokes it.
 - `--db` reuse of a populated DB (re-entry is via the checkpoint, one way).
 

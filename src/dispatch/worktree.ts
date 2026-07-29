@@ -439,6 +439,25 @@ export function resetWorktreeHard(worktreePath: string, sha: string): void {
   git(["clean", "-fd"], worktreePath);
 }
 
+/** Delete the local branch if it exists; a missing branch is a silent success. */
+export function deleteLocalBranch(repoPath: string, branch: string): void {
+  Bun.spawnSync(["git", "branch", "-D", branch], { cwd: repoPath }); // ignore exit (absent = fine)
+}
+
+/** Delete the remote branch (closing its PR) if it exists; a missing remote ref is a silent
+ *  success. Existence is probed first (locale-proof — no stderr parsing); a real delete failure
+ *  is a non-fatal warning (the effort reap already succeeded), never thrown. */
+export function deleteRemoteBranch(repoPath: string, branch: string): void {
+  const ls = Bun.spawnSync(["git", "ls-remote", "--heads", "origin", branch], { cwd: repoPath });
+  if (ls.exitCode !== 0 || ls.stdout.toString().trim() === "") return; // no remote / branch absent → silent
+  const res = Bun.spawnSync(["git", "push", "origin", "--delete", branch], { cwd: repoPath });
+  if (res.exitCode !== 0) {
+    process.stderr.write(
+      `styre clean: could not delete remote branch ${branch}: ${res.stderr.toString().trim()}\n`,
+    );
+  }
+}
+
 const SWEEP_SKIP_DIRS = new Set([".git", "node_modules"]);
 
 /** Recursively delete every directory named `styre_scratch/` under `worktreePath` — the worker's
