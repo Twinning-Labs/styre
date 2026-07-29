@@ -16,6 +16,10 @@ function row(c: Checkpoint): string {
   return `  ${c.ident}  [${c.kind}, ${humanAge(c.ageMs)}]  ${c.note ?? ""}`.trimEnd();
 }
 
+function leftoverRow(c: Checkpoint): string {
+  return `  ${c.slug}/${c.ident}  [${c.kind}, ${humanAge(c.ageMs)}]  ${c.note ?? ""}`.trimEnd();
+}
+
 export async function lsImpl(opts?: { root?: string }): Promise<void> {
   const all = listCheckpoints(opts?.root);
 
@@ -37,9 +41,9 @@ export async function lsImpl(opts?: { root?: string }): Promise<void> {
 
   if (leftovers.length > 0) {
     lines.push("");
-    lines.push("Finished leftovers (reap with `styre clean --all`):");
+    lines.push("Finished leftovers (reap per project with `styre clean --all`):");
     for (const c of leftovers) {
-      lines.push(row(c));
+      lines.push(leftoverRow(c));
     }
   }
 
