@@ -101,9 +101,10 @@ human output on stderr (see [`runtime-parameters.md`](runtime-parameters.md)).
 ## Checkpoints
 
 A run journals directly to `$XDG_STATE_HOME/styre/<slug>/<ticket-ident>/` (`src/cli/park.ts`): the
-run DB (`run.db`, plus its WAL sidecar) and the agent transcript (`transcript.json`). This dir **is**
-the run's live location, not a dump written only when something goes wrong — a pause or crash simply
-leaves it there, resumable. `styre run --resume <ident>` reads it back; `styre clean <ident>` /
+run DB (`run.db`, plus its WAL sidecar) is the live journal itself, not a dump written only when
+something goes wrong — a pause or crash simply leaves it there, resumable. A budget pause
+additionally (re)writes the agent transcript sidecar (`transcript.json`, via `dumpPark`) at that same
+checkpoint. `styre run --resume <ident>` reads it back; `styre clean <ident>` /
 `--all` / `--purge` reap exactly this checkpoint dir (worktree + checkpoint). The checkpoint dir uses
 the **profile's** slug; note that `styre run --slug X` steers config/profile lookup to slug `X` but
 the checkpoint still lands under the profile's own slug.

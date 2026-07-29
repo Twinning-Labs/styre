@@ -86,9 +86,10 @@ cannot continue without an external event. Every pause carries an internal `reas
 (out-of-credits/session-limit), `needs_you` (retry/tick exhaustion, or a loopback the loop cannot
 structurally resolve), or `interrupted` (reserved for a hard crash — not currently emitted by a live
 run). Every `paused` reason exits `75` (EX_TEMPFAIL), and so does `styre clean <ident>` refusing a
-live run. The SoT + transcript already live at the run's checkpoint
-(`$XDG_STATE_HOME/styre/<slug>/<ident>/`) — pausing writes nothing extra; `styre run --resume <ident>`
-reads the checkpoint back and resumes. (conventions.md; build-operations.md §3)
+live run. The SoT already lives at the run's checkpoint (`$XDG_STATE_HOME/styre/<slug>/<ident>/`) —
+there is no separate dump/copy step; a budget pause additionally (re)writes the `transcript.json`
+sidecar there. `styre run --resume <ident>` reads the checkpoint back and resumes. (conventions.md;
+build-operations.md §3)
 
 ### open-core seam (projector contract)
 

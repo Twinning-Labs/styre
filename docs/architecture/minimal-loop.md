@@ -138,8 +138,8 @@ The `event_log.loop` value is one of `implement`, `design`, `integration`, `chec
 | arbiter `check-wrong` | reset `checks:reauthor` + `checks:arbitrate` | `reauthor` |
 | arbiter/reauthor `code-wrong` (or rejected) | gate-origin reset (units → pending) | `implement` |
 | reauthor pure `check-wrong`, all installed | reset `verify:checks-gate` + `checks:arbitrate` only (units stay verified) | `checks` |
-| escalate (attempt exhaustion, stuck gate, unresolved review) | `t.status='waiting'`; raise a `human_resume` signal | `paused{needs_you}` |
-| escalate, provision | **immediate on first failure** — no attempt exhaustion, no unit/ticket/plan reset (an env fault can't be fixed by re-implementing) | `paused{needs_you}` |
+| escalate (attempt exhaustion, stuck gate, unresolved review) | `t.status='waiting'`; raise a `human_resume` signal | — (terminal pause) |
+| escalate, provision | **immediate on first failure** — no attempt exhaustion, no unit/ticket/plan reset (an env fault can't be fixed by re-implementing) | — (terminal pause) |
 
 A retry (no state rewind) — a could-not-run verify `error`, a completeness with no `fail` signal, or
 the catch-all `resetToPending` — re-runs the same step; a repeated *identical* failure signature vs
