@@ -71,7 +71,6 @@ after use:
 
 | Prefix | Purpose |
 |---|---|
-| `styre-run-*` | The per-run ephemeral SoT DB (`run.db`) when `--db` is not given. |
 | `styre-wt-*` | The dispatch **worktree** — the agent's only writable surface. |
 | `styre-inplace-*` | Identity-probe script dir for `--in-place` safety checks. |
 | `styre-reuse-*` | Env-reuse probe script dir. |
