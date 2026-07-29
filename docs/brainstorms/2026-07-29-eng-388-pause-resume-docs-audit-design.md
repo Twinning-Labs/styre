@@ -31,7 +31,7 @@ Source-verified against `src/cli/outcome.ts`, `src/cli/errors.ts`, `src/cli/run.
 - `75` (TEMPFAIL) — **any** `paused` (every reason) **and `styre clean <ident>` on a live run**
 - `1` abandoned
 - `65` resume-refused — the general resume-refused code: branch HEAD moved without `--accept-head`
-  (`park.ts:269`) *or* concurrent-resume lock contention (`park.ts:220`)
+  (`park.ts:264-266`, exit set at `:269`) *or* concurrent-resume lock contention (`park.ts:220`)
 - `64` usage · `69` toolchain · `70` internal · `78` config
 
 > ⚠️ **Ticket text is wrong on two points; docs follow the code.** (1) The ENG-388 description's

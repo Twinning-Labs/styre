@@ -536,7 +536,7 @@ git commit -m "docs(cli): document styre ls/clean, run --fresh + checkpoint refu
   (L91-106) with `paused`(+reason)/`abandoned`.
 - [ ] **Step 2 (`files-and-paths.md`):** L39 "a parked run's saved state" → the **live checkpoint**
   (`<slug>/<ident>/run.db`) for any run; reconcile the "throwaway per-run temp DB" claim (L42/L50) with
-  live journaling; verify whether `transcript.json` is still listed (L44) and correct if needed.
+  live journaling; verify whether `transcript.json` is still listed (~L43) and correct if needed.
 - [ ] **Step 3 (`home.ts`):** L236 user-visible copy "Styre escalates to you…" → pause wording
   (e.g. "Styre pauses and hands back to you once the retries are spent…").
 - [ ] **Step 4 (`configuration.md`):** Correct the "five internal states incl. blocked" wording
