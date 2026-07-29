@@ -58,7 +58,7 @@ next_step_key(t):        # mirrors src/daemon/resolver.ts nextStepKey
         return 'verify:integration'                                    # ADVISORY (ran-at-sha)
       if t.needs_docs and not done('docs:revise'):     return 'docs:revise'
       advance('implement' -> 'review'); recurse
-    else: blocked            # no actionable unit and not all verified → §8 owns it
+    else: paused(needs_you)  # no actionable unit and not all verified → §8 owns it
 
   'review':
     if not done('review'):                             return 'review'
@@ -138,8 +138,8 @@ The `event_log.loop` value is one of `implement`, `design`, `integration`, `chec
 | arbiter `check-wrong` | reset `checks:reauthor` + `checks:arbitrate` | `reauthor` |
 | arbiter/reauthor `code-wrong` (or rejected) | gate-origin reset (units → pending) | `implement` |
 | reauthor pure `check-wrong`, all installed | reset `verify:checks-gate` + `checks:arbitrate` only (units stay verified) | `checks` |
-| escalate (attempt exhaustion, stuck gate, unresolved review) | `t.status='waiting'`; raise a `human_resume` signal | `escalated{reason}` |
-| escalate, provision | **immediate on first failure** — no attempt exhaustion, no unit/ticket/plan reset (an env fault can't be fixed by re-implementing) | `escalated{reason}` |
+| escalate (attempt exhaustion, stuck gate, unresolved review) | `t.status='waiting'`; raise a `human_resume` signal | `paused{needs_you}` |
+| escalate, provision | **immediate on first failure** — no attempt exhaustion, no unit/ticket/plan reset (an env fault can't be fixed by re-implementing) | `paused{needs_you}` |
 
 A retry (no state rewind) — a could-not-run verify `error`, a completeness with no `fail` signal, or
 the catch-all `resetToPending` — re-runs the same step; a repeated *identical* failure signature vs
@@ -190,12 +190,12 @@ set of design targets; it is now reconciled to code.
 | consecutive-identical guard | **2** | failure-policy.ts | the same failure signature vs the immediately-previous loopback → escalate fast. |
 | provision failure | **immediate** | failure-policy.ts | any `provision`/env failure escalates on the first occurrence (no attempt exhaustion). |
 | AC-gate round cap | **3** | `GATE_ROUND_CAP`, arbiter-verdict.ts | keyed to `verify:checks-gate.attempt`; also caps re-author rounds. |
-| re-author cap per AC | **2** | `REAUTHOR_ESCALATE_CAP`, checks-verdict.ts | an AC still flagged after 2 re-authors → no-progress escalation. |
+| re-author cap per AC | **2** | `REAUTHOR_ESCALATE_CAP`, checks-verdict.ts | an AC still flagged after 2 re-authors → `paused` (needs_you). |
 | dispatch timeouts | design/review **60m**, default **30m**, verify **10m**, provision **15m** | handlers.ts | per step-type. |
 | `OUTBOX_RETRY_BUDGET` | **5** | projector.ts | retried on the **next drain** (no backoff), then escalate (service down). |
 | `CI_READ_TIMEOUT_MS` | **8s** | run-ticket.ts | bounds the one-shot t+0 checks read at merge; never a poll cadence — nothing in OSS polls. |
 | `MAX_TRANSITIONS` | **100** | advance.ts | pure transitions per `advanceOneStep`. |
-| per-ticket tick cap / idle cap | **200** / **3** | run-ticket.ts | overall iteration budget; 3 consecutive zero-advance ticks → `no-progress`. |
+| per-ticket tick cap / idle cap | **200** / **3** | run-ticket.ts | overall iteration budget; 3 consecutive zero-advance ticks, or exhausting the tick cap, → `paused` (needs_you). |
 | `K` concurrency | **2** | `DEFAULT_MAX_CONCURRENT`, loop.ts | the multi-ticket cap — *commercial Control Plane*; OSS `styre run` is single-ticket. |
 
 **Not implemented (deferred, despite earlier design notes):** the per-loop `K_DISTINCT` distinct-
@@ -206,15 +206,21 @@ live behavior.
 ## 5. The needs-you inbox (D3)
 
 > **[Commercial Control Plane]** The persistent needs-you inbox described in this section — including
-> `styre inbox`, `styre status`, `styre resume --after-fix`, and `styre abandon` — is a **commercial
-> Control Plane** feature. It requires a persistent service that can hold escalated tickets across
+> `styre inbox`, `styre status`, `styre resume`, and `styre abandon` — is a **commercial
+> Control Plane** feature. It requires a persistent service that can hold paused tickets across
 > runs. The design record below is preserved for reference.
 >
-> **OSS equivalent (`styre run` only):** an escalation that the loop cannot resolve makes
-> `styre run` exit nonzero. A session-interruption (credits/limit hit) **parks (exit 75)** and
-> resumes with `styre run --resume <ticket> --profile <p>` (see also `--accept-head`, `--inspect`).
+> **OSS equivalent (`styre run` only):** the loop never terminates a run silently — anything that
+> stops progress **pauses** the run (exit 75) with a `reason`: `needs_you` (an escalation the loop
+> cannot resolve on its own — attempt/tick-budget exhaustion or a structurally-unresolvable state)
+> or `budget` (a session interruption — out of credits or hit the session limit). Resume with
+> `styre run --resume <ticket> --profile <p>` (see also `--accept-head`, `--inspect`); resume takes
+> no separate flag for operator-edited state — it always consumes the pending signal, picking up
+> whatever the operator changed in the worktree/SoT state. To discard the paused checkpoint and
+> start over, use `styre run <ticket> --fresh`. A bare `styre run <ticket>` **refuses** when a
+> checkpoint already exists for that ticket, pointing at `--resume`/`--fresh` instead.
 
-The actionable surface for escalations — **SQLite-backed, not Linear** (Linear is the tracking mirror).
+The actionable surface for paused tickets — **SQLite-backed, not Linear** (Linear is the tracking mirror).
 - **Source:** tickets with `status='waiting'` on a `human_*` signal, joined to their `event_log`
   `escalated` row and full trace.
 - **Surface:** `styre inbox` / `styre status` (reads SQLite; renders **local tz**, DS-1). Each
@@ -224,10 +230,10 @@ The actionable surface for escalations — **SQLite-backed, not Linear** (Linear
   `projection_outbox`, configured via `notifier`/`notify`/`slack`); the persistent *inbox* around it
   is commercial.
 - **Actions (CLI, deliver the `human_resume` signal):**
-  - `styre resume <ticket>` — re-enter the parked step; reset per-loop + B2 counters; fresh B3 allowance.
-  - `styre resume <ticket> --after-fix` — operator edited plan/code/config by hand; the runner
-    picks up the changed worktree/SoT state.
-  - `styre abandon <ticket>` — terminal (`status='abandoned'`; projector → Canceled).
+  - `styre resume <ticket>` — re-enter the paused step; reset per-loop + B2 counters; fresh B3
+    allowance; always consumes the pending signal — there is no separate operator-edited-state flag.
+  - `styre abandon <ticket>` — terminal (`status='abandoned'`; projector → Canceled). Human/tracker-
+    driven only — styre itself has no producer for `abandoned`.
 
 ## 6. End-to-end — a clean run
 
