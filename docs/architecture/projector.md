@@ -117,7 +117,7 @@ keys can't dedup a non-keyed external API).
 **Notifier (Slack):**
 - `post` — sends one message via `chat.postMessage`; idempotency-keyed on the event `seq` / terminal
   outcome so a re-drain does not double-notify. A notify-row transport failure is retried but never
-  escalates the ticket.
+  pauses the ticket.
 
 ## 6. Name → id resolution (`external_id_cache`)
 
@@ -129,8 +129,9 @@ cache optimization is deferred.
 ## 7. Failure + escalation
 
 - **Transient** (network blip, rate-limit) → the row stays `pending`, retried on the next drain.
-- **Persistent** (past `OUTBOX_RETRY_BUDGET`) → **escalate the ticket**: it parks and the operator is
-  told the *external service* is down — never a silent infinite retry, never a lost projection (the
-  row is durable; it drains when the service returns). A `notify`-target failure is the exception: it
-  is retried but never escalates the ticket (a failed notification must not block a run).
+- **Persistent** (past `OUTBOX_RETRY_BUDGET`) → the run **pauses** (`paused`, reason `needs_you`): the
+  operator is told the *external service* is down — never a silent infinite retry, never a lost
+  projection (the row is durable; it drains when the service returns). A `notify`-target failure is
+  the exception: it is retried but never pauses the ticket (a failed notification must not block a
+  run).
 - A projection failure **never** blocks control flow — the runner's loop runs on the SoT regardless.
