@@ -17,6 +17,7 @@ import {
   parseWorktreePorcelain,
   pendingChanges,
   pendingEntries,
+  pushBranch,
   readDiscardedSources,
   reconcileWorktree,
   removeWorktree,
@@ -796,4 +797,105 @@ test("deleteLocalBranch + deleteRemoteBranch on a branch absent everywhere: no t
     process.stderr.write = origWrite;
   }
   expect(written).toEqual([]);
+});
+
+// --- ENG-387: pushBranch force-with-lease -----------------------------------------------------
+function remoteHead(repo: string, branch: string): string {
+  const res = Bun.spawnSync(["git", "ls-remote", "--heads", "origin", branch], { cwd: repo });
+  return res.stdout.toString().trim().split(/\s+/)[0] ?? "";
+}
+
+test("pushBranch: first push (no lease) creates the remote branch", () => {
+  const { repo } = makeRepoWithBareOrigin();
+  const run = (args: string[]) => Bun.spawnSync(["git", ...args], { cwd: repo });
+  run(["checkout", "-b", "feat/eng-387-a"]);
+  writeFileSync(join(repo, "a.txt"), "1");
+  run(["add", "-A"]);
+  run(["commit", "-m", "a"]);
+
+  expect(remoteHasBranch(repo, "feat/eng-387-a")).toBe(false);
+  pushBranch(repo, "feat/eng-387-a"); // no expected sha
+  expect(remoteHasBranch(repo, "feat/eng-387-a")).toBe(true);
+});
+
+test("pushBranch: fast-forward with a correct lease succeeds", () => {
+  const { repo } = makeRepoWithBareOrigin();
+  const run = (args: string[]) => Bun.spawnSync(["git", ...args], { cwd: repo });
+  run(["checkout", "-b", "feat/eng-387-ff"]);
+  writeFileSync(join(repo, "f.txt"), "1");
+  run(["add", "-A"]);
+  run(["commit", "-m", "v1"]);
+  pushBranch(repo, "feat/eng-387-ff");
+  const v1 = remoteHead(repo, "feat/eng-387-ff");
+
+  writeFileSync(join(repo, "f.txt"), "2"); // descends v1 → a fast-forward
+  run(["add", "-A"]);
+  run(["commit", "-m", "v2"]);
+  pushBranch(repo, "feat/eng-387-ff", v1); // lease = the sha we last saw
+
+  const v2 = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repo }).stdout.toString().trim();
+  expect(remoteHead(repo, "feat/eng-387-ff")).toBe(v2);
+  expect(v2).not.toBe(v1);
+});
+
+test("pushBranch: divergent redo with the leased sha overwrites the remote branch", () => {
+  const { repo } = makeRepoWithBareOrigin();
+  const run = (args: string[]) => Bun.spawnSync(["git", ...args], { cwd: repo });
+  // v1 pushed
+  run(["checkout", "-b", "feat/eng-387-div"]);
+  writeFileSync(join(repo, "d.txt"), "orig");
+  run(["add", "-A"]);
+  run(["commit", "-m", "v1"]);
+  pushBranch(repo, "feat/eng-387-div");
+  const v1 = remoteHead(repo, "feat/eng-387-div");
+
+  // --fresh: reset the branch to base and build DIVERGENT work (does not descend v1)
+  run(["reset", "--hard", "main"]);
+  writeFileSync(join(repo, "d.txt"), "redone");
+  run(["add", "-A"]);
+  run(["commit", "-m", "v2-divergent"]);
+  const v2 = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repo }).stdout.toString().trim();
+
+  pushBranch(repo, "feat/eng-387-div", v1); // lease still matches → force succeeds
+  expect(remoteHead(repo, "feat/eng-387-div")).toBe(v2);
+  // prove it was a real (non-fast-forward) overwrite: v2 is NOT a descendant of v1
+  const isAncestor = Bun.spawnSync(["git", "merge-base", "--is-ancestor", v1, v2], { cwd: repo });
+  expect(isAncestor.success).toBe(false);
+});
+
+test("pushBranch: a stale lease is rejected and the remote is left untouched", () => {
+  const { repo, origin } = makeRepoWithBareOrigin();
+  const run = (args: string[]) => Bun.spawnSync(["git", ...args], { cwd: repo });
+  run(["checkout", "-b", "feat/eng-387-stale"]);
+  writeFileSync(join(repo, "s.txt"), "1");
+  run(["add", "-A"]);
+  run(["commit", "-m", "v1"]);
+  pushBranch(repo, "feat/eng-387-stale");
+  const v1 = remoteHead(repo, "feat/eng-387-stale");
+
+  // A SECOND actor advances origin behind our back (clone the bare origin, push v1b).
+  const other = mkdtempSync(join(tmpdir(), "styre-other-"));
+  roots.push(other);
+  const orun = (args: string[]) => {
+    const res = Bun.spawnSync(["git", ...args], { cwd: other });
+    if (!res.success) throw new Error(`git ${args.join(" ")}: ${res.stderr.toString()}`);
+  };
+  orun(["clone", origin, "."]);
+  orun(["config", "user.email", "other@styre.dev"]); // a fresh clone inherits no identity; CI has no global one
+  orun(["config", "user.name", "Other"]);
+  orun(["checkout", "feat/eng-387-stale"]);
+  writeFileSync(join(other, "s.txt"), "other");
+  orun(["add", "-A"]);
+  orun(["commit", "-m", "v1b"]);
+  orun(["push", "origin", "feat/eng-387-stale"]);
+  const v1b = remoteHead(repo, "feat/eng-387-stale");
+  expect(v1b).not.toBe(v1);
+
+  // Our redo carries the STALE lease (v1). The lease must reject; origin stays at v1b.
+  run(["reset", "--hard", "main"]);
+  writeFileSync(join(repo, "s.txt"), "mine");
+  run(["add", "-A"]);
+  run(["commit", "-m", "v2-mine"]);
+  expect(() => pushBranch(repo, "feat/eng-387-stale", v1)).toThrow(/force-with-lease/);
+  expect(remoteHead(repo, "feat/eng-387-stale")).toBe(v1b); // NOT clobbered
 });

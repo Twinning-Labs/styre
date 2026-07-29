@@ -6,8 +6,11 @@
  *
  * Why both Octokit AND git: Octokit speaks the REST API (open/probe PRs, post comments) but cannot
  * transfer commit OBJECTS — only the daemon's authenticated `git push` moves the branch's commits to
- * the remote. So push is a `git -C ${repoPath} push origin ${branch}` (probe-skipped if the remote
- * ref is already at the target sha); PRs/comments go through Octokit.
+ * the remote. So push is a `git -C ${repoPath} push origin ${branch}` — skipped if the remote ref is
+ * already at the target sha, and a **`--force-with-lease`** keyed to the sha just probed when the
+ * remote branch exists but diverges (a `--fresh`/divergent redo cleanly overwrites its own branch;
+ * the lease still rejects a same-instant concurrent push that lands between probe and push);
+ * PRs/comments go through Octokit.
  *
  * Zero lock-in: every `@octokit/*` import stays here. The SDK/git-calling paths are not unit-tested
  * (the fake port covers the core, and they need a live token + remote), verified only by typecheck
@@ -32,6 +35,7 @@
 import { execFileSync } from "node:child_process";
 import { Octokit } from "@octokit/rest";
 import { parseGitHubRemote } from "../../config/slug.ts";
+import { pushBranch } from "../../dispatch/worktree.ts";
 import type { ForgePort } from "../forge.ts";
 
 export { parseGitHubRemote }; // re-exported so existing importers (probe, tests) are unchanged
@@ -93,23 +97,22 @@ export function githubForge(opts: { repoPath: string; token?: string }): ForgePo
 
   return {
     async push({ branch, sha }: { branch: string; sha: string }): Promise<void> {
-      // Probe: if the remote head is already at sha, skip (idempotent).
+      // Probe origin/<branch>. Three outcomes drive the push mode:
+      //   • remote head === sha  → already there, nothing to do (idempotent skip).
+      //   • remote head !== sha  → a divergent/ahead redo; force-with-lease keyed to THIS observed
+      //                            sha so we overwrite our own branch but never a concurrent push.
+      //   • 404 (no remote branch) → first push; plain, no lease.
+      let expectedRemoteSha: string | undefined;
       try {
         const ref = await octokit.git.getRef({ owner, repo, ref: `heads/${branch}` });
         if (ref.data.object.sha === sha) return;
+        expectedRemoteSha = ref.data.object.sha;
       } catch (err) {
-        // A 404 means the branch doesn't exist on the remote yet — fall through to push.
         if ((err as { status?: number }).status !== 404) throw err;
+        // 404 → expectedRemoteSha stays undefined → plain first push.
       }
       // Only the daemon's authenticated git can transfer the commit objects. Feature branch only.
-      try {
-        execFileSync("git", ["-C", repoPath, "push", "origin", branch], { stdio: "pipe" });
-      } catch (cause) {
-        const stderr = (cause as { stderr?: Buffer }).stderr?.toString() ?? "";
-        throw new Error(`githubForge.push: git push failed for ${branch}: ${stderr}`.trim(), {
-          cause,
-        });
-      }
+      pushBranch(repoPath, branch, expectedRemoteSha);
     },
 
     async ensurePr({

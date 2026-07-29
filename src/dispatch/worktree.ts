@@ -458,6 +458,28 @@ export function deleteRemoteBranch(repoPath: string, branch: string): void {
   }
 }
 
+/** Push `branch` to origin. When `expectedRemoteSha` is given, use --force-with-lease keyed to
+ *  that sha: overwrite origin/<branch> ONLY if it still points there, so a --fresh/divergent redo
+ *  cleanly replaces its own remote branch but a concurrent push by someone else is never clobbered
+ *  (the push is rejected instead). When it is undefined (branch absent on the remote), a plain push.
+ *  A push failure throws; the message states whether a lease was in play (locale-proof — branches on
+ *  the argument, never on git's stderr text). */
+export function pushBranch(repoPath: string, branch: string, expectedRemoteSha?: string): void {
+  const args =
+    expectedRemoteSha === undefined
+      ? ["push", "origin", branch]
+      : ["push", `--force-with-lease=${branch}:${expectedRemoteSha}`, "origin", branch];
+  const res = Bun.spawnSync(["git", ...args], { cwd: repoPath });
+  if (!res.success) {
+    const stderr = res.stderr.toString().trim();
+    const ctx =
+      expectedRemoteSha === undefined
+        ? `git push failed for ${branch}`
+        : `git push --force-with-lease failed for ${branch} (origin may have advanced past ${expectedRemoteSha} since styre last saw it; not overwritten)`;
+    throw new Error(`pushBranch: ${ctx}: ${stderr}`.trim());
+  }
+}
+
 const SWEEP_SKIP_DIRS = new Set([".git", "node_modules"]);
 
 /** Recursively delete every directory named `styre_scratch/` under `worktreePath` — the worker's
