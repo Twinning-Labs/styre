@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make the feature-branch push a `--force-with-lease` keyed to the sha styre just observed on the remote, so a `--fresh` (or any divergent) re-run cleanly overwrites `origin/<branch>` — while never clobbering a push from someone else.
+**Goal:** Make the feature-branch push a `--force-with-lease` keyed to the sha styre just observed on the remote, so a `--fresh` (or any divergent) re-run cleanly overwrites `origin/<branch>` instead of failing as a non-fast-forward — while still guarding against a same-instant concurrent push (the probe→push race).
+
+**Ownership premise (ratified — Option A):** a styre feature branch is styre-owned scratch. styre never reads the remote branch back (no `pull`/`fetch`/merge of it; every redo rebuilds off the base via `-B`), so whatever sits on the branch is discarded by the redo regardless. The lease is therefore sourced from the **live probe** of the current remote head, not from a persisted "last-pushed sha". Consequence, accepted deliberately: if something other than styre (e.g. a human pushing a fixup onto the PR branch) landed a commit while the run was idle, styre adopts that sha as the lease and overwrites it. The alternative (persist styre's own last-pushed sha and refuse when it doesn't match) would not preserve that commit into any outcome — the redo discards it anyway — it would only convert the overwrite into a hard push refusal, reintroducing exactly the re-run friction this ticket removes. So Option A is chosen with eyes open.
 
 **Architecture:** Split the push into two seams that already exist as a pattern in this codebase. The git-CLI push (the risky, newly-conditional part) becomes an exported, unit-tested `pushBranch(repoPath, branch, expectedRemoteSha?)` in `src/dispatch/worktree.ts` — the exact sibling of the already-tested `deleteRemoteBranch` there. The GitHub adapter (`src/integrations/adapters/github.ts`) keeps its SDK-coupled probe (which already fetches the current remote head sha) and threads that sha into `pushBranch` as the lease. No core changes, no new state.
 
@@ -10,7 +12,7 @@
 
 ## Global Constraints
 
-- **The lease value is the live-probed remote head, not recorded state.** `github.ts`'s push already probes `octokit.git.getRef(...)` and reads `ref.data.object.sha` — the authoritative current value of `origin/<branch>`. That sha is the lease. Do NOT introduce a persisted "last-pushed sha"; the live probe is both already-fetched and strictly more correct (it reflects a concurrent push, which a recorded sha would miss). This is a deliberate refinement of the ticket's "record the last-pushed sha" suggestion — noted for the reviewer.
+- **The lease value is the live-probed remote head, not recorded state.** `github.ts`'s push already probes `octokit.git.getRef(...)` and reads `ref.data.object.sha` — the current value of `origin/<branch>`. That sha is the lease. Do NOT introduce a persisted "last-pushed sha": it is already-fetched (no extra round-trip), and under the ratified ownership premise the branch is styre-owned scratch that the redo rebuilds regardless, so there is no non-styre commit worth persisting state to protect. The trade-off is explicit (see Ownership premise): this lease guards the same-instant probe→push race but NOT a foreign commit that predates the probe — that gets overwritten. This is a deliberate deviation from the ticket's "record the last-pushed sha" wording, ratified as Option A.
 - **Force only when the remote branch exists AND diverges from the target.** First push (probe returns 404) → plain `git push` (no lease; a first-time race fails safely as non-fast-forward already). Remote already at the target sha → the existing idempotent skip (no push at all). The only path that forces is exactly the redo/divergence case — this is how the plan satisfies the ticket's "only force when it's a known redo" without any extra redo signal.
 - **force-with-lease is strictly safer than plain push, never weaker.** It permits a normal fast-forward AND a divergent overwrite, but only while `origin/<branch>` still points at the leased sha; if origin advanced since the probe, the push is rejected and origin is left untouched. It is therefore correct to use it for every exists-and-differs case, not only the non-fast-forward one.
 - **Locale-proof error wording — no stderr token parsing.** Whether a lease was in play is known from the arguments (`expectedRemoteSha` was defined), never by grepping git's stderr for "stale info". The lease-context error message branches on that argument, matching the locale-proof discipline established by `deleteRemoteBranch` (existence probed via exit code + empty-stdout, never stderr text).
@@ -24,6 +26,8 @@
 - `src/dispatch/worktree.ts` — **add** `pushBranch(repoPath, branch, expectedRemoteSha?)`. Home of every git-CLI branch operation already (`ensureWorktree`, `commitWorktree`, `removeWorktree`, `deleteLocalBranch`, `deleteRemoteBranch`); `pushBranch` is the force-with-lease sibling of `deleteRemoteBranch`.
 - `test/dispatch/worktree.test.ts` — **extend** with `pushBranch` tests, reusing the existing `makeRepoWithBareOrigin()` / `remoteHasBranch()` harness (worktree.test.ts:738-758).
 - `src/integrations/adapters/github.ts` — **modify** the `push({branch, sha})` closure (lines 95-113) to thread the probed remote sha into `pushBranch`; **update** the module header prose (lines 8-10) to state the force-with-lease behavior.
+
+**Layering note:** this adds the first `adapter → dispatch` import (`github.ts` → `dispatch/worktree.ts`). No existing adapter imports `src/dispatch/*`; today `worktree.ts`'s only importers are in `src/cli/`. It is functionally safe — no cycle (`worktree.ts` imports only `../cli/run-lock.ts`, which never reaches back to the adapter) and biome's recommended ruleset has no import-boundary rule — but it is a new edge, called out here deliberately. The "sibling of `deleteRemoteBranch`" framing is about where the *helper lives* (both are git-CLI branch ops in `worktree.ts`), not about the caller: `deleteRemoteBranch` is called from `cli/clean.ts`, whereas `pushBranch` is called from the adapter.
 
 ---
 
@@ -146,6 +150,8 @@
       if (!res.success) throw new Error(`git ${args.join(" ")}: ${res.stderr.toString()}`);
     };
     orun(["clone", origin, "."]);
+    orun(["config", "user.email", "other@styre.dev"]); // a fresh clone inherits no identity; CI has no global one
+    orun(["config", "user.name", "Other"]);
     orun(["checkout", "feat/eng-387-stale"]);
     writeFileSync(join(other, "s.txt"), "other");
     orun(["add", "-A"]);
@@ -227,7 +233,7 @@ This task has no unit test **by the file's own documented convention** (the git-
   ```
 
 - [ ] **Step 3: Update the module header prose** (lines 8-10). Replace the sentence describing push as a plain `git push ... (probe-skipped if the remote ref is already at the target sha)` with one that also states the lease behavior, e.g.:
-  > So push is a `git -C ${repoPath} push origin ${branch}` — skipped if the remote ref is already at the target sha, and a **`--force-with-lease`** keyed to the sha just probed when the remote branch exists but diverges (a `--fresh`/divergent redo overwrites its own branch; a concurrent push by someone else is rejected, never clobbered); PRs/comments go through Octokit.
+  > So push is a `git -C ${repoPath} push origin ${branch}` — skipped if the remote ref is already at the target sha, and a **`--force-with-lease`** keyed to the sha just probed when the remote branch exists but diverges (a `--fresh`/divergent redo cleanly overwrites its own branch; the lease still rejects a same-instant concurrent push that lands between probe and push); PRs/comments go through Octokit.
 
   Keep the wording faithful to the code; do not add claims the code does not make.
 
@@ -253,7 +259,7 @@ This task has no unit test **by the file's own documented convention** (the git-
 **Spec coverage (ENG-387 description):**
 - "Make the feature-branch push force-with-lease … overwrite `origin/<branch>` only if it still points at the sha styre last saw" → Task 1 `pushBranch` + Task 2 threading the probed sha. ✓
 - "This lets a `--fresh` redo overwrite its own remote branch cleanly" → Task 1 divergent-redo test. ✓
-- "never clobber a push from someone else" → Task 1 stale-lease test (origin left at v1b). ✓
+- "never clobber a push from someone else" → honored for the probe→push race (Task 1 stale-lease test leaves origin at v1b); consciously NOT honored for a foreign push that predates the probe (Ownership premise, Option A). ✓ (scope narrowed and ratified)
 - "`git push --force-with-lease=<branch>:<expected-remote-sha>`" → exact argv in `pushBranch`. ✓
 - "fall back to `--force-with-lease` if unknown" → refined: the fallback for an unknown/absent remote is a **plain** push (404 path), because there is nothing to lease against; leasing without an expected value would consult a possibly-absent local tracking ref. Documented in Global Constraints for the reviewer. ✓
 - "Consider: only force when the run is a known redo" → satisfied structurally: force happens only on exists-and-differs, which is the redo/divergence case; first-time and no-op never force. ✓
@@ -265,6 +271,6 @@ This task has no unit test **by the file's own documented convention** (the git-
 
 ## Residual notes (for the human)
 
-- **Why the lease sha comes from the live Octokit probe, not persisted state:** it is already fetched (zero extra round-trip), and it reflects the remote's *current* head, so a push that raced in after our probe is caught by the lease. A recorded "last-pushed sha" would be blind to that race. This is the single intentional deviation from the ticket's "record the last-pushed sha" wording.
+- **Why the lease sha comes from the live Octokit probe, not persisted state:** it is already fetched (zero extra round-trip), and it reflects the remote's *current* head, so a push that raced in during the probe→push window is caught by the lease. It does NOT protect a foreign commit that landed before the probe — styre adopts that sha and overwrites it. That is acceptable under the ratified ownership premise (styre-owned branch, rebuilt on every redo); a persisted last-pushed sha would only turn the overwrite into a hard refusal, not save the commit. This is the single intentional, ratified deviation from the ticket's "record the last-pushed sha" wording.
 - **First-push races are left to plain-push semantics** (a non-fast-forward rejection), not an `expected=""` lease. A brand-new-branch collision is astronomically unlikely and already fails safely; adding an empty-lease guard would be complexity without a real scenario.
 - **No core / fake-forge change:** the entire change is the real adapter's leaf push plus a `worktree.ts` helper. The fake forge used by core tests does no real git, so core behavior is unaffected; the full suite is a regression guard, not a new coverage surface.
