@@ -139,8 +139,13 @@ being permissive.
 handler_key TEXT NOT NULL,
 CHECK ((work_unit_id IS NULL) = (kind IS NULL)),
 CHECK (trigger IS NULL OR trigger IN ('transition','retry','loopback','resume')),
-CHECK (effort  IS NULL OR effort  IN ('deep','standard','cheap'))
+CHECK (effort  IS NULL OR effort  IN ('deep','standard','cheap')),
+CHECK (stage   IS NULL OR stage   IN ('design','implement','verify','review','merge','released'))
 ```
+
+The `stage` CHECK mirrors `ticket.stage`'s existing constraint (`schema.sql:97`) — it is a snapshot of
+that column, so it takes the same six values even though only three are reachable on a dispatch row
+(§4.5). Constraining it to the reachable three would break the day a new stage dispatches.
 
 Verified against SQLite: the paired CHECK accepts `(NULL, NULL)` and `(1, 'php')` and rejects
 `(1, NULL)` and `(NULL, 'php')`.
@@ -206,12 +211,40 @@ exported. Zod's `.shape` supplies field names at runtime, which the erased TS in
 | `effort` | Carries the capability **tier** (`deep`/`standard`/`cheap`), computed at `run-dispatch.ts:141` and currently discarded. Column keeps its name for wire stability; the schema comment is corrected to say what it holds. Provider reasoning-effort, if ever configured, gets its own column then. |
 | `exit_code` | `result.exitCode` at `completeDispatch`; `na("agent timed out before exit")` where the runner never completed — `runner.ts:16` types it nullable for exactly that case. |
 | `predecessor_dispatch_id` | `getLatestForTicket` before insert; `na("first dispatch of the ticket")` at `seq === 1`. |
-| `stage` | **Kept, and documented as what it is.** It records `ctx.ticket.stage` at dispatch time, which is why all nine STYRE-7 rows read `design` including the three `checks:dispatch` ones (`resolver.ts:117-122` runs checks steps while the ticket is still in design). It is not step identity and the doc must stop implying it could be. |
+| `stage` | **Kept on the wire as a decoupling convenience, not as information.** It is fully derivable from `handler_key` (§4.5) and carries nothing that field doesn't. It stays so consumers computing spend-by-phase need not embed styre's internal handler taxonomy — a mapping that would break silently on any handler rename. Gains an enum CHECK (§4.2); the docs must stop implying it identifies a step. |
 
 **Vocabulary change:** `trigger`'s schema comment lists `'transition'/'retry'/'escalation'/'resume'`.
 `escalation` is vestigial — escalations route to needs-you and park; they do not dispatch — and the
 comment predates the Loopback Atlas. Replaced with `loopback`, which is the case that actually occurs
 and is already available as `spec.loopback`.
+
+### 4.5 Why `stage` is redundant, and why it stays anyway
+
+`ticket.stage` is a six-value enum, but **only three are reachable on a dispatch row**. `verify`,
+`merge`, and `released` produce no agent dispatches at all — their steps are `step_type`
+`verify`/`project`/`completeness` and never reach `runAgentDispatch`, so no dispatch row is created.
+
+Mapping every dispatching handler against the resolver's `switch` (`resolver.ts:97,127,227`):
+
+| handler_key | stage |
+|---|---|
+| `design:dispatch`, `design:extract`, `design:size`, `design:review`, `checks:dispatch`, `checks:classify` | `design` |
+| `implement:dispatch`, `checks:arbitrate`, `checks:reauthor`, `docs:revise` | `implement` |
+| `review` | `review` |
+
+`handler_key → stage` is a **total function**. No handler dispatches under two ticket stages, and none
+can: `ticket.stage` is what selects the `case` block that returns the step. Loopbacks preserve this —
+a redesign loopback resets `ticket.stage` to `design` *and* re-enters the design case, so the pair
+stays consistent. Once `handler_key` ships, `stage` adds no information.
+
+**It is kept regardless.** Removing it would force every consumer to embed styre's handler taxonomy
+to answer "cost by phase", coupling the plane to step-level naming that is free to churn. And
+removing a wire field is a breaking change under `telemetry-export.md` §6, costing a
+`SCHEMA_VERSION` 2 → 3 bump on the open-core seam — a steep price for deleting a redundant short
+string from a design that is otherwise purely additive (§5).
+
+The observation that every sampled STYRE-7 row read `design` is a property of that run (it never left
+the design stage), not of the field. That framing should not survive into the docs.
 
 ---
 
@@ -246,9 +279,10 @@ Retained columns appear in `RESERVED` (§4.3) and are marked in the docs table t
 
 `docs/architecture/telemetry-export.md`:
 
-- **§3.2 dispatch field table** — add `handler_key`; correct `stage`'s description to say it records
-  the ticket's stage at dispatch time and is not step identity; mark nothing else reserved (the two
-  reserved columns are SoT-only and never appear in this table).
+- **§3.2 dispatch field table** — add `handler_key`; rewrite `stage`'s description to *"a denormalized
+  snapshot of the ticket's stage, derivable from `handler_key`, carried so consumers need not embed
+  the handler taxonomy — not a step identifier"*; mark nothing else reserved (the two reserved
+  columns are SoT-only and never appear in this table).
 - **§6** — record that the SoT went to v9 while the wire stayed v2, with the reasoning.
 
 `docs/architecture/schema.sql` is a byte-identical copy of `src/db/schema.sql` (CLAUDE.md) — both
@@ -264,7 +298,8 @@ edited in the same PR.
 - **Projection completeness** (§4.3) — fails today on the four unmodelled columns.
 - **Scope union negative cases** — type-level tests that a work-unit dispatch without `kind`, and a
   ticket-level dispatch with one, do not compile.
-- **CHECK constraint coverage** — both legal shapes insert, both illegal shapes throw.
+- **CHECK constraint coverage** — the `work_unit_id`/`kind` pairing accepts both legal shapes and
+  rejects both illegal ones; the `trigger`/`effort`/`stage` enums reject an out-of-vocabulary value.
 - **`trigger` precedence** — one case per branch (resume / retry / loopback / transition).
 - **End-to-end** — assert `handler_key` on emitted dispatch events distinguishes `design:extract`
   from `design:review` in an existing e2e run.
@@ -283,7 +318,8 @@ edited in the same PR.
 - [ ] `branch` and `exit_subcode` dropped; `transcript_path` and `envelope_json` marked reserved in
       `RESERVED` and the docs
 - [ ] The projection test fails if a new column is added and neither projected nor excused
-- [ ] `stage` documented as ticket-stage-at-dispatch, explicitly not step identity
+- [ ] `stage` retained, CHECK-constrained, and documented as a derived denormalization of
+      `handler_key` — explicitly not a step identifier
 - [ ] SoT at `schema_meta` v9; wire stays `SCHEMA_VERSION` 2, with the reasoning recorded
 - [ ] `bun run lint` + `bun test` green
 
@@ -304,3 +340,7 @@ edited in the same PR.
 6. **Retain two reserved columns rather than delete all four.** Operator decision on
    `envelope_json`; `transcript_path` blocked on a feature. Both explicitly marked, because an
    unmarked reserved column is precisely this ticket.
+7. **Keep `stage` on the wire despite it being fully derivable from `handler_key`** (§4.5).
+   Redundant-in-information is not the same as useless: it decouples consumers from styre's internal
+   step naming, and deleting it would spend a `SCHEMA_VERSION` 2 → 3 breaking bump on an otherwise
+   additive change. Rejected: dropping the field; keeping it undocumented as-is.
