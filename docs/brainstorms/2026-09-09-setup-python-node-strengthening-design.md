@@ -77,7 +77,7 @@ The Cursor/Factory research that motivated DEC-5 stands (§4). Its conclusion wa
 - **`testpaths` is demoted from centrepiece.** pytest already reads `testpaths` from rootdir config when invoked with no path arguments, so the existing `python -m pytest` fallback honours it; transcribing it into the command string buys nothing functionally. And astropy's own `[tool:pytest]` declares `testpaths = "astropy" "docs"` — the same two paths as the failing command — so the agent most likely transcribed them and the "fix" would regenerate the broken command. **Requires verification against the real astropy tree before any implementation relies on it** (§9.1).
 - **"Scoped" is struck from DEC-2.** Nothing consumes a collected count, and §7 rules out narrowing. Setup/proof establishes **runnable and non-empty**, not scoped.
 - **The proposed `testFilePattern` additions are dropped.** They would be regressions: the proposed Node regex drops `test/` directories and `.mjs`/`.cjs`/`.mts`/`.cts`, all covered by the default. `php.ts` and `ruby.ts` narrow deliberately so A1 fails loud; adding patterns *tightens* A1 (`handlers.ts:1430-1437` → `behavioral-no-test` → loopback), which v1 presented as gap-filling.
-- **§7.1's "only regression signal" is withdrawn** — this design adds a typecheck gate, which the differential doc explicitly nominates as "an optional typecheck as a whole-tree net for untested code."
+- **The "only regression signal" claim is withdrawn** (§7.2) — this design adds a typecheck gate, which the differential doc explicitly nominates as "an optional typecheck as a whole-tree net for untested code."
 
 ## 4. Prior art — and what OSS can take
 
@@ -185,6 +185,21 @@ A component with **zero** usable gates is a distinct, louder finding than any in
 
 **test** — parse pytest config (`[tool.pytest.ini_options]`, `pytest.ini`, `setup.cfg [tool:pytest]`, `tox.ini [pytest]`) for **`addopts` and `testpaths` as recorded evidence**, not as a command rewrite (§3.2). Fall back as today.
 
+#### 6.1.1 — Two recorded test commands, not one rewritten at verify
+
+Detection emits **both** forms where it can derive them:
+
+| Key | Meaning |
+|---|---|
+| `commands.test` | The **native** command — what the project's own tooling would run (`tox`, `nox`, `pytest`). Unchanged semantics. |
+| `commands["test:direct"]` | An **equivalent invocation that does not rebuild the environment**, carrying whatever scope detection determined. Optional. |
+
+For a project already detected as plain pytest the two are identical. For `tox`/`nox` the direct form is typically `<interp> -m pytest`, since pytest reads its own `testpaths`. For poetry/uv/pdm they differ only in prefix.
+
+**No schema change is needed** — `commands` is an open record (`profile.ts:100`) — and no new verify job appears: `verify:integration` sweeps a fixed `["build","test"]` list (`handlers.ts:1516`), so an extra key is never picked up as a job.
+
+`test:direct` is **absent, not guessed**, when detection cannot derive it. Absence is the signal that the scope-preserving path is unavailable for this project, and it is visible in `profile.json` rather than inferred later. See §7 for what consumes it.
+
 **lint** — `[tool.ruff]` / `ruff.toml` → `ruff check .`; `.flake8` / `setup.cfg [flake8]` → `flake8`; `[tool.black]` → `black --check .`. `.pre-commit-config.yaml` noted, never used as a gate.
 
 **typecheck** — `[tool.mypy]` / `mypy.ini` → `mypy .`; `[tool.pyright]` / `pyrightconfig.json` → `pyright`.
@@ -213,9 +228,26 @@ Extensions needed: the `packageManager` (corepack) field as the first-priority s
 
 **Correction to v1's sequencing argument.** v1 claimed baselining a red-at-base gate "buys nothing." The differential doc says the opposite: red-on-base alone is "structural and sufficient" to demote the gate and stop looping the agent — its largest claimed win. The correct argument is that a **green** baseline is information-rich where a red one is "epistemically degraded," and that P1–P3 move astropy from the degraded branch to the rich one.
 
-**Unadjudicated between the two docs, and blocking:** `reuseAwareTestCommand` returns a bare `${interp} -m pytest`, discarding whatever setup detected — on exactly the ready-conda path P3 targets. The differential doc's §7.1 *wants* that substitution; this design wants the detected command preserved. **Resolution proposed:** the reuse path substitutes the **interpreter/prefix only**, never the command. This must be agreed before P3 ships.
+### 7.1 Adjudicated: which command runs when the environment is already usable
 
-### 7.1 What none of this delivers
+`reuseAwareTestCommand` (`reuse.ts`) currently returns a bare `${interp} -m pytest`, **discarding whatever setup detected** — on exactly the ready-environment path P3 targets. The differential doc's §7.1 *wants* that substitution (running "a pytest subset instead of the detected `tox`"); this design wants detection's scope preserved. Both are right about their own concern.
+
+The substitution exists for a good reason: astropy's detected command is `tox`, and tox rebuilds its environments from source, which exceeded the verify timeout. It is a rescue, not an accident. But it is all-or-nothing — it replaces the whole command, so any scope, flags or paths detection determined are discarded along with the part that was causing trouble.
+
+That costs nothing today, because detection only ever emits a bare runner. **It starts costing as soon as P1 lands** — and it fires precisely in the container case, which is the bench, so P1's Python work would be invisible in the one place it is measured.
+
+**Resolution: the reuse path chooses between two recorded commands; it never rewrites one** (§6.1.1).
+
+- Environment usable (P3's Q1 passes) **and** `test:direct` present → run `test:direct`.
+- Otherwise → run `commands.test`, exactly as today.
+
+The rejected alternative was to substitute the interpreter prefix while preserving the remainder. That requires inspecting the command string to decide whether it is separable — which is the same move `frameworkFor` makes to guess a test framework, and which this design calls a defect at D14. The remedy proposed there is the remedy here: **when a later step needs to know something about a command, the step that built it writes the answer down, rather than reconstructing it from text.**
+
+This also keeps the differential doc's §7.3 fallback available and unchanged: where no `test:direct` exists, pre-warming tox's environments so real tox runs affordably remains the right answer, and this design does not foreclose it.
+
+**Open, to verify during implementation:** whether `<interp> -m pytest` is a faithful direct form for most tox projects, or whether tox configurations commonly carry flags without which the direct form tests something different. If the latter, `test:direct` will be absent more often than expected and the differential doc's §7.3 pre-warm becomes load-bearing.
+
+### 7.2 What none of this delivers
 
 An AC check asks "did the intended behavior arrive?" — a specification check, authored independently of the fix (§11). A regression check asks "did I break something I was not supposed to touch?" Those are different questions.
 
@@ -256,7 +288,7 @@ Run-all remains the only safe regression policy **until** the differential desig
 
 Claims made during this design's development that were wrong, recorded so they do not propagate:
 
-- **"AC checks answer *did my change break something*."** They do not — they are specification checks (§7.1).
+- **"AC checks answer *did my change break something*."** They do not — they are specification checks (§7.2).
 - **"The AC test is self-authored by the implement agent."** False. `checks:dispatch` (`handlers.ts:547`) is a separate agent dispatch authoring the checks after design and before implement; `implement:dispatch` (`:969`) **reads** `ac_check` at `:1002` for prompt context but never authors or modifies one. The styre-bench strategy doc still carries the wrong claim — ENG-394.
 - **"Setup should provision and prove" (v1 DEC-5).** Withdrawn — unsafe and path-incorrect (§3.1).
 - **"`schemaVersion` bump touches both `schema.sql` copies."** False; `schemaVersion` is a `profile.json` field with no SQLite presence. No bump is needed at all now.
