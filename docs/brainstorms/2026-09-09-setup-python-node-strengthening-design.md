@@ -106,9 +106,32 @@ Self-contained, roughly the size the review estimated, and the highest-value sin
 
 ### P3 — Discovery before build, inside `provision`
 
-Fixes D10 and D11 together. `planProvision` consults the environment probe **before** emitting an install action; a component whose environment provably tests the worktree source is skipped rather than reinstalled.
+Fixes D10 and D11 together. `planProvision` consults the environment probe **before** emitting an install action; a component whose environment provably tests the worktree source is not reinstalled.
 
 Path-correct by construction (it runs in the worktree the run will use), never stale (per run), no schema bump, and mutates nothing the operator owns. This is where v1's DEC-6 belongs.
+
+#### P3.1 — Split the probe's two questions
+
+`pythonEnvReady` currently ANDs two checks that answer different kinds of question, and the AND is what makes it brittle. They separate:
+
+- **Q1 — the correctness precondition.** Does `import <name>` resolve to a file **under the component's dir**, checked from a tempdir outside it so `sys.path[0]` cannot false-pass a shadowed copy? This asks *am I editing what I am testing*. A `false` here means the environment is not usable for this worktree at all.
+- **Q2 — the readiness observation.** Does the suite collect? This asks *will the tests run*. It is informative, not a correctness property.
+
+**Only Q1 gates the reuse decision.** Q2 becomes an observation that feeds P4's proof and the verify-time picture. Joining them with AND conflated a hard requirement with a soft one, and let the soft one trigger the hard consequence.
+
+#### P3.2 — A failing probe must not be destructive
+
+The harm is asymmetric: **reusing a wrong environment produces wrong answers; reinstalling over a right one only costs time.** So Q1 stays strict — no thresholds, no partial credit — and what changes is the *consequence* of a negative answer.
+
+| Q1 | Q2 | Action |
+|---|---|---|
+| pass | pass | Skip `prepare` entirely. Gate recorded `proven`. |
+| pass | fail | **Bounded additive repair**, then re-ask Q2 once. Never a full rebuild — Q1 already proved the package is installed against this source, so what is missing is test dependencies or plugins, not the install. |
+| fail | — | The environment does not test this source. Full build path, as today. |
+
+The repair MUST be **additive, idempotent, and attempted exactly once**. Its exact form is manager-specific and is an implementation decision; the architectural constraint is that it adds what is missing rather than rebuilding what exists, and that a second failure records `unprovable` with the reason and continues (loop-not-halt) rather than retrying.
+
+This is what removes the failure mode that made the original probe dangerous: a single uncollectable module can no longer cause `pip install -e .` to run over a correctly prepared conda environment.
 
 ### P4 — Proof as a provision postcondition
 
@@ -213,12 +236,13 @@ Run-all remains the only safe regression policy **until** the differential desig
 
 1. **★ The astropy `testpaths` hypothesis is unverified.** §3.2's claim that astropy declares `testpaths = "astropy" "docs"` comes from review, not from inspecting the tree. If false, `testpaths` may be worth more than §3.2 allows. Verify before P1 relies on it either way.
 2. **★ The env probe's false-positive blast radius widens under P3.** The differential doc's §9.6 calls mistaking a shadowing copy for a ready env "the highest correctness risk of the reuse path." Today a false positive costs one substituted pytest invocation; under P3 it **skips `prepare` entirely**. Inherited, worsened, and mitigated only by the tempdir-outside-the-worktree technique already in `reuse.ts`.
-3. **★ `pythonEnvReady` is all-or-nothing and is built on a known-failing check.** One uncollectable module → `false` → full reinstall, i.e. the D10 breakage P3 exists to fix. And its source-check script is what `assertInPlaceIdentity` runs, which this project's own record shows has an **open, unresolved astropy failure**. P3 makes a known-broken probe load-bearing; that failure should be resolved first or P3 gated behind it.
-4. **★ Baseline cost scales with gate count.** The differential doc's §9.2 prices baselining per gate. P5 raises gates from three to four with `lint` and `typecheck` newly applicable for both stacks. Neither document computes the product.
-5. **P1 changes the bench's denominator.** `collect.ts:171`'s `isProbeProfile` reads `components[0].commands.test`, and `deriveTaxonomy` checks `probe` before `loop-exhausted` deliberately. Making Python always emit a runnable test command empties the `probe` bucket and shifts those runs to `loop-exhausted` — **post-change sweeps are not comparable to pre-change ones**, for reasons unrelated to the loop.
-6. **Adding gate commands widens the agent's shell surface.** `realRunnerCommands` feeds `allowlistFor` as `Bash(<cmd>:*)` prefix rules (`handlers.ts:582`, `:988`). Small, but it is a capability-isolation change.
-7. **Seam sequencing.** P5's gate vocabulary and the differential design's verdict-shape change are two independent breaks of the open-core contracts, currently unordered and mutually unaware.
-8. **No lock, no reaping, no network budget.** `styre run` takes a run lock; setup takes none. Nothing reaps a setup-created `.venv`. P2's probe gains a network dependency with no timeout or failure taxonomy, and it is undesigned whether `SECURITY.md`'s credential stripping applies to it. Materially reduced by §3.1 (setup no longer installs), but not zero.
+3. **The probe's all-or-nothing behaviour is addressed by P3.1/P3.2, not eliminated.** Splitting Q1 from Q2 and making a Q2 failure trigger a bounded additive repair removes the destructive path. What remains: an environment that passes Q1 but is genuinely broken for testing is now *reused* rather than rebuilt, so the failure surfaces later, at verify, and less directly. That is the accepted cost of the asymmetry argument in P3.2, and it should be watched on the first bench sweep. **The repair's exact per-manager form is undesigned** and is the main open implementation question in P3.
+4. **A prior blocker recorded against this machinery did not reproduce.** A July note recorded `assertInPlaceIdentity` failing on astropy with the cause unresolved, and v1 of this design treated it as gating P3. The 2026-09-08 run on v0.13.2 ran `--in-place` against the astropy image and completed — that check is called at `run.ts:186` and throws on failure, so it did not fail. Whether it was fixed or merely does not reproduce is unknown. Not a blocker; recorded so the stale note is not resurrected.
+5. **★ Baseline cost scales with gate count.** The differential doc's §9.2 prices baselining per gate. P5 raises gates from three to four with `lint` and `typecheck` newly applicable for both stacks. Neither document computes the product.
+6. **P1 changes the bench's denominator.** `collect.ts:171`'s `isProbeProfile` reads `components[0].commands.test`, and `deriveTaxonomy` checks `probe` before `loop-exhausted` deliberately. Making Python always emit a runnable test command empties the `probe` bucket and shifts those runs to `loop-exhausted` — **post-change sweeps are not comparable to pre-change ones**, for reasons unrelated to the loop.
+7. **Adding gate commands widens the agent's shell surface.** `realRunnerCommands` feeds `allowlistFor` as `Bash(<cmd>:*)` prefix rules (`handlers.ts:582`, `:988`). Small, but it is a capability-isolation change.
+8. **Seam sequencing.** P5's gate vocabulary and the differential design's verdict-shape change are two independent breaks of the open-core contracts, currently unordered and mutually unaware.
+9. **No lock, no reaping, no network budget.** `styre run` takes a run lock; setup takes none. Nothing reaps a setup-created `.venv`. P2's probe gains a network dependency with no timeout or failure taxonomy, and it is undesigned whether `SECURITY.md`'s credential stripping applies to it. Materially reduced by §3.1 (setup no longer installs), but not zero.
 
 ## 10. Testing
 
@@ -238,3 +262,4 @@ Claims made during this design's development that were wrong, recorded so they d
 - **"`schemaVersion` bump touches both `schema.sql` copies."** False; `schemaVersion` is a `profile.json` field with no SQLite presence. No bump is needed at all now.
 - **"`testFilePattern` is unset, so `isTestFile` has no pattern for these stacks."** False; `DEFAULT_TEST_FILE` covers both.
 - **"`kind` flips to `sveltekit` for nested packages."** False; guarded by `isRoot &&`.
+- **"`assertInPlaceIdentity` has an open astropy failure blocking P3."** Stale. The note was from July; the 2026-09-08 run passed that check (§9.4).
