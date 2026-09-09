@@ -30,14 +30,29 @@
 
 **Key insight this part exploits:** scoring does not need styre. `scorer/score.py score` takes `{"instance": {...}, "candidate_diff": "..."}` on stdin and returns `{"resolved": ...}`. The expensive, credentialed half (running styre) stays on macOS where it already works; only the oracle moves to Linux.
 
-### Task 1: Emit a scoreable payload from a completed local run
+### Task 1: Build a minimal, firewall-safe score payload
 
 **Files:**
 - Create: `bin/emit-score-payload.ts`
 - Create: `tests/emit-score-payload.test.ts`
 
 **Interfaces:**
-- Produces: `buildScorePayload(instance: Instance, diff: string): { instance: Instance; candidate_diff: string }` — consumed by Task 2's workflow as a JSON file.
+- Produces: `buildScorePayload(instanceId: string, language: string, diff: string): ScorePayload`
+
+**CRITICAL — what must NOT cross this boundary.** `orchestrator/types.ts:29-30` marks
+`fix_patch` (the accepted human fix) and `test_patch` (the held-out regression tests) as
+FIREWALL fields. `/data/` is **gitignored** (`.gitignore:156`), so the corpus carrying them is
+deliberately kept out of the public repo. A payload built from a whole `Instance` and committed
+for CI would put the oracle's answer key into a repo that agents read — not a secret leak, since
+SWE-bench is public, but a contamination hazard of exactly the class the strategy doc's §3.1
+warns about, and a reversal of an existing deliberate decision.
+
+**It is also unnecessary.** `SweBenchAdapter.score()` reads only `instance["id"]`
+(`scorer/adapters/swebench.py:222`); `fix_patch` is touched solely by `run_controls` at `:191`.
+Everything authoritative — `version`, `environment_setup_commit`, `test_patch`, the test lists —
+is re-fetched via `load_swebench_dataset("princeton-nlp/SWE-bench_Verified", "test",
+[instance_id])` at `:150`. So the runner needs **no corpus at all**, and the payload needs only
+an id, a language and the candidate diff.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -46,18 +61,27 @@ import { describe, expect, test } from "bun:test";
 import { buildScorePayload } from "../bin/emit-score-payload";
 
 describe("buildScorePayload", () => {
-  test("wraps instance and diff in the scorer's stdin shape", () => {
-    const inst = { id: "astropy__astropy-12907", language: "python" } as never;
-    const p = buildScorePayload(inst, "diff --git a/x b/x\n");
-    expect(p.instance).toBe(inst);
+  test("carries exactly id, language and the diff", () => {
+    const p = buildScorePayload("astropy__astropy-12907", "python", "diff --git a/x b/x\n");
+    expect(p.instance).toEqual({ id: "astropy__astropy-12907", language: "python" });
     expect(p.candidate_diff).toBe("diff --git a/x b/x\n");
   });
 
-  test("an empty diff is preserved, not omitted", () => {
-    // The harness filters empty patches out of its own CLI, which is why the
-    // adapter calls run_instance directly. An empty diff must still reach it as
-    // an explicit empty string so the result is `resolved: false`, not a crash.
-    const p = buildScorePayload({ id: "x", language: "python" } as never, "");
+  test("FIREWALL: no gold patch or held-out tests can appear in the payload", () => {
+    // types.ts:29-30 mark fix_patch/test_patch FIREWALL, and /data/ is gitignored so the
+    // corpus never enters the public repo. A payload is committed or uploaded for CI, so
+    // this assertion is the guard that keeps the answer key out of it.
+    const json = JSON.stringify(buildScorePayload("x__y-1", "python", "d"));
+    for (const forbidden of ["fix_patch", "test_patch", "FAIL_TO_PASS", "PASS_TO_PASS", "patch"]) {
+      expect(json).not.toContain(forbidden);
+    }
+  });
+
+  test("an empty diff is preserved as an explicit empty string", () => {
+    // The harness CLI filters empty patches out before starting a container, which is why the
+    // adapter calls run_instance directly. An empty diff must still reach it explicitly so the
+    // outcome is `resolved: false`, not a crash or a silent skip.
+    const p = buildScorePayload("x__y-1", "python", "");
     expect(p.candidate_diff).toBe("");
     expect(Object.hasOwn(p, "candidate_diff")).toBe(true);
   });
@@ -74,56 +98,53 @@ Expected: FAIL — cannot resolve `../bin/emit-score-payload`.
 ```ts
 #!/usr/bin/env bun
 /**
- * Emits the exact stdin payload `scorer/score.py score` expects, so a diff
- * produced by a local (macOS) styre run can be scored on x86-64 Linux.
+ * Emits the stdin payload `scorer/score.py score` expects, so a diff produced by a local
+ * (macOS) styre run can be scored on x86-64 Linux.
  *
- * Usage: bun bin/emit-score-payload.ts <instance-id> <diff-file> > payload.json
+ * FIREWALL: this deliberately carries ONLY an instance id, a language and the candidate diff.
+ * `SweBenchAdapter.score` reads only `instance["id"]` and re-fetches the authoritative record
+ * (including test_patch and the test lists) from Hugging Face, so nothing else is needed — and
+ * `fix_patch`/`test_patch` must never enter a committed or uploaded artifact.
  */
 import { readFileSync, writeFileSync } from "node:fs";
-import { loadInstances } from "../orchestrator/corpus";
-import { BENCH_CONFIG } from "../config/bench.config";
-import type { Instance } from "../orchestrator/types";
+
+export interface ScorePayload {
+  instance: { id: string; language: string };
+  candidate_diff: string;
+}
 
 /** PURE. The scorer's stdin contract (`scorer/score.py:_COMMANDS["score"]`). */
 export function buildScorePayload(
-  instance: Instance,
+  instanceId: string,
+  language: string,
   diff: string,
-): { instance: Instance; candidate_diff: string } {
-  return { instance, candidate_diff: diff };
+): ScorePayload {
+  return { instance: { id: instanceId, language }, candidate_diff: diff };
 }
 
-async function main(): Promise<void> {
-  const [id, diffFile] = process.argv.slice(2);
-  if (!id || !diffFile) {
-    console.error("usage: bun bin/emit-score-payload.ts <instance-id> <diff-file>");
+function main(): void {
+  const [id, language, diffFile] = process.argv.slice(2);
+  if (!id || !language || !diffFile) {
+    console.error("usage: bun bin/emit-score-payload.ts <instance-id> <language> <diff-file>");
     process.exit(64);
   }
-  const pool = [
-    ...(await loadInstances("swe-bench", BENCH_CONFIG)),
-    ...(await loadInstances("multi-swe-bench", BENCH_CONFIG)),
-  ];
-  const instance = pool.find((i) => i.id === id);
-  if (!instance) {
-    console.error(`no corpus instance with id '${id}'`);
-    process.exit(65);
-  }
   const diff = readFileSync(diffFile, "utf8");
-  writeFileSync(1, `${JSON.stringify(buildScorePayload(instance, diff))}\n`);
+  writeFileSync(1, `${JSON.stringify(buildScorePayload(id, language, diff))}\n`);
 }
 
-if (import.meta.main) await main();
+if (import.meta.main) main();
 ```
 
 - [ ] **Step 4: Run the test and see it pass**
 
-Run: `bun test tests/emit-score-payload.test.ts` — expect PASS.
+Run: `bun test tests/emit-score-payload.test.ts` — expect PASS, including the firewall assertion.
 
 - [ ] **Step 5: Gates and commit**
 
 ```bash
 bun run typecheck && bun run lint && bun test
 git add bin/emit-score-payload.ts tests/emit-score-payload.test.ts
-git commit -m "feat(score): emit a scoreable payload from a local run diff"
+git commit -m "feat(score): build a minimal firewall-safe payload for the oracle"
 ```
 
 ### Task 2: Scoring workflow on GitHub Actions
@@ -133,7 +154,7 @@ git commit -m "feat(score): emit a scoreable payload from a local run diff"
 - Create: `docs/scoring.md`
 
 **Interfaces:**
-- Consumes: a `payload.json` from Task 1, supplied as a workflow input or committed under `scoring/`.
+- Consumes: a `payload.json` from Task 1 — **id, language and diff only**. The corpus is gitignored and is never needed on the runner; the adapter re-fetches the authoritative record from Hugging Face.
 - Produces: a job summary line `resolved=true|false` and the raw scorer JSON as an artifact.
 
 **Why GitHub Actions:** `styre-bench` is **public**, so runner minutes are free; `ubuntu-latest` is x86-64 with Docker preinstalled; scoring needs **no secrets** (no agent key, no GitHub token beyond the default). The repo currently has no workflows.
@@ -151,7 +172,7 @@ on:
         description: "corpus instance id, e.g. astropy__astropy-12907"
         required: true
       payload_path:
-        description: "path to a committed payload.json"
+        description: "path to a committed payload.json (id + language + diff ONLY — never corpus fields)"
         required: true
         default: scoring/payload.json
 
