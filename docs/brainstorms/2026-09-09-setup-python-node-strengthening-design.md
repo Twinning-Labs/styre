@@ -1,20 +1,16 @@
 # Strengthening `styre setup` — Python and Node
 
-**Status:** Design (brainstorm output) — pending operator sign-off, then an implementation plan.
+**Status:** Design (brainstorm output), **v2** — restructured after an independent three-lens review (fact-check / adversarial / cross-doc alignment). The review **reversed this design's central decision**; see §3. Pending operator sign-off, then implementation plans (one per piece).
 **Date:** 2026-09-09
-**Scope:** what `styre setup` detects, what it proves, and what it records — for **Python and Node/JS/TS only**. Other languages in `REGISTRY` are untouched by this design and keep their current behaviour.
-**Deliberately reopens:** the polyglot detection freeze (`docs/brainstorms/2026-06-30-polyglot-setup-verify-frozen-design.md`), for these two stacks only. The freeze is what left `pythonDef` structurally unable to emit a `check` command at all. This is a decision, not a side effect.
-**Builds on / touches:**
-- `docs/brainstorms/2026-07-05-verification-as-differential-inference-design.md` — the baseline/attribution design. **Still unsigned and unbuilt.** This design deliberately does NOT duplicate it (§7).
-- `docs/brainstorms/2026-07-03-provisioning-design.md` — `prepare`, the source-under-test probe.
-- `CLAUDE.md` invariants: ground truth over self-report, loop-not-halt, capability isolation.
-- ENG-392 (setup accepts an unusable verify command). This design supersedes ENG-392's proposed mechanism — see §7.2.
+**Scope:** what `styre setup` detects, what gets proven, where, and what is recorded — for **Python and Node/JS/TS only**, except where a change is structurally all-languages (§5.5).
+**Deliberately reopens:** the polyglot detection freeze (`docs/brainstorms/2026-06-30-polyglot-setup-verify-frozen-design.md`), for these two stacks only. The freeze is what left `pythonDef` unable to emit a `check` command at all. A decision, not a side effect.
+**Supersedes:** v1 of this document (same path, prior commit). v1's DEC-5 — "setup provisions and proves" — is **withdrawn as unsafe and incorrect** (§3.1).
 
 ---
 
-## 1. Origin — what the 2026-09-08 astropy run exposed
+## 1. Origin — what the 2026-09-08 astropy run actually exposed
 
-styre ran `astropy__astropy-12907` end to end and produced the **correct fix** (the blind A/B reviewer, unaware which candidate was styre's, recorded that both candidates "make the identical correct core fix"). Its verification was nonetheless worthless, for reasons that are all in setup:
+styre produced the **correct fix** for `astropy__astropy-12907` (the blind A/B reviewer, unaware which candidate was styre's, recorded that both "make the identical correct core fix"). Its verification was worthless anyway.
 
 ```
 ⚠ python: no build command — styre cannot ground-truth-build this stack.
@@ -23,227 +19,222 @@ test          fail    pytest --pyargs astropy docs
 integration   fail    pytest --pyargs astropy docs
 ```
 
-Three distinct defects, none of which is a missing detector rule:
+Three defects:
 
-1. **A meaningless warning and a real one, emitted identically.** A pure Python library has nothing to build; demanding a build command manufactures a warning that can never be actioned. "No check command" is a genuine gap — no fast deterministic gate exists. Same severity today, which is how an operator learns to skim warnings.
-2. **The only gate was slow and unreliable.** `pytest --pyargs astropy docs` includes docs and runs without the project's test extras installed, so it could not go green whatever styre did. There was no lint or typecheck gate because `pythonDef` cannot emit one.
-3. **Nothing validated the command.** `discover.ts:60` accepts an agent-proposed command on three conditions — `isCommandSafe`, `probeCommandExists`, `trusted` — none of which asks whether the command produces a usable signal.
+1. **A meaningless warning and a real one, at equal severity.** A pure Python library has nothing to build. "No check command" is a real gap — no fast deterministic gate exists, because `pythonDef` cannot emit one. Emitting both identically is how an operator learns to skim warnings.
+2. **The only gate was slow and unreliable**, so a red result was both uninformative and unavoidable.
+3. **Nothing validated the command.** `discover.ts:63` accepts an agent proposal on `isCommandSafe && probeCommandExists && trusted`. None of the three asks whether the command produces a usable signal.
+
+**Correction to v1's origin story.** v1 claimed astropy's failure was a missing `[test]` extra in `pip install -e .`. That is unsupported: `pythonTestCommand` checks `tox.ini` **first** (`python.ts:7`), astropy ships one, so the detected command was `tox` and `pythonPrepare` returned `pip install tox` — the `pip install -e .` branch was never taken. Extras remain a real defect (D3) but were not astropy's cause.
+
+**Defect 3 is the cause, and it is the cheapest thing here to fix.** That reordering drives §5.
 
 ## 2. What the current design is
 
-`LangDef.detect(repoDir) → ComponentDraft[]` is a **synchronous, pure function from the filesystem to command strings**. It stats files, reads a little config, and emits `{build, test, check}` plus a `prepare`. `resolveCommands` then fills any unfilled slot with `{unavailable: true}` and warns.
+`LangDef.detect(repoDir) → ComponentDraft[]` (`lang/types.ts:7-10`) is synchronous and filesystem-only. `resolveCommands` then fills unfilled `MUST_HAVE` slots with `{unavailable:true}` and warns.
 
-Nothing anywhere executes a candidate command, inspects the environment, or checks that what it emitted is worth running.
+Setup is **not** entirely side-effect free — `probeCommandExists` spawns `command -v` (`discover-schema.ts:68`). The accurate narrow statement: **setup never runs a candidate command to see whether it produces a usable signal.**
 
-### 2.1 Verified defects in the two target detectors
+### 2.1 Verified defects
 
-| # | Defect | Evidence |
-|---|---|---|
-| D1 | Python emits **only** `test`. Never `build`, never `check`. | `python.ts` — `commands: { test: pythonTestCommand(repoDir) }` |
-| D2 | `pythonTestCommand` returns a bare runner from four `existsSync` calls; never reads pytest config (`testpaths`, `addopts`), `setup.cfg [tool:pytest]`, or `tox.ini [pytest]`. Unaware of uv, hatch, pdm. | `python.ts:6-20` |
-| D3 | `pythonPrepare` emits `pip install -e .` with **no extras**, so a project needing `.[test]` installs without its test dependencies. | `python.ts:22-33` |
-| D4 | **Node detects the package manager and then ignores it.** `nodePrepare` resolves pnpm/yarn/npm from lockfiles; the commands hardcode `npm run`. | `node.ts:8-12` vs `:34-36` |
-| D5 | Node reads exactly three hardcoded script names (`build`, `test`, `check`). No lint, no typecheck, no `test:unit`. | `node.ts:33-36` |
-| D6 | Node's root `paths` are hardcoded `["src/**","static/**","package.json"]` — Tauri/SvelteKit shaped. `kind` flips to `sveltekit` on **repo-root** config files even when scoring a nested package. | `node.ts:38-46` |
-| D7 | Workspace members are **not** skipped, despite the comment saying they are. Every `package.json` within depth 3 becomes a component; `uniquifyNames` then papers over the collisions. | `node.ts:18` comment vs `manifests.ts` `findManifests` |
-| D8 | `findManifests` walks to `maxDepth = 3`, silently missing e.g. `apps/web/packages/ui/package.json`. | `manifests.ts:24` |
-| D9 | `testFilePattern` is set only by `php.ts` and `ruby.ts`. **Neither Python nor Node sets it**, so `isTestFile` has no pattern for the two target stacks. | `handlers.ts:1432` |
-| D10 | Provision treats every Python component as never-ready, so `pip install -e .` runs on every provision — including over a prepared conda env that already has the package correctly installed. | `provision.ts:33` |
-| D11 | The environment-reuse probe runs at **verify** time, i.e. *after* provision already reinstalled. The cheap check follows the expensive one. | `reuse.ts` `reuseAwareTestCommand` |
-| D12 | Direct tool invocations (`tsc --noEmit`, `eslint .`) fail `probeCommandExists` because they are devDependencies, not on PATH — so `discover.ts` **rejects** good agent proposals for these gates. | `discover.ts:60` |
+Each verified against `main`. Locations are as-checked; v1's citations drifted by 1–3 lines and are corrected here.
 
-## 3. Decisions taken
+| # | Defect | Where | Layer |
+|---|---|---|---|
+| D1 | Python emits **only** `test`. Never build/lint/typecheck. | `lang/python.ts:93`, `:111` | detector |
+| D2 | `pythonTestCommand` returns a bare runner from four `existsSync` calls. `pyproject.toml` is read only for `/\[tool\.pytest/` presence. No `testpaths`, no `addopts`, no `setup.cfg`, no uv/hatch/pdm. | `lang/python.ts:7-20` | detector |
+| D3 | `pythonPrepare` emits `pip install -e .` with no extras; `[project.optional-dependencies]` is never read. | `lang/python.ts:22-34` | detector |
+| D4 | **Node resolves the package manager then ignores it.** `nodePrepare` reads the lockfiles; commands hardcode `npm run`. | `lang/node.ts:7-12` vs `:32-34` | detector |
+| D5 | Node reads three hardcoded script names. No lint, no typecheck, no `test:unit`. | `lang/node.ts:32-34` | detector |
+| D6 | Node's root `paths` are hardcoded `["src/**","static/**","package.json"]` — Tauri/SvelteKit shaped. | `lang/node.ts:44` | detector |
+| D7 | Workspace members are not skipped despite the comment saying so; `findManifests` has no workspace logic. Cost is duplicate/overlapping components. | `lang/node.ts:18`, `manifests.ts:24-38` | detector |
+| D8 | `findManifests` walks to `maxDepth = 3`, missing e.g. `apps/web/packages/ui/package.json`. | `manifests.ts:24` | detector |
+| D10 | Provision treats every Python component as never-ready, so `pip install -e .` runs on every provision — including over a prepared conda env. | `provision.ts:34` | run path |
+| D11 | The environment-reuse probe runs at **verify** time, after provision already reinstalled. | `reuse.ts`, called only from `handlers.ts:1344`, `:1521`; resolver gates provision first at `resolver.ts:134-142` | run path |
+| D12 | `tsc --noEmit` / `eslint .` fail `probeCommandExists` (devDependencies, not on PATH), so `discover.ts` **rejects** good agent proposals — silently, since neither warning branch fires for a probe-only failure. | `discover.ts:63-77`, `discover-schema.ts:55-68` | discovery |
+| **D13** | **`src/setup/detect.ts` already contains `detectPackageManager` (incl. bun), `KNOWN_SCRIPTS = ["test","build","lint","typecheck"]`, and `detectCommands` emitting `` `${pm} run ${name}` `` — and `probe.ts` imports only `detectChecksSystem`. The better implementation is orphaned; `node.ts` reimplemented a worse one.** | `detect.ts:7-36` vs `probe.ts:6` | detector |
+| **D14** | `frameworkFor` reverse-engineers the framework by regexing the command string and returns `null` for bare `npm test` (and for `pnpm run test:unit`). `null` → M2b records the AC check as coarse **`error`**. Node AC checks are broken today for the common case. | `check-selector.ts:50-62` | verify |
+| **D15** | `nodePrepare` has **no `bun.lock` branch at all**, and `NODE_INSTALL_MARKERS` has no bun entry. Bun is unhandled end-to-end in prepare. | `lang/node.ts:7-12`, `provision.ts:18` | run path |
 
-| # | Decision | Rationale |
-|---|---|---|
-| DEC-1 | **Setup may execute commands** to prove what it detected. | Static rules alone produce more confident wrongness; the astropy command was unvalidated, not unrecognised. |
-| DEC-2 | Setup proves **runnable and scoped**; verify proves **green**. | Green is volatile and expensive and already belongs to the differential design. Runnable is stable and cheap. |
-| DEC-3 | Gate applicability is **per stack**, with three states. | `MUST_HAVE` applying uniformly is what produced the meaningless "python: no build command". |
-| DEC-4 | Gates are explicit: `build`, `test`, `lint`, `typecheck`. | The vague `check` conflated two gates that behave differently. `commands` is already an open record, so the schema permits it. |
-| DEC-5 | **Setup provisions and proves**, and `prepare` MUST be idempotent. A `--no-prove` flag skips the provision-and-prove pass for a fast read-only probe; proving is the DEFAULT so the weak path is never the one most runs get. | Matches how Cursor and Factory solve this (§4). The alternative leaves the unproven path as the default. |
-| DEC-6 | **Discovery precedes build.** A prepared environment that provably tests the worktree source is reused; `prepare` becomes a no-op. | The astropy image ships a prepared conda env. Today provision reinstalls over it (D10). |
+**Withdrawn from v1.** *D6's second half* — "`kind` flips to `sveltekit` even for nested packages" — is **false**: `node.ts:41` reads `kind: isRoot && fe ? …`, and the `isRoot &&` guard means a nested package never inherits it. *D9* — "`testFilePattern` unset means `isTestFile` has no pattern for these stacks" — is **false**: `test-file.ts:4-8`'s `DEFAULT_TEST_FILE` already covers `tests?/`, `specs?/`, `__tests__/`, `.test.`/`.spec.` (with `[cm]?[jt]sx?`), `_test.<ext>` and `test_*`.
 
-## 4. Prior art — how Cursor and Factory solve the same problem
+## 3. What the review changed
 
-Both make the **prepared environment a durable artifact built once and reused**, rather than reconstructing it per run.
+### 3.1 DEC-5 is withdrawn — setup stays read-only
 
-- **Cursor** (`.cursor/environment.json`): agent-led setup, a saved **snapshot**, or a Dockerfile. The `install` script runs when a *Build* is created — ahead of time, in the background — not at each agent start, and it **must be idempotent** because it runs for every build and may run on already-prepared disk.
-- **Factory** (Droid Computers): persistent environments that retain filesystem, configuration, credentials, local services and process state between sessions, so a droid resumes rather than reconstructs.
+v1 decided setup would run `prepare` and prove every gate. That is **unsafe** and **incorrect**, on two independent grounds.
 
-**What styre can take.** The true snapshot — a built environment reused across runs and machines — is already assigned to the commercial plane by the differential doc's §10 ("managed environment provisioning"). OSS `styre run` is one-shot with ephemeral state and structurally cannot own it. What OSS *can* take is the **pay-once, idempotent-install** half, plus the observation that **styre's container mode already has the snapshot**: when running in-place inside a SWE-bench image, the image *is* the prepared environment. That is exactly the case where provisioning and proving at setup costs almost nothing — and exactly the case D10 currently breaks.
+**Unsafe.** `styre setup` operates on the real repo, and `setup.ts:159` prints to the operator, verbatim: `prepare: ${c.prepare} (stored, not run)`. `probe.ts:16` documents it as "Pure of side effects except reading the repo." Executing `pip install -e .` (which runs arbitrary `setup.py`), `npm ci` (which **deletes** `node_modules`), or `uv sync` against the operator's ambient interpreter breaks that contract. The ordering cannot be repaired: the approval gate (`setup.ts:149-169`) shows the command list and requires `y`, but proving requires `prepare` to have already run — *before* the operator approved anything. And that gate is `if (interactive)`, so the bench path (`--trust-agent-commands`, headless, explicit repo argument) skips both it and the `.styre-disposable` marker check. The codebase built `assertInPlaceSafe` for exactly this hazard; v1 routed around it.
 
-## 5. The shared spine
+**Incorrect.** `probe.ts:22` sets `targetRepo = resolve(repoDir)`. Verify runs at `join(worktreePath, c.dir ?? "")` — a different path in the default (non-`--in-place`) mode. `pythonEnvReady`'s correctness property is that `import <name>` resolves **under `absCwd`**; a proof taken against `targetRepo` is *provably false* in the worktree. A `proven` flag recorded at setup is meaningless for the majority run mode, with no staleness model to catch it.
 
-### 5.1 Gate applicability — three states, not two
+The Cursor/Factory research that motivated DEC-5 stands (§4). Its conclusion was transplanted into the wrong layer: it holds in `--in-place` mode, where `targetRepo` *is* the worktree — which is the case that was in mind. Placing the work in `provision` covers both modes.
 
-Two vocabularies are in play and both contain `n/a`; they are not the same field. **Applicability** is a property of the *stack* (`n/a` / `applicable` / `required`, declared by `LangDef.gates`). **State** is the per-component outcome below. A gate whose applicability is `n/a` has state `n/a`; every other applicability resolves to one of the remaining states.
+**Consequences.** No `--no-prove` flag. **No `schemaVersion` bump** — proof results are per-run and belong in a signal, not `profile.json`. v1's claim that this touched both `schema.sql` copies was a category error: `schemaVersion` is a `profile.json` field (`profile.ts:116`) with **zero** occurrences in either `schema.sql`.
+
+### 3.2 Other corrections carried in
+
+- **`testpaths` is demoted from centrepiece.** pytest already reads `testpaths` from rootdir config when invoked with no path arguments, so the existing `python -m pytest` fallback honours it; transcribing it into the command string buys nothing functionally. And astropy's own `[tool:pytest]` declares `testpaths = "astropy" "docs"` — the same two paths as the failing command — so the agent most likely transcribed them and the "fix" would regenerate the broken command. **Requires verification against the real astropy tree before any implementation relies on it** (§9.1).
+- **"Scoped" is struck from DEC-2.** Nothing consumes a collected count, and §7 rules out narrowing. Setup/proof establishes **runnable and non-empty**, not scoped.
+- **The proposed `testFilePattern` additions are dropped.** They would be regressions: the proposed Node regex drops `test/` directories and `.mjs`/`.cjs`/`.mts`/`.cts`, all covered by the default. `php.ts` and `ruby.ts` narrow deliberately so A1 fails loud; adding patterns *tightens* A1 (`handlers.ts:1430-1437` → `behavioral-no-test` → loopback), which v1 presented as gap-filling.
+- **§7.1's "only regression signal" is withdrawn** — this design adds a typecheck gate, which the differential doc explicitly nominates as "an optional typecheck as a whole-tree net for untested code."
+
+## 4. Prior art — and what OSS can take
+
+**Cursor** (`.cursor/environment.json`) runs `install` when a *Build* is created, ahead of agent start, and requires it to be **idempotent** because it runs for every build on possibly-prepared disk. **Factory** (Droid Computers) keeps whole environments persistent between sessions.
+
+Both make the prepared environment a durable artifact built once. The true snapshot is assigned to the commercial plane by the differential doc's §10 ("managed environment provisioning"), and OSS `styre run` is one-shot with ephemeral state.
+
+What OSS can take is the **idempotent, discover-before-rebuild** half — and the observation that **container mode already has the snapshot**: running in-place inside a SWE-bench image, the image *is* the prepared environment. That is exactly the case D10 currently breaks by reinstalling over it.
+
+## 5. Four independent pieces
+
+Each ships and reverts alone. They are ordered by value-per-risk, not by dependency.
+
+### P1 — Detector improvements (pure, no execution, no schema change)
+
+Fixes D1–D8, D13, D15. Pure functions over the filesystem, covered by the existing fixture-tree unit tests. Zero run-path blast radius. **Most of this document's value lives here**, and it is the piece that can land this week. Detail in §6.
+
+### P2 — Command validation at discovery
+
+Fixes D12 and **§1 defect 3 — astropy's actual cause**. When `discover.ts` is about to accept an agent-proposed command, run a bounded probe and reject it if it collects nothing. Two sub-parts:
+
+- **Fix the probe first.** `probeCommandExists` special-cases `^npm run` (`discover-schema.ts:57`) and otherwise falls back to `command -v <first token>`. So `pnpm run lint` is accepted whenever `pnpm` exists, script or not; and `tsc --noEmit` is rejected though it is a valid devDependency invocation. The probe must understand every resolved manager's script list and `node_modules/.bin`.
+- **Then add the emptiness gate.** Reject on "collects zero", never on "exits non-zero" — a command that runs and fails is exactly darkreader, and judging that is the differential design's job (§7).
+
+Self-contained, roughly the size the review estimated, and the highest-value single change here.
+
+### P3 — Discovery before build, inside `provision`
+
+Fixes D10 and D11 together. `planProvision` consults the environment probe **before** emitting an install action; a component whose environment provably tests the worktree source is skipped rather than reinstalled.
+
+Path-correct by construction (it runs in the worktree the run will use), never stale (per run), no schema bump, and mutates nothing the operator owns. This is where v1's DEC-6 belongs.
+
+### P4 — Proof as a provision postcondition
+
+`provision` already runs a post-install source check (`SOURCE_CHECK_SCRIPT`). Extend it from "the import resolves" to "each declared gate starts and enumerates work." Per run, in the worktree, after install — the ordering already works and the failure surface already exists.
+
+**The result is a signal, not a profile field.** That removes the staleness problem, the schema bump, and the two-writers hazard of v1's `proofs` record.
+
+### P5 (separate, all-languages) — the gate contract
+
+Three-state applicability (§5.5) and the `lint`/`typecheck` gate names are **not** Python/Node-scoped: `LangDef.gates` is a required field on all eight registry entries, and the consumers are global. Argued on its own merits, in its own document, because its blast radius is unrelated to P1–P4:
+
+- `run.ts:56` `assertResolved` **throws** when a `MUST_HAVE` key is `undefined`. So `n/a` **cannot** mean "absent key" — every Python profile would fail at run start. It must mean a distinct recorded value, or the model is warning-suppression only.
+- `resolve-commands.ts:4` and `run.ts:50` both hardcode `["build","test","check"]`.
+- `preflight.ts` iterates `["build","test","check"]`, so ENG-332's exit-69 toolchain preflight is blind to new gates.
+- `handlers.ts:1353-1370` (`verify:check`) **throws** on a check-type that is absent and not `{unavailable:true}` — and `prompts/design-extract.md:29` already offers `["lint"]` as an example check-type, so that throw is already armed.
+- `{unavailable:true}` drives a PR-visible `untested-merge-risk` signal (`handlers.ts:1376-1424`). A gate that is "silent `n/a`" in setup must not still surface at merge.
+
+### 5.5 The three-state model (P5's core)
 
 | State | Meaning | Surfaced as |
 |---|---|---|
-| `n/a` | The stack has no such concept (`build` for a pure Python library). | Silent. Never mentioned. |
-| `absent` | Applicable, this repo has not configured it (no linter). | Informational, and actionable — it says what adding one would buy. |
-| `declared` → `proven` / `unprovable` | Detected. Proof then resolves it. | `unprovable` is loud, with the reason. |
+| `n/a` | The stack has no such concept (`build` for a pure Python library). | Silent. |
+| `absent` | Applicable, this repo has not configured it. | Informational and actionable. |
+| `declared` | Detected. Proof (P4) resolves it at run time. | — |
 
-**A component with zero proven gates is a separate, louder finding** than any individual missing gate: it means styre cannot verify that component at all. Today that is indistinguishable from the noise.
+**Applicability** is a property of the stack (`n/a` / `applicable` / `required`). **State** is per component. They are different fields that share the token `n/a`.
 
 | | build | test | lint | typecheck |
 |---|---|---|---|---|
 | **python** | `n/a` | required | applicable | applicable |
 | **node** | applicable | required | applicable | applicable |
 
-Python's build analogue is `prepare` plus provision's existing import check; a separate build gate would be inventing work.
+A component with **zero** usable gates is a distinct, louder finding than any individual missing gate. **It must gate something** — a run-start refusal or a distinct exit code — or the model changes only the wording of text operators already skim.
 
-### 5.2 The ladder: declared → runnable → green
-
-- **declared** (setup, static): config declares the gate, the tool resolves, the command is shell-safe and scoped to the component.
-- **runnable** (setup, post-`prepare`): the command starts and finds work, with a count.
-- **green** (verify, per run): owned by the differential design. **Not in this scope.**
-
-### 5.3 Contract change
-
-```ts
-export type GateName = "build" | "test" | "lint" | "typecheck";
-export type GateState = "n/a" | "absent" | "declared" | "proven" | "unprovable";
-
-export interface LangDef {
-  kind: string;
-  /** Which gates mean anything for this stack (§5.1). */
-  gates: Record<GateName, "n/a" | "applicable" | "required">;
-  /** Static, filesystem-only. Unchanged in spirit. */
-  detect(repoDir: string): ComponentDraft[];
-  /** Post-prepare. MAY execute. Language-specific because scope is measured
-   *  differently per runner. */
-  prove?(c: Component, absDir: string, run: CmdRunner): Promise<GateProof[]>;
-}
-```
-
-Detection stays pure and unit-testable exactly as today; proof is a separate phase. The two never entangle.
-
-### 5.4 What gets recorded
-
-Additive, not a rewrite. `commands` is unchanged, so `commandFor` and every existing consumer are untouched. Each component gains:
-
-- `proofs: Record<GateName, GateProof>` — `{ state, collected?, durationMs?, provenAt, reason? }`
-- `toolchain` — the resolved package manager / Python environment, so `prepare` and the gate commands **cannot drift apart again** (D4).
-
-`schemaVersion` bumps to 4. Both `schema.sql` copies must move together (`src/db/` is authoritative; `docs/architecture/` is the doc).
-
-### 5.5 Environment discovery precedes environment build
-
-Two questions the current design collapses into one:
-
-1. **Discover** — is there already a prepared environment that provably tests *this worktree's source*? A conda env baked into an image, a `.venv`, an existing editable install. This is a fact about the machine; no manifest declares it.
-2. **Build** — only if discovery fails, resolve the manager and install.
-
-Discovery goes first. On success, `prepare` is a **no-op**, which is simultaneously the D10 correctness fix and the idempotence property DEC-5 requires.
-
-**Discovery and proof are the same operation.** `pythonEnvReady` (`reuse.ts`) already answers both: it proves `import <name>` resolves to a file under the worktree — run from a tempdir *outside* it, so CPython's `sys.path[0]` cannot false-pass a shadowed copy — and that `pytest --collect-only -q` exits 0. That is exactly the `proven` state. So the proof comes free from the probe that decides whether to skip `prepare`. This materially weakens the "proving is expensive" objection.
-
-The work is to **promote `pythonEnvReady` from a verify-time command substitution into the general discovery step**, and to have provision consult it (fixing D10 and D11).
-
-## 6. Per-language design
+## 6. Per-language detail (scope: P1)
 
 ### 6.1 Python
 
-**Environment ladder** (after discovery §5.5 fails):
+**Environment resolution** — drives `prepare` and the command prefix. Rows are additive to the existing tox/nox handling, which stays and is checked first (as today).
 
-| Evidence | Manager | Prepare (idempotent) | Prefix |
+| Evidence | Manager | Prepare | Prefix |
 |---|---|---|---|
+| `tox.ini` / `noxfile.py` | tox / nox | `pip install tox` / `nox` (as today) | — |
 | `uv.lock` | uv | `uv sync --frozen` | `uv run` |
 | `poetry.lock` | poetry | `poetry install --sync` | `poetry run` |
 | `pdm.lock` | pdm | `pdm install --check` | `pdm run` |
-| `environment.yml` | conda | existing reuse path | resolved interpreter |
 | `pyproject.toml` | pip | `pip install -e ".[<extra>]"` | `python -m` |
 | `requirements*.txt` | pip | `pip install -r …` | `python -m` |
 
-`<extra>` is read from `[project.optional-dependencies]`, preferring `test` > `tests` > `dev`. This is D3, and it is the difference between astropy's suite being able to run and not.
+`<extra>` from `[project.optional-dependencies]`, preferring `test` > `tests` > `dev` (D3).
 
-**test** — parse pytest config wherever it lives (`[tool.pytest.ini_options]`, `pytest.ini`, `setup.cfg [tool:pytest]`, `tox.ini [pytest]`) and use `testpaths` to scope the command to the project's **own declaration of its suite**, rather than an agent's improvisation. Fall back to a discovered `tests/`/`test/` directory, then bare `python -m pytest`, then `python -m unittest discover`. Keep `tox`/`nox` detection but mark them slow at proof time — the differential doc records tox rebuilding its environments under the 10-minute verify timeout.
+**test** — parse pytest config (`[tool.pytest.ini_options]`, `pytest.ini`, `setup.cfg [tool:pytest]`, `tox.ini [pytest]`) for **`addopts` and `testpaths` as recorded evidence**, not as a command rewrite (§3.2). Fall back as today.
 
-**lint** — `[tool.ruff]` or `ruff.toml` → `ruff check .`; `.flake8` / `setup.cfg [flake8]` → `flake8`; `[tool.black]` → `black --check .`. A `.pre-commit-config.yaml` is noted but never used as a gate (slow, usually wants network).
+**lint** — `[tool.ruff]` / `ruff.toml` → `ruff check .`; `.flake8` / `setup.cfg [flake8]` → `flake8`; `[tool.black]` → `black --check .`. `.pre-commit-config.yaml` noted, never used as a gate.
 
 **typecheck** — `[tool.mypy]` / `mypy.ini` → `mypy .`; `[tool.pyright]` / `pyrightconfig.json` → `pyright`.
 
-**testFilePattern** — `(^|/)(tests?/.*|test_.*|.*_test)\.py$` (D9).
-
 ### 6.2 Node
 
-**Package manager** — resolution order, first match wins. `packageManager` (corepack) is first because it is the project's own declaration and survives a gitignored lockfile.
+**Start from `detect.ts`, not from scratch (D13).** `detectPackageManager` already handles bun/pnpm/yarn/npm and `detectCommands` already emits `` `${pm} run ${name}` `` over `["test","build","lint","typecheck"]`. The work is to **wire the orphan into `runRegistry` and extend it**, and to delete `node.ts`'s worse duplicate — not to write a third implementation.
 
-| Evidence | Manager | Install |
-|---|---|---|
-| `packageManager` field | as declared | per manager |
-| `bun.lock` / `bun.lockb` | bun | `bun install --frozen-lockfile` |
-| `pnpm-lock.yaml` | pnpm | `pnpm install --frozen-lockfile` |
-| `yarn.lock` + `.yarnrc.yml` | yarn berry | `yarn install --immutable` |
-| `yarn.lock` | yarn classic | `yarn install --frozen-lockfile` |
-| `package-lock.json` | npm | `npm ci` |
-| none | npm | `npm install` |
+Extensions needed: the `packageManager` (corepack) field as the first-priority signal; berry vs classic yarn; script preference ladders (`test` > `test:unit`, deliberately **not** `test:ci`, which routinely expects a server); config fallbacks (`vitest.config.*`, jest config, `biome.json`, `eslint.config.*`, `tsconfig.json`).
 
-The resolved manager is recorded on the component (§5.4); `prepare` and every gate command read it from there (D4).
+**Bun requires a marker first (D15).** Adding a `bun install` branch without adding bun's completeness marker to `NODE_INSTALL_MARKERS` makes `isComponentReady` return false forever — a **deterministic** reinstall-every-provision regression, not a risk. Marker before branch.
 
-**Script ladders** with config fallbacks:
+**Record `framework` alongside the manager (D14).** `frameworkFor` returning `null` for bare `npm test` makes every such Node AC check coarse `error`. Detection knows the framework when it resolved it from `vitest.config.*` or a script body; P4's proof knows it for certain because it invoked the list mode. Persisting it turns `frameworkFor` from a guess into a lookup. **This is the single largest Node correctness win available and v1 missed it entirely.**
 
-- **test** — `test` > `test:unit`. Deliberately **not** `test:ci` (routinely expects a server or CI env) and not `test:e2e`. Else `vitest.config.*` → `vitest run`; jest config → `jest`.
-- **build** — `build`, else `absent`.
-- **lint** — `lint` > `lint:js`, else `biome.json` → `biome check .`, else `eslint.config.*` / `.eslintrc*` → `eslint .`.
-- **typecheck** — `typecheck` > `type-check` > `tsc`, else `tsconfig.json` → `tsc --noEmit`.
+**Paths** — derive from the package's own `files` field, else the source directories present (D6). The `sveltekit` `kind` behaviour is correct as-is and is not changed.
 
-**Tool invocation must go through the manager's exec** (`pnpm exec tsc --noEmit`), because these are devDependencies. This also fixes D12: bare `tsc --noEmit` fails `probeCommandExists`, so `discover.ts` currently rejects correct agent proposals for exactly the fast gates this design is trying to add.
-
-**Workspaces** — detect the root first (`pnpm-workspace.yaml`, package.json `workspaces`, `lerna.json` / `nx.json` / `turbo.json`). Members are the real components, each with its own `dir` and gates; the root is a component only if it has gates of its own rather than pure aggregation. `safeMember` already exists to validate the globs and is currently unused by Node. Resolving declared member globs also beats the blind walk, fixing D8.
-
-**Paths and kind** — derive `paths` from the package's own `files` field if present, else the source directories that exist; decide `kind` from the component's own directory, not the repo root (D6).
-
-**testFilePattern** — `(^|/)(__tests__/.*|.*\.(test|spec))\.(t|j)sx?$` (D9).
-
-**Proof — an honest asymmetry.** Python gets a clean probe from `pytest --collect-only -q`. Node has **no universal equivalent**: Jest has `--listTests`, Vitest has a list mode, and the exact current flags must be verified during implementation rather than assumed. Where a list mode exists, use it. Where it does not, Node's test proof degrades to "the manager resolves the script and a bounded smoke start succeeds" — a weaker guarantee that MUST be recorded as weaker, never presented as equivalent. Lint and typecheck are fast enough that proving them *is* running them.
+**Workspaces** — detect the root (`pnpm-workspace.yaml`, `workspaces`, `lerna.json` / `nx.json` / `turbo.json`); members become the components. Note that `safeMember` only *validates* — it rejects a member whose first segment is a glob. Expanding `packages/*` into a component list needs real filesystem expansion that **does not exist** in this repo today (rust's `collapseWorkspaceGlobs` collapses, it does not enumerate). That expansion is part of P1's cost.
 
 ## 7. Relationship to the differential design
 
-### 7.1 What this design cannot deliver
+`docs/brainstorms/2026-07-05-verification-as-differential-inference-design.md` owns baselining, attributed verdicts, and greenness. This design owns detection, discovery and runnability.
 
-**Regression safety.** An AC check asks "did the intended behavior arrive?" — the red-first probe proves the test fails before the change, the post-implement rerun proves it flips. That is a *specification* check. A regression check asks "did I break something I was not supposed to touch?", which requires running tests the change did not target and comparing against a prior state.
+**That doc is dated pre-M4 and current code has overtaken it in three places:** its §7.6 reconcile routing no longer exists (`verify:integration` never throws on the suite verdict, `handlers.ts:1554`); its §7.2 deliver-with-caveat is shipped (`verify-report.ts:161`); its §13(2) test-pinning is shipped at AC-check granularity as `ac-check-red-first`. **The composition claim here is against the residual — gate-granular baselining — not the whole document.**
 
-So **the broad test gate is the only regression signal styre has**, and it is currently uninterpretable: there is an "after" run and no "before" run, so a red result cannot distinguish "I broke it" from "it was already broken." That is precisely why `verify:integration` is demoted to advisory (`handlers.ts:1556` — "record the (possibly-fail) result and RETURN normally").
+**This design takes over that doc's §11 env-probe follow-on** ("per-language source-under-test predicates — Python/Node first") via P3. That is a reassignment and it should be named: it **discharges the differential doc's §7.1 shipping blocker**, which is the strongest argument for doing this work first.
 
-This also retroactively justifies "over-verify, never under-verify": with no test-impact analysis and no baseline, run-all is the only safe regression policy available. **Narrowing the broad gate is out of scope and would be a reversal, not a fix.**
+**Correction to v1's sequencing argument.** v1 claimed baselining a red-at-base gate "buys nothing." The differential doc says the opposite: red-on-base alone is "structural and sufficient" to demote the gate and stop looping the agent — its largest claimed win. The correct argument is that a **green** baseline is information-rich where a red one is "epistemically degraded," and that P1–P3 move astropy from the degraded branch to the rich one.
 
-No amount of detector work makes that gate interpretable. Setup can make it **affordable** and **capable of being green**; making it **interpretable** is the differential design's job and is blocked on its sign-off.
+**Unadjudicated between the two docs, and blocking:** `reuseAwareTestCommand` returns a bare `${interp} -m pytest`, discarding whatever setup detected — on exactly the ready-conda path P3 targets. The differential doc's §7.1 *wants* that substitution; this design wants the detected command preserved. **Resolution proposed:** the reuse path substitutes the **interpreter/prefix only**, never the command. This must be agreed before P3 ships.
 
-### 7.2 Why setup should nonetheless go first
+### 7.1 What none of this delivers
 
-Baselining a gate that is red at base because test extras were never installed buys nothing: you record "red at base," the verdict degrades to caveat, and nothing improves. **Fixing the environment is what makes baselining productive.** astropy is the exact case — baseline it today and you learn the suite is red; fix extras and `testpaths` first and the baseline becomes a real reference frame.
+An AC check asks "did the intended behavior arrive?" — a specification check, authored independently of the fix (§11). A regression check asks "did I break something I was not supposed to touch?" Those are different questions.
 
-This is also why this design **supersedes ENG-392's proposed mechanism.** ENG-392 proposed baselining at setup. Baselining belongs to the differential design at verify; setup's contribution is proving *runnable and scoped* (DEC-2). ENG-392 should be re-scoped to this design or closed in its favour.
+styre has **two** regression instruments: the broad gate (behavioral, currently uninterpretable without a baseline) and a typecheck (type-level cross-breakage only — narrower, real, and the thing this design adds). Neither is made *interpretable* by detector work. `verify:integration` sweeps `["build","test"]` plus `repoCommands` — builds are already inside it, which is why darkreader's packaging build blocked.
+
+Run-all remains the only safe regression policy **until** the differential design supplies the false-block defence. Narrowing the broad gate is out of scope; the differential doc treats "over-verify, never under-verify" as half a rule awaiting its mirror, not as vindicated.
 
 ## 8. Non-goals
 
-- Narrowing the broad test gate, or any form of test-impact analysis. The differential doc calls method-level test isolation "the biggest gap" and the hardest-deferred rung.
-- Baseline characterization, attributed verdicts, or anything that changes what a verify verdict *means*. That is the differential design, with M-D blast radius.
-- Any language other than Python and Node.
-- A persistent environment snapshot reused across runs and machines — assigned to the commercial plane by the differential doc's §10.
-- Changing `--trust-agent-commands`. Headless autonomy needs it; this design makes what it admits provable instead of taking it away.
+- Narrowing the broad test gate, or any test-impact analysis.
+- Baseline characterization or attributed verdicts.
+- Any language other than Python and Node, except P5 which is structurally all-languages.
+- A persistent environment snapshot across runs/machines (commercial plane).
+- Changing `--trust-agent-commands`. P2 makes what it admits provable instead of removing it.
+- **Packaging-vs-compile build discrimination.** The differential doc's §13(1) says styre "cannot yet tell them apart" and that gating on a packaging build was self-inflicted in darkreader. This design rebuilds the detector and does **not** teach it the distinction. Explicitly deferred, filed separately, and named here so the omission is not silent.
 
-## 9. Open items and risks
+## 9. Open risks
 
-1. **★ Node's proof is weaker than Python's** (§6.2). The per-framework list-mode flags must be verified against current Jest/Vitest during implementation, not assumed. Where no list mode exists the guarantee is genuinely weaker and must be recorded as such.
-2. **★ Setup becomes stateful and slow in the cold-worktree case.** Discovery makes the container case nearly free (§4), but a cold developer machine pays the install once. A `--no-prove` escape exists, but the default path is the slow one — that is deliberate, and it should be measured on a real fixture before it calcifies.
-3. **Idempotence is asserted, not enforced.** `npm ci` deletes `node_modules` by design; `isComponentReady`'s marker check guards re-running it, but bun's completeness marker is unverified and must be established during implementation.
-4. **`schemaVersion` 4 touches both `schema.sql` copies** and every profile in the wild. Migration behaviour for schemaVersion-3 profiles must be decided: regenerate, or lazily upgrade.
-5. **The three-state model changes warning output**, which operators and the bench's `probe` taxonomy both key on. `collect.ts`'s `isProbeProfile` reads `components[0].commands.test` — it will need to read `proofs` instead.
-6. **Unverified assumption:** that `testpaths` is present and correct in the repos we care about. astropy has one; this should be spot-checked across a handful of SWE-bench Python instances before relying on it as the primary scoping mechanism.
+1. **★ The astropy `testpaths` hypothesis is unverified.** §3.2's claim that astropy declares `testpaths = "astropy" "docs"` comes from review, not from inspecting the tree. If false, `testpaths` may be worth more than §3.2 allows. Verify before P1 relies on it either way.
+2. **★ The env probe's false-positive blast radius widens under P3.** The differential doc's §9.6 calls mistaking a shadowing copy for a ready env "the highest correctness risk of the reuse path." Today a false positive costs one substituted pytest invocation; under P3 it **skips `prepare` entirely**. Inherited, worsened, and mitigated only by the tempdir-outside-the-worktree technique already in `reuse.ts`.
+3. **★ `pythonEnvReady` is all-or-nothing and is built on a known-failing check.** One uncollectable module → `false` → full reinstall, i.e. the D10 breakage P3 exists to fix. And its source-check script is what `assertInPlaceIdentity` runs, which this project's own record shows has an **open, unresolved astropy failure**. P3 makes a known-broken probe load-bearing; that failure should be resolved first or P3 gated behind it.
+4. **★ Baseline cost scales with gate count.** The differential doc's §9.2 prices baselining per gate. P5 raises gates from three to four with `lint` and `typecheck` newly applicable for both stacks. Neither document computes the product.
+5. **P1 changes the bench's denominator.** `collect.ts:171`'s `isProbeProfile` reads `components[0].commands.test`, and `deriveTaxonomy` checks `probe` before `loop-exhausted` deliberately. Making Python always emit a runnable test command empties the `probe` bucket and shifts those runs to `loop-exhausted` — **post-change sweeps are not comparable to pre-change ones**, for reasons unrelated to the loop.
+6. **Adding gate commands widens the agent's shell surface.** `realRunnerCommands` feeds `allowlistFor` as `Bash(<cmd>:*)` prefix rules (`handlers.ts:582`, `:988`). Small, but it is a capability-isolation change.
+7. **Seam sequencing.** P5's gate vocabulary and the differential design's verdict-shape change are two independent breaks of the open-core contracts, currently unordered and mutually unaware.
+8. **No lock, no reaping, no network budget.** `styre run` takes a run lock; setup takes none. Nothing reaps a setup-created `.venv`. P2's probe gains a network dependency with no timeout or failure taxonomy, and it is undesigned whether `SECURITY.md`'s credential stripping applies to it. Materially reduced by §3.1 (setup no longer installs), but not zero.
 
 ## 10. Testing
 
-- **Detection** stays pure, so the existing fixture-tree unit tests extend directly: one fixture per manager, per script ladder rung, per workspace layout.
-- **Proof** is tested against a stubbed `CmdRunner` — no real installs in the unit suite.
-- **Discovery** needs a real integration test, because its correctness property (source-under-test, not a shadowing copy) is precisely what a stub cannot exercise. `pythonEnvReady`'s existing tempdir-outside-the-worktree technique is the pattern.
-- **The real test is the bench.** astropy should acquire a `testpaths`-scoped test command with extras installed, plus lint/typecheck gates if the repo configures them; darkreader should acquire the correct package manager. Both are directly observable in `profile.json`.
+- **P1** extends the existing fixture-tree unit tests directly — one fixture per manager, per ladder rung, per workspace layout. Pure, so no integration cost.
+- **P2** is testable with a stubbed runner for the accept/reject decision, plus one real probe test per manager.
+- **P3** needs a real integration test: its correctness property (source-under-test, not a shadowing copy) is precisely what a stub cannot exercise. `pythonEnvReady`'s tempdir-outside-the-worktree technique is the pattern.
+- **P4** asserts on the emitted signal, not on a profile field.
+- **The bench is the acceptance test, with risk 5's caveat** — astropy should acquire lint/typecheck gates if configured and stop reinstalling over its conda env; darkreader should acquire the correct manager and a resolvable framework.
 
 ## 11. Corrections recorded
 
-Two claims held earlier in this design conversation were wrong and are corrected here so they do not propagate:
+Claims made during this design's development that were wrong, recorded so they do not propagate:
 
-- **"AC checks answer *did my change break something*."** They do not. They are specification checks (§7.1).
-- **"The AC test is self-authored by the implement agent."** False against current code. `checks:dispatch` (`handlers.ts:547`) is a separate agent dispatch that authors the checks after design and before implement; `implement:dispatch` (`:969`) never touches `ac_check`. There is genuine author/implementer independence. The styre-bench strategy doc's §1 still carries the wrong claim and a stale citation — filed as ENG-394.
+- **"AC checks answer *did my change break something*."** They do not — they are specification checks (§7.1).
+- **"The AC test is self-authored by the implement agent."** False. `checks:dispatch` (`handlers.ts:547`) is a separate agent dispatch authoring the checks after design and before implement; `implement:dispatch` (`:969`) **reads** `ac_check` at `:1002` for prompt context but never authors or modifies one. The styre-bench strategy doc still carries the wrong claim — ENG-394.
+- **"Setup should provision and prove" (v1 DEC-5).** Withdrawn — unsafe and path-incorrect (§3.1).
+- **"`schemaVersion` bump touches both `schema.sql` copies."** False; `schemaVersion` is a `profile.json` field with no SQLite presence. No bump is needed at all now.
+- **"`testFilePattern` is unset, so `isTestFile` has no pattern for these stacks."** False; `DEFAULT_TEST_FILE` covers both.
+- **"`kind` flips to `sveltekit` for nested packages."** False; guarded by `isRoot &&`.
