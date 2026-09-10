@@ -470,8 +470,18 @@ test("behavioral unit: a test file in the diff passes the test check", async () 
   await advanceOneStep(db, ticketId, registry); // completeness:wu1 (declared=∅ → no throw)
   await advanceOneStep(db, ticketId, registry); // verify:check test → pass (test file present)
   const sig = listByUnit(db, unit.id).find((s) => s.signal_type === "test");
+  // ENG-402: the binding proof must record its outcome on EVERY path, including when it cannot be
+  // attempted. Recording only failures made a successful proof indistinguishable from the feature
+  // never running — which is what happened on ENG-405, where it could not be shown to have
+  // executed at all. Here `test: "true"` names no framework, so the proof is not attempted, and
+  // that fact itself must be on the record.
+  const binding = listByUnit(db, unit.id).find((s) => s.signal_type === "delivered-test-binding");
   db.close();
   expect(sig?.result).toBe("pass");
+  expect(binding).toBeDefined();
+  const bd = JSON.parse(binding?.detail_json ?? "{}");
+  expect(bd.reason).toBe("binding-proof-not-attempted");
+  expect(bd.unproven).toContain("feature.test.ts");
 });
 
 test("scope_diff records an advisory fail for out-of-scope files but does NOT fail the step", async () => {
