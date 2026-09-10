@@ -14,7 +14,10 @@ with `linear: {{ident}}` frontmatter. For each work unit, give a short labelled 
 extract step can read it cleanly — keep the surrounding reasoning as prose:
 - **kind** — the work type (prefer a detected stack below when the unit is stack-specific)
 - **files** — the files it will touch
-- **behavioral** — yes/no; if yes, how it is tested
+- **behavioral** — yes/no; if yes, how it is tested. A behavioral unit MUST include its own test
+  in its **files** list. Do not split a change and the test that proves it across two units: each
+  unit is verified on its own changed files, so a fix unit whose test lives elsewhere cannot pass
+  and will be reported to the reviewer as untested.
 - **verify** — the ground-truth check-types that gate it
 - **depends on** — earlier work units it needs
 

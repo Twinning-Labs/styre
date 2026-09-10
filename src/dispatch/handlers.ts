@@ -50,6 +50,7 @@ import { runCommand } from "../util/run-command.ts";
 import { nowUtc } from "../util/time.ts";
 import { type AdjClass, ChecksClassifyOutputSchema } from "./adjudicate-schema.ts";
 import { ChecksArbitrateOutputSchema } from "./arbitrate-schema.ts";
+import { preImplementBaselineSha, preexistingFrom, runAtBaseline } from "./baseline-rerun.ts";
 import { carryVerifiedVerdictForward } from "./carry-forward.ts";
 import { checkIntegrityViolations } from "./check-integrity.ts";
 import { resolveAuthoredTestPath } from "./check-path.ts";
@@ -1561,13 +1562,37 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     // never throw on the suite verdict. Coupled with the resolver's integration gate flip to
     // ranShasFor (below) in this SAME commit — an advisory fail with no pass at HEAD would otherwise
     // re-emit this step forever against the journal replay (MAX_TRANSITIONS deadlock).
+    // ENG-403: an advisory failure is only actionable if the reviewer can tell a regression from
+    // an already-broken repo. Re-run the FIRST FAILING job at the pre-implement baseline and
+    // record the comparison. Only on failure, so a green advisory costs nothing.
+    let preexisting: boolean | undefined;
+    if (result !== "pass") {
+      const failed = ran.find((j) => j.exitCode !== 0 || j.timedOut);
+      const job = failed ? jobs.find((j) => j.label === failed.label) : undefined;
+      const baselineSha = preImplementBaselineSha(ctx.db, ctx.ticket.id);
+      if (job && baselineSha) {
+        preexisting = preexistingFrom(
+          await runAtBaseline({
+            repoPath,
+            baselineSha,
+            command: job.command,
+            dir: job.dir,
+            timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
+          }),
+        );
+      }
+    }
     insertSignal(ctx.db, {
       ticketId: ctx.ticket.id,
       signalType: "integration",
       result,
       command: lastCommand,
       branchHeadSha,
-      detail: { ran, advisory: true },
+      detail: {
+        ran,
+        advisory: true,
+        ...(preexisting !== undefined ? { preexisting } : {}),
+      },
     });
     return { integration: result };
   });

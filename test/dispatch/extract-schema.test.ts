@@ -14,7 +14,7 @@ const unit = (over: Record<string, unknown> = {}) => ({
   description: "d",
   behavioral: true,
   test_plan: "test it",
-  files_to_touch: ["src/a.ts"],
+  files_to_touch: ["src/a.ts", "test/a.test.ts"],
   verify_check_types: ["test"],
   depends_on: [],
   ...over,
@@ -246,4 +246,43 @@ test("migration: a migration unit ordered AFTER a domain unit fails", () => {
     cdotImpact: { data: { applies: true, analysis: "x", schemaChange: true } },
   });
   expect(validateCdotImpact(o, profile).some((e) => e.includes("ordered before"))).toBe(true);
+});
+
+// -- ENG-402: a behavioral unit must carry its own test ------------------------------------
+
+test("a behavioral unit naming no test file is rejected at extraction", () => {
+  // darkreader__darkreader-7241: design split "anchor the delimiter regex" (source only) from
+  // "add regression test" (test only). `verify`'s A1 gate inspects each unit's OWN changed files,
+  // so the fix unit could not pass by construction and the reviewer was told the change was
+  // untested. Failing here gives a fixable message instead.
+  const errors = validateExtraction([
+    unit({ behavioral: true, test_plan: "covered by seq 2", files_to_touch: ["src/parse.ts"] }),
+  ]);
+  expect(errors.join(" ")).toMatch(/behavioral but names no test file/);
+});
+
+test("a behavioral unit that includes its own test is accepted", () => {
+  expect(
+    validateExtraction([
+      unit({
+        behavioral: true,
+        test_plan: "regression test for Base64 padding",
+        files_to_touch: ["src/parse.ts", "tests/parse.tests.ts"],
+      }),
+    ]),
+  ).toEqual([]);
+});
+
+test("a NON-behavioral unit needs no test file", () => {
+  // A docs or config unit must not be forced to invent a test.
+  expect(
+    validateExtraction([
+      unit({
+        behavioral: false,
+        test_plan: null,
+        files_to_touch: ["CHANGELOG.md"],
+        verify_check_types: [],
+      }),
+    ]),
+  ).toEqual([]);
 });

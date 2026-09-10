@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Profile } from "./profile.ts";
+import { isTestFile } from "./test-file.ts";
 
 /** One work-unit as proposed by design:extract (control-loop §3a). The daemon assigns nothing
  *  the agent can fake: completeness is checked deterministically by validateExtraction. */
@@ -126,6 +127,18 @@ export function validateExtraction(units: ExtractedWorkUnit[]): string[] {
       }
       if (!u.verify_check_types.includes("test")) {
         errors.push(`unit seq ${u.seq} is behavioral but verify_check_types lacks "test"`);
+      }
+      // ENG-402: a behavioral unit must carry its OWN test. `verify`'s A1 gate
+      // (handlers.ts, `behavioral-no-test`) inspects only the unit's own changed files, so a plan
+      // that puts the fix in one unit and its test in another produces a unit that cannot pass by
+      // construction. Observed on darkreader__darkreader-7241, where design split "anchor the
+      // delimiter regex" from "add regression test" and the fix unit was flagged untested despite
+      // a correct, tested delivery. Catching it here fails extraction with a fixable message
+      // instead of surfacing a misleading warning in the human's PR.
+      if (!u.files_to_touch.some((f) => isTestFile(f))) {
+        errors.push(
+          `unit seq ${u.seq} is behavioral but names no test file in files_to_touch — a behavioral unit must include its own test (do not split the change and its test across units)`,
+        );
       }
     }
     for (const dep of u.depends_on) {

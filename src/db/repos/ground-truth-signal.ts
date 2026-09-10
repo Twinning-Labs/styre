@@ -276,6 +276,15 @@ export interface AdvisorySweep {
   type: string; // signal_type: 'integration' or a checkType (open vocab)
   result: string; // 'fail' | 'error'
   firstFailingJob?: string;
+  /** ENG-402: the A1 gate overwrites a PASSING suite result to `fail` when a behavioral unit
+   *  shipped no test (`handlers.ts`). Carrying the reason lets the report say what actually
+   *  happened instead of claiming the suite failed, which it did not. */
+  reason?: string;
+  component?: string;
+  changed?: string[];
+  /** ENG-403: whether the same command already failed at the baseline sha. `true` = pre-existing,
+   *  `false` = introduced by this change, `undefined` = not established. */
+  preexisting?: boolean;
 }
 
 /** The demoted advisory suite/integration failures (M4 §8) — newest per `signal_type`, sha-agnostic
@@ -289,6 +298,10 @@ export function advisorySweeps(db: Database, ticketId: number): AdvisorySweep[] 
     const d = JSON.parse(s.detail_json ?? "{}") as {
       advisory?: unknown;
       ran?: Array<{ label: string; exitCode: number | null; timedOut?: boolean }>;
+      reason?: string;
+      component?: string;
+      changed?: string[];
+      preexisting?: boolean;
     };
     if (d.advisory !== true) continue;
     if (s.result === "pass") continue;
@@ -296,7 +309,15 @@ export function advisorySweeps(db: Database, ticketId: number): AdvisorySweep[] 
     if (s.signal_type === "integration" && Array.isArray(d.ran)) {
       firstFailingJob = d.ran.find((j) => j.exitCode !== 0 || j.timedOut)?.label;
     }
-    byType.set(s.signal_type, { type: s.signal_type, result: s.result, firstFailingJob });
+    byType.set(s.signal_type, {
+      type: s.signal_type,
+      result: s.result,
+      firstFailingJob,
+      ...(d.reason !== undefined ? { reason: d.reason } : {}),
+      ...(d.component !== undefined ? { component: d.component } : {}),
+      ...(Array.isArray(d.changed) ? { changed: d.changed } : {}),
+      ...(typeof d.preexisting === "boolean" ? { preexisting: d.preexisting } : {}),
+    });
   }
   return [...byType.values()];
 }
