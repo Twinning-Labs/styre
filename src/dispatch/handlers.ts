@@ -50,7 +50,12 @@ import { runCommand } from "../util/run-command.ts";
 import { nowUtc } from "../util/time.ts";
 import { type AdjClass, ChecksClassifyOutputSchema } from "./adjudicate-schema.ts";
 import { ChecksArbitrateOutputSchema } from "./arbitrate-schema.ts";
-import { preImplementBaselineSha, preexistingFrom, runAtBaseline } from "./baseline-rerun.ts";
+import {
+  deliveredTestBindsAtBaseline,
+  preImplementBaselineSha,
+  preexistingFrom,
+  runAtBaseline,
+} from "./baseline-rerun.ts";
 import { carryVerifiedVerdictForward } from "./carry-forward.ts";
 import { checkIntegrityViolations } from "./check-integrity.ts";
 import { resolveAuthoredTestPath } from "./check-path.ts";
@@ -58,6 +63,7 @@ import {
   type CheckFramework,
   type CoarseResult,
   buildCheckSelector,
+  buildFileSelector,
   collectionErrorExcerpt,
   frameworkFor,
   importErrorImplicatesDiscarded,
@@ -1436,11 +1442,59 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           for (const c of realImpacted) {
             if (commandFor(c, "test") === undefined) continue;
             const inComponent = owned.filter((p) => matchesComponent(c, p));
-            const hasTest = inComponent.some((p) => isTestFile(p, c.testFilePattern));
-            if (!hasTest) {
+            const delivered = inComponent.filter((p) => isTestFile(p, c.testFilePattern));
+            if (delivered.length === 0) {
               result = "fail";
               detail = { reason: "behavioral-no-test", component: c.name, changed: inComponent };
               break;
+            }
+            // ENG-402: a test FILE is not evidence. styre proves its own acceptance checks bind
+            // (`ac-check-red-first`) but applied nothing equivalent to the regression tests it
+            // writes into the repo and hands the reviewer. A test that already passes at the
+            // baseline proves nothing about the change.
+            const fw = frameworkFor(c);
+            const baselineSha = preImplementBaselineSha(ctx.db, ctx.ticket.id);
+            if (fw && baselineSha) {
+              const nonBinding: string[] = [];
+              const unproven: string[] = [];
+              for (const testFile of delivered) {
+                const verdict = await deliveredTestBindsAtBaseline({
+                  repoPath,
+                  baselineSha,
+                  testFile,
+                  sourcePath: join(worktreePath, testFile),
+                  command: `${launcherFor(c, fw)} ${buildFileSelector(fw, testFile)}`,
+                  dir: c.dir,
+                  timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
+                });
+                if (verdict === "does-not-bind") nonBinding.push(testFile);
+                else if (verdict === "unknown") unproven.push(testFile);
+              }
+              if (nonBinding.length > 0) {
+                result = "fail";
+                detail = {
+                  reason: "delivered-test-does-not-bind",
+                  component: c.name,
+                  changed: nonBinding,
+                };
+                break;
+              }
+              if (unproven.length > 0) {
+                // Reported, never treated as proof either way — the same fail-closed rule the
+                // baseline advisory uses.
+                insertSignal(ctx.db, {
+                  ticketId: ctx.ticket.id,
+                  workUnitId: ctx.workUnitId,
+                  signalType: "untested-merge-risk",
+                  result: "fail",
+                  branchHeadSha: latestSha,
+                  detail: {
+                    component: c.name,
+                    reason: "delivered-test-binding-unproven",
+                    files: unproven,
+                  },
+                });
+              }
             }
           }
         }

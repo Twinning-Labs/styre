@@ -84,3 +84,26 @@ describe("ENG-403: an advisory failure must say whether this change caused it", 
     expect(out).not.toContain("introduced");
   });
 });
+
+describe("ENG-402: a delivered test that proves nothing is said so plainly", () => {
+  test("states it already passed at the base commit, and that the suite passed", () => {
+    const out = report([
+      {
+        kind: "delivered-test-does-not-bind",
+        checkType: "test",
+        component: "frontend",
+        changed: ["tests/generators/utils/parse.tests.ts"],
+      },
+    ]);
+    expect(out).toContain("already PASSED at the base commit");
+    expect(out).toContain("does not prove the change does anything");
+    expect(out).toContain("tests/generators/utils/parse.tests.ts");
+    expect(out).not.toContain("test suite did not pass");
+  });
+
+  test("is distinct from the no-test-at-all case", () => {
+    const noTest = report([{ kind: "behavioral-no-test", checkType: "test" }]);
+    expect(noTest).toContain("without a test of its own");
+    expect(noTest).not.toContain("already PASSED at the base commit");
+  });
+});

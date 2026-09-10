@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { listByTicket } from "../db/repos/ground-truth-signal.ts";
 import { runCommand } from "../util/run-command.ts";
 
@@ -90,4 +90,68 @@ export function preexistingFrom(verdict: BaselineVerdict): boolean | undefined {
   if (verdict === "fail") return true;
   if (verdict === "pass") return false;
   return undefined;
+}
+
+export type BindingVerdict = "binds" | "does-not-bind" | "unknown";
+
+/**
+ * Does a DELIVERED test actually bind? (ENG-402)
+ *
+ * WHY THIS EXISTS. styre proves its own acceptance checks bind — `ac-check-red-first` runs them
+ * before the change and requires a failure, and `ac-check-classification` requires that failure to
+ * be an assertion rather than a collection error. It applies neither to the regression tests the
+ * implement stage writes into the repo. On darkreader__darkreader-7241 the AC check carried
+ * `red_first_result: red, red_class: assertion`, while the regression test added to
+ * `parse.tests.ts` — delivered to the reviewer in the PR — had no such evidence at all.
+ *
+ * A test that passes at the baseline proves nothing about the change: it would have passed before
+ * it too. `expect(true).toBe(true)` is the degenerate case, but an over-mocked or wrongly-scoped
+ * test fails the same way and reads as fine.
+ *
+ * The file is overlaid onto the baseline worktree because a NEW test does not exist at that sha —
+ * the same overlay `replay-harness.ts` performs for a re-authored check. For a MODIFIED file this
+ * runs the old tests alongside the new one; that is intended, since the delivered file as a whole
+ * must distinguish the two revisions.
+ */
+export async function deliveredTestBindsAtBaseline(p: {
+  repoPath: string;
+  baselineSha: string;
+  /** Repo-relative path of the delivered test file. */
+  testFile: string;
+  /** Absolute path to read the delivered content from (the implemented worktree). */
+  sourcePath: string;
+  /** `${launcher} ${fileSelector}` — the qualified launcher, so a wrapper's config is kept. */
+  command: string;
+  dir?: string;
+  timeoutMs: number;
+}): Promise<BindingVerdict> {
+  let wt: string;
+  try {
+    wt = mkdtempSync(join(tmpdir(), "styre-baseline-bind-"));
+  } catch {
+    return "unknown";
+  }
+  try {
+    if (!git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath).ok) return "unknown";
+    const target = join(wt, p.testFile);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, readFileSync(p.sourcePath, "utf8"));
+    const run = await runCommand(p.command, {
+      cwd: join(wt, p.dir ?? ""),
+      timeoutMs: p.timeoutMs,
+    });
+    if (run.timedOut || run.exitCode === null) return "unknown";
+    // Non-zero at the baseline = the test distinguishes the two revisions = it binds.
+    // Zero = it passed WITHOUT the change, so it proves nothing.
+    return run.exitCode === 0 ? "does-not-bind" : "binds";
+  } catch {
+    return "unknown";
+  } finally {
+    git(["worktree", "remove", "--force", wt], p.repoPath);
+    try {
+      rmSync(wt, { recursive: true, force: true });
+    } catch {
+      /* worktree remove already cleaned it */
+    }
+  }
 }

@@ -372,3 +372,29 @@ test("an integration sweep with no baseline verdict omits `preexisting` entirely
   const r = buildVerifyReport(db, ticketId);
   expect(r.advisory[0]).not.toHaveProperty("preexisting");
 });
+
+test("a delivered-test-does-not-bind sweep maps to its own advisory kind", () => {
+  const { db, ticketId } = makeTestDb();
+  seedHead(db, ticketId);
+  insertSignal(db, {
+    ticketId,
+    signalType: "test",
+    result: "fail",
+    branchHeadSha: HEAD,
+    detail: {
+      advisory: true,
+      reason: "delivered-test-does-not-bind",
+      component: "frontend",
+      changed: ["tests/generators/utils/parse.tests.ts"],
+    },
+  });
+  const r = buildVerifyReport(db, ticketId);
+  expect(r.advisory).toEqual([
+    {
+      kind: "delivered-test-does-not-bind",
+      checkType: "test",
+      component: "frontend",
+      changed: ["tests/generators/utils/parse.tests.ts"],
+    },
+  ]);
+});

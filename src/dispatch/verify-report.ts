@@ -24,6 +24,14 @@ export type AdvisoryLine =
   /** ENG-402: a behavioral unit shipped no test. The suite itself PASSED — the A1 gate in
    *  `handlers.ts` overwrites the result — so this must never be rendered as a suite failure. */
   | { kind: "behavioral-no-test"; checkType: string; component?: string; changed?: string[] }
+  /** ENG-402: a test WAS delivered, but it already passed at the baseline — so it does not
+   *  distinguish the two revisions and proves nothing about the change. */
+  | {
+      kind: "delivered-test-does-not-bind";
+      checkType: string;
+      component?: string;
+      changed?: string[];
+    }
   | { kind: "integration"; result: string; firstFailingJob?: string; preexisting?: boolean }
   | { kind: "environmental-red"; seq: number };
 
@@ -92,6 +100,13 @@ export function buildVerifyReport(db: Database, ticketId: number): VerifyReport 
         result: s.result,
         firstFailingJob: s.firstFailingJob,
         ...(s.preexisting !== undefined ? { preexisting: s.preexisting } : {}),
+      });
+    } else if (s.reason === "delivered-test-does-not-bind") {
+      advisory.push({
+        kind: "delivered-test-does-not-bind",
+        checkType: s.type,
+        ...(s.component !== undefined ? { component: s.component } : {}),
+        ...(s.changed !== undefined ? { changed: s.changed } : {}),
       });
     } else if (s.reason === "behavioral-no-test") {
       advisory.push({
@@ -185,6 +200,17 @@ function renderAdvisory(a: AdvisoryLine): string {
       return `- ⚠️ The full integration test run ${verb}${job}, and it PASSED at the base commit — this change appears to have introduced it. Not used as a merge gate, so please look before merging.`;
     }
     return `- ⚠️ The full integration test run ${verb}${job}. Whether it was already failing before this change could not be established. This was not used as a merge gate.`;
+  }
+  if (a.kind === "delivered-test-does-not-bind") {
+    const where = a.component ? ` in component \`${a.component}\`` : "";
+    const files =
+      a.changed && a.changed.length > 0
+        ? ` (${a.changed
+            .slice(0, 5)
+            .map((f) => `\`${f}\``)
+            .join(", ")}${a.changed.length > 5 ? ", …" : ""})`
+        : "";
+    return `- ⚠️ A test shipped with this change${where} already PASSED at the base commit${files}, so it does not prove the change does anything. The \`${a.checkType}\` suite itself passed. This was not used as a merge gate.`;
   }
   if (a.kind === "behavioral-no-test") {
     const where = a.component ? ` in component \`${a.component}\`` : "";
