@@ -123,7 +123,7 @@ test("A1 darkreader: a redundant unit whose declared file a sibling touched is c
   const profile = parseProfile({
     slug: "demo",
     targetRepo: repo,
-    components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+    components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
   });
   const registry = buildDispatchRegistry({
     runner,
@@ -163,7 +163,7 @@ test("A2 under-delivered: a unit that touches a file it did NOT declare loops ba
   const profile = parseProfile({
     slug: "demo",
     targetRepo: repo,
-    components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+    components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
   });
   const registry = buildDispatchRegistry({
     runner,
@@ -219,7 +219,7 @@ test("over-delivery uses the unit's OWN diff, not the cumulative (guards the two
   const profile = parseProfile({
     slug: "demo",
     targetRepo: repo,
-    components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+    components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
   });
   const registry = buildDispatchRegistry({
     runner,
@@ -264,7 +264,7 @@ test("A3' honest limit: unrelated work on a sibling-covered declared file is NOT
   const profile = parseProfile({
     slug: "demo",
     targetRepo: repo,
-    components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+    components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
   });
   const registry = buildDispatchRegistry({
     runner,
@@ -302,7 +302,7 @@ test("reconcile exemption: a reconcile unit with no declared files never comes b
   const profile = parseProfile({
     slug: "demo",
     targetRepo: repo,
-    components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+    components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
   });
   const registry = buildDispatchRegistry({
     runner,
@@ -352,7 +352,7 @@ function registryFor(repo: string, runner: FakeAgentRunner) {
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "bun test" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
       runtimeContext: ABSENT_RC,
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-cewt6-")),

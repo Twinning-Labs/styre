@@ -46,7 +46,7 @@ function writeProfile(build: string): string {
       components: [
         {
           name: "api",
-          kind: "custom",
+          kind: "node",
           paths: ["**"],
           commands: { build, test: "sh -c true", check: { unavailable: true } },
         },

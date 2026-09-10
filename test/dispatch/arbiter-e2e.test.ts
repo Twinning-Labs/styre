@@ -83,7 +83,7 @@ const CHECKS_COMPONENT = { name: "checks", kind: "python", paths: ["checks/**"],
 
 /** The "real code" component every implement no-op dispatch writes into — never touches `checks/`. */
 function appComponent(testCmd: string) {
-  return { name: "app", kind: "backend", paths: ["**"], commands: { test: testCmd } };
+  return { name: "app", kind: "node", paths: ["**"], commands: { test: testCmd } };
 }
 
 const ok = {

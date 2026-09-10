@@ -22,7 +22,11 @@ export function stackSummary(components: Component[]): string {
     .map((c) => {
       const test = commandFor(c, "test");
       const paths = c.paths.join(", ");
-      return `- ${c.name} (kind: ${c.kind}) — paths: ${paths}${test ? `; test: ${test}` : ""}`;
+      // `label` is the agent-authored description (ENG-399); surface it alongside the runtime
+      // identity so the descriptive detail the discovery agent produced is not lost now that it
+      // can no longer be smuggled into `kind`.
+      const ident = c.label ? `kind: ${c.kind}; ${c.label}` : `kind: ${c.kind}`;
+      return `- ${c.name} (${ident}) — paths: ${paths}${test ? `; test: ${test}` : ""}`;
     })
     .join("\n");
 }

@@ -90,7 +90,7 @@ test("a stack with a real command runs and passes", async () => {
   const unit = insertWorkUnit(db, {
     ticketId,
     seq: 1,
-    kind: "backend",
+    kind: "node",
     behavioral: 0,
     verifyCheckTypes: ["test"],
   });
@@ -109,7 +109,7 @@ test("a stack with a real command runs and passes", async () => {
     };
   });
   const { profile, worktreeRoot } = rig(repo, {
-    components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+    components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
   });
   const registry = buildDispatchRegistry({
     runner,
@@ -141,7 +141,7 @@ test("behavioral unit in a test-unavailable stack degrades to reviewer-only", as
   const unit = insertWorkUnit(db, {
     ticketId,
     seq: 1,
-    kind: "backend",
+    kind: "node",
     behavioral: 1,
     verifyCheckTypes: ["test"],
   });
@@ -164,7 +164,7 @@ test("behavioral unit in a test-unavailable stack degrades to reviewer-only", as
     components: [
       {
         name: "fe",
-        kind: "frontend",
+        kind: "node",
         paths: ["src/**"],
         commands: { test: { unavailable: true } },
       },
@@ -219,7 +219,7 @@ test("a declared check absent on an impacted component errors (loud)", async () 
     };
   });
   const { profile, worktreeRoot } = rig(repo, {
-    components: [{ name: "app", kind: "app", paths: ["src/**"], commands: { build: "true" } }],
+    components: [{ name: "app", kind: "node", paths: ["src/**"], commands: { build: "true" } }],
   });
   const registry = buildDispatchRegistry({
     runner,
@@ -279,7 +279,7 @@ test("mixed tested + untested behavioral unit: tested stack gates, untested stac
       },
       {
         name: "fe",
-        kind: "frontend",
+        kind: "node",
         paths: ["src/**"],
         commands: { test: { unavailable: true } },
       },
@@ -337,7 +337,7 @@ test("renderPrBody includes untested-merge-risk component name when degrade occu
     components: [
       {
         name: "myfe",
-        kind: "frontend",
+        kind: "node",
         paths: ["src/**"],
         commands: { test: { unavailable: true } },
       },
@@ -439,7 +439,7 @@ test("behavioral unit with docs-only diff → behavioral-no-code fail", async ()
     };
   });
   const { profile, worktreeRoot } = rig(repo, {
-    components: [{ name: "app", kind: "app", paths: ["src/**"], commands: { test: "true" } }],
+    components: [{ name: "app", kind: "node", paths: ["src/**"], commands: { test: "true" } }],
   });
   const registry = buildDispatchRegistry({
     runner,
@@ -491,8 +491,8 @@ test("advisory sweep records ran-all-unowned for failing untouched stack, unit s
   });
   const { profile, worktreeRoot } = rig(repo, {
     components: [
-      { name: "app", kind: "app", paths: ["app/**"], commands: { test: "true" } },
-      { name: "svc", kind: "svc", paths: ["svc/**"], commands: { test: "false" } },
+      { name: "app", kind: "node", paths: ["app/**"], commands: { test: "true" } },
+      { name: "svc", kind: "node", paths: ["svc/**"], commands: { test: "false" } },
     ],
   });
   const registry = buildDispatchRegistry({
@@ -549,8 +549,8 @@ test("advisory sweep with passing untouched stack emits no signal and unit passe
   });
   const { profile, worktreeRoot } = rig(repo, {
     components: [
-      { name: "app", kind: "app", paths: ["app/**"], commands: { test: "true" } },
-      { name: "svc", kind: "svc", paths: ["svc/**"], commands: { test: "true" } },
+      { name: "app", kind: "node", paths: ["app/**"], commands: { test: "true" } },
+      { name: "svc", kind: "node", paths: ["svc/**"], commands: { test: "true" } },
     ],
   });
   const registry = buildDispatchRegistry({
@@ -602,8 +602,8 @@ test("all changed files unowned non-inert → no hard gate runs, advisory sweep,
   });
   const { profile, worktreeRoot } = rig(repo, {
     components: [
-      { name: "app", kind: "app", paths: ["app/**"], commands: { test: "true" } },
-      { name: "svc", kind: "svc", paths: ["svc/**"], commands: { test: "false" } },
+      { name: "app", kind: "node", paths: ["app/**"], commands: { test: "true" } },
+      { name: "svc", kind: "node", paths: ["svc/**"], commands: { test: "false" } },
     ],
   });
   const registry = buildDispatchRegistry({
@@ -658,9 +658,9 @@ test("advisory sweep silently skips absent command on untouched stack (no error)
   });
   const { profile, worktreeRoot } = rig(repo, {
     components: [
-      { name: "app", kind: "app", paths: ["app/**"], commands: { test: "true" } },
+      { name: "app", kind: "node", paths: ["app/**"], commands: { test: "true" } },
       // svc has only `build`, no `test` — sweep must skip silently
-      { name: "svc", kind: "svc", paths: ["svc/**"], commands: { build: "true" } },
+      { name: "svc", kind: "node", paths: ["svc/**"], commands: { build: "true" } },
     ],
   });
   const registry = buildDispatchRegistry({
@@ -711,8 +711,8 @@ test("inert-only diff (LICENSE) non-behavioral → passes via inert-only path, n
   });
   const { profile, worktreeRoot } = rig(repo, {
     components: [
-      { name: "app", kind: "app", paths: ["app/**"], commands: { test: "true" } },
-      { name: "svc", kind: "svc", paths: ["svc/**"], commands: { test: "false" } },
+      { name: "app", kind: "node", paths: ["app/**"], commands: { test: "true" } },
+      { name: "svc", kind: "node", paths: ["svc/**"], commands: { test: "false" } },
     ],
   });
   const registry = buildDispatchRegistry({
@@ -763,7 +763,7 @@ test("inert-only diff (LICENSE) behavioral → behavioral-no-code fail", async (
     };
   });
   const { profile, worktreeRoot } = rig(repo, {
-    components: [{ name: "app", kind: "app", paths: ["src/**"], commands: { test: "true" } }],
+    components: [{ name: "app", kind: "node", paths: ["src/**"], commands: { test: "true" } }],
   });
   const registry = buildDispatchRegistry({
     runner,
@@ -810,8 +810,8 @@ test("non-inert unowned file (cfg.yaml) still triggers advisory sweep", async ()
   });
   const { profile, worktreeRoot } = rig(repo, {
     components: [
-      { name: "app", kind: "app", paths: ["app/**"], commands: { test: "true" } },
-      { name: "svc", kind: "svc", paths: ["svc/**"], commands: { test: "false" } },
+      { name: "app", kind: "node", paths: ["app/**"], commands: { test: "true" } },
+      { name: "svc", kind: "node", paths: ["svc/**"], commands: { test: "false" } },
     ],
   });
   const registry = buildDispatchRegistry({
@@ -866,8 +866,8 @@ test("renderPrBody renders ran-all-unowned under its own section, separate from 
   });
   const { profile, worktreeRoot } = rig(repo, {
     components: [
-      { name: "app", kind: "app", paths: ["app/**"], commands: { test: "true" } },
-      { name: "svc", kind: "svc", paths: ["svc/**"], commands: { test: "false" } },
+      { name: "app", kind: "node", paths: ["app/**"], commands: { test: "true" } },
+      { name: "svc", kind: "node", paths: ["svc/**"], commands: { test: "false" } },
     ],
   });
   const registry = buildDispatchRegistry({
@@ -927,8 +927,8 @@ test("sweep-cost signal fires with stacksSwept count when untouched stack has th
   });
   const { profile, worktreeRoot } = rig(repo, {
     components: [
-      { name: "app", kind: "app", paths: ["app/**"], commands: { test: "true" } },
-      { name: "svc", kind: "svc", paths: ["svc/**"], commands: { test: "true" } },
+      { name: "app", kind: "node", paths: ["app/**"], commands: { test: "true" } },
+      { name: "svc", kind: "node", paths: ["svc/**"], commands: { test: "true" } },
     ],
   });
   const registry = buildDispatchRegistry({
@@ -989,9 +989,9 @@ test("sweep-cost positive-trace: fires with stacksSwept:0 when untouched stacks 
   });
   const { profile, worktreeRoot } = rig(repo, {
     components: [
-      { name: "app", kind: "app", paths: ["app/**"], commands: { test: "true" } },
+      { name: "app", kind: "node", paths: ["app/**"], commands: { test: "true" } },
       // svc has only build, no test — sweep loop will skip it via `continue`
-      { name: "svc", kind: "svc", paths: ["svc/**"], commands: { build: "true" } },
+      { name: "svc", kind: "node", paths: ["svc/**"], commands: { build: "true" } },
     ],
   });
   const registry = buildDispatchRegistry({
@@ -1046,8 +1046,8 @@ test("no sweep-cost signal when all changed files are owned or inert", async () 
   });
   const { profile, worktreeRoot } = rig(repo, {
     components: [
-      { name: "app", kind: "app", paths: ["app/**"], commands: { test: "true" } },
-      { name: "svc", kind: "svc", paths: ["svc/**"], commands: { test: "true" } },
+      { name: "app", kind: "node", paths: ["app/**"], commands: { test: "true" } },
+      { name: "svc", kind: "node", paths: ["svc/**"], commands: { test: "true" } },
     ],
   });
   const registry = buildDispatchRegistry({

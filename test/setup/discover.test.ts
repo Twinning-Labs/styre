@@ -51,7 +51,7 @@ const SCAN_COMPONENTS: Component[] = [
   },
 ];
 
-test("agent refines kind/commands; scan paths are preserved; non-existent command is dropped", async () => {
+test("agent refines commands/paths but CANNOT change kind; non-existent command is dropped", async () => {
   const agentProposal = {
     components: [
       {
@@ -68,7 +68,10 @@ test("agent refines kind/commands; scan paths are preserved; non-existent comman
       },
       {
         name: "frontend",
-        kind: "sveltekit",
+        // The agent still emits a `kind` here on purpose: DiscoverSchema no longer declares the
+        // field, so zod strips it. This proves the override cannot land even when attempted.
+        kind: "browser-extension",
+        label: "browser extension",
         paths: ["src/**", "static/**", "package.json", "vite.config.js"],
         commands: { build: "vite build", check: "svelte-check" },
       },
@@ -88,9 +91,12 @@ test("agent refines kind/commands; scan paths are preserved; non-existent comman
   expect(rust?.paths).toContain("src-tauri/**");
   expect(rust?.paths).toContain("crates/**");
 
-  // Agent-refined kind adopted
+  // ENG-399: kind is SCAN-AUTHORITATIVE. The agent proposed `browser-extension` — an accurate
+  // description, a legal TopologyTypeEnum member, and an invalid runtime discriminator that
+  // silently disabled frameworkFor and isComponentReady on darkreader__darkreader-7241.
   const fe = result.components.find((c) => c.name === "frontend");
-  expect(fe?.kind).toBe("sveltekit");
+  expect(fe?.kind).toBe("node"); // the scan's value, not the agent's
+  expect(fe?.label).toBe("browser extension"); // the description is kept, just not as identity
 
   // Fabricated nonexistent command dropped by probe
   expect(rust?.commands.lint).toBeUndefined();
@@ -107,7 +113,9 @@ test("agent failure (completed=false) → scan returned unchanged", async () => 
     { components: SCAN_COMPONENTS, repoCommands: {} },
     { runner, agentConfig: DEFAULT_AGENT_CONFIG },
   );
-  expect(result.components).toBe(SCAN_COMPONENTS); // exact same reference (no copy made on fallback)
+  // ENG-399: the fallback now maps components to qualify `testAction`, so this is an equal
+  // copy rather than the same reference. Content must still be untouched by the failed agent.
+  expect(result.components).toEqual(SCAN_COMPONENTS);
   expect(result.repoCommands).toEqual({});
 });
 
@@ -118,7 +126,7 @@ test("agent timedOut → scan returned unchanged", async () => {
     { components: SCAN_COMPONENTS, repoCommands: {} },
     { runner, agentConfig: DEFAULT_AGENT_CONFIG },
   );
-  expect(result.components).toBe(SCAN_COMPONENTS);
+  expect(result.components).toEqual(SCAN_COMPONENTS); // equal copy: the fallback qualifies testAction (ENG-399)
 });
 
 test("agent no sidecar block → scan returned unchanged", async () => {
@@ -128,7 +136,7 @@ test("agent no sidecar block → scan returned unchanged", async () => {
     { components: SCAN_COMPONENTS, repoCommands: {} },
     { runner, agentConfig: DEFAULT_AGENT_CONFIG },
   );
-  expect(result.components).toBe(SCAN_COMPONENTS);
+  expect(result.components).toEqual(SCAN_COMPONENTS); // equal copy: the fallback qualifies testAction (ENG-399)
 });
 
 test("discover passes read-only tools + standard model + repoDir as cwd", async () => {
@@ -163,7 +171,7 @@ const GIT_SCAN = {
   components: [
     {
       name: "core",
-      kind: "rust",
+      kind: "rust" as const,
       paths: ["crates/**"],
       commands: { test: "git status" },
       extensions: [] as string[],

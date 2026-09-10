@@ -52,7 +52,7 @@ const CHECKS_COMPONENT = { name: "checks", kind: "python", paths: ["checks/**"],
  *  never python, so `reuseAwareTestCommand`'s python-reuse probe never fires (kind !== "python"
  *  short-circuits it) and the advisory sweep stays a deterministic, fast shell command. */
 function appComponent(testCmd: string) {
-  return { name: "app", kind: "backend", paths: ["**"], commands: { test: testCmd } };
+  return { name: "app", kind: "node", paths: ["**"], commands: { test: testCmd } };
 }
 
 const ok = {

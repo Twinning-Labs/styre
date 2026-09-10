@@ -8,6 +8,7 @@ import { allowlistFor } from "../dispatch/tool-allowlists.ts";
 import { readAgentsMd } from "./agents-md.ts";
 import { isCommandSafe } from "./command-safety.ts";
 import { DiscoverSchema, mergeComponents, probeCommandExists } from "./discover-schema.ts";
+import { withTestActions } from "./test-action.ts";
 
 const DISCOVER_TIMEOUT_MS = 300_000;
 
@@ -23,7 +24,14 @@ export async function discoverComponents(
   policy: DiscoverPolicy = { interactive: true, trustAgentCommands: false },
 ): Promise<{ components: Component[]; repoCommands: Record<string, string>; warnings: string[] }> {
   const warnings: string[] = [];
-  const fallback = { components: scan.components, repoCommands: scan.repoCommands, warnings };
+  // Qualify on the fallback too: discovery failing (unrendered prompt, agent timeout, malformed
+  // sidecar) must not also cost the test action, which is derived deterministically from the
+  // scan's own commands and needs no agent (ENG-399).
+  const fallback = {
+    components: withTestActions(repoDir, scan.components),
+    repoCommands: scan.repoCommands,
+    warnings,
+  };
 
   const rendered = renderPrompt(discoverTemplate, {
     draft: JSON.stringify(scan.components),
@@ -97,5 +105,7 @@ export async function discoverComponents(
     repoCommands[name] = cmd;
   }
 
-  return { components, repoCommands, warnings };
+  // Qualify the test invocation AFTER the merge, so it reflects whichever command actually won
+  // (agent-accepted or scan) rather than the draft (ENG-399).
+  return { components: withTestActions(repoDir, components), repoCommands, warnings };
 }

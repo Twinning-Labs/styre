@@ -346,7 +346,7 @@ export async function resumeParkedTicket(
     components: [
       {
         name: "app",
-        kind: "app",
+        kind: "node",
         paths: ["**"],
         commands: { build: "true", test: "true" },
       },
@@ -626,7 +626,7 @@ export interface FreshTicketRun {
  *  and bypasses `runImpl` entirely.
  *
  *  Clears the three pre-DB gates `runImpl` runs before it ever reaches the checkpoint:
- *   - Gate 1/2 (profile load + assertResolved + preflightToolchain): a real schemaVersion-3
+ *   - Gate 1/2 (profile load + assertResolved + preflightToolchain): a real schemaVersion-4
  *     profile.json with `components: []` (trivially resolved/preflighted) pointed at a real temp
  *     git repo (the `provision` handler still does `ensureWorktree` against it).
  *   - Gate 3 (agent-CLI probe): `deps.preflight` always reports `ok: true` so the real `claude`

@@ -93,9 +93,79 @@ const isSafeDir = (d: string): boolean => {
  *  file-identity routing and the optional `prepare` install command (EXECUTED by the
  *  runner-owned provision step before the first verify), plus the optional `dir` field
  *  (module root, relative to repo root — WO-9). */
+/** Frameworks `checks:dispatch` knows how to invoke. Mirrors `CheckFramework` in
+ *  `src/dispatch/check-selector.ts`; kept as a zod enum here so a profile carrying an
+ *  unknown framework is rejected at load rather than degrading to a coarse `error` at
+ *  check time (ENG-399). */
+export const CheckFrameworkEnum = z.enum([
+  "pytest",
+  "jest",
+  "vitest",
+  "go",
+  "cargo",
+  "junit-maven",
+  "junit-gradle",
+  "rspec",
+  "minitest",
+  "phpunit",
+]);
+
+/**
+ * A component's RUNTIME IDENTITY — the operational discriminator, not a description.
+ *
+ * schemaVersion 4 closes this set (ENG-399). It used to be `z.string().min(1)` while every
+ * consumer switched on a fixed list, and `prompts/setup-discover.md` asked the discovery agent
+ * for "a precise free-text stack label". Those are irreconcilable: on
+ * darkreader__darkreader-7241 the agent answered `browser-extension` — an accurate description,
+ * a legal `TopologyTypeEnum` member, and an invalid discriminator. `frameworkFor` fell to its
+ * `default` and returned null WITHOUT reading the test command, `isComponentReady` returned
+ * false, and the run escalated at design having written no code.
+ *
+ * Description now lives in `label`. This field is scan-authoritative — see `mergeComponents`.
+ */
+export const ComponentKindEnum = z.enum([
+  "node",
+  "sveltekit",
+  "python",
+  "go",
+  "rust",
+  "jvm-maven",
+  "jvm-gradle",
+  "ruby",
+  "php",
+]);
+export type ComponentKind = z.infer<typeof ComponentKindEnum>;
+/** The runtime identities styre can actually route. Exported so an error can NAME them rather
+ *  than leaving the operator to guess what a valid value is. */
+export const KNOWN_COMPONENT_KINDS: ReadonlySet<string> = new Set(ComponentKindEnum.options);
+
+/**
+ * How to actually RUN this component's tests, qualified at setup time (ENG-399).
+ *
+ * A framework name alone does not establish that styre can execute a check. `binaryFor("jest")`
+ * returns the bare binary, dropping the configured launcher and its `--config`; darkreader has
+ * no root jest config and a three-project `tests/jest.config.js`, so the bare invocation loads
+ * none of the ts-jest/jsdom/tsconfig setup the check needs. The launcher is therefore recorded
+ * WITH its configuration, and selector arguments are appended to it.
+ */
+export const TestActionSchema = z.object({
+  /** Validated framework — a lookup for `frameworkFor`, not a regex guess over a command. */
+  framework: CheckFrameworkEnum,
+  /** Argv prefix that runs the suite WITH its configuration. Selector args are appended, so a
+   *  script wrapper must already carry the `--` separator (e.g. `npm run test:ci --`). */
+  launcher: z.string().min(1),
+});
+export type TestAction = z.infer<typeof TestActionSchema>;
+
 export const ComponentSchema = z.object({
   name: z.string().min(1),
-  kind: z.string().min(1),
+  kind: ComponentKindEnum,
+  /** Free-text stack description (e.g. "browser-extension", "cli tool"). Agent-authorable and
+   *  carried into prompts; NEVER switched on. Purely descriptive by construction. */
+  label: z.string().optional(),
+  /** Qualified test invocation. Absent → `frameworkFor` falls back to inferring from `kind` +
+   *  the `test` command, which is the pre-ENG-399 behaviour and still correct when it resolves. */
+  testAction: TestActionSchema.optional(),
   paths: z.array(z.string().min(1)).min(1),
   commands: z.record(z.string(), CommandValueSchema).default({}),
   testFilePattern: z.string().optional(),
@@ -113,7 +183,7 @@ export type Component = z.infer<typeof ComponentSchema>;
 /** The project-profile: canonical stack truth the daemon reads (build-operations §5).
  *  schemaVersion 3 adds per-component `extensions[]` for file-identity routing. */
 export const ProfileSchema = z.object({
-  schemaVersion: z.literal(3).default(3),
+  schemaVersion: z.literal(4).default(4),
   slug: z.string(),
   targetRepo: z.string(),
   defaultBranch: z.string().default("main"),
@@ -139,7 +209,16 @@ export function parseProfile(raw: unknown, file = "profile.json"): Profile {
   if (raw && typeof raw === "object" && (raw as { schemaVersion?: unknown }).schemaVersion === 2) {
     throw new Error(
       "profile: schemaVersion 2 profile does not carry per-component extensions[] required for " +
-        "file-identity routing. Re-run `styre setup` to regenerate a schemaVersion-3 profile.",
+        "file-identity routing. Re-run `styre setup` to regenerate a schemaVersion-4 profile.",
+    );
+  }
+  if (raw && typeof raw === "object" && (raw as { schemaVersion?: unknown }).schemaVersion === 3) {
+    // Deliberately NOT migrated (ENG-399). A v3 `kind` is free text and may hold a value no
+    // consumer switches on — coercing it would silently reinstate the defect this bump closes.
+    throw new Error(
+      "profile: schemaVersion 3 carries a free-text component `kind`, which is no longer a valid " +
+        "runtime identity (a value outside the known set silently disables framework detection " +
+        "and provision readiness). Re-run `styre setup` to regenerate a schemaVersion-4 profile.",
     );
   }
   return parseConfigOrThrow(ProfileSchema, raw, file);

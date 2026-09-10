@@ -8,7 +8,10 @@ export const DiscoverSchema = z.object({
   components: z.array(
     z.object({
       name: z.string().min(1),
-      kind: z.string().min(1),
+      /** Free-text stack description. Replaces the agent-authored `kind` (ENG-399): the prompt
+       *  asked for "a precise free-text stack label" while every consumer switched on a closed
+       *  set, so a good description (`browser-extension`) became an invalid discriminator. */
+      label: z.string().min(1).optional(),
       paths: z.array(z.string().min(1)).min(1),
       commands: z.record(z.string(), z.string()).default({}),
     }),
@@ -36,7 +39,11 @@ export function mergeComponents(scan: Component[], proposed: Component[]): Compo
     });
     return {
       name: s.name,
-      kind: p.kind || s.kind,
+      // SCAN-AUTHORITATIVE (ENG-399). `kind` is the runtime discriminator for `frameworkFor`,
+      // `isComponentReady` and `EXTENSIONS_BY_KIND`; an agent value outside the closed set
+      // silently disables all three. The agent's description is carried in `label` instead.
+      kind: s.kind,
+      ...(p.label ? { label: p.label } : {}),
       paths: [...new Set([...s.paths, ...agentPaths])],
       commands: { ...s.commands, ...p.commands },
       ...(s.testFilePattern ? { testFilePattern: s.testFilePattern } : {}),

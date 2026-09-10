@@ -34,7 +34,7 @@ function registryFor(repo: string, runner: FakeAgentRunner) {
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "bun test" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-rewt-")),
   });

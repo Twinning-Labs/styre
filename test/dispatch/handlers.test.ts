@@ -33,7 +33,7 @@ function registryFor(repo: string, runner: FakeAgentRunner) {
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "bun test" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wtroot-")),
   });
@@ -146,7 +146,7 @@ test("implement:dispatch escalates to the deep tier after a bounce-back", async 
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-lbwt-")),
   });
@@ -248,7 +248,7 @@ test("implement:dispatch (default reject) rejects an undeclared loose file", asy
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
     worktreeRoot,
   });
@@ -290,7 +290,7 @@ test("implement:dispatch honors implementDisposition=discard", async () => {
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
     worktreeRoot,
   });
@@ -337,7 +337,7 @@ test("implement discard + malformed sidecar re-dispatches (transport failure), d
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
     worktreeRoot,
   });
@@ -387,7 +387,7 @@ test("implement discard + absent sidecar WITH undeclared new files re-dispatches
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
     worktreeRoot,
   });

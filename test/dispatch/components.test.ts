@@ -130,7 +130,7 @@ test("extMatches: foreign-ext files (config.yaml, Dockerfile) do not match mappe
 test("extMatches: undefined or empty extensions → path-only fallback (always true)", () => {
   const noExts: Component = {
     name: "custom",
-    kind: "custom",
+    kind: "node",
     paths: ["**"],
     commands: {},
     extensions: [],

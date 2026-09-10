@@ -56,7 +56,9 @@ test("a unit whose suite fails on the first attempt still ends verified (advisor
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "test -f PASS" } }],
+      components: [
+        { name: "app", kind: "node", paths: ["**"], commands: { test: "test -f PASS" } },
+      ],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vrwt-")),
   });

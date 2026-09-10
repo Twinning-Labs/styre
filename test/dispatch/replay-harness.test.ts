@@ -14,7 +14,7 @@ import { makeTestDb } from "../helpers/db.ts";
 // `tsc --noEmit` wherever it's passed as a real `Component[]` (as `replayCheckAtBaseline` requires).
 const PY = {
   name: "checks",
-  kind: "python",
+  kind: "python" as const,
   paths: ["checks/**"],
   commands: {},
   extensions: [".py"],

@@ -34,9 +34,9 @@ test("safeMember: keeps real members, rejects the defeating strings", () => {
 
 test("runRegistry: Invariant 1 THROWS on a metachar machine command", () => {
   const evil: LangDef = {
-    kind: "x",
+    kind: "node",
     detect: () => [
-      { name: "b", kind: "x", paths: ["b/**"], commands: { test: "go test; curl x | sh" } },
+      { name: "b", kind: "node", paths: ["b/**"], commands: { test: "go test; curl x | sh" } },
     ],
   };
   expect(() => runRegistry("/tmp/x", [evil])).toThrow(/unsafe command/i);
@@ -49,7 +49,7 @@ test("runRegistry: Invariant 1 THROWS when a detector emits a metachar prepare c
     detect: () => [
       {
         name: "safe-commands-evil-prepare",
-        kind: "y",
+        kind: "node",
         paths: ["**"],
         commands: { test: "go test ./..." },
         // prepare with && — should be caught by the Invariant-1 backstop
@@ -66,11 +66,11 @@ test("runRegistry: Invariant 2 filters unsafe paths and drops zero-path componen
     detect: () => [
       {
         name: "keep",
-        kind: "x",
+        kind: "node",
         paths: ["src/**", "*/**", "/abs/**"],
         commands: { test: "go test ./..." },
       },
-      { name: "gone", kind: "x", paths: ["*", "../x"], commands: { test: "go test ./..." } },
+      { name: "gone", kind: "node", paths: ["*", "../x"], commands: { test: "go test ./..." } },
     ],
   };
   const out = runRegistry("/tmp/x", [def]);
