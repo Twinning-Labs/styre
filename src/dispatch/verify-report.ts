@@ -21,7 +21,18 @@ export type AcLine = { seq: number; text: string; label: AcLabel };
 
 export type AdvisoryLine =
   | { kind: "suite"; checkType: string; result: string; firstFailingJob?: string }
-  | { kind: "integration"; result: string; firstFailingJob?: string }
+  /** ENG-402: a behavioral unit shipped no test. The suite itself PASSED — the A1 gate in
+   *  `handlers.ts` overwrites the result — so this must never be rendered as a suite failure. */
+  | { kind: "behavioral-no-test"; checkType: string; component?: string; changed?: string[] }
+  /** ENG-402: a test WAS delivered, but it already passed at the baseline — so it does not
+   *  distinguish the two revisions and proves nothing about the change. */
+  | {
+      kind: "delivered-test-does-not-bind";
+      checkType: string;
+      component?: string;
+      changed?: string[];
+    }
+  | { kind: "integration"; result: string; firstFailingJob?: string; preexisting?: boolean }
   | { kind: "environmental-red"; seq: number };
 
 export type ProvenanceLine = { seq: number; disposition: "installed" | "rejected"; reason: string };
@@ -84,7 +95,26 @@ export function buildVerifyReport(db: Database, ticketId: number): VerifyReport 
 
   for (const s of sweeps) {
     if (s.type === "integration") {
-      advisory.push({ kind: "integration", result: s.result, firstFailingJob: s.firstFailingJob });
+      advisory.push({
+        kind: "integration",
+        result: s.result,
+        firstFailingJob: s.firstFailingJob,
+        ...(s.preexisting !== undefined ? { preexisting: s.preexisting } : {}),
+      });
+    } else if (s.reason === "delivered-test-does-not-bind") {
+      advisory.push({
+        kind: "delivered-test-does-not-bind",
+        checkType: s.type,
+        ...(s.component !== undefined ? { component: s.component } : {}),
+        ...(s.changed !== undefined ? { changed: s.changed } : {}),
+      });
+    } else if (s.reason === "behavioral-no-test") {
+      advisory.push({
+        kind: "behavioral-no-test",
+        checkType: s.type,
+        ...(s.component !== undefined ? { component: s.component } : {}),
+        ...(s.changed !== undefined ? { changed: s.changed } : {}),
+      });
     } else {
       advisory.push({
         kind: "suite",
@@ -158,7 +188,42 @@ const EXPLAIN: Record<AcLabel, string> = {
 function renderAdvisory(a: AdvisoryLine): string {
   if (a.kind === "integration") {
     const job = a.firstFailingJob ? ` (first failing job: \`${a.firstFailingJob}\`)` : "";
-    return `- ⚠️ The full integration test run ${a.result === "error" ? "did not complete" : "FAILED"}${job}. This was not used as a merge gate.`;
+    const verb = a.result === "error" ? "did not complete" : "FAILED";
+    // ENG-403: say whether this change caused it. Reporting a failure without that leaves the
+    // reviewer unable to tell a regression from an already-broken repo — on
+    // darkreader__darkreader-7241 `frontend:build` was failing before the change (an upstream
+    // tslib/rollup-plugin-typescript2 incompatibility in the image) and the PR did not say so.
+    if (a.preexisting === true) {
+      return `- ⚠️ The full integration test run ${verb}${job} — but it ALSO ${verb.toLowerCase()} at the base commit, so this change did not cause it. Pre-existing; not used as a merge gate.`;
+    }
+    if (a.preexisting === false) {
+      return `- ⚠️ The full integration test run ${verb}${job}, and it PASSED at the base commit — this change appears to have introduced it. Not used as a merge gate, so please look before merging.`;
+    }
+    return `- ⚠️ The full integration test run ${verb}${job}. Whether it was already failing before this change could not be established. This was not used as a merge gate.`;
+  }
+  if (a.kind === "delivered-test-does-not-bind") {
+    const where = a.component ? ` in component \`${a.component}\`` : "";
+    const files =
+      a.changed && a.changed.length > 0
+        ? ` (${a.changed
+            .slice(0, 5)
+            .map((f) => `\`${f}\``)
+            .join(", ")}${a.changed.length > 5 ? ", …" : ""})`
+        : "";
+    return `- ⚠️ A test shipped with this change${where} already PASSED at the base commit${files}, so it does not prove the change does anything. The \`${a.checkType}\` suite itself passed. This was not used as a merge gate.`;
+  }
+  if (a.kind === "behavioral-no-test") {
+    const where = a.component ? ` in component \`${a.component}\`` : "";
+    const files =
+      a.changed && a.changed.length > 0
+        ? ` (${a.changed
+            .slice(0, 5)
+            .map((f) => `\`${f}\``)
+            .join(", ")}${a.changed.length > 5 ? ", …" : ""})`
+        : "";
+    // The suite PASSED. Saying otherwise — as this line used to — puts a false statement about
+    // the repo's own tests in front of the person deciding whether to merge.
+    return `- ⚠️ A behavior change${where} shipped without a test of its own${files}. The \`${a.checkType}\` suite itself passed. This was not used as a merge gate.`;
   }
   if (a.kind === "suite") {
     return `- ⚠️ The \`${a.checkType}\` test suite did not pass (result: ${a.result}). This was not used as a merge gate.`;

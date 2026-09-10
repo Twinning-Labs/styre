@@ -163,6 +163,38 @@ export function buildCheckSelector(
   }
 }
 
+/**
+ * Select a whole test FILE, with no test-name filter (ENG-402).
+ *
+ * `buildCheckSelector` needs a `testName` because an AC check targets one named test. Proving a
+ * DELIVERED regression test binds is a different question — the unit may have added several tests,
+ * or appended one to an existing file — so the file is the right unit of selection: run everything
+ * in it at the baseline and require a failure.
+ */
+export function buildFileSelector(fw: CheckFramework, testFile: string): string {
+  switch (fw) {
+    case "pytest":
+      return shq(testFile);
+    case "jest":
+      return testFile;
+    case "vitest":
+      return `run ${testFile}`;
+    case "go":
+      return `./${dirname(testFile)}`;
+    case "cargo":
+      return `--test ${classFromFile(testFile)}`;
+    case "junit-maven":
+      return `-Dtest=${classFromFile(testFile)} test`;
+    case "junit-gradle":
+      return `test --tests '${classFromFile(testFile)}'`;
+    case "rspec":
+    case "minitest":
+      return testFile;
+    case "phpunit":
+      return testFile;
+  }
+}
+
 /** A completed framework run — aliased to the shared CommandResult (`src/util/run-command.ts`) so
  *  M2b's `runCommand` result flows in directly and the two shapes can never drift. */
 export type RunOutcome = CommandResult;

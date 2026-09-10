@@ -292,3 +292,109 @@ test("no ACs → empty report", () => {
   expect(r.advisory).toEqual([]);
   expect(r.provenance).toEqual([]);
 });
+
+// -- ENG-402 / ENG-403: the sweep → advisory-line mapping ----------------------------------
+
+test("a behavioral-no-test sweep maps to its OWN advisory kind, not a suite failure", () => {
+  // The renderer can only tell the truth if the mapping distinguishes them. Guards the branch
+  // that reads `detail.reason`, which a renderer-only test cannot reach.
+  const { db, ticketId } = makeTestDb();
+  seedHead(db, ticketId);
+  insertSignal(db, {
+    ticketId,
+    signalType: "test",
+    result: "fail",
+    branchHeadSha: HEAD,
+    detail: {
+      advisory: true,
+      reason: "behavioral-no-test",
+      component: "frontend",
+      changed: ["src/generators/utils/parse.ts"],
+    },
+  });
+  const r = buildVerifyReport(db, ticketId);
+  expect(r.advisory).toEqual([
+    {
+      kind: "behavioral-no-test",
+      checkType: "test",
+      component: "frontend",
+      changed: ["src/generators/utils/parse.ts"],
+    },
+  ]);
+});
+
+test("a genuine suite failure still maps to kind 'suite'", () => {
+  const { db, ticketId } = makeTestDb();
+  seedHead(db, ticketId);
+  insertSignal(db, {
+    ticketId,
+    signalType: "test",
+    result: "fail",
+    branchHeadSha: HEAD,
+    detail: { advisory: true, ran: [{ component: "frontend", exitCode: 1 }] },
+  });
+  const r = buildVerifyReport(db, ticketId);
+  expect(r.advisory[0]?.kind).toBe("suite");
+});
+
+test("an integration sweep carries `preexisting` through to the advisory line", () => {
+  const { db, ticketId } = makeTestDb();
+  seedHead(db, ticketId);
+  insertSignal(db, {
+    ticketId,
+    signalType: "integration",
+    result: "fail",
+    branchHeadSha: HEAD,
+    detail: {
+      advisory: true,
+      preexisting: true,
+      ran: [{ label: "frontend:build", exitCode: 1 }],
+    },
+  });
+  const r = buildVerifyReport(db, ticketId);
+  expect(r.advisory).toEqual([
+    { kind: "integration", result: "fail", firstFailingJob: "frontend:build", preexisting: true },
+  ]);
+});
+
+test("an integration sweep with no baseline verdict omits `preexisting` entirely", () => {
+  // Absent must stay absent so the renderer says "could not be established" rather than
+  // defaulting to either answer.
+  const { db, ticketId } = makeTestDb();
+  seedHead(db, ticketId);
+  insertSignal(db, {
+    ticketId,
+    signalType: "integration",
+    result: "fail",
+    branchHeadSha: HEAD,
+    detail: { advisory: true, ran: [{ label: "frontend:build", exitCode: 1 }] },
+  });
+  const r = buildVerifyReport(db, ticketId);
+  expect(r.advisory[0]).not.toHaveProperty("preexisting");
+});
+
+test("a delivered-test-does-not-bind sweep maps to its own advisory kind", () => {
+  const { db, ticketId } = makeTestDb();
+  seedHead(db, ticketId);
+  insertSignal(db, {
+    ticketId,
+    signalType: "test",
+    result: "fail",
+    branchHeadSha: HEAD,
+    detail: {
+      advisory: true,
+      reason: "delivered-test-does-not-bind",
+      component: "frontend",
+      changed: ["tests/generators/utils/parse.tests.ts"],
+    },
+  });
+  const r = buildVerifyReport(db, ticketId);
+  expect(r.advisory).toEqual([
+    {
+      kind: "delivered-test-does-not-bind",
+      checkType: "test",
+      component: "frontend",
+      changed: ["tests/generators/utils/parse.tests.ts"],
+    },
+  ]);
+});

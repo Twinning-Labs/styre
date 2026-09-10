@@ -50,6 +50,12 @@ import { runCommand } from "../util/run-command.ts";
 import { nowUtc } from "../util/time.ts";
 import { type AdjClass, ChecksClassifyOutputSchema } from "./adjudicate-schema.ts";
 import { ChecksArbitrateOutputSchema } from "./arbitrate-schema.ts";
+import {
+  deliveredTestBindsAtBaseline,
+  preImplementBaselineSha,
+  preexistingFrom,
+  runAtBaseline,
+} from "./baseline-rerun.ts";
 import { carryVerifiedVerdictForward } from "./carry-forward.ts";
 import { checkIntegrityViolations } from "./check-integrity.ts";
 import { resolveAuthoredTestPath } from "./check-path.ts";
@@ -57,6 +63,7 @@ import {
   type CheckFramework,
   type CoarseResult,
   buildCheckSelector,
+  buildFileSelector,
   collectionErrorExcerpt,
   frameworkFor,
   importErrorImplicatesDiscarded,
@@ -1435,11 +1442,59 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           for (const c of realImpacted) {
             if (commandFor(c, "test") === undefined) continue;
             const inComponent = owned.filter((p) => matchesComponent(c, p));
-            const hasTest = inComponent.some((p) => isTestFile(p, c.testFilePattern));
-            if (!hasTest) {
+            const delivered = inComponent.filter((p) => isTestFile(p, c.testFilePattern));
+            if (delivered.length === 0) {
               result = "fail";
               detail = { reason: "behavioral-no-test", component: c.name, changed: inComponent };
               break;
+            }
+            // ENG-402: a test FILE is not evidence. styre proves its own acceptance checks bind
+            // (`ac-check-red-first`) but applied nothing equivalent to the regression tests it
+            // writes into the repo and hands the reviewer. A test that already passes at the
+            // baseline proves nothing about the change.
+            const fw = frameworkFor(c);
+            const baselineSha = preImplementBaselineSha(ctx.db, ctx.ticket.id);
+            if (fw && baselineSha) {
+              const nonBinding: string[] = [];
+              const unproven: string[] = [];
+              for (const testFile of delivered) {
+                const verdict = await deliveredTestBindsAtBaseline({
+                  repoPath,
+                  baselineSha,
+                  testFile,
+                  sourcePath: join(worktreePath, testFile),
+                  command: `${launcherFor(c, fw)} ${buildFileSelector(fw, testFile)}`,
+                  dir: c.dir,
+                  timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
+                });
+                if (verdict === "does-not-bind") nonBinding.push(testFile);
+                else if (verdict === "unknown") unproven.push(testFile);
+              }
+              if (nonBinding.length > 0) {
+                result = "fail";
+                detail = {
+                  reason: "delivered-test-does-not-bind",
+                  component: c.name,
+                  changed: nonBinding,
+                };
+                break;
+              }
+              if (unproven.length > 0) {
+                // Reported, never treated as proof either way — the same fail-closed rule the
+                // baseline advisory uses.
+                insertSignal(ctx.db, {
+                  ticketId: ctx.ticket.id,
+                  workUnitId: ctx.workUnitId,
+                  signalType: "untested-merge-risk",
+                  result: "fail",
+                  branchHeadSha: latestSha,
+                  detail: {
+                    component: c.name,
+                    reason: "delivered-test-binding-unproven",
+                    files: unproven,
+                  },
+                });
+              }
             }
           }
         }
@@ -1561,13 +1616,37 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     // never throw on the suite verdict. Coupled with the resolver's integration gate flip to
     // ranShasFor (below) in this SAME commit — an advisory fail with no pass at HEAD would otherwise
     // re-emit this step forever against the journal replay (MAX_TRANSITIONS deadlock).
+    // ENG-403: an advisory failure is only actionable if the reviewer can tell a regression from
+    // an already-broken repo. Re-run the FIRST FAILING job at the pre-implement baseline and
+    // record the comparison. Only on failure, so a green advisory costs nothing.
+    let preexisting: boolean | undefined;
+    if (result !== "pass") {
+      const failed = ran.find((j) => j.exitCode !== 0 || j.timedOut);
+      const job = failed ? jobs.find((j) => j.label === failed.label) : undefined;
+      const baselineSha = preImplementBaselineSha(ctx.db, ctx.ticket.id);
+      if (job && baselineSha) {
+        preexisting = preexistingFrom(
+          await runAtBaseline({
+            repoPath,
+            baselineSha,
+            command: job.command,
+            dir: job.dir,
+            timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
+          }),
+        );
+      }
+    }
     insertSignal(ctx.db, {
       ticketId: ctx.ticket.id,
       signalType: "integration",
       result,
       command: lastCommand,
       branchHeadSha,
-      detail: { ran, advisory: true },
+      detail: {
+        ran,
+        advisory: true,
+        ...(preexisting !== undefined ? { preexisting } : {}),
+      },
     });
     return { integration: result };
   });
