@@ -6,9 +6,9 @@ import { listByAc } from "../db/repos/ac-check.ts";
 import { signalForAcCheck } from "../db/repos/ground-truth-signal.ts";
 import {
   type CoarseOrNone,
-  binaryFor,
   buildCheckSelector,
   frameworkFor,
+  launcherFor,
 } from "./check-selector.ts";
 import { runCheckForRed } from "./checks-run.ts";
 import { impactedComponents } from "./components.ts";
@@ -77,7 +77,9 @@ export async function replayCheckAtBaseline(p: ReplayParams): Promise<CoarseOrNo
     const sel = buildCheckSelector(fw, { testFile: p.testFile, testName: p.testName });
     const res = await runCheckForRed({
       framework: fw,
-      binary: binaryFor(fw, { interp }),
+      // Same launcher as the production executors, or a base-replay would measure a different
+      // invocation than the one that decides the gate.
+      binary: launcherFor(comp, fw, { interp }),
       runArgs: sel.runArgs,
       // EXECUTOR NOTE (M3, non-blocking): this mirrors production `rerunOne`
       // (post-implement-rerun.ts) exactly — `cwd: join(wt, comp.dir ?? "")` is correct only when the

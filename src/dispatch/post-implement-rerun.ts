@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { listActiveByTicket as listAcChecks } from "../db/repos/ac-check.ts";
 import { insertSignal } from "../db/repos/ground-truth-signal.ts";
-import { type CoarseResult, binaryFor, frameworkFor } from "./check-selector.ts";
+import { type CoarseResult, frameworkFor, launcherFor } from "./check-selector.ts";
 import { runCheckForRed } from "./checks-run.ts";
 import { impactedComponents } from "./components.ts";
 import type { Component } from "./profile.ts";
@@ -39,7 +39,12 @@ async function rerunOne(
   }
   const res = await runCheckForRed({
     framework: fw,
-    binary: binaryFor(fw, { interp }),
+    // MUST match the red-first executor in checks:dispatch. Using the bare binary here made
+    // the post-implement re-run fail with `sh: 1: jest: not found` on
+    // darkreader__darkreader-7241 while the SAME check passed through `npm test --`: jest lives
+    // in node_modules/.bin, reachable only via the package manager's script environment. The
+    // check was recorded still-red at HEAD and the run escalated, though the fix was correct.
+    binary: launcherFor(comp, fw, { interp }),
     runArgs: selector,
     cwd: join(p.worktreePath, comp.dir ?? ""),
     timeoutMs: p.timeoutMs,
