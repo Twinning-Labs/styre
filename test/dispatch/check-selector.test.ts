@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { CHECK_RULES } from "../../src/dispatch/check-rules.ts";
-import { frameworkFor, isLaunchFailure } from "../../src/dispatch/check-selector.ts";
+import { frameworkFor, isLaunchFailure, launcherFor } from "../../src/dispatch/check-selector.ts";
 
 const comp = (kind: string, test?: string) => ({
   kind,
@@ -1442,5 +1442,49 @@ describe("mutation guard: the PHP symbol anchor must discriminate", () => {
       (CHECK_RULES.phpunit as { symbolNaming?: RegExp[] }).symbolNaming = orig;
     }
     expect(importErrorImplicatesDiscarded(out, ["src/Helper.php"], "phpunit", sources)).toEqual([]);
+  });
+});
+
+// -- ENG-399: qualified test action ------------------------------------------------------
+
+describe("frameworkFor / launcherFor with a qualified testAction", () => {
+  const darkreader = {
+    name: "frontend",
+    kind: "node",
+    commands: { test: "npm run test:ci" },
+    testAction: { framework: "jest" as const, launcher: "npm run test:ci --" },
+  };
+
+  test("a testAction resolves the framework the command string cannot (blocker 2)", () => {
+    // Without it: `npm run test:ci` names no framework, frameworkFor returns null, and the AC
+    // check is recorded coarse `error` — the darkreader__darkreader-7241 escalation.
+    expect(frameworkFor({ kind: "node", commands: { test: "npm run test:ci" } })).toBeNull();
+    expect(frameworkFor(darkreader)).toBe("jest");
+  });
+
+  test("the launcher keeps the repo's own configuration (blocker 3)", () => {
+    // binaryFor drops the wrapper's --config; darkreader has no root jest config and a
+    // three-project tests/jest.config.js, so bare `jest` would load none of its setup.
+    expect(binaryFor("jest")).toBe("jest");
+    expect(launcherFor(darkreader, "jest")).toBe("npm run test:ci --");
+  });
+
+  test("falls back to the bare binary when no testAction was qualified", () => {
+    expect(launcherFor({}, "jest")).toBe("jest");
+    expect(launcherFor({}, "pytest", { interp: "/venv/bin/python" })).toBe(
+      "/venv/bin/python -m pytest",
+    );
+  });
+
+  test("a testAction wins over the kind switch, so identity drift cannot silently disarm it", () => {
+    // Defense in depth: even if a component somehow carries a kind the switch does not know,
+    // an already-qualified action still runs.
+    expect(frameworkFor({ ...darkreader, kind: "unknown-kind" })).toBe("jest");
+  });
+
+  test("without a testAction an unknown kind still returns null (unchanged)", () => {
+    expect(
+      frameworkFor({ kind: "browser-extension", commands: { test: "npm run test:ci" } }),
+    ).toBeNull();
   });
 });

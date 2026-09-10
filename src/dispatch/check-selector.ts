@@ -50,7 +50,12 @@ function testCommandOf(component: { commands: Record<string, unknown> }): string
 export function frameworkFor(component: {
   kind: string;
   commands: Record<string, unknown>;
+  testAction?: { framework: CheckFramework; launcher: string };
 }): CheckFramework | null {
+  // A qualified `testAction` is a LOOKUP, not a guess (ENG-399). Setup resolved it by following
+  // `npm run <script>` into package.json, which is where Node projects actually name their
+  // framework — the regex below sees only `npm run test:ci` and returns null.
+  if (component.testAction) return component.testAction.framework;
   const cmd = testCommandOf(component);
   switch (component.kind) {
     case "python":
@@ -393,6 +398,23 @@ export function signalResultForCoarse(coarse: CoarseResult): "pass" | "fail" | "
  *  maven/gradle/vitest carry their goal/task/`run` IN the runArgs, so their binary is bare. pytest
  *  uses the resolved interpreter (`resolvePythonInterpreter`) so it runs against the provisioned env,
  *  not a bare `pytest` that may be absent. */
+/**
+ * The argv prefix that runs a check for this component, WITH the repo's own configuration.
+ *
+ * Prefers the qualified launcher recorded at setup. `binaryFor` returns the bare binary, which
+ * drops a wrapper's `--config`: darkreader has no root jest config and a three-project
+ * `tests/jest.config.js`, so bare `jest` loads none of the ts-jest/jsdom/tsconfig setup the
+ * check needs. Falling back to `binaryFor` keeps the pre-ENG-399 behaviour for components whose
+ * command already names the framework directly, where the two are equivalent.
+ */
+export function launcherFor(
+  component: { testAction?: { framework: CheckFramework; launcher: string } },
+  fw: CheckFramework,
+  opts?: { interp?: string },
+): string {
+  return component.testAction?.launcher ?? binaryFor(fw, opts);
+}
+
 export function binaryFor(fw: CheckFramework, opts?: { interp?: string }): string {
   switch (fw) {
     case "pytest":

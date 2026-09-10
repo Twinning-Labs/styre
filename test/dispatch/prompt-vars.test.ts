@@ -22,7 +22,7 @@ import { placeholders, renderPrompt } from "../../src/dispatch/render-prompt.ts"
 const profile = parseProfile({
   slug: "demo",
   targetRepo: "/tmp/demo",
-  components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "bun test" } }],
+  components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
   promptVars: { stack: "Bun + SQLite" },
 });
 const ticket = { ident: "ENG-9", title: "Add widget", description: "Add a widget feature" };
@@ -59,7 +59,7 @@ test("implementVars carries the feedback var (empty by default)", () => {
   const profile = parseProfile({
     slug: "demo",
     targetRepo: "/r",
-    components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "bun test" } }],
+    components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
   });
   const ticket = { ident: "ENG-1", title: "T" };
   const unit = {

@@ -9,7 +9,12 @@ For each component, correct:
   Tauri app's frontend lives at the repo root but owns `src/**`/`static/**`, NOT the sibling
   `src-tauri/**` Rust crate. Include build-affecting root files (root manifests, lockfiles, shared
   tsconfig) in the component they affect.
-- **kind**: a precise free-text stack label (e.g. `sveltekit`, `rust`, `node`).
+- **label**: a precise free-text stack description (e.g. `browser-extension`, `cli tool`,
+  `sveltekit app`). This is DESCRIPTIVE only — it is carried into prompts and never switched on.
+  Do NOT return `kind`: the deterministic scan owns runtime identity, because styre routes
+  framework detection and dependency installation off it and a value outside its known set
+  silently disables both. If the scan's `kind` looks wrong, say so in `label` rather than
+  attempting to override it.
 - **commands**: map check-types (`build`/`test`/`check`/`lint`) to the real command, reading scripts
   wherever they live (e.g. a `lint:rust` script in package.json belongs to the Rust component).
 Also propose **repoCommands**: commands that span/own no single component (e.g. an end-to-end suite).

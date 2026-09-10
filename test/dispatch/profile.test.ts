@@ -11,11 +11,11 @@ import {
   parseProfile,
 } from "../../src/dispatch/profile.ts";
 
-test("parses a v3 components profile", () => {
+test("parses a v4 components profile", () => {
   const p = parseProfile({
     slug: "demo",
     targetRepo: "/tmp/repo",
-    schemaVersion: 3,
+    schemaVersion: 4,
     components: [
       {
         name: "core",
@@ -34,7 +34,7 @@ test("parses a v3 components profile", () => {
     ],
     repoCommands: { integration: "playwright test" },
   });
-  expect(p.schemaVersion).toBe(3);
+  expect(p.schemaVersion).toBe(4);
   expect(p.components).toHaveLength(2);
   expect(p.components[0].extensions).toEqual([".rs"]);
   expect(p.components[1].extensions).toEqual([".ts", ".svelte"]);
@@ -70,7 +70,7 @@ test("parseProfile keeps provided values", () => {
     targetRepo: "/tmp/demo",
     defaultBranch: "trunk",
     checksSystem: "github",
-    components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "bun test" } }],
+    components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
     promptVars: { stack: "bun" },
   });
   expect(p.defaultBranch).toBe("trunk");
@@ -116,15 +116,15 @@ test("testFilePattern on a component is optional and parses when present", () =>
   const p2 = parseProfile({
     slug: "s",
     targetRepo: "/r",
-    components: [{ name: "app", kind: "app", paths: ["**"], testFilePattern: "\\.spec\\." }],
+    components: [{ name: "app", kind: "node", paths: ["**"], testFilePattern: "\\.spec\\." }],
   });
   expect(p2.components[0].testFilePattern).toBe("\\.spec\\.");
 });
 
 describe("runtimeContext", () => {
-  test("a v3 profile (no runtimeContext) validates as all-unknown", () => {
+  test("a v4 profile (no runtimeContext) validates as all-unknown", () => {
     const p = parseProfile({ slug: "demo", targetRepo: "/tmp/demo" });
-    expect(p.schemaVersion).toBe(3);
+    expect(p.schemaVersion).toBe(4);
     expect(p.runtimeContext.topology.type).toBe("unknown");
     expect(p.runtimeContext.data.presence).toBe("unknown");
     expect(p.runtimeContext.documentation.presence).toBe("unknown");
@@ -241,4 +241,89 @@ describe("enum vocabulary covers polyglot ecosystems", () => {
       expect(TopologyTypeEnum.parse(t)).toBe(t);
     }
   });
+});
+
+// -- ENG-399: runtime identity is a closed set --------------------------------------------
+
+test("a component kind outside the known set is rejected at load (blocker 1)", () => {
+  // `browser-extension` is an accurate description AND a legal TopologyTypeEnum member, which is
+  // exactly why it slipped through as a free-text `kind` on darkreader__darkreader-7241:
+  // frameworkFor fell to its default and returned null WITHOUT reading the test command, and
+  // isComponentReady returned false. Both failures were silent.
+  expect(() =>
+    parseProfile({
+      slug: "d",
+      targetRepo: "/tmp/d",
+      components: [
+        { name: "frontend", kind: "browser-extension", paths: ["src/**"], commands: {} },
+      ],
+    }),
+  ).toThrow(/kind/);
+});
+
+test("a descriptive label is carried without becoming runtime identity", () => {
+  const p = parseProfile({
+    slug: "d",
+    targetRepo: "/tmp/d",
+    components: [
+      {
+        name: "frontend",
+        kind: "node",
+        label: "browser-extension",
+        paths: ["src/**"],
+        commands: {},
+      },
+    ],
+  });
+  expect(p.components[0]?.kind).toBe("node");
+  expect(p.components[0]?.label).toBe("browser-extension");
+});
+
+test("a testAction parses and rejects an unknown framework", () => {
+  const withAction = parseProfile({
+    slug: "d",
+    targetRepo: "/tmp/d",
+    components: [
+      {
+        name: "frontend",
+        kind: "node",
+        paths: ["src/**"],
+        commands: { test: "npm run test:ci" },
+        testAction: { framework: "jest", launcher: "npm run test:ci --" },
+      },
+    ],
+  });
+  expect(withAction.components[0]?.testAction).toEqual({
+    framework: "jest",
+    launcher: "npm run test:ci --",
+  });
+
+  expect(() =>
+    parseProfile({
+      slug: "d",
+      targetRepo: "/tmp/d",
+      components: [
+        {
+          name: "frontend",
+          kind: "node",
+          paths: ["src/**"],
+          commands: {},
+          testAction: { framework: "karma", launcher: "npm run t --" },
+        },
+      ],
+    }),
+  ).toThrow(/framework/);
+});
+
+test("schemaVersion 3 profile is rejected with a re-run message", () => {
+  // Deliberately not migrated: a v3 `kind` is free text and may hold a value no consumer
+  // switches on, so coercing it would silently reinstate the defect this bump closes.
+  expect(() =>
+    parseProfile({
+      schemaVersion: 3,
+      slug: "d",
+      targetRepo: "/tmp/d",
+      components: [],
+    }),
+  ).toThrow(/schemaVersion 3.*Re-run `styre setup`/s);
 });

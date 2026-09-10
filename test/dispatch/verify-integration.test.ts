@@ -65,13 +65,13 @@ test("verify:integration runs all components' build+test + repoCommands and reco
       components: [
         {
           name: "api",
-          kind: "backend",
+          kind: "node",
           paths: ["api/**"],
           commands: { build: "true", test: "true" },
         },
         {
           name: "web",
-          kind: "frontend",
+          kind: "node",
           paths: ["web/**"],
           commands: { build: "true", test: "true" },
         },
@@ -130,13 +130,13 @@ test("verify:integration records an advisory fail when one component's test comm
       components: [
         {
           name: "api",
-          kind: "backend",
+          kind: "node",
           paths: ["api/**"],
           commands: { build: "true", test: "true" },
         },
         {
           name: "web",
-          kind: "frontend",
+          kind: "node",
           paths: ["web/**"],
           commands: { build: "true", test: "false" }, // failing test
         },

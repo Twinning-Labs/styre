@@ -9,7 +9,7 @@ import {
   probeCommandExists,
 } from "../../src/setup/discover-schema.ts";
 
-test("mergeComponents keeps scan's workspace paths but adopts agent's refined boundaries/commands", () => {
+test("mergeComponents keeps scan's kind + workspace paths but adopts agent's refined boundaries/commands", () => {
   const scan: Component[] = [
     {
       name: "rust-core",
@@ -44,7 +44,8 @@ test("mergeComponents keeps scan's workspace paths but adopts agent's refined bo
   ];
   const merged = mergeComponents(scan, proposed);
   const fe = merged.find((c) => c.name === "frontend");
-  expect(fe?.kind).toBe("sveltekit"); // agent refined the label
+  // ENG-399: kind is scan-authoritative. The agent may describe, never re-identify.
+  expect(fe?.kind).toBe("node"); // scan wins
   expect(fe?.commands.check).toBe("svelte-check"); // agent added a command
   const rust = merged.find((c) => c.name === "rust-core");
   expect(rust?.paths).toEqual(expect.arrayContaining(["src-tauri/**", "crates/**"])); // anchor preserved

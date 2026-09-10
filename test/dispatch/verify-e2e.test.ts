@@ -54,7 +54,7 @@ test("implement then real verify:check drives a work-unit to verified", async ()
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-ve2ewt-")),
   });

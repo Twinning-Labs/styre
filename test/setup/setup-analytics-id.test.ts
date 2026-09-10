@@ -3,14 +3,14 @@ import { deriveSetupInput, ensureAnalyticsId } from "../../src/cli/setup.ts";
 import type { Profile } from "../../src/dispatch/profile.ts";
 
 const profile: Profile = {
-  schemaVersion: 3 as const,
+  schemaVersion: 4 as const,
   slug: "demo",
   targetRepo: "/repo",
   defaultBranch: "main",
   checksSystem: "github" as const,
   components: [
-    { name: "api", kind: "backend", paths: ["api/"], commands: {}, extensions: [] },
-    { name: "web", kind: "frontend", paths: ["web/"], commands: {}, extensions: [] },
+    { name: "api", kind: "go", paths: ["api/"], commands: {}, extensions: [] },
+    { name: "web", kind: "node", paths: ["web/"], commands: {}, extensions: [] },
   ],
   repoCommands: {},
   promptVars: { TECHNOLOGY_STACK: "Node.js + Express" },
@@ -52,7 +52,7 @@ test("deriveSetupInput maps to coarse, allow-listed inputs", () => {
   expect(input.projectId).toBe("pid");
   expect(input.checksSystem).toBe("github");
   expect(input.componentCount).toBe(2);
-  expect(input.componentKinds.sort()).toEqual(["backend", "frontend"]);
+  expect(input.componentKinds.sort()).toEqual(["go", "node"]);
   expect(input.stackBucket).toBe("node");
   expect(input.topologyType).toBe("web-n-tier");
 });

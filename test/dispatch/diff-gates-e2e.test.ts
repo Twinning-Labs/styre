@@ -57,7 +57,7 @@ test("behavioral unit with no test file still verifies on the first attempt (A1 
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-dgwt-")),
   });
@@ -110,7 +110,7 @@ test("a failing integration suite is advisory and advances the ticket without sp
       targetRepo: repo,
       components: [
         // build always fails — the integration suite is red for the whole run.
-        { name: "app", kind: "app", paths: ["**"], commands: { test: "true", build: "false" } },
+        { name: "app", kind: "node", paths: ["**"], commands: { test: "true", build: "false" } },
       ],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-dgint-")),

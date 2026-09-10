@@ -56,12 +56,12 @@ import { resolveAuthoredTestPath } from "./check-path.ts";
 import {
   type CheckFramework,
   type CoarseResult,
-  binaryFor,
   buildCheckSelector,
   collectionErrorExcerpt,
   frameworkFor,
   importErrorImplicatesDiscarded,
   isLaunchFailure,
+  launcherFor,
   signalResultForCoarse,
 } from "./check-selector.ts";
 import { checksFeedback } from "./checks-feedback.ts";
@@ -87,6 +87,7 @@ import { gateFeedback, implementFeedback } from "./feedback.ts";
 import { ImplementOutputSchema } from "./implement-schema.ts";
 import { hasTicketPlan } from "./plan-frontmatter.ts";
 import { rerunAcChecks } from "./post-implement-rerun.ts";
+import { KNOWN_COMPONENT_KINDS } from "./profile.ts";
 import type { Profile } from "./profile.ts";
 import {
   type AdjudicateItem,
@@ -645,9 +646,14 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
 
         if (!comp || !fw) {
           coarse = "error"; // can't attempt — no framework (§5.2)
-          errorReason = comp
-            ? `no test framework could be detected for \`${testPath}\` (its component's \`test\` command names none) — the check could not be attempted`
-            : `no impacted component was found for \`${testPath}\` — the check could not be attempted`;
+          // ENG-399: name the ACTUAL cause. The old text always blamed the test command, which
+          // sent readers to the wrong file on darkreader__darkreader-7241 — that component HAD a
+          // working `npm run test:ci`; its `kind` was simply outside the set this switches on.
+          errorReason = !comp
+            ? `no impacted component was found for \`${testPath}\` — the check could not be attempted`
+            : !KNOWN_COMPONENT_KINDS.has(comp.kind)
+              ? `component \`${comp.name}\` has runtime identity \`${comp.kind}\`, which styre has no test framework for — the check could not be attempted (re-run \`styre setup\`; a valid identity is one of ${[...KNOWN_COMPONENT_KINDS].join(", ")})`
+              : `no test framework could be detected for \`${testPath}\`: component \`${comp.name}\` (${comp.kind}) has no qualified \`testAction\` and its \`test\` command (${commandFor(comp, "test") ?? "absent"}) names none — the check could not be attempted`;
         } else {
           let interp: string | undefined;
           if (fw === "pytest") {
@@ -665,7 +671,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
             selector = sel.runArgs;
             const res = await runCheckForRed({
               framework: fw,
-              binary: binaryFor(fw, { interp }),
+              binary: launcherFor(comp, fw, { interp }),
               runArgs: sel.runArgs,
               cwd: join(worktreePath, comp.dir ?? ""),
               timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
@@ -685,7 +691,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
             // (interpretRunOutput leaves 126 in the per-framework switch), where a coarse-gated
             // assignment would leave errorReason unset. Diagnosis-only (INV-B): names the fact, no advice.
             if (isLaunchFailure(exitCode))
-              errorReason = `the test launcher \`${binaryFor(fw, { interp })}\` for \`${testPath}\` could not be executed (exit ${exitCode}) — the check could not be attempted`;
+              errorReason = `the test launcher \`${launcherFor(comp, fw, { interp })}\` for \`${testPath}\` could not be executed (exit ${exitCode}) — the check could not be attempted`;
             else if (coarse === "error")
               errorReason = `the check for \`${testPath}\` timed out or could not be launched and produced no output`;
           }

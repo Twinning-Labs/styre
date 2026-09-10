@@ -152,12 +152,14 @@ Error surfaces differ by path: the merge path wraps a malformed file as
 ## Project profile (`profile.json`)
 
 `ProfileSchema` (`src/dispatch/profile.ts`), produced by `styre setup`, consumed by `styre run`.
-`schemaVersion` is pinned to `3`; a v1 (`commands`) or v2 profile is rejected with a "re-run
-`styre setup`" error.
+`schemaVersion` is pinned to `4`; a v1 (`commands`), v2 or v3 profile is rejected with a "re-run
+`styre setup`" error. v3 is rejected rather than migrated because its `kind` is free text and may
+hold a value no consumer switches on — coercing it would silently reinstate the defect v4 closes
+(ENG-399).
 
 | Key | Type | Notes |
 |---|---|---|
-| `schemaVersion` | literal `3` | Bumped on breaking profile changes; older versions are rejected, not migrated. |
+| `schemaVersion` | literal `4` | Bumped on breaking profile changes; older versions are rejected, not migrated. |
 | `slug` | string | Project slug; drives the profile/config path and the checkpoint dir. |
 | `targetRepo` | string | Absolute repo path. Overwritten in memory by `--in-place` to the discovered git root. |
 | `defaultBranch` | string (`"main"`) | Detected from `origin/HEAD` → current branch → `"main"`. PR base. |
@@ -173,7 +175,9 @@ Error surfaces differ by path: the merge path wraps a malformed file as
 | Field | Type | Notes |
 |---|---|---|
 | `name` | string (min 1) | Component identifier. |
-| `kind` | string (min 1) | Free text (e.g. `backend`, `frontend`, `data`) — not a CHECK enum. |
+| `kind` | enum | **Runtime identity**, closed set: `node`, `sveltekit`, `python`, `go`, `rust`, `jvm-maven`, `jvm-gradle`, `ruby`, `php`. Routes framework detection (`frameworkFor`), dependency install (`isComponentReady`) and file-identity (`EXTENSIONS_BY_KIND`). **Scan-authoritative** — the discovery agent cannot override it (ENG-399); it was free text until v4, and a value outside this set silently disabled all three consumers. |
+| `label` | string? | Free-text stack **description** (e.g. `browser-extension`). Agent-authored, carried into prompts, never switched on. |
+| `testAction` | `{framework, launcher}`? | Qualified test invocation, resolved at setup by following one level of `npm run <script>` into `package.json`. `framework` is a validated enum read by `frameworkFor` in preference to guessing from the command; `launcher` is the argv prefix **including the repo's own config** (e.g. `npm run test:ci --`), used instead of the bare binary so a wrapper's `--config` is not discarded. Node/sveltekit only; other stacks keep the `kind`-based inference. |
 | `paths` | `string[]` (≥1) | Path globs the component owns. |
 | `commands` | `Record<string, string \| {unavailable:true}>` | Build/test/check commands; `{unavailable:true}` marks a deliberately-absent one. |
 | `testFilePattern` | string? | Glob for the component's test files. |

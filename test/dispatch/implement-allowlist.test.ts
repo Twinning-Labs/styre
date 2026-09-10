@@ -17,13 +17,13 @@ const RUST_FE_PROFILE = parseProfile({
   components: [
     {
       name: "rust",
-      kind: "backend",
+      kind: "node",
       paths: ["src-tauri/**"],
       commands: { build: "cargo build", test: "cargo test" },
     },
     {
       name: "fe",
-      kind: "frontend",
+      kind: "node",
       paths: ["src/**"],
       commands: { build: "vite build", test: { unavailable: true } },
     },
@@ -37,7 +37,7 @@ const ALL_UNAVAILABLE_PROFILE = parseProfile({
   components: [
     {
       name: "lib",
-      kind: "library",
+      kind: "node",
       paths: ["**"],
       commands: { build: { unavailable: true }, test: { unavailable: true } },
     },

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 
 const base = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   slug: "demo",
   targetRepo: "/repo",
   components: [],

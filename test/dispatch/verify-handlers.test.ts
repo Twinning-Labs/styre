@@ -64,7 +64,7 @@ function registryFor(repo: string, commands: Record<string, string>) {
       targetRepo: repo,
       components:
         Object.keys(commands).length > 0
-          ? [{ name: "app", kind: "app", paths: ["**"], commands }]
+          ? [{ name: "app", kind: "node", paths: ["**"], commands }]
           : [],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfywt-")),
@@ -103,7 +103,7 @@ test("a passing check records a pass signal (with command) and the step succeeds
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfywt-")),
   });
@@ -155,7 +155,7 @@ test("a failing check records an advisory fail signal but the step SUCCEEDS (no 
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "false" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "false" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfywt-")),
   });
@@ -208,7 +208,7 @@ test("an absent check (component has no command for the declared check-type) rec
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { build: "true" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { build: "true" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-absent-")),
   });
@@ -313,7 +313,7 @@ test("a timed-out check records an error signal (not fail)", async () => {
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "sleep 5" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "sleep 5" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfywt2-")),
     timeoutMs: 200,
@@ -362,7 +362,7 @@ test("verify:check stamps the verified commit on the signal", async () => {
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-stmp-")),
   });
@@ -412,7 +412,7 @@ test("behavioral unit: green test command but no test in the diff fails with beh
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-a1-")),
   });
@@ -461,7 +461,7 @@ test("behavioral unit: a test file in the diff passes the test check", async () 
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-a1ok-")),
   });
@@ -508,7 +508,7 @@ test("scope_diff records an advisory fail for out-of-scope files but does NOT fa
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "app", paths: ["**"], commands: { test: "true" } }],
+      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-sd-")),
   });

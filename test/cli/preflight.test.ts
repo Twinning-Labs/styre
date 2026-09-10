@@ -166,7 +166,7 @@ test("preflightToolchain (real probe): catches an absent binary, passes a presen
     [
       {
         name: "x",
-        kind: "custom",
+        kind: "node",
         paths: ["**"],
         commands: {
           build: "styre-definitely-absent-xyz build",
