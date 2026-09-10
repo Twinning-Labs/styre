@@ -2,7 +2,13 @@ import { expect, test } from "bun:test";
 import { renderVerifyReport } from "../../src/dispatch/verify-report.ts";
 import type { VerifyReport } from "../../src/dispatch/verify-report.ts";
 
-const base: VerifyReport = { criteria: [], advisory: [], provenance: [], allClean: true };
+const base: VerifyReport = {
+  criteria: [],
+  advisory: [],
+  binding: [],
+  provenance: [],
+  allClean: true,
+};
 
 test("empty report renders nothing", () => {
   expect(renderVerifyReport(base)).toBe("");
@@ -74,6 +80,7 @@ test("provenance section only for installed/rejected", () => {
       { seq: 1, text: "x", label: "verified" },
       { seq: 2, text: "y", label: "check-unreplaced" },
     ],
+    binding: [],
     provenance: [
       { seq: 1, disposition: "installed", reason: "asserted stale field" },
       { seq: 2, disposition: "rejected", reason: "no correct check possible" },

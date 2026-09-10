@@ -1454,9 +1454,10 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
             // baseline proves nothing about the change.
             const fw = frameworkFor(c);
             const baselineSha = preImplementBaselineSha(ctx.db, ctx.ticket.id);
+            const bound: string[] = [];
+            const nonBinding: string[] = [];
+            const unproven: string[] = [];
             if (fw && baselineSha) {
-              const nonBinding: string[] = [];
-              const unproven: string[] = [];
               for (const testFile of delivered) {
                 const verdict = await deliveredTestBindsAtBaseline({
                   repoPath,
@@ -1467,34 +1468,60 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
                   dir: c.dir,
                   timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
                 });
-                if (verdict === "does-not-bind") nonBinding.push(testFile);
-                else if (verdict === "unknown") unproven.push(testFile);
+                if (verdict === "binds") bound.push(testFile);
+                else if (verdict === "does-not-bind") nonBinding.push(testFile);
+                else unproven.push(testFile);
               }
-              if (nonBinding.length > 0) {
-                result = "fail";
-                detail = {
-                  reason: "delivered-test-does-not-bind",
+            } else {
+              // Not even attempted (no resolvable framework, or no AC check to anchor a baseline
+              // on). Still a fact the record must carry.
+              unproven.push(...delivered);
+            }
+            // ALWAYS record the outcome, INCLUDING the all-clear. A proof that leaves no evidence
+            // when it succeeds cannot be audited: a successful run and a skipped one look
+            // identical afterwards. That is exactly what happened on ENG-405 — the feature could
+            // not be shown to have executed at all. `ac-check-red-first`, the mechanism this
+            // imitates, records its result whether red or green; so does this now.
+            insertSignal(ctx.db, {
+              ticketId: ctx.ticket.id,
+              workUnitId: ctx.workUnitId,
+              signalType: "delivered-test-binding",
+              result: nonBinding.length > 0 ? "fail" : unproven.length > 0 ? "error" : "pass",
+              branchHeadSha: latestSha,
+              detail: {
+                component: c.name,
+                baselineSha: baselineSha ?? null,
+                framework: fw ?? null,
+                bound,
+                nonBinding,
+                unproven,
+                ...(fw && baselineSha ? {} : { reason: "binding-proof-not-attempted" }),
+              },
+            });
+            if (nonBinding.length > 0) {
+              result = "fail";
+              detail = {
+                reason: "delivered-test-does-not-bind",
+                component: c.name,
+                changed: nonBinding,
+              };
+              break;
+            }
+            if (unproven.length > 0) {
+              // Surfaced to the reviewer, never treated as proof either way — the same
+              // fail-closed rule the baseline advisory uses.
+              insertSignal(ctx.db, {
+                ticketId: ctx.ticket.id,
+                workUnitId: ctx.workUnitId,
+                signalType: "untested-merge-risk",
+                result: "fail",
+                branchHeadSha: latestSha,
+                detail: {
                   component: c.name,
-                  changed: nonBinding,
-                };
-                break;
-              }
-              if (unproven.length > 0) {
-                // Reported, never treated as proof either way — the same fail-closed rule the
-                // baseline advisory uses.
-                insertSignal(ctx.db, {
-                  ticketId: ctx.ticket.id,
-                  workUnitId: ctx.workUnitId,
-                  signalType: "untested-merge-risk",
-                  result: "fail",
-                  branchHeadSha: latestSha,
-                  detail: {
-                    component: c.name,
-                    reason: "delivered-test-binding-unproven",
-                    files: unproven,
-                  },
-                });
-              }
+                  reason: "delivered-test-binding-unproven",
+                  files: unproven,
+                },
+              });
             }
           }
         }

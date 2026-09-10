@@ -5,6 +5,7 @@ function report(advisory: AdvisoryLine[]) {
   return renderVerifyReport({
     criteria: [{ seq: 1, text: "The reported bug no longer reproduces", label: "verified" }],
     advisory,
+    binding: [],
     provenance: [],
     allClean: false,
   });
@@ -105,5 +106,31 @@ describe("ENG-402: a delivered test that proves nothing is said so plainly", () 
     const noTest = report([{ kind: "behavioral-no-test", checkType: "test" }]);
     expect(noTest).toContain("without a test of its own");
     expect(noTest).not.toContain("already PASSED at the base commit");
+  });
+});
+
+describe("ENG-402: the binding proof is shown positively, not only on failure", () => {
+  test("the PR states the test was confirmed to fail at the base commit", () => {
+    const out = renderVerifyReport({
+      criteria: [{ seq: 1, text: "bug no longer reproduces", label: "verified" }],
+      binding: [{ component: "frontend", bound: ["tests/generators/utils/parse.tests.ts"] }],
+      advisory: [],
+      provenance: [],
+      allClean: true,
+    });
+    expect(out).toContain("checked out at the base commit");
+    expect(out).toContain("confirmed to FAIL there");
+    expect(out).toContain("tests/generators/utils/parse.tests.ts");
+  });
+
+  test("no binding evidence renders no section at all", () => {
+    const out = renderVerifyReport({
+      criteria: [{ seq: 1, text: "bug no longer reproduces", label: "verified" }],
+      binding: [],
+      advisory: [],
+      provenance: [],
+      allClean: true,
+    });
+    expect(out).not.toContain("base commit");
   });
 });

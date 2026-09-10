@@ -398,3 +398,46 @@ test("a delivered-test-does-not-bind sweep maps to its own advisory kind", () =>
     },
   ]);
 });
+
+test("a SUCCESSFUL binding proof is recorded, so 'ran and passed' is not mistaken for 'never ran'", () => {
+  // The gap this closes: the proof previously wrote a signal only on failure, so a run that
+  // succeeded left no trace and could not be distinguished from the feature never executing.
+  // Observed on ENG-405, where the binding proof could not be shown to have run at all.
+  const { db, ticketId } = makeTestDb();
+  seedHead(db, ticketId);
+  insertSignal(db, {
+    ticketId,
+    signalType: "delivered-test-binding",
+    result: "pass",
+    branchHeadSha: HEAD,
+    detail: {
+      component: "frontend",
+      bound: ["tests/generators/utils/parse.tests.ts"],
+      nonBinding: [],
+      unproven: [],
+    },
+  });
+  const r = buildVerifyReport(db, ticketId);
+  expect(r.binding).toEqual([
+    { component: "frontend", bound: ["tests/generators/utils/parse.tests.ts"] },
+  ]);
+});
+
+test("a binding proof that proved nothing contributes no positive evidence", () => {
+  const { db, ticketId } = makeTestDb();
+  seedHead(db, ticketId);
+  insertSignal(db, {
+    ticketId,
+    signalType: "delivered-test-binding",
+    result: "error",
+    branchHeadSha: HEAD,
+    detail: {
+      component: "frontend",
+      bound: [],
+      nonBinding: [],
+      unproven: ["tests/a.tests.ts"],
+      reason: "binding-proof-not-attempted",
+    },
+  });
+  expect(buildVerifyReport(db, ticketId).binding).toEqual([]);
+});

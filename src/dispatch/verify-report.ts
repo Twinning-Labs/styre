@@ -4,6 +4,7 @@ import { listByTicket as listAcs } from "../db/repos/acceptance-criterion.ts";
 import { getLatestForTicket } from "../db/repos/dispatch.ts";
 import {
   advisorySweeps,
+  deliveredTestBinding,
   postImplementAtSha,
   reauthorProvenance,
 } from "../db/repos/ground-truth-signal.ts";
@@ -37,8 +38,13 @@ export type AdvisoryLine =
 
 export type ProvenanceLine = { seq: number; disposition: "installed" | "rejected"; reason: string };
 
+/** ENG-402: the delivered regression tests proven to fail at the baseline. Positive evidence —
+ *  the reviewer should be able to see that the proof RAN, not only hear about it when it fails. */
+export type BindingLine = { component: string; bound: string[] };
+
 export type VerifyReport = {
   criteria: AcLine[];
+  binding: BindingLine[];
   advisory: AdvisoryLine[];
   provenance: ProvenanceLine[];
   allClean: boolean;
@@ -53,6 +59,9 @@ export function buildVerifyReport(db: Database, ticketId: number): VerifyReport 
   const postImpl = headSha ? postImplementAtSha(db, ticketId, headSha) : new Map();
   const prov = reauthorProvenance(db, ticketId);
   const sweeps = advisorySweeps(db, ticketId);
+  const binding = deliveredTestBinding(db, ticketId)
+    .filter((b) => b.bound.length > 0)
+    .map((b) => ({ component: b.component, bound: b.bound }));
 
   const rejectedCheckIds = new Set(
     prov.filter((p) => p.disposition === "rejected").map((p) => p.acCheckId),
@@ -149,7 +158,7 @@ export function buildVerifyReport(db: Database, ticketId: number): VerifyReport 
     criteria.every((c) => c.label === "verified" || c.label === "satisfied") &&
     advisory.length === 0;
 
-  return { criteria, advisory, provenance, allClean };
+  return { criteria, binding, advisory, provenance, allClean };
 }
 
 /** Truncate an AC to one line and neutralize markdown/HTML so a crafted AC cannot break the list or
@@ -231,6 +240,11 @@ function renderAdvisory(a: AdvisoryLine): string {
   return `- ⚠️ The automated check for AC-${a.seq} is still failing, but the failure looks environmental (for example, missing tooling or configuration) rather than something this change caused.`;
 }
 
+function renderBinding(b: BindingLine): string {
+  const files = b.bound.map((f) => `\`${f}\``).join(", ");
+  return `- ✅ ${b.component}: ${files} — checked out at the base commit and confirmed to FAIL there, so ${b.bound.length === 1 ? "it proves" : "they prove"} this change does something.`;
+}
+
 /** The `### Change-scoped verify` block, or "" when the ticket has no acceptance criteria. Pure. */
 export function renderVerifyReport(report: VerifyReport): string {
   if (report.criteria.length === 0) return "";
@@ -245,6 +259,14 @@ export function renderVerifyReport(report: VerifyReport): string {
   for (const c of report.criteria) {
     lines.push(`- ${SYMBOL[c.label]} AC-${c.seq} — ${acText(c.text)}`);
     lines.push(`  ${EXPLAIN[c.label]}`);
+    lines.push("");
+  }
+  if (report.binding.length > 0) {
+    lines.push(
+      "**Regression tests shipped with this change were checked against the base commit**",
+    );
+    lines.push("");
+    for (const b of report.binding) lines.push(renderBinding(b));
     lines.push("");
   }
   if (report.advisory.length > 0) {

@@ -322,6 +322,32 @@ export function advisorySweeps(db: Database, ticketId: number): AdvisorySweep[] 
   return [...byType.values()];
 }
 
+export interface BindingEvidence {
+  component: string;
+  bound: string[];
+  nonBinding: string[];
+  unproven: string[];
+}
+
+/** Newest `delivered-test-binding` per component (ENG-402). Recorded on EVERY path, including the
+ *  all-clear, so "the proof ran and passed" is distinguishable from "the proof never ran" —
+ *  which it was not when the signal was only written on failure. */
+export function deliveredTestBinding(db: Database, ticketId: number): BindingEvidence[] {
+  const byComponent = new Map<string, BindingEvidence>();
+  for (const s of listByTicket(db, ticketId)) {
+    if (s.signal_type !== "delivered-test-binding") continue;
+    const d = JSON.parse(s.detail_json ?? "{}") as Partial<BindingEvidence>;
+    if (typeof d.component !== "string") continue;
+    byComponent.set(d.component, {
+      component: d.component,
+      bound: Array.isArray(d.bound) ? d.bound : [],
+      nonBinding: Array.isArray(d.nonBinding) ? d.nonBinding : [],
+      unproven: Array.isArray(d.unproven) ? d.unproven : [],
+    });
+  }
+  return [...byComponent.values()];
+}
+
 export interface Provenance {
   acId: number;
   acCheckId: number;
