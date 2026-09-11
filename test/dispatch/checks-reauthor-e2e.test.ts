@@ -16,6 +16,7 @@ import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
+import { scriptedCheckRunner } from "../helpers/check-runner.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 function gitRepo(): string {
@@ -95,7 +96,12 @@ test("green-on-HEAD check → vacuous → scoped re-author → repeated vacuous 
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-rewt-")),
     // The authored check GREENS on clean HEAD (exit 0) → green-on-HEAD adjudication.
-    runCheckCommand: async () => ({ exitCode: 0, stdout: "1 passed", stderr: "", timedOut: false }),
+    runCheckCommand: scriptedCheckRunner(async () => ({
+      exitCode: 0,
+      stdout: "1 passed",
+      stderr: "",
+      timedOut: false,
+    })),
   });
 
   // Drive the loop until the ticket escalates (status=waiting) or a bound is hit.
@@ -194,7 +200,12 @@ test("a weak classification (surface-only assertion) drives the same re-author l
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-weak-wt-")),
     // The authored check stays RED (a `weak` verdict is only valid on a red coarse bucket, §2/Task 2).
-    runCheckCommand: async () => ({ exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false }),
+    runCheckCommand: scriptedCheckRunner(async () => ({
+      exitCode: 1,
+      stdout: "1 failed",
+      stderr: "",
+      timedOut: false,
+    })),
   });
 
   let escalated = false;
@@ -293,7 +304,12 @@ test("supersede, not delete: a healed AC (vacuous -> re-author -> already-satisf
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-heal-wt-")),
     // Green-on-HEAD both rounds — only the ADJUDICATOR's judgment changes between rounds.
-    runCheckCommand: async () => ({ exitCode: 0, stdout: "1 passed", stderr: "", timedOut: false }),
+    runCheckCommand: scriptedCheckRunner(async () => ({
+      exitCode: 0,
+      stdout: "1 passed",
+      stderr: "",
+      timedOut: false,
+    })),
   });
 
   let advancedPastDesign = false;

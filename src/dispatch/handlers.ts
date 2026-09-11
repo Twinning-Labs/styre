@@ -59,6 +59,7 @@ import {
   runAtBaseline,
 } from "./baseline-rerun.ts";
 import { carryVerifiedVerdictForward } from "./carry-forward.ts";
+import { probeCheckCapability } from "./check-capability.ts";
 import { checkIntegrityViolations } from "./check-integrity.ts";
 import { resolveAuthoredTestPath } from "./check-path.ts";
 import {
@@ -586,6 +587,62 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
     ensureWorktree(repoPath, branch, worktreePath);
     const preHead = worktreeHead(worktreePath);
+
+    // ENG-426: CAN styre run a check here at all? Asked BEFORE the authoring agent is dispatched,
+    // because authoring is the expensive step and a check that cannot be executed is worth
+    // nothing once written.
+    //
+    // Provision has already run (it is hoisted to the top of `design`), so this sees the
+    // environment the check would actually run in. `probeCommandExists` cannot answer this: it
+    // probes the leading program, and for `python3 -m pytest` that is `python3`, which is always
+    // present. On django__django-12325 that blindness surfaced only as a RED-first
+    // `No module named pytest`, correctly classified `environmental`, hence permanently
+    // advisory — and the run spent $6.42 and opened a PR on no executed evidence.
+    const capability = await probeCheckCapability(deps.profile.components, {
+      worktreePath,
+      run: deps.runCheckCommand,
+    });
+    for (const p of capability) {
+      insertSignal(ctx.db, {
+        ticketId: ctx.ticket.id,
+        signalType: "check-capability",
+        // `error`, not `fail`: an unrunnable framework was never MEASURED against this code.
+        result: p.runnable ? "pass" : "error",
+        branchHeadSha: preHead,
+        detail: { component: p.component, framework: p.framework, detail: p.detail },
+      });
+    }
+    // FIRES ONLY FOR THE CASE ENG-426 IS ABOUT: a framework RESOLVED and cannot execute. When no
+    // component resolves a framework at all, that is the older, different defect ENG-347/ENG-399
+    // already diagnose per-AC with better text (naming the component's `kind`, or its unresolved
+    // `test` command) — and those messages feed the retry prompt. Short-circuiting there would
+    // trade a specific diagnosis for a vague one.
+    //
+    // And only when NOTHING is capable. With one capable component left, re-dispatching CAN help
+    // (the author can land its check there), so the per-AC path and its retry stay in force —
+    // ENG-357's "could not be executed (exit 127)" message included. It is only when no component
+    // can execute anything that another authoring round is provably futile.
+    const anyFrameworkResolved = capability.some((p) => p.framework !== null);
+    if (capability.length > 0 && anyFrameworkResolved && capability.every((p) => !p.runnable)) {
+      // NOTHING can execute a check. Authoring one would produce a test that cannot run, a RED
+      // that means nothing, and an `environmental` class that permanently excuses it. Say so
+      // instead, and leave the ACs with no check — `verify-report` already renders that as
+      // `no-check`, and ENG-424's evidence floor then requires a green suite before this run can
+      // claim success. The advisory below is what tells a reviewer WHY there is no check.
+      insertSignal(ctx.db, {
+        ticketId: ctx.ticket.id,
+        signalType: "check-capability-run",
+        result: "error",
+        branchHeadSha: preHead,
+        detail: {
+          advisory: true,
+          reason: "no-runnable-check-framework",
+          components: capability.map((p) => p.component),
+          details: capability.map((p) => p.detail),
+        },
+      });
+      return { authored: 0, acs: acs.length, unrunnable: capability.length };
+    }
 
     // Dispatch the plan-blind author (scoped Bash to run/confirm its own RED-first checks; commits
     // via CL-COMMIT → sha).

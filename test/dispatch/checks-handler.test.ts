@@ -20,7 +20,9 @@ import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { getByKey, resetToPending } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
+import { buildVerifyReport, renderVerifyReport } from "../../src/dispatch/verify-report.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
+import { scriptedCheckRunner } from "../helpers/check-runner.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 function gitRepo(): string {
@@ -52,6 +54,11 @@ async function runSingleCheckDispatch(fixture: {
   testCmd: string;
   ext: string;
   run: () => { exitCode: number | null; stdout: string; stderr: string; timedOut: boolean };
+  /** ENG-426: false = the framework is absent entirely, so even the capability probe fails
+   *  (django's shape). Default true = the launcher answers `--version` while the check itself
+   *  fails, which is darkreader's ENG-399 shape (`npm run test:ci --` answers; bare `jest` does
+   *  not). Both are real; they are different scenarios and must be simulated differently. */
+  probeSucceeds?: boolean;
 }) {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
@@ -87,7 +94,9 @@ async function runSingleCheckDispatch(fixture: {
       ],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
-    runCheckCommand: async () => fixture.run(),
+    runCheckCommand: scriptedCheckRunner(async () => fixture.run(), {
+      probeFails: fixture.probeSucceeds === false,
+    }),
   });
   await advanceOneStep(db, ticketId, registry); // provision
   const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
@@ -95,8 +104,14 @@ async function runSingleCheckDispatch(fixture: {
   const step = getByKey(db, ticketId, "checks:dispatch");
   const message = step?.error_json != null ? (JSON.parse(step.error_json).message ?? "") : "";
   const stepStatus = step?.status;
+  const signals = listSignals(db, ticketId);
+  const report = buildVerifyReport(db, ticketId);
+  const markdown = renderVerifyReport(report);
+  const authorDispatches = listDispatches(db, ticketId).filter(
+    (d) => d.stage === "design" && d.dispatch_id.length > 0,
+  ).length;
   db.close();
-  return { checks, message, outcome, stepStatus };
+  return { checks, message, outcome, stepStatus, signals, report, markdown, authorDispatches };
 }
 
 test("checks:dispatch authors, verifies identity, runs RED-first, and persists a coarse red", async () => {
@@ -146,7 +161,12 @@ test("checks:dispatch authors, verifies identity, runs RED-first, and persists a
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
     // Inject the RED-first runner: a failing (red) run for every check (decision 4).
-    runCheckCommand: async () => ({ exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false }),
+    runCheckCommand: scriptedCheckRunner(async () => ({
+      exitCode: 1,
+      stdout: "1 failed",
+      stderr: "",
+      timedOut: false,
+    })),
   });
 
   // The loop collapses design→provision (no prepare → no-op) then steps checks:dispatch.
@@ -205,7 +225,12 @@ test("checks:dispatch rejects a MODIFIED file (identity: added-only) → postcon
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt2-")),
-    runCheckCommand: async () => ({ exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false }),
+    runCheckCommand: scriptedCheckRunner(async () => ({
+      exitCode: 1,
+      stdout: "1 failed",
+      stderr: "",
+      timedOut: false,
+    })),
   });
   await advanceOneStep(db, ticketId, registry); // provision
   const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch → postcondition fail
@@ -263,7 +288,12 @@ test("checks:dispatch reverts its author commit when coverage fails — no inval
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
     worktreeRoot,
-    runCheckCommand: async () => ({ exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false }),
+    runCheckCommand: scriptedCheckRunner(async () => ({
+      exitCode: 1,
+      stdout: "1 failed",
+      stderr: "",
+      timedOut: false,
+    })),
   });
   await advanceOneStep(db, ticketId, registry); // provision
   const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch → coverage fail
@@ -305,12 +335,12 @@ test("checks:dispatch on a checks re-author loopback re-authors ONLY the flagged
     targetRepo: repo,
     components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
   });
-  const runCheckCommand = async () => ({
+  const runCheckCommand = scriptedCheckRunner(async () => ({
     exitCode: 1,
     stdout: "1 failed",
     stderr: "",
     timedOut: false,
-  });
+  }));
 
   // Round 1: fresh dispatch — no checks-loopback event yet → whole-ticket author, both ACs covered.
   const runner1 = new FakeAgentRunner((input) => {
@@ -437,12 +467,12 @@ test("checks:dispatch scoped re-author is insert-only (deleteActiveByAc): a cras
     targetRepo: repo,
     components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
   });
-  const runCheckCommand = async () => ({
+  const runCheckCommand = scriptedCheckRunner(async () => ({
     exitCode: 1,
     stdout: "1 failed",
     stderr: "",
     timedOut: false,
-  });
+  }));
 
   // Round 1: fresh dispatch — whole-ticket author, both ACs covered.
   const runner1 = new FakeAgentRunner((input) => {
@@ -632,7 +662,12 @@ test("checks:dispatch reconciles a divergent path: written under styre_checks/, 
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
-    runCheckCommand: async () => ({ exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false }),
+    runCheckCommand: scriptedCheckRunner(async () => ({
+      exitCode: 1,
+      stdout: "1 failed",
+      stderr: "",
+      timedOut: false,
+    })),
   });
 
   // Drive until checks:dispatch resolves (correct arg order: db, ticketId, registry). Stop on its
@@ -693,7 +728,12 @@ test("checks:dispatch backward-compat: non-canonical name declared correctly sti
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
-    runCheckCommand: async () => ({ exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false }),
+    runCheckCommand: scriptedCheckRunner(async () => ({
+      exitCode: 1,
+      stdout: "1 failed",
+      stderr: "",
+      timedOut: false,
+    })),
   });
   for (let i = 0; i < 12; i++) {
     await advanceOneStep(db, ticketId, registry);
@@ -756,7 +796,12 @@ test("checks:dispatch discards an undeclared loose file instead of rejecting", a
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
     worktreeRoot,
-    runCheckCommand: async () => ({ exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false }),
+    runCheckCommand: scriptedCheckRunner(async () => ({
+      exitCode: 1,
+      stdout: "1 failed",
+      stderr: "",
+      timedOut: false,
+    })),
   });
   await advanceOneStep(db, ticketId, registry); // provision
   const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
@@ -829,12 +874,12 @@ test("checks:dispatch names a discarded-but-needed helper in the uncovered-AC fa
     worktreeRoot,
     // Simulate pytest collection finding zero tests (exit 5) because `util` is missing — the coarse
     // classifier's `selected-none` bucket (§5.1), regardless of the fake's literal test content.
-    runCheckCommand: async () => ({
+    runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 5,
       stdout: "collected 0 items",
       stderr: "",
       timedOut: false,
-    }),
+    })),
   });
   await advanceOneStep(db, ticketId, registry); // provision
   const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch → uncovered → throws
@@ -895,14 +940,14 @@ test("checks:dispatch — a discarded __init__.py yields a legible, non-persiste
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
     // RED-first run: a collection error naming the package whose __init__.py was discarded.
-    runCheckCommand: async () => ({
+    runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 2,
       stdout:
         "E   ModuleNotFoundError: No module named 'pkg'\n" +
         "ERROR checks/ac1.py - ModuleNotFoundError: No module named 'pkg'",
       stderr: "",
       timedOut: false,
-    }),
+    })),
   });
 
   await advanceOneStep(db, ticketId, registry); // provision (no-op)
@@ -957,9 +1002,9 @@ test("a ruby check whose test command names neither rspec nor minitest → frame
       components: [{ name: "app", kind: "ruby", paths: ["**"], commands: { test: "bin/test" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
-    runCheckCommand: async () => {
+    runCheckCommand: scriptedCheckRunner(async () => {
       throw new Error("runCheckCommand must not be called when no framework is detected");
-    },
+    }),
   });
   let outcome = await advanceOneStep(db, ticketId, registry); // provision
   outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
@@ -1010,7 +1055,12 @@ test("a check that times out with empty output → error, empty → AC uncovered
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
-    runCheckCommand: async () => ({ exitCode: null, stdout: "", stderr: "", timedOut: true }),
+    runCheckCommand: scriptedCheckRunner(async () => ({
+      exitCode: null,
+      stdout: "",
+      stderr: "",
+      timedOut: true,
+    })),
   });
   let outcome = await advanceOneStep(db, ticketId, registry); // provision
   outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
@@ -1121,4 +1171,154 @@ test("ENG-357 contrast: a genuine non-zero red (exit 1) IS recorded as covering 
   expect(checks).toHaveLength(1); // genuine red → covered
   expect(checks[0]?.red_first_result).toBe("red");
   expect(outcome.kind).toBe("stepped"); // succeeded, not a retry/escalation
+});
+
+/**
+ * ENG-426: the framework itself is absent, so no check could ever run.
+ *
+ * django__django-12325's shape exactly — `python3 -m pytest` on an image that ships no pytest
+ * (true of the OFFICIAL SWE-bench django image too; django's runner is `./tests/runtests.py`).
+ * Authoring a check there produces a test that cannot execute, a RED that means nothing, and an
+ * `environmental` class that permanently excuses it. That run spent $6.42 and opened a PR on no
+ * executed evidence at all.
+ */
+test("ENG-426: no runnable framework → the authoring agent is never dispatched", async () => {
+  const { checks, outcome, authorDispatches } = await runSingleCheckDispatch({
+    kind: "python",
+    testCmd: "pytest",
+    ext: "py",
+    probeSucceeds: false,
+    run: () => ({ exitCode: 1, stdout: "", stderr: "boom", timedOut: false }),
+  });
+
+  // THE POINT: authoring is the expensive step, and a check that cannot be executed is worth
+  // nothing once written. The saving is the whole reason the probe runs before the dispatch.
+  expect(authorDispatches).toBe(0);
+  expect(checks).toHaveLength(0);
+  expect(outcome.kind).toBe("stepped");
+});
+
+test("ENG-426: the capability verdict is recorded per component, as a signal", async () => {
+  const { signals } = await runSingleCheckDispatch({
+    kind: "python",
+    testCmd: "pytest",
+    ext: "py",
+    probeSucceeds: false,
+    run: () => ({ exitCode: 1, stdout: "", stderr: "boom", timedOut: false }),
+  });
+  const cap = signals.filter((s) => s.signal_type === "check-capability");
+  expect(cap).toHaveLength(1);
+  // `error`, not `fail`: an unrunnable framework was never MEASURED against this code.
+  expect(cap[0]?.result).toBe("error");
+  expect(cap[0]?.detail_json ?? "").toContain("No module named pytest");
+});
+
+test("ENG-426: the PR says WHY every criterion carries no check", async () => {
+  const { report, markdown } = await runSingleCheckDispatch({
+    kind: "python",
+    testCmd: "pytest",
+    ext: "py",
+    probeSucceeds: false,
+    run: () => ({ exitCode: 1, stdout: "", stderr: "boom", timedOut: false }),
+  });
+
+  // Without this the criteria render as a bare `no-check` — true, but silent about the cause,
+  // which is the one thing a reviewer needs in order to judge the change themselves.
+  expect(report.advisory.filter((a) => a.kind === "no-runnable-check-framework")).toHaveLength(1);
+  expect(markdown).toContain("No automated check could be created");
+  expect(markdown).toContain("No module named pytest");
+});
+
+test("ENG-426: a capable framework still authors exactly as before", async () => {
+  // The probe must not become a new way to do nothing. `probeSucceeds` defaults true here.
+  const { checks, authorDispatches } = await runSingleCheckDispatch({
+    kind: "python",
+    testCmd: "pytest",
+    ext: "py",
+    run: () => ({ exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false }),
+  });
+  expect(authorDispatches).toBeGreaterThan(0);
+  expect(checks).toHaveLength(1);
+  expect(checks[0]?.red_first_result).toBe("red");
+});
+
+test("ENG-426: ONE capable component is enough — authoring proceeds, per-AC diagnosis preserved", async () => {
+  // The guarantee the early return must NOT break. With a capable component left, re-dispatching
+  // the author CAN help (it can land its check there), so ENG-347/ENG-357's per-AC messages and
+  // their retry stay in force. Only when NOTHING can execute is another round provably futile.
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] one thing\n", ticketId);
+  await markDesignDone(db, ticketId);
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
+  setTicketTrack(db, ticketId, "fast");
+
+  const runner = new FakeAgentRunner((input) => {
+    const dir = join(input.cwd, "api");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "ENG-1_ac1_test.py"), "test_x placeholder\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: `\`\`\`styre-sidecar\n{"checksAuthored":[{"ac_id":1,"test_file":"api/ENG-1_ac1_test.py","test_name":"test_x"}]}\n\`\`\``,
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    };
+  });
+
+  const registry = buildDispatchRegistry({
+    runner,
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [
+        // `dir` matters: the probe runs in the component's own module root, so without it BOTH
+        // components probe the same cwd and the fake below cannot tell them apart — a test that
+        // would pass for the wrong reason (a mutation of `every` to `some` survived on exactly
+        // that flaw).
+        {
+          name: "api",
+          kind: "python",
+          dir: "api",
+          paths: ["api/**"],
+          commands: { test: "pytest" },
+        },
+        {
+          name: "legacy",
+          kind: "python",
+          dir: "legacy",
+          paths: ["legacy/**"],
+          commands: { test: "pytest" },
+        },
+      ],
+    }),
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
+    // `legacy` has no pytest; `api` does. Keyed on cwd, which is how the probe distinguishes them.
+    runCheckCommand: async (command, opts) => {
+      const incapable = opts.cwd.includes("legacy");
+      if (/ --version$/.test(command)) {
+        return incapable
+          ? { exitCode: 1, stdout: "", stderr: "No module named pytest", timedOut: false }
+          : { exitCode: 0, stdout: "pytest 8.4.2", stderr: "", timedOut: false };
+      }
+      return { exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false };
+    },
+  });
+
+  await advanceOneStep(db, ticketId, registry); // provision
+  await advanceOneStep(db, ticketId, registry); // checks:dispatch
+  const checks = listAcChecks(db, ticketId);
+  const report = buildVerifyReport(db, ticketId);
+  db.close();
+
+  // Authored normally — the incapable sibling did not veto the run.
+  expect(checks).toHaveLength(1);
+  expect(checks[0]?.red_first_result).toBe("red");
+  // And no run-level "nothing can run" advisory, because that is not what happened.
+  expect(report.advisory.filter((a) => a.kind === "no-runnable-check-framework")).toHaveLength(0);
 });

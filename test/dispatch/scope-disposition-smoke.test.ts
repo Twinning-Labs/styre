@@ -39,6 +39,7 @@ import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runAgentDispatch } from "../../src/dispatch/run-dispatch.ts";
 import { ensureWorktree } from "../../src/dispatch/worktree.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
+import { scriptedCheckRunner } from "../helpers/check-runner.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 // ---------------------------------------------------------------------------------------------------
@@ -184,7 +185,10 @@ async function driveChecks(
     agentConfig: DEFAULT_AGENT_CONFIG,
     profile: opts?.profile ?? pythonProfile(h.repo),
     worktreeRoot: h.worktreeRoot,
-    runCheckCommand: opts?.runCheck ?? redRun,
+    // ENG-426: checks:dispatch probes framework capability before authoring. A command-blind
+    // fake would answer that probe with the scripted RED and make every run look like a machine
+    // with no test framework at all.
+    runCheckCommand: scriptedCheckRunner(opts?.runCheck ?? redRun),
   });
   await advanceOneStep(h.db, h.ticketId, registry); // provision (creates the worktree)
   const wt = join(h.worktreeRoot, h.ident);
