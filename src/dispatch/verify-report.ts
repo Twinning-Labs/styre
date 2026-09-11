@@ -42,6 +42,16 @@ export type AdvisoryLine =
    *  the component itself is a fixture, example or vendored tree. The PR must still say so, or
    *  a reviewer cannot tell a deliberately narrowed scope from an accidentally narrow one. */
   | { kind: "component-not-primary"; components: string[]; roles: string[] }
+  /** ENG-426: no component could execute a check at all, so none was authored. It explains every
+   *  AC's `no-check` label at once, and it is the only place the PR says WHY the criteria carry no
+   *  automated evidence.
+   *
+   *  Deliberately NOT in `RUN_SCOPED_ADVISORY`, unlike the two component exclusions above: it
+   *  cannot arise without acceptance criteria, because `checks:dispatch` returns at
+   *  `allAcs.length === 0` before it ever probes. A kind that can only occur alongside criteria
+   *  needs no special case to survive their absence, and listing it there would be unreachable
+   *  code pretending to be a guard. */
+  | { kind: "no-runnable-check-framework"; components: string[]; details: string[] }
   | { kind: "integration"; result: string; firstFailingJob?: string; preexisting?: boolean }
   | { kind: "environmental-red"; seq: number };
 
@@ -131,6 +141,12 @@ export function buildVerifyReport(db: Database, ticketId: number): VerifyReport 
         kind: "component-unusable",
         components: s.components ?? [],
         missing: s.missing ?? [],
+      });
+    } else if (s.reason === "no-runnable-check-framework") {
+      advisory.push({
+        kind: "no-runnable-check-framework",
+        components: s.components ?? [],
+        details: s.details ?? [],
       });
     } else if (s.reason === "component-not-primary") {
       advisory.push({
@@ -261,6 +277,10 @@ function renderAdvisory(a: AdvisoryLine): string {
     // State the SCOPE loss, not just the missing tool: the reviewer's question is "what did
     // styre not look at?", and answering only "npm was missing" leaves them to infer the rest.
     return `- ⚠️ Nothing was built, tested or checked for ${comps} — the required tooling (${tools}) is not installed on the machine this run used, so ${a.components.length === 1 ? "that component" : "those components"} ${a.components.length === 1 ? "was" : "were"} skipped entirely. Any change touching ${a.components.length === 1 ? "it" : "them"} is unverified.`;
+  }
+  if (a.kind === "no-runnable-check-framework") {
+    const why = a.details.length > 0 ? ` Details: ${a.details.join("; ")}` : "";
+    return `- ⚠️ No automated check could be created for ANY acceptance criterion: styre could not execute a test framework in this environment for ${a.components.map((c) => `\`${c}\``).join(", ")}. The criteria below are unverified by automated test — review them directly.${why}`;
   }
   if (a.kind === "component-not-primary") {
     const comps = a.components
