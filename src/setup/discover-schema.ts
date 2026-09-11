@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import type { Component } from "../dispatch/profile.ts";
@@ -56,21 +56,98 @@ export function mergeComponents(scan: Component[], proposed: Component[]): Compo
   });
 }
 
-/** True if the command's program resolves (typo/missing-tool probe only — NOT correctness, NOT
- *  safety). For an `npm run X`, checks the script exists in the cwd package.json; otherwise checks
- *  the binary on PATH. (`readFileSync`/`join` imported at the top of the file.) */
+/** Package managers whose bare `<mgr> <word>` form usually means "run the script <word>". */
+const SCRIPT_RUNNERS = new Set(["npm", "pnpm", "yarn", "bun"]);
+
+/** Subcommands that are the MANAGER's own, not a package.json script. `<mgr> <builtin>` is valid
+ *  whenever the manager exists, so it must not be judged against the script list. Deliberately
+ *  narrow: anything not listed is treated as a script name and must actually exist, which is the
+ *  direction that catches typos. */
+const RUNNER_BUILTINS: Record<string, ReadonlySet<string>> = {
+  npm: new Set(["install", "i", "ci", "add", "exec", "x", "publish", "pack", "link", "audit"]),
+  pnpm: new Set(["install", "i", "add", "dlx", "exec", "publish", "pack", "link", "audit"]),
+  yarn: new Set([
+    "install",
+    "add",
+    "dlx",
+    "exec",
+    "publish",
+    "pack",
+    "link",
+    "audit",
+    "workspaces",
+  ]),
+  // `bun test` is bun's OWN test runner, not a script — listing it here keeps it from being
+  // rejected on repos that have no "test" script.
+  bun: new Set(["install", "i", "add", "x", "create", "test", "publish", "link"]),
+};
+
+/** npm maps these bare subcommands onto same-named package.json scripts. */
+const NPM_SCRIPT_ALIASES = new Set(["test", "start", "stop", "restart"]);
+
+/** Directories a repo's own tooling lives in but `command -v` never sees, because they are not
+ *  on PATH as this probe invokes it. */
+const LOCAL_BIN_DIRS = ["node_modules/.bin", ".venv/bin", "venv/bin", ".tox/bin", "bin"];
+
+/**
+ * The package.json script `command` invokes, or null when it is the manager's own subcommand
+ * (or not a manager invocation at all).
+ */
+function scriptNameFor(command: string): string | null {
+  const parts = command.trim().split(/\s+/);
+  const [mgr, first, second] = parts;
+  if (!mgr || !first || !SCRIPT_RUNNERS.has(mgr)) return null;
+  if (first === "run") return second ?? null;
+  if (mgr === "npm") return NPM_SCRIPT_ALIASES.has(first) ? first : null;
+  return RUNNER_BUILTINS[mgr]?.has(first) ? null : first;
+}
+
+function hasScript(repoDir: string, name: string): boolean {
+  try {
+    // NOTE: Bun.file(...).text() is ASYNC (empirically confirmed) — MUST use sync readFileSync.
+    const pkg = JSON.parse(readFileSync(join(repoDir, "package.json"), "utf8"));
+    return Boolean(pkg.scripts?.[name]);
+  } catch {
+    return false; // absent or malformed package.json — no script to find
+  }
+}
+
+function onPath(repoDir: string, bin: string): boolean {
+  return Bun.spawnSync(["sh", "-c", 'command -v "$1"', "sh", bin], { cwd: repoDir }).success;
+}
+
+function inLocalBin(repoDir: string, bin: string): boolean {
+  return LOCAL_BIN_DIRS.some((dir) => existsSync(join(repoDir, dir, bin)));
+}
+
+/**
+ * True if the command's program resolves (typo/missing-tool probe only — NOT correctness, NOT
+ * safety).
+ *
+ * ENG-414: this was wrong in BOTH directions, and every cell of the 2026-09-11 bench matrix lost
+ * gates to it. It special-cased `^npm run` and otherwise ran `command -v <first token>`, so:
+ *
+ *   - `pnpm run lint` was accepted whenever `pnpm` existed, script or not — a typo'd script name
+ *     sailed through.
+ *   - `tsc --noEmit`, `jest`, `eslint`, `pytest` were REJECTED, because a repo's own tooling lives
+ *     in `node_modules/.bin` or a virtualenv, neither of which is on PATH as this probe invokes
+ *     it. styre then ran with fewer ground-truth gates than the repo actually supports:
+ *     "python: no check command — styre cannot ground-truth-check this stack."
+ *
+ * Now: a manager script invocation (any of npm/pnpm/yarn/bun, with or without `run`) is checked
+ * against the script list; the manager's own subcommands are checked as a binary; and a bare
+ * program resolves from PATH *or* the repo's local bin directories.
+ *
+ * Still only a probe. It answers "could this run at all", never "is this the right command".
+ */
 export function probeCommandExists(repoDir: string, command: string): boolean {
   const trimmed = command.trim();
-  const npmRun = trimmed.match(/^npm run ([\w:-]+)/);
-  if (npmRun) {
-    try {
-      // NOTE: Bun.file(...).text() is ASYNC (empirically confirmed) — MUST use sync readFileSync here.
-      const pkg = JSON.parse(readFileSync(join(repoDir, "package.json"), "utf8"));
-      return Boolean(pkg.scripts?.[npmRun[1]]);
-    } catch {
-      return false;
-    }
-  }
+  if (!trimmed) return false;
+
+  const script = scriptNameFor(trimmed);
+  if (script !== null) return hasScript(repoDir, script);
+
   const bin = trimmed.split(/\s+/)[0];
-  return Bun.spawnSync(["sh", "-c", 'command -v "$1"', "sh", bin], { cwd: repoDir }).success;
+  if (!bin) return false;
+  return onPath(repoDir, bin) || inLocalBin(repoDir, bin);
 }
