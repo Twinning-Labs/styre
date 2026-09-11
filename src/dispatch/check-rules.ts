@@ -437,6 +437,9 @@ const phpRules: LanguageRules = {
  *  rejects (`package X does not exist` is ordinary English). See the ENG-343 design, section 2. */
 export const CHECK_RULES: Record<CheckFramework, LanguageRules> = {
   pytest: pythonRules,
+  // ENG-427: django's runner is unittest-based, but the LANGUAGE rules (discard-poison patterns,
+  // symbol tiers) are a property of Python, not of the runner. Same rules, different invocation.
+  "django-runtests": pythonRules,
   jest: nodeRules,
   vitest: nodeRules,
   go: goRules,

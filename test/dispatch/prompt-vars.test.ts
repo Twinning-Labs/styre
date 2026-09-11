@@ -290,3 +290,28 @@ test("implement prompt instructs new_files declaration + scratch prevention", ()
   // scratch goes in the swept styre_scratch/ drawer (ENG-300), not /tmp
   expect(IMPLEMENT_TEMPLATE).toContain("styre_scratch/");
 });
+
+test("ENG-427: the resolved check framework reaches the authoring prompt", () => {
+  // django declares `test: tox`, which tells an author nothing about how a single test runs. The
+  // runner is unittest-based and discovers only TestCase subclasses — an author told just "tox"
+  // writes a bare pytest-style function and django's runner finds nothing to run.
+  const line = stackSummary([
+    {
+      name: "python",
+      kind: "python",
+      paths: ["**"],
+      commands: { test: "tox" },
+      extensions: [".py"],
+      testAction: { framework: "django-runtests", launcher: "python ./tests/runtests.py" },
+    },
+  ] as never);
+  expect(line).toContain("check framework: django-runtests");
+  expect(line).toContain("test: tox");
+});
+
+test("ENG-427: a component with no resolved framework renders exactly as before", () => {
+  const line = stackSummary([
+    { name: "api", kind: "python", paths: ["**"], commands: { test: "pytest" }, extensions: [] },
+  ] as never);
+  expect(line).not.toContain("check framework");
+});

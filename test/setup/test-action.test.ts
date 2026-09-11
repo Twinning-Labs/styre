@@ -116,3 +116,91 @@ describe("withTestActions", () => {
     expect(out?.testAction).toBeUndefined();
   });
 });
+
+/**
+ * ENG-427: python's real runner, resolved at setup.
+ *
+ * ENG-399 deferred python from this mechanism by explicit scope, and django is the case that
+ * deferral produced — `frameworkFor` returned pytest for every python component, on images that
+ * ship no pytest at all.
+ */
+function djangoRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "styre-django-"));
+  mkdirSync(join(dir, "tests"), { recursive: true });
+  mkdirSync(join(dir, "django"), { recursive: true });
+  writeFileSync(join(dir, "tests", "runtests.py"), "#!/usr/bin/env python\n");
+  writeFileSync(join(dir, "django", "__init__.py"), "");
+  return dir;
+}
+
+function pyComponent(over: Record<string, unknown> = {}) {
+  return {
+    name: "python",
+    kind: "python" as const,
+    paths: ["**"],
+    commands: { test: "tox" },
+    extensions: [".py"],
+    ...over,
+  };
+}
+
+test("ENG-427: a django repo resolves django-runtests, not pytest", () => {
+  // Keyed on `tests/runtests.py` EXISTING, not on the `test` command — django declares `tox`,
+  // which says nothing about how a single test runs.
+  const [c] = withTestActions(djangoRepo(), [pyComponent()] as never);
+  expect(c?.testAction?.framework).toBe("django-runtests");
+  expect(c?.testAction?.launcher).toContain("./tests/runtests.py");
+});
+
+test("ENG-427: tests/runtests.py WITHOUT django is not django", () => {
+  // Plenty of repos ship a `tests/runtests.py`. Requiring `django/__init__.py` beside it is what
+  // makes this a detection rather than a guess.
+  const dir = mkdtempSync(join(tmpdir(), "styre-notdjango-"));
+  mkdirSync(join(dir, "tests"), { recursive: true });
+  writeFileSync(join(dir, "tests", "runtests.py"), "#!/usr/bin/env python\n");
+  const [c] = withTestActions(dir, [pyComponent()] as never);
+  expect(c?.testAction).toBeUndefined();
+});
+
+test("ENG-427: a plain python repo keeps the pytest inference (no testAction)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "styre-py-"));
+  const [c] = withTestActions(dir, [pyComponent({ commands: { test: "pytest" } })] as never);
+  expect(c?.testAction).toBeUndefined();
+});
+
+test("ENG-427: a django component in a subdirectory resolves against ITS module root", () => {
+  const root = mkdtempSync(join(tmpdir(), "styre-mono-"));
+  mkdirSync(join(root, "vendor", "django", "tests"), { recursive: true });
+  mkdirSync(join(root, "vendor", "django", "django"), { recursive: true });
+  writeFileSync(join(root, "vendor", "django", "tests", "runtests.py"), "");
+  writeFileSync(join(root, "vendor", "django", "django", "__init__.py"), "");
+  const [c] = withTestActions(root, [pyComponent({ dir: "vendor/django" })] as never);
+  expect(c?.testAction?.framework).toBe("django-runtests");
+});
+
+test("ENG-427: node resolution is untouched", () => {
+  // The ENG-399 path must keep working — this change adds a branch, it does not reroute one.
+  const dir = mkdtempSync(join(tmpdir(), "styre-node-"));
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { "test:ci": "jest --ci" } }));
+  const [c] = withTestActions(dir, [
+    {
+      name: "web",
+      kind: "node",
+      paths: ["**"],
+      commands: { test: "npm run test:ci" },
+      extensions: [".ts"],
+    },
+  ] as never);
+  expect(c?.testAction?.framework).toBe("jest");
+});
+
+test("ENG-427: a `django/` package WITHOUT tests/runtests.py is not django's own repo", () => {
+  // The mirror of the test above, and it has to exist on its own: without it, removing the
+  // runtests.py guard entirely still passes every other case, because they all fail the second
+  // guard instead. A mutation proved exactly that.
+  const dir = mkdtempSync(join(tmpdir(), "styre-djangoapp-"));
+  mkdirSync(join(dir, "django"), { recursive: true });
+  writeFileSync(join(dir, "django", "__init__.py"), "");
+  const [c] = withTestActions(dir, [pyComponent()] as never);
+  expect(c?.testAction).toBeUndefined();
+});

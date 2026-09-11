@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Component, TestAction } from "../dispatch/profile.ts";
 
@@ -16,10 +16,16 @@ import type { Component, TestAction } from "../dispatch/profile.ts";
  * three-project `tests/jest.config.js`, so the bare invocation would load none of the
  * ts-jest/jsdom/tsconfig setup the check needs.
  *
- * SCOPE: node/sveltekit only. Other stacks keep the pre-ENG-399 inference path, which resolves
- * correctly for them today (python is unconditionally pytest; go/rust/jvm/php are fixed per
- * kind). Extending this to python's interpreter-resolved launcher is deliberately out of scope
- * here — see ENG-399.
+ * SCOPE (ENG-427): node/sveltekit, plus python where the repo declares its own runner. The
+ * remaining stacks keep the pre-ENG-399 inference path, which resolves correctly for them today
+ * (go/rust/jvm/php are fixed per kind).
+ *
+ * Python was the deferral ENG-399 called out explicitly, and django is the case it produced:
+ * `frameworkFor` returned `pytest` for every python component, `binaryFor` built
+ * `python3 -m pytest`, and a django image ships no pytest at all — its runner is
+ * `./tests/runtests.py`. 46.2% of SWE-bench Verified is django. A run there authored a check that
+ * could never execute, recorded the failure as `environmental`, and opened a pull request on no
+ * evidence.
  */
 
 /** Package managers whose `run` passes trailing args straight through to the script. */
@@ -89,13 +95,41 @@ export function resolveTestAction(componentDir: string, command: string): TestAc
   return { framework, launcher };
 }
 
-/** Attach `testAction` to node/sveltekit components that have a resolvable `test` command. */
+/**
+ * Does this python component ship django's own test runner?
+ *
+ * Keyed on `tests/runtests.py` EXISTING, not on the component's `test` command. django's declared
+ * command is `tox` (a `tox.ini` is present), which says nothing about how a single test is run —
+ * and the AC check needs the runner, not the CI wrapper. The file's presence is the fact that
+ * actually decides it, and it is a property of the repo, so it belongs here at setup time rather
+ * than being re-derived per run.
+ *
+ * Verified in the official django image: the runner works from the repo root, needs no
+ * `--settings`, and takes dotted labels relative to `tests/`.
+ */
+function djangoTestAction(moduleDir: string): TestAction | null {
+  if (!existsSync(join(moduleDir, "tests", "runtests.py"))) return null;
+  // A `tests/runtests.py` alone is not django — require django itself to be the thing being
+  // built, which its own repo declares by shipping `django/__init__.py` beside it.
+  if (!existsSync(join(moduleDir, "django", "__init__.py"))) return null;
+  return { framework: "django-runtests", launcher: "python ./tests/runtests.py --parallel 1" };
+}
+
+/** Attach `testAction` to components whose real test invocation can be resolved from the repo:
+ *  node/sveltekit via `package.json` scripts (ENG-399), python via its own runner (ENG-427). */
 export function withTestActions(repoDir: string, components: Component[]): Component[] {
   return components.map((c) => {
+    const moduleDir = join(repoDir, c.dir ?? "");
+    if (c.kind === "python") {
+      const action = djangoTestAction(moduleDir);
+      // No django runner → leave `testAction` absent, which keeps `frameworkFor`'s pytest
+      // inference. That is still right for the ~30% of the corpus that genuinely runs pytest.
+      return action ? { ...c, testAction: action } : c;
+    }
     if (c.kind !== "node" && c.kind !== "sveltekit") return c;
     const cmd = c.commands.test;
     if (typeof cmd !== "string") return c;
-    const action = resolveTestAction(join(repoDir, c.dir ?? ""), cmd);
+    const action = resolveTestAction(moduleDir, cmd);
     return action ? { ...c, testAction: action } : c;
   });
 }

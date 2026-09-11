@@ -93,12 +93,23 @@ const isSafeDir = (d: string): boolean => {
  *  file-identity routing and the optional `prepare` install command (EXECUTED by the
  *  runner-owned provision step before the first verify), plus the optional `dir` field
  *  (module root, relative to repo root — WO-9). */
-/** Frameworks `checks:dispatch` knows how to invoke. Mirrors `CheckFramework` in
- *  `src/dispatch/check-selector.ts`; kept as a zod enum here so a profile carrying an
- *  unknown framework is rejected at load rather than degrading to a coarse `error` at
- *  check time (ENG-399). */
+/** Frameworks `checks:dispatch` knows how to invoke. Kept as a zod enum so a profile carrying an
+ *  unknown framework is rejected at load rather than degrading to a coarse `error` at check time
+ *  (ENG-399).
+ *
+ *  THE SINGLE SOURCE. `check-selector.ts` used to hand-maintain a mirror union of the same names,
+ *  and the two drifted the moment ENG-427 added a member — the compiler caught it, but only
+ *  because the mismatch happened to surface through `testAction`. It now derives `CheckFramework`
+ *  from this enum, so a new framework is declared once and every exhaustive `switch` over it
+ *  (`binaryFor`, `buildCheckSelector`, `interpretRunOutput`, `capabilityCommandFor`) fails to
+ *  compile until it is handled. */
 export const CheckFrameworkEnum = z.enum([
   "pytest",
+  /** ENG-427: django's own runner (`./tests/runtests.py`), resolved at setup by
+   *  `withTestActions`. Not a variant of pytest — it is unittest-based, takes dotted labels
+   *  relative to `tests/` rather than `path::name`, and is the ONLY way to run tests in a django
+   *  image, which ships no pytest at all. 46.2% of SWE-bench Verified is django. */
+  "django-runtests",
   "jest",
   "vitest",
   "go",
@@ -109,6 +120,9 @@ export const CheckFrameworkEnum = z.enum([
   "minitest",
   "phpunit",
 ]);
+
+/** The frameworks `CheckFrameworkEnum` admits — see its doc for why this is the only definition. */
+export type CheckFramework = z.infer<typeof CheckFrameworkEnum>;
 
 /**
  * A component's RUNTIME IDENTITY — the operational discriminator, not a description.
