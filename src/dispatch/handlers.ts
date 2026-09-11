@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { branchNameFor } from "../agent/branch.ts";
 import type { AgentRunner } from "../agent/runner.ts";
+import type { UnusableComponent } from "../cli/preflight.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
 import { latestReauthorRoute } from "../daemon/arbiter-verdict.ts";
 import { latestChecksReauthorAcs } from "../daemon/checks-verdict.ts";
@@ -154,6 +155,11 @@ export interface RegistryDeps {
   runner: AgentRunner;
   agentConfig: AgentConfig;
   profile: Profile;
+  /** ENG-412: components this RUN excluded because their toolchain is absent on this machine.
+   *  They are already filtered out of `profile.components` — this is carried separately so the
+   *  run can REPORT what it narrowed, and so environment state never leaks into the profile
+   *  (which describes the repo, not the host). Absent/empty means nothing was skipped. */
+  unusableComponents?: UnusableComponent[];
   worktreeRoot: string;
   inPlace?: boolean;
   timeoutMs?: number;
@@ -1073,6 +1079,28 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   registry.register("provision", async (ctx: HandlerContext) => {
     const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
     ensureWorktree(repoPath, branch, worktreePath);
+    // ENG-412: record what the run narrowed, ONCE, where a db + ticket finally exist (the
+    // toolchain decision is made in `styre run` before either does). `advisory: true` routes it
+    // into the PR's advisory block, so a reviewer sees that a component was skipped entirely
+    // rather than silently getting a PR that claims less coverage than it appears to.
+    const unusable = deps.unusableComponents ?? [];
+    if (unusable.length > 0) {
+      insertSignal(ctx.db, {
+        ticketId: ctx.ticket.id,
+        workUnitId: null,
+        signalType: "toolchain",
+        // `error`, not `fail`: the component was never MEASURED. `fail` would assert that a
+        // check ran and came back red, which is a different and untrue claim. (The column's
+        // CHECK constraint allows only pass/fail/error, and it caught an invented fourth value.)
+        result: "error",
+        detail: {
+          advisory: true,
+          reason: "component-unusable",
+          components: unusable.map((u) => u.component),
+          missing: unusable.flatMap((u) => u.missing.map((m) => m.missing)),
+        },
+      });
+    }
     const actions = planProvision(deps.profile.components, worktreePath);
     for (const a of actions) {
       const run = await runCommand(a.command, { cwd: a.cwd, timeoutMs: PROVISION_TIMEOUT_MS });

@@ -1,7 +1,8 @@
 import { join } from "node:path";
 import { commandFor } from "../dispatch/components.ts";
-import type { Profile } from "../dispatch/profile.ts";
+import type { Component, Profile } from "../dispatch/profile.ts";
 import { probeCommandExists } from "../setup/discover-schema.ts";
+import { toolchainError } from "./errors.ts";
 
 /** One command the run will execute, tagged with the component + slot it came from. */
 export interface ToolProbe {
@@ -86,4 +87,97 @@ export function formatMissingTools(missing: MissingCommand[]): string {
   return missing
     .map((m) => `- [${m.component} / ${m.label}] \`${m.command}\`  (missing: ${m.missing})`)
     .join("\n");
+}
+
+/** The run's verdict on each component's tooling (ENG-412). */
+export interface ToolchainPartition {
+  /** Every command whose leading program is not runnable — the full list, for the error body. */
+  missing: MissingCommand[];
+  /** Components the run must NOT use: at least one required tool is absent. */
+  unusable: UnusableComponent[];
+  /** The components the run CAN use. A component with no probes at all is usable by
+   *  construction — nothing about its tooling is in question. */
+  usable: Component[];
+  /** True iff tooling is missing AND nothing usable is left — the run could accomplish
+   *  nothing, so it must refuse to start (exit 69). */
+  fatal: boolean;
+}
+
+/** One component the run will skip, and the tools that made it unusable. */
+export interface UnusableComponent {
+  component: string;
+  missing: MissingCommand[];
+}
+
+/**
+ * Decide, per component, whether the run can use it (ENG-412).
+ *
+ * WHY THIS IS NOT "any missing tool is fatal". That was the original rule, and on a Python repo
+ * carrying a `package.json` — django, and a very common shape — it refused to start at all:
+ * the Node detector correctly reports a `frontend` component, its `prepare` is `npm install`,
+ * and a SWE-bench Python image has no npm. A pure-Python ticket then died before its first tick
+ * over a component it would never touch.
+ *
+ * The preflight's INSTINCT is right (ENG-332: refuse rather than fail deep in a run); the
+ * question it asked was wrong. "Is every component's tooling present?" is not the question that
+ * decides whether a run is worth starting. "Can this run accomplish anything?" is. So a missing
+ * toolchain disqualifies its own component, and only a run with NO usable component left is
+ * fatal — which is still exactly the old behaviour for a single-component repo whose one
+ * toolchain is absent.
+ *
+ * This never silently narrows scope: `unusable` is returned so the caller can say out loud what
+ * it is skipping, both on stderr and in the PR. Pure — no side effects.
+ */
+export function partitionByToolchain(
+  profile: Profile,
+  probe: (repoDir: string, command: string) => boolean = probeCommandExists,
+): ToolchainPartition {
+  const missing = preflightToolchain(profile, probe);
+  const brokenNames = new Set(missing.map((m) => m.component));
+  const unusable: UnusableComponent[] = [...brokenNames].map((component) => ({
+    component,
+    missing: missing.filter((m) => m.component === component),
+  }));
+  const usable = profile.components.filter((c) => !brokenNames.has(c.name));
+  return { missing, unusable, usable, fatal: missing.length > 0 && usable.length === 0 };
+}
+
+/** The stderr/PR sentence for a skipped component: what was skipped and what would fix it. */
+export function formatUnusableComponents(unusable: UnusableComponent[]): string {
+  return unusable
+    .map(
+      (u) =>
+        `- ${u.component}: skipped — ${u.missing.map((m) => `\`${m.command}\` (missing: ${m.missing})`).join(", ")}`,
+    )
+    .join("\n");
+}
+
+/** What the run decided about its own toolchain: the components it will use, and the ones it
+ *  will not. Returned rather than applied in place so the caller can report the loss. */
+export interface ToolchainGate {
+  /** `profile`, narrowed to the components this machine can actually use. */
+  profile: Profile;
+  /** Components dropped from that profile, with the tools whose absence dropped them. */
+  unusable: UnusableComponent[];
+}
+
+/**
+ * The run-start toolchain decision (ENG-412), extracted so it is testable without driving a
+ * whole run: throws `toolchainError` (exit 69) iff NOTHING is usable, else returns the narrowed
+ * profile plus what it dropped.
+ *
+ * The narrowing is returned as a NEW profile and never written back to disk. What is missing is a
+ * property of this machine; the profile describes the repo. Conflating the two would let one
+ * host's gaps be mistaken for the project's shape on the next run, on a different machine.
+ */
+export function applyToolchainGate(
+  profile: Profile,
+  probe: (repoDir: string, command: string) => boolean = probeCommandExists,
+): ToolchainGate {
+  const partition = partitionByToolchain(profile, probe);
+  if (partition.fatal) {
+    throw toolchainError(formatMissingTools(partition.missing));
+  }
+  if (partition.unusable.length === 0) return { profile, unusable: [] };
+  return { profile: { ...profile, components: partition.usable }, unusable: partition.unusable };
 }

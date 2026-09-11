@@ -281,6 +281,12 @@ export interface AdvisorySweep {
    *  happened instead of claiming the suite failed, which it did not. */
   reason?: string;
   component?: string;
+  /** ENG-412: the components this run excluded for want of a toolchain (plural — one signal
+   *  carries them all, because `advisorySweeps` keys by signal_type and would otherwise keep
+   *  only the last). */
+  components?: string[];
+  /** ENG-412: the programs/scripts whose absence caused the exclusion. */
+  missing?: string[];
   changed?: string[];
   /** ENG-403: whether the same command already failed at the baseline sha. `true` = pre-existing,
    *  `false` = introduced by this change, `undefined` = not established. */
@@ -300,8 +306,10 @@ export function advisorySweeps(db: Database, ticketId: number): AdvisorySweep[] 
       ran?: Array<{ label: string; exitCode: number | null; timedOut?: boolean }>;
       reason?: string;
       component?: string;
+      components?: string[];
       changed?: string[];
       preexisting?: boolean;
+      missing?: string[];
     };
     if (d.advisory !== true) continue;
     if (s.result === "pass") continue;
@@ -315,6 +323,8 @@ export function advisorySweeps(db: Database, ticketId: number): AdvisorySweep[] 
       firstFailingJob,
       ...(d.reason !== undefined ? { reason: d.reason } : {}),
       ...(d.component !== undefined ? { component: d.component } : {}),
+      ...(Array.isArray(d.components) ? { components: d.components } : {}),
+      ...(Array.isArray(d.missing) ? { missing: d.missing } : {}),
       ...(Array.isArray(d.changed) ? { changed: d.changed } : {}),
       ...(typeof d.preexisting === "boolean" ? { preexisting: d.preexisting } : {}),
     });

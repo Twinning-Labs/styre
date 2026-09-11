@@ -109,3 +109,49 @@ test("AC text is escaped and truncated (M3)", () => {
   expect(acLine.length).toBeGreaterThan(0);
   expect(acLine.length).toBeLessThan(160);
 });
+
+test("ENG-412: a skipped component says what was NOT verified, not merely that a tool was missing", () => {
+  const out = renderVerifyReport({
+    ...base,
+    criteria: [{ seq: 1, text: "returns 201", label: "verified" }],
+    advisory: [{ kind: "component-unusable", components: ["frontend"], missing: ["npm"] }],
+    allClean: false,
+  });
+
+  // The reviewer's question is "what did styre not look at?" — naming only the missing tool
+  // leaves them to infer the scope loss, which is the part that decides whether to merge.
+  expect(out).toContain("`frontend`");
+  expect(out).toContain("`npm`");
+  expect(out).toContain("Nothing was built, tested or checked");
+  expect(out).toContain("unverified");
+});
+
+test("ENG-412: several skipped components read as plural, and duplicate tools are collapsed", () => {
+  const out = renderVerifyReport({
+    ...base,
+    advisory: [
+      {
+        kind: "component-unusable",
+        components: ["frontend", "docs"],
+        missing: ["npm", "npm"],
+      },
+    ],
+    allClean: false,
+  });
+
+  expect(out).toContain("`frontend`, `docs`");
+  expect(out).toContain("those components");
+  expect(out).toContain("were skipped");
+  // "npm" listed once, not twice.
+  expect(out.match(/`npm`/g)).toHaveLength(1);
+});
+
+test("ENG-412: a skipped component defeats allClean, so the PR keeps no closing assurance", () => {
+  const out = renderVerifyReport({
+    ...base,
+    criteria: [{ seq: 1, text: "returns 201", label: "verified" }],
+    advisory: [{ kind: "component-unusable", components: ["frontend"], missing: ["npm"] }],
+    allClean: false,
+  });
+  expect(out).toContain("advisory signals");
+});
