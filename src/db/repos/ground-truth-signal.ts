@@ -287,6 +287,9 @@ export interface AdvisorySweep {
   components?: string[];
   /** ENG-412: the programs/scripts whose absence caused the exclusion. */
   missing?: string[];
+  /** ENG-425: the classification that excluded each of `components` (fixture/example/vendored),
+   *  positionally aligned with it. */
+  roles?: string[];
   changed?: string[];
   /** ENG-403: whether the same command already failed at the baseline sha. `true` = pre-existing,
    *  `false` = introduced by this change, `undefined` = not established. */
@@ -310,6 +313,7 @@ export function advisorySweeps(db: Database, ticketId: number): AdvisorySweep[] 
       changed?: string[];
       preexisting?: boolean;
       missing?: string[];
+      roles?: string[];
     };
     if (d.advisory !== true) continue;
     if (s.result === "pass") continue;
@@ -325,6 +329,7 @@ export function advisorySweeps(db: Database, ticketId: number): AdvisorySweep[] 
       ...(d.component !== undefined ? { component: d.component } : {}),
       ...(Array.isArray(d.components) ? { components: d.components } : {}),
       ...(Array.isArray(d.missing) ? { missing: d.missing } : {}),
+      ...(Array.isArray(d.roles) ? { roles: d.roles } : {}),
       ...(Array.isArray(d.changed) ? { changed: d.changed } : {}),
       ...(typeof d.preexisting === "boolean" ? { preexisting: d.preexisting } : {}),
     });

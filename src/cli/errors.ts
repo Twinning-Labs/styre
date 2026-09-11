@@ -60,6 +60,25 @@ export function toolchainError(detail: string): StyreError {
   });
 }
 
+/**
+ * Every detected component was classified non-primary, so the run has nothing to work on
+ * (ENG-425).
+ *
+ * Distinct from `toolchainError` despite sharing its exit code: nothing is missing from this
+ * machine, so borrowing that headline would put a false statement in front of the operator and
+ * send them off installing tools that are already there. The cause here is a classification, and
+ * the fix is to correct it — which is why the detail names what was classified as what.
+ */
+export function noPrimaryComponentError(detail: string): StyreError {
+  return new StyreError({
+    code: EXIT.TOOLCHAIN_MISSING,
+    headline: "cannot start — every detected component was classified as not part of the product",
+    detail,
+    recovery:
+      "If one of these IS the product, re-run `styre setup` — the classification comes from the discovery step, not from your machine.",
+  });
+}
+
 /** The configured agent CLI is missing or below its supported version (ENG-326). Distinct from
  *  toolchainError because an out-of-range binary IS runnable — the fix is to upgrade, not install.
  *  Both variants exit 69 (non-retry), so a missing/old CLI never reaches the transient-retry path. */
