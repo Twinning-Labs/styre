@@ -52,6 +52,9 @@ export interface CapabilityProbe {
  */
 export function capabilityCommandFor(fw: CheckFramework, launcher: string): string {
   if (fw === "go") return "go version";
+  // django's runner has no `--version`. `--help` exits 0 and proves the interpreter can import
+  // django and load the runner, which is the whole question.
+  if (fw === "django-runtests") return `${launcher} --help`;
   if (fw === "minitest") return `${launcher} -e "require 'minitest/autorun'"`;
   return `${launcher} --version`;
 }

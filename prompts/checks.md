@@ -51,6 +51,11 @@ Rules — follow them exactly:
 
 {{detected_stacks}}
 
+Where a component names a **check framework**, write the test in the shape THAT framework
+discovers — it is how styre will run your check, and a test it cannot discover counts as no test
+at all. In particular `django-runtests` is unittest-based: it finds `TestCase` subclasses (e.g.
+`django.test.SimpleTestCase`) and ignores bare `test_*` functions.
+
 Emit your answer as a single fenced block, exactly:
 
 ```styre-sidecar

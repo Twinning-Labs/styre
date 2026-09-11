@@ -26,7 +26,13 @@ export function stackSummary(components: Component[]): string {
       // identity so the descriptive detail the discovery agent produced is not lost now that it
       // can no longer be smuggled into `kind`.
       const ident = c.label ? `kind: ${c.kind}; ${c.label}` : `kind: ${c.kind}`;
-      return `- ${c.name} (${ident}) — paths: ${paths}${test ? `; test: ${test}` : ""}`;
+      // ENG-427: the RESOLVED check framework, when setup found one. `test` is the repo's CI
+      // command and can say nothing about how a single test runs — django declares `tox` while
+      // its runner is `./tests/runtests.py`, which is unittest-based and discovers only
+      // `TestCase` subclasses. An author told just "test: tox" writes a bare pytest-style
+      // function, and django's runner then finds nothing to run.
+      const fw = c.testAction ? `; check framework: ${c.testAction.framework}` : "";
+      return `- ${c.name} (${ident}) — paths: ${paths}${test ? `; test: ${test}` : ""}${fw}`;
     })
     .join("\n");
 }

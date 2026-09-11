@@ -10,18 +10,11 @@ import {
 } from "./check-rules.ts";
 
 /** A concrete test framework the selector constructor + coarse run-output reader understand.
- *  Derived from a profile component's `kind` and its `test` command string. */
-export type CheckFramework =
-  | "pytest"
-  | "jest"
-  | "vitest"
-  | "go"
-  | "cargo"
-  | "junit-maven"
-  | "junit-gradle"
-  | "rspec"
-  | "minitest"
-  | "phpunit";
+ *  Re-exported from `profile.ts`, which owns the one definition — this module used to keep a
+ *  hand-maintained mirror of the same names, and mirrors drift. `import type` is erased at
+ *  compile time, so this module stays dependency-light at runtime. */
+export type { CheckFramework } from "./profile.ts";
+import type { CheckFramework } from "./profile.ts";
 
 /** How a check's selector is scoped (observability + risk-tier only). `precise` = an exact node/
  *  method id; `anchored` = file/package scope + an anchored name; `package` = package/crate scope +
@@ -113,6 +106,19 @@ function shq(s: string): string {
  *  tier (precise > anchored > package > file). For file-addressable frameworks the styre-authored
  *  file is itself the scope (M2b's added-file identity guarantees it holds only this check); Go/Rust
  *  have no file-level run, so they scope to the package/crate + an anchored/exact name. */
+/** `tests/styre_checks/ENG-1_ac1_test.py` -> `styre_checks.ENG-1_ac1_test`.
+ *
+ *  django's runner takes dotted labels relative to `tests/`, so the leading `tests/` segment is
+ *  dropped and the rest joined with dots. A file outside `tests/` keeps its full dotted path,
+ *  which is what the runner expects for an app-local test module. Hyphens are LEFT ALONE on
+ *  purpose: `styre_checks.ENG-421_ac1_test` was verified to load in the real django image, and
+ *  rewriting the name here would address a module that does not exist on disk. */
+export function djangoLabel(testFile: string): string {
+  const withoutExt = testFile.replace(/\.py$/, "");
+  const rel = withoutExt.startsWith("tests/") ? withoutExt.slice("tests/".length) : withoutExt;
+  return rel.split("/").join(".");
+}
+
 export function buildCheckSelector(
   fw: CheckFramework,
   p: { testFile: string; testName: string },
@@ -121,6 +127,17 @@ export function buildCheckSelector(
   switch (fw) {
     case "pytest":
       return { runArgs: shq(`${testFile}::${testName}`), precision: "precise" };
+    case "django-runtests":
+      // A DOTTED LABEL relative to `tests/`, not a path — django's runner is unittest-based.
+      // MODULE-level, at `file` precision: a unittest label addresses `module.Class.method`, and
+      // the authored sidecar gives styre the method name but never the class. Rather than guess a
+      // class from the filename (valid for Java, meaningless for Python), scope to the module —
+      // which `SelectorPrecision`'s `file` already describes, and which M2b's added-file identity
+      // guarantee makes safe: the file holds only this check.
+      //
+      // Verified in the official django image: labels resolve from the repo root, and hyphenated
+      // module names (`styre_checks.ENG-421_ac1_test`) load fine, so no renaming is needed.
+      return { runArgs: shq(djangoLabel(testFile)), precision: "file" };
     case "jest":
       return {
         runArgs: `${testFile} -t ${shq(`^${escapeRegex(testName)}$`)}`,
@@ -175,6 +192,10 @@ export function buildFileSelector(fw: CheckFramework, testFile: string): string 
   switch (fw) {
     case "pytest":
       return shq(testFile);
+    case "django-runtests":
+      // Already file-scoped: a dotted MODULE label runs every test in that module, which is
+      // exactly what proving a delivered test binds asks for.
+      return shq(djangoLabel(testFile));
     case "jest":
       return testFile;
     case "vitest":
@@ -228,6 +249,22 @@ export function interpretRunOutput(fw: CheckFramework, run: RunOutcome): CoarseO
       if (code === 5) return "selected-none"; // pytest: no tests collected
       if (code === 1 || code === 2) return "red"; // 1=failures, 2=collection/import error (absence)
       return "error"; // 3=internal, 4=usage, etc.
+    case "django-runtests": {
+      // EVERY BRANCH HERE WAS MEASURED in swebench/sweb.eval.x86_64.django_1776_django-12325,
+      // not inferred. Two of them are load-bearing and neither is guessable from exit codes:
+      //
+      //  - A module that matched but holds NO tests exits **0** with `Ran 0 tests`. Reading the
+      //    exit code alone makes that a FALSE GREEN — a check that proves nothing, recorded as
+      //    proof. This is precisely what the selects->=1 identity guard exists for.
+      //  - An unresolvable label (unknown module OR unknown method) exits 1, indistinguishable
+      //    from a real failure by code — but unittest synthesises `unittest.loader._FailedTest`,
+      //    which a genuine in-test ImportError does NOT produce. So the selector being wrong is
+      //    separable from the code being wrong, and must be: the first is an identity reject to
+      //    re-dispatch, the second is a legitimate RED.
+      if (outputHas(run, "unittest.loader._FailedTest")) return "selected-none";
+      if (outputMatches(run, /\bRan 0 tests\b/)) return "selected-none";
+      return code === 0 ? "green" : "red";
+    }
     case "jest":
     case "vitest":
       // TODO(M3): confirm vitest loaded-but-no-match phrasing
@@ -451,6 +488,13 @@ export function binaryFor(fw: CheckFramework, opts?: { interp?: string }): strin
   switch (fw) {
     case "pytest":
       return `${opts?.interp ?? "python3"} -m pytest`;
+    case "django-runtests":
+      // Run from the component's own dir (the repo root for django) — verified to work there, so
+      // no `cd tests` wrapper is needed. `--parallel 1` because a single check has nothing to
+      // parallelise and the multi-process runner interleaves the output this module reads.
+      // Deliberately no `--settings`: django's runtests defaults to `test_sqlite`, and naming it
+      // would break any repo that has renamed it.
+      return `${opts?.interp ?? "python3"} ./tests/runtests.py --parallel 1`;
     case "jest":
       return "jest";
     case "vitest":
