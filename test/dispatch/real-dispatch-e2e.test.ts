@@ -118,3 +118,82 @@ test("ENG-412: a run that skipped nothing writes no toolchain advisory at all", 
   expect(report.advisory.filter((a) => a.kind === "component-unusable")).toHaveLength(0);
   db.close();
 });
+
+test("ENG-425: a non-primary component reaches the PR advisory through the real dispatch path", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+
+  const registry = buildDispatchRegistry({
+    runner: new FakeAgentRunner(() => {
+      throw new Error("the agent must not be reached — provision runs first");
+    }),
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    // Already narrowed, exactly as `styre run` hands it over: the decoy is gone from components
+    // and survives only in `nonPrimaryComponents`.
+    profile: parseProfile({ slug: "demo", targetRepo: repo }),
+    nonPrimaryComponents: [
+      {
+        component: "extra-setup-py.test",
+        role: "fixture",
+        label: "legacy stub package (py.test name reservation, sdist-only, no real tests)",
+      },
+    ],
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-e2ewt-")),
+  });
+
+  expect(await advanceOneStep(db, ticketId, registry)).toEqual({
+    kind: "stepped",
+    stepKey: "provision",
+  });
+
+  // The whole path: deps -> insertSignal -> advisorySweeps -> report -> markdown. A unit test of
+  // the renderer would pass with the emission deleted — the gap that let mutations survive in
+  // ENG-412 and ENG-419.
+  const report = buildVerifyReport(db, ticketId);
+  expect(report.advisory.filter((a) => a.kind === "component-not-primary")).toHaveLength(1);
+
+  const markdown = renderVerifyReport(report);
+  expect(markdown).toContain("`extra-setup-py.test`");
+  expect(markdown).toContain("fixture");
+  expect(markdown).toContain("not part of the product");
+  db.close();
+});
+
+test("ENG-425 + ENG-412: both narrowings survive together; neither signal overwrites the other", async () => {
+  // `advisorySweeps` keys by signal_type and keeps only the newest per key. These are emitted
+  // under different types precisely so both reach the PR — this is the writer's half of that
+  // contract, and it is the half a renderer test cannot check.
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+
+  const registry = buildDispatchRegistry({
+    runner: new FakeAgentRunner(() => {
+      throw new Error("the agent must not be reached — provision runs first");
+    }),
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({ slug: "demo", targetRepo: repo }),
+    unusableComponents: [
+      {
+        component: "frontend",
+        missing: [
+          { component: "frontend", label: "prepare", command: "npm install", missing: "npm" },
+        ],
+      },
+    ],
+    nonPrimaryComponents: [{ component: "demo", role: "example" }],
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-e2ewt-")),
+  });
+
+  await advanceOneStep(db, ticketId, registry);
+
+  const report = buildVerifyReport(db, ticketId);
+  expect(report.advisory.filter((a) => a.kind === "component-unusable")).toHaveLength(1);
+  expect(report.advisory.filter((a) => a.kind === "component-not-primary")).toHaveLength(1);
+
+  const markdown = renderVerifyReport(report);
+  expect(markdown).toContain("`frontend`");
+  expect(markdown).toContain("`demo` (example)");
+  db.close();
+});

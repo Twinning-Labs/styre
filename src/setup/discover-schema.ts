@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
+import { ComponentRoleEnum } from "../dispatch/profile.ts";
 import type { Component } from "../dispatch/profile.ts";
 
 /** What the read-only discovery agent proposes. Refines the deterministic skeleton. */
@@ -12,6 +13,10 @@ export const DiscoverSchema = z.object({
        *  asked for "a precise free-text stack label" while every consumer switched on a closed
        *  set, so a good description (`browser-extension`) became an invalid discriminator. */
       label: z.string().min(1).optional(),
+      /** ENG-425. What the component IS to the repo — the one judgment the agent could already
+       *  make but had nowhere to put. Optional: an agent that says nothing leaves the scan's
+       *  default (`primary`) in place, which is the pre-ENG-425 behaviour. */
+      role: ComponentRoleEnum.optional(),
       paths: z.array(z.string().min(1)).min(1),
       commands: z.record(z.string(), z.string()).default({}),
     }),
@@ -43,6 +48,12 @@ export function mergeComponents(scan: Component[], proposed: Component[]): Compo
       // `isComponentReady` and `EXTENSIONS_BY_KIND`; an agent value outside the closed set
       // silently disables all three. The agent's description is carried in `label` instead.
       kind: s.kind,
+      // ENG-425. AGENT-AUTHORABLE, unlike `kind`, and deliberately so: `kind` is a runtime
+      // discriminator a wrong value silently disables, whereas `role` only ever REMOVES a
+      // component from the run — and a removal is reported on stderr and in the PR, so a wrong
+      // one is visible rather than silent. The scan still anchors existence; this classifies
+      // what the scan found. An agent that says nothing leaves the scan's `primary`.
+      role: p.role ?? s.role,
       ...(p.label ? { label: p.label } : {}),
       paths: [...new Set([...s.paths, ...agentPaths])],
       commands: { ...s.commands, ...p.commands },

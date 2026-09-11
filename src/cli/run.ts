@@ -30,6 +30,7 @@ import { stdoutSink } from "../telemetry/emit.ts";
 import { buildSummary } from "../telemetry/emitter.ts";
 import type { TelemetryEvent } from "../telemetry/events.ts";
 import { nowUtc } from "../util/time.ts";
+import { applyRoleGate, formatNonPrimaryComponents } from "./component-roles.ts";
 import { EXIT, StyreError, agentCliError, errorKindForExit, usageError } from "./errors.ts";
 import { guard } from "./output.ts";
 import { finishRunResult, parkDir } from "./park.ts";
@@ -203,6 +204,20 @@ export async function runImpl(
     // when nothing usable is left — for a single-component repo that is the identical ENG-332
     // behaviour, and for a Python repo carrying an incidental `package.json` it is the
     // difference between running and refusing to start over a component the ticket never touches.
+    // ENG-425 FIRST, deliberately. A component the repo itself treats as a fixture must not be
+    // probed for tooling, let alone provisioned — probing it would either pass (and provision a
+    // decoy) or fail (and report a missing toolchain for something the run was never going to
+    // touch). Classifying what a component IS precedes asking whether this machine can run it.
+    const roles = applyRoleGate(profile);
+    profile = roles.profile;
+    if (roles.nonPrimary.length > 0) {
+      process.stderr.write(
+        `run: skipping ${roles.nonPrimary.length} component(s) the repo scan found but that are not part of the product; ` +
+          `the run continues with ${profile.components.map((c) => c.name).join(", ")}.\n` +
+          `${formatNonPrimaryComponents(roles.nonPrimary)}\n`,
+      );
+    }
+
     const toolchain = applyToolchainGate(profile);
     profile = toolchain.profile;
     if (toolchain.unusable.length > 0) {
@@ -303,6 +318,7 @@ export async function runImpl(
         agentConfig,
         profile,
         unusableComponents: toolchain.unusable,
+        nonPrimaryComponents: roles.nonPrimary,
         worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-")),
         inPlace: (args["in-place"] as boolean | undefined) ?? false,
       });

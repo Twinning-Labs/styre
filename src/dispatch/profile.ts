@@ -157,9 +157,48 @@ export const TestActionSchema = z.object({
 });
 export type TestAction = z.infer<typeof TestActionSchema>;
 
+/**
+ * What a detected component IS TO THIS REPO (ENG-425) — as distinct from `kind` (how to run it)
+ * and `label` (how to describe it).
+ *
+ * The deterministic scan anchors EXISTENCE and must keep doing so: `mergeComponents` drops any
+ * component the agent invents. But that rule had no inverse, and a scan that creates a component
+ * for every nested `setup.py` creates them for fixtures too. On pytest-dev__pytest-5631 the
+ * scan found `extra/setup-py.test/setup.py`, gave it `prepare: pip install -e .`, and the
+ * discovery agent — which correctly recognised it, writing "legacy stub package (py.test name
+ * reservation, sdist-only, no real tests)" into `label` — had no field in which to say "do not
+ * provision this". The install failed and took the whole run with it at tick 1.
+ *
+ * `role` is that field. The agent still cannot invent a component; it can only classify one the
+ * scan already found, which keeps the existence rule intact while letting a judgment the agent
+ * was already making become structural instead of decorative.
+ *
+ * ABSENT means primary. A profile written before this field existed reads as all-primary — i.e.
+ * exactly the old behaviour — so there is no schema bump and no migration. The field is
+ * `optional()` rather than `default("primary")` deliberately: a default would make `role`
+ * required on the inferred type and force a literal into ~14 files of hand-built test fixtures,
+ * burying a behavioural change in mechanical churn. The cost of `optional()` is that every
+ * consumer must know absent means primary — so NO consumer is allowed to know. `isPrimary` below
+ * is the single place that decides, and `test/dispatch/component-role-invariant.test.ts` fails
+ * the build if anything else reads `.role` to make that call.
+ */
+export const ComponentRoleEnum = z.enum(["primary", "fixture", "example", "vendored"]);
+export type ComponentRole = z.infer<typeof ComponentRoleEnum>;
+
+/** THE ONLY place "does this component take part in the run?" is decided. Absent = primary:
+ *  a scan that saw a manifest and nothing else has expressed no opinion, and no opinion means
+ *  the component counts. */
+export function isPrimary(c: { role?: ComponentRole }): boolean {
+  return (c.role ?? "primary") === "primary";
+}
+
 export const ComponentSchema = z.object({
   name: z.string().min(1),
   kind: ComponentKindEnum,
+  /** What this component is to the repo — see `ComponentRoleEnum`. Anything but `primary` is
+   *  excluded from the run (provision/build/test/check) and REPORTED, never silently dropped.
+   *  Absent = primary; read it through `isPrimary`, never directly. */
+  role: ComponentRoleEnum.optional(),
   /** Free-text stack description (e.g. "browser-extension", "cli tool"). Agent-authorable and
    *  carried into prompts; NEVER switched on. Purely descriptive by construction. */
   label: z.string().optional(),

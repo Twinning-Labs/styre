@@ -37,6 +37,11 @@ export type AdvisoryLine =
    *  this machine. The PR must say so — a narrowed scope that never leaves stderr is a silent
    *  one by the time anybody reviews the diff. */
   | { kind: "component-unusable"; components: string[]; missing: string[] }
+  /** ENG-425: a component was excluded from the run because the repo does not treat it as part
+   *  of the product. Distinct from `component-unusable`: nothing is missing from the machine —
+   *  the component itself is a fixture, example or vendored tree. The PR must still say so, or
+   *  a reviewer cannot tell a deliberately narrowed scope from an accidentally narrow one. */
+  | { kind: "component-not-primary"; components: string[]; roles: string[] }
   | { kind: "integration"; result: string; firstFailingJob?: string; preexisting?: boolean }
   | { kind: "environmental-red"; seq: number };
 
@@ -126,6 +131,12 @@ export function buildVerifyReport(db: Database, ticketId: number): VerifyReport 
         kind: "component-unusable",
         components: s.components ?? [],
         missing: s.missing ?? [],
+      });
+    } else if (s.reason === "component-not-primary") {
+      advisory.push({
+        kind: "component-not-primary",
+        components: s.components ?? [],
+        roles: s.roles ?? [],
       });
     } else if (s.reason === "behavioral-no-test") {
       advisory.push({
@@ -251,6 +262,13 @@ function renderAdvisory(a: AdvisoryLine): string {
     // styre not look at?", and answering only "npm was missing" leaves them to infer the rest.
     return `- ⚠️ Nothing was built, tested or checked for ${comps} — the required tooling (${tools}) is not installed on the machine this run used, so ${a.components.length === 1 ? "that component" : "those components"} ${a.components.length === 1 ? "was" : "were"} skipped entirely. Any change touching ${a.components.length === 1 ? "it" : "them"} is unverified.`;
   }
+  if (a.kind === "component-not-primary") {
+    const comps = a.components
+      .map((c, i) => `\`${c}\`${a.roles[i] ? ` (${a.roles[i]})` : ""}`)
+      .join(", ");
+    const one = a.components.length === 1;
+    return `- ⚠️ ${comps} ${one ? "was" : "were"} skipped entirely — the repo scan found a manifest there, but ${one ? "it is" : "they are"} not part of the product (a fixture, example or vendored tree), so nothing was built, tested or checked for ${one ? "it" : "them"}.`;
+  }
   if (a.kind === "suite") {
     return `- ⚠️ The \`${a.checkType}\` test suite did not pass (result: ${a.result}). This was not used as a merge gate.`;
   }
@@ -262,12 +280,21 @@ function renderBinding(b: BindingLine): string {
   return `- ✅ ${b.component}: ${files} — checked out at the base commit and confirmed to FAIL there, so ${b.bound.length === 1 ? "it proves" : "they prove"} this change does something.`;
 }
 
-/** ENG-412: `component-unusable` is the one advisory that is RUN-scoped rather than AC-scoped —
- *  it says a whole component was skipped, which is true regardless of how many acceptance criteria
- *  the ticket carries. Every other kind derives from a check or a suite, so it cannot arise
- *  without criteria to hang it on. */
+/** The RUN-scoped advisory kinds: each says a whole component was skipped, which is true
+ *  regardless of how many acceptance criteria the ticket carries. Every other kind derives from a
+ *  check or a suite, so it cannot arise without criteria to hang it on.
+ *
+ *  ENG-412 added `component-unusable` (the machine lacks its tooling); ENG-425 added
+ *  `component-not-primary` (the repo does not treat it as part of the product). Adding a kind
+ *  here and forgetting this set is silent: the block simply does not render on a ticket with no
+ *  ACs, which is exactly the case where the reviewer most needs it. */
+const RUN_SCOPED_ADVISORY: ReadonlySet<AdvisoryLine["kind"]> = new Set([
+  "component-unusable",
+  "component-not-primary",
+]);
+
 function hasRunScopedAdvisory(report: VerifyReport): boolean {
-  return report.advisory.some((a) => a.kind === "component-unusable");
+  return report.advisory.some((a) => RUN_SCOPED_ADVISORY.has(a.kind));
 }
 
 /** The `### Change-scoped verify` block, or "" when there is nothing to report. Pure.

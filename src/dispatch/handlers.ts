@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { branchNameFor } from "../agent/branch.ts";
 import type { AgentRunner } from "../agent/runner.ts";
+import type { NonPrimaryComponent } from "../cli/component-roles.ts";
 import type { UnusableComponent } from "../cli/preflight.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
 import { latestReauthorRoute } from "../daemon/arbiter-verdict.ts";
@@ -160,6 +161,11 @@ export interface RegistryDeps {
    *  run can REPORT what it narrowed, and so environment state never leaks into the profile
    *  (which describes the repo, not the host). Absent/empty means nothing was skipped. */
   unusableComponents?: UnusableComponent[];
+  /** ENG-425: components this RUN excluded because the repo does not treat them as part of the
+   *  product (a fixture/example/vendored tree the scan found a manifest in). Like
+   *  `unusableComponents` they are already filtered out of `profile.components`; this carries
+   *  them so the run can REPORT the narrowing. Absent/empty means nothing was skipped. */
+  nonPrimaryComponents?: NonPrimaryComponent[];
   worktreeRoot: string;
   inPlace?: boolean;
   timeoutMs?: number;
@@ -1098,6 +1104,26 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           reason: "component-unusable",
           components: unusable.map((u) => u.component),
           missing: unusable.flatMap((u) => u.missing.map((m) => m.missing)),
+        },
+      });
+    }
+    // ENG-425: the same contract, one aisle over — a component excluded for WHAT IT IS rather
+    // than for what this machine lacks. Separate `signalType` on purpose: `advisorySweeps` keys
+    // by signal_type and keeps only the newest per key, so reusing `toolchain` would make one
+    // of the two narrowings silently overwrite the other.
+    const nonPrimary = deps.nonPrimaryComponents ?? [];
+    if (nonPrimary.length > 0) {
+      insertSignal(ctx.db, {
+        ticketId: ctx.ticket.id,
+        workUnitId: null,
+        signalType: "component-role",
+        // `error`, not `fail` — never measured, same reasoning as the toolchain signal above.
+        result: "error",
+        detail: {
+          advisory: true,
+          reason: "component-not-primary",
+          components: nonPrimary.map((n) => n.component),
+          roles: nonPrimary.map((n) => n.role),
         },
       });
     }

@@ -238,3 +238,59 @@ test("probeCommandExists: command injection in bin name does not execute and ret
     }
   }
 });
+
+/** A scan-side component, in this file's inline style. */
+function scanComp(over: Partial<Component> & { name: string }): Component {
+  return { kind: "python", paths: [`${over.name}/**`], commands: {}, extensions: [], ...over };
+}
+
+/**
+ * ENG-425. `role` is AGENT-AUTHORABLE, unlike `kind`.
+ *
+ * The asymmetry is deliberate: a wrong `kind` silently disables framework routing and dependency
+ * installation (ENG-399), whereas `role` only ever REMOVES a component from the run — and every
+ * removal is reported on stderr and in the PR, so a wrong one is visible rather than silent.
+ */
+test("ENG-425: the agent's role survives the merge", () => {
+  const merged = mergeComponents([scanComp({ name: "extra-setup-py.test" })], [
+    {
+      name: "extra-setup-py.test",
+      role: "fixture",
+      label: "legacy stub package (py.test name reservation, sdist-only, no real tests)",
+      paths: ["extra/setup-py.test/**"],
+      commands: {},
+    },
+  ] as unknown as Component[]);
+  expect(merged[0]?.role).toBe("fixture");
+  expect(merged[0]?.label).toContain("stub package");
+});
+
+test("ENG-425: an agent that says nothing leaves the role absent (= primary)", () => {
+  const merged = mergeComponents([scanComp({ name: "app" })], [
+    { name: "app", paths: ["**"], commands: {} },
+  ] as unknown as Component[]);
+  // Absent, which `isPrimary` reads as primary — the pre-ENG-425 behaviour exactly. This is the
+  // backward-compatibility contract: no schema bump, no migration.
+  expect(merged[0]?.role).toBeUndefined();
+});
+
+test("ENG-425: the agent still cannot invent a component to classify", () => {
+  const merged = mergeComponents([scanComp({ name: "app" })], [
+    { name: "app", paths: ["**"], commands: {} },
+    { name: "ghost", role: "fixture", paths: ["ghost/**"], commands: {} },
+  ] as unknown as Component[]);
+  expect(merged.map((c) => c.name)).toEqual(["app"]);
+});
+
+test("ENG-425: the discovery schema accepts role and rejects an unknown one", () => {
+  const ok = DiscoverSchema.safeParse({
+    components: [{ name: "a", role: "vendored", paths: ["a/**"], commands: {} }],
+    repoCommands: {},
+  });
+  expect(ok.success).toBe(true);
+  const bad = DiscoverSchema.safeParse({
+    components: [{ name: "a", role: "probably-fine", paths: ["a/**"], commands: {} }],
+    repoCommands: {},
+  });
+  expect(bad.success).toBe(false);
+});

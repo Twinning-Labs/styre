@@ -155,3 +155,56 @@ test("ENG-412: a skipped component defeats allClean, so the PR keeps no closing 
   });
   expect(out).toContain("advisory signals");
 });
+
+test("ENG-425: a non-primary component says WHAT it was, not that a tool was missing", () => {
+  const out = renderVerifyReport({
+    ...base,
+    criteria: [{ seq: 1, text: "returns 201", label: "verified" }],
+    advisory: [
+      { kind: "component-not-primary", components: ["extra-setup-py.test"], roles: ["fixture"] },
+    ],
+    allClean: false,
+  });
+
+  expect(out).toContain("`extra-setup-py.test`");
+  expect(out).toContain("fixture");
+  expect(out).toContain("not part of the product");
+  // It must NOT read as a missing-toolchain skip: nothing was missing from the machine, and a
+  // reviewer told otherwise would chase an installation problem that does not exist.
+  expect(out).not.toContain("not installed on the machine");
+});
+
+test("ENG-425: several non-primary components read as plural and keep their own roles", () => {
+  const out = renderVerifyReport({
+    ...base,
+    advisory: [
+      {
+        kind: "component-not-primary",
+        components: ["demo", "third_party"],
+        roles: ["example", "vendored"],
+      },
+    ],
+    allClean: false,
+  });
+
+  expect(out).toContain("`demo` (example)");
+  expect(out).toContain("`third_party` (vendored)");
+  expect(out).toContain("were skipped");
+});
+
+test("ENG-425 + ENG-412: both narrowings reach the PR; neither overwrites the other", () => {
+  // `advisorySweeps` keys by signal_type and keeps only the newest per key, which is why these
+  // are emitted under DIFFERENT signal types. This pins the reader's half of that contract.
+  const out = renderVerifyReport({
+    ...base,
+    advisory: [
+      { kind: "component-unusable", components: ["frontend"], missing: ["npm"] },
+      { kind: "component-not-primary", components: ["demo"], roles: ["example"] },
+    ],
+    allClean: false,
+  });
+
+  expect(out).toContain("`frontend`");
+  expect(out).toContain("`npm`");
+  expect(out).toContain("`demo` (example)");
+});
