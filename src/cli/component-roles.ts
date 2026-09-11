@@ -85,6 +85,24 @@ export function applyRoleGate(profile: Profile): RoleGate {
   return { profile: { ...profile, components: primary }, nonPrimary };
 }
 
+/**
+ * Did role classification leave this run nothing to work on? (ENG-435)
+ *
+ * A PREDICATE, not a throw, and the caller decides. `applyRoleGate` used to throw from inside
+ * the narrowing, which was fine while narrowing happened only on the fresh path — and became a
+ * contract break the moment narrowing moved into loading, because `--resume`/`--inspect` then
+ * inherited a new way to exit 69. `docs/architecture/runtime-parameters.md` states exit 69 is
+ * "never raised on `--resume`/`--inspect`", and `--inspect` is a read-only diagnostic that must
+ * exit 0 — an operator has to be able to inspect a checkpoint even when a re-run of
+ * `styre setup` has misclassified every component.
+ */
+export function noPrimaryLeft(loaded: {
+  profile: { components: unknown[] };
+  nonPrimary: NonPrimaryComponent[];
+}): boolean {
+  return loaded.profile.components.length === 0 && loaded.nonPrimary.length > 0;
+}
+
 /** The stderr/PR sentence for a skipped component: what was skipped, and why. */
 export function formatNonPrimaryComponents(nonPrimary: NonPrimaryComponent[]): string {
   return nonPrimary
