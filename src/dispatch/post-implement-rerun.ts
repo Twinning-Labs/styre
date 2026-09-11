@@ -1,10 +1,11 @@
 import type { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { listActiveByTicket as listAcChecks } from "../db/repos/ac-check.ts";
-import { insertSignal } from "../db/repos/ground-truth-signal.ts";
+import { insertSignal, signalForAcCheck } from "../db/repos/ground-truth-signal.ts";
 import { type CoarseResult, frameworkFor, launcherFor } from "./check-selector.ts";
 import { runCheckForRed } from "./checks-run.ts";
 import { impactedComponents } from "./components.ts";
+import { blockerPersists } from "./env-blocker.ts";
 import type { Component } from "./profile.ts";
 import { resolvePythonInterpreter } from "./provision.ts";
 import type { CmdRunner } from "./reuse.ts";
@@ -86,9 +87,29 @@ export async function rerunAcChecks(p: RerunParams): Promise<RerunResult> {
     }
     const { coarse, rawOutput } = await rerunOne(p, check.test_path, check.selector);
     let outcome: GateOutcome;
-    if (check.red_class === "environmental") {
+    if (check.red_class === "environmental" && coarse === "green") {
+      // The environment recovered and the check passes — nothing to caveat, nothing to gate.
       outcome = "advisory-red";
-      if (coarse !== "green") advisory.push(check.ac_id);
+    } else if (check.red_class === "environmental") {
+      // ENG-424 hole 2. `red_class` is frozen at RED-first time, so a check adjudicated
+      // `environmental` used to stay advisory no matter WHAT it failed with later — including a
+      // genuine assertion failure once the environment recovered. A stale label was silently
+      // shielding a real red.
+      //
+      // Re-deriving the class here is not an option: `coarse` cannot tell "ran and failed" from
+      // "could not start" (django's `No module named pytest` exits 1, bucketed `red`, exactly
+      // like a failed assertion), and re-running `classifyPrior` would overrule the adjudicator
+      // on the very output it already judged. So ask the answerable question instead — is the
+      // blocker that WAS adjudicated still there? If yes the class still fits; if it is gone
+      // while the check is still red, this is a different failure and must gate.
+      const redFirstOutput = signalForAcCheck(p.db, check.id)?.detail.rawOutput ?? "";
+      if (blockerPersists(redFirstOutput, rawOutput)) {
+        outcome = "advisory-red";
+        advisory.push(check.ac_id);
+      } else {
+        outcome = "gated-red";
+        stillRed.push(check.ac_id);
+      }
     } else if (coarse === "green") {
       outcome = "green";
     } else {

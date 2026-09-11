@@ -2,7 +2,10 @@ import type { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { classifyAcCheck, insertAcCheck } from "../../src/db/repos/ac-check.ts";
 import { insertAc } from "../../src/db/repos/acceptance-criterion.ts";
-import { listByTicket as listSignals } from "../../src/db/repos/ground-truth-signal.ts";
+import {
+  insertSignal,
+  listByTicket as listSignals,
+} from "../../src/db/repos/ground-truth-signal.ts";
 import { rerunAcChecks } from "../../src/dispatch/post-implement-rerun.ts";
 import type { Component } from "../../src/dispatch/profile.ts";
 import type { CommandResult } from "../../src/util/run-command.ts";
@@ -240,4 +243,80 @@ test("a gated (assertion) check with test_path=NULL fails CLOSED — never silen
   );
   db.close();
   expect(signals[0]?.result).toBe("fail");
+});
+
+/** The RED-first signal `signalForAcCheck` reads — the adjudicated failure's actual output. */
+function seedRedFirst(db: Database, ticketId: number, acCheckId: number, rawOutput: string) {
+  return insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-red-first",
+    result: "fail",
+    detail: { acCheckId, rawOutput, exitCode: 1, framework: "pytest" },
+  });
+}
+
+/**
+ * ENG-424 hole 2, THROUGH `rerunAcChecks` rather than through `env-blocker` alone.
+ *
+ * `test/dispatch/env-blocker.test.ts` proves the signature logic. These prove the gate actually
+ * CALLS it — the gap that let two mutations survive in ENG-412 and ENG-419.
+ */
+test("environmental + the SAME blocker still present → advisory, exactly as before", async () => {
+  const { db, ticketId } = makeTestDb();
+  const { acId, acCheckId } = seedCheck(db, ticketId, { redClass: "environmental" });
+  seedRedFirst(db, ticketId, acCheckId, "python3: No module named pytest");
+
+  const result = await rerunAcChecks({
+    db,
+    ticketId,
+    components: [PY_COMPONENT],
+    worktreePath: "/repo",
+    headSha: "deadbeef",
+    timeoutMs: 1000,
+    run: fakeRun({ exitCode: 1, stdout: "python3: No module named pytest" }),
+  });
+
+  // django-12325's real shape. The gate is right to stay advisory here — it is the evidence
+  // floor, not this branch, that stops the run claiming success.
+  expect(result.stillRed).toEqual([]);
+  expect(result.advisory).toEqual([acId]);
+});
+
+test("environmental but the blocker is GONE and the check is still red → stillRed", async () => {
+  const { db, ticketId } = makeTestDb();
+  const { acId, acCheckId } = seedCheck(db, ticketId, { redClass: "environmental" });
+  seedRedFirst(db, ticketId, acCheckId, "python3: No module named pytest");
+
+  const result = await rerunAcChecks({
+    db,
+    ticketId,
+    components: [PY_COMPONENT],
+    worktreePath: "/repo",
+    headSha: "deadbeef",
+    timeoutMs: 1000,
+    // pytest is installed now; the test RAN and failed its assertion. That is a real red, and
+    // the stale `environmental` label must stop shielding it.
+    run: fakeRun({ exitCode: 1, stdout: "FAILED tests/test_x.py::test_x - AssertionError" }),
+  });
+
+  expect(result.stillRed).toEqual([acId]);
+  expect(result.advisory).toEqual([]);
+  expect(result.ran[0]?.outcome).toBe("gated-red");
+});
+
+test("environmental with NO red-first signal keeps the frozen class (cannot tell)", async () => {
+  const { db, ticketId } = makeTestDb();
+  const { acId } = seedCheck(db, ticketId, { redClass: "environmental" });
+  // No red-first signal at all → no blocker to track → never override the adjudicator.
+  const result = await rerunAcChecks({
+    db,
+    ticketId,
+    components: [PY_COMPONENT],
+    worktreePath: "/repo",
+    headSha: "deadbeef",
+    timeoutMs: 1000,
+    run: fakeRun({ exitCode: 1, stdout: "FAILED tests/test_x.py::test_x - AssertionError" }),
+  });
+  expect(result.stillRed).toEqual([]);
+  expect(result.advisory).toEqual([acId]);
 });

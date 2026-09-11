@@ -44,9 +44,135 @@ function seedUnitAndGateStep(db: Database, ticketId: number, attempt = 0) {
   return { unit, gateStep };
 }
 
-test("a passing ac-check-gate signal (stillRed=[]) → clean", () => {
+/** An AC check that RAN and came back green at `sha` — the primary form of verify evidence. */
+function provenAc(db: Database, ticketId: number, acId: number, sha: string) {
+  return insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-post-implement",
+    result: "pass",
+    branchHeadSha: sha,
+    detail: { acCheckId: acId * 10, acId, coarse: "green", redClass: "assertion" },
+  });
+}
+
+/** A component test sweep at `sha` — the coarser, second form of evidence. */
+function suite(db: Database, ticketId: number, sha: string, result: "pass" | "fail") {
+  return insertSignal(db, {
+    ticketId,
+    signalType: "test",
+    result,
+    branchHeadSha: sha,
+    detail: { ran: [{ component: "api", exitCode: result === "pass" ? 0 : 1 }] },
+  });
+}
+
+test("a passing ac-check-gate signal (stillRed=[]) WITH a proven AC → clean", () => {
   const { db, ticketId } = makeTestDb();
-  gateSignal(db, ticketId, { stillRed: [] });
+  gateSignal(db, ticketId, { stillRed: [], sha: "S1" });
+  provenAc(db, ticketId, 1, "S1");
+  const r = applyAcCheckGateVerdict(db, ticketId, { stepKey: "verify:checks-gate" });
+  db.close();
+  expect(r.decision).toBe("clean");
+});
+
+/**
+ * ENG-424 — THE EVIDENCE FLOOR.
+ *
+ * These pin the invariant django__django-12325 violated: it reached `pr-ready` with 16 ticks,
+ * 0 escalations, 0 loopbacks, a real pull request — and not one acceptance criterion ever
+ * executed. Its single check hit `No module named pytest`, was correctly classified
+ * `environmental`, and an environmental red is permanently advisory. The gate then saw
+ * `stillRed: []` and called it clean.
+ *
+ * An empty still-red set is not the same claim as "verified".
+ */
+/** An AC check that RAN and came back RED at `sha` — django's advisory environmental check.
+ *  It emits an `ac-check-post-implement` signal just like a green one, so the floor must read
+ *  `coarse`, not merely the signal's presence. */
+function unprovenAc(db: Database, ticketId: number, acId: number, sha: string) {
+  return insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-post-implement",
+    result: "fail",
+    branchHeadSha: sha,
+    detail: {
+      acCheckId: acId * 10,
+      acId,
+      coarse: "red",
+      redClass: "environmental",
+      outcome: "advisory-red",
+      rawOutput: "No module named pytest",
+    },
+  });
+}
+
+test("stillRed=[] but NOTHING was proven and no suite passed → escalated, not clean", () => {
+  const { db, ticketId } = makeTestDb();
+  // django-12325's exact shape: one AC check that RAN and came back red, classified
+  // environmental so it never gated, plus a failing suite — and a gate that passed anyway.
+  // The post-implement signal EXISTS here; only its `coarse` says it proved nothing.
+  gateSignal(db, ticketId, { stillRed: [], sha: "S1" });
+  unprovenAc(db, ticketId, 1, "S1");
+  suite(db, ticketId, "S1", "fail");
+  const r = applyAcCheckGateVerdict(db, ticketId, { stepKey: "verify:checks-gate" });
+  const events = listEvents(db, ticketId).filter((e) => e.kind === "escalated");
+  const ticket = getTicket(db, ticketId);
+  db.close();
+  expect(r.decision).toBe("escalated");
+  expect(events).toHaveLength(1);
+  expect(events[0]?.signature).toBe("evidence-floor");
+  expect(events[0]?.reason).toMatch(/verified nothing/);
+  expect(ticket?.status).toBe("waiting");
+});
+
+test("a green test suite ALONE satisfies the floor (docs-only / not-expressible tickets)", () => {
+  // No AC check can be expressed for some tickets. That must not force an escalation when the
+  // repo's own suite ran green over the change.
+  const { db, ticketId } = makeTestDb();
+  gateSignal(db, ticketId, { stillRed: [], sha: "S1" });
+  suite(db, ticketId, "S1", "pass");
+  const r = applyAcCheckGateVerdict(db, ticketId, { stepKey: "verify:checks-gate" });
+  db.close();
+  expect(r.decision).toBe("clean");
+});
+
+test("evidence from an EARLIER head is not evidence about the head being gated", () => {
+  // A pass recorded against S0 is a fact about S0. Counting it at S1 would be the same
+  // category of error the floor exists to delete.
+  const { db, ticketId } = makeTestDb();
+  provenAc(db, ticketId, 1, "S0");
+  suite(db, ticketId, "S0", "pass");
+  gateSignal(db, ticketId, { stillRed: [], sha: "S1" });
+  const r = applyAcCheckGateVerdict(db, ticketId, { stepKey: "verify:checks-gate" });
+  db.close();
+  expect(r.decision).toBe("escalated");
+});
+
+test("a ticket with NO ac-checks at all (no gate signal) still faces the floor", () => {
+  // `verify:checks-gate` returns early when there are no checks, so it writes no signal and
+  // `latestGate` finds none. That route reached `clean` too — zero checks is zero evidence.
+  const { db, ticketId } = makeTestDb();
+  const r = applyAcCheckGateVerdict(db, ticketId, { stepKey: "verify:checks-gate" });
+  db.close();
+  expect(r.decision).toBe("escalated");
+});
+
+test("no gate signal, but the suite passed at the dispatch head → clean", () => {
+  // The same no-checks route, with real evidence: the floor must read the head off the latest
+  // dispatch when there is no gate signal to carry one.
+  const { db, ticketId } = makeTestDb();
+  const seq = nextSeq(db, ticketId);
+  const d = insertDispatch(db, {
+    ticketId,
+    dispatchId: `d-${seq}`,
+    seq,
+    stage: "implement",
+    model: "m",
+  });
+  // `branch_head_sha` lands at COMPLETION, not insert — and `getLatestForTicket` only returns
+  // rows that have one, which is exactly the head the floor should judge against.
+  completeDispatch(db, d.id, { outcome: "clean-success", branchHeadSha: "S9" });
+  suite(db, ticketId, "S9", "pass");
   const r = applyAcCheckGateVerdict(db, ticketId, { stepKey: "verify:checks-gate" });
   db.close();
   expect(r.decision).toBe("clean");
