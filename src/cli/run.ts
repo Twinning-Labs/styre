@@ -30,17 +30,10 @@ import { stdoutSink } from "../telemetry/emit.ts";
 import { buildSummary } from "../telemetry/emitter.ts";
 import type { TelemetryEvent } from "../telemetry/events.ts";
 import { nowUtc } from "../util/time.ts";
-import {
-  EXIT,
-  StyreError,
-  agentCliError,
-  errorKindForExit,
-  toolchainError,
-  usageError,
-} from "./errors.ts";
+import { EXIT, StyreError, agentCliError, errorKindForExit, usageError } from "./errors.ts";
 import { guard } from "./output.ts";
 import { finishRunResult, parkDir } from "./park.ts";
-import { formatMissingTools, preflightToolchain } from "./preflight.ts";
+import { applyToolchainGate, formatUnusableComponents } from "./preflight.ts";
 import { acquireRunLock, releaseRunLock, runLockStatus } from "./run-lock.ts";
 
 /** Exit codes this command can produce: 0 success · 1 abandoned (reserved terminal) ·
@@ -206,9 +199,21 @@ export async function runImpl(
     // Fail fast before any spend if a program the components' commands need isn't installed on
     // this machine. Fresh-run path only — `--resume`/`--inspect` returned above (their re-running
     // ground-truth steps are the check, and `--inspect` must stay exit-0 on a tool-less machine).
-    const missingTools = preflightToolchain(profile);
-    if (missingTools.length > 0) {
-      throw toolchainError(formatMissingTools(missingTools));
+    // ENG-412: a missing toolchain disqualifies its OWN component, not the whole run. Fatal only
+    // when nothing usable is left — for a single-component repo that is the identical ENG-332
+    // behaviour, and for a Python repo carrying an incidental `package.json` it is the
+    // difference between running and refusing to start over a component the ticket never touches.
+    const toolchain = applyToolchainGate(profile);
+    profile = toolchain.profile;
+    if (toolchain.unusable.length > 0) {
+      // Say it out loud, twice. Here for whoever is watching the run, and again in the PR body
+      // (the `toolchain` signal emitted by `provision`) for whoever reviews it later — a
+      // narrowed scope that only ever appeared on stderr is a silent one by the time it matters.
+      process.stderr.write(
+        `run: skipping ${toolchain.unusable.length} component(s) whose toolchain is absent; ` +
+          `the run continues with ${profile.components.map((c) => c.name).join(", ")}.\n` +
+          `${formatUnusableComponents(toolchain.unusable)}\n`,
+      );
     }
 
     // Fail fast (no retry burn) if the configured agent CLI is missing or below its supported
@@ -297,6 +302,7 @@ export async function runImpl(
         runner,
         agentConfig,
         profile,
+        unusableComponents: toolchain.unusable,
         worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-")),
         inPlace: (args["in-place"] as boolean | undefined) ?? false,
       });

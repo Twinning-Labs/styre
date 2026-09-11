@@ -6,9 +6,12 @@ import { toolchainError } from "../../src/cli/errors.ts";
 import { renderError } from "../../src/cli/output.ts";
 import {
   type MissingCommand,
+  applyToolchainGate,
   collectToolProbes,
   formatMissingTools,
+  formatUnusableComponents,
   missingHint,
+  partitionByToolchain,
   preflightToolchain,
 } from "../../src/cli/preflight.ts";
 import type { Profile } from "../../src/dispatch/profile.ts";
@@ -182,4 +185,115 @@ test("preflightToolchain (real probe): catches an absent binary, passes a presen
   const labels = missing.map((m) => `${m.label}:${m.missing}`);
   expect(labels).toContain("build:styre-definitely-absent-xyz");
   expect(labels).not.toContain("test:sh"); // `sh` is present
+});
+
+// -- ENG-412: a missing toolchain disqualifies its component, not the whole run ---------------
+
+/** django's real shape: a Python repo that also ships a `package.json` for linting its admin JS. */
+function djangoShapedProfile(): Profile {
+  return makeProfile([
+    {
+      name: "python",
+      kind: "python",
+      paths: ["django/**"],
+      commands: { test: "tox" },
+      prepare: "pip install -e .",
+    },
+    {
+      name: "frontend",
+      kind: "node",
+      paths: ["js_tests/**"],
+      commands: {},
+      prepare: "npm install",
+    },
+  ]);
+}
+
+test("partitionByToolchain: a Python repo carrying a package.json is NOT fatal — it runs without the frontend", () => {
+  const p = partitionByToolchain(djangoShapedProfile(), fakeProbe(["pip"]));
+
+  expect(p.fatal).toBe(false);
+  expect(p.unusable.map((u) => u.component)).toEqual(["frontend"]);
+  expect(p.usable.map((c) => c.name)).toEqual(["python"]);
+  // The reason survives, so the caller can say WHY it skipped, not merely that it did.
+  expect(p.unusable[0]?.missing[0]?.missing).toBe("npm");
+});
+
+test("partitionByToolchain: a single-component repo whose one toolchain is absent is STILL fatal (ENG-332 preserved)", () => {
+  const profile = makeProfile([
+    { name: "web", kind: "node", paths: ["src/**"], commands: {}, prepare: "npm install" },
+  ]);
+  const p = partitionByToolchain(profile, fakeProbe([]));
+
+  expect(p.fatal).toBe(true);
+  expect(p.usable).toEqual([]);
+  expect(p.missing).toHaveLength(1);
+});
+
+test("partitionByToolchain: EVERY component broken is fatal even when there are several", () => {
+  const p = partitionByToolchain(djangoShapedProfile(), fakeProbe([]));
+
+  expect(p.fatal).toBe(true);
+  expect(p.unusable.map((u) => u.component).sort()).toEqual(["frontend", "python"]);
+});
+
+test("partitionByToolchain: nothing missing is never fatal and skips nothing", () => {
+  const p = partitionByToolchain(djangoShapedProfile(), fakeProbe(["pip", "npm"]));
+
+  expect(p.fatal).toBe(false);
+  expect(p.unusable).toEqual([]);
+  expect(p.usable).toHaveLength(2);
+});
+
+test("partitionByToolchain: a component with NO probes at all is usable — its tooling is not in question", () => {
+  const profile = makeProfile([
+    { name: "docs", kind: "node", paths: ["docs/**"], commands: {} },
+    { name: "web", kind: "node", paths: ["src/**"], commands: {}, prepare: "npm install" },
+  ]);
+  const p = partitionByToolchain(profile, fakeProbe([]));
+
+  // `web` is broken, but `docs` survives, so the run can still do something.
+  expect(p.fatal).toBe(false);
+  expect(p.usable.map((c) => c.name)).toEqual(["docs"]);
+});
+
+test("formatUnusableComponents: names the component, the command and the missing program", () => {
+  const p = partitionByToolchain(djangoShapedProfile(), fakeProbe(["pip"]));
+  const text = formatUnusableComponents(p.unusable);
+
+  expect(text).toContain("frontend");
+  expect(text).toContain("npm install");
+  expect(text).toContain("missing: npm");
+});
+
+test("applyToolchainGate: refuses with exit 69 when NOTHING is usable — ENG-332's behaviour, preserved", () => {
+  const profile = makeProfile([
+    { name: "web", kind: "node", paths: ["src/**"], commands: {}, prepare: "npm install" },
+  ]);
+  let code: number | undefined;
+  try {
+    applyToolchainGate(profile, fakeProbe([]));
+  } catch (e) {
+    code = (e as { code?: number }).code;
+  }
+  expect(code).toBe(69);
+});
+
+test("applyToolchainGate: narrows the profile instead of refusing when something is usable", () => {
+  const original = djangoShapedProfile();
+  const gate = applyToolchainGate(original, fakeProbe(["pip"]));
+
+  expect(gate.profile.components.map((c) => c.name)).toEqual(["python"]);
+  expect(gate.unusable.map((u) => u.component)).toEqual(["frontend"]);
+  // The CALLER's profile is untouched — the narrowing is this run's, on this machine, and must
+  // never be mistaken for the project's shape.
+  expect(original.components.map((c) => c.name)).toEqual(["python", "frontend"]);
+});
+
+test("applyToolchainGate: a fully-equipped repo is returned unchanged, same object identity", () => {
+  const profile = djangoShapedProfile();
+  const gate = applyToolchainGate(profile, fakeProbe(["pip", "npm"]));
+
+  expect(gate.profile).toBe(profile);
+  expect(gate.unusable).toEqual([]);
 });

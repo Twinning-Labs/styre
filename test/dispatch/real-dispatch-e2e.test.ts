@@ -7,6 +7,7 @@ import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
+import { buildVerifyReport, renderVerifyReport } from "../../src/dispatch/verify-report.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 function gitRepo(): string {
@@ -54,4 +55,66 @@ test("real design:dispatch handler (fake agent) commits a plan and the step succ
   const outcome = await advanceOneStep(db, ticketId, registry);
   db.close();
   expect(outcome).toEqual({ kind: "stepped", stepKey: "design:dispatch" });
+});
+
+test("ENG-412: a component skipped for want of a toolchain reaches the PR advisory, not just stderr", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+
+  const registry = buildDispatchRegistry({
+    runner: new FakeAgentRunner(() => {
+      throw new Error("the agent must not be reached — provision runs first");
+    }),
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    // The profile is ALREADY narrowed, exactly as `styre run` hands it over: `frontend` is gone
+    // from components and survives only in `unusableComponents`.
+    profile: parseProfile({ slug: "demo", targetRepo: repo }),
+    unusableComponents: [
+      {
+        component: "frontend",
+        missing: [
+          { component: "frontend", label: "prepare", command: "npm install", missing: "npm" },
+        ],
+      },
+    ],
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-e2ewt-")),
+  });
+
+  expect(await advanceOneStep(db, ticketId, registry)).toEqual({
+    kind: "stepped",
+    stepKey: "provision",
+  });
+
+  // The whole path, not a piece of it: deps -> insertSignal -> advisorySweeps -> report -> markdown.
+  const report = buildVerifyReport(db, ticketId);
+  const unusable = report.advisory.filter((a) => a.kind === "component-unusable");
+  expect(unusable).toHaveLength(1);
+
+  const markdown = renderVerifyReport(report);
+  expect(markdown).toContain("`frontend`");
+  expect(markdown).toContain("`npm`");
+  expect(markdown).toContain("unverified");
+  db.close();
+});
+
+test("ENG-412: a run that skipped nothing writes no toolchain advisory at all", async () => {
+  const { db, ticketId, projectId } = makeTestDb();
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+
+  const registry = buildDispatchRegistry({
+    runner: new FakeAgentRunner(() => {
+      throw new Error("the agent must not be reached — provision runs first");
+    }),
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: parseProfile({ slug: "demo", targetRepo: repo }),
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-e2ewt-")),
+  });
+
+  await advanceOneStep(db, ticketId, registry);
+
+  const report = buildVerifyReport(db, ticketId);
+  expect(report.advisory.filter((a) => a.kind === "component-unusable")).toHaveLength(0);
+  db.close();
 });

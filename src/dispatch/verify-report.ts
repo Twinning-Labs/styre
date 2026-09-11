@@ -33,6 +33,10 @@ export type AdvisoryLine =
       component?: string;
       changed?: string[];
     }
+  /** ENG-412: a component was excluded from the whole run because its toolchain is absent on
+   *  this machine. The PR must say so — a narrowed scope that never leaves stderr is a silent
+   *  one by the time anybody reviews the diff. */
+  | { kind: "component-unusable"; components: string[]; missing: string[] }
   | { kind: "integration"; result: string; firstFailingJob?: string; preexisting?: boolean }
   | { kind: "environmental-red"; seq: number };
 
@@ -116,6 +120,12 @@ export function buildVerifyReport(db: Database, ticketId: number): VerifyReport 
         checkType: s.type,
         ...(s.component !== undefined ? { component: s.component } : {}),
         ...(s.changed !== undefined ? { changed: s.changed } : {}),
+      });
+    } else if (s.reason === "component-unusable") {
+      advisory.push({
+        kind: "component-unusable",
+        components: s.components ?? [],
+        missing: s.missing ?? [],
       });
     } else if (s.reason === "behavioral-no-test") {
       advisory.push({
@@ -234,6 +244,13 @@ function renderAdvisory(a: AdvisoryLine): string {
     // the repo's own tests in front of the person deciding whether to merge.
     return `- ⚠️ A behavior change${where} shipped without a test of its own${files}. The \`${a.checkType}\` suite itself passed. This was not used as a merge gate.`;
   }
+  if (a.kind === "component-unusable") {
+    const comps = a.components.map((c) => `\`${c}\``).join(", ");
+    const tools = [...new Set(a.missing)].map((m) => `\`${m}\``).join(", ");
+    // State the SCOPE loss, not just the missing tool: the reviewer's question is "what did
+    // styre not look at?", and answering only "npm was missing" leaves them to infer the rest.
+    return `- ⚠️ Nothing was built, tested or checked for ${comps} — the required tooling (${tools}) is not installed on the machine this run used, so ${a.components.length === 1 ? "that component" : "those components"} ${a.components.length === 1 ? "was" : "were"} skipped entirely. Any change touching ${a.components.length === 1 ? "it" : "them"} is unverified.`;
+  }
   if (a.kind === "suite") {
     return `- ⚠️ The \`${a.checkType}\` test suite did not pass (result: ${a.result}). This was not used as a merge gate.`;
   }
@@ -245,17 +262,30 @@ function renderBinding(b: BindingLine): string {
   return `- ✅ ${b.component}: ${files} — checked out at the base commit and confirmed to FAIL there, so ${b.bound.length === 1 ? "it proves" : "they prove"} this change does something.`;
 }
 
-/** The `### Change-scoped verify` block, or "" when the ticket has no acceptance criteria. Pure. */
+/** ENG-412: `component-unusable` is the one advisory that is RUN-scoped rather than AC-scoped —
+ *  it says a whole component was skipped, which is true regardless of how many acceptance criteria
+ *  the ticket carries. Every other kind derives from a check or a suite, so it cannot arise
+ *  without criteria to hang it on. */
+function hasRunScopedAdvisory(report: VerifyReport): boolean {
+  return report.advisory.some((a) => a.kind === "component-unusable");
+}
+
+/** The `### Change-scoped verify` block, or "" when there is nothing to report. Pure.
+ *
+ *  Normally that means "no acceptance criteria". The exception is a run-scoped advisory: a
+ *  component skipped for want of a toolchain must reach the PR even on a ticket with no ACs,
+ *  or the narrowing is silent exactly where a reviewer would need it most. */
 export function renderVerifyReport(report: VerifyReport): string {
-  if (report.criteria.length === 0) return "";
-  const lines: string[] = [
-    "### Change-scoped verify",
-    "",
-    "For each acceptance criterion on this ticket, Styre tried to write an automated test that fails before the change and passes after it. Here is what those checks found.",
-    "",
-    "**Acceptance criteria**",
-    "",
-  ];
+  if (report.criteria.length === 0 && !hasRunScopedAdvisory(report)) return "";
+  const lines: string[] = ["### Change-scoped verify", ""];
+  if (report.criteria.length > 0) {
+    lines.push(
+      "For each acceptance criterion on this ticket, Styre tried to write an automated test that fails before the change and passes after it. Here is what those checks found.",
+      "",
+      "**Acceptance criteria**",
+      "",
+    );
+  }
   for (const c of report.criteria) {
     lines.push(`- ${SYMBOL[c.label]} AC-${c.seq} — ${acText(c.text)}`);
     lines.push(`  ${EXPLAIN[c.label]}`);
