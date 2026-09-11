@@ -25,6 +25,44 @@ function latestGate(db: Database, ticketId: number): { stillRed: number[]; sha: 
   return { stillRed: stillRed.slice().sort((a, b) => a - b), sha: sig.branch_head_sha };
 }
 
+/**
+ * What this run actually PROVED at `sha` (ENG-424, hole 1).
+ *
+ * `provenAcIds` are acceptance criteria whose check ran and came back green at the HEAD being
+ * gated. A `disposition` (satisfied / not-expressible) is deliberately NOT evidence: those
+ * checks never execute — `rerunAcChecks` skips them before it emits a signal — so nothing was
+ * measured. `suitePassed` is the other, coarser source: a component's `test` sweep going green.
+ *
+ * SCOPED TO `sha`, always. A pass recorded against an earlier commit is a fact about that
+ * commit, not about the code being gated now; counting it would be the same category of error
+ * as reporting an unmeasured value as a measured one. `sha === null` therefore yields no
+ * evidence at all rather than falling back to "the most recent pass anywhere".
+ */
+export interface VerifyEvidence {
+  provenAcIds: number[];
+  suitePassed: boolean;
+}
+
+export function verifyEvidenceAt(
+  db: Database,
+  ticketId: number,
+  sha: string | null,
+): VerifyEvidence {
+  if (sha === null) return { provenAcIds: [], suitePassed: false };
+  const proven = new Set<number>();
+  let suitePassed = false;
+  for (const s of listSignals(db, ticketId)) {
+    if (s.branch_head_sha !== sha) continue;
+    if (s.signal_type === "ac-check-post-implement") {
+      const d = JSON.parse(s.detail_json ?? "{}") as { acId?: number; coarse?: string };
+      if (d.coarse === "green" && typeof d.acId === "number") proven.add(d.acId);
+    } else if (s.signal_type === "test" && s.result === "pass") {
+      suitePassed = true;
+    }
+  }
+  return { provenAcIds: [...proven].sort((a, b) => a - b), suitePassed };
+}
+
 /** Mutating escalate (ticket → waiting + human_resume signal + an 'escalated' event). Exported so
  *  advance.ts's interpreter can call it for the resolver's `{ kind: "escalate" }` descriptor (Task
  *  12 LIVENESS fix, see resolver.ts's `case "implement"` — the resolver stays pure/descriptor-only;
@@ -114,9 +152,43 @@ export function applyAcCheckGateVerdict(
   // runAgentDispatch, so it has no dispatch row of its own. Its events instead carry the CODE
   // dispatch (the latest dispatch whose HEAD the gate judged), matching what the gate handler
   // itself already looks up to find the sha it checks.
-  const dispatchId = getLatestForTicket(db, ticketId)?.dispatch_id ?? undefined;
+  const latest = getLatestForTicket(db, ticketId);
+  const dispatchId = latest?.dispatch_id ?? undefined;
   const { stillRed, sha } = latestGate(db, ticketId);
-  if (stillRed.length === 0) return { decision: "clean" };
+  if (stillRed.length === 0) {
+    // THE EVIDENCE FLOOR (ENG-424). An empty still-red set is not the same claim as "verified".
+    // Three routes reach it having measured nothing at all: every check classified
+    // `environmental` (permanently advisory), every check carrying a `disposition` (never
+    // executed), and a ticket with NO checks (the gate handler returns early and writes no
+    // signal, so `latestGate` finds none and `sha` is null).
+    //
+    // django__django-12325 took the first: one AC, one check, `No module named pytest`,
+    // classified environmental, gate `{stillRed: [], advisory: [1]}` — and the run reached
+    // `pr-ready` with 0 escalations, 0 loopbacks and a real pull request behind zero ground
+    // truth. Every rule was individually correct; the run-level invariant was missing.
+    //
+    // ESCALATE rather than continue-with-a-caveat. Loop-not-halt's "bounded retry against
+    // ground truth" presupposes a ground-truth channel; here the channel itself is broken, so
+    // there is nothing to retry against. And `pr-ready` is styre's terminal SUCCESS claim —
+    // a caveat in the PR body (which verify-report.ts already renders) does not make that
+    // claim true.
+    //
+    // A green suite alone satisfies the floor: a docs-only or `not-expressible` ticket has
+    // nothing to express as a check and must not be forced to escalate for it.
+    const gateSha = sha ?? latest?.branch_head_sha ?? null;
+    const evidence = verifyEvidenceAt(db, ticketId, gateSha);
+    if (evidence.provenAcIds.length === 0 && !evidence.suitePassed) {
+      escalate(
+        db,
+        ticketId,
+        `gate: no acceptance criterion was proven and no test suite passed at ${gateSha ?? "an unknown HEAD"} — this run verified nothing`,
+        "evidence-floor",
+        dispatchId,
+      );
+      return { decision: "escalated" };
+    }
+    return { decision: "clean" };
+  }
   const behavioral = sha === null ? [] : behavioralStillRed(db, ticketId, sha);
   if (behavioral.length > 0) {
     if (gateRoundExceeded(db, ticketId, GATE_ROUND_CAP)) {
