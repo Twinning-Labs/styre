@@ -146,6 +146,31 @@ export async function runImpl(
       slug = derived;
       profile = loadProfileByConvention(slug);
     }
+    // ENG-435: THE FIRST THING THAT TOUCHES THE PROFILE. Not "before the toolchain gate" —
+    // before every consumer, because the profile's component list is wrong for this run until
+    // it is narrowed, and every reader of it inherits that.
+    //
+    // ENG-425 placed this between the in-place checks and the toolchain gate, having reasoned
+    // only about the latter. Three consumers sat above it: `assertResolved` iterates every
+    // component's commands, `assertInPlaceIdentity` killed sphinx-doc__sphinx-7590 on a
+    // component it had itself classified `fixture`, and `resumeRun` takes the whole profile and
+    // RETURNS — so a `--resume` run never reached the gate at all and ENG-425 was bypassed
+    // entirely on that path.
+    //
+    // Ahead of `assertResolved` on purpose: refusing to start because a fixture component has an
+    // unresolved command is the same mistake ENG-412 fixed for toolchains — a run must not be
+    // blocked by a component it will never touch.
+    const roles = applyRoleGate(profile);
+    profile = roles.profile;
+    if (roles.nonPrimary.length > 0) {
+      // Say it out loud, twice: here for whoever is watching, and again in the PR body (the
+      // `component-role` signal provision emits) for whoever reviews the diff later.
+      process.stderr.write(
+        `run: skipping ${roles.nonPrimary.length} component(s) the repo scan found but that are not part of the product; ` +
+          `the run continues with ${profile.components.map((c) => c.name).join(", ")}.\n` +
+          `${formatNonPrimaryComponents(roles.nonPrimary)}\n`,
+      );
+    }
     assertResolved(profile);
     const runtimeConfig = discoverRuntimeConfig({ explicitPath: args.config, slug });
     // Build analytics the moment config is resolved — BEFORE the remaining fail-fast checks
@@ -204,20 +229,6 @@ export async function runImpl(
     // when nothing usable is left — for a single-component repo that is the identical ENG-332
     // behaviour, and for a Python repo carrying an incidental `package.json` it is the
     // difference between running and refusing to start over a component the ticket never touches.
-    // ENG-425 FIRST, deliberately. A component the repo itself treats as a fixture must not be
-    // probed for tooling, let alone provisioned — probing it would either pass (and provision a
-    // decoy) or fail (and report a missing toolchain for something the run was never going to
-    // touch). Classifying what a component IS precedes asking whether this machine can run it.
-    const roles = applyRoleGate(profile);
-    profile = roles.profile;
-    if (roles.nonPrimary.length > 0) {
-      process.stderr.write(
-        `run: skipping ${roles.nonPrimary.length} component(s) the repo scan found but that are not part of the product; ` +
-          `the run continues with ${profile.components.map((c) => c.name).join(", ")}.\n` +
-          `${formatNonPrimaryComponents(roles.nonPrimary)}\n`,
-      );
-    }
-
     const toolchain = applyToolchainGate(profile);
     profile = toolchain.profile;
     if (toolchain.unusable.length > 0) {

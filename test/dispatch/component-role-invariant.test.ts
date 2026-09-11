@@ -63,3 +63,46 @@ test("the run reports the narrowing on stderr and threads it to the registry", (
   expect(text).toContain("formatNonPrimaryComponents(roles.nonPrimary)");
   expect(text).toContain("nonPrimaryComponents: roles.nonPrimary");
 });
+
+/**
+ * ENG-435: the role gate must be the FIRST thing that touches the profile, not a step placed
+ * ahead of one named neighbour.
+ *
+ * ENG-425 reasoned carefully about ordering relative to the toolchain gate, placed the gate
+ * there, and pinned exactly that pair. Three consumers sat above it and none were considered:
+ *
+ *   assertResolved(profile)                  iterates every component's commands
+ *   assertInPlaceIdentity(targetRepo, …)     killed sphinx-7590 on a component it was told to skip
+ *   resumeRun(…, profile, …)  → return       a --resume run NEVER REACHED the gate at all
+ *
+ * The third is the worst: ENG-425 was entirely bypassed on the resume path. A guard that pins
+ * one pairwise ordering says nothing about the orderings it does not mention, so this one is
+ * written as "before every other consumer" instead.
+ */
+test("the role gate precedes EVERY consumer of the profile, not just the toolchain gate", () => {
+  const text = readFileSync("src/cli/run.ts", "utf8");
+  const gateAt = text.indexOf("applyRoleGate(profile)");
+  expect(gateAt).toBeGreaterThan(-1);
+
+  // Anything that reads the component list, or hands the whole profile onward.
+  const consumers = [
+    "assertResolved(profile)",
+    "assertInPlaceIdentity(",
+    "resumeRun(",
+    "applyToolchainGate(profile)",
+    "buildDispatchRegistry(",
+  ];
+  const early = consumers.filter((c) => {
+    const at = text.indexOf(c);
+    return at > -1 && at < gateAt;
+  });
+  expect(early).toEqual([]);
+});
+
+test("the profile the gate returns is the one every later consumer sees", () => {
+  // Narrowing that is computed and then not assigned is the same bug wearing a different hat
+  // (ENG-412 shipped exactly that and a mutation caught it).
+  const text = readFileSync("src/cli/run.ts", "utf8");
+  const assignAt = text.indexOf("profile = roles.profile");
+  expect(assignAt).toBeGreaterThan(text.indexOf("applyRoleGate(profile)"));
+});
