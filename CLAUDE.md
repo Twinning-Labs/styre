@@ -16,6 +16,13 @@ The canonical code-layout decisions live in `docs/architecture/build-operations.
 - **Branch naming:** features and improvements use the `feat/` prefix; bug fixes use the `fix/` prefix.
 - **Merging back is via PR only.** Open a PR from the branch into `main`.
 - **No auto-merge, ever.** Do not merge PRs (no `gh pr merge`, no `--auto`). The operator merges every PR personally. Your job ends at "PR is open and ready."
+- **An independent review is a precondition of opening a PR, not a courtesy.** Dispatch an independent adversarial reviewer over the *exact* state that will ship, then record it at `.claude/reviews/<full-sha>.md` (gitignored) with the reviewer's actual findings and these two lines:
+  - `reviewed-sha: <full-sha>` — from `git rev-parse HEAD`
+  - `reviewed-remote: <url>` — from `git remote get-url origin`, so a checkout whose origin points somewhere unexpected cannot reuse a valid record
+
+  A `PreToolUse` hook enforces this (`.claude/hooks/require-independent-review.sh`) and refuses the command outright if either line is missing. It accepts one command shape only — optionally a single leading `cd` to a literal absolute or `~/` path, then the bare `gh pr` verb with no `-R`/`--repo` and no `--head`/`-H` — because eight review rounds found more than twenty ways to point such a command at a repository the record never covered. Merging is refused entirely, since you merge every PR personally. Run `.claude/hooks/test-require-independent-review.sh` after changing the hook.
+  - **Keyed by SHA deliberately.** A review of an earlier commit does not count. If anything has been committed since the review ran — *including the fixes the review asked for* — review again. styre-bench#36 shipped ~60 unreviewed lines exactly that way, two of them defects.
+  - This rule covers development, not just design docs. It exists because 26 PRs merged green — typecheck, lint, full suites — while six later review passes found 49 defects.
 
 ## Read the docs in this order
 
