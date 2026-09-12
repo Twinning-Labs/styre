@@ -10,7 +10,7 @@ import { resolveAgentRunner } from "../agent/resolve.ts";
 import type { AgentRunner } from "../agent/runner.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
 import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
-import { discoverRuntimeConfig, loadProfileByConvention, slugForCwd } from "../config/discover.ts";
+import { discoverRuntimeConfig } from "../config/discover.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
 import type { ProjectorPorts } from "../daemon/projector.ts";
 import { realRecoverDeps, recover } from "../daemon/recover.ts";
@@ -20,7 +20,6 @@ import { migrate } from "../db/migrate.ts";
 import { getRun, insertRun } from "../db/repos/run.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
-import { loadProfile } from "../dispatch/profile.ts";
 import { reconcileWorktree } from "../dispatch/worktree.ts";
 import { assertSlackConfigured } from "../integrations/notifier.ts";
 import { branchPrefixFor } from "../integrations/ticket-source.ts";
@@ -30,8 +29,10 @@ import { stdoutSink } from "../telemetry/emit.ts";
 import { buildSummary } from "../telemetry/emitter.ts";
 import type { TelemetryEvent } from "../telemetry/events.ts";
 import { nowUtc } from "../util/time.ts";
-import { applyRoleGate, formatNonPrimaryComponents } from "./component-roles.ts";
+import { formatNonPrimaryComponents, noPrimaryLeft } from "./component-roles.ts";
+import { noPrimaryComponentError } from "./errors.ts";
 import { EXIT, StyreError, agentCliError, errorKindForExit, usageError } from "./errors.ts";
+import { loadRunProfile } from "./load-profile.ts";
 import { guard } from "./output.ts";
 import { finishRunResult, parkDir } from "./park.ts";
 import { applyToolchainGate, formatUnusableComponents } from "./preflight.ts";
@@ -130,23 +131,24 @@ export async function runImpl(
   // config was never resolved, the catch builds a fallback client (env opt-outs still apply).
   let analytics: Analytics | undefined;
   try {
-    let profile: Profile;
-    let slug: string;
-    if (args.profile && args.profile.length > 0) {
-      profile = loadProfile(args.profile);
-      slug = args.slug && args.slug.length > 0 ? args.slug : profile.slug;
-    } else {
-      const derived = args.slug && args.slug.length > 0 ? args.slug : slugForCwd();
-      if (!derived) {
-        throw usageError(
-          "no --profile given and the current directory is not a git repo",
-          "cd into the target repo, or pass --profile / --slug.",
-        );
-      }
-      slug = derived;
-      profile = loadProfileByConvention(slug);
-    }
+    // ENG-435: loaded ALREADY NARROWED by component role. There is no "apply the gate here"
+    // step any more, and therefore no ordering for a future consumer to get on the wrong side
+    // of — see `loadRunProfile` for why an ordering guard could not hold this.
+    const loaded = loadRunProfile({ profile: args.profile, slug: args.slug });
+    let profile: Profile = loaded.profile;
+    const slug: string = loaded.slug;
     assertResolved(profile);
+    if (loaded.nonPrimary.length > 0) {
+      // NEVER SILENT (ENG-425). Said here for whoever is watching the run, and again in the PR
+      // body via the `component-role` signal `provision` emits from `nonPrimaryComponents` —
+      // which the resume path passes too, since narrowing now reaches it and an unreported
+      // narrowing there would be exactly the silence this contract forbids.
+      process.stderr.write(
+        `run: skipping ${loaded.nonPrimary.length} component(s) the repo scan found but that are not part of the product; ` +
+          `the run continues with ${profile.components.map((c) => c.name).join(", ")}.\n` +
+          `${formatNonPrimaryComponents(loaded.nonPrimary)}\n`,
+      );
+    }
     const runtimeConfig = discoverRuntimeConfig({ explicitPath: args.config, slug });
     // Build analytics the moment config is resolved — BEFORE the remaining fail-fast checks
     // (assertSlackConfigured) — so a throw in that window is counted through the real client and
@@ -186,6 +188,8 @@ export async function runImpl(
         { resume: args.resume, acceptHead: args["accept-head"], inspect: args.inspect },
         profile,
         runtimeConfig,
+        undefined,
+        loaded.nonPrimary,
       );
       return;
     }
@@ -204,18 +208,13 @@ export async function runImpl(
     // when nothing usable is left — for a single-component repo that is the identical ENG-332
     // behaviour, and for a Python repo carrying an incidental `package.json` it is the
     // difference between running and refusing to start over a component the ticket never touches.
-    // ENG-425 FIRST, deliberately. A component the repo itself treats as a fixture must not be
-    // probed for tooling, let alone provisioned — probing it would either pass (and provision a
-    // decoy) or fail (and report a missing toolchain for something the run was never going to
-    // touch). Classifying what a component IS precedes asking whether this machine can run it.
-    const roles = applyRoleGate(profile);
-    profile = roles.profile;
-    if (roles.nonPrimary.length > 0) {
-      process.stderr.write(
-        `run: skipping ${roles.nonPrimary.length} component(s) the repo scan found but that are not part of the product; ` +
-          `the run continues with ${profile.components.map((c) => c.name).join(", ")}.\n` +
-          `${formatNonPrimaryComponents(roles.nonPrimary)}\n`,
-      );
+    // ENG-435: the FRESH-RUN-ONLY fatal. Nothing primary left means this run could accomplish
+    // nothing, so it refuses at the door where the operator can see the classification that
+    // caused it. Deliberately below the `--resume`/`--inspect` return above: those must not
+    // gain a new way to exit 69 (runtime-parameters.md), and `--inspect` must stay a read-only
+    // diagnostic that exits 0 even when a re-run of `styre setup` misclassified everything.
+    if (noPrimaryLeft(loaded)) {
+      throw noPrimaryComponentError(formatNonPrimaryComponents(loaded.nonPrimary));
     }
 
     const toolchain = applyToolchainGate(profile);
@@ -318,7 +317,7 @@ export async function runImpl(
         agentConfig,
         profile,
         unusableComponents: toolchain.unusable,
-        nonPrimaryComponents: roles.nonPrimary,
+        nonPrimaryComponents: loaded.nonPrimary,
         worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-")),
         inPlace: (args["in-place"] as boolean | undefined) ?? false,
       });

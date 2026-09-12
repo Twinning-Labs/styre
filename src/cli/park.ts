@@ -38,6 +38,7 @@ import { branchHeadSha, reconcileWorktree } from "../dispatch/worktree.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
 import { nowUtc } from "../util/time.ts";
+import type { NonPrimaryComponent } from "./component-roles.ts";
 import { agentCliError, usageError } from "./errors.ts";
 import { exitCodeForOutcome } from "./outcome.ts";
 import { formatMessage } from "./output.ts";
@@ -200,6 +201,12 @@ export async function resumeRun(
     ports?: ProjectorPorts;
     preflight?: (config: AgentConfig) => AgentCliPreflight;
   },
+  /** ENG-435: components role-classification removed from `profile`, so a RESUMED run reports
+   *  the narrowing in its PR the same way a fresh one does. `profile` arrives already narrowed
+   *  (see `loadRunProfile`); without this the resume path would narrow SILENTLY, which is the
+   *  one thing ENG-425's contract forbids — and it is the path ENG-425 originally missed.
+   *  Last, with a default, so existing callers are untouched. */
+  nonPrimaryComponents: NonPrimaryComponent[] = [],
 ): Promise<void> {
   const dir = parkDir(profile.slug, args.resume);
   const dbPath = join(dir, "run.db");
@@ -359,6 +366,7 @@ export async function resumeRun(
           runner: resolveAgentRunner(runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG),
           agentConfig: runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG,
           profile,
+          nonPrimaryComponents,
           inPlace,
           worktreeRoot, // minted once above (in-place = repo root), shared with the reconcile
           resumeContext,

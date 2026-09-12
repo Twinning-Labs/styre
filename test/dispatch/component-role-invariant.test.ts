@@ -45,21 +45,45 @@ test("isPrimary is still exported and still the thing the role gate calls", () =
   expect(readFileSync("src/cli/component-roles.ts", "utf8")).toContain("isPrimary(c)");
 });
 
-test("run.ts applies the role gate BEFORE the toolchain gate", () => {
-  // ORDERING, not mere presence. A fixture component must not be probed for tooling: probing it
-  // either passes (and provisions a decoy — the pytest-5631 bug) or fails (and reports a missing
-  // toolchain for something the run was never going to touch). Deciding what a component IS
-  // precedes asking whether this machine can run it.
+/**
+ * ENG-435: there is no ordering left to pin, so this pins the thing that replaced it.
+ *
+ * The previous guards asserted the role gate preceded a LIST of named consumers. An independent
+ * review broke that in two lines: inserting a new consumer above the gate passed, and
+ * re-introducing the original bug as `assertResolved({ ...profile })` — one character of
+ * spelling difference — passed too. A guard that enumerates call sites cannot see the call site
+ * nobody thought to enumerate, which is the same shape as the defect it was written to prevent.
+ *
+ * `run.ts` now obtains its profile ONLY through `loadRunProfile`, which narrows as part of
+ * loading. An un-narrowed profile is never bound to a name, so a new consumer cannot be on the
+ * wrong side of anything. This invariant cannot pass vacuously the way an ordering list could:
+ * it fails on the presence of a raw loader, not on the absence of a string somebody remembered
+ * to add.
+ */
+test("run.ts never loads a profile except through the narrowing loader", () => {
   const text = readFileSync("src/cli/run.ts", "utf8");
-  const roleAt = text.indexOf("applyRoleGate(profile)");
-  const toolchainAt = text.indexOf("applyToolchainGate(profile)");
-  expect(roleAt).toBeGreaterThan(-1);
-  expect(toolchainAt).toBeGreaterThan(-1);
-  expect(roleAt).toBeLessThan(toolchainAt);
+  const rawLoaders = ["loadProfile(", "loadProfileByConvention("];
+  const found = rawLoaders.filter((l) => text.includes(l));
+  expect(found).toEqual([]);
+  expect(text).toContain("loadRunProfile(");
 });
 
-test("the run reports the narrowing on stderr and threads it to the registry", () => {
+test("the narrowing loader is the only place that partitions by role for a run", () => {
+  // If a second caller starts narrowing on its own, the "one property of loading" claim is gone
+  // and the ordering problem comes back by another door.
+  const offenders: string[] = [];
+  for (const file of sourceFiles("src")) {
+    if (file.endsWith("component-roles.ts") || file.endsWith("load-profile.ts")) continue;
+    if (/partitionByRole\s*\(/.test(readFileSync(file, "utf8"))) offenders.push(file);
+  }
+  expect(offenders).toEqual([]);
+});
+
+test("the resume path is handed what the narrowing removed", () => {
+  // ENG-425's NEVER SILENT contract. The resume path was the one ENG-425 missed entirely; a
+  // narrowing it cannot report is the silence that contract forbids.
   const text = readFileSync("src/cli/run.ts", "utf8");
-  expect(text).toContain("formatNonPrimaryComponents(roles.nonPrimary)");
-  expect(text).toContain("nonPrimaryComponents: roles.nonPrimary");
+  const resumeAt = text.indexOf("resumeRun(");
+  expect(resumeAt).toBeGreaterThan(-1);
+  expect(text.slice(resumeAt, resumeAt + 400)).toContain("loaded.nonPrimary");
 });
