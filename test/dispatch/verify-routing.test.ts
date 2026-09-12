@@ -79,7 +79,13 @@ test("docs-only diff with no owned files passes for non-behavioral unit", async 
   db.close();
   // pure-inert + non-behavioral → pass (no hard gate ran, no sweep triggered)
   expect(sig?.result).toBe("pass");
-  expect(JSON.parse(sig?.detail_json ?? "{}").reason).toBe("inert-only");
+  const inertDetail = JSON.parse(sig?.detail_json ?? "{}");
+  expect(inertDetail.reason).toBe("inert-only");
+  // ...and it says so in the run record, which is what keeps this `pass` from being read as
+  // evidence by the ENG-439 evidence floor. Asserted at the PRODUCER: the floor's own tests pin
+  // the reader, and a reader that cannot be fooled is worth nothing if the writer stops saying it.
+  expect(inertDetail.ran).toEqual([]);
+  expect(inertDetail.executed).toBe(false);
 });
 
 test("a stack with a real command runs and passes", async () => {
@@ -131,6 +137,14 @@ test("a stack with a real command runs and passes", async () => {
   db.close();
   expect(sig?.result).toBe("pass");
   expect(afterUnit?.status).toBe("verified");
+  // The floor's per-unit evidence channel IS this run record. The floor's own tests build signals
+  // by hand, so emptying `ran` here would kill that channel and fail nothing — this is the
+  // positive direction, mirroring the two empty-record assertions below (ENG-439).
+  const ranDetail = JSON.parse(sig?.detail_json ?? "{}");
+  expect(ranDetail.executed).toBe(true);
+  expect(ranDetail.ran).toHaveLength(1);
+  expect(ranDetail.ran[0].component).toBe("app");
+  expect(ranDetail.ran[0].kind).toBe("test");
 });
 
 test("behavioral unit in a test-unavailable stack degrades to reviewer-only", async () => {
@@ -187,6 +201,10 @@ test("behavioral unit in a test-unavailable stack degrades to reviewer-only", as
   db.close();
   // Decision C: not an error — result is pass (degraded) AND untested-merge-risk is emitted
   expect(testSig?.result).toBe("pass");
+  // The empty run record is what stops this degrade satisfying the evidence floor (ENG-439).
+  const degradedDetail = JSON.parse(testSig?.detail_json ?? "{}");
+  expect(degradedDetail.ran).toEqual([]);
+  expect(degradedDetail.executed).toBe(false);
   expect(riskSig).toBeTruthy();
   expect(JSON.parse(riskSig?.detail_json ?? "{}").component).toBe("fe");
 });

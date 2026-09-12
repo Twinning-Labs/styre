@@ -51,6 +51,22 @@ export function insertAcCheck(
   return created;
 }
 
+/** Does this check GATE its acceptance criterion — i.e. can it prove one?
+ *
+ *  `assertion` / `absence` are the classes whose RED-first established that the check binds to the
+ *  behaviour. `environmental` did not (the red was the environment, not the code), and a check
+ *  carrying a `disposition` was adjudicated as having nothing to run at all. Neither proves a
+ *  criterion, and neither disproves one.
+ *
+ *  Exported and shared on purpose: `buildVerifyReport` labels a criterion `verified` from this set,
+ *  and `evidenceFloor` refuses to leave `implement` unless this set is green. Those two answers
+ *  reaching a reader as "verified" and "not proven" for the same criterion is a defect that has now
+ *  happened twice — once for a `disposition`ed sibling check, once for an `environmental` one.
+ *  Duplicating the expression is what allowed it both times. */
+export function isGatingCheck(c: AcCheckRow): boolean {
+  return c.disposition === null && (c.red_class === "assertion" || c.red_class === "absence");
+}
+
 export function listByTicket(db: Database, ticketId: number): AcCheckRow[] {
   return db
     .query<AcCheckRow, [number]>(`SELECT ${COLS} FROM ac_check WHERE ticket_id = ? ORDER BY id`)

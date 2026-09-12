@@ -396,3 +396,86 @@ export function reauthorProvenance(db: Database, ticketId: number): Provenance[]
   }
   return out;
 }
+
+/** One command a verify step actually executed. `kind` is tagged by the PRODUCER at the moment it
+ *  builds the job list — never inferred later from the label, because `repoCommands` names are
+ *  free text authored by the setup agent (`prompts/setup-discover.md` offers `"integration"` as its
+ *  own example), so `label.endsWith(":test")` silently misses a repo whose only suite is a repo
+ *  command under any other name. */
+export interface RanJob {
+  /** verify:integration names jobs; verify:check names components. One of the two is always set. */
+  label?: string;
+  component?: string;
+  /** Absent on every row written before ENG-439 added it — see `exercisesBehaviour`. */
+  kind?: "build" | "test" | "repo" | "other";
+  exitCode: number | null;
+  timedOut?: boolean;
+}
+
+/** The `detail` of a suite/check signal. `executed` is DERIVED from `ran`, never passed in, and
+ *  `extra` is spread FIRST so it cannot override either — a caller cannot claim an execution it did
+ *  not record. That closes the accidental over-claim (a `pass` written beside no run record); it
+ *  does NOT make a fabricated `ran` impossible, and nothing here should be described as if it did.
+ *  Control flow reads `ran` (see `isExecutedPass`), not `executed`; `executed` exists for the human
+ *  reading the ledger, which is why it is safe for it to be the forgeable term. */
+export function suiteDetail(
+  ran: RanJob[],
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return { ...extra, ran, executed: ran.length > 0 };
+}
+
+/** `detail.ran` as jobs, or `[]` when the signal carries no run record at all — which is exactly
+ *  what the three "passed without executing anything" producers write (inert-only, the
+ *  reviewer-only degrade, and the no-impacted-component fall-through). */
+export function executedJobs(row: GroundTruthSignalRow): RanJob[] {
+  // Total by construction. `insertSignal` stringifies whatever it is given, so a `detail: null`
+  // persists as the literal string "null" and `JSON.parse` returns null — and this is read from
+  // inside `nextStepKey`, which is called OUTSIDE advance.ts's try/catch. A throw here would crash
+  // the run with a stack trace instead of pausing it. No producer writes either shape today; that
+  // is not a reason to be one edit away from it.
+  const parsed = JSON.parse(row.detail_json ?? "{}") as { ran?: unknown } | null;
+  const ran = parsed?.ran;
+  if (!Array.isArray(ran)) return [];
+  return ran.filter((j): j is RanJob => j !== null && typeof j === "object");
+}
+
+/** A signal that PASSED and can name the commands it ran to earn that.
+ *
+ *  Deliberately keyed on `ran`, not on `detail.executed`: `executed` is a claim, `ran` is the
+ *  record the claim is derived from, and a predicate that reads the claim can be defeated by
+ *  writing the claim. (Review finding: the only forgeable term in the conjunction was the one that
+ *  added nothing.)
+ *
+ *  This says "commands ran and exited 0". It does NOT say the commands asserted anything: `npm
+ *  test` on a repo with no matching tests, `jest --passWithNoTests`, or a no-op test script all
+ *  exit 0. Vacuous execution is a real, separate hole — `ac-check-red-first` and
+ *  `delivered-test-binding` are the mechanisms aimed at it. Do not read this predicate as more
+ *  than it is. */
+export function isExecutedPass(row: GroundTruthSignalRow): boolean {
+  if (row.result !== "pass") return false;
+  const jobs = executedJobs(row);
+  return jobs.length > 0 && jobs.every((j) => j.exitCode === 0 && j.timedOut !== true);
+}
+
+/** The sha at which this run's acceptance-criterion evidence was measured = the branch head the
+ *  newest `ac-check-post-implement` signal carries.
+ *
+ *  NOT `getLatestForTicket()`. `docs:revise` runs AFTER the gate and can commit, moving the ticket
+ *  head; `carryVerifiedVerdictForward` then stamps a carried `ac-check-gate` pass and a carried
+ *  `integration` signal at the new head but does NOT carry post-implement signals. Reading AC
+ *  evidence at the ticket head therefore finds NOTHING on every `needs_docs` ticket that committed
+ *  docs — which is why `buildVerifyReport` renders every gating AC as still-red on exactly those
+ *  tickets today. One helper, two readers, so the two cannot drift again.
+ *
+ *  Safe because `rerunAcChecks` re-runs EVERY active undispositioned check in one pass at a single
+ *  head sha, so "the newest post-implement signal" always names a whole round, never a fragment of
+ *  one. Returns null when no check has ever run — which must be read as "no evidence", never as
+ *  "fall back to the ticket head". */
+export function acEvidenceSha(db: Database, ticketId: number): string | null {
+  return (
+    listByTicket(db, ticketId)
+      .filter((s) => s.signal_type === "ac-check-post-implement" && s.branch_head_sha !== null)
+      .at(-1)?.branch_head_sha ?? null
+  );
+}

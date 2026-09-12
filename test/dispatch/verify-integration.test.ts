@@ -96,8 +96,18 @@ test("verify:integration runs all components' build+test + repoCommands and reco
   expect(sigs).toHaveLength(1);
   expect(sigs[0]?.result).toBe("pass");
 
-  const detail = JSON.parse(sigs[0]?.detail_json ?? "{}") as { ran: Array<{ label: string }> };
+  const detail = JSON.parse(sigs[0]?.detail_json ?? "{}") as {
+    ran: Array<{ label: string; kind: string }>;
+  };
   const labels = detail.ran.map((r) => r.label);
+  // The KIND is what the ENG-439 evidence floor reads, and it is tagged here, by the producer that
+  // knows where each job came from. Pinned at the producer because the floor's own tests build
+  // their run records by hand — without this, tagging every job `build` would break the floor and
+  // fail nothing.
+  const kindOf = (label: string) => detail.ran.find((r) => r.label === label)?.kind;
+  expect(kindOf("api:build")).toBe("build");
+  expect(kindOf("api:test")).toBe("test");
+  expect(kindOf("repo:integration")).toBe("repo");
   // Each component's build and test, plus the repoCommand
   expect(labels).toContain("api:build");
   expect(labels).toContain("api:test");

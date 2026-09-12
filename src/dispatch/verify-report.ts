@@ -1,8 +1,8 @@
 import type { Database } from "bun:sqlite";
-import { listActiveByTicket as listActiveChecks } from "../db/repos/ac-check.ts";
+import { isGatingCheck, listActiveByTicket as listActiveChecks } from "../db/repos/ac-check.ts";
 import { listByTicket as listAcs } from "../db/repos/acceptance-criterion.ts";
-import { getLatestForTicket } from "../db/repos/dispatch.ts";
 import {
+  acEvidenceSha,
   advisorySweeps,
   deliveredTestBinding,
   postImplementAtSha,
@@ -74,8 +74,22 @@ export type VerifyReport = {
 export function buildVerifyReport(db: Database, ticketId: number): VerifyReport {
   const acs = listAcs(db, ticketId); // ORDER BY seq
   const checks = listActiveChecks(db, ticketId); // superseded_at IS NULL
-  const headSha = getLatestForTicket(db, ticketId)?.branch_head_sha ?? null;
-  const postImpl = headSha ? postImplementAtSha(db, ticketId, headSha) : new Map();
+  // The sha the CHECKS ran at, which is not always the ticket head: a `docs:revise` that commits
+  // moves the head afterwards, and `carryVerifiedVerdictForward` carries the gate and integration
+  // signals to the new head but not the post-implement ones. Reading at the ticket head therefore
+  // found nothing on every needs_docs ticket that committed docs, and this report rendered each
+  // gating criterion as `still-red` (dropping `allClean`) on a run that had in fact verified them.
+  // Shared with the evidence floor so the PR body and the gate can never disagree about which
+  // commit the evidence belongs to.
+  //
+  // KNOWN WEAKENING, recorded here because it is the durable place for it: this also decouples the
+  // report from a head that moved for a reason that is NOT a docs commit. A read-only dispatch can
+  // move it — `commitWorktree` opens with `git add -u` and sweeps up whatever a verify run dirtied
+  // (ENG-453). Before this change that rendered every gating criterion `still-red`: wrong, but
+  // loud. Now it renders `verified` at a sha nothing ran at: right in the docs case, silent in the
+  // ENG-453 one. Fixing ENG-453 removes the second case; until then this is the trade.
+  const evidenceSha = acEvidenceSha(db, ticketId);
+  const postImpl = evidenceSha ? postImplementAtSha(db, ticketId, evidenceSha) : new Map();
   const prov = reauthorProvenance(db, ticketId);
   const sweeps = advisorySweeps(db, ticketId);
   const binding = deliveredTestBinding(db, ticketId)
@@ -98,7 +112,7 @@ export function buildVerifyReport(db: Database, ticketId: number): VerifyReport 
     } else if (mine.some((c) => rejectedCheckIds.has(c.id))) {
       label = "check-unreplaced"; // C1 — a wrong-shape check left active; never verified
     } else {
-      const gating = mine.filter((c) => c.red_class === "assertion" || c.red_class === "absence");
+      const gating = mine.filter(isGatingCheck); // shared with evidenceFloor — see isGatingCheck
       if (gating.length > 0) {
         const allGreen = gating.every((c) => postImpl.get(c.id)?.coarse === "green");
         label = allGreen ? "verified" : "still-red";

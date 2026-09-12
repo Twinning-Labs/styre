@@ -29,11 +29,13 @@ import {
 } from "../db/repos/dispatch.ts";
 import { listByTicket as listEvents } from "../db/repos/event-log.ts";
 import {
+  type RanJob,
   behavioralStillRed,
   insertSignal,
   listByUnit,
   listByTicket as listSignalsByTicket,
   signalForAcCheck,
+  suiteDetail,
 } from "../db/repos/ground-truth-signal.ts";
 import { getProject } from "../db/repos/project.ts";
 import { enqueue } from "../db/repos/projection-outbox.ts";
@@ -627,8 +629,10 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       // NOTHING can execute a check. Authoring one would produce a test that cannot run, a RED
       // that means nothing, and an `environmental` class that permanently excuses it. Say so
       // instead, and leave the ACs with no check — `verify-report` already renders that as
-      // `no-check`, and ENG-424's evidence floor then requires a green suite before this run can
-      // claim success. The advisory below is what tells a reviewer WHY there is no check.
+      // `no-check`, and the evidence floor then refuses to leave `implement` unless something
+      // executed (ENG-439's `evidence-floor.ts`; ENG-424's version, named here originally, lived
+      // in the AC gate and this route never reached it — it is defect A of ENG-439). The advisory
+      // below is what tells a reviewer WHY there is no check.
       insertSignal(ctx.db, {
         ticketId: ctx.ticket.id,
         signalType: "check-capability-run",
@@ -1440,13 +1444,16 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         workUnitId: ctx.workUnitId,
         signalType: checkType,
         result: "pass",
+        // `pass` here means "nothing needed to run", not "the suite went green". The empty run
+        // record is what says so — the evidence floor reads `ran`, so this can never be mistaken
+        // for a measurement (ENG-439 finding B: this exact signal used to satisfy it).
         branchHeadSha: latestSha,
-        detail: {
+        detail: suiteDetail([], {
           reason: "inert-only",
           note: "inert-only change (docs/licence/attribution), no code gates ran",
           checkType,
           changed,
-        },
+        }),
       });
       return { check: checkType, result: "pass" };
     }
@@ -1458,6 +1465,14 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     let lastCommand = "";
     let lastStderr = "";
     let detail: Record<string, unknown> = {};
+    // HOISTED out of the block below on purpose. When `realImpacted` is empty (every changed file
+    // is unowned and non-inert) no HARD GATE runs and this stays `[]` — so the terminal signal
+    // records an empty run record rather than no run record at all. That path emitted `pass` with a
+    // bare `{advisory:true}` detail and satisfied the evidence floor (ENG-439 finding B, third
+    // producer). The precautionary sweep below does execute untouched stacks' commands, but those
+    // results belong to stacks this unit's diff never touched: they are recorded as their own
+    // `ran-all-unowned` / `sweep-cost` signals and are deliberately not evidence about this change.
+    const ran: RanJob[] = [];
 
     if (realImpacted.length > 0) {
       const toRun = await Promise.all(
@@ -1513,27 +1528,37 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           signalType: checkType,
           result: "pass",
           branchHeadSha: latestSha,
-          detail: { degraded: "reviewer-only", unavailable: unavailable.map((c) => c.name) },
+          // Decision C keeps this a `pass` so the unit is not wedged; the empty run record keeps it
+          // from being read as evidence. The `untested-merge-risk` rows above are what the reviewer
+          // sees. (ENG-439 finding B, first producer.)
+          detail: suiteDetail([], {
+            degraded: "reviewer-only",
+            unavailable: unavailable.map((c) => c.name),
+          }),
         });
         return { check: checkType, result: "pass", degraded: true };
       }
 
       // (a) run each realImpacted component's real command; aggregate.
-      const ran: Array<{ component: string; exitCode: number | null; timedOut: boolean }> = [];
       for (const { component, command, dir } of toRun) {
         lastCommand = command;
         const run = await runCommand(command, {
           cwd: join(worktreePath, dir ?? ""),
           timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
         });
-        ran.push({ component, exitCode: run.exitCode, timedOut: run.timedOut });
+        ran.push({
+          component,
+          kind: checkType === "test" ? "test" : checkType === "build" ? "build" : "other",
+          exitCode: run.exitCode,
+          timedOut: run.timedOut,
+        });
         if (run.exitCode !== 0) {
           result = run.timedOut || run.exitCode === null ? "error" : "fail";
           lastStderr = run.stderr.slice(0, 2000);
           break;
         }
       }
-      detail = { ran, stderr: lastStderr };
+      detail = { stderr: lastStderr };
 
       // Per-component A1 behavioral gate: each realImpacted component with a real test command
       // needs a matching test file among the owned files for this unit. Components with test
@@ -1700,7 +1725,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       result,
       command: lastCommand,
       branchHeadSha: latestSha,
-      detail: { ...detail, advisory: true },
+      detail: suiteDetail(ran, { ...detail, advisory: true }),
     });
 
     return { check: checkType, result };
@@ -1710,7 +1735,11 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
     ensureWorktree(repoPath, branch, worktreePath);
 
-    const jobs: Array<{ label: string; command: string; dir?: string }> = [];
+    // `kind` is tagged HERE, where the job's origin is known, and carried into the run record.
+    // Inferring it later from the label cannot work: repoCommands names are free text authored by
+    // the setup agent (its own prompt offers "integration" as the example), so a suffix test for
+    // ":test" silently misses a repo whose only suite is a repo command under another name.
+    const jobs: Array<{ label: string; command: string; dir?: string; kind: RanJob["kind"] }> = [];
     for (const c of deps.profile.components) {
       for (const key of ["build", "test"] as const) {
         const cmd = commandFor(c, key);
@@ -1719,11 +1748,11 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           key === "test"
             ? await reuseAwareTestCommand(c, key, cmd, join(worktreePath, c.dir ?? ""))
             : cmd;
-        jobs.push({ label: `${c.name}:${key}`, command, dir: c.dir });
+        jobs.push({ label: `${c.name}:${key}`, command, dir: c.dir, kind: key });
       }
     }
     for (const [name, cmd] of Object.entries(deps.profile.repoCommands)) {
-      jobs.push({ label: `repo:${name}`, command: cmd }); // repo-wide → no dir → worktree root
+      jobs.push({ label: `repo:${name}`, command: cmd, kind: "repo" }); // repo-wide → no dir → worktree root
     }
     if (jobs.length === 0) {
       insertSignal(ctx.db, {
@@ -1735,16 +1764,16 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       throw new Error("verify:integration: nothing to run");
     }
     const branchHeadSha = getLatestForTicket(ctx.db, ctx.ticket.id)?.branch_head_sha ?? undefined;
-    const ran: Array<{ label: string; exitCode: number | null; timedOut: boolean }> = [];
+    const ran: RanJob[] = [];
     let result: "pass" | "fail" | "error" = "pass";
     let lastCommand = "";
-    for (const { label, command, dir } of jobs) {
+    for (const { label, command, dir, kind } of jobs) {
       lastCommand = command;
       const run = await runCommand(command, {
         cwd: join(worktreePath, dir ?? ""),
         timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
       });
-      ran.push({ label, exitCode: run.exitCode, timedOut: run.timedOut });
+      ran.push({ label, kind, exitCode: run.exitCode, timedOut: run.timedOut });
       if (run.exitCode !== 0) {
         result = run.timedOut || run.exitCode === null ? "error" : "fail";
         break;
@@ -1780,11 +1809,10 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       result,
       command: lastCommand,
       branchHeadSha,
-      detail: {
-        ran,
+      detail: suiteDetail(ran, {
         advisory: true,
         ...(preexisting !== undefined ? { preexisting } : {}),
-      },
+      }),
     });
     return { integration: result };
   });

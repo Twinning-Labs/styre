@@ -44,3 +44,49 @@ test("no ac-check-gate carry when the ticket has no active checks", () => {
   expect(atC1.some((s) => s.signal_type === "ac-check-gate")).toBe(false);
   expect(atC1.some((s) => s.signal_type === "integration")).toBe(true);
 });
+
+test("the carried integration signal names the head it was carried FROM (ENG-439)", () => {
+  // `carriedFrom` is read by the evidence floor: the per-unit sweeps are NOT carried, so the floor
+  // follows this back to find them. Asserted at the PRODUCER — the floor's own test builds the
+  // carried signal by hand, so dropping this write would break the floor and fail nothing.
+  const { db, ticketId } = makeTestDb();
+  insertSignal(db, {
+    ticketId,
+    signalType: "integration",
+    result: "fail",
+    branchHeadSha: "V",
+    detail: { ran: [{ label: "api:test", kind: "test", exitCode: 1 }], advisory: true },
+  });
+  carryVerifiedVerdictForward(db, ticketId, "W");
+  const carried = listByTicket(db, ticketId)
+    .filter((r) => r.signal_type === "integration" && r.branch_head_sha === "W")
+    .at(-1);
+  const detail = JSON.parse(carried?.detail_json ?? "{}");
+  db.close();
+  expect(detail.carriedForward).toBe(true);
+  expect(detail.carriedFrom).toBe("V");
+});
+
+test("a second carry names the head IT carried from, never inheriting the first (ENG-439)", () => {
+  // `...carried` replicates the previous detail wholesale, so a stale `carriedFrom` would ride
+  // along and point the evidence floor two hops back — at a head where the per-unit sweeps it is
+  // looking for do not live. `docs:revise` is journaled exactly-once so this cannot happen today;
+  // the guard is one `?? null` and the cost of learning otherwise the hard way is a false
+  // "verified".
+  const { db, ticketId } = makeTestDb();
+  insertSignal(db, {
+    ticketId,
+    signalType: "integration",
+    result: "pass",
+    branchHeadSha: "V",
+    detail: { ran: [{ label: "api:test", kind: "test", exitCode: 0 }], advisory: true },
+  });
+  carryVerifiedVerdictForward(db, ticketId, "W");
+  carryVerifiedVerdictForward(db, ticketId, "X");
+  const latest = listByTicket(db, ticketId)
+    .filter((r) => r.signal_type === "integration" && r.branch_head_sha === "X")
+    .at(-1);
+  const detail = JSON.parse(latest?.detail_json ?? "{}");
+  db.close();
+  expect(detail.carriedFrom).toBe("W"); // the head this hop came from, not "V"
+});

@@ -23,7 +23,7 @@ check fails on current code *for the right reason* before any implementation exi
 
 ### AC checks-gate
 
-the gate that actually blocks a ticket in the implement stage: the behavioral `ac_check` tests must
+the hard gate over a ticket's acceptance criteria in the implement stage: the behavioral `ac_check` tests must
 go green at the branch HEAD (`verify:checks-gate`). Unlike the advisory per-unit build/test checks,
 a still-red AC gate does not advance — it routes into arbitration. Round-capped
 (`GATE_ROUND_CAP = 3`). (control-loop §4; resolver.ts)
@@ -34,6 +34,17 @@ the `checks:arbitrate` step that judges *why* an AC check is still red at HEAD a
 blame: `code-wrong` (loop back to re-implement) or `check-wrong` (loop to `checks:reauthor`, which
 rewrites the check). It exists because a red check is ambiguous — the code may be wrong, or the test
 may be. (control-loop §4; arbiter-verdict.ts)
+
+### evidence floor
+
+an unconditional precondition of the `implement → review` transition, and the second thing that can
+stop a ticket shipping (the AC checks-gate is the first). It asks one question — did this run
+measure anything real about the code it is about to ship? — and it holds when either a test command
+executed and passed at the sha being shipped, or every acceptance criterion was proven by all of its
+gating checks. A `result: "pass"` that executed nothing carries an empty run record and is not
+evidence. Unlike the AC gate it is not a step, so it cannot be skipped by a step not being
+scheduled: that is how its first version failed. Failure escalates with
+`event_log.signature = 'evidence-floor'`. (control-loop §S4-S5; daemon/evidence-floor.ts)
 
 ### ground truth
 

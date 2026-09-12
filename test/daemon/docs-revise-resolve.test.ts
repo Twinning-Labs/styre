@@ -19,6 +19,7 @@ import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import {
   insertSignal as insertGtSignal,
   listByTicket as listGtSignals,
+  suiteDetail,
 } from "../../src/db/repos/ground-truth-signal.ts";
 import { listPending } from "../../src/db/repos/signal.ts";
 import { getTicket, setNeedsDocs } from "../../src/db/repos/ticket.ts";
@@ -86,7 +87,10 @@ function seedDocsReviseReady(db: TestDb, ticketId: number, repoPath: string): st
     signalType: "integration",
     result: "pass",
     branchHeadSha: V,
-    detail: { ran: [] },
+    // A real integration pass names the jobs it ran; the ENG-439 evidence floor reads them, and an
+    // EMPTY run record is exactly how a suite that executed nothing is distinguished from one that
+    // did. Seeding `ran: []` here modelled a run that had verified nothing.
+    detail: suiteDetail([{ label: "api:test", kind: "test", exitCode: 0 }], { advisory: true }),
   });
 
   const ac = insertAc(db, { ticketId, seq: 1, text: "does the thing", source: "checklist" });

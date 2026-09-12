@@ -441,3 +441,45 @@ test("a binding proof that proved nothing contributes no positive evidence", () 
   });
   expect(buildVerifyReport(db, ticketId).binding).toEqual([]);
 });
+
+test("a committing docs:revise does not erase the AC evidence this report renders (ENG-439)", () => {
+  // Pre-existing defect, found while relocating the evidence floor. `docs:revise` runs AFTER the
+  // gate; when it commits, the ticket head moves and `carryVerifiedVerdictForward` carries the
+  // gate and integration signals to the new head — but NOT the `ac-check-post-implement` ones.
+  // This report read post-implement results at the TICKET HEAD, so on every needs_docs ticket that
+  // committed docs it found none, rendered every gating criterion `still-red`, and dropped
+  // `allClean` — on a run that had in fact verified them. The report and the floor now read the
+  // same helper, so the PR body cannot contradict the gate about which commit the evidence is for.
+  const { db, ticketId } = makeTestDb();
+  seedHead(db, ticketId);
+  const ac = insertAc(db, { ticketId, seq: 1, text: "returns 201 on create", source: "checklist" });
+  const chk = insertAcCheck(db, { ticketId, acId: ac.id, selector: "s", testPath: "t" });
+  classifyAcCheck(db, { acCheckId: chk.id, redClass: "assertion" });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-post-implement",
+    result: "pass",
+    branchHeadSha: HEAD,
+    detail: {
+      acCheckId: chk.id,
+      acId: ac.id,
+      coarse: "green",
+      redClass: "assertion",
+      outcome: "green",
+    },
+  });
+  // ...then the docs step commits, moving the head. Exactly what carry-forward.ts writes:
+  const d2 = insertDispatch(db, { ticketId, dispatchId: "d-docs", seq: nextSeq(db, ticketId) });
+  completeDispatch(db, d2.id, { outcome: "clean-success", branchHeadSha: "docs-head" });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-gate",
+    result: "pass",
+    branchHeadSha: "docs-head",
+    detail: { carriedForward: true },
+  });
+
+  const r = buildVerifyReport(db, ticketId);
+  expect(r.criteria).toEqual([{ seq: 1, text: "returns 201 on create", label: "verified" }]);
+  expect(r.allClean).toBe(true);
+});

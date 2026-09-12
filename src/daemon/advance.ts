@@ -95,14 +95,19 @@ export async function advanceOneStep(
     }
 
     if (d.kind === "escalate") {
-      // The resolver only DETECTED the terminal stuck-replay state (Task 12 LIVENESS fix); the
-      // mutation (ticket → waiting + human_resume signal + an 'escalated' event) happens here, the
-      // interpreter — never inside the pure resolver.
-      // The gate has no dispatch of its own (in-process handler) — carry the code dispatch instead
-      // (the latest dispatch whose HEAD the gate judged), same derivation as checks-gate-verdict.ts.
-      const stuckDispatchId = getLatestForTicket(db, ticketId)?.dispatch_id ?? undefined;
-      escalate(db, ticketId, d.reason, "gate-stuck-head", stuckDispatchId);
-      return { kind: "escalated", stepKey: "verify:checks-gate" };
+      // The resolver only DETECTED the condition; the mutation (ticket → waiting + human_resume
+      // signal + an 'escalated' event) happens here, the interpreter — never inside the pure
+      // resolver. Two distinct conditions arrive through this branch today — the Task-12 stuck-
+      // replay state and ENG-439's evidence floor — so the signature and step key travel ON the
+      // descriptor. They used to be hardcoded to the stuck-replay values, which would have filed
+      // every floor escalation under `gate-stuck-head`, against a gate step that in the floor's
+      // motivating case never ran at all. `event_log.signature` is the audit key for WHY a run
+      // stopped; two causes must not share one.
+      // Neither condition has a dispatch of its own (both are computed in-process) — carry the
+      // latest code dispatch instead, same derivation as checks-gate-verdict.ts.
+      const escalateDispatchId = getLatestForTicket(db, ticketId)?.dispatch_id ?? undefined;
+      escalate(db, ticketId, d.reason, d.signature, escalateDispatchId);
+      return { kind: "escalated", stepKey: d.stepKey };
     }
 
     // d.kind === "step"
