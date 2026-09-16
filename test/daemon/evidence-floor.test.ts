@@ -11,6 +11,7 @@ import { insertSignal, suiteDetail } from "../../src/db/repos/ground-truth-signa
 import { listPending } from "../../src/db/repos/signal.ts";
 import { getTicket, setTicketStage } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
+import { carryVerifiedVerdictForward } from "../../src/dispatch/carry-forward.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
@@ -411,10 +412,7 @@ test("AC evidence is read at the sha the checks RAN at, not the head a docs comm
   // ...the docs commit moves the head, and carry-forward stamps its two signals there.
   const d2 = insertDispatch(db, { ticketId, dispatchId: "d-docs", seq: nextSeq(db, ticketId) });
   completeDispatch(db, d2.id, { outcome: "clean-success", branchHeadSha: "DOCS" });
-  gatePassed(db, ticketId, "DOCS");
-  integration(db, ticketId, "DOCS", "pass", ranJobs(["api:build", "build", 0]), {
-    carriedForward: true,
-  });
+  carryVerifiedVerdictForward(db, ticketId, "DOCS");
   const d = nextStepKey(db, ticketId);
   db.close();
   expect(d).toEqual({ kind: "advance", from: "implement", to: "review" });
@@ -503,8 +501,8 @@ test("ALL of a criterion's live checks must be green, not just one of them", asy
 });
 
 test("AC evidence comes from the NEWEST round, not the first one recorded", async () => {
-  // `acEvidenceSha` takes the last post-implement signal. A gate round that went red, looped back
-  // and re-ran green must not be judged on the round before it.
+  // A gate round that went red, looped back and re-ran green at the current head must not be
+  // judged on the measurements at the previous head.
   const { db, ticketId } = await atTheTransition();
   integration(db, ticketId, "SHIP", "pass", ranJobs(["api:build", "build", 0])); // not evidence
   const a = insertAc(db, { ticketId, seq: 1, text: "criterion", source: "checklist" });
@@ -825,4 +823,15 @@ test("an `absence`-class check gates its criterion, the same as an `assertion` o
   const d = nextStepKey(db, ticketId);
   db.close();
   expect(d).toEqual({ kind: "advance", from: "implement", to: "review" });
+});
+
+test("an earlier green AC round cannot satisfy the floor at a changed untested head", async () => {
+  const { db, ticketId } = await atTheTransition("NEW");
+  ac(db, ticketId, 1, "OLD");
+  // Routing facts at NEW do not themselves establish that the AC measurements still apply.
+  gatePassed(db, ticketId, "NEW");
+  integration(db, ticketId, "NEW", "pass", ranJobs(["api:build", "build", 0]));
+  const decision = nextStepKey(db, ticketId);
+  expect(decision).toMatchObject({ kind: "escalate", signature: "evidence-floor" });
+  db.close();
 });

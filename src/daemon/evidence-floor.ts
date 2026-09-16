@@ -207,9 +207,7 @@ export function evidenceFloor(db: Database, ticketId: number): FloorVerdict {
     };
   }
 
-  // AC evidence is read at the sha the checks actually RAN at, which is not necessarily the ticket
-  // head: a committing `docs:revise` moves the head afterwards and carries forward only the gate
-  // and integration signals. See `acEvidenceSha`.
+  // Share the report's current-head / explicit docs-carry provenance rule.
   const sha = acEvidenceSha(db, ticketId);
   const proven = sha === null ? new Map() : postImplementAtSha(db, ticketId, sha);
   const checks = listAcChecks(db, ticketId);

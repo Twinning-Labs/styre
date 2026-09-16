@@ -3,6 +3,7 @@ import { classifyAcCheck, insertAcCheck, supersedeByAc } from "../../src/db/repo
 import { insertAc } from "../../src/db/repos/acceptance-criterion.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
+import { carryVerifiedVerdictForward } from "../../src/dispatch/carry-forward.ts";
 import { buildVerifyReport } from "../../src/dispatch/verify-report.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
@@ -468,18 +469,77 @@ test("a committing docs:revise does not erase the AC evidence this report render
       outcome: "green",
     },
   });
-  // ...then the docs step commits, moving the head. Exactly what carry-forward.ts writes:
+  insertSignal(db, { ticketId, signalType: "integration", result: "pass", branchHeadSha: HEAD });
   const d2 = insertDispatch(db, { ticketId, dispatchId: "d-docs", seq: nextSeq(db, ticketId) });
   completeDispatch(db, d2.id, { outcome: "clean-success", branchHeadSha: "docs-head" });
-  insertSignal(db, {
-    ticketId,
-    signalType: "ac-check-gate",
-    result: "pass",
-    branchHeadSha: "docs-head",
-    detail: { carriedForward: true },
-  });
+  carryVerifiedVerdictForward(db, ticketId, "docs-head");
 
   const r = buildVerifyReport(db, ticketId);
   expect(r.criteria).toEqual([{ seq: 1, text: "returns 201 on create", label: "verified" }]);
   expect(r.allClean).toBe(true);
 });
+
+for (const scenario of [
+  "unrelated-head",
+  "missing-source",
+  "wrong-source",
+  "missing-gate",
+  "gate-failed",
+  "unmarked",
+  "new-red",
+] as const) {
+  test(`old AC evidence cannot verify the current head: ${scenario}`, () => {
+    const { db, ticketId } = makeTestDb();
+    seedHead(db, ticketId);
+    const ac = insertAc(db, { ticketId, seq: 1, text: "works", source: "checklist" });
+    const check = insertAcCheck(db, { ticketId, acId: ac.id, selector: "s", testPath: "t" });
+    classifyAcCheck(db, { acCheckId: check.id, redClass: "assertion" });
+    insertSignal(db, {
+      ticketId,
+      signalType: "ac-check-post-implement",
+      result: "pass",
+      branchHeadSha: HEAD,
+      detail: { acCheckId: check.id, acId: ac.id, coarse: "green", outcome: "green" },
+    });
+    const dispatch = insertDispatch(db, {
+      ticketId,
+      dispatchId: "new",
+      seq: nextSeq(db, ticketId),
+    });
+    completeDispatch(db, dispatch.id, { outcome: "clean-success", branchHeadSha: "NEW" });
+    if (scenario !== "unrelated-head") {
+      insertSignal(db, {
+        ticketId,
+        signalType: "integration",
+        result: "pass",
+        branchHeadSha: "NEW",
+        detail: {
+          carriedForward: scenario !== "unmarked",
+          ...(scenario === "missing-source"
+            ? {}
+            : { carriedFrom: scenario === "wrong-source" ? "OTHER" : HEAD }),
+        },
+      });
+      if (scenario !== "missing-gate")
+        insertSignal(db, {
+          ticketId,
+          signalType: "ac-check-gate",
+          result: scenario === "gate-failed" ? "fail" : "pass",
+          branchHeadSha: "NEW",
+          detail: { carriedForward: true },
+        });
+    }
+    if (scenario === "new-red")
+      insertSignal(db, {
+        ticketId,
+        signalType: "ac-check-post-implement",
+        result: "fail",
+        branchHeadSha: "NEW",
+        detail: { acCheckId: check.id, acId: ac.id, coarse: "red", outcome: "gated-red" },
+      });
+    const report = buildVerifyReport(db, ticketId);
+    expect(report.criteria[0]?.label).toBe("still-red");
+    expect(report.allClean).toBe(false);
+    db.close();
+  });
+}

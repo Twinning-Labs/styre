@@ -74,20 +74,8 @@ export type VerifyReport = {
 export function buildVerifyReport(db: Database, ticketId: number): VerifyReport {
   const acs = listAcs(db, ticketId); // ORDER BY seq
   const checks = listActiveChecks(db, ticketId); // superseded_at IS NULL
-  // The sha the CHECKS ran at, which is not always the ticket head: a `docs:revise` that commits
-  // moves the head afterwards, and `carryVerifiedVerdictForward` carries the gate and integration
-  // signals to the new head but not the post-implement ones. Reading at the ticket head therefore
-  // found nothing on every needs_docs ticket that committed docs, and this report rendered each
-  // gating criterion as `still-red` (dropping `allClean`) on a run that had in fact verified them.
-  // Shared with the evidence floor so the PR body and the gate can never disagree about which
-  // commit the evidence belongs to.
-  //
-  // KNOWN WEAKENING, recorded here because it is the durable place for it: this also decouples the
-  // report from a head that moved for a reason that is NOT a docs commit. A read-only dispatch can
-  // move it — `commitWorktree` opens with `git add -u` and sweeps up whatever a verify run dirtied
-  // (ENG-453). Before this change that rendered every gating criterion `still-red`: wrong, but
-  // loud. Now it renders `verified` at a sha nothing ran at: right in the docs case, silent in the
-  // ENG-453 one. Fixing ENG-453 removes the second case; until then this is the trade.
+  // Measurements belong to the current head, or its explicitly recorded docs-only carry source.
+  // A head moved by any other dispatch (including ENG-453) must not inherit an earlier pass.
   const evidenceSha = acEvidenceSha(db, ticketId);
   const postImpl = evidenceSha ? postImplementAtSha(db, ticketId, evidenceSha) : new Map();
   const prov = reauthorProvenance(db, ticketId);

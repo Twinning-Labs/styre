@@ -484,7 +484,10 @@ and the gate has not passed at the branch HEAD, the resolver serves this cluster
   before `kind` existed is read by its job label instead; a FAILING S4 does **not** count, not even flagged
   `detail.preexisting` (ENG-457: the baseline re-run is un-provisioned and stamps a real regression
   pre-existing) — **or** every acceptance criterion was proven individually by all of its GATING
-  checks (`assertion`/`absence`, the same set `buildVerifyReport` judges on). `result:"pass"` alone is not evidence: three producers emit it having executed nothing, and
+  checks (`assertion`/`absence`, the same set `buildVerifyReport` judges on). AC measurements must
+  belong to the current head, or to the source named by its explicitly carried integration and
+  passing gate. Old docs carries without source provenance fail closed; current-head legacy
+  measurements remain valid. `result:"pass"` alone is not evidence: three producers emit it having executed nothing, and
   they are distinguished by an empty `detail.ran`.
 - **Fails →** `{kind:"escalate"}` with `event_log.signature = 'evidence-floor'`; the run pauses
   `needs_you` with the unproven criteria named. Resume recomputes the same answer from the same

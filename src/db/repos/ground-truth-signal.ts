@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { nowUtc } from "../../util/time.ts";
+import { getLatestForTicket } from "./dispatch.ts";
 
 export interface GroundTruthSignalRow {
   id: number;
@@ -458,24 +459,41 @@ export function isExecutedPass(row: GroundTruthSignalRow): boolean {
   return jobs.length > 0 && jobs.every((j) => j.exitCode === 0 && j.timedOut !== true);
 }
 
-/** The sha at which this run's acceptance-criterion evidence was measured = the branch head the
- *  newest `ac-check-post-implement` signal carries.
- *
- *  NOT `getLatestForTicket()`. `docs:revise` runs AFTER the gate and can commit, moving the ticket
- *  head; `carryVerifiedVerdictForward` then stamps a carried `ac-check-gate` pass and a carried
- *  `integration` signal at the new head but does NOT carry post-implement signals. Reading AC
- *  evidence at the ticket head therefore finds NOTHING on every `needs_docs` ticket that committed
- *  docs — which is why `buildVerifyReport` renders every gating AC as still-red on exactly those
- *  tickets today. One helper, two readers, so the two cannot drift again.
- *
- *  Safe because `rerunAcChecks` re-runs EVERY active undispositioned check in one pass at a single
- *  head sha, so "the newest post-implement signal" always names a whole round, never a fragment of
- *  one. Returns null when no check has ever run — which must be read as "no evidence", never as
- *  "fall back to the ticket head". */
+/** Select AC evidence for the current ticket head, never merely the latest measured commit.
+ *  A docs-only commit may reuse its source measurements, but only through the explicit carry
+ *  recorded by `carryVerifiedVerdictForward`: both a carried passing gate and an integration
+ *  record naming the source SHA at this head. This is one hop, matching the unit-sweep channel.
+ *  Older carries without `carriedFrom` cannot establish that link and fail closed; measurements
+ *  at the current head need no new metadata and remain readable on legacy checkpoints. */
 export function acEvidenceSha(db: Database, ticketId: number): string | null {
-  return (
-    listByTicket(db, ticketId)
-      .filter((s) => s.signal_type === "ac-check-post-implement" && s.branch_head_sha !== null)
-      .at(-1)?.branch_head_sha ?? null
-  );
+  const head = getLatestForTicket(db, ticketId)?.branch_head_sha;
+  if (!head) return null;
+  const signals = listByTicket(db, ticketId);
+  // Even a partial or failing measurement at this head takes precedence over carried evidence.
+  if (
+    signals.some((s) => s.signal_type === "ac-check-post-implement" && s.branch_head_sha === head)
+  ) {
+    return head;
+  }
+  const atHead = signals.filter((s) => s.branch_head_sha === head && s.work_unit_id === null);
+  const integration = atHead.filter((s) => s.signal_type === "integration").at(-1);
+  const gate = atHead.filter((s) => s.signal_type === "ac-check-gate").at(-1);
+  const carried = JSON.parse(integration?.detail_json ?? "null") as {
+    carriedForward?: unknown;
+    carriedFrom?: unknown;
+  } | null;
+  const gateDetail = JSON.parse(gate?.detail_json ?? "null") as { carriedForward?: unknown } | null;
+  if (
+    carried?.carriedForward !== true ||
+    typeof carried.carriedFrom !== "string" ||
+    !carried.carriedFrom ||
+    gate?.result !== "pass" ||
+    gateDetail?.carriedForward !== true
+  )
+    return null;
+  return signals.some(
+    (s) => s.signal_type === "ac-check-post-implement" && s.branch_head_sha === carried.carriedFrom,
+  )
+    ? carried.carriedFrom
+    : null;
 }
