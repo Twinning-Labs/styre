@@ -1,5 +1,6 @@
 import { z } from "zod";
-import type { Profile } from "./profile.ts";
+import { matchesComponent } from "./components.ts";
+import type { Component, Profile } from "./profile.ts";
 import { isTestFile } from "./test-file.ts";
 
 /** One work-unit as proposed by design:extract (control-loop §3a). The daemon assigns nothing
@@ -98,7 +99,10 @@ export function validateCdotImpact(output: ExtractOutput, profile: Profile): str
 
 /** Deterministic completeness gate (S1b postcondition). Returns human-readable errors;
  *  an empty array means the extraction is well-formed. Never throws. */
-export function validateExtraction(units: ExtractedWorkUnit[]): string[] {
+export function validateExtraction(
+  units: ExtractedWorkUnit[],
+  components: Component[] = [],
+): string[] {
   const errors: string[] = [];
   if (units.length === 0) {
     errors.push("extraction has no work units");
@@ -135,7 +139,14 @@ export function validateExtraction(units: ExtractedWorkUnit[]): string[] {
       // delimiter regex" from "add regression test" and the fix unit was flagged untested despite
       // a correct, tested delivery. Catching it here fails extraction with a fixable message
       // instead of surfacing a misleading warning in the human's PR.
-      if (!u.files_to_touch.some((f) => isTestFile(f))) {
+      if (
+        !u.files_to_touch.some((f) => {
+          const owners = components.filter((c) => matchesComponent(c, f));
+          return owners.length > 0
+            ? owners.some((c) => isTestFile(f, c.testFilePattern))
+            : isTestFile(f);
+        })
+      ) {
         errors.push(
           `unit seq ${u.seq} is behavioral but names no test file in files_to_touch — a behavioral unit must include its own test (do not split the change and its test across units)`,
         );

@@ -101,6 +101,25 @@ function shq(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
+/** The source presence check is only a prefilter; the framework execution must still select
+ * a test. Pytest's file-relative node suffix can name enclosing classes and a parametrized
+ * case, neither of which appears as one contiguous string in Python source. Split before
+ * the first `[` (as pytest does), so `::` inside a parameter ID remains data, not a class. */
+export function authoredTestNameInContent(
+  framework: CheckFramework | null,
+  content: string,
+  testName: string,
+): boolean {
+  if (framework !== "pytest") return content.includes(testName);
+  const bracket = testName.indexOf("[");
+  if (bracket !== -1 && !testName.endsWith("]")) return false;
+  const qualifiedName = bracket === -1 ? testName : testName.slice(0, bracket);
+  const names = qualifiedName.split("::");
+  return names.every(
+    (name) => /^[\p{ID_Start}_][\p{ID_Continue}_]*$/u.test(name) && content.includes(name),
+  );
+}
+
 /** Construct the framework-native selection args that run ONLY the one authored check (§5.2). The
  *  returned `runArgs` are appended to the framework binary by M2b; `precision` records the scoping
  *  tier (precise > anchored > package > file). For file-addressable frameworks the styre-authored
@@ -247,6 +266,9 @@ export function interpretRunOutput(fw: CheckFramework, run: RunOutcome): CoarseO
     case "pytest":
       if (code === 0) return "green";
       if (code === 5) return "selected-none"; // pytest: no tests collected
+      // A nonexistent node inside a collected file raises pytest UsageError (exit 4),
+      // not NO_TESTS_COLLECTED (5). Keep other usage/config errors environmental.
+      if (code === 4 && outputMatches(run, /^ERROR:\s+not found:\s+\S/m)) return "selected-none";
       if (code === 1 || code === 2) return "red"; // 1=failures, 2=collection/import error (absence)
       return "error"; // 3=internal, 4=usage, etc.
     case "django-runtests": {

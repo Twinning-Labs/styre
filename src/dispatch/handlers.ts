@@ -65,6 +65,7 @@ import { resolveAuthoredTestPath } from "./check-path.ts";
 import {
   type CheckFramework,
   type CoarseResult,
+  authoredTestNameInContent,
   buildCheckSelector,
   buildFileSelector,
   collectionErrorExcerpt,
@@ -294,8 +295,11 @@ async function reauthorCheckWrong(
     authored.test_file,
   );
   if (testPath === null) return "rejected";
+  const installComp = impactedComponents(deps.profile.components, [testPath])[0];
+  const installFw = installComp ? frameworkFor(installComp) : null;
   const content = fileContentAt(reauthorSha, testPath, worktreePath);
-  if (content === null || !content.includes(authored.test_name)) return "rejected";
+  if (content === null || !authoredTestNameInContent(installFw, content, authored.test_name))
+    return "rejected";
 
   // 3) Clean-HEAD replay — the RED-first oracle. coarse == red installs; everything else rejects.
   const coarse = await replayCheckAtBaseline({
@@ -324,8 +328,6 @@ async function reauthorCheckWrong(
   // 5) Install: supersede the old generation + insert the new active + red-first at the re-author sha.
   // (The replay above already resolved a component+framework for this same test_file — coarse would
   // have been "error" otherwise, rejecting before this point — but fail closed here too, no assertion.)
-  const installComp = impactedComponents(deps.profile.components, [testPath])[0];
-  const installFw = installComp ? frameworkFor(installComp) : null;
   if (!installComp || !installFw) return "rejected";
   const sel = buildCheckSelector(installFw, {
     testFile: testPath,
@@ -447,7 +449,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       // Absent/malformed sidecar = transport failure (§3a) → failure-policy re-dispatches.
       throw new Error(`design:extract sidecar ${parsed.reason}: ${parsed.detail}`);
     }
-    const errors = validateExtraction(parsed.value.units);
+    const errors = validateExtraction(parsed.value.units, deps.profile.components);
     if (errors.length > 0) {
       throw new Error(`design:extract completeness failed: ${errors.join("; ")}`);
     }
@@ -504,13 +506,14 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   });
 
   registry.register("design:review", async (ctx: HandlerContext) => {
+    const units = listUnits(ctx.db, ctx.ticket.id);
     const result = await runAgentDispatch(
       ctx,
       depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
       {
         handlerKey: "design:review",
         template: DESIGN_REVIEW_TEMPLATE,
-        vars: designReviewVars(ctx.ticket, deps.profile),
+        vars: designReviewVars(ctx.ticket, deps.profile, units),
         postcondition: () => {}, // read-only: nothing commits
       },
     );
@@ -519,7 +522,6 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     if (!parsed.ok) {
       throw new Error(`design:review sidecar ${parsed.reason}: ${parsed.detail}`);
     }
-    const units = listUnits(ctx.db, ctx.ticket.id);
     const seqToId = new Map(units.map((u) => [u.seq, u.id]));
     const errors = validateReviewFindings(parsed.value.findings, [...seqToId.keys()]);
     if (errors.length > 0) {
@@ -701,17 +703,16 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           );
           continue;
         }
+        const comp = impactedComponents(components, [testPath])[0]; // decision 2
+        const fw = comp ? frameworkFor(comp) : null;
         const content = fileContentAt(sha, testPath, worktreePath);
-        if (content === null || !content.includes(c.test_name)) {
+        if (content === null || !authoredTestNameInContent(fw, content, c.test_name)) {
           missReason.set(
             c.ac_id,
             `\`${testPath}\` does not contain a test named \`${c.test_name}\``,
           );
           continue; // name absent → reject
         }
-
-        const comp = impactedComponents(components, [testPath])[0]; // decision 2
-        const fw = comp ? frameworkFor(comp) : null;
 
         let coarse: CoarseResult;
         let selector = testPath; // NOT-NULL fallback when no framework (decision 2)
@@ -757,7 +758,10 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
             exitCode = res.exitCode;
             command = res.command;
             if (res.coarse === "selected-none") {
-              missReason.set(c.ac_id, `the selector for \`${testPath}\` matched no test`);
+              missReason.set(
+                c.ac_id,
+                `the selector \`${sel.runArgs}\` for \`${testPath}\` matched no test${fw === "pytest" ? "; a class method's test_name must include its enclosing classes (TestClass::test_method)" : ""}`,
+              );
               continue; // selects 0 → identity reject (§5.1)
             }
             coarse = res.coarse;

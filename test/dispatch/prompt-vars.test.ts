@@ -152,11 +152,11 @@ test("design-review template renders with designReviewVars (no missing placehold
   const profile = parseProfile({ slug: "demo", targetRepo: "/tmp/x" });
   const r = renderPrompt(
     DESIGN_REVIEW_TEMPLATE,
-    designReviewVars({ ident: "ENG-1", title: "T" }, profile),
+    designReviewVars({ ident: "ENG-1", title: "T" }, profile, []),
   );
   expect(r.ok).toBe(true);
   for (const name of placeholders(DESIGN_REVIEW_TEMPLATE)) {
-    expect(name in designReviewVars({ ident: "ENG-1", title: "T" }, profile)).toBe(true);
+    expect(name in designReviewVars({ ident: "ENG-1", title: "T" }, profile, [])).toBe(true);
   }
 });
 

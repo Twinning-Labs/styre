@@ -26,3 +26,10 @@ test("checks prompt pins the canonical written==declared path and discards undec
   expect(t).toContain("reject"); // guard still rejects undeclared new files
   expect(t).toContain("new_files"); // retained, now scoped to genuine helpers only
 });
+
+test("checks prompt requires pytest's class-qualified file-relative node suffix", () => {
+  expect(CHECKS_TEMPLATE).toContain("TestClass::test_method");
+  expect(CHECKS_TEMPLATE).toMatch(/enclosing\s+class/);
+  expect(CHECKS_TEMPLATE).toContain("[parameter-id]");
+  expect(CHECKS_TEMPLATE).not.toContain("test_name (function/case name)");
+});

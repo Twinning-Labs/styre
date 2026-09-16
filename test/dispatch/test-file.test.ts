@@ -26,3 +26,12 @@ test("an explicit pattern overrides the heuristic", () => {
   expect(isTestFile("src/foo.ts", "\\.ts$")).toBe(true);
   expect(isTestFile("src/foo.test.ts", "checks/")).toBe(false);
 });
+
+// pytest's own suite includes modules without a test_ prefix under testing/python/.
+test("recognizes testing directories without accepting similarly named production paths", () => {
+  expect(isTestFile("testing/python/integration.py")).toBe(true);
+  expect(isTestFile("pkg/testing/regression.py")).toBe(true);
+  expect(isTestFile("src/_pytest/compat.py")).toBe(false);
+  expect(isTestFile("src/testing_tools.py")).toBe(false);
+  expect(isTestFile("testing/python/integration.py", "^checks/")).toBe(false);
+});

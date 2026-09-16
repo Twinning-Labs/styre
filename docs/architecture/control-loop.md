@@ -265,7 +265,9 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 **S1c · `design:review`** — semantic plan-quality gate (cold; deep tier, default Opus 4.8; **full-track only**, C2)
 - **Guard:** S1b completeness clean; `track='full'`.
 - **Input — cold (anti-anchoring):** the plan + the ticket requirements + the codebase. **NOT** the
-  designer's reasoning.
+  designer's reasoning. The prompt also includes the persisted work-unit decomposition (seq,
+  scope, files, tests and dependencies); findings reference these canonical seqs, which can differ
+  from plan task numbers after extraction combines tasks. Unmapped/plan-wide findings use null.
 - **Mechanism (§3a):** files findings via tool calls (`file_finding` / `complete_review`); the runner
   derives the verdict from the ledger — the **same machinery as code-review (S5)**, applied to the
   plan.
@@ -293,6 +295,13 @@ implement.
   code for the right reason** (RED-first). The author is **plan-blind** — it is given the AC text, not
   the implementation plan — so a check encodes the requirement, not the intended solution.
 - **Failure → route:** shape/retry within the step's attempt budget.
+
+  Pytest check names include enclosing classes (`TestClass::test_method`), with `test_file`
+  reported separately. Source-presence checks handle those qualifiers and parameter IDs, then
+  pytest must select the exact node. An exit-4 `ERROR: not found:` selection failure is rejected
+  like exit 5 (no tests selected): no AC check is persisted, the invalid author commit is reverted,
+  and the bounded retry receives the failing selector. Other exit-4 usage/configuration failures
+  remain errors; an unavailable environment is not treated as an invalid authored selector.
 
 **S1e · `checks:classify`** — triage the red-first traces (standard tier, prompt `checks-classify.md`)
 - **Guard:** `!done('checks:classify')`.

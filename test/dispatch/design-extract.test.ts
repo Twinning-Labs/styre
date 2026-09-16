@@ -35,14 +35,27 @@ const ABSENT_RC = {
   releasePackaging: { mechanism: "none" },
 };
 
-function registryFor(repo: string, runner: FakeAgentRunner, rc: unknown = ABSENT_RC) {
+function registryFor(
+  repo: string,
+  runner: FakeAgentRunner,
+  rc: unknown = ABSENT_RC,
+  testFilePattern?: string,
+) {
   return buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
+      components: [
+        {
+          name: "app",
+          kind: "node",
+          paths: ["**"],
+          commands: { test: "bun test" },
+          testFilePattern,
+        },
+      ],
       runtimeContext: rc,
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wtroot-")),
@@ -262,3 +275,45 @@ test("design:extract fails the step when completeness checks fail (behavioral, n
   expect(step?.status).not.toBe("succeeded");
   expect(units.length).toBe(0);
 });
+
+for (const [testPath, pattern] of [
+  ["testing/python/integration.py", undefined],
+  ["checks/regression.py", "^checks/"],
+] as const) {
+  test(`design:extract persists a production fix with its ${testPath} test`, async () => {
+    const { db, ticketId, projectId } = makeTestDb();
+    const repo = gitRepo();
+    db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+    readyForExtract(db, ticketId);
+    const runner = new FakeAgentRunner(() => ({
+      completed: true,
+      exitCode: 0,
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+      stdout: sidecar(
+        JSON.stringify({
+          units: [
+            {
+              seq: 1,
+              kind: "python",
+              title: "Fix compat",
+              description: "Regression",
+              behavioral: true,
+              test_plan: "Exercise decorated callable",
+              files_to_touch: ["src/_pytest/compat.py", testPath],
+              verify_check_types: ["test"],
+              depends_on: [],
+            },
+          ],
+        }),
+      ),
+    }));
+    await advanceOneStep(db, ticketId, registryFor(repo, runner, ABSENT_RC, pattern));
+    expect(getByKey(db, ticketId, "design:extract")?.status).toBe("succeeded");
+    expect(listByTicket(db, ticketId)).toHaveLength(1);
+    db.close();
+  });
+}
