@@ -2,7 +2,8 @@ import { z } from "zod";
 
 /** One authored native check the plan-blind `checks:dispatch` agent wrote (control-loop §3a / M2
  *  design §4). The agent reports ONLY facts it knows because it wrote them — the target acceptance
- *  criterion, the NEW test file it created, and the test function/case name. It reports NO selector
+ *  criterion, the NEW test file it created, and the test function/case name (pytest: the complete
+ *  file-relative node suffix, including enclosing classes and any parameter ID). It reports NO command
  *  (runner-constructed, §5.2) and NO verdict (ground truth, §5). */
 export const AuthoredCheckSchema = z.object({
   ac_id: z.number().int().positive(),

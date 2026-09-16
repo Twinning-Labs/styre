@@ -114,6 +114,110 @@ async function runSingleCheckDispatch(fixture: {
   return { checks, message, outcome, stepStatus, signals, report, markdown, authorDispatches };
 }
 
+test.each(["TestRegression::test_x", "TestRegression::test_x[case::value]"])(
+  "checks:dispatch rejects the live missing-class selector and retries successfully with %s",
+  async (qualifiedName) => {
+    const { db, ticketId, projectId } = makeTestDb();
+    const repo = gitRepo();
+    db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+    db.query("UPDATE ticket SET description = ? WHERE id = ?").run(
+      "- [ ] one behavior\n",
+      ticketId,
+    );
+    await markDesignDone(db, ticketId);
+    insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
+    setTicketTrack(db, ticketId, "fast");
+    const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-qualified-check-"));
+    const testFile = "checks/ENG-1_ac1_test.py";
+    let attempts = 0;
+    const runner = new FakeAgentRunner((input) => {
+      attempts++;
+      mkdirSync(join(input.cwd, "checks"), { recursive: true });
+      writeFileSync(
+        join(input.cwd, testFile),
+        "class TestRegression:\n    def test_x(self, value):\n        assert value\n",
+      );
+      return {
+        completed: true,
+        exitCode: 0,
+        stderr: "",
+        timedOut: false,
+        costUsd: null,
+        tokensIn: null,
+        tokensOut: null,
+        stdout: `\`\`\`styre-sidecar\n${JSON.stringify({ checksAuthored: [{ ac_id: 1, test_file: testFile, test_name: attempts === 1 ? "test_x" : qualifiedName }] })}\n\`\`\``,
+      };
+    });
+    const commands: string[] = [];
+    const registry = buildDispatchRegistry({
+      runner,
+      agentConfig: DEFAULT_AGENT_CONFIG,
+      worktreeRoot,
+      profile: parseProfile({
+        slug: "demo",
+        targetRepo: repo,
+        components: [
+          { name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } },
+        ],
+      }),
+      runCheckCommand: scriptedCheckRunner(async (command) => {
+        commands.push(command);
+        if (command === `python3 -m pytest '${testFile}::test_x'`) {
+          return {
+            exitCode: 4,
+            stdout: "collected 0 items",
+            stderr: `ERROR: not found: /testbed/${testFile}::test_x\n(no name 'test_x' in any of [<Module ENG-1_ac1_test.py>])`,
+            timedOut: false,
+          };
+        }
+        expect(command).toBe(`python3 -m pytest '${testFile}::${qualifiedName}'`);
+        return { exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false };
+      }),
+    });
+    await advanceOneStep(db, ticketId, registry); // provision
+    const rejected = await advanceOneStep(db, ticketId, registry);
+    expect(rejected.kind).toBe("retry");
+    expect(listAcChecks(db, ticketId)).toHaveLength(0);
+    expect(
+      listSignals(db, ticketId).filter((s) => s.signal_type === "ac-check-red-first"),
+    ).toHaveLength(0);
+    const message = JSON.parse(
+      getByKey(db, ticketId, "checks:dispatch")?.error_json ?? "{}",
+    ).message;
+    expect(message).toContain("matched no test");
+    expect(message).toContain("TestClass::test_method");
+    // Rejected author commits must roll back so the corrected retry can still add a NEW file.
+    expect(existsSync(join(runner.inputs[0]?.cwd ?? "", testFile))).toBe(false);
+    const accepted = await advanceOneStep(db, ticketId, registry);
+    expect(accepted.kind).toBe("stepped");
+    expect(attempts).toBe(2);
+    expect(runner.inputs[1]?.prompt).toContain("matched no test");
+    const checks = listAcChecks(db, ticketId);
+    expect(checks).toHaveLength(1);
+    expect(checks[0]?.selector).toBe(`'${testFile}::${qualifiedName}'`);
+    expect(checks[0]?.red_first_result).toBe("red");
+    expect(commands).toHaveLength(2);
+    db.close();
+  },
+);
+
+test("checks:dispatch keeps unrelated pytest usage errors advisory, not an identity retry", async () => {
+  const { checks, outcome } = await runSingleCheckDispatch({
+    kind: "python",
+    testCmd: "pytest -q",
+    ext: "py",
+    run: () => ({
+      exitCode: 4,
+      stdout: "",
+      stderr: "ERROR: /testbed/pytest.ini:2: unexpected line",
+      timedOut: false,
+    }),
+  });
+  expect(outcome.kind).toBe("stepped");
+  expect(checks).toHaveLength(1);
+  expect(checks[0]?.red_first_result).toBe("error");
+});
+
 test("checks:dispatch authors, verifies identity, runs RED-first, and persists a coarse red", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();

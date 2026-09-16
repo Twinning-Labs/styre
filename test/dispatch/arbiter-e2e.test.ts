@@ -279,7 +279,17 @@ async function driveToStopOrWaiting(
   }
 }
 
-test("checks:reauthor: RED-first-valid + assertion-classified re-author installs (supersede old, insert new active, fresh red-first at the reauthor sha)", async () => {
+test.each([
+  { testName: "test_new", body: "def test_new():\n    assert save_pref() == 1\n" },
+  {
+    testName: "TestPrefs::test_new",
+    body: "class TestPrefs:\n    def test_new(self):\n        assert save_pref() == 1\n",
+  },
+  {
+    testName: "TestPrefs::test_new[case::value]",
+    body: "class TestPrefs:\n    def test_new(self, value):\n        assert save_pref() == value\n",
+  },
+])("checks:reauthor installs $testName", async ({ testName, body }) => {
   const { db, ticketId, projectId } = makeTestDb();
   const { root: repo, initSha } = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
@@ -321,21 +331,15 @@ test("checks:reauthor: RED-first-valid + assertion-classified re-author installs
     if (isClassifyPrompt(input.prompt)) {
       return classifyResponse("assertion", "real behavioral assert")(input);
     }
-    return authorResponse(
-      ac.id,
-      "checks/new_test.py",
-      "test_new",
-      "def test_new():\n    assert save_pref() == 1\n",
-    )(input);
+    return authorResponse(ac.id, "checks/new_test.py", testName, body)(input);
   });
 
   // RED at the baseline replay (pytest exit 1).
-  const registry = registryWith(repo, runner, async () => ({
-    exitCode: 1,
-    stdout: "1 failed",
-    stderr: "",
-    timedOut: false,
-  }));
+  const commands: string[] = [];
+  const registry = registryWith(repo, runner, async (command) => {
+    commands.push(command);
+    return { exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false };
+  });
 
   const handler = registry.resolve("checks:reauthor");
   if (!handler) throw new Error("checks:reauthor handler not registered");
@@ -370,10 +374,20 @@ test("checks:reauthor: RED-first-valid + assertion-classified re-author installs
   expect(active.length).toBe(1);
   expect(active[0]?.id).not.toBe(oldCheck.id); // a fresh row, never the superseded id
   expect(active[0]?.red_class).toBe("assertion");
+  expect(active[0]?.selector).toBe(`'checks/new_test.py::${testName}'`);
+  expect(commands).toContain(`python3 -m pytest 'checks/new_test.py::${testName}'`);
   expect(dispositions).toEqual([{ acId: ac.id, acCheckId: oldCheck.id, disposition: "installed" }]);
 });
 
-test("checks:reauthor: a re-author that GREENS at the baseline replay is rejected — the old check stays active, no supersede", async () => {
+test.each([
+  { exitCode: 0, stdout: "1 passed", stderr: "" },
+  {
+    exitCode: 4,
+    stdout: "collected 0 items",
+    stderr:
+      "ERROR: not found: checks/new_test.py::test_new\n(no name 'test_new' in any of [<Module new_test.py>])",
+  },
+])("checks:reauthor rejects exit $exitCode", async (replayResult) => {
   const { db, ticketId, projectId } = makeTestDb();
   const { root: repo, initSha } = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
@@ -413,8 +427,8 @@ test("checks:reauthor: a re-author that GREENS at the baseline replay is rejecte
 
   const runner = new FakeAgentRunner((input) => {
     if (isClassifyPrompt(input.prompt)) {
-      // Should never be reached: a green-at-baseline replay rejects BEFORE classification.
-      throw new Error("unexpected classify dispatch on a green-at-baseline re-author");
+      // Should never be reached: a non-red-at-baseline replay rejects BEFORE classification.
+      throw new Error("unexpected classify dispatch on a non-red-at-baseline re-author");
     }
     return authorResponse(
       ac.id,
@@ -424,13 +438,8 @@ test("checks:reauthor: a re-author that GREENS at the baseline replay is rejecte
     )(input);
   });
 
-  // GREEN at the baseline replay (pytest exit 0) — the RED-first oracle rejects.
-  const registry = registryWith(repo, runner, async () => ({
-    exitCode: 0,
-    stdout: "1 passed",
-    stderr: "",
-    timedOut: false,
-  }));
+  // Neither a pass nor a nonexistent node demonstrates the required baseline failure.
+  const registry = registryWith(repo, runner, async () => ({ ...replayResult, timedOut: false }));
 
   const handler = registry.resolve("checks:reauthor");
   if (!handler) throw new Error("checks:reauthor handler not registered");

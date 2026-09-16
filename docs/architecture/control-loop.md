@@ -296,6 +296,13 @@ implement.
   the implementation plan — so a check encodes the requirement, not the intended solution.
 - **Failure → route:** shape/retry within the step's attempt budget.
 
+  Pytest check names include enclosing classes (`TestClass::test_method`), with `test_file`
+  reported separately. Source-presence checks handle those qualifiers and parameter IDs, then
+  pytest must select the exact node. An exit-4 `ERROR: not found:` selection failure is rejected
+  like exit 5 (no tests selected): no AC check is persisted, the invalid author commit is reverted,
+  and the bounded retry receives the failing selector. Other exit-4 usage/configuration failures
+  remain errors; an unavailable environment is not treated as an invalid authored selector.
+
 **S1e · `checks:classify`** — triage the red-first traces (standard tier, prompt `checks-classify.md`)
 - **Guard:** `!done('checks:classify')`.
 - **Output:** each red-first check classified (red classes vs green-on-HEAD dispositions, plus the

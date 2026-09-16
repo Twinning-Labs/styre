@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { CHECK_RULES } from "../../src/dispatch/check-rules.ts";
-import { frameworkFor, isLaunchFailure, launcherFor } from "../../src/dispatch/check-selector.ts";
+import {
+  authoredTestNameInContent,
+  frameworkFor,
+  isLaunchFailure,
+  launcherFor,
+} from "../../src/dispatch/check-selector.ts";
 
 const comp = (kind: string, test?: string) => ({
   kind,
@@ -45,6 +50,37 @@ describe("frameworkFor", () => {
   });
 });
 
+describe("authoredTestNameInContent", () => {
+  const content =
+    "class TestOuter:\n    class TestInner:\n        def test_result(self, value):\n            assert value\n";
+
+  test.each([
+    "test_result",
+    "TestOuter::TestInner::test_result",
+    "TestOuter::TestInner::test_result[case::value]",
+  ])("accepts pytest node suffix %s without requiring it verbatim in source", (name) => {
+    expect(authoredTestNameInContent("pytest", content, name)).toBe(true);
+  });
+
+  test.each([
+    "",
+    "TestMissing::test_result",
+    "TestOuter::test_missing",
+    "TestOuter::::test_result",
+    "TestOuter::test_result[unterminated",
+    "test_file.py::TestOuter::test_result",
+  ])("rejects absent or malformed pytest identity %s", (name) => {
+    expect(authoredTestNameInContent("pytest", content, name)).toBe(false);
+  });
+
+  test("other frameworks retain the literal test-name presence check", () => {
+    expect(authoredTestNameInContent("jest", "it('returns a value')", "returns a value")).toBe(
+      true,
+    );
+    expect(authoredTestNameInContent("jest", content, "TestOuter::test_result")).toBe(false);
+  });
+});
+
 import { buildCheckSelector } from "../../src/dispatch/check-selector.ts";
 
 describe("buildCheckSelector", () => {
@@ -53,6 +89,18 @@ describe("buildCheckSelector", () => {
       buildCheckSelector("pytest", { testFile: "tests/test_api.py", testName: "test_ok" }),
     ).toEqual({
       runArgs: "'tests/test_api.py::test_ok'",
+      precision: "precise",
+    });
+  });
+
+  test("pytest preserves class qualifiers and :: inside parameter IDs in an exact quoted selector", () => {
+    expect(
+      buildCheckSelector("pytest", {
+        testFile: "checks/ac_test.py",
+        testName: "TestOuter::TestInner::test_result[case::value]",
+      }),
+    ).toEqual({
+      runArgs: "'checks/ac_test.py::TestOuter::TestInner::test_result[case::value]'",
       precision: "precise",
     });
   });
@@ -180,6 +228,34 @@ describe("interpretRunOutput", () => {
       interpretRunOutput("pytest", run({ exitCode: 2, stdout: "errors during collection" })),
     ).toBe("red");
     expect(interpretRunOutput("pytest", run({ exitCode: 5 }))).toBe("selected-none");
+  });
+
+  test("pytest: exit 4 with its missing-node diagnostic selects no test", () => {
+    const stderr =
+      "ERROR: not found: /testbed/checks/ac_test.py::test_result\n(no name 'test_result' in any of [<Module ac_test.py>])\n";
+    expect(
+      interpretRunOutput("pytest", run({ exitCode: 4, stderr, stdout: "collected 0 items" })),
+    ).toBe("selected-none");
+    expect(interpretRunOutput("pytest", run({ exitCode: 4, stdout: stderr }))).toBe(
+      "selected-none",
+    );
+    // The diagnostic alone cannot override a timeout, internal failure, or actual test failure.
+    expect(interpretRunOutput("pytest", run({ exitCode: 4, stderr, timedOut: true }))).toBe(
+      "error",
+    );
+    expect(interpretRunOutput("pytest", run({ exitCode: 3, stderr }))).toBe("error");
+    expect(interpretRunOutput("pytest", run({ exitCode: 1, stderr }))).toBe("red");
+  });
+
+  test.each([
+    "ERROR: usage: pytest [options] [file_or_dir]\npytest: error: unrecognized arguments: --invalid",
+    "ERROR: /testbed/pytest.ini:2: unexpected line",
+    "ImportError while loading conftest '/testbed/conftest.py'.",
+    "ERROR: file or directory not found: missing_test.py",
+    "plugin log: ERROR: not found: unrelated value",
+    "",
+  ])("pytest: unrelated exit-4 errors remain environmental: %s", (stderr) => {
+    expect(interpretRunOutput("pytest", run({ exitCode: 4, stderr }))).toBe("error");
   });
 
   test("jest/vitest: green, red on failure/import error, selected-none on no-match", () => {
