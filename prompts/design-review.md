@@ -6,6 +6,16 @@ ticket requirements, and the codebase it will touch. You did not write this plan
 Do NOT read it as "what the designer intended" — judge what is actually on the page. Do NOT modify
 any files; your only output is the findings sidecar below.
 
+## Persisted work units
+
+{{work_units}}
+
+This is the decomposition the daemon will execute. Use these `seq` values for `work_unit_seq`.
+Plan task numbers may differ because extraction can combine implementation and test tasks. Match
+by scope, description, and files; never copy a plan heading's number into `work_unit_seq` without
+matching it to this list. Use null for plan-wide findings or missing work that has no stored unit.
+Review both the written plan and this decomposition; flag omissions or unsound grouping normally.
+
 Grade the plan across these dimensions and file a finding for each real problem:
 - **feasibility** — will this approach actually work against the real codebase?
 - **completeness** — does the plan cover the ticket's requirements, with no missing substance?
@@ -40,7 +50,7 @@ For each finding provide:
 - **rationale**: for `major`/`critical` findings, structure it so the designer can act without guessing — **Problem** (what is wrong), **Required change** (the specific fix), **Acceptance check** (how to tell the revised plan fixed it), **Evidence** (plan section, ticket line, or `file:line`). Keep the whole rationale a single valid JSON string: put the labels on separate lines using escaped newlines (`\n`), not literal line breaks. For `minor`/`nit`, one sentence is fine. File a `major`/`critical` finding only when grounded in evidence, not speculation.
 - **factors**: an object of booleans for context, or null.
 - **deferral_candidate**: leave `false` for plan review (deferral is a code-ship concept).
-- **work_unit_seq**: the seq of the work unit a finding is about, or null if plan-wide.
+- **work_unit_seq**: the `seq` from the persisted work units above, or null if no stored unit applies.
 
 If the plan is sound, return an empty `findings` array. Do NOT pass or fail the plan yourself — the
 system decides from your findings. Emit exactly one fenced block:
@@ -55,7 +65,7 @@ system decides from your findings. Emit exactly one fenced block:
       "rationale": "…",
       "factors": null,
       "deferral_candidate": false,
-      "work_unit_seq": 3
+      "work_unit_seq": null
     }
   ]
 }

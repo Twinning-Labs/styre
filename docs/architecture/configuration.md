@@ -180,7 +180,7 @@ hold a value no consumer switches on — coercing it would silently reinstate th
 | `testAction` | `{framework, launcher}`? | Qualified test invocation, resolved at setup by following one level of `npm run <script>` into `package.json`. `framework` is a validated enum read by `frameworkFor` in preference to guessing from the command; `launcher` is the argv prefix **including the repo's own config** (e.g. `npm run test:ci --`), used instead of the bare binary so a wrapper's `--config` is not discarded. Node/sveltekit only; other stacks keep the `kind`-based inference. |
 | `paths` | `string[]` (≥1) | Path globs the component owns. |
 | `commands` | `Record<string, string \| {unavailable:true}>` | Build/test/check commands; `{unavailable:true}` marks a deliberately-absent one. |
-| `testFilePattern` | string? | Glob for the component's test files. |
+| `testFilePattern` | string? | Regex source for the component's test files (overrides the default path heuristic in extraction and verification). |
 | `extensions` | `string[]` | File extensions, for file-identity verify routing (schemaVersion 3). |
 | `prepare` | string? | Install command **executed** by the runner-owned `provision` step before the first verify. |
 | `dir` | string? | Module root relative to repo root; refined by `isSafeDir` (rejects empty/absolute/`..`). |

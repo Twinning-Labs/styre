@@ -265,7 +265,9 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 **S1c · `design:review`** — semantic plan-quality gate (cold; deep tier, default Opus 4.8; **full-track only**, C2)
 - **Guard:** S1b completeness clean; `track='full'`.
 - **Input — cold (anti-anchoring):** the plan + the ticket requirements + the codebase. **NOT** the
-  designer's reasoning.
+  designer's reasoning. The prompt also includes the persisted work-unit decomposition (seq,
+  scope, files, tests and dependencies); findings reference these canonical seqs, which can differ
+  from plan task numbers after extraction combines tasks. Unmapped/plan-wide findings use null.
 - **Mechanism (§3a):** files findings via tool calls (`file_finding` / `complete_review`); the runner
   derives the verdict from the ledger — the **same machinery as code-review (S5)**, applied to the
   plan.

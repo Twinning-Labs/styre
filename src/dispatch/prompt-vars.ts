@@ -10,7 +10,12 @@ import designTemplate from "../../prompts/design.md" with { type: "text" };
 import docsReviseTemplate from "../../prompts/docs-revise.md" with { type: "text" };
 import implementTemplate from "../../prompts/implement.md" with { type: "text" };
 import reviewTemplate from "../../prompts/review.md" with { type: "text" };
-import { type WorkUnitRow, parseFilesToTouch } from "../db/repos/work-unit.ts";
+import {
+  type WorkUnitRow,
+  parseDependsOn,
+  parseFilesToTouch,
+  parseVerifyCheckTypes,
+} from "../db/repos/work-unit.ts";
 import { commandFor, impactedComponents } from "./components.ts";
 import { DOC_PATHS_HINT } from "./docs-paths.ts";
 import type { Component, Profile } from "./profile.ts";
@@ -208,12 +213,30 @@ export function complexityGradeVars(
 export function designReviewVars(
   ticket: { ident: string; title: string | null },
   profile: Profile,
+  units: WorkUnitRow[],
 ): Record<string, string> {
   return {
     ident: ticket.ident,
     title: ticket.title ?? "",
     slug: profile.slug,
     ...profile.promptVars,
+    // The persisted decomposition is authoritative, including after a redesign. Profile prompt
+    // customization must not replace IDs that the findings validator will resolve.
+    work_units: JSON.stringify(
+      units.map((u) => ({
+        seq: u.seq,
+        kind: u.kind,
+        title: u.title,
+        description: u.description,
+        behavioral: u.behavioral === 1,
+        test_plan: u.test_plan,
+        files_to_touch: parseFilesToTouch(u),
+        verify_check_types: parseVerifyCheckTypes(u),
+        depends_on: parseDependsOn(u),
+      })),
+      null,
+      2,
+    ),
   };
 }
 

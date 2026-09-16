@@ -447,7 +447,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       // Absent/malformed sidecar = transport failure (§3a) → failure-policy re-dispatches.
       throw new Error(`design:extract sidecar ${parsed.reason}: ${parsed.detail}`);
     }
-    const errors = validateExtraction(parsed.value.units);
+    const errors = validateExtraction(parsed.value.units, deps.profile.components);
     if (errors.length > 0) {
       throw new Error(`design:extract completeness failed: ${errors.join("; ")}`);
     }
@@ -504,13 +504,14 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   });
 
   registry.register("design:review", async (ctx: HandlerContext) => {
+    const units = listUnits(ctx.db, ctx.ticket.id);
     const result = await runAgentDispatch(
       ctx,
       depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
       {
         handlerKey: "design:review",
         template: DESIGN_REVIEW_TEMPLATE,
-        vars: designReviewVars(ctx.ticket, deps.profile),
+        vars: designReviewVars(ctx.ticket, deps.profile, units),
         postcondition: () => {}, // read-only: nothing commits
       },
     );
@@ -519,7 +520,6 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     if (!parsed.ok) {
       throw new Error(`design:review sidecar ${parsed.reason}: ${parsed.detail}`);
     }
-    const units = listUnits(ctx.db, ctx.ticket.id);
     const seqToId = new Map(units.map((u) => [u.seq, u.id]));
     const errors = validateReviewFindings(parsed.value.findings, [...seqToId.keys()]);
     if (errors.length > 0) {

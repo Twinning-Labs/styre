@@ -44,7 +44,7 @@ test("design-review.md requires structured rationale for blocking findings (E)",
 });
 
 test("design-review.md still renders with no unsatisfied placeholder", () => {
-  const vars = designReviewVars({ ident: "ENG-1", title: "T" }, profile);
+  const vars = designReviewVars({ ident: "ENG-1", title: "T" }, profile, []);
   const result = renderPrompt(DESIGN_REVIEW_TEMPLATE, vars);
   expect(result.ok).toBe(true);
 });

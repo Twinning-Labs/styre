@@ -286,3 +286,38 @@ test("a NON-behavioral unit needs no test file", () => {
     ]),
   ).toEqual([]);
 });
+
+test("pytest regression file and production fix can form one behavioral unit", () => {
+  expect(
+    validateExtraction([
+      unit({ files_to_touch: ["src/_pytest/compat.py", "testing/python/integration.py"] }),
+    ]),
+  ).toEqual([]);
+  expect(validateExtraction([unit({ files_to_touch: ["src/_pytest/compat.py"] })])).toContain(
+    "unit seq 1 is behavioral but names no test file in files_to_touch — a behavioral unit must include its own test (do not split the change and its test across units)",
+  );
+});
+
+test("extraction honors a component test pattern only for paths it owns", () => {
+  const { components } = parseProfile({
+    slug: "custom",
+    targetRepo: "/tmp/x",
+    components: [
+      { name: "api", kind: "python", paths: ["api/**"], testFilePattern: "^api/checks/" },
+      { name: "web", kind: "node", paths: ["web/**"], testFilePattern: "^web/specs/" },
+    ],
+  });
+  expect(
+    validateExtraction(
+      [unit({ files_to_touch: ["api/app.py", "api/checks/regression.py"] })],
+      components,
+    ),
+  ).toEqual([]);
+  expect(
+    validateExtraction([unit({ files_to_touch: ["api/tests/test_old.py"] })], components).length,
+  ).toBeGreaterThan(0);
+  // A profile's custom regex does not turn an unrelated source path into a test.
+  expect(
+    validateExtraction([unit({ files_to_touch: ["web/api/checks/source.ts"] })], components).length,
+  ).toBeGreaterThan(0);
+});
