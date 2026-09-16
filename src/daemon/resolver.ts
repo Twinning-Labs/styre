@@ -6,6 +6,7 @@ import { hasDelivered } from "../db/repos/signal.ts";
 import { getTicket } from "../db/repos/ticket.ts";
 import * as workUnits from "../db/repos/work-unit.ts";
 import { getByKey } from "../db/repos/workflow-step.ts";
+import { evidenceFloor } from "./evidence-floor.ts";
 
 export type StepDescriptor =
   | {
@@ -19,7 +20,7 @@ export type StepDescriptor =
   | { kind: "mark-verified"; workUnitId: number }
   | { kind: "wait"; signalType: string }
   | { kind: "blocked"; reason: string }
-  | { kind: "escalate"; reason: string }
+  | { kind: "escalate"; reason: string; signature: string; stepKey: string }
   | { kind: "done" };
 
 function done(db: Database, ticketId: number, stepKey: string): boolean {
@@ -193,6 +194,8 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
                 kind: "escalate",
                 reason:
                   "gate: check(s) still red at HEAD after arbitration/reauthor — no further HEAD movement possible (stuck)",
+                signature: "gate-stuck-head",
+                stepKey: "verify:checks-gate",
               };
             }
             if (!done(db, ticketId, "provision")) {
@@ -219,6 +222,20 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
         if (ticket.needs_docs === 1 && !done(db, ticketId, "docs:revise")) {
           return step("docs:revise", "dispatch", "docs:revise", null);
         }
+        // THE EVIDENCE FLOOR (ENG-439). Unconditional — it does not depend on any step having been
+        // scheduled, which is the whole point: the old floor lived in `verify:checks-gate`'s
+        // verdict and a ticket with no ac_check rows never reached it. Last thing before the stage
+        // leaves `implement`, so `verify:integration` above has already produced its evidence and
+        // nothing has been pushed yet.
+        const floor = evidenceFloor(db, ticketId);
+        if (!floor.holds) {
+          return {
+            kind: "escalate",
+            reason: floor.reason,
+            signature: "evidence-floor",
+            stepKey: "verify:integration",
+          };
+        }
         return { kind: "advance", from: "implement", to: "review" };
       }
       return { kind: "blocked", reason: "no actionable unit and not all units verified" };
@@ -228,6 +245,15 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
       if (!done(db, ticketId, "review")) {
         return step("review", "dispatch", "review", null);
       }
+      // NOT re-asserted here, though it looks like it should be. A run resumed from a park taken
+      // during `review` re-enters at this case without re-crossing implement → review, so a second
+      // assertion would close that door — but the only thing that can change the floor's answer
+      // between the two transitions is the ticket head moving, and today the actor that moves it
+      // there is styre itself: `runAgentDispatch`'s read-only branch commits through
+      // `commitWorktree`, which opens with `git add -u` and sweeps up any tracked file `provision`
+      // or a verify run dirtied (a lockfile, a snapshot). So the assertion's common outcome would
+      // be a confusing pause on a healthy run, blaming a test suite that ran fine. ENG-453 owns
+      // that defect; this belongs after it, not before it.
       return { kind: "advance", from: "review", to: "merge" };
     }
 

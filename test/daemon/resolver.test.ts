@@ -3,7 +3,14 @@ import { nextActionableUnit, nextStepKey, nextUnrunCheck } from "../../src/daemo
 import { insertAcCheck } from "../../src/db/repos/ac-check.ts";
 import { insertAc } from "../../src/db/repos/acceptance-criterion.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
-import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
+import { insertSignal, suiteDetail } from "../../src/db/repos/ground-truth-signal.ts";
+
+/** A run record for one green test job — what a real `verify:integration` writes. The ENG-439
+ *  evidence floor reads it, so a fixture without one is a fixture of a run that measured nothing
+ *  and the floor will (correctly) refuse to let it leave `implement`. */
+const GREEN_TEST_RUN = suiteDetail([{ label: "api:test", kind: "test", exitCode: 0 }], {
+  advisory: true,
+});
 import { insertPending, markDelivered } from "../../src/db/repos/signal.ts";
 import { setNeedsDocs, setTicketStage, setTicketTrack } from "../../src/db/repos/ticket.ts";
 import { getById, insertWorkUnit, setStatus } from "../../src/db/repos/work-unit.ts";
@@ -220,6 +227,7 @@ test("implement: all units verified + no docs → verify:integration then advanc
     signalType: "integration",
     result: "pass",
     branchHeadSha: "sha-abc",
+    detail: GREEN_TEST_RUN,
   });
   const afterIntegration = nextStepKey(db, ticketId);
   db.close();
@@ -256,6 +264,18 @@ test("implement: a FAILED integration signal at HEAD still advances past verify:
     result: "fail",
     branchHeadSha: "sha-abc",
     detail: { advisory: true },
+  });
+  // The unit's own sweep DID run green at this head. Without it the run has measured nothing and
+  // the evidence floor stops it here instead — that case is pinned in evidence-floor.test.ts; this
+  // test is about the §8c routing property (a recorded fail must not re-emit the step forever),
+  // so give it the evidence and keep the assertion on routing.
+  insertSignal(db, {
+    ticketId,
+    workUnitId: u.id,
+    signalType: "test",
+    result: "pass",
+    branchHeadSha: "sha-abc",
+    detail: GREEN_TEST_RUN,
   });
   const afterIntegration = nextStepKey(db, ticketId);
   db.close();

@@ -57,6 +57,7 @@ next_step_key(t):        # mirrors src/daemon/resolver.ts nextStepKey
         if not done('provision'):                      return 'provision'
         return 'verify:integration'                                    # ADVISORY (ran-at-sha)
       if t.needs_docs and not done('docs:revise'):     return 'docs:revise'
+      if not evidence_floor(t):                      escalate   # nothing was measured — see below
       advance('implement' -> 'review'); recurse
     else: paused(needs_you)  # no actionable unit and not all verified → §8 owns it
 
@@ -103,7 +104,57 @@ a non-empty own-diff → `completed-by-self` (advance). Over-delivery (`ownTouch
 advisory — emitted as `scope_diff`, an input to review, never a gate. This step is **recomputable**
 (like `provision`): no exactly-once effect, safe to re-run on replay.
 
-**The AC checks-gate is the real ship-gate of the implement stage.** The per-unit `verify:{u}:{c}`
+**The evidence floor (`evidence_floor`) is a precondition of LEAVING implement, not a step.**
+It asks one question — *did this run measure anything real about the code it is about to ship?* —
+and it asks it at the `implement → review` transition, unconditionally, on every tick. It is not a
+step's verdict and cannot be skipped by a step not being scheduled: that is exactly how its first
+version failed. It lived in `verify:checks-gate`'s `onSucceed`, and the
+resolver only schedules that step when the ticket has active `ac_check` rows — so a ticket whose
+checks could not be authored at all — no runnable framework anywhere, or an empty ticket
+description — walked straight past it. (Not "no parseable checklist": a non-empty description
+always yields at least one `whole-description` criterion.) It holds when either
+
+- something EXECUTED at the sha being shipped and came back clean — `verify:integration` carrying a
+  job its producer tagged `test` or `repo` (`repoCommands` is where a suite spanning components
+  lives; a `build` job alone is not evidence, since compiling is not exercising), or the newest
+  `test` sweep of some work unit at that same sha. Two exceptions, both narrow: a signal written
+  before the `kind` field existed is read by its job label instead (a pre-upgrade ledger being
+  resumed), and when a committing `docs:revise` moved the head, the carried integration signal
+  names the head it came from in `carriedFrom` and the unit channel follows it one hop back —
+  `carryVerifiedVerdictForward` replicates the integration signal across that commit but not the
+  per-unit ones. A `pass` that ran nothing (an inert-only diff, a reviewer-only
+  degrade, no impacted component) carries an empty run record and is not evidence. A FAILING
+  integration does NOT count, not even flagged `detail.preexisting`: the baseline re-run that sets
+  that flag is un-provisioned, so it stamps a real regression pre-existing (ENG-457);
+- **or** every acceptance criterion was proven individually: each of its GATING checks
+  (`red_class` `assertion` or `absence` — the same set `buildVerifyReport` judges on, so the gate
+  and the PR body cannot disagree) green at the sha those checks ran at. A criterion with no gating
+  check at all is not proven: nothing executed for it. One green criterion out of N does not vouch
+  for the other N−1.
+
+What it does NOT establish, deliberately: a work unit's sweep covers the stacks that unit's diff
+touched, not the whole ticket, so on a multi-unit ticket one unit's evidence at the shipped sha can
+satisfy the floor — `integration` is the channel that covers the rest. And "a command exited 0" is
+not "a test asserted something"; vacuous execution is a separate hole, owned by
+`ac-check-red-first` and `delivered-test-binding`.
+
+`review → merge` is deliberately NOT guarded, though a run resumed from a park during `review`
+re-enters there without re-crossing the first door. See the comment in `resolver.ts` and ENG-453:
+the only thing that can change the floor's answer between the two transitions is the ticket head
+moving, and today the actor that moves it there is styre's own read-only dispatch commit.
+
+A still-red `environmental` check never escalates a criterion that also has a green gating check —
+suite green or not; `environmental` is not a gating class, it is advisory by design, and the PR body
+carries the caveat. When the floor fails, the run pauses `needs_you` with the reason naming the
+unproven criteria. Resuming recomputes the same answer from the same state, so the recourse is to
+fix what stopped the checks or the suite from running and re-run `--fresh` — though `styre ls` still
+lists such a checkpoint under "Paused/resumable efforts" and prints a `--resume` command that cannot
+get past it (ENG-455).
+
+**The AC checks-gate is the hard gate over the acceptance criteria; the evidence floor above is the
+second, unconditional one.** Neither alone is "the ship-gate": the AC gate can pass on a ticket that
+measured nothing — which is what the floor exists for — and the floor can hold on a ticket whose
+criteria were never expressible. The per-unit `verify:{u}:{c}`
 build/test checks are **advisory** — a recorded verdict (pass *or* fail) at the unit's current sha
 marks it `verified` and lets routing proceed; only a could-not-run `error` re-arms the check. What
 actually blocks the ticket is the behavioral acceptance-criterion gate authored back in the design

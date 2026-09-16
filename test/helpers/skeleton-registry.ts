@@ -7,7 +7,7 @@ import {
   insertDispatch,
   nextSeq,
 } from "../../src/db/repos/dispatch.ts";
-import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
+import { insertSignal, suiteDetail } from "../../src/db/repos/ground-truth-signal.ts";
 import { setTicketTrack } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit, setStatus as setUnitStatus } from "../../src/db/repos/work-unit.ts";
 
@@ -69,13 +69,17 @@ export function skeletonRegistry(): StepRegistry {
       seq: nextSeq(ctx.db, ctx.ticket.id),
     });
     completeDispatch(ctx.db, d.id, { outcome: "clean-success", branchHeadSha: "sha-skeleton" });
-    // Stamp the integration PASS at the branch's current SHA
+    // Stamp the integration PASS at the branch's current SHA. The run record is not decoration:
+    // the ENG-439 evidence floor reads `ran` to tell a suite that executed from one that did not,
+    // so a fake that omits it is a fake of a run that verified nothing — and the floor would
+    // correctly refuse to let it reach review.
     const sha = getLatestForTicket(ctx.db, ctx.ticket.id)?.branch_head_sha ?? null;
     insertSignal(ctx.db, {
       ticketId: ctx.ticket.id,
       signalType: "integration",
       result: "pass",
       branchHeadSha: sha ?? undefined,
+      detail: suiteDetail([{ label: "api:test", kind: "test", exitCode: 0 }], { advisory: true }),
     });
     return { integration: "pass" };
   });

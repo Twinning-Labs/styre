@@ -1,8 +1,8 @@
 import type { Database } from "bun:sqlite";
-import { listActiveByTicket as listActiveChecks } from "../db/repos/ac-check.ts";
+import { isGatingCheck, listActiveByTicket as listActiveChecks } from "../db/repos/ac-check.ts";
 import { listByTicket as listAcs } from "../db/repos/acceptance-criterion.ts";
-import { getLatestForTicket } from "../db/repos/dispatch.ts";
 import {
+  acEvidenceSha,
   advisorySweeps,
   deliveredTestBinding,
   postImplementAtSha,
@@ -74,8 +74,10 @@ export type VerifyReport = {
 export function buildVerifyReport(db: Database, ticketId: number): VerifyReport {
   const acs = listAcs(db, ticketId); // ORDER BY seq
   const checks = listActiveChecks(db, ticketId); // superseded_at IS NULL
-  const headSha = getLatestForTicket(db, ticketId)?.branch_head_sha ?? null;
-  const postImpl = headSha ? postImplementAtSha(db, ticketId, headSha) : new Map();
+  // Measurements belong to the current head, or its explicitly recorded docs-only carry source.
+  // A head moved by any other dispatch (including ENG-453) must not inherit an earlier pass.
+  const evidenceSha = acEvidenceSha(db, ticketId);
+  const postImpl = evidenceSha ? postImplementAtSha(db, ticketId, evidenceSha) : new Map();
   const prov = reauthorProvenance(db, ticketId);
   const sweeps = advisorySweeps(db, ticketId);
   const binding = deliveredTestBinding(db, ticketId)
@@ -98,7 +100,7 @@ export function buildVerifyReport(db: Database, ticketId: number): VerifyReport 
     } else if (mine.some((c) => rejectedCheckIds.has(c.id))) {
       label = "check-unreplaced"; // C1 — a wrong-shape check left active; never verified
     } else {
-      const gating = mine.filter((c) => c.red_class === "assertion" || c.red_class === "absence");
+      const gating = mine.filter(isGatingCheck); // shared with evidenceFloor — see isGatingCheck
       if (gating.length > 0) {
         const allGreen = gating.every((c) => postImpl.get(c.id)?.coarse === "green");
         label = allGreen ? "verified" : "still-red";

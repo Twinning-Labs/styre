@@ -71,7 +71,9 @@ export function partitionByRole(profile: Profile): {
  * Throws `noPrimaryComponentError` (exit 69 — its own headline, because nothing is missing
  * from the machine) iff EVERY component was classified non-primary. That is not
  * a run worth starting — it would provision nothing, verify nothing and reach `pr-ready` having
- * measured nothing, which is exactly the shape ENG-424's evidence floor exists to refuse. Better
+ * measured nothing, which is exactly the shape the evidence floor exists to refuse (ENG-439's
+ * `daemon/evidence-floor.ts`; ENG-424's earlier version sat in the AC gate and never saw this
+ * route). Better
  * to refuse at the door, where the operator can see the classification that caused it, than to
  * spend a run discovering it. It also fails closed on the realistic mistake: a discovery agent
  * that misreads a repo and demotes everything cannot quietly produce an empty run.

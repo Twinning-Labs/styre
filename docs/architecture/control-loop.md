@@ -286,7 +286,7 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 ### Checks authoring (still the design stage, before advancing to implement)
 
 Before the ticket leaves `design`, the runner authors the behavioral acceptance-criterion tests that
-will become the real ship-gate in implement. These run in the design stage (`resolver.ts`), not in
+will become the hard gate over the acceptance criteria in implement. These run in the design stage (`resolver.ts`), not in
 implement.
 
 **S1d · `checks:dispatch`** — derive acceptance criteria + author RED-first checks (standard tier, prompt `checks.md`)
@@ -427,10 +427,12 @@ implement.
 - **Failure → route:** a could-not-run `error` → I6 retry. The old suite-verdict loopbacks I3/I4/I5
   are now **unreachable** — a red suite is advisory (see above), so it no longer routes back from here.
 
-#### The AC checks-gate (the real ship-gate)
+#### The AC checks-gate (the hard gate over the acceptance criteria)
 
 Once **all units are verified**, the behavioral acceptance-criterion tests authored in the design
-stage (S1d/S1e) become the gate that actually blocks the ticket. If the ticket has active `ac_check`s
+stage (S1d/S1e) become the hard gate over the acceptance criteria. (It is not the only thing that
+blocks the ticket: the evidence floor below is a second, unconditional precondition of leaving
+`implement`, and it fires on runs this gate passes.) If the ticket has active `ac_check`s
 and the gate has not passed at the branch HEAD, the resolver serves this cluster before integration.
 
 **S3b · `verify:checks-gate`** — re-run the behavioral AC checks (runner-executed, no LLM)
@@ -472,6 +474,35 @@ and the gate has not passed at the branch HEAD, the resolver serves this cluster
   a **ticket-scoped `reconcile`** implement unit (may edit any unit's files) and resets the gate, then
   re-runs. (An advisory red result, by contrast, does not loop back.)
 
+**The evidence floor** — a precondition of the `implement → review` transition (ENG-424/ENG-439)
+- **Not a step.** It is evaluated by the resolver on every tick, immediately before it returns
+  `{kind:"advance", from:"implement", to:"review"}`. `advance.ts` is the only forward writer of
+  `ticket.stage`, so there is no path to a pull request that does not cross it. `review → merge` is
+  deliberately NOT guarded as well — see `resolver.ts` and ENG-453.
+- **Why not a step's verdict.** It was one: `verify:checks-gate`'s `onSucceed`. The resolver only
+  schedules that step when the ticket has active `ac_check` rows, so the two routes that author no
+  checks at all — nothing in the repo can execute a check (ENG-426), which leaves real criteria
+  with no checks; or an EMPTY ticket description, which yields no criteria — never reached it. It
+  was unreachable on the case it was written for. (Not "no parseable checklist": `ac-checklist.ts`
+  falls back to one `whole-description` criterion for any non-empty description.)
+  It also ran *before* S4, so a floor there could only refuse runs about to produce its evidence.
+- **Holds when** something executed at the sha being shipped and came back clean — S4's run record
+  carrying a job its producer tagged `test` or `repo` (a `build` job alone is not evidence), or the
+  newest `test` sweep of some work unit at that same sha — or, one hop back, at the head a carried
+  S4 signal names in `carriedFrom` when a committing `docs:revise` moved it. A run record written
+  before `kind` existed is read by its job label instead; a FAILING S4 does **not** count, not even flagged
+  `detail.preexisting` (ENG-457: the baseline re-run is un-provisioned and stamps a real regression
+  pre-existing) — **or** every acceptance criterion was proven individually by all of its GATING
+  checks (`assertion`/`absence`, the same set `buildVerifyReport` judges on). AC measurements must
+  belong to the current head, or to the source named by its explicitly carried integration and
+  passing gate. Old docs carries without source provenance fail closed; current-head legacy
+  measurements remain valid. `result:"pass"` alone is not evidence: three producers emit it having executed nothing, and
+  they are distinguished by an empty `detail.ran`.
+- **Fails →** `{kind:"escalate"}` with `event_log.signature = 'evidence-floor'`; the run pauses
+  `needs_you` with the unproven criteria named. Resume recomputes the same answer from the same
+  state, so the recourse is `--fresh` — but `styre ls` still lists the checkpoint as resumable and
+  prints a `--resume` command that cannot get past it (ENG-455).
+
 ### Docs
 
 **`docs:revise`** — ticket-level documentation sync (conditional; cheap tier, default Haiku 4.5)
@@ -489,7 +520,8 @@ and the gate has not passed at the branch HEAD, the resolver serves this cluster
 ### Review (cold, independent; redesigned)
 
 **S5 · `review`** — independent cold-context reviewer (A2/A4; deep tier, default Opus 4.8)
-- **Guard:** the AC gate + integration passed; `docs:revise` done if it ran.
+- **Guard:** the AC gate + integration ran at HEAD; `docs:revise` done if it ran; **and the evidence
+  floor holds** (above) — the stage cannot leave `implement` otherwise.
 - **Input — artifacts only (anti-anchoring, A2):** the full diff + plan + ground-truth signals +
   `scope_diff`. **Explicitly NOT the implementer's transcript.**
 - **Mechanism (§3a):** the reviewer **files each finding via a forced-schema tool call**

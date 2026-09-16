@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
-import { insertAcCheck } from "../../src/db/repos/ac-check.ts";
+import { evidenceFloor } from "../../src/daemon/evidence-floor.ts";
+import { classifyAcCheck, insertAcCheck } from "../../src/db/repos/ac-check.ts";
 import { insertAc } from "../../src/db/repos/acceptance-criterion.ts";
 import {
   insertSignal,
@@ -12,6 +13,7 @@ import {
 } from "../../src/db/repos/ground-truth-signal.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
+import { buildVerifyReport } from "../../src/dispatch/verify-report.ts";
 import { worktreeHead } from "../../src/dispatch/worktree.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
 import { makeTestDb } from "../helpers/db.ts";
@@ -78,17 +80,25 @@ test("a docs-only edit commits and carries the verified verdict forward", async 
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
   const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-drwt-"));
 
-  // A verified integration signal + an active ac-check at the pre-edit HEAD ("V"), so we can
-  // observe carry-forward actually replicating them at the new commit sha.
+  // Measure at the actual git head, then exercise the real scoped docs commit and carry.
+  const measuredSha = worktreeHead(repo);
   insertSignal(db, {
     ticketId,
     signalType: "integration",
     result: "pass",
-    branchHeadSha: "V",
+    branchHeadSha: measuredSha,
     detail: { ran: [] },
   });
   const ac = insertAc(db, { ticketId, seq: 1, text: "x", source: "checklist" });
-  insertAcCheck(db, { ticketId, acId: ac.id, selector: "s", testPath: "t" });
+  const check = insertAcCheck(db, { ticketId, acId: ac.id, selector: "s", testPath: "t" });
+  classifyAcCheck(db, { acCheckId: check.id, redClass: "assertion" });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-post-implement",
+    result: "pass",
+    branchHeadSha: measuredSha,
+    detail: { acCheckId: check.id, acId: ac.id, coarse: "green", outcome: "green" },
+  });
 
   const runner = new FakeAgentRunner((input) => {
     mkdirSync(join(input.cwd, "docs"), { recursive: true });
@@ -113,6 +123,10 @@ test("a docs-only edit commits and carries the verified verdict forward", async 
   const atNewSha = listSignals(db, ticketId).filter((s) => s.branch_head_sha === newSha);
   expect(atNewSha.some((s) => s.signal_type === "integration")).toBe(true);
   expect(atNewSha.some((s) => s.signal_type === "ac-check-gate")).toBe(true);
+  expect(newSha).not.toBe(measuredSha);
+  expect(buildVerifyReport(db, ticketId).criteria[0]?.label).toBe("verified");
+  expect(buildVerifyReport(db, ticketId).allClean).toBe(true);
+  expect(evidenceFloor(db, ticketId)).toEqual({ holds: true });
   db.close();
 });
 
