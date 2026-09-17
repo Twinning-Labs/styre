@@ -204,3 +204,30 @@ test("ENG-427: a `django/` package WITHOUT tests/runtests.py is not django's own
   const [c] = withTestActions(dir, [pyComponent()] as never);
   expect(c?.testAction).toBeUndefined();
 });
+
+test("qualifies native Mocha wrapper and retains its changed selector directory", () => {
+  const dir = repoWithScripts({
+    test: "cd ../../ && cross-env NODE_ENV=test mocha 'packages/ui/**/*.test.{js,tsx}'",
+  });
+  expect(resolveTestAction(dir, "npm run test")).toEqual({
+    framework: "mocha",
+    launcher: "npm run test --",
+    selectorDir: "../../",
+  });
+});
+
+test.each([
+  "echo mocha",
+  "mocha && true",
+  "mocha || true",
+  "mocha; true",
+  "mocha\necho done",
+  "mocha -- --version",
+  "mocha --watch",
+  "mocha # comment",
+  "cd $ROOT && mocha",
+  "npm run other",
+])("does not qualify unsupported Mocha script grammar: %s", (script) => {
+  const dir = repoWithScripts({ test: script });
+  expect(resolveTestAction(dir, "npm test")).toBeNull();
+});

@@ -11,6 +11,15 @@ export class StepInFlightError extends Error {
   }
 }
 
+/** The step cannot progress until an operator repairs a prerequisite. Journaled by name so
+ * failure routing remains deterministic across process restarts; resume rechecks the prerequisite. */
+export class StepPrerequisiteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StepPrerequisiteError";
+  }
+}
+
 export interface RunStepParams {
   ticketId: number;
   workUnitId?: number | null;

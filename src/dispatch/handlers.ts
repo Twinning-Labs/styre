@@ -49,27 +49,27 @@ import {
   setBaseSha,
   setStatus as setUnitStatus,
 } from "../db/repos/work-unit.ts";
+import { StepPrerequisiteError } from "../engine/step-journal.ts";
 import { pythonImportName } from "../setup/lang/python.ts";
 import { runCommand } from "../util/run-command.ts";
 import { nowUtc } from "../util/time.ts";
 import { type AdjClass, ChecksClassifyOutputSchema } from "./adjudicate-schema.ts";
 import { ChecksArbitrateOutputSchema } from "./arbitrate-schema.ts";
 import {
-  deliveredTestBindsAtBaseline,
+  deliveredTestEvidenceAtBaseline,
   preImplementBaselineSha,
   preexistingFrom,
   runAtBaseline,
 } from "./baseline-rerun.ts";
 import { carryVerifiedVerdictForward } from "./carry-forward.ts";
 import { probeCheckCapability } from "./check-capability.ts";
+import { type CheckExecutionPlan, checkOwner, resolveCheckExecution } from "./check-execution.ts";
 import { checkIntegrityViolations } from "./check-integrity.ts";
 import { resolveAuthoredTestPath } from "./check-path.ts";
 import {
   type CheckFramework,
   type CoarseResult,
   authoredTestNameInContent,
-  buildCheckSelector,
-  buildFileSelector,
   collectionErrorExcerpt,
   frameworkFor,
   importErrorImplicatesDiscarded,
@@ -78,7 +78,7 @@ import {
   signalResultForCoarse,
 } from "./check-selector.ts";
 import { checksFeedback } from "./checks-feedback.ts";
-import { runCheckForRed } from "./checks-run.ts";
+import { runCheckExecution } from "./checks-run.ts";
 import { ChecksOutputSchema } from "./checks-schema.ts";
 import { classifyPrior } from "./classify-prior.ts";
 import { checksScopeFor, docScope, implementScope, planScope } from "./commit-scope.ts";
@@ -133,7 +133,7 @@ import {
   resolvePythonInterpreter,
   sourceCheckCommand,
 } from "./provision.ts";
-import { baselineShaForAc, replayCheckAtBaseline } from "./replay-harness.ts";
+import { baselineShaForAc, replayCheckEvidence } from "./replay-harness.ts";
 import { reuseAwareTestCommand } from "./reuse.ts";
 import { reviewFeedback } from "./review-feedback.ts";
 import { ReviewOutputSchema, computeBlocksShip, validateReviewFindings } from "./review-schema.ts";
@@ -175,7 +175,7 @@ export interface RegistryDeps {
   timeoutMs?: number;
   resumeContext?: { stepKey: string; transcript: string };
   /** RED-first check executor override (tests inject a scripted runner; production uses runCommand).
-   *  Only `checks:dispatch` reads it (M2b decision 4). */
+   *  Shared by authoring, baseline replay, delivered binding, and post-implement reruns. */
   runCheckCommand?: import("./reuse.ts").CmdRunner;
 }
 
@@ -297,14 +297,19 @@ async function reauthorCheckWrong(
     authored.test_file,
   );
   if (testPath === null) return "rejected";
-  const installComp = impactedComponents(deps.profile.components, [testPath])[0];
+  let installComp: (typeof deps.profile.components)[number];
+  try {
+    installComp = checkOwner(deps.profile.components, testPath);
+  } catch {
+    return "rejected";
+  }
   const installFw = installComp ? frameworkFor(installComp) : null;
   const content = fileContentAt(reauthorSha, testPath, worktreePath);
   if (content === null || !authoredTestNameInContent(installFw, content, authored.test_name))
     return "rejected";
 
   // 3) Clean-HEAD replay — the RED-first oracle. coarse == red installs; everything else rejects.
-  const coarse = await replayCheckAtBaseline({
+  const replay = await replayCheckEvidence({
     repoPath,
     baselineSha,
     components: deps.profile.components,
@@ -314,7 +319,7 @@ async function reauthorCheckWrong(
     timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
     run: deps.runCheckCommand,
   });
-  if (String(coarse) !== "red") return "rejected"; // green / selected-none / error
+  if (!replay || replay.coarse !== "red") return "rejected"; // green / selected-none / error
 
   // 4) Classify via the adjudicator directly (NOT applyChecksVerdict). environmental → reject.
   const cls = await adjudicateOne(ctx, deps, {
@@ -323,7 +328,7 @@ async function reauthorCheckWrong(
     testPath: testPath,
     testName: authored.test_name,
     coarse: "red",
-    rawOutput: "", // the replay trace is red-shaped; the prior/adjudicator judge absence vs assertion
+    rawOutput: replay.rawOutput,
   });
   if (cls !== "assertion" && cls !== "absence") return "rejected"; // environmental/weak/null → reject
 
@@ -331,10 +336,7 @@ async function reauthorCheckWrong(
   // (The replay above already resolved a component+framework for this same test_file — coarse would
   // have been "error" otherwise, rejecting before this point — but fail closed here too, no assertion.)
   if (!installComp || !installFw) return "rejected";
-  const sel = buildCheckSelector(installFw, {
-    testFile: testPath,
-    testName: authored.test_name,
-  }).runArgs;
+  const sel = replay.plan.runArgs;
   ctx.db.transaction(() => {
     supersedeByAc(ctx.db, acId); // supersedes ALL active for the AC (resume-safe; counter is gate attempt)
     const row = insertAcCheck(ctx.db, {
@@ -350,7 +352,14 @@ async function reauthorCheckWrong(
       signalType: "ac-check-red-first",
       result: "fail",
       branchHeadSha: reauthorSha, // §5.4 integrity re-freeze at the new baseline
-      detail: { rawOutput: "", exitCode: 1, framework: null, command: null, acCheckId: row.id },
+      detail: {
+        rawOutput: replay.rawOutput,
+        exitCode: replay.exitCode,
+        framework: replay.plan.framework,
+        command: replay.command,
+        executionPlan: replay.plan,
+        acCheckId: row.id,
+      },
     });
   })();
   return "installed";
@@ -616,25 +625,24 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         detail: { component: p.component, framework: p.framework, detail: p.detail },
       });
     }
-    // FIRES ONLY FOR THE CASE ENG-426 IS ABOUT: a framework RESOLVED and cannot execute. When no
-    // component resolves a framework at all, that is the older, different defect ENG-347/ENG-399
-    // already diagnose per-AC with better text (naming the component's `kind`, or its unresolved
-    // `test` command) — and those messages feed the retry prompt. Short-circuiting there would
-    // trade a specific diagnosis for a vague one.
-    //
-    // And only when NOTHING is capable. With one capable component left, re-dispatching CAN help
-    // (the author can land its check there), so the per-AC path and its retry stay in force —
-    // ENG-357's "could not be executed (exit 127)" message included. It is only when no component
-    // can execute anything that another authoring round is provably futile.
-    const anyFrameworkResolved = capability.some((p) => p.framework !== null);
-    if (capability.length > 0 && anyFrameworkResolved && capability.every((p) => !p.runnable)) {
-      // NOTHING can execute a check. Authoring one would produce a test that cannot run, a RED
-      // that means nothing, and an `environmental` class that permanently excuses it. Say so
-      // instead, and leave the ACs with no check — `verify-report` already renders that as
-      // `no-check`, and the evidence floor then refuses to leave `implement` unless something
-      // executed (ENG-439's `evidence-floor.ts`; ENG-424's version, named here originally, lived
-      // in the AC gate and this route never reached it — it is defect A of ENG-439). The advisory
-      // below is what tells a reviewer WHY there is no check.
+    // A missing/unresolvable runner is a prerequisite failure, not a request for another
+    // author. Preserve an explicit advisory for non-behavioral work; behavioral work pauses
+    // before spending on authors or implementations that cannot be verified.
+    const behavioralUnits = listUnits(ctx.db, ctx.ticket.id).filter((u) => u.behavioral === 1);
+    const requiredOwners = new Set<string>();
+    for (const file of behavioralUnits.flatMap(parseFilesToTouch)) {
+      try {
+        requiredOwners.add(checkOwner(deps.profile.components, file).name);
+      } catch {
+        /* unresolved plan scope is handled by the authored-file ownership check */
+      }
+    }
+    const requiredUnavailable = capability.filter(
+      (p) => requiredOwners.has(p.component) && !p.runnable,
+    );
+    if (requiredUnavailable.length > 0 || capability.every((p) => !p.runnable)) {
+      // Keep the diagnosed missing capability in the durable report, including nonbehavioral
+      // tickets that may continue without authored checks.
       insertSignal(ctx.db, {
         ticketId: ctx.ticket.id,
         signalType: "check-capability-run",
@@ -647,6 +655,11 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           details: capability.map((p) => p.detail),
         },
       });
+      if (behavioralUnits.length > 0) {
+        throw new StepPrerequisiteError(
+          `no runnable acceptance-check framework: ${capability.map((p) => `${p.component}: ${p.detail}`).join("; ")}. Repair the runner/profile and resume.`,
+        );
+      }
       return { authored: 0, acs: acs.length, unrunnable: capability.length };
     }
 
@@ -692,6 +705,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         exitCode: number | null;
         framework: CheckFramework | null;
         command: string | null;
+        executionPlan?: CheckExecutionPlan;
       }> = [];
       const covered = new Set<number>();
 
@@ -707,7 +721,13 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           );
           continue;
         }
-        const comp = impactedComponents(components, [testPath])[0]; // decision 2
+        let comp: (typeof components)[number];
+        try {
+          comp = checkOwner(components, testPath);
+        } catch (err) {
+          missReason.set(c.ac_id, String(err));
+          continue;
+        }
         const fw = comp ? frameworkFor(comp) : null;
         const content = fileContentAt(sha, testPath, worktreePath);
         if (content === null || !authoredTestNameInContent(fw, content, c.test_name)) {
@@ -718,6 +738,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           continue; // name absent → reject
         }
 
+        let executionPlan: CheckExecutionPlan | undefined;
         let coarse: CoarseResult;
         let selector = testPath; // NOT-NULL fallback when no framework (decision 2)
         let rawOutput = "";
@@ -748,13 +769,21 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
             coarse = "error"; // no interpreter → can't attempt
             errorReason = `no Python interpreter could be resolved for \`${testPath}\` — the check could not be attempted`;
           } else {
-            const sel = buildCheckSelector(fw, { testFile: testPath, testName: c.test_name });
-            selector = sel.runArgs;
-            const res = await runCheckForRed({
-              framework: fw,
-              binary: launcherFor(comp, fw, { interp }),
-              runArgs: sel.runArgs,
-              cwd: join(worktreePath, comp.dir ?? ""),
+            try {
+              executionPlan = resolveCheckExecution({
+                components,
+                testFile: testPath,
+                testName: c.test_name,
+                interp,
+              });
+            } catch (err) {
+              missReason.set(c.ac_id, String(err));
+              continue;
+            }
+            selector = executionPlan.runArgs;
+            const res = await runCheckExecution({
+              plan: executionPlan,
+              worktreePath,
               timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
               run,
             });
@@ -764,9 +793,16 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
             if (res.coarse === "selected-none") {
               missReason.set(
                 c.ac_id,
-                `the selector \`${sel.runArgs}\` for \`${testPath}\` matched no test${fw === "pytest" ? "; a class method's test_name must include its enclosing classes (TestClass::test_method)" : ""}`,
+                `the selector \`${selector}\` for \`${testPath}\` matched no test${fw === "pytest" ? "; a class method's test_name must include its enclosing classes (TestClass::test_method)" : ""}`,
               );
               continue; // selects 0 → identity reject (§5.1)
+            }
+            if (res.coarse === "error" && (fw === "mocha" || fw === "django-runtests")) {
+              missReason.set(
+                c.ac_id,
+                `${res.reason ?? "test execution failed"}: ${res.rawOutput.slice(-1000)}`,
+              );
+              continue;
             }
             coarse = res.coarse;
             // ENG-357: a shell launch failure (127 command-not-found / 126 not-executable) means the
@@ -838,6 +874,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           exitCode,
           framework: fw,
           command,
+          executionPlan,
         });
         covered.add(c.ac_id);
       }
@@ -889,6 +926,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
               exitCode: r.exitCode,
               framework: r.framework,
               command: r.command,
+              executionPlan: r.executionPlan,
               acCheckId: row.id,
             },
           });
@@ -1597,17 +1635,32 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
             const bound: string[] = [];
             const nonBinding: string[] = [];
             const unproven: string[] = [];
+            const executions: Array<Record<string, unknown>> = [];
             if (fw && baselineSha) {
               for (const testFile of delivered) {
-                const verdict = await deliveredTestBindsAtBaseline({
+                let plan: CheckExecutionPlan;
+                try {
+                  plan = resolveCheckExecution({
+                    components: deps.profile.components,
+                    testFile,
+                    interp: fw === "pytest" ? resolvePythonInterpreter() : undefined,
+                  });
+                } catch (err) {
+                  unproven.push(testFile);
+                  executions.push({ testFile, reason: String(err) });
+                  continue;
+                }
+                const evidence = await deliveredTestEvidenceAtBaseline({
                   repoPath,
                   baselineSha,
                   testFile,
                   sourcePath: join(worktreePath, testFile),
-                  command: `${launcherFor(c, fw)} ${buildFileSelector(fw, testFile)}`,
-                  dir: c.dir,
+                  plan,
                   timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
+                  run: deps.runCheckCommand,
                 });
+                executions.push({ testFile, plan, ...evidence });
+                const verdict = evidence.verdict;
                 if (verdict === "binds") bound.push(testFile);
                 else if (verdict === "does-not-bind") nonBinding.push(testFile);
                 else unproven.push(testFile);
@@ -1635,6 +1688,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
                 bound,
                 nonBinding,
                 unproven,
+                executions,
                 ...(fw && baselineSha ? {} : { reason: "binding-proof-not-attempted" }),
               },
             });

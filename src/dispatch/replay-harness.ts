@@ -4,14 +4,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { listByAc } from "../db/repos/ac-check.ts";
 import { signalForAcCheck } from "../db/repos/ground-truth-signal.ts";
-import {
-  type CoarseOrNone,
-  buildCheckSelector,
-  frameworkFor,
-  launcherFor,
-} from "./check-selector.ts";
-import { runCheckForRed } from "./checks-run.ts";
-import { impactedComponents } from "./components.ts";
+import { type CheckExecutionPlan, resolveCheckExecution } from "./check-execution.ts";
+import type { CoarseOrNone } from "./check-selector.ts";
+import { type CheckRunResult, runCheckExecution } from "./checks-run.ts";
 import type { Component } from "./profile.ts";
 import { resolvePythonInterpreter } from "./provision.ts";
 import type { CmdRunner } from "./reuse.ts";
@@ -51,52 +46,43 @@ export interface ReplayParams {
  *  agent's word. The CALLER applies the predicate `coarse == red` installs; green/selected-none/error
  *  reject. Any harness fault (git/framework/interp) returns `error` → caller rejects (fails closed,
  *  never a false install). The temp worktree is always removed. */
-export async function replayCheckAtBaseline(p: ReplayParams): Promise<CoarseOrNone> {
-  const comp = impactedComponents(p.components, [p.testFile])[0];
-  const fw = comp ? frameworkFor(comp) : null;
-  if (!comp || !fw) return "error";
-
-  let interp: string | undefined;
-  if (fw === "pytest") {
-    try {
-      interp = resolvePythonInterpreter();
-    } catch {
-      return "error";
-    }
+export async function replayCheckEvidence(
+  p: ReplayParams,
+): Promise<(CheckRunResult & { plan: CheckExecutionPlan }) | null> {
+  let plan: CheckExecutionPlan;
+  try {
+    plan = resolveCheckExecution({
+      components: p.components,
+      testFile: p.testFile,
+      testName: p.testName,
+    });
+    if (plan.framework === "pytest")
+      plan = resolveCheckExecution({
+        components: p.components,
+        testFile: p.testFile,
+        testName: p.testName,
+        interp: resolvePythonInterpreter(),
+      });
+  } catch {
+    return null;
   }
 
   const wt = mkdtempSync(join(tmpdir(), "styre-baseline-wt-"));
   try {
     const added = git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath);
-    if (!added.ok) return "error";
+    if (!added.ok) return null;
     // Overlay the re-author content at the SAME repo-relative path (absent at the baseline sha).
     const target = join(wt, p.testFile);
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, p.content);
 
-    const sel = buildCheckSelector(fw, { testFile: p.testFile, testName: p.testName });
-    const res = await runCheckForRed({
-      framework: fw,
-      // Same launcher as the production executors, or a base-replay would measure a different
-      // invocation than the one that decides the gate.
-      binary: launcherFor(comp, fw, { interp }),
-      runArgs: sel.runArgs,
-      // EXECUTOR NOTE (M3, non-blocking): this mirrors production `rerunOne`
-      // (post-implement-rerun.ts) exactly — `cwd: join(wt, comp.dir ?? "")` is correct only when the
-      // impacted component's `dir` is the repo root (empty). Both the harness's component selection
-      // (`impactedComponents(...)[0]`) and this cwd join carry that same pre-existing single-root
-      // assumption; they are not a new hazard this plan introduces, but if a future change adds a
-      // non-root component, both `rerunOne` and this harness would need to pick the SAME component the
-      // check actually lives under, or every replay will run in the wrong cwd and silently reject
-      // (never a false install, but a false escalate). Keep the two in lockstep.
-      cwd: join(wt, comp.dir ?? ""),
+    const result = await runCheckExecution({
+      plan,
+      worktreePath: wt,
       timeoutMs: p.timeoutMs,
       run: p.run,
     });
-    // FIX M2: return CoarseOrNone directly (includes "selected-none") — no widen-then-cast dance. The
-    // caller (Task 6's reauthorCheckWrong) compares `=== "red"`, so every non-red value — green,
-    // selected-none, error — rejects by construction; this signature change doesn't touch that.
-    return res.coarse;
+    return { ...result, plan };
   } finally {
     git(["worktree", "remove", "--force", wt], p.repoPath);
     try {
@@ -105,4 +91,8 @@ export async function replayCheckAtBaseline(p: ReplayParams): Promise<CoarseOrNo
       /* worktree remove already cleaned it */
     }
   }
+}
+
+export async function replayCheckAtBaseline(p: ReplayParams): Promise<CoarseOrNone> {
+  return (await replayCheckEvidence(p))?.coarse ?? "error";
 }

@@ -77,13 +77,24 @@ function registryWith(
   });
 }
 
-/** A python component scoped to `checks/**` only (mirrors verify-gate-e2e.test.ts). Listed FIRST so
- *  `impactedComponents(...)[0]` prefers it over "app" for check-file paths. */
-const CHECKS_COMPONENT = { name: "checks", kind: "python", paths: ["checks/**"], commands: {} };
+/** A python component scoped to `checks/**` only (mirrors verify-gate-e2e.test.ts). Extension-owned so Python checks cannot be claimed by the Node app component. */
+const CHECKS_COMPONENT = {
+  name: "checks",
+  kind: "python",
+  paths: ["checks/**"],
+  commands: {},
+  extensions: [".py"],
+};
 
 /** The "real code" component every implement no-op dispatch writes into — never touches `checks/`. */
 function appComponent(testCmd: string) {
-  return { name: "app", kind: "node", paths: ["**"], commands: { test: testCmd } };
+  return {
+    name: "app",
+    kind: "node",
+    paths: ["**"],
+    commands: { test: testCmd },
+    extensions: [".ts", ".js"],
+  };
 }
 
 const ok = {

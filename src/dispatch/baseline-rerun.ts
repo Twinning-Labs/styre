@@ -4,6 +4,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { listByTicket } from "../db/repos/ground-truth-signal.ts";
 import { runCommand } from "../util/run-command.ts";
+import {
+  type CheckExecutionPlan,
+  CheckExecutionPlanSchema,
+  provesBehavioralFailure,
+} from "./check-execution.ts";
+import { type CheckRunResult, runCheckExecution } from "./checks-run.ts";
+import type { CmdRunner } from "./reuse.ts";
 
 /**
  * Was an advisory failure already there before this change? (ENG-403)
@@ -113,39 +120,53 @@ export type BindingVerdict = "binds" | "does-not-bind" | "unknown";
  * runs the old tests alongside the new one; that is intended, since the delivered file as a whole
  * must distinguish the two revisions.
  */
-export async function deliveredTestBindsAtBaseline(p: {
+export interface DeliveredTestParams {
   repoPath: string;
   baselineSha: string;
   /** Repo-relative path of the delivered test file. */
   testFile: string;
   /** Absolute path to read the delivered content from (the implemented worktree). */
   sourcePath: string;
-  /** `${launcher} ${fileSelector}` — the qualified launcher, so a wrapper's config is kept. */
-  command: string;
+  /** Legacy callers without a plan receive unknown; an arbitrary exit code is not evidence. */
+  command?: string;
   dir?: string;
+  plan?: CheckExecutionPlan;
   timeoutMs: number;
-}): Promise<BindingVerdict> {
+  run?: CmdRunner;
+}
+
+export async function deliveredTestEvidenceAtBaseline(
+  p: DeliveredTestParams,
+): Promise<{ verdict: BindingVerdict; execution?: CheckRunResult; reason?: string }> {
+  const parsed = CheckExecutionPlanSchema.safeParse(p.plan);
+  if (!parsed.success || parsed.data.testFile !== p.testFile || parsed.data.testName !== undefined)
+    return { verdict: "unknown", reason: "missing or invalid file execution plan" };
   let wt: string;
   try {
     wt = mkdtempSync(join(tmpdir(), "styre-baseline-bind-"));
-  } catch {
-    return "unknown";
+  } catch (err) {
+    return { verdict: "unknown", reason: `baseline execution failed: ${String(err)}` };
   }
   try {
-    if (!git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath).ok) return "unknown";
+    if (!git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath).ok)
+      return { verdict: "unknown", reason: "baseline worktree could not be prepared or executed" };
     const target = join(wt, p.testFile);
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, readFileSync(p.sourcePath, "utf8"));
-    const run = await runCommand(p.command, {
-      cwd: join(wt, p.dir ?? ""),
+    const execution = await runCheckExecution({
+      plan: parsed.data,
+      worktreePath: wt,
       timeoutMs: p.timeoutMs,
+      run: p.run,
     });
-    if (run.timedOut || run.exitCode === null) return "unknown";
-    // Non-zero at the baseline = the test distinguishes the two revisions = it binds.
-    // Zero = it passed WITHOUT the change, so it proves nothing.
-    return run.exitCode === 0 ? "does-not-bind" : "binds";
-  } catch {
-    return "unknown";
+    const verdict = provesBehavioralFailure(parsed.data, execution)
+      ? "binds"
+      : execution.coarse === "green"
+        ? "does-not-bind"
+        : "unknown";
+    return { verdict, execution };
+  } catch (err) {
+    return { verdict: "unknown", reason: `baseline execution failed: ${String(err)}` };
   } finally {
     git(["worktree", "remove", "--force", wt], p.repoPath);
     try {
@@ -154,4 +175,10 @@ export async function deliveredTestBindsAtBaseline(p: {
       /* worktree remove already cleaned it */
     }
   }
+}
+
+export async function deliveredTestBindsAtBaseline(
+  p: DeliveredTestParams,
+): Promise<BindingVerdict> {
+  return (await deliveredTestEvidenceAtBaseline(p)).verdict;
 }

@@ -26,6 +26,11 @@ Rules — follow them exactly:
   for a top-level function or `TestClass::test_method` for a class method (include every enclosing
   class). For a specific parametrized case, append its exact `[parameter-id]`. Do not repeat the file
   path: the runner constructs `test_file::test_name`. A method name alone cannot select a class method.
+- **For Django's unittest runner, report `Class.test_method` (or `Class::test_method`).** Include
+  the class; a bare method is ambiguous. Do not include the module or file path in `test_name`.
+- **For Mocha, report the exact full title**, joining every enclosing `describe` title and the `it`
+  title with a single space, exactly as Mocha reports it. The same file must not define duplicate full
+  titles. Skipped/pending tests do not prove an acceptance criterion.
 - The file must contain **only** this criterion's check(s) — nothing else.
 - **Assert the criterion's *observable output*, not just that the surface responded.** Check the
   returned data shape / a persisted value / a produced side-effect — the thing the AC actually
@@ -73,7 +78,7 @@ Emit your answer as a single fenced block, exactly:
 
 Report, per check: the acceptance-criterion `ac_id` it targets, the repo-relative `test_file` you created,
 and the `test_name` you wrote (for pytest, the complete file-relative node name described above;
-for other frameworks, the function/case name). Report no command or result. If — and only if — a
+for Django, the class and method; for Mocha, the full title; for other frameworks, the function/case name). Report no command or result. If — and only if — a
 check genuinely needs a NEW non-test helper (a fixture / `conftest.py`) — never a reproduction or debug
 script — list its repo-relative path in `new_files`; your test files are already declared via `test_file`
 and must NOT be repeated there. Otherwise leave `new_files` empty.

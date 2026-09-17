@@ -37,16 +37,17 @@ test("a file outside tests/ keeps its full dotted path", () => {
   expect(djangoLabel("myapp/tests/test_x.py")).toBe("myapp.tests.test_x");
 });
 
-test("the selector is module-scoped at `file` precision, not a path", () => {
+test("the selector identifies the exact class and method, not the entire module", () => {
   const sel = buildCheckSelector("django-runtests", {
     testFile: "tests/styre_checks/ENG-1_ac1_test.py",
-    testName: "test_thing",
+    testName: "ThingTests::test_thing",
   });
   expect(sel.runArgs).toContain("styre_checks.ENG-1_ac1_test");
   expect(sel.runArgs).not.toContain("/");
   // A unittest label is `module.Class.method`; the sidecar gives styre the method but never the
   // class, so the module is the honest scope. M2b's added-file identity makes it safe.
-  expect(sel.precision).toBe("file");
+  expect(sel.runArgs).toContain("ThingTests.test_thing");
+  expect(sel.precision).toBe("precise");
 });
 
 test("the launcher runs from the repo root, single-process", () => {

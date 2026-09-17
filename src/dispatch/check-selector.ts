@@ -101,6 +101,14 @@ function shq(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
+/** Literal shell argument; retain readable safe atoms, quote paths/names with metacharacters. */
+function arg(s: string): string {
+  return /^[A-Za-z0-9_./#=-]+$/.test(s) ? s : shq(s);
+}
+function fileArg(s: string): string {
+  return arg(s.startsWith("-") ? `./${s}` : s);
+}
+
 /** The source presence check is only a prefilter; the framework execution must still select
  * a test. Pytest's file-relative node suffix can name enclosing classes and a parametrized
  * case, neither of which appears as one contiguous string in Python source. Split before
@@ -110,6 +118,9 @@ export function authoredTestNameInContent(
   content: string,
   testName: string,
 ): boolean {
+  // Composed JS titles and unittest dotted identities are established by execution,
+  // not by looking for their display name as one source substring.
+  if (framework === "mocha" || framework === "django-runtests") return testName.trim().length > 0;
   if (framework !== "pytest") return content.includes(testName);
   const bracket = testName.indexOf("[");
   if (bracket !== -1 && !testName.endsWith("]")) return false;
@@ -132,6 +143,16 @@ export function authoredTestNameInContent(
  *  which is what the runner expects for an app-local test module. Hyphens are LEFT ALONE on
  *  purpose: `styre_checks.ENG-421_ac1_test` was verified to load in the real django image, and
  *  rewriting the name here would address a module that does not exist on disk. */
+export function djangoTestName(name: string): string {
+  const parts = name.split(/::|\./);
+  if (parts.length < 2 || !parts.every((p) => /^[\p{ID_Start}_][\p{ID_Continue}_]*$/u.test(p))) {
+    throw new Error(
+      "Django test_name must identify Class.method (or Class::method); a bare method is ambiguous",
+    );
+  }
+  return parts.join(".");
+}
+
 export function djangoLabel(testFile: string): string {
   const withoutExt = testFile.replace(/\.py$/, "");
   const rel = withoutExt.startsWith("tests/") ? withoutExt.slice("tests/".length) : withoutExt;
@@ -147,55 +168,60 @@ export function buildCheckSelector(
     case "pytest":
       return { runArgs: shq(`${testFile}::${testName}`), precision: "precise" };
     case "django-runtests":
-      // A DOTTED LABEL relative to `tests/`, not a path — django's runner is unittest-based.
-      // MODULE-level, at `file` precision: a unittest label addresses `module.Class.method`, and
-      // the authored sidecar gives styre the method name but never the class. Rather than guess a
-      // class from the filename (valid for Java, meaningless for Python), scope to the module —
-      // which `SelectorPrecision`'s `file` already describes, and which M2b's added-file identity
-      // guarantee makes safe: the file holds only this check.
-      //
-      // Verified in the official django image: labels resolve from the repo root, and hyphenated
-      // module names (`styre_checks.ENG-421_ac1_test`) load fine, so no renaming is needed.
-      return { runArgs: shq(djangoLabel(testFile)), precision: "file" };
+      return {
+        runArgs: shq(`${djangoLabel(testFile)}.${djangoTestName(testName)}`),
+        precision: "precise",
+      };
+    case "mocha":
+      return {
+        runArgs: `${shq(testFile)} --grep ${shq(`^${escapeRegex(testName)}$`)}`,
+        precision: "anchored",
+      };
     case "jest":
       return {
-        runArgs: `${testFile} -t ${shq(`^${escapeRegex(testName)}$`)}`,
+        runArgs: `${fileArg(testFile)} -t ${shq(`^${escapeRegex(testName)}$`)}`,
         precision: "anchored",
       };
     case "vitest":
       return {
-        runArgs: `run ${testFile} -t ${shq(`^${escapeRegex(testName)}$`)}`,
+        runArgs: `run ${fileArg(testFile)} -t ${shq(`^${escapeRegex(testName)}$`)}`,
         precision: "anchored",
       };
     case "go":
       return {
-        runArgs: `-run '^${escapeRegex(testName)}$' ./${dirname(testFile)}`,
+        runArgs: `-run ${shq(`^${escapeRegex(testName)}$`)} ${fileArg(`./${dirname(testFile)}`)}`,
         precision: "package",
       };
     case "cargo":
       // One-file-one-crate integration test (§5.2 Rust mandate): `--test <stem>` selects the crate,
       // `<name> -- --exact` the single test function.
       return {
-        runArgs: `--test ${classFromFile(testFile)} ${testName} -- --exact`,
+        runArgs: `--test ${arg(classFromFile(testFile))} ${arg(testName)} -- --exact`,
         precision: "package",
       };
     case "junit-maven":
       return {
-        runArgs: `-Dtest=${classFromFile(testFile)}#${testName} test`,
+        runArgs: `${arg(`-Dtest=${classFromFile(testFile)}#${testName}`)} test`,
         precision: "precise",
       };
     case "junit-gradle":
       return {
-        runArgs: `test --tests '${classFromFile(testFile)}.${testName}'`,
+        runArgs: `test --tests ${shq(`${classFromFile(testFile)}.${testName}`)}`,
         precision: "precise",
       };
     case "rspec":
       // rspec -e is a substring match; the styre-authored file is the real scope (safe by identity).
-      return { runArgs: `${testFile} -e ${shq(testName)}`, precision: "file" };
+      return { runArgs: `${fileArg(testFile)} -e ${shq(testName)}`, precision: "file" };
     case "minitest":
-      return { runArgs: `${testFile} -n '/^${escapeRegex(testName)}$/'`, precision: "file" };
+      return {
+        runArgs: `${fileArg(testFile)} -n ${shq(`/^${escapeRegex(testName)}$/`)}`,
+        precision: "file",
+      };
     case "phpunit":
-      return { runArgs: `--filter '/::${escapeRegex(testName)}$/' ${testFile}`, precision: "file" };
+      return {
+        runArgs: `--filter ${shq(`/::${escapeRegex(testName)}$/`)} ${fileArg(testFile)}`,
+        precision: "file",
+      };
   }
 }
 
@@ -215,23 +241,24 @@ export function buildFileSelector(fw: CheckFramework, testFile: string): string 
       // Already file-scoped: a dotted MODULE label runs every test in that module, which is
       // exactly what proving a delivered test binds asks for.
       return shq(djangoLabel(testFile));
+    case "mocha":
     case "jest":
-      return testFile;
+      return shq(testFile);
     case "vitest":
-      return `run ${testFile}`;
+      return `run ${fileArg(testFile)}`;
     case "go":
-      return `./${dirname(testFile)}`;
+      return fileArg(`./${dirname(testFile)}`);
     case "cargo":
-      return `--test ${classFromFile(testFile)}`;
+      return `--test ${arg(classFromFile(testFile))}`;
     case "junit-maven":
-      return `-Dtest=${classFromFile(testFile)} test`;
+      return `${arg(`-Dtest=${classFromFile(testFile)}`)} test`;
     case "junit-gradle":
-      return `test --tests '${classFromFile(testFile)}'`;
+      return `test --tests ${shq(classFromFile(testFile))}`;
     case "rspec":
     case "minitest":
-      return testFile;
+      return fileArg(testFile);
     case "phpunit":
-      return testFile;
+      return fileArg(testFile);
   }
 }
 
@@ -287,6 +314,8 @@ export function interpretRunOutput(fw: CheckFramework, run: RunOutcome): CoarseO
       if (outputMatches(run, /\bRan 0 tests\b/)) return "selected-none";
       return code === 0 ? "green" : "red";
     }
+    case "mocha":
+      return "error"; // requires file/fullTitle evidence through interpretCheckExecution
     case "jest":
     case "vitest":
       // TODO(M3): confirm vitest loaded-but-no-match phrasing
@@ -517,6 +546,8 @@ export function binaryFor(fw: CheckFramework, opts?: { interp?: string }): strin
       // Deliberately no `--settings`: django's runtests defaults to `test_sqlite`, and naming it
       // would break any repo that has renamed it.
       return `${opts?.interp ?? "python3"} ./tests/runtests.py --parallel 1`;
+    case "mocha":
+      return "mocha";
     case "jest":
       return "jest";
     case "vitest":
