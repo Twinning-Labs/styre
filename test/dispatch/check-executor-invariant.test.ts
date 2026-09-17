@@ -61,10 +61,10 @@ test("the known executors are all still present (guards a silent rename)", () =>
     "src/dispatch/handlers.ts",
     "src/dispatch/post-implement-rerun.ts",
     "src/dispatch/replay-harness.ts",
+    "src/dispatch/baseline-rerun.ts",
   ];
   for (const f of executors) {
     const text = readFileSync(f, "utf8");
-    expect(text).toContain("runCheckForRed");
-    expect(text).toContain("launcherFor");
+    expect(text.includes("runCheckExecution")).toBe(true);
   }
 });

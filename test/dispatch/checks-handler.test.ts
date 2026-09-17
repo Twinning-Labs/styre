@@ -59,13 +59,20 @@ async function runSingleCheckDispatch(fixture: {
    *  fails, which is darkreader's ENG-399 shape (`npm run test:ci --` answers; bare `jest` does
    *  not). Both are real; they are different scenarios and must be simulated differently. */
   probeSucceeds?: boolean;
+  behavioral?: 0 | 1;
 }) {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
   db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] one thing\n", ticketId);
   await markDesignDone(db, ticketId);
-  insertWorkUnit(db, { ticketId, seq: 1, kind: fixture.kind, verifyCheckTypes: ["test"] });
+  insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: fixture.kind,
+    behavioral: fixture.behavioral,
+    verifyCheckTypes: ["test"],
+  });
   setTicketTrack(db, ticketId, "fast");
   const runner = new FakeAgentRunner((input) => {
     const dir = join(input.cwd, "checks");
@@ -1069,7 +1076,7 @@ test("checks:dispatch — a discarded __init__.py yields a legible, non-persiste
   expect(message).toContain("No module named 'pkg'");
 });
 
-test("a ruby check whose test command names neither rspec nor minitest → framework null, empty output → AC uncovered (ENG-347)", async () => {
+test("an unresolved framework pauses behavioral work before dispatching an author", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
@@ -1116,11 +1123,12 @@ test("a ruby check whose test command names neither rspec nor minitest → frame
   const step = getByKey(db, ticketId, "checks:dispatch");
   const message = step?.error_json != null ? (JSON.parse(step.error_json).message ?? "") : "";
   db.close();
-  expect(["retry", "escalated"]).toContain(outcome.kind);
-  expect(step?.status).toBe("pending");
+  expect(outcome.kind).toBe("escalated");
+  expect(runner.inputs).toHaveLength(0);
+  expect(step?.status).toBe("failed");
   expect(checks).toHaveLength(0); // NOT recorded as covering
-  expect(message).toMatch(/no test framework could be detected/);
-  expect(message).toMatch(/could not be attempted/);
+  expect(message).toMatch(/no test framework could be resolved/);
+  expect(message).toMatch(/Repair the runner/);
 });
 
 test("a check that times out with empty output → error, empty → AC uncovered (ENG-347)", async () => {
@@ -1299,7 +1307,7 @@ test("ENG-426: no runnable framework → the authoring agent is never dispatched
   // nothing once written. The saving is the whole reason the probe runs before the dispatch.
   expect(authorDispatches).toBe(0);
   expect(checks).toHaveLength(0);
-  expect(outcome.kind).toBe("stepped");
+  expect(outcome.kind).toBe("escalated");
 });
 
 test("ENG-426: the capability verdict is recorded per component, as a signal", async () => {
@@ -1346,83 +1354,116 @@ test("ENG-426: a capable framework still authors exactly as before", async () =>
   expect(checks[0]?.red_first_result).toBe("red");
 });
 
-test("ENG-426: ONE capable component is enough — authoring proceeds, per-AC diagnosis preserved", async () => {
-  // The guarantee the early return must NOT break. With a capable component left, re-dispatching
-  // the author CAN help (it can land its check there), so ENG-347/ENG-357's per-AC messages and
-  // their retry stay in force. Only when NOTHING can execute is another round provably futile.
-  const { db, ticketId, projectId } = makeTestDb();
-  const repo = gitRepo();
-  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
-  db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] one thing\n", ticketId);
-  await markDesignDone(db, ticketId);
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
+for (const requiredUnavailable of [false, true]) {
+  test(`capability: runnable sibling ${requiredUnavailable ? "cannot mask a required unavailable owner" : "allows authoring when no required owner is unavailable"}`, async () => {
+    const { db, ticketId, projectId } = makeTestDb();
+    const repo = gitRepo();
+    db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+    db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] one thing\n", ticketId);
+    await markDesignDone(db, ticketId);
+    insertWorkUnit(db, {
+      ticketId,
+      seq: 1,
+      kind: "python",
+      verifyCheckTypes: ["test"],
+      filesToTouch: requiredUnavailable ? ["legacy/feature.py"] : ["api/feature.py"],
+    });
+    setTicketTrack(db, ticketId, "fast");
 
-  const runner = new FakeAgentRunner((input) => {
-    const dir = join(input.cwd, "api");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "ENG-1_ac1_test.py"), "test_x placeholder\n");
-    return {
-      completed: true,
-      exitCode: 0,
-      stdout: `\`\`\`styre-sidecar\n{"checksAuthored":[{"ac_id":1,"test_file":"api/ENG-1_ac1_test.py","test_name":"test_x"}]}\n\`\`\``,
-      stderr: "",
-      timedOut: false,
-      costUsd: null,
-      tokensIn: null,
-      tokensOut: null,
-    };
+    let authorDispatches = 0;
+    const runner = new FakeAgentRunner((input) => {
+      authorDispatches++;
+      const dir = join(input.cwd, "api");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "ENG-1_ac1_test.py"), "test_x placeholder\n");
+      return {
+        completed: true,
+        exitCode: 0,
+        stdout: `\`\`\`styre-sidecar\n{"checksAuthored":[{"ac_id":1,"test_file":"api/ENG-1_ac1_test.py","test_name":"test_x"}]}\n\`\`\``,
+        stderr: "",
+        timedOut: false,
+        costUsd: null,
+        tokensIn: null,
+        tokensOut: null,
+      };
+    });
+
+    const registry = buildDispatchRegistry({
+      runner,
+      agentConfig: DEFAULT_AGENT_CONFIG,
+      profile: parseProfile({
+        slug: "demo",
+        targetRepo: repo,
+        components: [
+          // `dir` matters: the probe runs in the component's own module root, so without it BOTH
+          // components probe the same cwd and the fake below cannot tell them apart — a test that
+          // would pass for the wrong reason (a mutation of `every` to `some` survived on exactly
+          // that flaw).
+          {
+            name: "api",
+            kind: "python",
+            dir: "api",
+            paths: ["api/**"],
+            commands: { test: "pytest" },
+          },
+          {
+            name: "legacy",
+            kind: "python",
+            dir: "legacy",
+            paths: ["legacy/**"],
+            commands: { test: "pytest" },
+          },
+        ],
+      }),
+      worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
+      // `legacy` has no pytest; `api` does. Keyed on cwd, which is how the probe distinguishes them.
+      runCheckCommand: async (command, opts) => {
+        const incapable = opts.cwd.includes("legacy");
+        if (/ --version$/.test(command)) {
+          return incapable
+            ? { exitCode: 1, stdout: "", stderr: "No module named pytest", timedOut: false }
+            : { exitCode: 0, stdout: "pytest 8.4.2", stderr: "", timedOut: false };
+        }
+        return { exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false };
+      },
+    });
+
+    await advanceOneStep(db, ticketId, registry); // provision
+    const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
+    const checks = listAcChecks(db, ticketId);
+    const report = buildVerifyReport(db, ticketId);
+    db.close();
+
+    if (requiredUnavailable) {
+      expect(outcome.kind).toBe("escalated");
+      expect(authorDispatches).toBe(0);
+      expect(checks).toHaveLength(0);
+      expect(report.advisory.some((a) => a.kind === "no-runnable-check-framework")).toBe(true);
+    } else {
+      expect(outcome.kind).toBe("stepped");
+      expect(authorDispatches).toBe(1);
+      expect(checks).toHaveLength(1);
+      expect(checks[0]?.red_first_result).toBe("red");
+      expect(report.advisory.filter((a) => a.kind === "no-runnable-check-framework")).toHaveLength(
+        0,
+      );
+    }
   });
+}
 
-  const registry = buildDispatchRegistry({
-    runner,
-    agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: repo,
-      components: [
-        // `dir` matters: the probe runs in the component's own module root, so without it BOTH
-        // components probe the same cwd and the fake below cannot tell them apart — a test that
-        // would pass for the wrong reason (a mutation of `every` to `some` survived on exactly
-        // that flaw).
-        {
-          name: "api",
-          kind: "python",
-          dir: "api",
-          paths: ["api/**"],
-          commands: { test: "pytest" },
-        },
-        {
-          name: "legacy",
-          kind: "python",
-          dir: "legacy",
-          paths: ["legacy/**"],
-          commands: { test: "pytest" },
-        },
-      ],
-    }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
-    // `legacy` has no pytest; `api` does. Keyed on cwd, which is how the probe distinguishes them.
-    runCheckCommand: async (command, opts) => {
-      const incapable = opts.cwd.includes("legacy");
-      if (/ --version$/.test(command)) {
-        return incapable
-          ? { exitCode: 1, stdout: "", stderr: "No module named pytest", timedOut: false }
-          : { exitCode: 0, stdout: "pytest 8.4.2", stderr: "", timedOut: false };
-      }
-      return { exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false };
+test("nonbehavioral work retains an explicit capability advisory without authoring", async () => {
+  const result = await runSingleCheckDispatch({
+    kind: "ruby",
+    testCmd: "bin/test",
+    ext: "rb",
+    behavioral: 0,
+    run: () => {
+      throw Error("must not run");
     },
   });
-
-  await advanceOneStep(db, ticketId, registry); // provision
-  await advanceOneStep(db, ticketId, registry); // checks:dispatch
-  const checks = listAcChecks(db, ticketId);
-  const report = buildVerifyReport(db, ticketId);
-  db.close();
-
-  // Authored normally — the incapable sibling did not veto the run.
-  expect(checks).toHaveLength(1);
-  expect(checks[0]?.red_first_result).toBe("red");
-  // And no run-level "nothing can run" advisory, because that is not what happened.
-  expect(report.advisory.filter((a) => a.kind === "no-runnable-check-framework")).toHaveLength(0);
+  expect(result.outcome.kind).toBe("stepped");
+  expect(result.authorDispatches).toBe(0);
+  expect(
+    result.signals.some((s) => s.signal_type === "check-capability-run" && s.result === "error"),
+  ).toBe(true);
 });

@@ -441,6 +441,7 @@ export const CHECK_RULES: Record<CheckFramework, LanguageRules> = {
   // symbol tiers) are a property of Python, not of the runner. Same rules, different invocation.
   "django-runtests": pythonRules,
   jest: nodeRules,
+  mocha: nodeRules,
   vitest: nodeRules,
   go: goRules,
   cargo: rustRules,

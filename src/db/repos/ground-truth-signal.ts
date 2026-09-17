@@ -137,6 +137,8 @@ export function ranShasFor(
 
 /** The parsed shape M2b's `checks:dispatch` persists in an `ac-check-red-first` signal's detail. */
 export interface RedFirstDetail {
+  /** Untrusted until CheckExecutionPlanSchema validates it on resume. */
+  executionPlan?: unknown;
   rawOutput: string;
   exitCode: number | null;
   framework: string | null;

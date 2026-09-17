@@ -69,13 +69,17 @@ export function applyFailurePolicy(
   const maxAttempts = opts?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   const dispatchId = latestDispatchForStep(db, ticketId, step.step_key) ?? undefined;
 
-  if (step.attempt >= maxAttempts) {
+  const prerequisite =
+    step.error_json !== null && JSON.parse(step.error_json).name === "StepPrerequisiteError";
+  if (prerequisite || step.attempt >= maxAttempts) {
     db.transaction(() => {
       setTicketStatus(db, ticketId, "waiting");
       insertSignal(db, {
         ticketId,
         signalType: "human_resume",
-        reason: `step '${step.step_key}' exhausted after ${step.attempt} attempts`,
+        reason: prerequisite
+          ? failureSignature(step)
+          : `step '${step.step_key}' exhausted after ${step.attempt} attempts`,
       });
       appendEvent(db, {
         ticketId,

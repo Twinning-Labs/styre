@@ -320,3 +320,75 @@ test("environmental with NO red-first signal keeps the frozen class (cannot tell
   expect(result.stillRed).toEqual([]);
   expect(result.advisory).toEqual([acId]);
 });
+
+import { resolveCheckExecution } from "../../src/dispatch/check-execution.ts";
+
+test("rerun honors the frozen cwd, launcher, and identity after profile changes", async () => {
+  const { db, ticketId } = makeTestDb();
+  const ac = insertAc(db, { ticketId, seq: 1, text: "nested test", source: "checklist" });
+  const plan = resolveCheckExecution({
+    components: [
+      {
+        ...PY_COMPONENT,
+        dir: "api",
+        paths: ["api/**"],
+        testAction: { framework: "pytest", launcher: "python -m pytest -c pytest.ini" },
+      },
+    ],
+    testFile: "api/tests/test_x.py",
+    testName: "Case::test_x",
+  });
+  const check = insertAcCheck(db, {
+    ticketId,
+    acId: ac.id,
+    selector: plan.runArgs,
+    testPath: plan.testFile,
+    redFirstResult: "red",
+  });
+  classifyAcCheck(db, { acCheckId: check.id, redClass: "assertion" });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-red-first",
+    result: "fail",
+    detail: { acCheckId: check.id, executionPlan: plan },
+  });
+  const result = await rerunAcChecks({
+    db,
+    ticketId,
+    components: [],
+    worktreePath: "/repo",
+    headSha: "new-head",
+    timeoutMs: 1000,
+    run: async (command, opts) => {
+      expect(command).toBe("python -m pytest -c pytest.ini 'tests/test_x.py::Case::test_x'");
+      expect(opts.cwd).toBe("/repo/api");
+      return { exitCode: 0, stdout: "1 passed", stderr: "", timedOut: false };
+    },
+  });
+  expect(result.stillRed).toEqual([]);
+  expect(result.ran[0].outcome).toBe("green");
+  db.close();
+});
+
+test("a malformed persisted plan fails closed without spawning a command", async () => {
+  const { db, ticketId } = makeTestDb();
+  const { acId, acCheckId } = seedCheck(db, ticketId, { redClass: "assertion" });
+  insertSignal(db, {
+    ticketId,
+    signalType: "ac-check-red-first",
+    result: "fail",
+    detail: { acCheckId, executionPlan: { version: 999 } },
+  });
+  const result = await rerunAcChecks({
+    db,
+    ticketId,
+    components: [PY_COMPONENT],
+    worktreePath: "/repo",
+    headSha: "new-head",
+    timeoutMs: 1000,
+    run: neverRun,
+  });
+  expect(result.stillRed).toEqual([acId]);
+  expect(result.ran[0].coarse).toBe("error");
+  db.close();
+});

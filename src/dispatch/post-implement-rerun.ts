@@ -2,8 +2,9 @@ import type { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { listActiveByTicket as listAcChecks } from "../db/repos/ac-check.ts";
 import { insertSignal, signalForAcCheck } from "../db/repos/ground-truth-signal.ts";
+import { CheckExecutionPlanSchema } from "./check-execution.ts";
 import { type CoarseResult, frameworkFor, launcherFor } from "./check-selector.ts";
-import { runCheckForRed } from "./checks-run.ts";
+import { runCheckExecution, runCheckForRed } from "./checks-run.ts";
 import { impactedComponents } from "./components.ts";
 import { blockerPersists } from "./env-blocker.ts";
 import type { Component } from "./profile.ts";
@@ -21,11 +22,46 @@ async function rerunOne(
   p: RerunParams,
   testPath: string | null,
   selector: string,
-): Promise<{ coarse: CoarseResult; rawOutput: string }> {
+  executionPlan: unknown,
+): Promise<{
+  coarse: CoarseResult;
+  rawOutput: string;
+  command?: string;
+  exitCode?: number | null;
+  executionPlan?: unknown;
+}> {
+  if (executionPlan !== undefined) {
+    const parsed = CheckExecutionPlanSchema.safeParse(executionPlan);
+    if (!parsed.success || parsed.data.testFile !== testPath || parsed.data.runArgs !== selector)
+      return {
+        coarse: "error",
+        rawOutput: "invalid or inconsistent persisted test execution plan; re-author the check",
+      };
+    const res = await runCheckExecution({
+      plan: parsed.data,
+      worktreePath: p.worktreePath,
+      timeoutMs: p.timeoutMs,
+      run: p.run,
+    });
+    return {
+      command: res.command,
+      exitCode: res.exitCode,
+      executionPlan: parsed.data,
+      coarse: res.coarse === "selected-none" ? "error" : res.coarse,
+      rawOutput: [res.reason, res.rawOutput].filter(Boolean).join("\n"),
+    };
+  }
   if (testPath === null) return { coarse: "error", rawOutput: "" };
   const comp = impactedComponents(p.components, [testPath])[0];
   const fw = comp ? frameworkFor(comp) : null;
   if (!comp || !fw) return { coarse: "error", rawOutput: "" };
+  // Legacy root checks retain their historical invocation. Nested paths and module-only
+  // Django checks cannot be safely reinterpreted; require re-authoring rather than guessing.
+  if (comp.dir || fw === "django-runtests" || fw === "mocha")
+    return {
+      coarse: "error",
+      rawOutput: "legacy check lacks an exact execution plan; re-author the check",
+    };
   let interp: string | undefined;
   if (fw === "pytest") {
     // PATH-dependent (FIX 5c): resolves python3/python from $PATH, same as checks:dispatch. The
@@ -85,7 +121,13 @@ export async function rerunAcChecks(p: RerunParams): Promise<RerunResult> {
       ran.push({ acId: check.ac_id, acCheckId: check.id, coarse: "green", outcome: "disposition" });
       continue; // satisfied / not-expressible → M6 surfaces; does not gate
     }
-    const { coarse, rawOutput } = await rerunOne(p, check.test_path, check.selector);
+    const execution = await rerunOne(
+      p,
+      check.test_path,
+      check.selector,
+      signalForAcCheck(p.db, check.id)?.detail.executionPlan,
+    );
+    const { coarse, rawOutput } = execution;
     let outcome: GateOutcome;
     if (check.red_class === "environmental" && coarse === "green") {
       // The environment recovered and the check passes — nothing to caveat, nothing to gate.
@@ -123,6 +165,7 @@ export async function rerunAcChecks(p: RerunParams): Promise<RerunResult> {
       result: coarse === "green" ? "pass" : "fail",
       branchHeadSha: p.headSha,
       detail: {
+        ...execution,
         acCheckId: check.id,
         acId: check.ac_id,
         coarse,

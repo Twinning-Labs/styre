@@ -111,6 +111,7 @@ export const CheckFrameworkEnum = z.enum([
    *  image, which ships no pytest at all. 46.2% of SWE-bench Verified is django. */
   "django-runtests",
   "jest",
+  "mocha",
   "vitest",
   "go",
   "cargo",
@@ -168,6 +169,8 @@ export const TestActionSchema = z.object({
   /** Argv prefix that runs the suite WITH its configuration. Selector args are appended, so a
    *  script wrapper must already carry the `--` separator (e.g. `npm run test:ci --`). */
   launcher: z.string().min(1),
+  /** Where the launcher interprets appended paths, relative to its component cwd. */
+  selectorDir: z.string().min(1).optional(),
 });
 export type TestAction = z.infer<typeof TestActionSchema>;
 

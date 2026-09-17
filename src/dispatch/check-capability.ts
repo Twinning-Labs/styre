@@ -1,3 +1,4 @@
+import { executionDirectories } from "./check-execution.ts";
 import { type CheckFramework, frameworkFor, launcherFor } from "./check-selector.ts";
 import type { Component } from "./profile.ts";
 import { resolvePythonInterpreter } from "./provision.ts";
@@ -88,6 +89,11 @@ export async function probeComponent(
         detail: `no python interpreter is on PATH, so \`pytest\` cannot be invoked for component \`${component.name}\``,
       };
     }
+  }
+  try {
+    executionDirectories(component);
+  } catch (err) {
+    return { component: component.name, framework: fw, runnable: false, detail: String(err) };
   }
   const command = capabilityCommandFor(fw, launcherFor(component, fw, { interp }));
   const { runCommand } = await import("../util/run-command.ts");

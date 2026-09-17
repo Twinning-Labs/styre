@@ -47,6 +47,41 @@ function frameworkInCommand(cmd: string): TestAction["framework"] | null {
   return null;
 }
 
+/** A deliberately closed shell grammar: optional `cd PATH &&`, optional env/cross-env
+ * assignments, then mocha and literal arguments. It does not guess through script chains,
+ * substitutions, pipelines, or conditionals. The original wrapper still executes verbatim. */
+export function mochaInvocation(command: string): { selectorDir?: string } | null {
+  if (/[\r\n]/.test(command)) return null;
+  const tokens: string[] = [];
+  const token = /\s*(?:'([^']*)'|"([^"$`\\]*)"|([^\s'"$`;|<>\\]+))/y;
+  let at = 0;
+  while (at < command.trimEnd().length) {
+    token.lastIndex = at;
+    const m = token.exec(command);
+    if (!m) return null;
+    tokens.push(m[1] ?? m[2] ?? m[3]);
+    at = token.lastIndex;
+  }
+  let selectorDir: string | undefined;
+  if (tokens[0] === "cd") {
+    if (!tokens[1] || tokens[2] !== "&&") return null;
+    if (/[~*?{}]/.test(tokens[1])) return null;
+    selectorDir = tokens[1];
+    tokens.splice(0, 3);
+  }
+  if (tokens.some((t) => /[&#]/.test(t)) || tokens.includes("--")) return null;
+  if (
+    tokens.some((t) =>
+      /^(?:--(?:help|version|watch|list-interfaces|list-reporters)|-[hVw])(?:=|$)/.test(t),
+    )
+  )
+    return null;
+  if (tokens[0] === "cross-env" || tokens[0] === "env") tokens.shift();
+  while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0] ?? "")) tokens.shift();
+  if (!/^(?:[A-Za-z0-9_./-]+\/)?mocha$/.test(tokens[0] ?? "")) return null;
+  return selectorDir === undefined ? {} : { selectorDir };
+}
+
 function readScripts(dir: string): Record<string, string> {
   try {
     const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as {
@@ -74,6 +109,8 @@ export function resolveTestAction(componentDir: string, command: string): TestAc
   const trimmed = command.trim();
   if (!trimmed) return null;
 
+  const mocha = mochaInvocation(trimmed);
+  if (mocha) return { framework: "mocha", launcher: trimmed, ...mocha };
   const direct = frameworkInCommand(trimmed);
   if (direct) return { framework: direct, launcher: trimmed };
 
@@ -83,7 +120,8 @@ export function resolveTestAction(componentDir: string, command: string): TestAc
   const body = readScripts(componentDir)[script];
   if (body === undefined) return null;
 
-  const framework = frameworkInCommand(body);
+  const mochaScript = mochaInvocation(body);
+  const framework = mochaScript ? "mocha" : frameworkInCommand(body);
   if (!framework) return null;
 
   // Keep the WRAPPER as the launcher, not the resolved body: the wrapper is what carries the
@@ -92,7 +130,7 @@ export function resolveTestAction(componentDir: string, command: string): TestAc
   const needsSeparator = SEPARATOR_RUNNERS.has(runner);
   const launcher = needsSeparator ? `${trimmed} --` : trimmed;
   if (!needsSeparator && !PASSTHROUGH_RUNNERS.has(runner)) return null;
-  return { framework, launcher };
+  return { framework, launcher, ...mochaScript };
 }
 
 /**

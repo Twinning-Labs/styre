@@ -43,7 +43,7 @@ function repoWithBaseline(): { repoPath: string; baselineSha: string } {
   return { repoPath: dir, baselineSha };
 }
 
-test("a test that FAILS at the baseline binds", async () => {
+test("an unqualified failing command cannot prove a delivered test binds", async () => {
   const { repoPath, baselineSha } = repoWithBaseline();
   const src = mkdtempSync(join(tmpdir(), "styre-bind-src-"));
   mkdirSync(join(src, "t"), { recursive: true });
@@ -57,10 +57,10 @@ test("a test that FAILS at the baseline binds", async () => {
     command: "sh t/a.test.sh",
     timeoutMs: 20_000,
   });
-  expect(verdict).toBe("binds");
+  expect(verdict).toBe("unknown");
 });
 
-test("a test that PASSES at the baseline does not bind (the hollow case)", async () => {
+test("an unqualified successful command cannot prove test execution", async () => {
   // `expect(true).toBe(true)` is the degenerate form, but an over-mocked or wrongly-scoped test
   // fails identically and reads as fine. This is what styre already proves for its own AC checks
   // via ac-check-red-first, and previously proved for nothing it delivered.
@@ -76,7 +76,7 @@ test("a test that PASSES at the baseline does not bind (the hollow case)", async
     command: "sh t/a.test.sh",
     timeoutMs: 20_000,
   });
-  expect(verdict).toBe("does-not-bind");
+  expect(verdict).toBe("unknown");
 });
 
 test("an unusable baseline is unknown, never a verdict either way", async () => {
@@ -94,3 +94,53 @@ test("an unusable baseline is unknown, never a verdict either way", async () => 
   });
   expect(verdict).toBe("unknown");
 });
+
+import { existsSync } from "node:fs";
+import { deliveredTestEvidenceAtBaseline } from "../../src/dispatch/baseline-rerun.ts";
+import { resolveCheckExecution } from "../../src/dispatch/check-execution.ts";
+
+test.each([
+  [1, "E       assert 1 == 2\n1 failed in 0.01s", "binds"],
+  [0, "1 passed in 0.01s", "does-not-bind"],
+  [1, "No module named pytest", "unknown"],
+  [1, "E   AttributeError: missing\n1 failed in 0.01s", "unknown"],
+  [2, "1 error in 0.01s", "unknown"],
+  [5, "no tests ran", "unknown"],
+  [0, "1 skipped", "unknown"],
+] as const)(
+  "delivered baseline exit %s with %s gives %s and retains execution evidence",
+  async (exitCode, stdout, verdict) => {
+    const { repoPath, baselineSha } = repoWithBaseline();
+    const sourcePath = join(repoPath, "delivered.py");
+    writeFileSync(sourcePath, "def test_bug(): assert False\n");
+    const plan = resolveCheckExecution({
+      components: [
+        {
+          name: "api",
+          kind: "python",
+          dir: "api",
+          paths: ["api/**"],
+          commands: {},
+          extensions: [".py"],
+        },
+      ],
+      testFile: "api/tests/test_bug.py",
+    });
+    const evidence = await deliveredTestEvidenceAtBaseline({
+      repoPath,
+      baselineSha,
+      testFile: plan.testFile,
+      sourcePath,
+      plan,
+      timeoutMs: 1000,
+      run: async (command, opts) => {
+        expect(command).toContain("'tests/test_bug.py'");
+        expect(opts.cwd.endsWith("/api")).toBe(true);
+        expect(existsSync(join(opts.cwd, "tests/test_bug.py"))).toBe(true);
+        return { exitCode, stdout, stderr: "", timedOut: false };
+      },
+    });
+    expect(evidence.verdict).toBe(verdict);
+    expect(evidence.execution?.rawOutput).toContain(stdout);
+  },
+);

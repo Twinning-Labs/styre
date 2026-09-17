@@ -294,7 +294,13 @@ implement.
 - **Output:** `acceptance_criterion` rows and their `ac_check` tests, authored to **fail on current
   code for the right reason** (RED-first). The author is **plan-blind** — it is given the AC text, not
   the implementation plan — so a check encodes the requirement, not the intended solution.
-- **Failure → route:** shape/retry within the step's attempt budget.
+- **Failure → route:** shape/retry within the step's attempt budget. A missing check capability
+  required by behavioral work is a `StepPrerequisiteError`: pause before authoring/implementation,
+  repair the runner/profile, then resume. Nonbehavioral work may retain an explicit advisory.
+- **Execution contract:** see [test execution and identity](test-execution.md). New checks persist
+  a versioned execution plan in their RED-first signal; reruns preserve its launcher, directories,
+  selector and logical identity. Mocha full titles and Django class/method names are established
+  by native execution, not contiguous source-string matching.
 
   Pytest check names include enclosing classes (`TestClass::test_method`), with `test_file`
   reported separately. Source-presence checks handle those qualifiers and parameter IDs, then

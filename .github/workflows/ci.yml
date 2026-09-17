@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    # `edited` so a title/body change re-runs both jobs — the pr-title
+    # `edited` so a title/body change re-runs the jobs — the pr-title
     # Conventional-Commits lint must re-evaluate when the title is fixed
     # (default types omit `edited`, so a title-only edit otherwise never re-checks).
     types: [opened, synchronize, reopened, edited]
@@ -26,6 +26,30 @@ jobs:
           bun run build
           ./dist/styre --version
           ./dist/styre migrate --db ./ci.db
+
+  native-test-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20.19.5'
+          package-manager-cache: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: bun install --frozen-lockfile
+      - name: Install pinned native test runners
+        run: |
+          npm install --prefix "$RUNNER_TEMP/styre-native-contract" --ignore-scripts --no-audit --no-fund mocha@10.2.0
+          python -m venv "$RUNNER_TEMP/styre-native-contract/venv"
+          "$RUNNER_TEMP/styre-native-contract/venv/bin/pip" install pytest==8.3.5 Django==4.2.23
+      - name: Verify native execution contracts
+        run: STYRE_TEST_NATIVE_ROOT="$RUNNER_TEMP/styre-native-contract" bun test test/dispatch/check-execution.test.ts
 
   pr-title:
     # Conventional-Commits lint on the PR title. Squash-merge makes the PR title
