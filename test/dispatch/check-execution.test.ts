@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -301,7 +301,9 @@ native(
       ...django,
       testAction: {
         framework: "django-runtests" as const,
-        launcher: `${nativeRoot}/venv/bin/python runner.py --parallel 1`,
+        // This fixture rewrites equal-sized Python source within one timestamp second.
+        // Start without bytecode writes so every subprocess imports the current variant.
+        launcher: `${nativeRoot}/venv/bin/python -B runner.py --parallel 1`,
       },
     };
     const p = resolveCheckExecution({
@@ -312,17 +314,21 @@ native(
     const run = () => runCheckExecution({ plan: p, worktreePath: root, timeoutMs: 15000 });
     const source = (body: string) =>
       `from django.test import SimpleTestCase\nclass ParentTests(SimpleTestCase):\n    def test_parent_link(self):\n        """Checks a real behavior."""\n        ${body}\n    def test_unrelated(self):\n        self.fail('must not run')\n`;
-    writeFileSync(join(root, p.testFile), source("self.assertEqual(1, 2)"));
+    const writeTest = (content: string) => {
+      writeFileSync(join(root, p.testFile), content);
+      // Deliberately identical metadata: CI must not depend on when the wall clock ticks.
+      utimesSync(join(root, p.testFile), 1700000000, 1700000000);
+    };
+    writeTest(source("self.assertEqual(1, 2)"));
     const failure = await run();
     expect(failure.coarse).toBe("red");
     expect(provesBehavioralFailure(p, failure)).toBe(true);
-    writeFileSync(join(root, p.testFile), source("self.assertEqual(1, 1)"));
+    writeTest(source("self.assertEqual(1, 1)"));
     expect((await run()).coarse).toBe("green");
-    writeFileSync(join(root, p.testFile), source("self.skipTest('not evidence')"));
+    writeTest(source("self.skipTest('not evidence')"));
     expect((await run()).coarse).toBe("selected-none");
     for (const phase of ["setUp", "tearDown"]) {
-      writeFileSync(
-        join(root, p.testFile),
+      writeTest(
         source("self.assertEqual(1, 1)").replace(
           "class ParentTests(SimpleTestCase):",
           `class ParentTests(SimpleTestCase):\n    def ${phase}(self):\n        self.fail('fixture assertion')`,
