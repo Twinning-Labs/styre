@@ -66,12 +66,14 @@ consecutive-identical-failure guard and per-gate round caps — the concrete num
 **Human gates are narrow by design.** The only wired human gate is MERGE approval: `styre run`
 exits at PR-ready and the operator reviews the pull request and merges it personally. The second
 touch point is the `needs_you` pause: when the loop exhausts its retry budget or reaches something
-it structurally cannot decide (a `major` finding flagged as a deferral candidate, a persistent
+it structurally cannot decide (an unresolved review after bounded repair, a persistent
 conflict the agent cannot resolve, an infrastructure outage), `styre run` **pauses** (reason:
 `needs_you`) and exits **75** — the checkpoint holds the point it reached, and the operator resumes
 with `styre run --resume <ident>` once the underlying issue is fixed. The persistent
 [needs-you inbox](glossary.md#needs-you-inbox) is a feature of the commercial Control Plane; in OSS,
-the exit code and the checkpoint are the signal. Every other situation loops.
+the exit code and the checkpoint are the signal. A deferral nomination first follows the normal
+repair path; plain resume never accepts it. Explicit, SHA-bound risk acceptance is described in
+[review-repair.md](review-repair.md). Every other situation loops.
 
 ---
 
