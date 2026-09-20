@@ -372,7 +372,7 @@ test("plan-review redesign preserves a per-unit blocking finding for the redesig
   expect(feedback).toContain("PLAN-WIDE-ISSUE"); // still there
 });
 
-test("non-blocking major + deferral_candidate → escalated", () => {
+test("legacy blocks_ship=0 major + deferral_candidate → repair loopback", () => {
   const { db, ticketId } = makeTestDb();
   const { did } = seedReviewRound(db, ticketId);
   insertFinding(db, {
@@ -388,8 +388,8 @@ test("non-blocking major + deferral_candidate → escalated", () => {
   const r = applyReviewVerdict(db, ticketId, DEFAULT_RUNTIME_CONFIG, { stepKey: "review" });
   const ticket = getTicket(db, ticketId);
   db.close();
-  expect(r.decision).toBe("escalated");
-  expect(ticket?.status).toBe("waiting");
+  expect(r.decision).toBe("loopback");
+  expect(ticket?.status).toBe("active");
 });
 
 test("no-progress guard: identical blocking signature in prior loopback event → escalated (not loopback)", () => {

@@ -42,6 +42,11 @@ export interface DispatchSpec {
   vars: Record<string, string>;
   loopback?: boolean;
   postcondition: (args: { worktreePath: string; changed: boolean; sha: string }) => void;
+  /** Validate structured repair output before committing any edits. Failure rolls back this attempt. */
+  validateOutput?: (output: string, worktreePath: string) => void;
+  validateCommittedOutput?: (output: string, worktreePath: string, sha: string) => void;
+  /** Review must not accidentally commit tracked mutations from tests or the reviewer. */
+  readOnly?: boolean;
   /** Bash runner commands to scope the implement allowlist to (string commands only). Other
    *  handlers omit this (their allowlists do not scope Bash). */
   runnerCommands?: string[];
@@ -127,6 +132,11 @@ export async function runAgentDispatch(
   }
 
   ensureWorktree(deps.repoPath, deps.branch, deps.worktreePath);
+  if (spec.readOnly && pendingEntries(deps.worktreePath).some((e) => !e.isNew)) {
+    throw new Error(
+      "review requires a clean tracked worktree; verification left uncommitted changes",
+    );
+  }
 
   // Only files THIS dispatch creates are in the scope's jurisdiction; pre-existing untracked cruft
   // (an earlier stray, provision's *.egg-info) is captured here and excluded from judgment/staging.
@@ -184,6 +194,25 @@ export async function runAgentDispatch(
   // The worker's sanctioned throwaway drawer(s): delete every styre_scratch/ before judging/committing
   // so scratch is never an offender and never survives into a later broad test run (ENG-300). Runs on
   // the success path — which undoAttempt never touches — for both write and read-only dispatches.
+  try {
+    spec.validateOutput?.(result.stdout, deps.worktreePath);
+    if (spec.readOnly && pendingEntries(deps.worktreePath).some((e) => !e.isNew)) {
+      throw new Error("read-only review modified tracked files");
+    }
+  } catch (err) {
+    undoAttempt(deps.worktreePath, untrackedBefore);
+    completeDispatch(ctx.db, inserted.id, {
+      outcome: "postcondition-failed",
+      endedAt: nowUtc(),
+      branchHeadSha: worktreeHead(deps.worktreePath),
+      costUsd: result.costUsd,
+      tokensIn: result.tokensIn,
+      tokensOut: result.tokensOut,
+      cacheRead: result.cacheRead ?? null,
+      cacheCreate: result.cacheCreate ?? null,
+    });
+    throw err;
+  }
   const swept = sweepScratch(deps.worktreePath);
   if (swept.length > 0) {
     appendEvent(ctx.db, {
@@ -277,6 +306,20 @@ export async function runAgentDispatch(
     cacheCreate: result.cacheCreate ?? null,
   };
   try {
+    try {
+      spec.validateCommittedOutput?.(result.stdout, deps.worktreePath, sha);
+    } catch (error) {
+      if (changed) {
+        const reset = Bun.spawnSync(["git", "reset", "--hard", preHead], {
+          cwd: deps.worktreePath,
+        });
+        if (!reset.success)
+          throw new Error(`failed to revert invalid committed review evidence: ${reset.stderr}`);
+      }
+      undoAttempt(deps.worktreePath, untrackedBefore);
+      completion.branchHeadSha = preHead;
+      throw error;
+    }
     spec.postcondition({ worktreePath: deps.worktreePath, changed, sha });
   } catch (err) {
     completeDispatch(ctx.db, inserted.id, { outcome: "postcondition-failed", ...completion });

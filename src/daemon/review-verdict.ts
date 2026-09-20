@@ -6,6 +6,13 @@ import {
   latestDispatchForStep,
   listByDispatch,
 } from "../db/repos/review-finding.ts";
+import {
+  REVIEW_REPAIR_LIMIT,
+  commitReviewCompletion,
+  requiredCodeFindings,
+  requiresResolution,
+  reviewRepairCount,
+} from "../db/repos/review-round.ts";
 import { insertPending as insertSignal } from "../db/repos/signal.ts";
 import { getTicket, setTicketStage, setTicketStatus } from "../db/repos/ticket.ts";
 import {
@@ -47,7 +54,7 @@ function isRepeatedReviewLoopback(db: Database, ticketId: number, signature: str
 /** Ticket-level verify steps re-arm on any HEAD-moving loopback: their recorded success is content-
  *  keyed to the OLD head, so leaving them 'succeeded' replays a stale gate pass at the new HEAD →
  *  resolver re-emit → MAX_TRANSITIONS. Reset is a no-op when a step doesn't exist (getByKey null). */
-function resetTicketVerifySteps(db: Database, ticketId: number): void {
+export function resetTicketVerifySteps(db: Database, ticketId: number): void {
   for (const key of [
     "verify:integration",
     "verify:checks-gate",
@@ -83,7 +90,7 @@ function escalate(
   })();
 }
 
-function codeLoopback(
+export function codeLoopback(
   db: Database,
   ticketId: number,
   blocking: ReviewFindingRow[],
@@ -93,7 +100,7 @@ function codeLoopback(
   db.transaction(() => {
     const ticket = getTicket(db, ticketId);
     const from = ticket?.stage ?? "review";
-    const anyNullUnit = blocking.some((f) => f.work_unit_id === null);
+    const anyNullUnit = blocking.length === 0 || blocking.some((f) => f.work_unit_id === null);
     if (anyNullUnit) {
       // Conservative: a blocking code finding not tied to a unit re-codes the whole ticket.
       for (const unit of listUnits(db, ticketId)) {
@@ -136,7 +143,7 @@ function codeLoopback(
   })();
 }
 
-function redesignLoopback(
+export function redesignLoopback(
   db: Database,
   ticketId: number,
   signature: string,
@@ -146,8 +153,8 @@ function redesignLoopback(
   // Snapshot the blocking findings that forced this redesign into the loopback event's payload, so
   // the re-dispatched design agent (via designFeedback) sees exactly what to fix — regardless of
   // which review step raised them (plan review OR code review, ENG-272). The snapshot rides
-  // event_log.payload_json (no schema change) and survives the deleteByTicket below, so no detach
-  // of per-unit findings is needed.
+  // event_log.payload_json and survives replacement of the old plan. Code finding identities
+  // are also retained below so the later code reviewer must resolve those obligations.
   const findings = blocking.map((f) => ({
     category: f.category,
     location: f.location,
@@ -156,6 +163,11 @@ function redesignLoopback(
   db.transaction(() => {
     const ticket = getTicket(db, ticketId);
     const from = ticket?.stage ?? "review";
+    // Replacing a plan must not erase unresolved code-review obligations through the unit FK.
+    // Detach them so the new plan's first unit receives the same IDs as ticket-wide findings.
+    db.query(
+      "UPDATE review_finding SET work_unit_id=NULL WHERE ticket_id=? AND review_kind='code'",
+    ).run(ticketId);
     deleteByTicket(db, ticketId);
     // §6, as resetTicketVerifySteps does for the gate: a redesign is a fresh round, not a
     // continuation, so these steps get their attempt budget back. Without the reset a cycle-1
@@ -192,7 +204,7 @@ function redesignLoopback(
 
 /** Read the latest review round's findings and decide what happens next (M5b-1):
  *  clean → advance; blocking code → re-code loopback; blocking plan-defect → (config) escalate
- *  or redesign loopback; deferrable major → escalate. Ground-truth over self-report: this reads
+ *  or redesign loopback. Deferral suggestions remain blocking. Ground-truth over self-report: this reads
  *  the persisted findings ledger, never an agent verdict. */
 export function applyReviewVerdict(
   db: Database,
@@ -200,13 +212,26 @@ export function applyReviewVerdict(
   config: RuntimeConfig,
   opts: { stepKey: string },
 ): ReviewVerdictResult {
+  if (opts.stepKey === "review") commitReviewCompletion(db, ticketId);
   const dispatchId = latestDispatchForStep(db, ticketId, opts.stepKey);
   if (dispatchId === null) {
     return { decision: "clean" };
   }
 
-  const open = listByDispatch(db, ticketId, dispatchId).filter((f) => f.status === "open");
-  const blocking = open.filter((f) => f.blocks_ship === 1);
+  const blocking =
+    opts.stepKey === "review"
+      ? requiredCodeFindings(db, ticketId)
+      : listByDispatch(db, ticketId, dispatchId).filter(requiresResolution);
+  if (blocking.length > 0 && reviewRepairCount(db, ticketId) >= REVIEW_REPAIR_LIMIT) {
+    escalate(
+      db,
+      ticketId,
+      `review repair limit reached; unresolved finding IDs: ${blocking.map((f) => f.id).join(",")}`,
+      findingsSignature(blocking),
+      dispatchId,
+    );
+    return { decision: "escalated" };
+  }
 
   // Plan review (S1c): any blocking plan finding → re-design (always; re-design is the natural
   // action at design time). No category routing, no deferral path. No-progress → escalate.
@@ -223,8 +248,7 @@ export function applyReviewVerdict(
     return { decision: "loopback" };
   }
 
-  // Code review (S5): existing M5b-1 routing.
-  const deferred = open.filter((f) => f.severity === "major" && f.deferral_candidate === 1);
+  // A suggestion to defer is not an accepted disposition. Investigate it with the other majors.
 
   if (blocking.length > 0) {
     const signature = findingsSignature(blocking);
@@ -254,17 +278,6 @@ export function applyReviewVerdict(
 
     codeLoopback(db, ticketId, blocking, signature, dispatchId);
     return { decision: "loopback" };
-  }
-
-  if (deferred.length > 0) {
-    escalate(
-      db,
-      ticketId,
-      "deferrable major finding requires a human deferral decision",
-      findingsSignature(deferred),
-      dispatchId,
-    );
-    return { decision: "escalated" };
   }
 
   return { decision: "clean" };

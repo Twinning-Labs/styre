@@ -464,11 +464,19 @@ export function deleteRemoteBranch(repoPath: string, branch: string): void {
  *  (the push is rejected instead). When it is undefined (branch absent on the remote), a plain push.
  *  A push failure throws; the message states whether a lease was in play (locale-proof — branches on
  *  the argument, never on git's stderr text). */
-export function pushBranch(repoPath: string, branch: string, expectedRemoteSha?: string): void {
+export function pushBranch(
+  repoPath: string,
+  branch: string,
+  expectedRemoteSha?: string,
+  reviewedSha?: string,
+): void {
+  if (reviewedSha !== undefined && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(reviewedSha))
+    throw new Error("push requires a full reviewed commit SHA");
+  const refspec = reviewedSha ? `${reviewedSha}:refs/heads/${branch}` : branch;
   const args =
     expectedRemoteSha === undefined
-      ? ["push", "origin", branch]
-      : ["push", `--force-with-lease=${branch}:${expectedRemoteSha}`, "origin", branch];
+      ? ["push", "origin", refspec]
+      : ["push", `--force-with-lease=${branch}:${expectedRemoteSha}`, "origin", refspec];
   const res = Bun.spawnSync(["git", ...args], { cwd: repoPath });
   if (!res.success) {
     const stderr = res.stderr.toString().trim();

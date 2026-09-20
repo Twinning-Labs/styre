@@ -9,6 +9,7 @@ import {
   markFailed,
   markSent,
 } from "../db/repos/projection-outbox.ts";
+import { unresolvedReviewReason } from "../db/repos/review-round.ts";
 import { insertPending as insertSignal, recordDelivered } from "../db/repos/signal.ts";
 import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
 import type { ChecksPort } from "../integrations/checks.ts";
@@ -104,6 +105,15 @@ async function applyRow(
   const ref = ticket.ident; // the issue ref the adapter resolves (e.g. "ENG-1")
   const payload =
     row.payload_json === null ? {} : (JSON.parse(row.payload_json) as Record<string, unknown>);
+
+  if (row.target === "forge" && ["push", "pr_create"].includes(row.op)) {
+    const unresolved = unresolvedReviewReason(
+      db,
+      row.ticket_id,
+      row.op === "push" ? PushPayload.parse(payload).sha : undefined,
+    );
+    if (unresolved) throw new Error(`forge projection blocked: ${unresolved}`);
+  }
 
   if (row.target === "issue_tracker") {
     const it = ports.issueTracker;

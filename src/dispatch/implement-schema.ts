@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ReviewResponseSchema } from "./review-schema.ts";
 
 /** implement:dispatch structured-output contract (control-loop §3a). The agent lists every NEW file
  *  it created as part of the fix so the runner can commit them by name; throwaway/debug files must
@@ -6,6 +7,7 @@ import { z } from "zod";
  *  pure-edit fix). An absent sidecar is NOT a transport failure for implement (unlike checks). */
 export const ImplementOutputSchema = z.object({
   new_files: z.array(z.string()).default([]),
+  review_responses: z.array(ReviewResponseSchema).default([]),
 });
 
 export type ImplementOutput = z.infer<typeof ImplementOutputSchema>;

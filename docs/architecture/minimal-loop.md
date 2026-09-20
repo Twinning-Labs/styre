@@ -138,10 +138,11 @@ satisfy the floor — `integration` is the channel that covers the rest. And "a 
 not "a test asserted something"; vacuous execution is a separate hole, owned by
 `ac-check-red-first` and `delivered-test-binding`.
 
-`review → merge` is deliberately NOT guarded, though a run resumed from a park during `review`
-re-enters there without re-crossing the first door. See the comment in `resolver.ts` and ENG-453:
-the only thing that can change the floor's answer between the two transitions is the ticket head
-moving, and today the actor that moves it there is styre's own read-only dispatch commit.
+`review → merge` checks the unresolved review ledger. A completed review cannot advance with
+open major/critical findings or a risk acceptance for a different SHA. Merge handlers and the
+forge outbox drainer enforce the same guard. The existing evidence floor still guards entry into
+review; operator changes accepted on resume re-enter implementation and normal verification.
+See [review-repair.md](review-repair.md).
 
 A still-red `environmental` check never escalates a criterion that also has a green gating check —
 suite green or not; `environmental` is not a gating class, it is advisory by design, and the PR body

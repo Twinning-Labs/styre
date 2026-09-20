@@ -371,7 +371,7 @@ CREATE TABLE review_finding (
                                                         -- {in_changed_code,is_regression,user_visible,
                                                         --  reversible_post_ship,has_workaround}
     deferral_candidate INTEGER NOT NULL DEFAULT 0 CHECK (deferral_candidate IN (0,1)),  -- reviewer-flagged
-    blocks_ship        INTEGER CHECK (blocks_ship IN (0,1)),  -- RUNNER-computed (critical-floor + major-not-deferred)
+    blocks_ship        INTEGER CHECK (blocks_ship IN (0,1)),  -- RUNNER-computed (critical + major, including suggested deferrals)
     location           TEXT,                            -- file:line
     rationale          TEXT,
     status             TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','fixed','deferred','wont-fix')),
@@ -554,5 +554,6 @@ WHERE p.paused = 0
 --     created_at         TEXT NOT NULL, last_confirmed_at TEXT
 -- );
 -- The review-deferral decisions recorded now (CL-NODEFER: record-now/learn-later)
--- seed this table; at cutover they live as `event_log` escalation+resume rows.
+-- seed this table; explicit decisions live as `event_log` review-risk-accepted notes
+-- with SHA, finding IDs, rationale and the accepted finding snapshot.
 -- ============================================================================

@@ -159,12 +159,13 @@ export function implementVars(
     files_to_touch,
     test_plan,
     gate_feedback: gateFeedbackText,
-    review_feedback: reviewFeedbackText,
+
     // profile.promptVars is spread LAST intentionally — it is how the profile injects `stack`
     // (and other project-specific slots) over the placeholder default set here. A profile therefore
     // must not define a promptVar named after a computed section (`authored_checks`, `files_to_touch`,
     // `test_plan`, `feedback`, …) or it would silently shadow it; those names are reserved to the runner.
     ...profile.promptVars,
+    review_feedback: reviewFeedbackText,
   };
 }
 
@@ -177,6 +178,7 @@ export function reviewVars(
     title: ticket.title ?? "",
     slug: profile.slug,
     ...profile.promptVars,
+    review_context: "{}",
   };
 }
 

@@ -1,25 +1,21 @@
 import type { Database } from "bun:sqlite";
-import { latestDispatchForStep, listByDispatch } from "../db/repos/review-finding.ts";
+import { findingsForUnit } from "../db/repos/review-round.ts";
 
-/** Corrective feedback for an implement re-code after a code-review→implement loopback: the blocking
- *  findings from the latest `review` round that pertain to THIS unit (its own findings, plus any
- *  finding not tied to a unit — those re-code the whole ticket). Empty when there is no prior review
- *  round, or none of its blocking findings touch this unit — so a first implement dispatch renders a
- *  blank `{{review_feedback}}`. Ground truth: reads the persisted finding ledger scoped to the round
- *  that forced the bounce (the same set `applyReviewVerdict` used), never an agent verdict. Mirrors
- *  `implementFeedback`/`gateFeedback` (feedback.ts) and `designFeedback`. */
+/** The same unresolved ledger used by routing, including legacy deferrable majors. */
 export function reviewFeedback(db: Database, ticketId: number, workUnitId: number): string {
-  const dispatchId = latestDispatchForStep(db, ticketId, "review");
-  if (dispatchId === null) return "";
-  const blocking = listByDispatch(db, ticketId, dispatchId).filter(
-    (f) =>
-      f.status === "open" &&
-      f.blocks_ship === 1 &&
-      (f.work_unit_id === workUnitId || f.work_unit_id === null),
-  );
-  if (blocking.length === 0) return "";
-  const lines = blocking.map(
-    (f) => `- [${f.severity}] ${f.location ?? "unit-wide"}: ${f.rationale ?? ""}`,
-  );
-  return `## Code-review findings to fix (a prior review blocked shipping on these)\n\nThe last code review of your work raised the following blocking findings. Fix EACH before you finish — do NOT weaken or delete tests to hide them:\n${lines.join("\n")}`;
+  const findings = findingsForUnit(db, ticketId, workUnitId);
+  if (findings.length === 0) return "";
+  return `## Review findings requiring investigation
+
+Treat each rationale as a claim to validate against code and evidence. Repair a justified finding;
+if it is incorrect, dispute it with concrete counterevidence without making an unjustified edit.
+Do not weaken tests to hide a defect. You cannot close findings or accept risk yourself.
+Include exactly one review_responses entry per finding in your existing styre-sidecar:
+{ "new_files": [], "review_responses": [{ "finding_id": 1, "action": "repaired" | "disputed",
+"rationale": "why", "evidence": [{"kind":"source","path":"repo/relative/file","line":1}] }] }
+Evidence may instead be {"kind":"measurement","signal_id":1} for runner-recorded evidence,
+or {"kind":"reference","url":"https://primary-source.example/spec"} for a cited external source.
+Citations and your response are claims; an independent reviewer will adjudicate them.
+
+${JSON.stringify(findings, null, 2)}`;
 }

@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import { listActiveByTicket as listAcChecks } from "../db/repos/ac-check.ts";
 import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";
 import * as gts from "../db/repos/ground-truth-signal.ts";
+import { requiredPlanFindings, unresolvedReviewReason } from "../db/repos/review-round.ts";
 import { hasDelivered } from "../db/repos/signal.ts";
 import { getTicket } from "../db/repos/ticket.ts";
 import * as workUnits from "../db/repos/work-unit.ts";
@@ -115,6 +116,14 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
       }
       if (ticket.track === "full" && !done(db, ticketId, "design:review")) {
         return step("design:review", "dispatch", "design:review", null);
+      }
+      if (ticket.track === "full" && requiredPlanFindings(db, ticketId).length) {
+        return {
+          kind: "escalate",
+          reason: "unresolved plan-review findings",
+          signature: "review:unresolved-plan",
+          stepKey: "design:review",
+        };
       }
       if (!done(db, ticketId, "checks:dispatch")) {
         return step("checks:dispatch", "dispatch", "checks:dispatch", null);
@@ -254,6 +263,14 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
       // or a verify run dirtied (a lockfile, a snapshot). So the assertion's common outcome would
       // be a confusing pause on a healthy run, blaming a test suite that ran fine. ENG-453 owns
       // that defect; this belongs after it, not before it.
+      const unresolved = unresolvedReviewReason(db, ticketId);
+      if (unresolved)
+        return {
+          kind: "escalate",
+          reason: unresolved,
+          signature: "review-unresolved",
+          stepKey: "review",
+        };
       return { kind: "advance", from: "review", to: "merge" };
     }
 

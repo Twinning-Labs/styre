@@ -2,9 +2,9 @@ import type { Database } from "bun:sqlite";
 import * as steps from "../db/repos/workflow-step.ts";
 
 export interface RecoverDeps {
-  /** True if a process with this pid is currently alive. */
+  /** True if this PID is alive; a negative value denotes a POSIX process group. */
   isAlive: (pid: number) => boolean;
-  /** Force-kill the process (a journaled orphan from before the crash). */
+  /** Force-kill the process or negative-PID process group journaled before the crash. */
   kill: (pid: number) => void;
 }
 

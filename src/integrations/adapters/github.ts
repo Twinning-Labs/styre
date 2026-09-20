@@ -112,7 +112,7 @@ export function githubForge(opts: { repoPath: string; token?: string }): ForgePo
         // 404 → expectedRemoteSha stays undefined → plain first push.
       }
       // Only the daemon's authenticated git can transfer the commit objects. Feature branch only.
-      pushBranch(repoPath, branch, expectedRemoteSha);
+      pushBranch(repoPath, branch, expectedRemoteSha, sha);
     },
 
     async ensurePr({

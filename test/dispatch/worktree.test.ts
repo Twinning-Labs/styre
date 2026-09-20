@@ -899,3 +899,21 @@ test("pushBranch: a stale lease is rejected and the remote is left untouched", (
   expect(() => pushBranch(repo, "feat/eng-387-stale", v1)).toThrow(/force-with-lease/);
   expect(remoteHead(repo, "feat/eng-387-stale")).toBe(v1b); // NOT clobbered
 });
+
+test("pushBranch publishes the reviewed commit even if the local branch advanced", () => {
+  const { repo } = makeRepoWithBareOrigin();
+  const run = (args: string[]) => {
+    const result = Bun.spawnSync(["git", ...args], { cwd: repo });
+    if (!result.success) throw new Error(result.stderr.toString());
+    return result.stdout.toString().trim();
+  };
+  const branch = "fix/reviewed-object";
+  run(["checkout", "-b", branch]);
+  const reviewed = run(["rev-parse", "HEAD"]);
+  writeFileSync(join(repo, "later.txt"), "not reviewed");
+  run(["add", "-A"]);
+  run(["commit", "-m", "later local work"]);
+  expect(run(["rev-parse", "HEAD"])).not.toBe(reviewed);
+  pushBranch(repo, branch, undefined, reviewed);
+  expect(remoteHead(repo, branch)).toBe(reviewed);
+});

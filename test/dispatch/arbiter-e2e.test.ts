@@ -21,6 +21,7 @@ import {
   latestReauthorAtSha,
   listByTicket as listSignals,
 } from "../../src/db/repos/ground-truth-signal.ts";
+import { requiredCodeFindings } from "../../src/db/repos/review-round.ts";
 import { listPending } from "../../src/db/repos/signal.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
@@ -1099,6 +1100,16 @@ test("Flow 6 — counter no-false-escalate: repeated review loopbacks (nits) nev
   }); // pending: drives the REAL implement pipeline on every loopback round
   seedGatedAssertionCheck(db, ticketId, head(repo));
 
+  const reviewOutput = (raw: string) => {
+    const output = JSON.parse(raw.split("```styre-sidecar")[1]?.split("```")[0] ?? "null");
+    output.resolutions = requiredCodeFindings(db, ticketId).map((f) => ({
+      finding_id: f.id,
+      disposition: "fixed",
+      rationale: "Independently inspected the repaired source",
+      evidence: [{ kind: "source", path: "note-1.ts", line: 1 }],
+    }));
+    return `\`\`\`styre-sidecar\n${JSON.stringify(output)}\n\`\`\``;
+  };
   let reviewAttempt = 0;
   let noteN = 0;
   const runner = new FakeAgentRunner((input) => {
@@ -1108,13 +1119,24 @@ test("Flow 6 — counter no-false-escalate: repeated review loopbacks (nits) nev
       // merge. (Distinct locations: an identical-shaped 2nd finding would trip review-verdict's own
       // separate "no progress: identical review findings" no-op detector, not the §6 gate counter
       // this flow is about.)
-      if (reviewAttempt === 1) return { ...ok, stdout: blockingCodeFinding };
-      if (reviewAttempt === 2) return { ...ok, stdout: blockingCodeFinding2 };
-      return { ...ok, stdout: cleanFindings };
+      if (reviewAttempt === 1) return { ...ok, stdout: reviewOutput(blockingCodeFinding) };
+      if (reviewAttempt === 2) return { ...ok, stdout: reviewOutput(blockingCodeFinding2) };
+      return { ...ok, stdout: reviewOutput(cleanFindings) };
     }
     noteN += 1;
     writeFileSync(join(input.cwd, `note-${noteN}.ts`), "export const x = 1;\n"); // never touches checks/
-    return { ...ok, stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["note-${noteN}.ts"]}\n\`\`\`` };
+    return {
+      ...ok,
+      stdout: `\`\`\`styre-sidecar\n${JSON.stringify({
+        new_files: [`note-${noteN}.ts`],
+        review_responses: requiredCodeFindings(db, ticketId).map((f) => ({
+          finding_id: f.id,
+          action: "repaired",
+          rationale: "Updated the implementation",
+          evidence: [{ kind: "source", path: `note-${noteN}.ts`, line: 1 }],
+        })),
+      })}\n\`\`\``,
+    };
   });
   const registry = buildDispatchRegistry({
     runner,
