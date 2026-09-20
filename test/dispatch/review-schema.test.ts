@@ -37,9 +37,9 @@ test("computeBlocksShip: critical always blocks, even if deferral_candidate", ()
   expect(computeBlocksShip("critical", false)).toBe(1);
 });
 
-test("computeBlocksShip: major blocks unless deferred", () => {
+test("computeBlocksShip: major blocks even when deferral is suggested", () => {
   expect(computeBlocksShip("major", false)).toBe(1);
-  expect(computeBlocksShip("major", true)).toBe(0);
+  expect(computeBlocksShip("major", true)).toBe(1);
 });
 
 test("computeBlocksShip: minor and nit never block", () => {
@@ -70,4 +70,10 @@ test("computeBlocksShip: nit with deferral_candidate never blocks", () => {
 
 test("validateReviewFindings accepts a clean set (null unit seq allowed)", () => {
   expect(validateReviewFindings([finding({ work_unit_seq: null })], [1])).toEqual([]);
+});
+
+test("plan review mechanically rejects every deferral suggestion", () => {
+  expect(validateReviewFindings([finding({ deferral_candidate: true })], [1], "plan")).toContain(
+    "plan findings cannot be deferral_candidate",
+  );
 });

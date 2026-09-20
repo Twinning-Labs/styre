@@ -40,6 +40,12 @@ import {
 import { getProject } from "../db/repos/project.ts";
 import { enqueue } from "../db/repos/projection-outbox.ts";
 import { insertFinding } from "../db/repos/review-finding.ts";
+import {
+  assertExactFindingIds,
+  findingsForUnit,
+  recordResponses,
+  unresolvedReviewReason,
+} from "../db/repos/review-round.ts";
 import { setNeedsDocs, setTicketTrack } from "../db/repos/ticket.ts";
 import {
   getById as getUnit,
@@ -81,6 +87,7 @@ import { checksFeedback } from "./checks-feedback.ts";
 import { runCheckExecution } from "./checks-run.ts";
 import { ChecksOutputSchema } from "./checks-schema.ts";
 import { classifyPrior } from "./classify-prior.ts";
+import { runCodeReview } from "./code-review.ts";
 import { checksScopeFor, docScope, implementScope, planScope } from "./commit-scope.ts";
 import { classifyDisposition, reconcileScope } from "./completeness.ts";
 import { ComplexityGradeSchema } from "./complexity-schema.ts";
@@ -135,6 +142,7 @@ import {
 } from "./provision.ts";
 import { baselineShaForAc, replayCheckEvidence } from "./replay-harness.ts";
 import { reuseAwareTestCommand } from "./reuse.ts";
+import { validateReviewEvidence } from "./review-evidence.ts";
 import { reviewFeedback } from "./review-feedback.ts";
 import { ReviewOutputSchema, computeBlocksShip, validateReviewFindings } from "./review-schema.ts";
 import type { DispatchDeps } from "./run-dispatch.ts";
@@ -400,12 +408,31 @@ export function renderPrBody(
           }),
         ]
       : [];
+  const accepted = db
+    .query<{ id: number; location: string | null; rationale: string | null }, [number]>(
+      "SELECT id, location, rationale FROM review_finding WHERE ticket_id=? AND status='deferred'",
+    )
+    .all(ticket.id);
+  const acceptedLines = accepted.length
+    ? [
+        "",
+        "Review risks explicitly accepted by the operator:",
+        ...accepted.map((f) => {
+          const event = listEvents(db, ticket.id)
+            .filter((e) => e.reason === "review-risk-accepted")
+            .reverse()
+            .find((e) => JSON.parse(e.payload_json ?? "{}").findingIds?.includes(f.id));
+          const decision = JSON.parse(event?.payload_json ?? "{}");
+          return `- Finding #${f.id} (${f.location ?? "ticket-wide"}): ${f.rationale ?? ""}. Accepted at ${decision.sha ?? "unknown SHA"}: ${decision.rationale ?? "missing acceptance record"}`;
+        }),
+      ]
+    : [];
   const report = buildVerifyReport(db, ticket.id);
   const verifyBlock = renderVerifyReport(report); // "" when the ticket has no ACs
   const verifyLines = verifyBlock === "" ? [] : ["", verifyBlock];
   // Keep the closing assurance only when there is nothing to caveat: no ACs at all (block empty), or a
   // fully clean report. A ⚠/⚪/➖ AC or an advisory failure means "verified" would over-claim (design §3).
-  const keepClosing = verifyBlock === "" || report.allClean;
+  const keepClosing = accepted.length === 0 && (verifyBlock === "" || report.allClean);
   const closingLines = keepClosing
     ? ["", "Verified against the project's checks and passed independent review."]
     : [];
@@ -417,6 +444,7 @@ export function renderPrBody(
     ...verifyLines,
     ...riskLines,
     ...sweepLines,
+    ...acceptedLines,
     ...closingLines,
   ].join("\n");
 }
@@ -534,7 +562,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       throw new Error(`design:review sidecar ${parsed.reason}: ${parsed.detail}`);
     }
     const seqToId = new Map(units.map((u) => [u.seq, u.id]));
-    const errors = validateReviewFindings(parsed.value.findings, [...seqToId.keys()]);
+    const errors = validateReviewFindings(parsed.value.findings, [...seqToId.keys()], "plan");
     if (errors.length > 0) {
       throw new Error(`design:review findings invalid: ${errors.join("; ")}`);
     }
@@ -1116,6 +1144,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     const scoped = scopedRunnersForFiles(deps.profile.components, filesToTouch);
     const runnerCommands = scoped.length > 0 ? scoped : realRunnerCommands(deps.profile.components);
     const implPreHead = worktreeHead(implWorktreePath);
+    const repairFindings = findingsForUnit(ctx.db, ctx.ticket.id, unit.id);
     const result = await runAgentDispatch(
       ctx,
       depsFor(ctx, deps, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS),
@@ -1134,6 +1163,35 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         loopback: isUnitLoopback(ctx, unit.seq),
         runnerCommands,
         commitScope: implementScope,
+        validateOutput: repairFindings.length
+          ? (output, root) => {
+              const parsed = extractSidecar(output, ImplementOutputSchema);
+              if (!parsed.ok)
+                throw new Error(`review response sidecar ${parsed.reason}: ${parsed.detail}`);
+              assertExactFindingIds(
+                parsed.value.review_responses.map((r) => r.finding_id),
+                repairFindings.map((f) => f.id),
+              );
+              for (const r of parsed.value.review_responses)
+                validateReviewEvidence(ctx.db, ctx.ticket.id, root, implPreHead, r.evidence);
+            }
+          : undefined,
+        validateCommittedOutput: repairFindings.length
+          ? (output, root, sha) => {
+              const parsed = extractSidecar(output, ImplementOutputSchema);
+              if (!parsed.ok) throw new Error("validated review response disappeared");
+              // Measurement citations retain their original provenance; source citations must exist in the committed tree.
+              for (const r of parsed.value.review_responses)
+                validateReviewEvidence(
+                  ctx.db,
+                  ctx.ticket.id,
+                  root,
+                  sha,
+                  r.evidence.filter((e) => e.kind !== "measurement"),
+                  true,
+                );
+            }
+          : undefined,
         disposition: ctx.config.implementDisposition,
         // Empty-diff is no longer a dispatch-level failure: the plan gate guarantees non-empty
         // declared files, and the completeness step (under-delivery) is what gates on it now.
@@ -1171,6 +1229,17 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
             `discarded=[${result.discarded.join(", ")}] — re-dispatching`,
         );
       }
+    }
+    if (repairFindings.length) {
+      const parsed = extractSidecar(result.output, ImplementOutputSchema);
+      if (!parsed.ok) throw new Error("validated review response disappeared");
+      recordResponses(
+        ctx.db,
+        ctx.ticket.id,
+        result.dispatchId,
+        result.sha,
+        parsed.value.review_responses,
+      );
     }
     setUnitStatus(ctx.db, unit.id, "verifying");
     // Review F-2: if this dispatch's committed diff touched a dependency manifest, a once-gated
@@ -2060,52 +2129,26 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   });
 
   registry.register("review", async (ctx: HandlerContext) => {
-    const result = await runAgentDispatch(
-      ctx,
-      depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
-      {
-        handlerKey: "review",
-        template: REVIEW_TEMPLATE,
-        vars: reviewVars(ctx.ticket, deps.profile),
-        postcondition: () => {}, // read-only: nothing commits
-      },
-    );
-
-    const parsed = extractSidecar(result.output, ReviewOutputSchema);
-    if (!parsed.ok) {
-      throw new Error(`review sidecar ${parsed.reason}: ${parsed.detail}`);
-    }
-    const units = listUnits(ctx.db, ctx.ticket.id);
-    const seqToId = new Map(units.map((u) => [u.seq, u.id]));
-    const errors = validateReviewFindings(parsed.value.findings, [...seqToId.keys()]);
-    if (errors.length > 0) {
-      throw new Error(`review findings invalid: ${errors.join("; ")}`);
-    }
-
-    let blocking = 0;
-    for (const f of parsed.value.findings) {
-      const blocksShip = computeBlocksShip(f.severity, f.deferral_candidate);
-      if (blocksShip === 1) {
-        blocking += 1;
-      }
-      insertFinding(ctx.db, {
-        ticketId: ctx.ticket.id,
-        reviewKind: "code",
-        dispatchId: result.dispatchId,
-        workUnitId: f.work_unit_seq === null ? null : (seqToId.get(f.work_unit_seq) ?? null),
-        severity: f.severity,
-        category: f.category,
-        factorsJson: f.factors === null ? null : JSON.stringify(f.factors),
-        deferralCandidate: f.deferral_candidate ? 1 : 0,
-        blocksShip,
-        location: f.location,
-        rationale: f.rationale,
-      });
-    }
-    return { findings: parsed.value.findings.length, blocking };
+    const dispatchDeps = depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS);
+    ensureWorktree(dispatchDeps.repoPath, dispatchDeps.branch, dispatchDeps.worktreePath);
+    return runCodeReview(ctx, {
+      profile: deps.profile,
+      worktreePath: dispatchDeps.worktreePath,
+      timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
+      dispatch: (context) =>
+        runAgentDispatch(ctx, dispatchDeps, {
+          handlerKey: "review",
+          template: REVIEW_TEMPLATE,
+          vars: { ...reviewVars(ctx.ticket, deps.profile), review_context: context },
+          readOnly: true,
+          postcondition: () => {},
+        }),
+    });
   });
 
   registry.register("merge:push", (ctx: HandlerContext) => {
+    const unresolved = unresolvedReviewReason(ctx.db, ctx.ticket.id);
+    if (unresolved) throw new StepPrerequisiteError(unresolved);
     const branch = branchNameFor(ctx.ticket);
     const sha = getLatestForTicket(ctx.db, ctx.ticket.id)?.branch_head_sha;
     if (!sha) {
@@ -2122,6 +2165,8 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   });
 
   registry.register("merge:pr-ensure", (ctx: HandlerContext) => {
+    const unresolved = unresolvedReviewReason(ctx.db, ctx.ticket.id);
+    if (unresolved) throw new StepPrerequisiteError(unresolved);
     const branch = branchNameFor(ctx.ticket);
     const base = deps.profile.defaultBranch;
     const title = `${ctx.ticket.ident}${ctx.ticket.title ? ` ${ctx.ticket.title}` : ""}`;

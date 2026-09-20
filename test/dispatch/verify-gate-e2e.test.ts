@@ -13,6 +13,7 @@ import {
   insertSignal,
   listByTicket as listSignals,
 } from "../../src/db/repos/ground-truth-signal.ts";
+import { requiredCodeFindings } from "../../src/db/repos/review-round.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
 import { getById as getUnit, insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
@@ -373,16 +374,40 @@ test("a code-review loopback that moves HEAD re-runs verify:checks-gate (reset s
   }); // pending: drives the REAL implement pipeline both before and after the loopback
   seedGatedAssertionCheck(db, ticketId, head(repo));
 
+  const reviewOutput = (raw: string) => {
+    const output = JSON.parse(raw.split("```styre-sidecar")[1]?.split("```")[0] ?? "null");
+    output.resolutions = requiredCodeFindings(db, ticketId).map((f) => ({
+      finding_id: f.id,
+      disposition: "fixed",
+      rationale: "Independently inspected the repaired source",
+      evidence: [{ kind: "source", path: "note-1.ts", line: 1 }],
+    }));
+    return `\`\`\`styre-sidecar\n${JSON.stringify(output)}\n\`\`\``;
+  };
   let reviewAttempt = 0;
   let noteN = 0;
   const runner = new FakeAgentRunner((input) => {
     if (input.prompt.includes("independent code reviewer")) {
       reviewAttempt += 1;
-      return { ...ok, stdout: reviewAttempt === 1 ? blockingCodeFinding : cleanFindings };
+      return {
+        ...ok,
+        stdout: reviewOutput(reviewAttempt === 1 ? blockingCodeFinding : cleanFindings),
+      };
     }
     noteN += 1;
     writeFileSync(join(input.cwd, `note-${noteN}.ts`), "export const x = 1;\n"); // never touches checks/
-    return { ...ok, stdout: `{}\n\`\`\`styre-sidecar\n{"new_files":["note-${noteN}.ts"]}\n\`\`\`` };
+    return {
+      ...ok,
+      stdout: `\`\`\`styre-sidecar\n${JSON.stringify({
+        new_files: [`note-${noteN}.ts`],
+        review_responses: requiredCodeFindings(db, ticketId).map((f) => ({
+          finding_id: f.id,
+          action: "repaired",
+          rationale: "Updated the implementation",
+          evidence: [{ kind: "source", path: `note-${noteN}.ts`, line: 1 }],
+        })),
+      })}\n\`\`\``,
+    };
   });
   const registry = buildDispatchRegistry({
     runner,

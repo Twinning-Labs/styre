@@ -19,6 +19,11 @@ import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
 import type { ProjectorPorts } from "../daemon/projector.ts";
 import { realRecoverDeps, recover } from "../daemon/recover.ts";
+import {
+  type ReviewResumePlan,
+  applyReviewResume,
+  planReviewResume,
+} from "../daemon/review-resume.ts";
 import { driveToTerminal, formatRunSummary } from "../daemon/run-ticket.ts";
 import type { PauseReason, RunOutcome } from "../daemon/run-ticket.ts";
 import type { StepRegistry } from "../daemon/step-registry.ts";
@@ -163,6 +168,9 @@ function onlyTicketId(db: Database): number {
 export interface ResumeArgs {
   resume: string; // ticket ident
   acceptHead?: boolean;
+  reviewAction?: string;
+  reviewFindings?: string;
+  reviewReason?: string;
   inspect?: boolean;
 }
 
@@ -277,6 +285,22 @@ export async function resumeRun(
       return;
     }
 
+    let reviewPlan: ReviewResumePlan;
+    try {
+      reviewPlan = planReviewResume(db, ticketId, current, moved, {
+        action: args.reviewAction,
+        findings: args.reviewFindings,
+        reason: args.reviewReason,
+      });
+    } catch (error) {
+      process.stderr.write(
+        `resume refused: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      db.close();
+      process.exitCode = 65;
+      return;
+    }
+
     // Fail fast (no retry burn) if the configured agent CLI is missing or below its supported
     // version — resume dispatches the CLI too (resolveAgentRunner below), and a resume often runs
     // later / on another machine where the CLI may have changed since the park (ENG-326). Placed
@@ -329,32 +353,47 @@ export async function resumeRun(
     // `provision` step installed are gone with it. Re-arm provision so it re-runs before the next
     // verify. In-place: the repo root is never wiped, so the deps persist — resetting here would
     // needlessly discard the reuse payoff (re-running provision for no reason).
-    if (!inPlace) {
-      resetProvisionForResume(db, ticketId);
+    if (
+      reviewPlan.kind !== "none" &&
+      branchHeadSha(project.target_repo, branch) !== reviewPlan.head
+    ) {
+      process.stderr.write(
+        "resume refused: branch HEAD changed while preparing review resume; inspect and retry\n",
+      );
+      db.close();
+      process.exitCode = 65;
+      return;
     }
-
-    // Consume any pending human_resume BEFORE driveToTerminal — else hasPendingHumanResume
-    // (run-ticket.ts:113) fires on the first tick and instantly re-pauses. Budget/interrupted
-    // checkpoints have no such signal and fall through untouched. (No reset-time gate — resetAt is
-    // free text, see the plan header; a still-out-of-budget run simply re-pauses.)
-    for (const s of listPending(db, ticketId).filter((s) => s.signal_type === "human_resume")) {
-      markConsumed(db, s.id);
-    }
-
-    setTicketStatus(db, ticketId, "active");
     let resumeContext: { stepKey: string; transcript: string } | undefined;
-    if (moved && args.acceptHead) {
-      appendEvent(db, { ticketId, kind: "resumed", reason: `accept-head:${current}` });
-      // carryover dropped: the operator changed the base, so the transcript is untrustworthy
-    } else {
-      if (parkedStep && existsSync(join(dir, "transcript.json"))) {
-        const tj = JSON.parse(readFileSync(join(dir, "transcript.json"), "utf8")) as {
-          transcript: string;
-        };
-        resumeContext = { stepKey: parkedStep.step_key, transcript: tj.transcript };
+    db.transaction(() => {
+      if (!inPlace) {
+        resetProvisionForResume(db, ticketId);
       }
-      appendEvent(db, { ticketId, kind: "resumed", reason: "resume" });
-    }
+
+      // Consume any pending human_resume BEFORE driveToTerminal — else hasPendingHumanResume
+      // (run-ticket.ts:113) fires on the first tick and instantly re-pauses. Budget/interrupted
+      // checkpoints have no such signal and fall through untouched. (No reset-time gate — resetAt is
+      // free text, see the plan header; a still-out-of-budget run simply re-pauses.)
+      for (const s of listPending(db, ticketId).filter((s) => s.signal_type === "human_resume")) {
+        markConsumed(db, s.id);
+      }
+
+      setTicketStatus(db, ticketId, "active");
+      if (moved && args.acceptHead) {
+        appendEvent(db, { ticketId, kind: "resumed", reason: `accept-head:${current}` });
+        // carryover dropped: the operator changed the base, so the transcript is untrustworthy
+      } else {
+        if (parkedStep && existsSync(join(dir, "transcript.json"))) {
+          const tj = JSON.parse(readFileSync(join(dir, "transcript.json"), "utf8")) as {
+            transcript: string;
+          };
+          resumeContext = { stepKey: parkedStep.step_key, transcript: tj.transcript };
+        }
+        appendEvent(db, { ticketId, kind: "resumed", reason: "resume" });
+      }
+
+      applyReviewResume(db, ticketId, runtimeConfig, reviewPlan);
+    })();
 
     recover(db, realRecoverDeps()); // resets the interrupted 'running' step → pending
 

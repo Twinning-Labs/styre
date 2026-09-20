@@ -43,12 +43,23 @@ resume it with `--resume <ident>`, or discard it and start over with `styre run 
 | `--db <path>` | string | a fresh per-run temp DB (`os.tmpdir()/styre-run-*/run.db`) | SQLite state-of-truth for this run. |
 | `--resume <ident>` | string | — | Resume a paused run by ticket ident. |
 | `--accept-head` | boolean | off | On resume, proceed even though the branch HEAD moved (drops carried-forward context). |
+| `--review-action` | `retry` or `accept-risk` | retry semantics | Resume an unresolved review; plain resume never accepts risk. Requires `--resume`. |
+| `--review-findings` | comma-separated positive IDs | — | With `accept-risk`, list exactly all current nominated major finding IDs. |
+| `--review-reason` | nonblank text | — | With `accept-risk`, record why shipping these findings is acceptable at the reviewed SHA. |
 | `--inspect` | boolean | off | Print resume diagnostics to stderr and exit `0` without running. |
 | `--in-place` | boolean | off | Work on a branch in the **repo root** instead of an isolated worktree. Fresh-run only (on resume it is derived from the DB). Requires a disposable, single-use checkout — see below. |
 | `--fresh` | boolean | off | Discard an existing checkpoint for this ticket and reconcile the worktree, then start over. Fresh-run only. |
 
 No flag declares a default in citty; booleans are `undefined` when absent and coerced at the use
 site. There are no short aliases.
+
+Review resume decisions are validated before signal consumption or worktree reconciliation.
+Plain resume and `--review-action retry` preserve unresolved findings and repair limits. An
+unchanged repeated finding can immediately escalate again; retry is not a waiver. Explicit
+`accept-risk` requires a succeeded current code review, unchanged HEAD, exactly all eligible
+major IDs and a reason; plan and critical findings cannot be deferred. Accepted risks appear in
+the PR body. `--accept-head` cannot waive review: changed code re-enters implementation and
+verification. Invalid review decisions exit `65`. See [review-repair.md](review-repair.md).
 
 ### `--in-place` and the `.styre-disposable` marker
 

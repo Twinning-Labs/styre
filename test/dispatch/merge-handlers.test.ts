@@ -6,10 +6,12 @@ import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
+import { appendEvent } from "../../src/db/repos/event-log.ts";
 import { listPending } from "../../src/db/repos/projection-outbox.ts";
+import { insertFinding, setStatus } from "../../src/db/repos/review-finding.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { getByKey, insertPending } from "../../src/db/repos/workflow-step.ts";
-import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
+import { buildDispatchRegistry, renderPrBody } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
@@ -75,4 +77,34 @@ test("released:project runs (best-effort worktree cleanup) and succeeds", async 
   const step = getByKey(db, ticketId, "released:project");
   db.close();
   expect(step?.status).toBe("succeeded"); // cleanup is best-effort; the step doesn't fail if the worktree is absent
+});
+
+test("PR body discloses accepted findings and does not claim an unqualified review pass", () => {
+  const { db, ticketId } = makeTestDb();
+  const finding = insertFinding(db, {
+    ticketId,
+    reviewKind: "code",
+    severity: "major",
+    deferralCandidate: 1,
+    blocksShip: 1,
+    location: "module.ts:5",
+    rationale: "known limitation",
+  });
+  setStatus(db, finding.id, "deferred");
+  appendEvent(db, {
+    ticketId,
+    kind: "note",
+    reason: "review-risk-accepted",
+    payload: {
+      sha: "reviewed-sha",
+      findingIds: [finding.id],
+      rationale: "bounded impact accepted",
+    },
+  });
+  const body = renderPrBody(db, { id: ticketId, ident: "ENG-1", title: null });
+  expect(body).toContain(`Finding #${finding.id}`);
+  expect(body).toContain("reviewed-sha");
+  expect(body).toContain("bounded impact accepted");
+  expect(body).not.toContain("passed independent review");
+  db.close();
 });

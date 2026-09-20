@@ -155,7 +155,7 @@ test("clean review (no findings) advances ticket to merge with no review_finding
 
 // ─── Flow 2: Blocking code finding → re-code → clean → merge ─────────────────
 
-test("blocking code finding loops back to implement; clean second review drives to merge via dispatch-scoping", async () => {
+test("blocking code finding loops back to implement; explicitly resolved second review drives to merge", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
@@ -168,7 +168,20 @@ test("blocking code finding loops back to implement; clean second review drives 
     return {
       completed: true,
       exitCode: 0,
-      stdout: reviewAttempt === 1 ? blockingCodeFinding : cleanFindings,
+      stdout:
+        reviewAttempt === 1
+          ? blockingCodeFinding
+          : sidecar(
+              JSON.stringify({
+                findings: [],
+                resolutions: listOpenByTicket(db, ticketId).map((f) => ({
+                  finding_id: f.id,
+                  disposition: "fixed",
+                  rationale: "Checked the resulting source",
+                  evidence: [{ kind: "source", path: "README.md", line: 1 }],
+                })),
+              }),
+            ),
       stderr: "",
       timedOut: false,
       costUsd: null,
@@ -188,8 +201,7 @@ test("blocking code finding loops back to implement; clean second review drives 
   expect(reviewStepAfterLoopback?.status).toBe("pending");
 
   // The round-1 finding stays 'open' — findings are NOT mutated on loopback.
-  // Round isolation is guaranteed by dispatch-scoping: the next review reads only the
-  // latest dispatch's findings via latestReviewDispatchId + listByDispatch.
+  // The next review must explicitly assess this stable finding ID.
   const openAfterLoopback = listOpenByTicket(db, ticketId);
   expect(openAfterLoopback.length).toBe(1); // finding remains open after loopback
   expect(openAfterLoopback[0]?.status).toBe("open");
@@ -200,8 +212,7 @@ test("blocking code finding loops back to implement; clean second review drives 
   db.query("UPDATE work_unit SET status = 'verified' WHERE ticket_id = ?").run(ticketId);
 
   // Round 2: drive the review step with clean findings (0 findings in new dispatch),
-  // then catch the merge:push throw. The verdict reads only the round-2 dispatch → 0 findings
-  // → clean → advances to merge. The round-1 finding on the older dispatch is never re-read.
+  // and an explicit resolution of the prior finding; only then can merge proceed.
   for (let i = 0; i < 8; i++) {
     const t = getTicket(db, ticketId);
     if (!t || t.stage !== "review") break;
@@ -222,15 +233,14 @@ test("blocking code finding loops back to implement; clean second review drives 
 
   expect(getTicket(db, ticketId)?.stage).toBe("merge");
 
-  // Total finding count: 1 from round 1 (still open, on its older dispatch).
-  // Round 2 filed 0 findings. Dispatch-scoping means the verdict saw 0 → clean.
+  // Round 2 closes the prior finding with independent evidence and provenance.
   const allFindings = db
     .query<{ status: string }, [number]>(
       "SELECT status FROM review_finding WHERE ticket_id = ? ORDER BY id",
     )
     .all(ticketId);
   expect(allFindings.length).toBe(1);
-  expect(allFindings[0]?.status).toBe("open"); // round-1 finding untouched, stays open
+  expect(allFindings[0]?.status).toBe("fixed");
 
   db.close();
 });
@@ -304,9 +314,9 @@ test("blocking plan-defect with onPlanDefect=redesign routes to design stage wit
   db.close();
 });
 
-// ─── Flow 5: Major + deferral_candidate → escalated ─────────────────────────
+// ─── Flow 5: Major + deferral_candidate → investigate ─────────────────────────
 
-test("major finding with deferral_candidate=true escalates ticket to waiting with human_resume pending", async () => {
+test("major finding with deferral_candidate=true routes to implementation before asking a human", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
@@ -325,20 +335,19 @@ test("major finding with deferral_candidate=true escalates ticket to waiting wit
   const registry = registryFor(repo, runner);
 
   const outcome = await advanceOneStep(db, ticketId, registry);
-  expect(outcome.kind).toBe("escalated");
+  expect(outcome.kind).toBe("loopback");
 
   const ticket = getTicket(db, ticketId);
-  expect(ticket?.status).toBe("waiting");
-  expect(ticket?.stage).toBe("review");
+  expect(ticket?.status).toBe("active");
+  expect(ticket?.stage).toBe("implement");
 
   const signals = listPending(db, ticketId);
-  expect(signals.some((s) => s.signal_type === "human_resume")).toBe(true);
+  expect(signals.some((s) => s.signal_type === "human_resume")).toBe(false);
 
-  // The finding stays 'open': the deferral path escalates the ticket to waiting for a human
-  // deferral decision but does NOT supersede the finding (that decision belongs to the operator).
+  // A deferral suggestion neither closes the finding nor supplies human acceptance.
   const open = listOpenByTicket(db, ticketId);
   expect(open.length).toBe(1);
-  expect(open[0]?.blocks_ship).toBe(0);
+  expect(open[0]?.blocks_ship).toBe(1);
   expect(open[0]?.deferral_candidate).toBe(1);
 
   db.close();

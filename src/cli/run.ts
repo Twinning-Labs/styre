@@ -71,6 +71,9 @@ export interface RunArgs {
   db?: string;
   resume?: string;
   "accept-head"?: boolean;
+  "review-action"?: string;
+  "review-findings"?: string;
+  "review-reason"?: string;
   inspect?: boolean;
   "in-place"?: boolean;
   /** Discard an existing checkpoint instead of refusing (ENG-382 Task 4: refuse-guard escape only —
@@ -103,6 +106,18 @@ export const runCommand = defineCommand({
       type: "boolean",
       description: "Resume even though the branch HEAD moved (drops carryover)",
     },
+    "review-action": {
+      type: "string",
+      description: "On resume: retry review (default) or accept-risk",
+    },
+    "review-findings": {
+      type: "string",
+      description: "Exact comma-separated finding IDs for risk acceptance",
+    },
+    "review-reason": {
+      type: "string",
+      description: "Reason for explicitly accepting the specified review risks",
+    },
     inspect: { type: "boolean", description: "Print resume diagnostics and exit without running" },
     "in-place": {
       type: "boolean",
@@ -134,6 +149,16 @@ export async function runImpl(
     // ENG-435: loaded ALREADY NARROWED by component role. There is no "apply the gate here"
     // step any more, and therefore no ordering for a future consumer to get on the wrong side
     // of — see `loadRunProfile` for why an ordering guard could not hold this.
+    if (
+      !args.resume &&
+      [args["review-action"], args["review-findings"], args["review-reason"]].some(
+        (v) => v !== undefined,
+      )
+    )
+      throw usageError(
+        "review actions require --resume",
+        "Use --resume <ticket> with a review action.",
+      );
     const loaded = loadRunProfile({ profile: args.profile, slug: args.slug });
     let profile: Profile = loaded.profile;
     const slug: string = loaded.slug;
@@ -185,7 +210,14 @@ export async function runImpl(
     if (args.resume && args.resume.length > 0) {
       const { resumeRun } = await import("./park.ts");
       await resumeRun(
-        { resume: args.resume, acceptHead: args["accept-head"], inspect: args.inspect },
+        {
+          resume: args.resume,
+          acceptHead: args["accept-head"],
+          inspect: args.inspect,
+          reviewAction: args["review-action"],
+          reviewFindings: args["review-findings"],
+          reviewReason: args["review-reason"],
+        },
         profile,
         runtimeConfig,
         undefined,

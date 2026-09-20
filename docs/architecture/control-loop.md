@@ -543,7 +543,7 @@ and the gate has not passed at the branch HEAD, the resolver serves this cluster
     `plan-defect` is governed by the **`onPlanDefect` config knob** — default **`escalate`** (hand the
     plan defect to a human), or **`redesign`** to loop back to **design** (V3). Every other blocking
     category → **implement (V1)**. **Critical-floor: critical always blocks** (non-deferrable).
-  - a `major` tagged `deferral_candidate` → **escalate that finding to the human** (V-defer).
+  - a `major` tagged `deferral_candidate` remains blocking and follows the same repair route. Only explicit operator acceptance can defer it (V-def).
   - else → **ship-ready**, transition `review → merge`.
 - **No deferral dictionary (`[CL-NODEFER]`).** At cutover the threshold is fixed (major+ blocks);
   deferral ("this major is OK to ship *here*") is a *judgment that varies by project* — a
@@ -552,6 +552,7 @@ and the gate has not passed at the branch HEAD, the resolver serves this cluster
   Nothing learns automatically at cutover.
 - **Tools:** `Read`, `Grep`, `Glob` (+ read-only git); `file_finding`, `complete_review`. ❌ no
   `Write`/`Edit`, no execution, no outward tools.
+- **Repair/dispute contract:** every unresolved major/critical finding is carried into the repair prompt by ID. The author returns `repaired` or `disputed` with rationale and citations. A separate read-only reviewer must resolve every prior ID as `fixed`, `invalid`, or `unresolved`; missing, duplicate, or foreign IDs fail the review. Closure and new findings commit atomically with the successful review step. See [review-repair.md](review-repair.md) for evidence, legacy checkpoint, probe, and resume contracts.
 - **Failure → route:** V1–V6 in §8.
 
 ### Merge (runner; external effects via the outbox)
@@ -799,10 +800,10 @@ discarded with `--fresh` — are in execution-model.md.)*
 | **Docs** ||||||
 | C1 | docs:revise | claude death | retry | — | K_retry → escalate |
 | **Code review** ||||||
-| V1 | S5 | blocking finding, **code** category (runner `blocks_ship`: critical-floor, or major-not-deferred) | → S2b, targeted | unit | K_distinct → escalate |
-| V2 | S5 | reviewer judges scope expansion **unjustified** → files a `scope` finding ² | = V1 (justify or revert) | unit | K_distinct → escalate |
+| V1 | S5 | blocking finding, **code** category (runner `blocks_ship`: critical or major, including suggested deferrals) | → S2b, targeted | unit | 3 review-origin loopbacks per ticket; consecutive identical findings escalate earlier |
+| V2 | S5 | reviewer judges scope expansion **unjustified** → files a `scope` finding ² | = V1 (justify or revert) | unit | 3 review-origin loopbacks per ticket; consecutive identical findings escalate earlier |
 | V3 | S5 | blocking finding, **plan-defect** category (impl correct, plan wrong) | per `onPlanDefect`: **`escalate`** (default) or **`redesign`** → S1a re-design | plan | attempt cap → escalate |
-| V-def | S5 | a `major` tagged `deferral_candidate` | escalate that finding to the human | — | — |
+| V-def | paused S5 | operator explicitly accepts all current nominated major IDs at unchanged reviewed HEAD, with rationale | mark deferred and audit the decision; disclose in PR | ticket | critical/plan findings cannot be accepted |
 | V4 | S5 | reviewer death / transport (dispatch didn't complete) | retry dispatch | — | K_retry → escalate |
 
 > ENG-164: a transport death is now classified by cause. session-limit / out-of-credits →
@@ -824,7 +825,7 @@ discarded with `--fresh` — are in execution-model.md.)*
 | **Cross-cutting terminators** ||||||
 | B0 | any step | `attempt >= 3` (`DEFAULT_MAX_ATTEMPTS`) | escalate (resumable wait) | — | **the implemented bound** |
 | B0′ | any loop | same failure signature vs the immediately-previous loopback | escalate fast | — | consecutive-identical guard |
-| ~~B1/B2/B3~~ | — | ~~per-loop distinct cap / cross-loop 3-of-20 / spend-wall-clock ceiling~~ — **not implemented** (deferred; no code reads `dispatch.cost_usd` for control). The live bounds are B0/B0′ plus the per-gate round caps (G-rows) and the 200-tick / 3-idle run caps. | — | — |
+| ~~B1/B2/B3~~ | — | ~~per-loop distinct cap / cross-loop 3-of-20 / spend-wall-clock ceiling~~ — **not implemented** (deferred; no code reads `dispatch.cost_usd` for control). The live bounds are B0/B0′, 3 review-origin loopbacks per ticket, 3 review verification requests per ticket, plus the per-gate round caps (G-rows) and the 200-tick / 3-idle run caps. | — | — |
 
 ² **Scope is reviewer-judged (A3):** the reviewer first decides if an expansion is **benign/justified**
 (→ files *no* finding, nothing loops back) or **unjustified** (→ a `scope` finding, then exactly V1).
