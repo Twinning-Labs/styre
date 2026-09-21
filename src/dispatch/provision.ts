@@ -58,7 +58,9 @@ export function planProvision(components: Component[], worktreePath: string): Pr
     if (!c.prepare || c.testEnvironment?.policy === "existing") continue;
     const cwd = join(
       worktreePath,
-      c.testEnvironment?.adapter === "node" ? c.testEnvironment.workspaceDir : (c.dir ?? ""),
+      c.testEnvironment && ["node", "karma"].includes(c.testEnvironment.adapter)
+        ? c.testEnvironment.workspaceDir
+        : (c.dir ?? ""),
     );
     if (!c.testEnvironment && isComponentReady(c.kind, cwd)) continue;
     if (out.some((a) => a.cwd === cwd && a.command === c.prepare)) continue;

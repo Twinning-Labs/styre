@@ -79,6 +79,8 @@ export async function runCheckExecution(p: {
   if (p.plan.environmentFingerprint && !component?.testEnvironment)
     return invalid("Qualified execution plan requires its component environment contract");
   if (component?.testEnvironment) {
+    if (component.testEnvironment.adapter === "karma")
+      return invalid("Karma supports existing suites only; authored checks are unsupported");
     if (
       component.testAction?.launcher !== p.plan.launcher ||
       component.testAction?.framework !== p.plan.framework ||

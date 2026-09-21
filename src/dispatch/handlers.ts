@@ -149,7 +149,7 @@ import { ReviewOutputSchema, computeBlocksShip, validateReviewFindings } from ".
 import type { DispatchDeps } from "./run-dispatch.ts";
 import { runAgentDispatch } from "./run-dispatch.ts";
 import { extractSidecar } from "./sidecar.ts";
-import { observeSuiteCommand } from "./suite-observation.ts";
+import { observeSuiteCommand, suiteResult } from "./suite-observation.ts";
 import { isTestFile } from "./test-file.ts";
 import { assertTestTargets } from "./test-target.ts";
 import { combineTrack, sizeTrack } from "./track-sizing.ts";
@@ -693,6 +693,10 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       try {
         requiredOwners.add(checkOwner(deps.profile.components, file).name);
       } catch {
+        if (deps.profile.components.some((c) => c.testEnvironment?.adapter === "karma"))
+          throw new StepPrerequisiteError(
+            `Behavioral file ${file} has no unambiguous check owner; resolve scope before authoring checks in a mixed-capability project.`,
+          );
         /* unresolved plan scope is handled by the authored-file ownership check */
       }
     }
@@ -1635,7 +1639,16 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     if (realImpacted.length > 0) {
       const toRun = realImpacted.flatMap((c) => {
         const command = commandFor(c, checkType);
-        return command === undefined ? [] : [{ component: c.name, command, dir: c.dir }];
+        return command === undefined
+          ? []
+          : [
+              {
+                component: c.name,
+                command,
+                dir: c.dir,
+                environment: checkType === "test" ? c.testEnvironment : undefined,
+              },
+            ];
       });
       const unavailable = realImpacted.filter((c) => isUnavailable(c, checkType));
       const absent = realImpacted.filter(
@@ -1688,10 +1701,11 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       }
 
       // (a) run each realImpacted component's real command; aggregate.
-      for (const { component, command, dir } of toRun) {
+      for (const { component, command, dir, environment } of toRun) {
         lastCommand = command;
         const run = await observeSuiteCommand({
           command,
+          environment,
           sha: worktreeHead(worktreePath),
           onSpawn: (pid) => setPid(ctx.db, ctx.step.id, -pid),
           onSettled: () => setPid(ctx.db, ctx.step.id, null),
@@ -1705,8 +1719,8 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           exitCode: run.exitCode,
           timedOut: run.timedOut,
         });
-        if (run.exitCode !== 0) {
-          result = run.timedOut || run.exitCode === null ? "error" : "fail";
+        if (suiteResult(run) !== "pass") {
+          result = suiteResult(run);
           lastStderr = run.stderr.slice(0, 2000);
           break;
         }
@@ -1908,12 +1922,24 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     // Inferring it later from the label cannot work: repoCommands names are free text authored by
     // the setup agent (its own prompt offers "integration" as the example), so a suffix test for
     // ":test" silently misses a repo whose only suite is a repo command under another name.
-    const jobs: Array<{ label: string; command: string; dir?: string; kind: RanJob["kind"] }> = [];
+    const jobs: Array<{
+      label: string;
+      command: string;
+      dir?: string;
+      kind: RanJob["kind"];
+      environment?: import("../testing/environment-schema.ts").TestEnvironmentPlan;
+    }> = [];
     for (const c of deps.profile.components) {
       for (const key of ["build", "test"] as const) {
         const cmd = commandFor(c, key);
         if (!cmd) continue;
-        jobs.push({ label: `${c.name}:${key}`, command: cmd, dir: c.dir, kind: key });
+        jobs.push({
+          label: `${c.name}:${key}`,
+          command: cmd,
+          dir: c.dir,
+          kind: key,
+          environment: key === "test" ? c.testEnvironment : undefined,
+        });
       }
     }
     for (const [name, cmd] of Object.entries(deps.profile.repoCommands)) {
@@ -1932,10 +1958,11 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     const ran: RanJob[] = [];
     let result: "pass" | "fail" | "error" = "pass";
     let lastCommand = "";
-    for (const { label, command, dir, kind } of jobs) {
+    for (const { label, command, dir, kind, environment } of jobs) {
       lastCommand = command;
       const run = await observeSuiteCommand({
         command,
+        environment,
         sha: worktreeHead(worktreePath),
         onSpawn: (pid) => setPid(ctx.db, ctx.step.id, -pid),
         onSettled: () => setPid(ctx.db, ctx.step.id, null),
@@ -1943,8 +1970,8 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
       });
       ran.push({ label, kind, exitCode: run.exitCode, timedOut: run.timedOut, observation: run });
-      if (run.exitCode !== 0) {
-        result = run.timedOut || run.exitCode === null ? "error" : "fail";
+      if (suiteResult(run) !== "pass") {
+        result = suiteResult(run);
         break;
       }
     }
@@ -1982,6 +2009,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           reason: baseline?.reason ?? "No baseline observation available.",
         },
         ...(baseline ? { baseline } : {}),
+        requiredSuites: jobs.filter((j) => j.environment?.adapter === "karma").map((j) => j.label),
         notExecuted: jobs.slice(ran.length).map(({ label }) => label),
       }),
     });

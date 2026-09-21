@@ -835,3 +835,75 @@ test("an earlier green AC round cannot satisfy the floor at a changed untested h
   expect(decision).toMatchObject({ kind: "escalate", signature: "evidence-floor" });
   db.close();
 });
+
+test("a required browser suite cannot be excused by a green Python job", async () => {
+  const { db, ticketId } = await atTheTransition();
+  integration(db, ticketId, "SHIP", "fail", ranJobs(["python:test", "test", 0]), {
+    requiredSuites: ["browser:test"],
+  });
+  expect(nextStepKey(db, ticketId)).toMatchObject({ signature: "evidence-floor" });
+  db.close();
+});
+
+for (const passed of [true, false])
+  test(`required browser suite documentation carry preserves ${passed ? "pass" : "failure"}`, async () => {
+    const { db, ticketId } = await atTheTransition("PRE");
+    const jobs = [
+      {
+        label: "browser:test",
+        kind: "test" as const,
+        exitCode: passed ? 0 : 1,
+        timedOut: false,
+        observation: {
+          version: 1 as const,
+          sha: "PRE",
+          command: "npm test",
+          cwd: "/repo",
+          outcome: passed ? ("completed-zero" as const) : ("completed-nonzero" as const),
+          exitCode: passed ? 0 : 1,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          outputTruncated: false,
+          karma: {
+            verdict: passed ? ("pass" as const) : ("fail" as const),
+            completion: {
+              version: 1 as const,
+              browsers: [
+                {
+                  id: "1",
+                  name: "Firefox",
+                  completed: true,
+                  runtimeErrors: 0,
+                  success: passed ? 1 : 0,
+                  failed: passed ? 0 : 1,
+                  skipped: 0,
+                  total: 1,
+                  error: false,
+                  disconnected: false,
+                },
+              ],
+              success: passed ? 1 : 0,
+              failed: passed ? 0 : 1,
+              exitCode: passed ? 0 : 1,
+              error: false,
+              disconnected: false,
+            },
+          },
+        },
+      },
+    ];
+    insertSignal(db, {
+      ticketId,
+      signalType: "integration",
+      result: passed ? "pass" : "fail",
+      branchHeadSha: "PRE",
+      detail: suiteDetail(jobs, { advisory: true, requiredSuites: ["browser:test"] }),
+    });
+    await succeed(db, ticketId, "docs:revise");
+    const d = insertDispatch(db, { ticketId, dispatchId: "docs", seq: nextSeq(db, ticketId) });
+    completeDispatch(db, d.id, { outcome: "clean-success", branchHeadSha: "DOCS" });
+    carryVerifiedVerdictForward(db, ticketId, "DOCS");
+    expect(nextStepKey(db, ticketId).kind).toBe(passed ? "advance" : "escalate");
+    db.close();
+  });

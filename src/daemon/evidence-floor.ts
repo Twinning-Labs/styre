@@ -11,6 +11,7 @@ import {
   postImplementAtSha,
   reauthorProvenance,
 } from "../db/repos/ground-truth-signal.ts";
+import { KarmaCompletionSchema, karmaVerdict } from "../testing/karma.ts";
 
 export type FloorVerdict = { holds: true } | { holds: false; reason: string };
 
@@ -191,6 +192,66 @@ function newestUnitSweepPassed(signals: ReturnType<typeof listSignals>): boolean
  */
 export function evidenceFloor(db: Database, ticketId: number): FloorVerdict {
   const headSha = getLatestForTicket(db, ticketId)?.branch_head_sha ?? null;
+  // Suite-only components cannot be excused by a different component's passing authored check.
+  const integration = listSignals(db, ticketId)
+    .filter(
+      (s) =>
+        s.signal_type === "integration" && s.work_unit_id === null && s.branch_head_sha === headSha,
+    )
+    .at(-1);
+  if (integration?.detail_json) {
+    try {
+      const detail = JSON.parse(integration.detail_json);
+      if (Array.isArray(detail?.requiredSuites)) {
+        let measuredSha = headSha;
+        if (detail.carriedForward === true && typeof detail.carriedFrom === "string") {
+          const source = listSignals(db, ticketId)
+            .filter(
+              (s) =>
+                s.signal_type === "integration" &&
+                s.work_unit_id === null &&
+                s.branch_head_sha === detail.carriedFrom,
+            )
+            .at(-1);
+          const sourceDetail = JSON.parse(source?.detail_json ?? "null");
+          if (
+            !sourceDetail ||
+            sourceDetail.carriedForward === true ||
+            JSON.stringify(sourceDetail.ran) !== JSON.stringify(detail.ran) ||
+            JSON.stringify(sourceDetail.requiredSuites) !== JSON.stringify(detail.requiredSuites)
+          )
+            return {
+              holds: false,
+              reason: "Required browser suite has no valid one-hop documentation carry provenance.",
+            };
+          measuredSha = detail.carriedFrom;
+        }
+        for (const label of detail.requiredSuites) {
+          const job = Array.isArray(detail.ran)
+            ? detail.ran.find((j: RanJob) => j.label === label)
+            : undefined;
+          const completion = KarmaCompletionSchema.safeParse(job?.observation?.karma?.completion);
+          if (
+            !measuredSha ||
+            !job ||
+            !completion.success ||
+            karmaVerdict(completion.data, job.exitCode, completion.data.browsers.length) !==
+              "pass" ||
+            job.observation?.sha !== measuredSha ||
+            job.observation?.karma?.verdict !== "pass" ||
+            job.exitCode !== 0 ||
+            job.timedOut
+          )
+            return {
+              holds: false,
+              reason: `Required browser suite ${label} has no complete passing evidence at the current SHA.`,
+            };
+        }
+      }
+    } catch {
+      return { holds: false, reason: "Malformed integration evidence for required suites." };
+    }
+  }
   if (executedTestEvidenceAt(db, ticketId, headSha)) return { holds: true };
 
   const where = headSha ?? "an unknown HEAD";

@@ -55,6 +55,46 @@ jobs:
           export PATH="$RUNNER_TEMP/styre-native-contract/venv/bin:$PATH"
           STYRE_ENV_NATIVE_NODE_DEPS="$RUNNER_TEMP/styre-native-contract/node_modules" STYRE_ENV_NATIVE_PYTHON=1 bun test test/testing
 
+  native-browser-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - name: Prepare pinned Sphinx baseline fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="$RUNNER_TEMP/styre-karma-baseline"
+          context="$RUNNER_TEMP/styre-karma-image"
+          mkdir -p "$fixture" "$context/sphinx"
+          git -C "$fixture" init
+          git -C "$fixture" fetch --depth=1 https://github.com/sphinx-doc/sphinx.git 2e506c5ab457cba743bb47eb5b8c8eb9dd51d23d
+          test "$(git -C "$fixture" rev-parse FETCH_HEAD)" = 2e506c5ab457cba743bb47eb5b8c8eb9dd51d23d
+          git -C "$fixture" archive FETCH_HEAD package.json package-lock.json karma.conf.js tests/js sphinx/themes/basic/static/underscore.js sphinx/themes/basic/static/jquery.js sphinx/themes/basic/static/doctools.js | tar -xf - -C "$context/sphinx"
+          cat > "$context/Dockerfile" <<'DOCKERFILE'
+          FROM node:20-bookworm
+          RUN apt-get update && apt-get install -y --no-install-recommends firefox-esr xvfb xauth && rm -rf /var/lib/apt/lists/*
+          WORKDIR /suite
+          COPY sphinx/ ./
+          RUN npm ci --ignore-scripts --no-audit --no-fund
+          ENV FIREFOX_BIN=/usr/bin/firefox-esr
+          DOCKERFILE
+          docker build -t styre-karma-native "$context"
+      - name: Verify browser adapter and Sphinx baseline contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --init --network none --memory 3g --cpus 2 --pids-limit 512 \
+            -v "$GITHUB_WORKSPACE:/code:ro" \
+            -v "$(command -v bun):/usr/local/bin/bun:ro" \
+            -e STYRE_KARMA_NATIVE_DEPS=/suite/node_modules \
+            -e STYRE_KARMA_SPHINX=/suite \
+            styre-karma-native xvfb-run -a bun test /code/test/testing/karma-native.test.ts
+
   pr-title:
     # Conventional-Commits lint on the PR title. Squash-merge makes the PR title
     # the commit + changelog line git-cliff parses, so a malformed title would

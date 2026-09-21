@@ -74,7 +74,10 @@ export async function probeComponent(
       component: component.name,
       framework: null,
       runnable: false,
-      detail: `no test framework could be resolved for component \`${component.name}\` (${component.kind})`,
+      detail:
+        component.testEnvironment?.adapter === "karma"
+          ? "Karma suite execution is supported; authored-check selection and identity are unsupported"
+          : `no test framework could be resolved for component \`${component.name}\` (${component.kind})`,
     };
   }
   let interp: string | undefined;
