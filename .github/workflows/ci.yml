@@ -45,11 +45,15 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Install pinned native test runners
         run: |
-          npm install --prefix "$RUNNER_TEMP/styre-native-contract" --ignore-scripts --no-audit --no-fund mocha@10.2.0
+          npm install --prefix "$RUNNER_TEMP/styre-native-contract" --ignore-scripts --no-audit --no-fund mocha@10.2.0 jest@29.7.0 vitest@2.1.9
           python -m venv "$RUNNER_TEMP/styre-native-contract/venv"
           "$RUNNER_TEMP/styre-native-contract/venv/bin/pip" install pytest==8.3.5 Django==4.2.23
       - name: Verify native execution contracts
         run: STYRE_TEST_NATIVE_ROOT="$RUNNER_TEMP/styre-native-contract" bun test test/dispatch/check-execution.test.ts
+      - name: Verify environment qualification contracts
+        run: |
+          export PATH="$RUNNER_TEMP/styre-native-contract/venv/bin:$PATH"
+          STYRE_ENV_NATIVE_NODE_DEPS="$RUNNER_TEMP/styre-native-contract/node_modules" STYRE_ENV_NATIVE_PYTHON=1 bun test test/testing
 
   pr-title:
     # Conventional-Commits lint on the PR title. Squash-merge makes the PR title

@@ -90,7 +90,8 @@ Regression fixtures cover malformed plans, runtime mismatch, source shadowing,
 selector forwarding, collection errors/timeouts/empty suites, manager conflicts,
 workspace exclusions, named scripts, fresh resumed gates, and observation identity.
 Native Linux fixtures exercise pytest 8.3.3, Jest 29.7.0, Vitest 2.1.9, and Mocha
-10.8.2. Sphinx validation uses its ordinary baseline checkout and collection only;
+10.8.2. The native CI job also exercises these contracts with its existing
+pytest 8.3.5 / Mocha 10.2.0 pins, plus Jest 29.7.0 and Vitest 2.1.9. Sphinx validation uses its ordinary baseline checkout and collection only;
 no held-out patches, benchmark run, or test-body/oracle success is implied.
 
 - [tox-current-env 0.0.11](https://pypi.org/project/tox-current-env/0.0.11/)
