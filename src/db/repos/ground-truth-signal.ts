@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import type { SuiteObservation } from "../../dispatch/suite-observation.ts";
 import { nowUtc } from "../../util/time.ts";
 import { getLatestForTicket } from "./dispatch.ts";
 
@@ -296,12 +297,12 @@ export interface AdvisorySweep {
   /** ENG-426: per-component reasons a check framework could not be executed. */
   details?: string[];
   changed?: string[];
-  /** ENG-403: whether the same command already failed at the baseline sha. `true` = pre-existing,
-   *  `false` = introduced by this change, `undefined` = not established. */
+  /** Legacy input compatibility only. Exit-derived booleans cannot establish causality;
+   *  advisorySweeps no longer emits this field and reports must ignore it. */
   preexisting?: boolean;
 }
 
-/** The demoted advisory suite/integration failures (M4 §8) — newest per `signal_type`, sha-agnostic
+/** The demoted advisory suite/integration failures — newest per work-unit/type, sha-agnostic
  *  (a check-only re-author moves HEAD without re-running the suite, so scoping to HEAD would drop a
  *  still-failing suite — review finding I2). Selected by `detail.advisory === true` (the boolean) so the
  *  `ac-check-gate` signal — whose `advisory` is a number[] — is never mis-selected; and `result !== pass`
@@ -322,12 +323,18 @@ export function advisorySweeps(db: Database, ticketId: number): AdvisorySweep[] 
       details?: string[];
     };
     if (d.advisory !== true) continue;
-    if (s.result === "pass") continue;
+    // A successful aggregate covers this unit/type's earlier failure. Select latest first;
+    // another unit's result cannot clear or replace this unit's evidence.
+    const key = JSON.stringify([s.work_unit_id, s.signal_type]);
+    if (s.result === "pass") {
+      byType.delete(key);
+      continue;
+    }
     let firstFailingJob: string | undefined;
     if (s.signal_type === "integration" && Array.isArray(d.ran)) {
       firstFailingJob = d.ran.find((j) => j.exitCode !== 0 || j.timedOut)?.label;
     }
-    byType.set(s.signal_type, {
+    byType.set(key, {
       type: s.signal_type,
       result: s.result,
       firstFailingJob,
@@ -338,7 +345,7 @@ export function advisorySweeps(db: Database, ticketId: number): AdvisorySweep[] 
       ...(Array.isArray(d.roles) ? { roles: d.roles } : {}),
       ...(Array.isArray(d.details) ? { details: d.details } : {}),
       ...(Array.isArray(d.changed) ? { changed: d.changed } : {}),
-      ...(typeof d.preexisting === "boolean" ? { preexisting: d.preexisting } : {}),
+      // Legacy booleans were derived from exits alone and cannot establish pre-existence.
     });
   }
   return [...byType.values()];
@@ -413,6 +420,7 @@ export interface RanJob {
   kind?: "build" | "test" | "repo" | "other";
   exitCode: number | null;
   timedOut?: boolean;
+  observation?: SuiteObservation;
 }
 
 /** The `detail` of a suite/check signal. `executed` is DERIVED from `ran`, never passed in, and

@@ -253,7 +253,7 @@ function checkWrongArbitrationAll(reason: string) {
 }
 
 function isClassifyPrompt(prompt: string): boolean {
-  return prompt.includes("adjudicat") || prompt.includes("Checks to classify");
+  return prompt.startsWith("You are an independent adjudicator for ");
 }
 
 function isArbitratePrompt(prompt: string): boolean {

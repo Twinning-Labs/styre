@@ -55,6 +55,7 @@ import {
   setBaseSha,
   setStatus as setUnitStatus,
 } from "../db/repos/work-unit.ts";
+import { setPid } from "../db/repos/workflow-step.ts";
 import { StepPrerequisiteError } from "../engine/step-journal.ts";
 import { pythonImportName } from "../setup/lang/python.ts";
 import { runCommand } from "../util/run-command.ts";
@@ -62,9 +63,9 @@ import { nowUtc } from "../util/time.ts";
 import { type AdjClass, ChecksClassifyOutputSchema } from "./adjudicate-schema.ts";
 import { ChecksArbitrateOutputSchema } from "./arbitrate-schema.ts";
 import {
+  type BaselineObservation,
   deliveredTestEvidenceAtBaseline,
   preImplementBaselineSha,
-  preexistingFrom,
   runAtBaseline,
 } from "./baseline-rerun.ts";
 import { carryVerifiedVerdictForward } from "./carry-forward.ts";
@@ -148,6 +149,7 @@ import { ReviewOutputSchema, computeBlocksShip, validateReviewFindings } from ".
 import type { DispatchDeps } from "./run-dispatch.ts";
 import { runAgentDispatch } from "./run-dispatch.ts";
 import { extractSidecar } from "./sidecar.ts";
+import { observeSuiteCommand } from "./suite-observation.ts";
 import { isTestFile } from "./test-file.ts";
 import { combineTrack, sizeTrack } from "./track-sizing.ts";
 import { buildVerifyReport, renderVerifyReport } from "./verify-report.ts";
@@ -1653,13 +1655,18 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       // (a) run each realImpacted component's real command; aggregate.
       for (const { component, command, dir } of toRun) {
         lastCommand = command;
-        const run = await runCommand(command, {
+        const run = await observeSuiteCommand({
+          command,
+          sha: worktreeHead(worktreePath),
+          onSpawn: (pid) => setPid(ctx.db, ctx.step.id, -pid),
+          onSettled: () => setPid(ctx.db, ctx.step.id, null),
           cwd: join(worktreePath, dir ?? ""),
           timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
         });
         ran.push({
           component,
           kind: checkType === "test" ? "test" : checkType === "build" ? "build" : "other",
+          observation: run,
           exitCode: run.exitCode,
           timedOut: run.timedOut,
         });
@@ -1896,11 +1903,15 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     let lastCommand = "";
     for (const { label, command, dir, kind } of jobs) {
       lastCommand = command;
-      const run = await runCommand(command, {
+      const run = await observeSuiteCommand({
+        command,
+        sha: worktreeHead(worktreePath),
+        onSpawn: (pid) => setPid(ctx.db, ctx.step.id, -pid),
+        onSettled: () => setPid(ctx.db, ctx.step.id, null),
         cwd: join(worktreePath, dir ?? ""),
         timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
       });
-      ran.push({ label, kind, exitCode: run.exitCode, timedOut: run.timedOut });
+      ran.push({ label, kind, exitCode: run.exitCode, timedOut: run.timedOut, observation: run });
       if (run.exitCode !== 0) {
         result = run.timedOut || run.exitCode === null ? "error" : "fail";
         break;
@@ -1910,24 +1921,23 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     // never throw on the suite verdict. Coupled with the resolver's integration gate flip to
     // ranShasFor (below) in this SAME commit — an advisory fail with no pass at HEAD would otherwise
     // re-emit this step forever against the journal replay (MAX_TRANSITIONS deadlock).
-    // ENG-403: an advisory failure is only actionable if the reviewer can tell a regression from
-    // an already-broken repo. Re-run the FIRST FAILING job at the pre-implement baseline and
-    // record the comparison. Only on failure, so a green advisory costs nothing.
-    let preexisting: boolean | undefined;
+    // A baseline command is diagnostic evidence only until its environment/source binding and
+    // test identities are qualified. A shared nonzero exit must never excuse a candidate failure.
+    let baseline: BaselineObservation | undefined;
     if (result !== "pass") {
       const failed = ran.find((j) => j.exitCode !== 0 || j.timedOut);
       const job = failed ? jobs.find((j) => j.label === failed.label) : undefined;
       const baselineSha = preImplementBaselineSha(ctx.db, ctx.ticket.id);
       if (job && baselineSha) {
-        preexisting = preexistingFrom(
-          await runAtBaseline({
-            repoPath,
-            baselineSha,
-            command: job.command,
-            dir: job.dir,
-            timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
-          }),
-        );
+        baseline = await runAtBaseline({
+          repoPath,
+          baselineSha,
+          onSpawn: (pid) => setPid(ctx.db, ctx.step.id, -pid),
+          onSettled: () => setPid(ctx.db, ctx.step.id, null),
+          command: job.command,
+          dir: job.dir,
+          timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
+        });
       }
     }
     insertSignal(ctx.db, {
@@ -1938,7 +1948,12 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       branchHeadSha,
       detail: suiteDetail(ran, {
         advisory: true,
-        ...(preexisting !== undefined ? { preexisting } : {}),
+        comparison: {
+          status: "unqualified",
+          reason: baseline?.reason ?? "No baseline observation available.",
+        },
+        ...(baseline ? { baseline } : {}),
+        notExecuted: jobs.slice(ran.length).map(({ label }) => label),
       }),
     });
     return { integration: result };

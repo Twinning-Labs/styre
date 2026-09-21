@@ -89,9 +89,10 @@ export type FloorVerdict = { holds: true } | { holds: false; reason: string };
  * never shown would excuse a real regression, which is the more dangerous of the two errors"; the
  * implementation does exactly that, and this floor is not the place to discover it.
  *
- * The cost is real and is the honest state of things: a repo carrying one long-standing red test
- * has no integration evidence channel, and its tickets lean entirely on the per-AC one. ENG-457
- * owns making the baseline re-run sound; when it is, this branch can come back.
+ * Suite observations now retain bounded process diagnostics and baseline comparisons are explicitly
+ * unqualified. They still cannot establish passing behavioral evidence or authorize a waiver here.
+ * Source/environment qualification and test-identity comparison remain separate prerequisites.
+
  */
 /** Does this job record the execution of something that can exercise behaviour? */
 function exercisesBehaviour(j: RanJob): boolean {

@@ -155,7 +155,14 @@ test("a failing check records an advisory fail signal but the step SUCCEEDS (no 
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "false" } }],
+      components: [
+        {
+          name: "app",
+          kind: "node",
+          paths: ["**"],
+          commands: { test: "echo assertion-output; echo setup-output >&2; exit 1" },
+        },
+      ],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfywt-")),
   });
@@ -172,6 +179,11 @@ test("a failing check records an advisory fail signal but the step SUCCEEDS (no 
   const testSig = sigs.find((s) => s.signal_type === "test");
   expect(testSig?.result).toBe("fail");
   expect(JSON.parse(testSig?.detail_json ?? "{}").advisory).toBe(true);
+  const observation = JSON.parse(testSig?.detail_json ?? "{}").ran[0].observation;
+  expect(observation.stdout).toContain("assertion-output");
+  expect(observation.stderr).toContain("setup-output");
+  expect(observation.sha).toBe(testSig?.branch_head_sha);
+  expect(observation.outcome).toBe("completed-nonzero");
   expect(step?.status).toBe("succeeded"); // no failure-policy involvement — routing advances
   expect(after?.status).toBe("verifying"); // unit is NOT bounced back to pending
 });

@@ -1,21 +1,5 @@
 import { expect, test } from "bun:test";
-import { preexistingFrom } from "../../src/dispatch/baseline-rerun.ts";
-
-test("a baseline FAIL means the failure pre-dates the change", () => {
-  expect(preexistingFrom("fail")).toBe(true);
-});
-
-test("a baseline PASS means this change introduced it", () => {
-  expect(preexistingFrom("pass")).toBe(false);
-});
-
-test("an unusable baseline is UNDEFINED, never 'pre-existing'", () => {
-  // Fail-closed. Reporting a failure as pre-existing when that was never shown would excuse a
-  // real regression — the more dangerous of the two errors, so neither `error` nor `unknown`
-  // may collapse into `true`.
-  expect(preexistingFrom("error")).toBeUndefined();
-  expect(preexistingFrom("unknown")).toBeUndefined();
-});
+import { runAtBaseline } from "../../src/dispatch/baseline-rerun.ts";
 
 // -- ENG-402: a delivered test must be shown to bind ---------------------------------------
 
@@ -142,5 +126,40 @@ test.each([
     });
     expect(evidence.verdict).toBe(verdict);
     expect(evidence.execution?.rawOutput).toContain(stdout);
+  },
+);
+
+test("missing baseline dependencies cannot certify a candidate failure as pre-existing", async () => {
+  const { repoPath, baselineSha } = repoWithBaseline();
+  // An ignored install is present in the candidate tree, absent in the detached baseline.
+  writeFileSync(join(repoPath, "installed"), "yes");
+  const observation = await runAtBaseline({
+    repoPath,
+    baselineSha,
+    command:
+      "if test -f installed; then echo assertion-failed; exit 1; else echo missing-dependency >&2; exit 127; fi",
+    timeoutMs: 5000,
+  });
+  expect(observation.comparison).toBe("unqualified");
+  expect(observation.execution?.outcome).toBe("completed-nonzero");
+  expect(observation.execution?.stderr).toContain("missing-dependency");
+  expect(observation.execution?.sha).toBe(baselineSha);
+  expect(observation).not.toHaveProperty("preexisting");
+});
+
+test.each([0, 1])(
+  "baseline exit %s is an observation, not a causal classification",
+  async (code) => {
+    const { repoPath, baselineSha } = repoWithBaseline();
+    const observation = await runAtBaseline({
+      repoPath,
+      baselineSha,
+      command: `echo stdout-evidence; echo stderr-evidence >&2; exit ${code}`,
+      timeoutMs: 5000,
+    });
+    expect(observation.comparison).toBe("unqualified");
+    expect(observation.execution?.exitCode).toBe(code);
+    expect(observation.execution?.stdout).toContain("stdout-evidence");
+    expect(observation.execution?.stderr).toContain("stderr-evidence");
   },
 );

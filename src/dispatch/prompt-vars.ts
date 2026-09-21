@@ -246,7 +246,7 @@ export function designReviewVars(
  *  criteria (each by its DB `id`, which the agent echoes as `ac_id`) + the detected stacks/test-commands.
  *  Deliberately NOT the implementation plan — the step is plan-blind. */
 export function checksVars(
-  ticket: { ident: string; title: string | null },
+  ticket: { ident: string; title: string | null; description?: string | null },
   profile: Profile,
   acs: { id: number; text: string }[],
   feedback = "",
@@ -259,6 +259,8 @@ export function checksVars(
     acceptance_criteria: acs.map((a) => `- ac_id=${a.id}: ${a.text}`).join("\n"),
     checks_feedback: feedback,
     ...profile.promptVars,
+    ticket_description:
+      ticket.description?.trim() || "(No original ticket description was provided.)",
   };
 }
 
@@ -276,7 +278,7 @@ export interface AdjudicateItem {
 /** Prompt vars for the `checks:classify` adjudicator (§5). Renders each check as a labeled block with
  *  its recorded trace; the agent echoes `ac_check_id` back in its sidecar. Read-only, plan-blind. */
 export function adjudicateVars(
-  ticket: { ident: string; title: string | null },
+  ticket: { ident: string; title: string | null; description?: string | null },
   profile: Profile,
   items: AdjudicateItem[],
 ): Record<string, string> {
@@ -295,6 +297,8 @@ export function adjudicateVars(
     slug: profile.slug,
     checks_to_classify: blocks,
     ...profile.promptVars,
+    ticket_description:
+      ticket.description?.trim() || "(No original ticket description was provided.)",
   };
 }
 
@@ -315,7 +319,7 @@ export interface ArbitrateItem {
 /** Prompt vars for the `checks:arbitrate` adjudicator (M5): the AC text, check source, and recorded
  *  post-implement trace per still-red check. Read-only; the agent never re-runs. */
 export function arbitrateVars(
-  ticket: { ident: string; title: string | null },
+  ticket: { ident: string; title: string | null; description?: string | null },
   profile: Profile,
   items: ArbitrateItem[],
 ): Record<string, string> {
@@ -335,5 +339,7 @@ export function arbitrateVars(
     slug: profile.slug,
     checks_to_arbitrate: blocks,
     ...profile.promptVars,
+    ticket_description:
+      ticket.description?.trim() || "(No original ticket description was provided.)",
   };
 }

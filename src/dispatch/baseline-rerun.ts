@@ -3,7 +3,6 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { listByTicket } from "../db/repos/ground-truth-signal.ts";
-import { runCommand } from "../util/run-command.ts";
 import {
   type CheckExecutionPlan,
   CheckExecutionPlanSchema,
@@ -11,6 +10,7 @@ import {
 } from "./check-execution.ts";
 import { type CheckRunResult, runCheckExecution } from "./checks-run.ts";
 import type { CmdRunner } from "./reuse.ts";
+import { type SuiteObservation, observeSuiteCommand } from "./suite-observation.ts";
 
 /**
  * Was an advisory failure already there before this change? (ENG-403)
@@ -46,57 +46,57 @@ export function preImplementBaselineSha(db: Database, ticketId: number): string 
   return null;
 }
 
-export type BaselineVerdict = "pass" | "fail" | "error" | "unknown";
+export interface BaselineObservation {
+  version: 1;
+  requestedSha: string;
+  comparison: "unqualified";
+  reason: string;
+  execution: SuiteObservation | null;
+}
 
-/**
- * Run `command` at `baselineSha` in a throwaway detached worktree.
- *
- * `unknown` on any harness-side problem (worktree add failed, spawn threw). Never guess: reporting
- * a failure as pre-existing when that was never shown would excuse a real regression, which is the
- * more dangerous of the two errors.
- */
+/** A detached checkout is not a qualified equivalent environment. Preserve what ran without
+ * claiming that equal exits prove the same failure, or that a passing baseline proves causality. */
 export async function runAtBaseline(p: {
   repoPath: string;
   baselineSha: string;
   command: string;
   dir?: string;
   timeoutMs: number;
-}): Promise<BaselineVerdict> {
-  let wt: string;
+  onSpawn?: (pid: number) => void;
+  onSettled?: () => void;
+}): Promise<BaselineObservation> {
+  const result: BaselineObservation = {
+    version: 1,
+    requestedSha: p.baselineSha,
+    comparison: "unqualified",
+    reason:
+      "Baseline dependencies, source binding and test identities have not been qualified for comparison.",
+    execution: null,
+  };
+  let wt: string | undefined;
   try {
     wt = mkdtempSync(join(tmpdir(), "styre-baseline-adv-"));
-  } catch {
-    return "unknown";
-  }
-  try {
-    if (!git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath).ok) return "unknown";
-    const run = await runCommand(p.command, {
+    if (!git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath).ok)
+      return { ...result, reason: "Baseline checkout could not be prepared." };
+    const head = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: wt });
+    if (!head.success) return { ...result, reason: "Baseline checkout HEAD could not be read." };
+    result.execution = await observeSuiteCommand({
+      command: p.command,
+      onSpawn: p.onSpawn,
+      onSettled: p.onSettled,
+      sha: head.stdout.toString().trim(),
       cwd: join(wt, p.dir ?? ""),
       timeoutMs: p.timeoutMs,
     });
-    if (run.timedOut || run.exitCode === null) return "error";
-    return run.exitCode === 0 ? "pass" : "fail";
-  } catch {
-    return "unknown";
+    return result;
+  } catch (error) {
+    return { ...result, reason: `Baseline execution unavailable: ${String(error).slice(0, 1000)}` };
   } finally {
-    git(["worktree", "remove", "--force", wt], p.repoPath);
-    try {
+    if (wt) {
+      git(["worktree", "remove", "--force", wt], p.repoPath);
       rmSync(wt, { recursive: true, force: true });
-    } catch {
-      /* worktree remove already cleaned it */
     }
   }
-}
-
-/**
- * `true` = the failure pre-dates the change, `false` = the change introduced it, `undefined` =
- * could not be established. Note a baseline `error` yields `undefined`, not `true`: a baseline run
- * that could not complete has not shown the failure to be pre-existing.
- */
-export function preexistingFrom(verdict: BaselineVerdict): boolean | undefined {
-  if (verdict === "fail") return true;
-  if (verdict === "pass") return false;
-  return undefined;
 }
 
 export type BindingVerdict = "binds" | "does-not-bind" | "unknown";

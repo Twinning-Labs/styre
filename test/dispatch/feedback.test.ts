@@ -127,7 +127,7 @@ test("advisory ran-all-unowned (untouched-stack red) is excluded from re-coding 
   expect(fb).toBe(""); // the only signal is advisory → no corrective feedback
 });
 
-test("advisory verify:check suite failure (M4 demotion) is excluded from re-coding feedback", () => {
+test("advisory verify:check suite failure (M4 demotion) is diagnostic context, not a repair instruction", () => {
   const { db, ticketId } = makeTestDb();
   const u = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend" });
   seedAttempt(db, ticketId, u.id, "sha1");
@@ -142,7 +142,9 @@ test("advisory verify:check suite failure (M4 demotion) is excluded from re-codi
   });
   const fb = implementFeedback(db, u.id);
   db.close();
-  expect(fb).toBe(""); // the only signal is advisory → no corrective feedback
+  expect(fb).toContain("Recorded suite diagnostics");
+  expect(fb).toContain('"evidenceMissing":true');
+  expect(fb).not.toContain("Fix these before finishing");
 });
 
 test("gateFeedback lists the still-red ACs + their check paths from the ac-check-gate signal", () => {
@@ -229,4 +231,23 @@ test("gateFeedback appends the arbiter's code-wrong blame reason when one was re
   db.close();
   expect(fb).toContain("Arbiter blame");
   expect(fb).toContain("returns 201 not 200");
+});
+
+test("ticket-level integration evidence reaches repair as explicitly unqualified context", () => {
+  const { db, ticketId } = makeTestDb();
+  const u = insertWorkUnit(db, { ticketId, seq: 1, kind: "backend" });
+  seedAttempt(db, ticketId, u.id, "sha1");
+  insertSignal(db, {
+    ticketId,
+    signalType: "integration",
+    result: "fail",
+    branchHeadSha: "sha1",
+    detail: { advisory: true, preexisting: true, ran: [{ label: "api:test", exitCode: 1 }] },
+  });
+  const feedback = implementFeedback(db, u.id);
+  db.close();
+  expect(feedback).toContain("api:test");
+  expect(feedback).toContain("unqualified");
+  expect(feedback).not.toContain("Fix these before finishing");
+  expect(feedback).not.toContain("preexisting");
 });

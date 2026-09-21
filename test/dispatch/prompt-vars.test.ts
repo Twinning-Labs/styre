@@ -3,12 +3,16 @@ import type { WorkUnitRow } from "../../src/db/repos/work-unit.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import type { Component } from "../../src/dispatch/profile.ts";
 import {
+  CHECKS_ARBITRATE_TEMPLATE,
+  CHECKS_CLASSIFY_TEMPLATE,
   CHECKS_TEMPLATE,
   DESIGN_REVIEW_TEMPLATE,
   DESIGN_TEMPLATE,
   EXTRACT_TEMPLATE,
   IMPLEMENT_TEMPLATE,
   REVIEW_TEMPLATE,
+  adjudicateVars,
+  arbitrateVars,
   checksVars,
   designReviewVars,
   designVars,
@@ -314,4 +318,32 @@ test("ENG-427: a component with no resolved framework renders exactly as before"
     { name: "api", kind: "python", paths: ["**"], commands: { test: "pytest" }, extensions: [] },
   ] as never);
   expect(line).not.toContain("check framework");
+});
+
+test("original requirements reach all independent check stages and cannot be overwritten by profile vars", () => {
+  const p = parseProfile({
+    slug: "demo",
+    targetRepo: "/tmp/demo",
+    promptVars: { ticket_description: "wrong requirement" },
+  });
+  const original = {
+    ident: "ENG-1",
+    title: "Feature",
+    description: "Return the existing public identifier format, including literal suffixes.",
+  };
+  for (const [template, vars] of [
+    [
+      CHECKS_TEMPLATE,
+      checksVars(original, p, [{ id: 1, text: "The reported bug no longer reproduces" }]),
+    ],
+    [CHECKS_CLASSIFY_TEMPLATE, adjudicateVars(original, p, [])],
+    [CHECKS_ARBITRATE_TEMPLATE, arbitrateVars(original, p, [])],
+  ] as const) {
+    const rendered = renderPrompt(template, vars);
+    expect(rendered.ok).toBe(true);
+    if (rendered.ok) {
+      expect(rendered.prompt).toContain(original.description);
+      expect(rendered.prompt).not.toContain("wrong requirement");
+    }
+  }
 });

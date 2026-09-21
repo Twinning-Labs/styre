@@ -338,7 +338,7 @@ test("a genuine suite failure still maps to kind 'suite'", () => {
   expect(r.advisory[0]?.kind).toBe("suite");
 });
 
-test("an integration sweep carries `preexisting` through to the advisory line", () => {
+test("legacy preexisting booleans do not authorize a causal claim", () => {
   const { db, ticketId } = makeTestDb();
   seedHead(db, ticketId);
   insertSignal(db, {
@@ -354,7 +354,7 @@ test("an integration sweep carries `preexisting` through to the advisory line", 
   });
   const r = buildVerifyReport(db, ticketId);
   expect(r.advisory).toEqual([
-    { kind: "integration", result: "fail", firstFailingJob: "frontend:build", preexisting: true },
+    { kind: "integration", result: "fail", firstFailingJob: "frontend:build" },
   ]);
 });
 
