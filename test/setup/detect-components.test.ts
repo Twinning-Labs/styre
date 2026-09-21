@@ -26,14 +26,9 @@ test("tauri app → one frontend (root package.json) + one rust (src-tauri) comp
   expect(components.some((c) => c.paths.some((p) => p.startsWith("src-tauri")))).toBe(true);
 });
 
-test("malformed package.json is skipped (component absent, no throw)", () => {
-  const root = fixture({
-    "package.json": "{ this is not valid json {{",
-  });
-  expect(() => detectComponents(root)).not.toThrow();
-  const { components } = detectComponents(root);
-  // No node/sveltekit component should be produced from the malformed file
-  expect(components.filter((c) => c.kind === "node" || c.kind === "sveltekit")).toHaveLength(0);
+test("malformed package.json fails loudly instead of erasing the component", () => {
+  const root = fixture({ "package.json": "{ invalid json" });
+  expect(() => detectComponents(root)).toThrow("invalid package.json");
 });
 
 test("malformed root Cargo.toml does not throw and yields no rust-workspace component", () => {
@@ -80,7 +75,7 @@ test("python: pyproject.toml → one python component, default runner", () => {
   const root = fixture({ "pyproject.toml": "[project]\nname='x'\n" });
   const py = detectComponents(root).components.find((c) => c.kind === "python");
   expect(py?.paths).toEqual(["**"]);
-  expect(py?.commands.test).toBe("python -m pytest");
+  expect(py?.commands.test).toMatchObject({ unresolved: expect.stringContaining("No declared") });
 });
 
 test("python: runner detection precedence tox > nox > pytest-config > default", () => {
@@ -98,17 +93,17 @@ test("python: runner detection precedence tox > nox > pytest-config > default", 
     detectComponents(fixture({ "setup.py": "", "pytest.ini": "[pytest]\n" })).components.find(
       (c) => c.kind === "python",
     )?.commands.test,
-  ).toBe("pytest");
+  ).toBe("python3 -m pytest");
   expect(
     detectComponents(fixture({ "pyproject.toml": "[tool.pytest.ini_options]\n" })).components.find(
       (c) => c.kind === "python",
     )?.commands.test,
-  ).toBe("pytest");
+  ).toBe("python3 -m pytest");
   expect(
     detectComponents(fixture({ "requirements.txt": "pytest\n" })).components.find(
       (c) => c.kind === "python",
     )?.commands.test,
-  ).toBe("python -m pytest");
+  ).toBe("python3 -m pytest");
 });
 
 test("python: no python manifest → no python component", () => {

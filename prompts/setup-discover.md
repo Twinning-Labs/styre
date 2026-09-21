@@ -4,6 +4,15 @@ REFINE it — do not invent components the scan did not find.
 
 Draft components (JSON): {{draft}}
 
+Runtime observations from bounded host probes (facts, not permission to change environment policy):
+{{environment_evidence}}
+
+Use these observations with repository declarations to justify the selected test context. Do not
+infer that an installed plugin authorizes skipping installation. Keep package-manager/version,
+workspace directory, and interpreter consistent. Unsupported or missing evidence remains unknown.
+For a new project, explicitly propose a test-authoring command/framework; absence of existing tests
+is not proof that testing is unavailable.
+
 For each component, correct:
 - **paths**: the glob set that truly belongs to this stack. Critical for co-located stacks — e.g. a
   Tauri app's frontend lives at the repo root but owns `src/**`/`static/**`, NOT the sibling

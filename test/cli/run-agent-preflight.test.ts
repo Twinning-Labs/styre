@@ -47,7 +47,11 @@ function writeProfile(): string {
           name: "api",
           kind: "node",
           paths: ["**"],
-          commands: { build: "sh -c true", test: "sh -c true", check: { unavailable: true } },
+          commands: {
+            build: "sh -c true",
+            test: { unavailable: true },
+            check: { unavailable: true },
+          },
         },
       ],
     }),

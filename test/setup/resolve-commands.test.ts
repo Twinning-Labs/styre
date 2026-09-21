@@ -31,10 +31,10 @@ test("operator supplies a missing test command", () => {
   expect(fe?.commands.test).toBe("bun test");
 });
 
-test("operator declines → unavailable + warning; non-interactive missing also unavailable", () => {
+test("blank answer leaves test intent unresolved with warning", () => {
   const { components, warnings } = resolveCommands(base(), { interactive: true, ask: () => "" });
   const fe = components.find((c) => c.name === "fe");
-  expect(fe?.commands.test).toEqual({ unavailable: true });
+  expect(fe?.commands.test).toMatchObject({ unresolved: expect.any(String) });
   expect(warnings.some((w) => /fe.*test/i.test(w))).toBe(true);
 });
 
@@ -56,10 +56,10 @@ test("script-runner commands trigger a warning", () => {
   expect(warnings.some((w) => /bash build\.sh/.test(w))).toBe(true);
 });
 
-test("non-interactive missing command becomes unavailable without prompting", () => {
+test("non-interactive missing test stays unresolved without prompting", () => {
   const { components, warnings } = resolveCommands(base(), { interactive: false, ask: () => null });
   const fe = components.find((c) => c.name === "fe");
-  expect(fe?.commands.test).toEqual({ unavailable: true });
+  expect(fe?.commands.test).toMatchObject({ unresolved: expect.any(String) });
   expect(fe?.commands.check).toEqual({ unavailable: true });
   // Warnings emitted for both missing must-haves
   expect(warnings.some((w) => /fe.*test/i.test(w))).toBe(true);

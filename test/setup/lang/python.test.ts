@@ -23,7 +23,7 @@ test("python: pyproject.toml → one python component, default runner", () => {
   expect(c.name).toBe("python");
   expect(c.kind).toBe("python");
   expect(c.paths).toEqual(["**"]);
-  expect(c.commands.test).toBe("python -m pytest");
+  expect(c.commands.test).toMatchObject({ unresolved: expect.stringContaining("No declared") });
 });
 
 test("python: setup.py → one python component", () => {
@@ -37,7 +37,7 @@ test("python: requirements.txt → one python component", () => {
   const root = fixture({ "requirements.txt": "pytest\n" });
   const components = pythonDef.detect(root);
   expect(components).toHaveLength(1);
-  expect(components[0].commands.test).toBe("python -m pytest");
+  expect(components[0].commands.test).toBe("python3 -m pytest");
 });
 
 test("python: runner detection precedence tox > nox > pytest-config > default", () => {
@@ -49,13 +49,13 @@ test("python: runner detection precedence tox > nox > pytest-config > default", 
   ).toMatchObject({ unresolved: expect.stringContaining("nox") });
   expect(
     pythonDef.detect(fixture({ "setup.py": "", "pytest.ini": "[pytest]\n" }))[0]?.commands.test,
-  ).toBe("pytest");
+  ).toBe("python3 -m pytest");
   expect(
     pythonDef.detect(fixture({ "pyproject.toml": "[tool.pytest.ini_options]\n" }))[0]?.commands
       .test,
-  ).toBe("pytest");
+  ).toBe("python3 -m pytest");
   expect(pythonDef.detect(fixture({ "requirements.txt": "pytest\n" }))[0]?.commands.test).toBe(
-    "python -m pytest",
+    "python3 -m pytest",
   );
 });
 
@@ -71,7 +71,7 @@ test("python: single root pyproject → one root component (unchanged)", () => {
       name: "python",
       kind: "python",
       paths: ["**"],
-      commands: { test: "python -m pytest" },
+      commands: { test: { unresolved: expect.stringContaining("No declared") } },
       prepare: "pip install -e .",
     },
   ]);
@@ -214,4 +214,13 @@ test.each<Record<string, string>>([
     unresolved: expect.stringContaining("tox"),
   });
   expect(pythonPrepare(root)).toBe("pip install tox");
+});
+
+test("literal distribution name resolves a real package among tests/tools, without executing setup.py", () => {
+  const root = fixture({
+    "setup.py": "raise RuntimeError('never execute')\nname='Sphinx',\n",
+    "sphinx/__init__.py": "",
+    "tests/__init__.py": "",
+  });
+  expect(pythonImportName(root)).toBe("sphinx");
 });

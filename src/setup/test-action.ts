@@ -150,7 +150,7 @@ function djangoTestAction(moduleDir: string): TestAction | null {
   // A `tests/runtests.py` alone is not django — require django itself to be the thing being
   // built, which its own repo declares by shipping `django/__init__.py` beside it.
   if (!existsSync(join(moduleDir, "django", "__init__.py"))) return null;
-  return { framework: "django-runtests", launcher: "python ./tests/runtests.py --parallel 1" };
+  return { framework: "django-runtests", launcher: "python3 ./tests/runtests.py --parallel 1" };
 }
 
 /** Attach `testAction` to components whose real test invocation can be resolved from the repo:

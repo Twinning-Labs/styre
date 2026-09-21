@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import discoverTemplate from "../../prompts/setup-discover.md" with { type: "text" };
 import type { AgentRunner } from "../agent/runner.ts";
 import { type AgentConfig, modelForTier } from "../config/agent-config.ts";
@@ -15,6 +16,7 @@ const DISCOVER_TIMEOUT_MS = 300_000;
 export interface DiscoverPolicy {
   interactive: boolean;
   trustAgentCommands: boolean;
+  environmentEvidence?: unknown;
 }
 
 export async function discoverComponents(
@@ -36,6 +38,7 @@ export async function discoverComponents(
   const rendered = renderPrompt(discoverTemplate, {
     draft: JSON.stringify(scan.components),
     agents_md: readAgentsMd(repoDir),
+    environment_evidence: JSON.stringify(policy.environmentEvidence ?? []),
   });
   if (!rendered.ok) return fallback;
   const result = await deps.runner.run({
@@ -45,9 +48,17 @@ export async function discoverComponents(
     cwd: repoDir,
     timeoutMs: DISCOVER_TIMEOUT_MS,
   });
-  if (!result.completed || result.timedOut) return fallback;
+  if (!result.completed || result.timedOut) {
+    warnings.push(
+      "setup discovery failed or timed out; retaining unresolved machine observations.",
+    );
+    return fallback;
+  }
   const parsed = extractSidecar(result.stdout, DiscoverSchema, { fence: "styre-setup-discover" });
-  if (!parsed.ok) return fallback;
+  if (!parsed.ok) {
+    warnings.push(`setup discovery invalid: ${parsed.reason}; retaining machine observations.`);
+    return fallback;
+  }
 
   const trusted = policy.interactive || policy.trustAgentCommands;
   const scanByName = new Map(scan.components.map((c) => [c.name, c]));
@@ -68,7 +79,8 @@ export async function discoverComponents(
         continue;
       }
       const scanVal = scanCmds[key]; // unresolved intent must survive a rejected proposal
-      const accept = isCommandSafe(value) && probeCommandExists(repoDir, value) && trusted;
+      const accept =
+        isCommandSafe(value) && probeCommandExists(join(repoDir, c.dir ?? "."), value) && trusted;
       if (accept) {
         commands[key] = value;
         continue;
@@ -81,6 +93,12 @@ export async function discoverComponents(
           `⚠ ${c.name}.${key}: headless — agent override not accepted (use --trust-agent-commands).`,
         );
       }
+      if (
+        isCommandSafe(value) &&
+        trusted &&
+        !probeCommandExists(join(repoDir, c.dir ?? "."), value)
+      )
+        warnings.push(`⚠ ${c.name}.${key}: command not found in component directory — rejected.`);
       if (scanVal !== undefined) commands[key] = scanVal;
       else warnings.push(`⚠ ${c.name}.${key}: dropped (no detected command).`);
     }

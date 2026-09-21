@@ -78,6 +78,7 @@ export async function replayCheckEvidence(
 
     const result = await runCheckExecution({
       plan,
+      components: p.components,
       worktreePath: wt,
       timeoutMs: p.timeoutMs,
       run: p.run,

@@ -55,10 +55,19 @@ export function isComponentReady(kind: string, compAbsDir: string): boolean {
 export function planProvision(components: Component[], worktreePath: string): ProvisionAction[] {
   const out: ProvisionAction[] = [];
   for (const c of components) {
-    if (!c.prepare) continue;
-    const cwd = join(worktreePath, c.dir ?? "");
-    if (isComponentReady(c.kind, cwd)) continue;
+    if (!c.prepare || c.testEnvironment?.policy === "existing") continue;
+    const cwd = join(
+      worktreePath,
+      c.testEnvironment?.adapter === "node" ? c.testEnvironment.workspaceDir : (c.dir ?? ""),
+    );
+    if (!c.testEnvironment && isComponentReady(c.kind, cwd)) continue;
+    if (out.some((a) => a.cwd === cwd && a.command === c.prepare)) continue;
     out.push({ component: c.name, command: c.prepare, cwd });
+    if (
+      c.testEnvironment?.policy === "managed" &&
+      /^python3 -m tox -e py\d+$/.test(c.testEnvironment.suiteCommand)
+    )
+      out.push({ component: c.name, command: `${c.testEnvironment.suiteCommand} --notest`, cwd });
   }
   return out;
 }

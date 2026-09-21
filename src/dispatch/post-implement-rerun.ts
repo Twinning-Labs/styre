@@ -29,6 +29,7 @@ async function rerunOne(
   command?: string;
   exitCode?: number | null;
   executionPlan?: unknown;
+  environment?: import("../testing/environment-schema.ts").EnvironmentObservation;
 }> {
   if (executionPlan !== undefined) {
     const parsed = CheckExecutionPlanSchema.safeParse(executionPlan);
@@ -39,11 +40,13 @@ async function rerunOne(
       };
     const res = await runCheckExecution({
       plan: parsed.data,
+      components: p.components,
       worktreePath: p.worktreePath,
       timeoutMs: p.timeoutMs,
       run: p.run,
     });
     return {
+      environment: res.environment,
       command: res.command,
       exitCode: res.exitCode,
       executionPlan: parsed.data,
@@ -57,7 +60,7 @@ async function rerunOne(
   if (!comp || !fw) return { coarse: "error", rawOutput: "" };
   // Legacy root checks retain their historical invocation. Nested paths and module-only
   // Django checks cannot be safely reinterpreted; require re-authoring rather than guessing.
-  if (comp.dir || fw === "django-runtests" || fw === "mocha")
+  if (comp.testEnvironment || comp.dir || fw === "django-runtests" || fw === "mocha")
     return {
       coarse: "error",
       rawOutput: "legacy check lacks an exact execution plan; re-author the check",

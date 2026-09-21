@@ -27,7 +27,7 @@ test("node: root package.json + svelte.config.js → sveltekit frontend scoped t
   expect(c.paths).toEqual(["src/**", "static/**", "package.json"]);
   expect(c.commands.build).toBe("npm run build");
   expect(c.commands.check).toBe("npm run check");
-  expect(c.commands.test).toBeUndefined();
+  expect(c.commands.test).toMatchObject({ unresolved: expect.any(String) });
 });
 
 test("node: root package.json + vite.config.js → sveltekit kind", () => {
@@ -99,20 +99,19 @@ test("node: only scripts present in package.json are added as commands", () => {
   expect(c.commands.check).toBe("npm run check");
 });
 
-test("node: package.json with no scripts → empty commands", () => {
+test("node: package.json with no scripts → unknown test intent", () => {
   const root = fixture({
     "package.json": JSON.stringify({ name: "pkg" }),
   });
   const [c] = nodeDef.detect(root);
-  expect(c.commands).toEqual({});
+  expect(c.commands.test).toMatchObject({ unresolved: expect.any(String) });
 });
 
-test("node: malformed package.json → no component, no throw", () => {
+test("node: malformed package.json fails loudly", () => {
   const root = fixture({
     "package.json": "{ this is not valid json {{",
   });
-  expect(() => nodeDef.detect(root)).not.toThrow();
-  expect(nodeDef.detect(root)).toHaveLength(0);
+  expect(() => nodeDef.detect(root)).toThrow("invalid package.json");
 });
 
 test("node: no package.json → no components", () => {

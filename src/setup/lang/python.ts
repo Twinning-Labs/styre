@@ -6,6 +6,11 @@ import type { ComponentDraft, LangDef } from "./types.ts";
 
 /** §5.3 runner detection: tox > nox > pytest-config > default. Root-level config only. */
 export function pythonTestCommand(repoDir: string): CommandValue {
+  if (
+    existsSync(join(repoDir, "django", "__init__.py")) &&
+    existsSync(join(repoDir, "tests", "runtests.py"))
+  )
+    return "python3 ./tests/runtests.py --parallel 1";
   if (hasToxConfig(repoDir))
     return {
       unresolved:
@@ -16,16 +21,33 @@ export function pythonTestCommand(repoDir: string): CommandValue {
       unresolved:
         "nox configuration found; select the test sessions explicitly with nox -s <names>.",
     };
-  if (existsSync(join(repoDir, "pytest.ini"))) return "pytest";
+  if (existsSync(join(repoDir, "pytest.ini"))) return "python3 -m pytest";
   const pp = join(repoDir, "pyproject.toml");
   if (existsSync(pp)) {
     try {
-      if (/\[tool\.pytest/.test(readFileSync(pp, "utf8"))) return "pytest";
+      if (/\[tool\.pytest/.test(readFileSync(pp, "utf8"))) return "python3 -m pytest";
     } catch {
       // unreadable pyproject — fall through to default
     }
   }
-  return "python -m pytest";
+  for (const file of [
+    "setup.py",
+    "setup.cfg",
+    "requirements.txt",
+    "requirements-test.txt",
+    "pyproject.toml",
+  ]) {
+    const path = join(repoDir, file);
+    if (
+      existsSync(path) &&
+      /(?:["'\s\[,]|^)pytest(?:["'\s>=<~!\],]|$)|\[tool:pytest\]/m.test(readFileSync(path, "utf8"))
+    )
+      return "python3 -m pytest";
+  }
+  return {
+    unresolved:
+      "No declared Python test framework. Select an existing runner or an explicit test-authoring workflow.",
+  };
 }
 
 export function pythonPrepare(repoDir: string): string | undefined {
@@ -77,6 +99,25 @@ export function pythonImportName(repoDir: string): string | undefined {
     } catch {
       // unreadable/unparsable pyproject — fall through to the directory scans
     }
+  }
+  // A literal distribution name is only a hint: confirm a matching source directory.
+  // This resolves setup.py projects with additional test/tool packages without executing setup.py.
+  const setup = join(repoDir, "setup.py");
+  if (existsSync(setup)) {
+    const literal = /^\s*name\s*=\s*["']([A-Za-z0-9_-]+)["']\s*,?\s*$/m
+      .exec(readFileSync(setup, "utf8"))?.[1]
+      .replace(/-/g, "_");
+    if (literal)
+      for (const base of [repoDir, join(repoDir, "src")]) {
+        if (!existsSync(base)) continue;
+        const matching = readdirSync(base, { withFileTypes: true }).filter(
+          (e) =>
+            e.isDirectory() &&
+            e.name.toLowerCase() === literal.toLowerCase() &&
+            existsSync(join(base, e.name, "__init__.py")),
+        );
+        if (matching.length === 1) return matching[0].name;
+      }
   }
   try {
     const candidates = readdirSync(repoDir, { withFileTypes: true })

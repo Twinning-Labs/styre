@@ -1,5 +1,6 @@
 import { isAbsolute, join, posix, resolve } from "node:path";
 import { z } from "zod";
+import { observedEnvironment } from "../testing/environment.ts";
 import type { CommandResult } from "../util/run-command.ts";
 import {
   type CoarseOrNone,
@@ -29,6 +30,7 @@ const repoDir = z.union([z.literal("."), repoPath]);
 export const CheckExecutionPlanSchema = z
   .object({
     version: z.literal(1),
+    environmentFingerprint: z.string().optional(),
     component: z.string().min(1),
     framework: CheckFrameworkEnum,
     cwd: repoDir,
@@ -98,6 +100,7 @@ export function resolveCheckExecution(p: {
   return CheckExecutionPlanSchema.parse({
     version: 1,
     component: component.name,
+    environmentFingerprint: observedEnvironment(component)?.fingerprint,
     framework,
     ...dirs,
     testFile: p.testFile,

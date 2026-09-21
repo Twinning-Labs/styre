@@ -1,6 +1,8 @@
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { EnvironmentObservation } from "../testing/environment-schema.ts";
+import { requireTestEnvironment } from "../testing/environment.ts";
 import { runCommand } from "../util/run-command.ts";
 import type { CmdRunner } from "../util/run-command.ts";
 import {
@@ -9,8 +11,11 @@ import {
   interpretCheckExecution,
 } from "./check-execution.ts";
 import { type CheckFramework, type CoarseOrNone, interpretRunOutput } from "./check-selector.ts";
+import type { Component } from "./profile.ts";
 
 export interface CheckRunResult {
+  /** Measured for this execution checkout; distinct from the frozen plan fingerprint. */
+  environment?: EnvironmentObservation;
   /** The coarse RED-first bucket, or `selected-none` (identity reject, §5.1). */
   coarse: CoarseOrNone;
   /** The exact assembled command line that ran (for the ac_check selector / observability). */
@@ -49,6 +54,7 @@ export async function runCheckForRed(p: {
 /** Execute a frozen plan identically at the design, replay, and implemented revisions. */
 export async function runCheckExecution(p: {
   plan: CheckExecutionPlan;
+  components?: Component[];
   worktreePath: string;
   timeoutMs: number;
   run?: CmdRunner;
@@ -58,6 +64,36 @@ export async function runCheckExecution(p: {
     root = realpathSync(root);
   } catch {
     /* runner reports missing cwd; injectable tests may use virtual paths */
+  }
+  let environment: EnvironmentObservation | undefined;
+  const commandPrefix = `${p.plan.launcher} ${p.plan.runArgs}`;
+  const invalid = (reason: string): CheckRunResult => ({
+    coarse: "error",
+    command: commandPrefix,
+    rawOutput: reason,
+    reason,
+    exitCode: null,
+    ...(environment ? { environment } : {}),
+  });
+  const component = p.components?.find((c) => c.name === p.plan.component);
+  if (p.plan.environmentFingerprint && !component?.testEnvironment)
+    return invalid("Qualified execution plan requires its component environment contract");
+  if (component?.testEnvironment) {
+    if (
+      component.testAction?.launcher !== p.plan.launcher ||
+      component.testAction?.framework !== p.plan.framework ||
+      (component.dir ?? ".") !== p.plan.cwd ||
+      p.plan.selectorCwd !== p.plan.cwd
+    )
+      return invalid(
+        "Persisted execution context differs from current test environment intent; re-author the check",
+      );
+    const obs = await requireTestEnvironment(root, component, { run: p.run });
+    environment = obs;
+    if (!obs || !["ready", "empty"].includes(obs.status))
+      return invalid(
+        `Test environment could not be qualified at execution checkout: ${obs?.reason ?? "unknown"}`,
+      );
   }
   const cwd = executionCwd(p.plan, root);
   const reportDir =
@@ -78,6 +114,7 @@ export async function runCheckExecution(p: {
       }
     }
     return {
+      ...(environment ? { environment } : {}),
       ...interpretCheckExecution(p.plan, { ...out, stdout: report }, root),
       command,
       rawOutput: [out.stdout, out.stderr, reportPath ? report : ""]
