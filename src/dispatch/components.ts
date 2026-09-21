@@ -58,13 +58,16 @@ export function isScriptRunner(cmd: string): boolean {
  *  absent or explicitly `{ unavailable: true }`. */
 export function commandFor(c: Component, checkType: string): string | undefined {
   const v = c.commands[checkType];
+  if (typeof v === "object" && "unresolved" in v) {
+    throw new Error(`${c.name}.${checkType}: ${v.unresolved}`);
+  }
   return typeof v === "string" ? v : undefined;
 }
 
 /** True iff the component declares this check-type as explicitly unavailable. */
 export function isUnavailable(c: Component, checkType: string): boolean {
   const v = c.commands[checkType];
-  return typeof v === "object" && v.unavailable === true;
+  return typeof v === "object" && "unavailable" in v && v.unavailable === true;
 }
 
 /** True iff `file`'s extension is in the component's `extensions[]`, or the component has no

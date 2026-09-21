@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { listActiveByTicket as listAcChecks } from "../db/repos/ac-check.ts";
 import { insertSignal, signalForAcCheck } from "../db/repos/ground-truth-signal.ts";
+import type { CmdRunner } from "../util/run-command.ts";
 import { CheckExecutionPlanSchema } from "./check-execution.ts";
 import { type CoarseResult, frameworkFor, launcherFor } from "./check-selector.ts";
 import { runCheckExecution, runCheckForRed } from "./checks-run.ts";
@@ -9,7 +10,6 @@ import { impactedComponents } from "./components.ts";
 import { blockerPersists } from "./env-blocker.ts";
 import type { Component } from "./profile.ts";
 import { resolvePythonInterpreter } from "./provision.ts";
-import type { CmdRunner } from "./reuse.ts";
 
 export type GateOutcome = "green" | "gated-red" | "advisory-red" | "disposition" | "error";
 export interface RerunResult {

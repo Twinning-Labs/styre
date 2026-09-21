@@ -55,3 +55,6 @@ export async function runCommand(
     clearTimeout(timer);
   }
 }
+
+/** Injectable command executor with the same contract as the native runner. */
+export type CmdRunner = typeof runCommand;

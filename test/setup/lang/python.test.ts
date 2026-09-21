@@ -43,10 +43,10 @@ test("python: requirements.txt → one python component", () => {
 test("python: runner detection precedence tox > nox > pytest-config > default", () => {
   expect(
     pythonDef.detect(fixture({ "setup.py": "", "tox.ini": "[tox]\n" }))[0]?.commands.test,
-  ).toBe("tox");
-  expect(pythonDef.detect(fixture({ "setup.py": "", "noxfile.py": "" }))[0]?.commands.test).toBe(
-    "nox",
-  );
+  ).toMatchObject({ unresolved: expect.stringContaining("tox") });
+  expect(
+    pythonDef.detect(fixture({ "setup.py": "", "noxfile.py": "" }))[0]?.commands.test,
+  ).toMatchObject({ unresolved: expect.stringContaining("nox") });
   expect(
     pythonDef.detect(fixture({ "setup.py": "", "pytest.ini": "[pytest]\n" }))[0]?.commands.test,
   ).toBe("pytest");
@@ -199,4 +199,19 @@ describe("pythonImportName", () => {
     const root = fixture({ "pkg/__init__.py": "", "src/other/__init__.py": "" });
     expect(pythonImportName(root)).toBe("pkg");
   });
+});
+
+test.each<Record<string, string>>([
+  { "tox.ini": "[tox]\nenvlist=docs,lint,py311\n" },
+  { "tox.toml": 'env_list=["docs", "py311"]' },
+  { "setup.cfg": "[tox:tox]\nenvlist=docs,py311\n" },
+  { "setup.cfg": "[testenv]\ncommands=pytest\n" },
+  { "pyproject.toml": '["tool"."tox"]\nlegacy_tox_ini=""\n' },
+  { "pyproject.toml": 'tool = { tox = { env_list = ["docs", "py311"] } }\n' },
+])("Python orchestrator config preserves unresolved test intent", (config) => {
+  const root = fixture({ "setup.py": "", ...config });
+  expect(pythonDef.detect(root)[0]?.commands.test).toMatchObject({
+    unresolved: expect.stringContaining("tox"),
+  });
+  expect(pythonPrepare(root)).toBe("pip install tox");
 });

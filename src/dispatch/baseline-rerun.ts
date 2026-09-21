@@ -3,13 +3,13 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { listByTicket } from "../db/repos/ground-truth-signal.ts";
+import type { CmdRunner } from "../util/run-command.ts";
 import {
   type CheckExecutionPlan,
   CheckExecutionPlanSchema,
   provesBehavioralFailure,
 } from "./check-execution.ts";
 import { type CheckRunResult, runCheckExecution } from "./checks-run.ts";
-import type { CmdRunner } from "./reuse.ts";
 import { type SuiteObservation, observeSuiteCommand } from "./suite-observation.ts";
 
 /**

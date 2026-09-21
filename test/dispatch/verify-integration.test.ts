@@ -170,11 +170,11 @@ test("verify:integration records an advisory fail when one component's test comm
   expect(JSON.parse(sigs[0]?.detail_json ?? "{}").advisory).toBe(true);
 });
 
-// --- Task 3: verify:integration test-job command resolution routes through reuseAwareTestCommand ---
+// Explicit suite commands must survive integration execution verbatim.
 
-test("verify:integration test command for a python component with no ready env falls back to the configured harness unchanged", async () => {
+test("verify:integration preserves a selected Python suite command", async () => {
   const { db, ticketId, projectId } = makeTestDb();
-  const repo = gitRepo(); // no pyproject.toml / editable install anywhere → never provably "ready"
+  const repo = gitRepo();
   seedAllVerified(db, ticketId, projectId, repo);
 
   const registry = buildDispatchRegistry({
@@ -192,10 +192,13 @@ test("verify:integration test command for a python component with no ready env f
     profile: parseProfile({
       slug: "demo",
       targetRepo: repo,
-      // kind: "python" + key "test" is exactly what reuseAwareTestCommand self-gates on; "tox"
-      // here is the "detected harness" that must survive unchanged when reuse isn't proven.
       components: [
-        { name: "py", kind: "python", paths: ["**"], commands: { build: "true", test: "tox" } },
+        {
+          name: "py",
+          kind: "python",
+          paths: ["**"],
+          commands: { build: "true", test: "tox -e unit" },
+        },
       ],
     }),
     worktreeRoot: mkdtempSync(join(tmpdir(), "styre-int-pynoready-")),
@@ -219,15 +222,11 @@ test("verify:integration test command for a python component with no ready env f
   expect(buildJob?.exitCode).toBe(0); // build job untouched, ran the detected "true"
 });
 
-// RUN_LIVE-gated: exercises the real reuse resolver end to end through verify:integration — a
-// real editable pip install (via the existing `provision` step) makes the python env provably
-// ready, so the test job must run pytest directly instead of the configured "false" harness
-// (which would fail the step if it ran unchanged — the strongest possible proof the wiring is
-// live, not mocked). Mirrors the pattern in test/dispatch/verify-handlers.test.ts (Task 2).
+// Optional real editable-install check: readiness must not replace the configured suite.
 const live = process.env.RUN_LIVE === "1" ? test : test.skip;
 
 live(
-  "verify:integration: a ready python env resolves the test job to pytest, not the configured harness",
+  "verify:integration: a ready python env preserves the explicit suite command",
   async () => {
     const root = mkdtempSync(join(tmpdir(), "styre-int-pyready-"));
     const interp = resolvePythonInterpreter();
@@ -272,7 +271,7 @@ live(
               name: "pkg",
               kind: "python",
               paths: ["**"],
-              // "false" would fail the step if it ran unchanged — proves reuse actually replaced it.
+              // An explicit command remains authoritative even in a ready pytest environment.
               commands: { test: "false" },
               prepare: `${interp} -m pip install --break-system-packages --user pytest && ${interp} -m pip install --break-system-packages --user -e .`,
             },
@@ -291,8 +290,8 @@ live(
       db.close();
 
       expect(outcome.kind).toBe("stepped");
-      expect(sigs[0]?.result).toBe("pass");
-      expect(sigs[0]?.command).toBe(`${interp} -m pytest`);
+      expect(sigs[0]?.result).toBe("fail");
+      expect(sigs[0]?.command).toBe("false");
     } finally {
       await Bun.spawn([interp, "-m", "pip", "uninstall", "-y", "--break-system-packages", "pkg"])
         .exited;

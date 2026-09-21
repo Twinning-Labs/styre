@@ -71,6 +71,10 @@ export type RuntimeContext = z.infer<typeof RuntimeContextSchema>;
 export const CommandValueSchema = z.union([
   z.string().min(1),
   z.object({ unavailable: z.literal(true) }).strict(),
+  // A discovered runner without a selected scope is not an intentional absence of tests.
+  z
+    .object({ unresolved: z.string().min(1) })
+    .strict(),
 ]);
 export type CommandValue = z.infer<typeof CommandValueSchema>;
 

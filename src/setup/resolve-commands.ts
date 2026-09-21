@@ -1,5 +1,6 @@
 import { commandFor, isScriptRunner, isUnavailable } from "../dispatch/components.ts";
 import type { CommandValue, Component } from "../dispatch/profile.ts";
+import { qualifyTestCommand } from "../dispatch/test-target.ts";
 
 const MUST_HAVE = ["build", "test", "check"] as const;
 
@@ -19,16 +20,32 @@ export function resolveCommands(
   const warnings: string[] = [];
   const out = components.map((c) => {
     const commands: Record<string, CommandValue> = { ...c.commands };
+    if (commands.test !== undefined) commands.test = qualifyTestCommand(commands.test);
     for (const k of MUST_HAVE) {
-      if (commandFor(c, k) !== undefined) continue; // already a real command
-      if (isUnavailable(c, k)) continue; // already confirmed-none
+      const value = commands[k];
+      if (typeof value === "object" && "unresolved" in value) {
+        const answer = opts.interactive
+          ? opts.ask(
+              `${c.name}.${k}: ${value.unresolved} Supply an explicit command, or leave blank to keep unresolved:`,
+            )
+          : null;
+        if (answer?.trim() && answer.trim().toLowerCase() !== "none")
+          commands[k] = k === "test" ? qualifyTestCommand(answer.trim()) : answer.trim();
+        if (typeof commands[k] !== "string")
+          warnings.push(
+            `⚠ ${c.name}.${k}: unresolved — testing has not been declared unavailable.`,
+          );
+        continue;
+      }
+      if (commandFor({ ...c, commands }, k) !== undefined) continue; // already a real command
+      if (isUnavailable({ ...c, commands }, k)) continue; // already confirmed-none
       const answer = opts.interactive
         ? opts.ask(
             `${c.name} (${c.kind}) has no ${k} command — supply one, or leave blank for none:`,
           )
         : null;
       if (answer && answer.trim() !== "" && answer.trim().toLowerCase() !== "none") {
-        commands[k] = answer.trim();
+        commands[k] = k === "test" ? qualifyTestCommand(answer.trim()) : answer.trim();
       } else {
         commands[k] = { unavailable: true };
         warnings.push(`⚠ ${c.name}: no ${k} command — styre cannot ground-truth-${k} this stack.`);

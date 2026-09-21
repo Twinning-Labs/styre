@@ -1,4 +1,4 @@
-import type { CmdRunner } from "../../src/dispatch/reuse.ts";
+import type { CmdRunner } from "../../src/util/run-command.ts";
 import type { CommandResult } from "../../src/util/run-command.ts";
 
 const OK: CommandResult = { exitCode: 0, stdout: "", stderr: "", timedOut: false };

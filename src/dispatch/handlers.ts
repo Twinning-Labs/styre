@@ -142,7 +142,6 @@ import {
   sourceCheckCommand,
 } from "./provision.ts";
 import { baselineShaForAc, replayCheckEvidence } from "./replay-harness.ts";
-import { reuseAwareTestCommand } from "./reuse.ts";
 import { validateReviewEvidence } from "./review-evidence.ts";
 import { reviewFeedback } from "./review-feedback.ts";
 import { ReviewOutputSchema, computeBlocksShip, validateReviewFindings } from "./review-schema.ts";
@@ -151,6 +150,7 @@ import { runAgentDispatch } from "./run-dispatch.ts";
 import { extractSidecar } from "./sidecar.ts";
 import { observeSuiteCommand } from "./suite-observation.ts";
 import { isTestFile } from "./test-file.ts";
+import { assertTestTargets } from "./test-target.ts";
 import { combineTrack, sizeTrack } from "./track-sizing.ts";
 import { buildVerifyReport, renderVerifyReport } from "./verify-report.ts";
 import {
@@ -186,7 +186,7 @@ export interface RegistryDeps {
   resumeContext?: { stepKey: string; transcript: string };
   /** RED-first check executor override (tests inject a scripted runner; production uses runCommand).
    *  Shared by authoring, baseline replay, delivered binding, and post-implement reruns. */
-  runCheckCommand?: import("./reuse.ts").CmdRunner;
+  runCheckCommand?: import("../util/run-command.ts").CmdRunner;
 }
 
 const DESIGN_TIMEOUT_MS = 60 * 60 * 1000;
@@ -454,6 +454,7 @@ export function renderPrBody(
 /** Register the real worktree-agent handlers (control-loop §4 S1a/S2b), provider-agnostic.
  *  design:extract (M5a) is real; design:review (M5b) and merge (M6) are added later. */
 export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
+  assertTestTargets(deps.profile);
   const registry = new StepRegistry();
 
   registry.register("design:dispatch", async (ctx: HandlerContext) =>
@@ -1588,20 +1589,10 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     const ran: RanJob[] = [];
 
     if (realImpacted.length > 0) {
-      const toRun = await Promise.all(
-        realImpacted
-          .filter((c) => commandFor(c, checkType) !== undefined)
-          .map(async (c) => ({
-            component: c.name,
-            command: await reuseAwareTestCommand(
-              c,
-              checkType,
-              commandFor(c, checkType) as string,
-              join(worktreePath, c.dir ?? ""),
-            ),
-            dir: c.dir,
-          })),
-      );
+      const toRun = realImpacted.flatMap((c) => {
+        const command = commandFor(c, checkType);
+        return command === undefined ? [] : [{ component: c.name, command, dir: c.dir }];
+      });
       const unavailable = realImpacted.filter((c) => isUnavailable(c, checkType));
       const absent = realImpacted.filter(
         (c) => commandFor(c, checkType) === undefined && !isUnavailable(c, checkType),
@@ -1876,11 +1867,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       for (const key of ["build", "test"] as const) {
         const cmd = commandFor(c, key);
         if (!cmd) continue;
-        const command =
-          key === "test"
-            ? await reuseAwareTestCommand(c, key, cmd, join(worktreePath, c.dir ?? ""))
-            : cmd;
-        jobs.push({ label: `${c.name}:${key}`, command, dir: c.dir, kind: key });
+        jobs.push({ label: `${c.name}:${key}`, command: cmd, dir: c.dir, kind: key });
       }
     }
     for (const [name, cmd] of Object.entries(deps.profile.repoCommands)) {

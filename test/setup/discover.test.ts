@@ -385,3 +385,30 @@ test("headless without --trust-agent-commands: AGENTS.md-influenced override is 
   expect(rust?.commands.test).toBe("cargo test --workspace"); // scan value kept, not "true"
   expect(out.warnings.some((w) => w.includes("headless"))).toBe(true);
 });
+
+test.each([false, true])(
+  "rejected discovery preserves unresolved scan intent (trust=%s)",
+  async (trustAgentCommands) => {
+    const unresolved = { unresolved: "Select the tox test environments" };
+    const scan: Component = {
+      name: "python",
+      kind: "python",
+      paths: ["**"],
+      commands: { test: unresolved },
+      extensions: [],
+    };
+    const out = await discoverComponents(
+      process.cwd(),
+      { components: [scan], repoCommands: {} },
+      {
+        runner: runnerFor({
+          components: [{ name: "python", commands: { test: "git status; echo invalid" } }],
+          repoCommands: {},
+        }),
+        agentConfig: DEFAULT_AGENT_CONFIG,
+      },
+      { interactive: false, trustAgentCommands },
+    );
+    expect(out.components[0]?.commands.test).toEqual(unresolved);
+  },
+);
