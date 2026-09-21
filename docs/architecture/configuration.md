@@ -201,3 +201,42 @@ command values or raw model responses.
 
 At run time, `assertResolved` throws if any component lacks a resolved `build`/`test`/`check`
 command — a profile must be command-complete before a run proceeds.
+
+### Suite execution versus authored checks
+
+A `testEnvironment` plan authorizes a particular execution adapter; it does not imply that
+Styre can author and select individual tests for that framework. Existing `python` and `node`
+plans support both. The `karma` adapter supports the existing suite only, and deliberately has
+no `testAction`, check framework, or single-check launcher. Stale authored execution plans are
+rejected for it. Behavioral work requiring that component pauses before check authoring; another
+component's passing tests cannot replace the missing check capability.
+
+The first Karma adapter qualifies Karma 4, npm, default `karma.conf.js`, and scripts of the form
+`karma start --browsers Firefox --single-run` (also the explicit `./node_modules/.bin/karma`
+launcher). `npm test` and `npm run <script>` are supported; npm builtins are not script aliases.
+Built-in Firefox/Chrome headed and headless launcher names are recognized; custom launchers,
+async configs, extra shell/config/filter options, and pre/post script hooks require another
+qualified adapter. The declared browser is never silently replaced with a headless browser.
+
+Readiness uses the original npm script and config callback to check the selected Node runtime,
+Karma plugin providers, browser executable/version, and headed-display prerequisite. It exits
+before starting the server and makes **no collection or test-success claim**. Under `existing`
+policy it does not install project or browser dependencies. Operators must provide missing Node,
+plugins, browser and display prerequisites; `managed` project preparation alone does not install
+system browsers. Xvfb is one way to supply a display for an explicitly headed Linux browser.
+
+Suite execution retains the npm command, config-relative paths, plugins/reporters and CLI
+browser choices. A temporary config adds a completion reporter. Evidence retains the actual
+process exit, timeout, bounded stdout/stderr, SHA, execution time, instrumented command, and
+structured browser counts. Missing/empty/inconsistent completion, browser errors, disconnects
+and timeouts are execution errors, routed through existing bounded retries and escalation.
+Completed assertion failures are recorded distinctly. Required Karma suites must have passing
+completion at the shipping SHA (or the established, validated single-hop docs carry); a green
+Python sweep or individual check cannot excuse an omitted or failing required browser suite.
+This does not change the existing advisory policy for other legacy suites.
+
+Karma configuration is executable project code, and its reporter is measurement infrastructure,
+not a security boundary against a malicious test suite. The version-scoped adapter uses Karma
+4's plugin resolver to match the actual server's module search behavior. Native fixtures are
+opt-in with `STYRE_KARMA_NATIVE_DEPS` and `STYRE_KARMA_SPHINX`; they are separate from benchmark
+runs and do not demonstrate held-out oracle success.

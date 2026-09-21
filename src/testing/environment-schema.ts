@@ -36,6 +36,16 @@ export const TestEnvironmentPlanSchema = z.discriminatedUnion("adapter", [
       managerVersion: z.string().optional(),
     })
     .strict(),
+  z
+    .object({
+      ...common,
+      adapter: z.literal("karma"),
+      manager: z.literal("npm"),
+      managerVersion: z.string().optional(),
+      configFile: z.literal("karma.conf.js"),
+      browsers: z.array(z.enum(["Firefox", "FirefoxHeadless", "Chrome", "ChromeHeadless"])).min(1),
+    })
+    .strict(),
   z.object({ ...common, adapter: z.literal("unsupported"), reason: z.string().min(1) }).strict(),
 ]);
 export type TestEnvironmentPlan = z.infer<typeof TestEnvironmentPlanSchema>;
@@ -59,4 +69,23 @@ export interface EnvironmentObservation {
     truncated: boolean;
   }>;
   collection?: { count: number | null; exitCode: number | null; timedOut: boolean };
+}
+
+/** Suite execution and individually selected authored checks are distinct contracts. */
+export function testCapabilities(plan: TestEnvironmentPlan) {
+  if (plan.adapter === "unsupported")
+    return { suite: "unsupported", authoredChecks: "unsupported", reason: plan.reason } as const;
+  if (plan.adapter === "karma")
+    return {
+      suite: "supported",
+      authoredChecks: "unsupported",
+      reason:
+        "Karma suite execution is supported; authored-check selection and identity are not supported.",
+    } as const;
+  return {
+    suite: "supported",
+    authoredChecks: "supported",
+    framework: plan.framework,
+    launcher: plan.checkLauncher,
+  } as const;
 }

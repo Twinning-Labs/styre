@@ -64,6 +64,7 @@ export function suiteDiagnostics(rows: GroundTruthSignalRow[], currentSha: strin
           command: o.command,
           cwd: o.cwd,
           outcome: o.outcome,
+          karma: o.karma ?? null,
           exitCode: o.exitCode,
           timedOut: o.timedOut,
           timing: o.timing ?? null,

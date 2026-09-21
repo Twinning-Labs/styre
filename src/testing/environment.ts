@@ -8,11 +8,13 @@ import { nodeManager } from "../setup/node-manager.ts";
 import { resolveTestAction } from "../setup/test-action.ts";
 import { runBoundedCommand } from "../util/run-bounded-command.ts";
 import type { CmdRunner, CommandResult } from "../util/run-command.ts";
+import { testCapabilities } from "./environment-schema.ts";
 import {
   type EnvironmentObservation,
   type TestEnvironmentPlan,
   TestEnvironmentPlanSchema,
 } from "./environment-schema.ts";
+import { karmaPlan, qualifyKarma } from "./karma.ts";
 
 export const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 const PYTHON_INVENTORY = `import sys,json,importlib.util,importlib.metadata as m
@@ -21,9 +23,10 @@ for n in ['pytest','tox','tox-current-env','Django']:
  try: packages[n]=m.version(n)
  except m.PackageNotFoundError: packages[n]=None
 data={'executable':sys.executable,'version':sys.version.split()[0],'packages':packages}`;
-const NODE_INVENTORY = `const fs=require('fs'),path=require('path');const packages={};for(const name of ['jest','vitest','mocha']){try{let file=require.resolve(name,{paths:[process.cwd()]});let dir=path.dirname(file);let version=null;while(dir!==path.dirname(dir)){const p=path.join(dir,'package.json');if(fs.existsSync(p)){const m=JSON.parse(fs.readFileSync(p));if(m.name===name){version=m.version;break;}}dir=path.dirname(dir);}packages[name]={path:file,version};}catch{packages[name]=null;}}console.log(JSON.stringify({executable:process.execPath,version:process.versions.node,packages}));`;
+const NODE_INVENTORY = `const fs=require('fs'),path=require('path');const packages={};for(const name of ['jest','vitest','mocha','karma']){try{let file=require.resolve(name,{paths:[process.cwd()]});let dir=path.dirname(file);let version=null;while(dir!==path.dirname(dir)){const p=path.join(dir,'package.json');if(fs.existsSync(p)){const m=JSON.parse(fs.readFileSync(p));if(m.name===name){version=m.version;break;}}dir=path.dirname(dir);}packages[name]={path:file,version};}catch{packages[name]=null;}}console.log(JSON.stringify({executable:process.execPath,version:process.versions.node,packages}));`;
 const FILES = [
   "package.json",
+  "karma.conf.js",
   "package-lock.json",
   "pnpm-lock.yaml",
   "pnpm-workspace.yaml",
@@ -214,6 +217,8 @@ export function planTestEnvironment(
     ? JSON.parse(readFileSync(join(moduleDir, "package.json"), "utf8"))
     : {};
   const body = scriptName ? pkg.scripts?.[scriptName] : undefined;
+  const karma = karmaPlan(repo, c, policy);
+  if (karma) return karma;
   // Scope/filter arguments cannot leak into authored checks. Unknown wrappers need their own adapter.
   if (
     typeof body !== "string" ||
@@ -369,6 +374,10 @@ export function testEnvironmentProblem(repo: string, c: Component): string | und
     JSON.stringify(TestEnvironmentPlanSchema.parse(plan))
   )
     return "Test environment intent differs from current declarations; rerun setup";
+  if (plan.adapter === "karma")
+    return c.testAction
+      ? "Suite-only Karma plan cannot authorize an authored-check action; rerun setup"
+      : undefined;
   if (
     c.testAction?.framework !== plan.framework ||
     c.testAction?.launcher !== plan.checkLauncher ||
@@ -416,7 +425,18 @@ export async function qualifyTestEnvironment(
   if (problem) return fail(plan?.adapter === "unsupported" ? "unsupported" : "error", problem);
   if (!plan || plan.adapter === "unsupported")
     return fail("unsupported", "No supported test environment plan");
+  obs.runtime.capabilities = testCapabilities(plan);
   if (obs.status !== "ready") return obs;
+  if (plan.adapter === "karma") {
+    const qualified = await qualifyKarma(obs.cwd, plan, run);
+    obs.runtime.karma = qualified.evidence;
+    obs.fingerprint = fingerprint(repo, c, obs.runtime);
+    return {
+      ...obs,
+      status: qualified.ready ? "ready" : "requires-preparation",
+      reason: qualified.reason,
+    };
+  }
   if (plan.adapter === "python") {
     if (plan.suiteCommand.includes("tox")) {
       const problem = await toxProblem(repo, c, plan.suiteCommand, obs, run);

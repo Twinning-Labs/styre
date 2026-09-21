@@ -210,7 +210,7 @@ export async function runSetup(args: {
     return {
       ...c,
       testEnvironment: plan,
-      ...(plan.adapter !== "unsupported"
+      ...(plan.adapter === "python" || plan.adapter === "node"
         ? {
             testAction: {
               ...c.testAction,
@@ -218,7 +218,7 @@ export async function runSetup(args: {
               launcher: plan.checkLauncher,
             },
           }
-        : {}),
+        : { testAction: undefined }),
     };
   });
   const repoCommands = preserveCommands

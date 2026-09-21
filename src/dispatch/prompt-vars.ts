@@ -36,7 +36,12 @@ export function stackSummary(components: Component[]): string {
       // its runner is `./tests/runtests.py`, which is unittest-based and discovers only
       // `TestCase` subclasses. An author told just "test: tox" writes a bare pytest-style
       // function, and django's runner then finds nothing to run.
-      const fw = c.testAction ? `; check framework: ${c.testAction.framework}` : "";
+      const fw =
+        c.testEnvironment?.adapter === "karma"
+          ? "; existing Karma suite supported; authored-check selection unsupported. Do not substitute another component's tests for frontend requirements."
+          : c.testAction
+            ? `; check framework: ${c.testAction.framework}`
+            : "";
       return `- ${c.name} (${ident}) — paths: ${paths}${test ? `; test: ${test}` : ""}${fw}`;
     })
     .join("\n");

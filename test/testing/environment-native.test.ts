@@ -52,7 +52,7 @@ for (const fw of ["jest", "vitest", "mocha"] as const)
         }).components[0];
         c.testEnvironment = planTestEnvironment(root, c, "existing");
         const p = c.testEnvironment;
-        if (!p || p.adapter === "unsupported") throw Error(p?.reason ?? "missing plan");
+        if (!p || p.adapter !== "node") throw Error("missing node plan");
         c.testAction = { framework: p.framework, launcher: p.checkLauncher };
         const good = await qualifyTestEnvironment(root, c, { collect: true });
         expect({

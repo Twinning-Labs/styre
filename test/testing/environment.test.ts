@@ -47,7 +47,7 @@ function component(
   };
   c.testEnvironment = planTestEnvironment(repo, c, policy);
   const p = c.testEnvironment;
-  if (p && p.adapter !== "unsupported")
+  if (p && (p.adapter === "python" || p.adapter === "node"))
     c.testAction = { framework: p.framework, launcher: p.checkLauncher };
   return c;
 }
