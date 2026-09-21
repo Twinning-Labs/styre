@@ -7,10 +7,11 @@ test("checks prompt requires a behavioral/observable assertion, not status-only"
   expect(t).toMatch(/status[- ]?(code)?[- ]?only|existence[- ]?only/); // forbids the weak shape
 });
 
-test("checks prompt requires the author to run its check and confirm it fails RED-first", () => {
+test("checks prompt requires execution without manufacturing a failure or self-reporting a verdict", () => {
   const t = CHECKS_TEMPLATE.toLowerCase();
   expect(t).toMatch(/run .*(check|test)/); // must instruct running it
-  expect(t).toContain("fail"); // confirm it FAILS on current code
+  expect(t).toContain("already passes, preserve it");
+  expect(t).toContain("never invent a stronger");
   expect(t).toContain("vacuous"); // name the failure mode it prevents
   expect(t).toContain("do not report a verdict"); // still no self-reported verdict — runner is ground truth
 });

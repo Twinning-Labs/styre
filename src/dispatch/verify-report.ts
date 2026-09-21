@@ -237,16 +237,7 @@ function renderAdvisory(a: AdvisoryLine): string {
   if (a.kind === "integration") {
     const job = a.firstFailingJob ? ` (first failing job: \`${a.firstFailingJob}\`)` : "";
     const verb = a.result === "error" ? "did not complete" : "FAILED";
-    // ENG-403: say whether this change caused it. Reporting a failure without that leaves the
-    // reviewer unable to tell a regression from an already-broken repo — on
-    // darkreader__darkreader-7241 `frontend:build` was failing before the change (an upstream
-    // tslib/rollup-plugin-typescript2 incompatibility in the image) and the PR did not say so.
-    if (a.preexisting === true) {
-      return `- ⚠️ The full integration test run ${verb}${job} — but it ALSO ${verb.toLowerCase()} at the base commit, so this change did not cause it. Pre-existing; not used as a merge gate.`;
-    }
-    if (a.preexisting === false) {
-      return `- ⚠️ The full integration test run ${verb}${job}, and it PASSED at the base commit — this change appears to have introduced it. Not used as a merge gate, so please look before merging.`;
-    }
+    // Neither legacy preexisting booleans nor equal process exits prove a common cause.
     return `- ⚠️ The full integration test run ${verb}${job}. Whether it was already failing before this change could not be established. This was not used as a merge gate.`;
   }
   if (a.kind === "delivered-test-does-not-bind") {

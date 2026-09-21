@@ -49,20 +49,20 @@ describe("ENG-402: behavioral-no-test must not be reported as a suite failure", 
   });
 });
 
-describe("ENG-403: an advisory failure must say whether this change caused it", () => {
-  test("pre-existing is stated explicitly and exonerates the change", () => {
+describe("ENG-403: an advisory failure must not invent causality", () => {
+  test("legacy preexisting=true does not exonerate the change", () => {
     // darkreader__darkreader-7241: `npm run build` failed identically on the pristine base image
     // (an upstream tslib/rollup-plugin-typescript2 incompatibility). The PR reported the failure
     // and never said it pre-dated the change.
     const out = report([
       { kind: "integration", result: "fail", firstFailingJob: "frontend:build", preexisting: true },
     ]);
-    expect(out).toContain("base commit");
-    expect(out).toContain("did not cause it");
+    expect(out).toContain("could not be established");
+    expect(out).not.toContain("did not cause it");
     expect(out).toContain("frontend:build");
   });
 
-  test("introduced is called out as this change's doing", () => {
+  test("legacy preexisting=false does not prove the change caused it", () => {
     const out = report([
       {
         kind: "integration",
@@ -71,8 +71,8 @@ describe("ENG-403: an advisory failure must say whether this change caused it", 
         preexisting: false,
       },
     ]);
-    expect(out).toContain("PASSED at the base commit");
-    expect(out).toContain("introduced");
+    expect(out).toContain("could not be established");
+    expect(out).not.toContain("introduced");
   });
 
   test("unknown says so rather than implying either answer", () => {

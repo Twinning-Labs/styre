@@ -55,9 +55,6 @@ export async function runParkedTicket(): Promise<ParkedRunResult> {
   const stateRoot = mkdtempSync(join(tmpdir(), "styre-park-state-"));
   process.env.XDG_STATE_HOME = stateRoot;
 
-  // Reset process.exitCode to 0 so we can observe what finishRunResult sets it to.
-  process.exitCode = 0;
-
   // A real git repo + on-disk SQLite DB seeded with ticket ENG-1 at stage='implement' + work_unit.
   // repoPath and stateRoot must outlive this function (needed by resumeParkedTicket); they are
   // tracked in _tempDirs so the caller can clean them up after the full test via cleanupParkedRun.
@@ -109,7 +106,10 @@ export async function runParkedTicket(): Promise<ParkedRunResult> {
     checks: fakeChecks("passing"),
   };
 
+  // Bun does not clear an assigned exit code when assigned undefined; restore success as 0.
+  const previousExitCode = process.exitCode ?? 0;
   try {
+    process.exitCode = 0;
     const result = await driveToTerminal(db, registry, {
       ticketId,
       config: DEFAULT_RUNTIME_CONFIG,
@@ -144,6 +144,7 @@ export async function runParkedTicket(): Promise<ParkedRunResult> {
       _tempDirs: [stateRoot, repoPath],
     };
   } finally {
+    process.exitCode = previousExitCode;
     // Restore XDG_STATE_HOME so the global side-effect doesn't leak to subsequent tests.
     if (prevXdgStateHome === undefined) {
       process.env.XDG_STATE_HOME = undefined;
@@ -175,9 +176,6 @@ export async function runNeedsYouTicket(): Promise<ParkedRunResult> {
   const prevXdgStateHome = process.env.XDG_STATE_HOME;
   const stateRoot = mkdtempSync(join(tmpdir(), "styre-needsyou-state-"));
   process.env.XDG_STATE_HOME = stateRoot;
-
-  // Reset process.exitCode to 0 so we can observe what finishRunResult sets it to.
-  process.exitCode = 0;
 
   // A real git repo + on-disk SQLite DB seeded with ticket ENG-1 at stage='implement' + work_unit.
   const { db, ticketId, repoPath } = gitRepoWithProject();
@@ -226,7 +224,10 @@ export async function runNeedsYouTicket(): Promise<ParkedRunResult> {
     checks: fakeChecks("passing"),
   };
 
+  // Bun does not clear an assigned exit code when assigned undefined; restore success as 0.
+  const previousExitCode = process.exitCode ?? 0;
   try {
+    process.exitCode = 0;
     const result = await driveToTerminal(db, registry, {
       ticketId,
       config: DEFAULT_RUNTIME_CONFIG,
@@ -274,6 +275,7 @@ export async function runNeedsYouTicket(): Promise<ParkedRunResult> {
       _tempDirs: [stateRoot, repoPath],
     };
   } finally {
+    process.exitCode = previousExitCode;
     // Restore XDG_STATE_HOME so the global side-effect doesn't leak to subsequent tests.
     if (prevXdgStateHome === undefined) {
       process.env.XDG_STATE_HOME = undefined;
@@ -320,7 +322,6 @@ export async function resumeParkedTicket(
   const xdgStateHome = join(parked.dumpDir, "..", "..", "..");
   const prevXdgStateHome = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = xdgStateHome;
-  process.exitCode = 0;
 
   // Read the real repo path from the dump DB for the profile.
   // (resumeRun re-opens it internally; we just need it for the profile here.)
@@ -375,7 +376,10 @@ export async function resumeParkedTicket(
     checks: fakeChecks("passing"),
   };
 
+  // Bun does not clear an assigned exit code when assigned undefined; restore success as 0.
+  const previousExitCode = process.exitCode ?? 0;
   try {
+    process.exitCode = 0;
     await resumeRun(
       { resume: parked.ident, acceptHead: opts?.acceptHead, inspect: opts?.inspect },
       realProfile,
@@ -459,6 +463,7 @@ export async function resumeParkedTicket(
     const ran = ((lastRunner as FakeAgentRunner | null)?.inputs.length ?? 0) > 0;
     return { prompts, result, exitCode, ran };
   } finally {
+    process.exitCode = previousExitCode;
     if (prevXdgStateHome === undefined) {
       process.env.XDG_STATE_HOME = undefined;
     } else {
@@ -690,7 +695,9 @@ export async function runFreshTicket(opts?: {
     if (ownsStateRoot) rmSync(stateRoot, { recursive: true, force: true });
   };
 
+  const previousExitCode = process.exitCode ?? 0;
   try {
+    process.exitCode = 0;
     const ports = {
       issueTracker: fakeIssueTracker({
         ticket: {
@@ -713,6 +720,8 @@ export async function runFreshTicket(opts?: {
     // the caller — clean up (env + temp dirs) here instead, so a failed call never leaks either.
     localCleanup();
     throw err;
+  } finally {
+    process.exitCode = previousExitCode;
   }
 
   const checkpointDir = parkDir(FRESH_SLUG, FRESH_IDENT); // reads the still-live XDG_STATE_HOME

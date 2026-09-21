@@ -11,6 +11,7 @@ import {
   beginReviewContract,
   requiredCodeFindings,
 } from "../db/repos/review-round.ts";
+import { getTicket } from "../db/repos/ticket.ts";
 import { listByTicket as units } from "../db/repos/work-unit.ts";
 import { setPid } from "../db/repos/workflow-step.ts";
 import { StepPrerequisiteError } from "../engine/step-journal.ts";
@@ -20,6 +21,7 @@ import type { Profile } from "./profile.ts";
 import { validateReviewEvidence } from "./review-evidence.ts";
 import { CodeReviewOutputSchema, validateReviewFindings } from "./review-schema.ts";
 import { extractSidecar } from "./sidecar.ts";
+import { suiteDiagnostics } from "./suite-diagnostics.ts";
 import { pendingEntries, undoAttempt, worktreeHead } from "./worktree.ts";
 
 export const REVIEW_PROBE_LIMIT = 3; // persisted per ticket, including interrupted requests
@@ -38,6 +40,11 @@ function reviewContext(db: Database, ticketId: number, sha: string, profile: Pro
   return JSON.stringify(
     {
       reviewed_sha: sha,
+      original_ticket: {
+        title: getTicket(db, ticketId)?.title,
+        description: getTicket(db, ticketId)?.description,
+      },
+      suite_diagnostics: suiteDiagnostics(signals(db, ticketId), sha),
       work_units: units(db, ticketId).map((u) => ({
         id: u.id,
         seq: u.seq,

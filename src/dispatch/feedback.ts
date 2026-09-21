@@ -7,6 +7,8 @@ import {
   listByUnit,
   listByTicket as listSignals,
 } from "../db/repos/ground-truth-signal.ts";
+import { getById as getUnit } from "../db/repos/work-unit.ts";
+import { suiteDiagnostics } from "./suite-diagnostics.ts";
 
 /** Build the corrective feedback for re-coding a bounced-back unit, from the prior coding
  *  attempt's non-pass check results. Empty string on the first attempt (no prior failures). */
@@ -15,7 +17,20 @@ export function implementFeedback(db: Database, workUnitId: number): string {
   if (sha === null) {
     return "";
   }
-  const failures = listByUnit(db, workUnitId).filter((s) => {
+  const observations = listByUnit(db, workUnitId);
+  const unit = getUnit(db, workUnitId);
+  const diagnosticRows = unit
+    ? listSignals(db, unit.ticket_id).filter(
+        (s) =>
+          s.work_unit_id === workUnitId ||
+          (s.work_unit_id === null && s.signal_type === "integration"),
+      )
+    : observations;
+  const diagnostics = suiteDiagnostics(diagnosticRows, sha);
+  const diagnosticText = diagnostics.observations.length
+    ? `\nRecorded suite diagnostics (evidence, not repair instructions):\n${JSON.stringify(diagnostics)}`
+    : "";
+  const failures = observations.filter((s) => {
     if (s.branch_head_sha !== sha || s.result === "pass") return false;
     // advisory run-all-on-unowned sweeps surface UNTOUCHED stacks' pre-existing red — never feed
     // them to the re-coding agent (it can't and shouldn't iterate on stacks this unit didn't touch).
@@ -28,9 +43,7 @@ export function implementFeedback(db: Database, workUnitId: number): string {
     if (detail.advisory === true) return false;
     return true;
   });
-  if (failures.length === 0) {
-    return "";
-  }
+  if (failures.length === 0) return diagnosticText;
   const lines = failures.map((s) => {
     const detail =
       s.detail_json === null ? {} : (JSON.parse(s.detail_json) as Record<string, unknown>);
@@ -47,7 +60,7 @@ export function implementFeedback(db: Database, workUnitId: number): string {
         : "";
     return `- The ${s.signal_type} check ${s.result}${why}`;
   });
-  return `Your previous attempt did not pass verification. Fix these before finishing:\n${lines.join("\n")}`;
+  return `Your previous attempt did not pass verification. Fix these before finishing:\n${lines.join("\n")}${diagnosticText}`;
 }
 
 /** Corrective feedback for a gate-fail loopback: WHICH acceptance-checks are still red. UNLIKE

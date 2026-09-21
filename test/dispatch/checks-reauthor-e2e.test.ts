@@ -53,8 +53,7 @@ test("green-on-HEAD check → vacuous → scoped re-author → repeated vacuous 
   let file = 0;
   const runner = new FakeAgentRunner((input) => {
     // checks:dispatch authors a new test file; checks:classify returns a sidecar with no file write.
-    const wantsSidecar =
-      input.prompt.includes("adjudicat") || input.prompt.includes("Checks to classify");
+    const wantsSidecar = input.prompt.startsWith("You are an independent adjudicator for ");
     if (!wantsSidecar) {
       file += 1;
       const dir = join(input.cwd, "checks");
@@ -152,8 +151,7 @@ test("a weak classification (surface-only assertion) drives the same re-author l
 
   let file = 0;
   const runner = new FakeAgentRunner((input) => {
-    const wantsSidecar =
-      input.prompt.includes("adjudicat") || input.prompt.includes("Checks to classify");
+    const wantsSidecar = input.prompt.startsWith("You are an independent adjudicator for ");
     if (!wantsSidecar) {
       file += 1;
       const dir = join(input.cwd, "checks");
@@ -259,8 +257,7 @@ test("supersede, not delete: a healed AC (vacuous -> re-author -> already-satisf
   // set) must instead read this AC as resolved.
   let round = 0;
   const runner = new FakeAgentRunner((input) => {
-    const wantsSidecar =
-      input.prompt.includes("adjudicat") || input.prompt.includes("Checks to classify");
+    const wantsSidecar = input.prompt.startsWith("You are an independent adjudicator for ");
     if (!wantsSidecar) {
       round += 1;
       const dir = join(input.cwd, "checks");
