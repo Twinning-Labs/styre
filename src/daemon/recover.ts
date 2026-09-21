@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 import * as steps from "../db/repos/workflow-step.ts";
+import { StepExecutionError } from "../engine/step-journal.ts";
+import { isSuiteStep } from "./verification-retry.ts";
 
 export interface RecoverDeps {
   /** True if this PID is alive; a negative value denotes a POSIX process group. */
@@ -26,6 +28,11 @@ export function recover(db: Database, deps: RecoverDeps): RecoverResult {
     if (step.pid !== null && deps.isAlive(step.pid)) {
       deps.kill(step.pid);
       killed++;
+    }
+    // An interrupted suite is incomplete execution, not a verdict. Retain its consumed attempt
+    // and typed error so restarting cannot skip the same bounded retry policy as a timeout.
+    if (isSuiteStep(step)) {
+      steps.markFailed(db, step.id, new StepExecutionError("verification execution interrupted"));
     }
     steps.resetToPending(db, step.id);
   }

@@ -20,6 +20,14 @@ export function runBoundedCommand(
     let truncated = false;
     let settled = false;
     const cap = 64 * 1024;
+    // Keep the beginning AND latest output. Retaining only a prefix hides the command phase
+    // active at timeout, even when downstream diagnostics ask for the log's tail.
+    const capture = (previous: string, next: string) => {
+      const combined = previous + next;
+      if (combined.length <= cap) return combined;
+      truncated = true;
+      return combined.slice(0, cap / 2) + combined.slice(-cap / 2);
+    };
     const finish = (exitCode: number | null, timedOut: boolean, error?: string) => {
       let resultExitCode = exitCode;
       let resultError = error;
@@ -50,13 +58,11 @@ export function runBoundedCommand(
     const timer = setTimeout(() => finish(null, true), opts.timeoutMs);
     proc.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString();
-      truncated ||= stdout.length + text.length > cap;
-      stdout = (stdout + text).slice(0, cap);
+      stdout = capture(stdout, text);
     });
     proc.stderr.on("data", (chunk: Buffer) => {
       const text = chunk.toString();
-      truncated ||= stderr.length + text.length > cap;
-      stderr = (stderr + text).slice(0, cap);
+      stderr = capture(stderr, text);
     });
     proc.on("error", (err) => finish(null, false, String(err)));
     proc.on("close", (code) => finish(code, false));

@@ -27,6 +27,7 @@ import {
 import { driveToTerminal, formatRunSummary } from "../daemon/run-ticket.ts";
 import type { PauseReason, RunOutcome } from "../daemon/run-ticket.ts";
 import type { StepRegistry } from "../daemon/step-registry.ts";
+import { resumeVerificationRetries } from "../daemon/verification-retry.ts";
 import { openDb } from "../db/client.ts";
 import { migrate } from "../db/migrate.ts";
 import { getLatestForTicket, getLatestWorktreePath } from "../db/repos/dispatch.ts";
@@ -393,6 +394,7 @@ export async function resumeRun(
       }
 
       applyReviewResume(db, ticketId, runtimeConfig, reviewPlan);
+      resumeVerificationRetries(db, ticketId);
     })();
 
     recover(db, realRecoverDeps()); // resets the interrupted 'running' step → pending

@@ -63,7 +63,7 @@ test("caps both output streams while draining them to completion", async () => {
   await withDirectory(async (cwd) => {
     writeFileSync(
       join(cwd, "large-output.js"),
-      'process.stdout.write("o".repeat(131072)); process.stderr.write("e".repeat(131072));',
+      'process.stdout.write("START" + "o".repeat(131072) + "END"); process.stderr.write("FIRST" + "e".repeat(131072) + "LAST");',
     );
     const result = await runBoundedCommand(`${quote(process.execPath)} large-output.js`, {
       cwd,
@@ -72,8 +72,12 @@ test("caps both output streams while draining them to completion", async () => {
     expect(result.exitCode).toBe(0);
     expect(result.timedOut).toBe(false);
     expect(result.truncated).toBe(true);
-    expect(result.stdout).toBe("o".repeat(65536));
-    expect(result.stderr).toBe("e".repeat(65536));
+    expect(result.stdout.length).toBe(65536);
+    expect(result.stderr.length).toBe(65536);
+    expect(result.stdout.startsWith("START")).toBe(true);
+    expect(result.stdout.endsWith("END")).toBe(true);
+    expect(result.stderr.startsWith("FIRST")).toBe(true);
+    expect(result.stderr.endsWith("LAST")).toBe(true);
   });
 });
 

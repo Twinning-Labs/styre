@@ -66,6 +66,7 @@ export function suiteDiagnostics(rows: GroundTruthSignalRow[], currentSha: strin
           outcome: o.outcome,
           exitCode: o.exitCode,
           timedOut: o.timedOut,
+          timing: o.timing ?? null,
           stdout: typeof o.stdout === "string" ? o.stdout.slice(-750) : null,
           stderr: typeof o.stderr === "string" ? o.stderr.slice(-750) : null,
           outputTruncated:

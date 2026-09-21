@@ -22,6 +22,7 @@ import { enqueueStageProjection } from "./projector.ts";
 import { nextStepKey } from "./resolver.ts";
 import { type ReviewVerdictResult, applyReviewVerdict } from "./review-verdict.ts";
 import type { StepRegistry } from "./step-registry.ts";
+import { prepareVerificationRetry } from "./verification-retry.ts";
 
 const MAX_TRANSITIONS = 100;
 
@@ -111,6 +112,9 @@ export async function advanceOneStep(
     }
 
     // d.kind === "step"
+    const existing = getByKey(db, ticketId, d.stepKey);
+    const retry = existing ? prepareVerificationRetry(db, existing) : null;
+    if (retry) return { kind: retry.decision, stepKey: d.stepKey };
     const ticket = getTicket(db, ticketId);
     if (!ticket) {
       throw new Error(`advanceOneStep: ticket ${ticketId} not found`);
@@ -127,7 +131,7 @@ export async function advanceOneStep(
       const verdictBox: {
         value: ReviewVerdictResult | ChecksVerdictResult | GateVerdictResult | null;
       } = { value: null };
-      await runStep(db, {
+      const execution = await runStep(db, {
         ticketId,
         workUnitId: d.workUnitId,
         stepKey: d.stepKey,
@@ -157,6 +161,19 @@ export async function advanceOneStep(
             }
           : undefined,
       });
+      if (execution.replayed) {
+        // The resolver requested work whose effects are already journaled. Replaying again
+        // cannot change routing. Fail loudly, including for checkpoints produced by older code,
+        // without discarding evidence or silently re-executing an effectful step.
+        escalate(
+          db,
+          ticketId,
+          `no progress: resolver requested completed step '${d.stepKey}'; inspect its evidence and routing before resuming`,
+          `step-replay-no-progress:${d.stepKey}`,
+          getLatestForTicket(db, ticketId)?.dispatch_id ?? undefined,
+        );
+        return { kind: "escalated", stepKey: d.stepKey };
+      }
       const verdict = verdictBox.value;
       if (verdict !== null && verdict.decision !== "clean") {
         return { kind: verdict.decision, stepKey: d.stepKey };

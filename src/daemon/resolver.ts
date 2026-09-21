@@ -213,11 +213,9 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
             return step("verify:checks-gate", "verify", "verify:checks-gate", null);
           }
         }
-        // M4 §8c: verify:integration is demoted to advisory — ran-at-sha (ANY recorded result),
-        // not passingShasFor. Coupled with handlers.ts's throw removal (same commit): a handler that
-        // records an advisory fail with no pass at HEAD would otherwise leave this gate re-emitting
-        // forever against the journal replay (MAX_TRANSITIONS).
-        const integrationRanShas = gts.ranShasFor(db, {
+        // A completed pass OR fail satisfies advisory routing. An error must remain eligible
+        // for bounded execution retry, just like per-unit checks; it is not a suite verdict.
+        const integrationRanShas = gts.verdictShasFor(db, {
           ticketId,
           workUnitId: null,
           signalType: "integration",
