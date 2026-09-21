@@ -923,3 +923,56 @@ live(
   },
   120_000,
 );
+
+for (const exitCode of [0, 1])
+  test(`integration writes an independent non-browser requirement and a bound receipt for exit ${exitCode}`, async () => {
+    const { db, ticketId, projectId } = makeTestDb();
+    const repo = gitRepo();
+    const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-required-wt-"));
+    try {
+      seedAllVerified(db, ticketId, projectId, repo);
+      const { insertDispatch, completeDispatch } = await import("../../src/db/repos/dispatch.ts");
+      const { listByTicket } = await import("../../src/db/repos/ground-truth-signal.ts");
+      const { requiredSuiteProblem } = await import("../../src/testing/suite-requirements.ts");
+      const sha = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repo })
+        .stdout.toString()
+        .trim();
+      const dispatch = insertDispatch(db, { ticketId, dispatchId: "implementation", seq: 1 });
+      completeDispatch(db, dispatch.id, { outcome: "clean-success", branchHeadSha: sha });
+      const registry = buildDispatchRegistry({
+        profile: parseProfile({
+          slug: "test",
+          targetRepo: repo,
+          components: [
+            {
+              name: "app",
+              kind: "node",
+              paths: ["**"],
+              commands: { test: `exit ${exitCode}` },
+              testPolicy: { suite: "required" },
+            },
+          ],
+        }),
+        agentConfig: DEFAULT_AGENT_CONFIG,
+        runner: new FakeAgentRunner(() => {
+          throw Error("must not dispatch an agent");
+        }),
+        worktreeRoot,
+      });
+      await advanceOneStep(db, ticketId, registry);
+      await advanceOneStep(db, ticketId, registry);
+      const signals = listByTicket(db, ticketId);
+      const declaration = signals.find((s) => s.signal_type === "suite-requirements");
+      const measured = signals.find((s) => s.signal_type === "integration");
+      if (!declaration || !measured) throw Error("missing declaration or integration");
+      expect(declaration.id).toBeLessThan(measured.id);
+      expect(JSON.parse(measured.detail_json ?? "null").ran[0].observation.suite.evidence).toBe(
+        "process",
+      );
+      expect(requiredSuiteProblem(signals, sha) === undefined).toBe(exitCode === 0);
+    } finally {
+      db.close();
+      rmSync(worktreeRoot, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });

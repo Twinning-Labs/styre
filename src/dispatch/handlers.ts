@@ -46,7 +46,7 @@ import {
   recordResponses,
   unresolvedReviewReason,
 } from "../db/repos/review-round.ts";
-import { setNeedsDocs, setTicketTrack } from "../db/repos/ticket.ts";
+import { getTicket, setNeedsDocs, setTicketTrack } from "../db/repos/ticket.ts";
 import {
   getById as getUnit,
   insertWorkUnit,
@@ -58,7 +58,13 @@ import {
 import { setPid } from "../db/repos/workflow-step.ts";
 import { StepExecutionError, StepPrerequisiteError } from "../engine/step-journal.ts";
 import { pythonImportName } from "../setup/lang/python.ts";
+import { authoredChecksUnavailable } from "../testing/capabilities.ts";
 import { requireTestEnvironment, testEnvironmentProblem } from "../testing/environment.ts";
+import {
+  declaredSuiteRequirements,
+  requiredSuiteProblem,
+  requirementsHash,
+} from "../testing/suite-requirements.ts";
 import { runCommand } from "../util/run-command.ts";
 import { nowUtc } from "../util/time.ts";
 import { type AdjClass, ChecksClassifyOutputSchema } from "./adjudicate-schema.ts";
@@ -198,7 +204,7 @@ const PROVISION_TIMEOUT_MS = 15 * 60 * 1000;
 /** Resolve the repo + ticket worktree + branch for a DAEMON-run step (verify). Unlike
  *  `depsFor` this carries no agent capability — verify only reads the committed worktree. */
 export function worktreeFor(
-  ctx: HandlerContext,
+  ctx: Pick<HandlerContext, "db" | "ticket">,
   deps: RegistryDeps,
 ): { repoPath: string; worktreePath: string; branch: string } {
   const project = getProject(ctx.db, ctx.ticket.project_id);
@@ -457,8 +463,43 @@ export function renderPrBody(
  *  design:extract (M5a) is real; design:review (M5b) and merge (M6) are added later. */
 export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   assertTestTargets(deps.profile);
-  const registry = new StepRegistry();
+  function synchronizeRequirements(db: Database, ticketId: number) {
+    const ticket = getTicket(db, ticketId);
+    if (!ticket) throw Error(`Missing ticket ${ticketId}`);
+    const record = (result: "pass" | "error", detail: unknown) => {
+      const prior = listSignalsByTicket(db, ticketId)
+        .filter((s) => s.signal_type === "suite-requirements")
+        .at(-1);
+      if (prior?.detail_json !== JSON.stringify(detail) || prior.result !== result)
+        insertSignal(db, { ticketId, signalType: "suite-requirements", result, detail });
+    };
+    try {
+      record(
+        "pass",
+        declaredSuiteRequirements(
+          deps.profile.components,
+          worktreeFor({ db, ticket }, deps).worktreePath,
+        ),
+      );
+    } catch (error) {
+      // Poison an older permissive declaration before the outbox can drain after this pause.
+      record("error", { version: 1, error: String(error) });
+      throw error;
+    }
+  }
+  const registry = new StepRegistry((db, ticketId) => {
+    synchronizeRequirements(db, ticketId);
+    const ticket = getTicket(db, ticketId);
+    if (ticket && ["review", "merge"].includes(ticket.stage)) {
+      const problem = requiredSuiteProblem(
+        listSignalsByTicket(db, ticketId),
+        getLatestForTicket(db, ticketId)?.branch_head_sha ?? null,
+      );
+      if (problem) throw new StepPrerequisiteError(problem);
+    }
+  });
   async function environmentGate(ctx: HandlerContext, collect = false) {
+    synchronizeRequirements(ctx.db, ctx.ticket.id);
     if (!deps.profile.components.some((c) => c.testEnvironment)) return;
     const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
     ensureWorktree(repoPath, branch, worktreePath);
@@ -693,7 +734,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       try {
         requiredOwners.add(checkOwner(deps.profile.components, file).name);
       } catch {
-        if (deps.profile.components.some((c) => c.testEnvironment?.adapter === "karma"))
+        if (deps.profile.components.some((c) => authoredChecksUnavailable(c)))
           throw new StepPrerequisiteError(
             `Behavioral file ${file} has no unambiguous check owner; resolve scope before authoring checks in a mixed-capability project.`,
           );
@@ -2009,7 +2050,9 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           reason: baseline?.reason ?? "No baseline observation available.",
         },
         ...(baseline ? { baseline } : {}),
-        requiredSuites: jobs.filter((j) => j.environment?.adapter === "karma").map((j) => j.label),
+        suiteRequirementsHash: requirementsHash(
+          declaredSuiteRequirements(deps.profile.components, worktreePath),
+        ),
         notExecuted: jobs.slice(ran.length).map(({ label }) => label),
       }),
     });

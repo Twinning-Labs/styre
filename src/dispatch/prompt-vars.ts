@@ -16,6 +16,7 @@ import {
   parseFilesToTouch,
   parseVerifyCheckTypes,
 } from "../db/repos/work-unit.ts";
+import { authoredChecksUnavailable, suiteRequirement } from "../testing/capabilities.ts";
 import { commandFor, impactedComponents } from "./components.ts";
 import { DOC_PATHS_HINT } from "./docs-paths.ts";
 import type { Component, Profile } from "./profile.ts";
@@ -36,12 +37,11 @@ export function stackSummary(components: Component[]): string {
       // its runner is `./tests/runtests.py`, which is unittest-based and discovers only
       // `TestCase` subclasses. An author told just "test: tox" writes a bare pytest-style
       // function, and django's runner then finds nothing to run.
-      const fw =
-        c.testEnvironment?.adapter === "karma"
-          ? "; existing Karma suite supported; authored-check selection unsupported. Do not substitute another component's tests for frontend requirements."
-          : c.testAction
-            ? `; check framework: ${c.testAction.framework}`
-            : "";
+      const fw = authoredChecksUnavailable(c)
+        ? `; ${authoredChecksUnavailable(c)}; suite policy: ${suiteRequirement(c)}. Do not substitute another component's tests for this component's requirements.`
+        : c.testAction
+          ? `; check framework: ${c.testAction.framework}`
+          : "";
       return `- ${c.name} (${ident}) — paths: ${paths}${test ? `; test: ${test}` : ""}${fw}`;
     })
     .join("\n");

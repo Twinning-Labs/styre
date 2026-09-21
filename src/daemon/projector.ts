@@ -1,6 +1,8 @@
 import type { Database } from "bun:sqlite";
 import { z } from "zod";
+import { getLatestForTicket } from "../db/repos/dispatch.ts";
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
+import { listByTicket as listGroundTruth } from "../db/repos/ground-truth-signal.ts";
 import {
   type OutboxRow,
   bumpAttempt,
@@ -17,6 +19,7 @@ import type { ForgePort } from "../integrations/forge.ts";
 import type { IssueState, IssueTrackerPort } from "../integrations/issue-tracker.ts";
 import { NotificationMessageSchema } from "../integrations/notifier.ts";
 import type { NotifierPort } from "../integrations/notifier.ts";
+import { requiredSuiteProblem } from "../testing/suite-requirements.ts";
 
 const PushPayload = z.object({ branch: z.string(), sha: z.string() });
 const PrCreatePayload = z.object({
@@ -113,6 +116,11 @@ async function applyRow(
       row.op === "push" ? PushPayload.parse(payload).sha : undefined,
     );
     if (unresolved) throw new Error(`forge projection blocked: ${unresolved}`);
+    const suiteProblem = requiredSuiteProblem(
+      listGroundTruth(db, row.ticket_id),
+      getLatestForTicket(db, row.ticket_id)?.branch_head_sha ?? null,
+    );
+    if (suiteProblem) throw new Error(`forge projection blocked: ${suiteProblem}`);
   }
 
   if (row.target === "issue_tracker") {

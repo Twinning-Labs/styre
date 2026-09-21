@@ -55,6 +55,13 @@ export async function advanceOneStep(
   registry: StepRegistry,
   opts?: { config?: RuntimeConfig },
 ): Promise<AdvanceOutcome> {
+  try {
+    registry.synchronize(db, ticketId);
+  } catch (error) {
+    const reason = `Verification contract could not be established: ${String(error)}`;
+    pauseTicket(db, ticketId, reason);
+    return { kind: "paused-noprogress", reason };
+  }
   for (let i = 0; i < MAX_TRANSITIONS; i++) {
     const d = nextStepKey(db, ticketId);
 

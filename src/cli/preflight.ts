@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { commandFor } from "../dispatch/components.ts";
 import type { Component, Profile } from "../dispatch/profile.ts";
 import { probeCommandExists } from "../setup/discover-schema.ts";
+import { suiteRequirement } from "../testing/capabilities.ts";
 import { toolchainError } from "./errors.ts";
 
 /** One command the run will execute, tagged with the component + slot it came from. */
@@ -175,7 +176,12 @@ export function applyToolchainGate(
   probe: (repoDir: string, command: string) => boolean = probeCommandExists,
 ): ToolchainGate {
   const partition = partitionByToolchain(profile, probe);
-  if (partition.fatal) {
+  if (
+    partition.fatal ||
+    partition.unusable.some((u) =>
+      profile.components.some((c) => c.name === u.component && suiteRequirement(c) === "required"),
+    )
+  ) {
     throw toolchainError(formatMissingTools(partition.missing));
   }
   if (partition.unusable.length === 0) return { profile, unusable: [] };

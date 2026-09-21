@@ -71,21 +71,4 @@ export interface EnvironmentObservation {
   collection?: { count: number | null; exitCode: number | null; timedOut: boolean };
 }
 
-/** Suite execution and individually selected authored checks are distinct contracts. */
-export function testCapabilities(plan: TestEnvironmentPlan) {
-  if (plan.adapter === "unsupported")
-    return { suite: "unsupported", authoredChecks: "unsupported", reason: plan.reason } as const;
-  if (plan.adapter === "karma")
-    return {
-      suite: "supported",
-      authoredChecks: "unsupported",
-      reason:
-        "Karma suite execution is supported; authored-check selection and identity are not supported.",
-    } as const;
-  return {
-    suite: "supported",
-    authoredChecks: "supported",
-    framework: plan.framework,
-    launcher: plan.checkLauncher,
-  } as const;
-}
+export { testCapabilities } from "./capabilities.ts";

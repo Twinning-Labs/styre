@@ -301,3 +301,18 @@ test("setup never inherits another repository's commands from a shared output pa
   });
   expect(second.profile.repoCommands.integration).toBeUndefined();
 });
+
+test("setup preserves explicit suite policy and disables authored actions without disabling suites", async () => {
+  const repo = gitRepo();
+  const out = join(mkdtempSync(join(tmpdir(), "styre-policy-out-")), "profile.json");
+  const first = await runSetup({ repo, out, deps: fakeDeps() });
+  const c = first.profile.components.find((c) => c.kind === "node");
+  if (!c) throw Error("missing Node component");
+  c.testPolicy = { authoredChecks: "disabled", suite: "required" };
+  writeFileSync(out, JSON.stringify(first.profile));
+  const second = await runSetup({ repo, out, deps: fakeDeps() });
+  const updated = second.profile.components.find((candidate) => candidate.name === c.name);
+  expect(updated?.testPolicy).toEqual(c.testPolicy);
+  expect(updated?.testAction).toBeUndefined();
+  expect(updated?.testEnvironment?.adapter).toBe("node");
+});

@@ -22,6 +22,7 @@ import { resolveCommands } from "../setup/resolve-commands.ts";
 import { withTestActions } from "../setup/test-action.ts";
 import { createAnalytics } from "../telemetry/analytics/index.ts";
 import type { SetupInput } from "../telemetry/analytics/properties.ts";
+import { testCapabilities } from "../testing/capabilities.ts";
 import type { EnvironmentObservation } from "../testing/environment-schema.ts";
 import {
   inspectTestRuntime,
@@ -187,11 +188,12 @@ export async function runSetup(args: {
       ? existing?.components.find((p) => p.name === c.name && p.kind === c.kind && p.dir === c.dir)
       : undefined;
     const test = prior?.commands.test;
+    const configured = prior?.testPolicy ? { ...c, testPolicy: prior.testPolicy } : c;
     return test !== undefined &&
       !(typeof test === "object" && "unresolved" in test) &&
       !(typeof test === "string" && testTargetProblem(test))
-      ? { ...c, commands: { ...c.commands, test } }
-      : c;
+      ? { ...configured, commands: { ...c.commands, test } }
+      : configured;
   });
   const { components: resolved, warnings } = resolveCommands(candidates, {
     interactive,
@@ -207,15 +209,16 @@ export async function runSetup(args: {
       "managed";
     const plan = planTestEnvironment(repoDir, c, policy);
     if (!plan) return c;
+    const capabilities = testCapabilities(plan, c.testPolicy);
     return {
       ...c,
       testEnvironment: plan,
-      ...(plan.adapter === "python" || plan.adapter === "node"
+      ...(capabilities.authoredChecks === "supported"
         ? {
             testAction: {
               ...c.testAction,
-              framework: plan.framework,
-              launcher: plan.checkLauncher,
+              framework: capabilities.framework,
+              launcher: capabilities.launcher,
             },
           }
         : { testAction: undefined }),

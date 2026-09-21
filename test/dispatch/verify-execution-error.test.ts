@@ -143,7 +143,8 @@ for (const scope of ["unit", "integration"] as const) {
           stepKey: f.key,
         });
         expect(getByKey(f.db, f.ticketId, f.key)?.attempt).toBe(3);
-        expect(signals(f.db, f.ticketId)).toHaveLength(0);
+        // Synchronizing the active contract is not another test execution or retry.
+        expect(signals(f.db, f.ticketId).map((s) => s.signal_type)).toEqual(["suite-requirements"]);
         // Explicit operator action grants a new bounded window and retains the previous counter.
         f.db.transaction(() => resumeVerificationRetries(f.db, f.ticketId))();
         setTicketStatus(f.db, f.ticketId, "active");
@@ -274,7 +275,10 @@ for (const scope of ["unit", "integration"] as const) {
         kind: "escalated",
         stepKey: f.key,
       });
-      expect(signals(f.db, f.ticketId)).toHaveLength(1);
+      expect(signals(f.db, f.ticketId).map((s) => s.signal_type)).toEqual([
+        scope === "unit" ? "test" : "integration",
+        "suite-requirements",
+      ]);
       expect(getByKey(f.db, f.ticketId, f.key)?.attempt).toBe(0);
       expect(events(f.db, f.ticketId).at(-1)?.signature).toBe(`step-replay-no-progress:${f.key}`);
       expect(getTicket(f.db, f.ticketId)?.status).toBe("waiting");

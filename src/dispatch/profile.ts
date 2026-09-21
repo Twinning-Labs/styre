@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { parseConfigOrThrow } from "../config/parse-config.ts";
+import { TestPolicySchema } from "../testing/capabilities.ts";
 import { TestEnvironmentPlanSchema } from "../testing/environment-schema.ts";
 
 export const PresenceEnum = z.enum(["present", "absent", "unknown"]);
@@ -214,32 +215,43 @@ export function isPrimary(c: { role?: ComponentRole }): boolean {
   return (c.role ?? "primary") === "primary";
 }
 
-export const ComponentSchema = z.object({
-  name: z.string().min(1),
-  kind: ComponentKindEnum,
-  /** What this component is to the repo — see `ComponentRoleEnum`. Anything but `primary` is
-   *  excluded from the run (provision/build/test/check) and REPORTED, never silently dropped.
-   *  Absent = primary; read it through `isPrimary`, never directly. */
-  role: ComponentRoleEnum.optional(),
-  /** Free-text stack description (e.g. "browser-extension", "cli tool"). Agent-authorable and
-   *  carried into prompts; NEVER switched on. Purely descriptive by construction. */
-  label: z.string().optional(),
-  /** Qualified test invocation. Absent → `frameworkFor` falls back to inferring from `kind` +
-   *  the `test` command, which is the pre-ENG-399 behaviour and still correct when it resolves. */
-  testAction: TestActionSchema.optional(),
-  testEnvironment: TestEnvironmentPlanSchema.optional(),
-  paths: z.array(z.string().min(1)).min(1),
-  commands: z.record(z.string(), CommandValueSchema).default({}),
-  testFilePattern: z.string().optional(),
-  extensions: z.array(z.string()).default([]),
-  /** Install command EXECUTED by the runner-owned `provision` step (src/dispatch/provision.ts)
-   *  before the first verify — makes the detected verify command runnable against the worktree
-   *  source. Optional; absent → provision skips this component. `isCommandSafe`-validated at
-   *  setup (detect-components.ts). (Was WO-12 detect-only "never run".) */
-  prepare: z.string().optional(),
-  /** Module root directory, relative to repo root; absent means root (WO-9 non-root modules). */
-  dir: z.string().refine(isSafeDir, "unsafe dir (absolute or traversal)").optional(),
-});
+export const ComponentSchema = z
+  .object({
+    name: z.string().min(1),
+    kind: ComponentKindEnum,
+    /** What this component is to the repo — see `ComponentRoleEnum`. Anything but `primary` is
+     *  excluded from the run (provision/build/test/check) and REPORTED, never silently dropped.
+     *  Absent = primary; read it through `isPrimary`, never directly. */
+    role: ComponentRoleEnum.optional(),
+    /** Free-text stack description (e.g. "browser-extension", "cli tool"). Agent-authorable and
+     *  carried into prompts; NEVER switched on. Purely descriptive by construction. */
+    label: z.string().optional(),
+    /** Qualified test invocation. Absent → `frameworkFor` falls back to inferring from `kind` +
+     *  the `test` command, which is the pre-ENG-399 behaviour and still correct when it resolves. */
+    testAction: TestActionSchema.optional(),
+    testEnvironment: TestEnvironmentPlanSchema.optional(),
+    /** Verification obligation is separate from adapter support. Never enables an unsupported capability. */
+    testPolicy: TestPolicySchema.optional(),
+    paths: z.array(z.string().min(1)).min(1),
+    commands: z.record(z.string(), CommandValueSchema).default({}),
+    testFilePattern: z.string().optional(),
+    extensions: z.array(z.string()).default([]),
+    /** Install command EXECUTED by the runner-owned `provision` step (src/dispatch/provision.ts)
+     *  before the first verify — makes the detected verify command runnable against the worktree
+     *  source. Optional; absent → provision skips this component. `isCommandSafe`-validated at
+     *  setup (detect-components.ts). (Was WO-12 detect-only "never run".) */
+    prepare: z.string().optional(),
+    /** Module root directory, relative to repo root; absent means root (WO-9 non-root modules). */
+    dir: z.string().refine(isSafeDir, "unsafe dir (absolute or traversal)").optional(),
+  })
+  .refine(
+    (c) => c.testPolicy?.suite !== "required" || c.role === undefined || c.role === "primary",
+    {
+      message:
+        "A required suite cannot belong to an excluded component; set its role to primary or change the suite policy",
+      path: ["testPolicy", "suite"],
+    },
+  );
 export type Component = z.infer<typeof ComponentSchema>;
 
 /** The project-profile: canonical stack truth the daemon reads (build-operations §5).

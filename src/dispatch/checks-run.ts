@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { authoredChecksUnavailable } from "../testing/capabilities.ts";
 import type { EnvironmentObservation } from "../testing/environment-schema.ts";
 import { requireTestEnvironment } from "../testing/environment.ts";
 import { runCommand } from "../util/run-command.ts";
@@ -78,9 +79,9 @@ export async function runCheckExecution(p: {
   const component = p.components?.find((c) => c.name === p.plan.component);
   if (p.plan.environmentFingerprint && !component?.testEnvironment)
     return invalid("Qualified execution plan requires its component environment contract");
+  const unavailable = component && authoredChecksUnavailable(component);
+  if (unavailable) return invalid(unavailable);
   if (component?.testEnvironment) {
-    if (component.testEnvironment.adapter === "karma")
-      return invalid("Karma supports existing suites only; authored checks are unsupported");
     if (
       component.testAction?.launcher !== p.plan.launcher ||
       component.testAction?.framework !== p.plan.framework ||

@@ -8,7 +8,7 @@ import { nodeManager } from "../setup/node-manager.ts";
 import { resolveTestAction } from "../setup/test-action.ts";
 import { runBoundedCommand } from "../util/run-bounded-command.ts";
 import type { CmdRunner, CommandResult } from "../util/run-command.ts";
-import { testCapabilities } from "./environment-schema.ts";
+import { testCapabilities } from "./capabilities.ts";
 import {
   type EnvironmentObservation,
   type TestEnvironmentPlan,
@@ -374,13 +374,14 @@ export function testEnvironmentProblem(repo: string, c: Component): string | und
     JSON.stringify(TestEnvironmentPlanSchema.parse(plan))
   )
     return "Test environment intent differs from current declarations; rerun setup";
-  if (plan.adapter === "karma")
+  const capability = testCapabilities(plan, c.testPolicy);
+  if (capability.authoredChecks === "unsupported")
     return c.testAction
-      ? "Suite-only Karma plan cannot authorize an authored-check action; rerun setup"
+      ? "Suite-only plan cannot authorize an authored-check action; rerun setup"
       : undefined;
   if (
-    c.testAction?.framework !== plan.framework ||
-    c.testAction?.launcher !== plan.checkLauncher ||
+    c.testAction?.framework !== capability.framework ||
+    c.testAction?.launcher !== capability.launcher ||
     c.testAction?.selectorDir
   )
     return "Single-check launcher differs from qualified suite context; rerun setup";
@@ -425,7 +426,7 @@ export async function qualifyTestEnvironment(
   if (problem) return fail(plan?.adapter === "unsupported" ? "unsupported" : "error", problem);
   if (!plan || plan.adapter === "unsupported")
     return fail("unsupported", "No supported test environment plan");
-  obs.runtime.capabilities = testCapabilities(plan);
+  obs.runtime.capabilities = testCapabilities(plan, c.testPolicy);
   if (obs.status !== "ready") return obs;
   if (plan.adapter === "karma") {
     const qualified = await qualifyKarma(obs.cwd, plan, run);

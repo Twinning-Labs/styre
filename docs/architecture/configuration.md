@@ -204,12 +204,59 @@ command — a profile must be command-complete before a run proceeds.
 
 ### Suite execution versus authored checks
 
-A `testEnvironment` plan authorizes a particular execution adapter; it does not imply that
-Styre can author and select individual tests for that framework. Existing `python` and `node`
-plans support both. The `karma` adapter supports the existing suite only, and deliberately has
-no `testAction`, check framework, or single-check launcher. Stale authored execution plans are
-rejected for it. Behavioral work requiring that component pauses before check authoring; another
-component's passing tests cannot replace the missing check capability.
+A `testEnvironment` plan selects an execution adapter. The adapter capability contract describes
+suite support, evidence strength, authored-check support, and install scope. Setup, check routing,
+prompt construction and provisioning consume that contract rather than branching on runner names.
+Supporting a suite does not imply support for authoring or selecting individual tests.
+
+Operator verification policy is separate from support. A component may declare:
+
+```json
+"testPolicy": { "suite": "required", "authoredChecks": "disabled" }
+```
+
+Both fields are optional. `suite` accepts `required` or `advisory`; `authoredChecks` only accepts
+`disabled`, so a policy cannot enable a capability the adapter lacks. Ordinary setup reruns
+preserve this policy for the same component identity; `--force` resets discovery. Disabling
+authored checks clears `testAction` without disabling suite execution. Behavioral work owned by
+that component pauses before authoring; another component's checks cannot substitute for it.
+Python and Node plans can therefore be suite-only too. Their internal launcher metadata remains
+necessary for environment qualification and does not itself authorize authored checks.
+
+Without an explicit suite policy, supported suite-only components default to `required`; other
+components retain the existing `advisory` behavior. Explicitly required suites cannot be dropped
+by the toolchain gate. An explicit required policy on an excluded component role is rejected as
+contradictory configuration. Missing prerequisites fail before agent spend. Policy governs component
+`test` commands; untyped `repoCommands` keep their legacy advisory semantics.
+
+Before step resolution, including resume with no pending handlers, the runner records the current
+complete `suite-requirements` declaration separately from execution results. Integration binds its
+report to that declaration's digest. The evidence floor checks every required suite against it;
+removing a job or a report's requirement list cannot remove an obligation. Duplicate identities,
+missing/invalid receipts, changed commands/workspaces/contracts, and stale source revisions fail
+closed. Resumed review/merge stages and queued forge push/PR effects enforce the same required
+contract; changing policy cannot bypass it after leaving implementation. Documentation carry is one hop and must match the latest original integration's contract,
+result and execution records. This does not broaden which changes qualify as documentation-only.
+
+New suite observations contain a versioned generic receipt with an adapter protocol, expected
+execution parameters, command/workspace digest, evidence strength, raw payload and derived verdict.
+Only adapters instrument commands and interpret runner protocols; the gate revalidates receipts
+against the independent expectation. `process-v1` establishes command completion only: exit zero
+is **not** evidence of nonempty test collection or behavior. `karma-v1` additionally requires
+consistent, nonempty completion on the declared number of browsers. A process receipt cannot
+satisfy a structured contract, nor can the observed browser count replace the declared count.
+
+Old process ledgers retain their existing weaker semantics. Old structured receipts remain
+inspectable, but a legacy required-suite record lacks an independent declaration and must be
+verified again. Native receipts missing that declaration are rejected rather than treated as
+legacy. Required-suite failure blocks the evidence floor; execution errors retain the existing
+bounded retry/escalation behavior. This change does not add automatic repair for suite failures.
+
+Adding a runner requires its plan/discovery/qualification support and capability declaration at
+the adapter boundary, plus a versioned execution/receipt validator when process evidence is
+insufficient. It does not require adding runner-name checks to setup, dispatch or the evidence
+floor. Arbitrary runners, shell wrappers, browser provisioning, and authored-check identity for
+new frameworks still require actual implementations and qualification.
 
 The first Karma adapter qualifies Karma 4, npm, default `karma.conf.js`, and scripts of the form
 `karma start --browsers Firefox --single-run` (also the explicit `./node_modules/.bin/karma`
@@ -230,10 +277,8 @@ browser choices. A temporary config adds a completion reporter. Evidence retains
 process exit, timeout, bounded stdout/stderr, SHA, execution time, instrumented command, and
 structured browser counts. Missing/empty/inconsistent completion, browser errors, disconnects
 and timeouts are execution errors, routed through existing bounded retries and escalation.
-Completed assertion failures are recorded distinctly. Required Karma suites must have passing
-completion at the shipping SHA (or the established, validated single-hop docs carry); a green
-Python sweep or individual check cannot excuse an omitted or failing required browser suite.
-This does not change the existing advisory policy for other legacy suites.
+Completed assertion failures are recorded distinctly. The generic required-suite policy above
+applies to this adapter; no browser-specific gate exists in orchestration.
 
 Karma configuration is executable project code, and its reporter is measurement infrastructure,
 not a security boundary against a malicious test suite. The version-scoped adapter uses Karma
