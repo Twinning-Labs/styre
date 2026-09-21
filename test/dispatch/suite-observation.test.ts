@@ -66,6 +66,8 @@ test("native suite runner captures stdout/stderr and exposes the process recover
   expect(o.stdout).toContain("failing-test-output");
   expect(o.stderr).toContain("setup-diagnostic");
   expect(o.outcome).toBe("completed-nonzero");
+  expect(o.timing?.timeoutMs).toBe(5000);
+  expect(o.timing?.durationMs).toBeGreaterThan(0);
 });
 
 test("latest pass clears one unit's advisory without clearing another unit", () => {

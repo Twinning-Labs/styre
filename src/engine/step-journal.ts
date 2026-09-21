@@ -20,6 +20,15 @@ export class StepPrerequisiteError extends Error {
   }
 }
 
+/** An attempted operation did not complete. Retry the same step within its attempt budget;
+ * never interpret this as a behavioral verdict or ask an author to repair code for it. */
+export class StepExecutionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StepExecutionError";
+  }
+}
+
 export interface RunStepParams {
   ticketId: number;
   workUnitId?: number | null;

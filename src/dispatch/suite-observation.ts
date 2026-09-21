@@ -15,6 +15,10 @@ export const SuiteObservationSchema = z
     stdout: z.string(),
     stderr: z.string(),
     outputTruncated: z.boolean(),
+    // Optional for older checkpoints and synthetic observations, measured for native runs.
+    timing: z
+      .object({ durationMs: z.number().nonnegative(), timeoutMs: z.number().positive() })
+      .optional(),
   })
   .refine(
     (o) =>
@@ -68,9 +72,13 @@ export async function observeSuiteCommand(p: {
   onSpawn?: (pid: number) => void;
   onSettled?: () => void;
 }): Promise<SuiteObservation> {
+  const started = performance.now();
   try {
     const run = await runBoundedCommand(p.command, p);
-    return suiteObservation({ sha: p.sha, command: p.command, cwd: p.cwd }, run);
+    return {
+      ...suiteObservation({ sha: p.sha, command: p.command, cwd: p.cwd }, run),
+      timing: { durationMs: performance.now() - started, timeoutMs: p.timeoutMs },
+    };
   } finally {
     p.onSettled?.();
   }

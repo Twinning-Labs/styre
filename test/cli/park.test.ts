@@ -19,9 +19,14 @@ import { openDb } from "../../src/db/client.ts";
 import { migrate } from "../../src/db/migrate.ts";
 import { insertProject } from "../../src/db/repos/project.ts";
 import { insertTicket, setTicketStage } from "../../src/db/repos/ticket.ts";
-import { getByKey } from "../../src/db/repos/workflow-step.ts";
+import {
+  getByKey,
+  insertPending,
+  markFailed,
+  markRunning,
+} from "../../src/db/repos/workflow-step.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
-import { runStep } from "../../src/engine/step-journal.ts";
+import { StepExecutionError, runStep } from "../../src/engine/step-journal.ts";
 import { fakeChecks } from "../../src/integrations/adapters/fake-checks.ts";
 import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
@@ -140,6 +145,13 @@ test("resumeRun wires resetProvisionForResume into the resume path (S4)", async 
       execute: () => ({ ok: true }),
     });
     expect(getByKey(seedDb, ticketId, "provision")?.status).toBe("succeeded");
+    const failedSuite = insertPending(seedDb, {
+      ticketId,
+      stepKey: "verify:integration",
+      stepType: "verify",
+    });
+    for (let i = 0; i < 3; i++) markRunning(seedDb, failedSuite.id, {});
+    markFailed(seedDb, failedSuite.id, new StepExecutionError("suite timed out"));
     seedDb.exec("PRAGMA wal_checkpoint(TRUNCATE);");
     seedDb.close();
 
@@ -175,6 +187,10 @@ test("resumeRun wires resetProvisionForResume into the resume path (S4)", async 
         buildRegistry: () => {
           const checkDb = openDb(dbPath);
           observedStatus = getByKey(checkDb, ticketId, "provision")?.status;
+          expect(getByKey(checkDb, ticketId, "verify:integration")).toMatchObject({
+            status: "pending",
+            attempt: 0,
+          });
           checkDb.close();
           throw new Sentinel("stop before dispatch");
         },

@@ -56,7 +56,7 @@ import {
   setStatus as setUnitStatus,
 } from "../db/repos/work-unit.ts";
 import { setPid } from "../db/repos/workflow-step.ts";
-import { StepPrerequisiteError } from "../engine/step-journal.ts";
+import { StepExecutionError, StepPrerequisiteError } from "../engine/step-journal.ts";
 import { pythonImportName } from "../setup/lang/python.ts";
 import { runCommand } from "../util/run-command.ts";
 import { nowUtc } from "../util/time.ts";
@@ -1804,7 +1804,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     // unit — absent commands on swept stacks are silently skipped (no "check-absent" error).
     // Cost is recorded as a "sweep-cost" (result:"pass") signal for every triggered sweep so
     // the T1 frequency risk (freeze §13 #1) becomes observable data.
-    if (unownedNonInert.length > 0) {
+    if (result !== "error" && unownedNonInert.length > 0) {
       const untouched = components.filter((c) => !realImpacted.includes(c));
       const sweepStart = Date.now();
       let stacksSwept = 0;
@@ -1846,12 +1846,8 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       });
     }
 
-    // M4 §8a: the component-suite verdict is DEMOTED to advisory — record the (possibly-fail)
-    // result for observability and RETURN normally; never throw on it. The AC-checks gate
-    // (verify:checks-gate) is now the only per-change hard gate. The realImpacted run loop + the
-    // A1 behavioral-no-test check above still COMPUTE `result`/`detail` as before — only the
-    // terminal throw is removed. `advisory: true` marks this signal so implementFeedback (and any
-    // other reader) knows it never gates and must not be fed back as a re-coding instruction.
+    // Completed suite verdicts are advisory. Incomplete execution is not a verdict: retain its
+    // diagnostics first, then fail the step so bounded retry/escalation owns the outcome.
     insertSignal(ctx.db, {
       ticketId: ctx.ticket.id,
       workUnitId: ctx.workUnitId,
@@ -1861,7 +1857,9 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       branchHeadSha: latestSha,
       detail: suiteDetail(ran, { ...detail, advisory: true }),
     });
-
+    if (result === "error") {
+      throw new StepExecutionError(`verify:check ${checkType}: suite execution incomplete`);
+    }
     return { check: checkType, result };
   });
 
@@ -1917,14 +1915,12 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         break;
       }
     }
-    // M4 §8c: demoted to advisory (§3/§7) — record the (possibly-fail) result and RETURN normally;
-    // never throw on the suite verdict. Coupled with the resolver's integration gate flip to
-    // ranShasFor (below) in this SAME commit — an advisory fail with no pass at HEAD would otherwise
-    // re-emit this step forever against the journal replay (MAX_TRANSITIONS deadlock).
+    // Completed suite verdicts are advisory; execution errors retry the same sweep. Do not spend
+    // another command deadline on a baseline comparison when the candidate never completed.
     // A baseline command is diagnostic evidence only until its environment/source binding and
     // test identities are qualified. A shared nonzero exit must never excuse a candidate failure.
     let baseline: BaselineObservation | undefined;
-    if (result !== "pass") {
+    if (result === "fail") {
       const failed = ran.find((j) => j.exitCode !== 0 || j.timedOut);
       const job = failed ? jobs.find((j) => j.label === failed.label) : undefined;
       const baselineSha = preImplementBaselineSha(ctx.db, ctx.ticket.id);
@@ -1956,6 +1952,9 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         notExecuted: jobs.slice(ran.length).map(({ label }) => label),
       }),
     });
+    if (result === "error") {
+      throw new StepExecutionError("verify:integration: suite execution incomplete");
+    }
     return { integration: result };
   });
 

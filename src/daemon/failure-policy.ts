@@ -23,7 +23,7 @@ export interface FailurePolicyResult {
   decision: FailureDecision;
 }
 
-const DEFAULT_MAX_ATTEMPTS = 3;
+export const DEFAULT_MAX_ATTEMPTS = 3;
 
 function failureSignature(step: WorkflowStepRow): string {
   const message = step.error_json === null ? "" : (JSON.parse(step.error_json).message ?? "");
@@ -112,6 +112,13 @@ export function applyFailurePolicy(
       });
     })();
     return { decision: "escalated" };
+  }
+
+  // Persisted error type, not stale signals or output prose, defines retry-only execution faults.
+  // The attempt cap above applies equally to unit checks and ticket-scoped integration sweeps.
+  if (step.error_json !== null && JSON.parse(step.error_json).name === "StepExecutionError") {
+    resetToPending(db, step.id);
+    return { decision: "retry" };
   }
 
   // A throwing verify:checks-gate is an infra/invariant fault (missing branch sha, git fault, or a
