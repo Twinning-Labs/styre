@@ -20,6 +20,7 @@ import { migrate } from "../db/migrate.ts";
 import { getRun, insertRun } from "../db/repos/run.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
+import { assertTestTargets } from "../dispatch/test-target.ts";
 import { reconcileWorktree } from "../dispatch/worktree.ts";
 import { assertSlackConfigured } from "../integrations/notifier.ts";
 import { branchPrefixFor } from "../integrations/ticket-source.ts";
@@ -48,6 +49,7 @@ const MUST_HAVE = ["build", "test", "check"] as const;
  *  `{ unavailable: true }`). Throws if any are undefined (absent) — the unresolved state that
  *  indicates setup was not run or was incomplete. */
 export function assertResolved(profile: Profile): void {
+  assertTestTargets(profile);
   for (const c of profile.components) {
     for (const k of MUST_HAVE) {
       const v = c.commands[k];
@@ -162,7 +164,7 @@ export async function runImpl(
     const loaded = loadRunProfile({ profile: args.profile, slug: args.slug });
     let profile: Profile = loaded.profile;
     const slug: string = loaded.slug;
-    assertResolved(profile);
+    if (!args.inspect) assertResolved(profile);
     if (loaded.nonPrimary.length > 0) {
       // NEVER SILENT (ENG-425). Said here for whoever is watching the run, and again in the PR
       // body via the `component-role` signal `provision` emits from `nonPrimaryComponents` —

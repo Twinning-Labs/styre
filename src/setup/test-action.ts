@@ -156,7 +156,7 @@ function djangoTestAction(moduleDir: string): TestAction | null {
 /** Attach `testAction` to components whose real test invocation can be resolved from the repo:
  *  node/sveltekit via `package.json` scripts (ENG-399), python via its own runner (ENG-427). */
 export function withTestActions(repoDir: string, components: Component[]): Component[] {
-  return components.map((c) => {
+  return components.map(({ testAction: _previousAction, ...c }) => {
     const moduleDir = join(repoDir, c.dir ?? "");
     if (c.kind === "python") {
       const action = djangoTestAction(moduleDir);

@@ -11,6 +11,7 @@ import { DEFAULT_RUNTIME_CONFIG } from "../config/runtime-config.ts";
 import { deriveSlug } from "../config/slug.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
+import { testTargetProblem, unresolvedTestTargets } from "../dispatch/test-target.ts";
 import { unrootedManifestWarnings } from "../setup/detect-components.ts";
 import { discoverComponents } from "../setup/discover.ts";
 import type { EnrichDeps } from "../setup/enrich.ts";
@@ -18,9 +19,10 @@ import { enrichRuntimeContext } from "../setup/enrich.ts";
 import { mergeRuntimeContext } from "../setup/merge.ts";
 import { probeProfile } from "../setup/probe.ts";
 import { resolveCommands } from "../setup/resolve-commands.ts";
+import { withTestActions } from "../setup/test-action.ts";
 import { createAnalytics } from "../telemetry/analytics/index.ts";
 import type { SetupInput } from "../telemetry/analytics/properties.ts";
-import { agentCliError } from "./errors.ts";
+import { agentCliError, usageError } from "./errors.ts";
 import { guard } from "./output.ts";
 
 const CHECKS = new Set(["github", "external", "none"]);
@@ -96,7 +98,12 @@ export async function runSetup(args: {
   reprobe?: boolean;
   trustAgentCommands?: boolean;
   deps: EnrichDeps;
-}): Promise<{ outPath: string; profile: Profile; needsInput: string[] }> {
+}): Promise<{
+  outPath: string;
+  profile: Profile;
+  needsInput: string[];
+  unresolvedCommands: string[];
+}> {
   const repoDir = resolve(args.repo);
   if (!existsSync(repoDir)) throw new Error(`setup: repo path not found: ${repoDir}`);
   if (args.checks !== undefined && !CHECKS.has(args.checks)) {
@@ -117,10 +124,11 @@ export async function runSetup(args: {
       : join(configDir(), profile.slug, "profile.json");
   // Preserve an existing project's analytics id whenever a profile is already on disk — even under
   // --force/--reprobe — so the same project keeps a STABLE id and is never double-counted.
-  const priorAnalyticsId = existsSync(outPath) ? loadProfile(outPath).analyticsId : undefined;
+  const existing = existsSync(outPath) ? loadProfile(outPath) : undefined;
+  const priorAnalyticsId = existing?.analyticsId;
   if (existsSync(outPath) && !clean) {
     // Layer 3: idempotent re-probe — enrich without clobbering operator-resolved runtime context.
-    const existing = loadProfile(outPath);
+    if (!existing) throw new Error("setup: previous profile vanished");
     profile = {
       ...profile,
       analyticsId: existing.analyticsId ?? profile.analyticsId,
@@ -137,10 +145,34 @@ export async function runSetup(args: {
   );
   for (const w of discovered.warnings) console.warn(w);
   for (const w of unrootedManifestWarnings(repoDir)) console.warn(w);
-  const { components, warnings } = resolveCommands(discovered.components, {
+  // Existing explicit test commands are operator configuration, not scan defaults to overwrite.
+  // Match module identity as well as name so a moved/changed component cannot inherit a target.
+  const preserveCommands = !clean && existing && resolve(existing.targetRepo) === repoDir;
+  const candidates = discovered.components.map((c) => {
+    const prior = preserveCommands
+      ? existing?.components.find((p) => p.name === c.name && p.kind === c.kind && p.dir === c.dir)
+      : undefined;
+    const test = prior?.commands.test;
+    return test !== undefined &&
+      !(typeof test === "object" && "unresolved" in test) &&
+      !(typeof test === "string" && testTargetProblem(test))
+      ? { ...c, commands: { ...c.commands, test } }
+      : c;
+  });
+  const { components: resolved, warnings } = resolveCommands(candidates, {
     interactive,
     ask: (q) => (interactive ? (globalThis.prompt(q) ?? null) : null),
   });
+  const components = withTestActions(repoDir, resolved);
+  const repoCommands = preserveCommands
+    ? {
+        ...existing.repoCommands,
+        ...discovered.repoCommands,
+        ...Object.fromEntries(
+          Object.entries(existing.repoCommands).filter(([, cmd]) => !testTargetProblem(cmd)),
+        ),
+      }
+    : discovered.repoCommands;
   for (const w of warnings) console.warn(w);
 
   // SECURITY-BEARING CONFIRM: every command (incl. agent-supplied ones) runs via `sh -c` at verify
@@ -153,13 +185,15 @@ export async function runSetup(args: {
     for (const c of components) {
       process.stderr.write(`  ${c.name} [${c.kind}]  paths: ${c.paths.join(", ")}\n`);
       for (const [k, v] of Object.entries(c.commands)) {
-        process.stderr.write(`    ${k}: ${typeof v === "string" ? v : "(none)"}\n`);
+        process.stderr.write(
+          `    ${k}: ${typeof v === "string" ? v : "unresolved" in v ? `(unresolved: ${v.unresolved})` : "(none)"}\n`,
+        );
       }
       if (c.prepare !== undefined) {
         process.stderr.write(`    prepare: ${c.prepare} (stored, not run)\n`);
       }
     }
-    for (const [name, cmd] of Object.entries(discovered.repoCommands)) {
+    for (const [name, cmd] of Object.entries(repoCommands)) {
       process.stderr.write(`  repo.${name}: ${cmd}\n`);
     }
     const ok = globalThis.prompt("Approve these components (commands + paths)? [y/N]");
@@ -168,14 +202,16 @@ export async function runSetup(args: {
     }
   }
 
-  profile = ensureAnalyticsId(
-    { ...profile, components, repoCommands: discovered.repoCommands },
-    priorAnalyticsId,
-  );
+  profile = ensureAnalyticsId({ ...profile, components, repoCommands }, priorAnalyticsId);
 
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, `${JSON.stringify(profile, null, 2)}\n`);
-  return { outPath, profile, needsInput: unknownRuntimeSections(profile) };
+  return {
+    outPath,
+    profile,
+    needsInput: unknownRuntimeSections(profile),
+    unresolvedCommands: unresolvedTestTargets(profile),
+  };
 }
 
 /** Non-fatal note about creds a later `styre run` will need. Tracker-aware: if any JIRA_* var is
@@ -273,7 +309,7 @@ export async function setupImpl({ args }: { args: SetupArgs }): Promise<void> {
   if (!cliPreflight.ok) throw agentCliError(cliPreflight);
   if (cliPreflight.unauthHint) process.stderr.write(`setup: ${cliPreflight.unauthHint}\n`);
   const runner = resolveAgentRunner(agentConfig);
-  const { outPath, profile, needsInput } = await runSetup({
+  const { outPath, profile, needsInput, unresolvedCommands } = await runSetup({
     repo,
     out: args.out,
     checks: args.checks,
@@ -284,6 +320,11 @@ export async function setupImpl({ args }: { args: SetupArgs }): Promise<void> {
     deps: { runner, agentConfig },
   });
   process.stderr.write(`setup: wrote ${outPath}\n`);
+  if (unresolvedCommands.length)
+    throw usageError(
+      `setup has unresolved test targets:\n${unresolvedCommands.join("\n")}`,
+      `Edit ${outPath} with explicit test commands before running. Unresolved does not mean unavailable.`,
+    );
   if (needsInput.length > 0) {
     const lines = needsInput.map((s) => `         - ${s}`).join("\n");
     process.stderr.write(

@@ -1,8 +1,8 @@
+import type { CmdRunner } from "../util/run-command.ts";
 import { executionDirectories } from "./check-execution.ts";
 import { type CheckFramework, frameworkFor, launcherFor } from "./check-selector.ts";
 import type { Component } from "./profile.ts";
 import { resolvePythonInterpreter } from "./provision.ts";
-import type { CmdRunner } from "./reuse.ts";
 
 /**
  * CAN STYRE ACTUALLY RUN A CHECK FOR THIS COMPONENT? (ENG-426)

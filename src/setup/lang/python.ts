@@ -1,12 +1,21 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import type { CommandValue } from "../../dispatch/profile.ts";
 import { findManifests } from "../manifests.ts";
 import type { ComponentDraft, LangDef } from "./types.ts";
 
 /** §5.3 runner detection: tox > nox > pytest-config > default. Root-level config only. */
-export function pythonTestCommand(repoDir: string): string {
-  if (existsSync(join(repoDir, "tox.ini"))) return "tox";
-  if (existsSync(join(repoDir, "noxfile.py"))) return "nox";
+export function pythonTestCommand(repoDir: string): CommandValue {
+  if (hasToxConfig(repoDir))
+    return {
+      unresolved:
+        "tox configuration found; select the test environments explicitly with tox -e <names>.",
+    };
+  if (existsSync(join(repoDir, "noxfile.py")))
+    return {
+      unresolved:
+        "nox configuration found; select the test sessions explicitly with nox -s <names>.",
+    };
   if (existsSync(join(repoDir, "pytest.ini"))) return "pytest";
   const pp = join(repoDir, "pyproject.toml");
   if (existsSync(pp)) {
@@ -20,9 +29,8 @@ export function pythonTestCommand(repoDir: string): string {
 }
 
 export function pythonPrepare(repoDir: string): string | undefined {
-  const test = pythonTestCommand(repoDir);
-  if (test === "tox") return "pip install tox";
-  if (test === "nox") return "pip install nox";
+  if (hasToxConfig(repoDir)) return "pip install tox";
+  if (existsSync(join(repoDir, "noxfile.py"))) return "pip install nox";
   if (
     existsSync(join(repoDir, "pyproject.toml")) ||
     existsSync(join(repoDir, "setup.py")) ||
@@ -31,6 +39,21 @@ export function pythonPrepare(repoDir: string): string | undefined {
     return "pip install -e .";
   if (existsSync(join(repoDir, "requirements.txt"))) return "pip install -r requirements.txt";
   return undefined;
+}
+
+function hasToxConfig(repoDir: string): boolean {
+  if (["tox.ini", "tox.toml"].some((name) => existsSync(join(repoDir, name)))) return true;
+  const cfg = join(repoDir, "setup.cfg");
+  if (
+    existsSync(cfg) &&
+    /^\s*\[(?:tox:tox|testenv(?::[^\]]+)?)\]\s*(?:[#;].*)?$/m.test(readFileSync(cfg, "utf8"))
+  )
+    return true;
+  const pp = join(repoDir, "pyproject.toml");
+  if (!existsSync(pp)) return false;
+  const parsed = Bun.TOML.parse(readFileSync(pp, "utf8"));
+  const tool = "tool" in parsed ? parsed.tool : undefined;
+  return typeof tool === "object" && tool !== null && "tox" in tool;
 }
 
 /** The importable module name for a python component, used by `provision`'s post-install

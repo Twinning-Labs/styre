@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { listByAc } from "../db/repos/ac-check.ts";
 import { signalForAcCheck } from "../db/repos/ground-truth-signal.ts";
+import type { CmdRunner } from "../util/run-command.ts";
 import { type CheckExecutionPlan, resolveCheckExecution } from "./check-execution.ts";
 import type { CoarseOrNone } from "./check-selector.ts";
 import { type CheckRunResult, runCheckExecution } from "./checks-run.ts";
 import type { Component } from "./profile.ts";
 import { resolvePythonInterpreter } from "./provision.ts";
-import type { CmdRunner } from "./reuse.ts";
 
 function git(args: string[], cwd: string): { ok: boolean; out: string } {
   const res = Bun.spawnSync(["git", ...args], { cwd });

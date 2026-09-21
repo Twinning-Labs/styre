@@ -49,9 +49,7 @@ function commitAll(repo: string, message: string): string {
  *  Listed FIRST so `impactedComponents(...)[0]` prefers it over "app" for the check path. */
 const CHECKS_COMPONENT = { name: "checks", kind: "python", paths: ["checks/**"], commands: {} };
 
-/** The "real code" component every implement dispatch writes into — a plain shell test command,
- *  never python, so `reuseAwareTestCommand`'s python-reuse probe never fires (kind !== "python"
- *  short-circuits it) and the advisory sweep stays a deterministic, fast shell command. */
+/** The real-code component uses a deterministic shell command for the advisory sweep. */
 function appComponent(testCmd: string) {
   return { name: "app", kind: "node", paths: ["**"], commands: { test: testCmd } };
 }

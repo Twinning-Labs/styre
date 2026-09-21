@@ -26,6 +26,14 @@ For each component, correct:
   wherever they live (e.g. a `lint:rust` script in package.json belongs to the Rust component).
 Also propose **repoCommands**: commands that span/own no single component (e.g. an end-to-end suite).
 
+A tox/nox configuration does not identify the intended test target. Read its configured commands,
+dependencies, factors and the repository's contributor instructions before proposing concrete
+`tox -e <environments>` or `nox -s <sessions>` selections. Never propose bare tox/nox, ALL, listing,
+package-only or no-test modes as test commands. Environment names (including Python versions)
+alone do not establish test purpose. If scope cannot be established, leave the detected unresolved
+test command alone; do not turn uncertainty into an assertion that tests are unavailable. Preserve
+required flags and configuration; a generic successful pytest collection is not an equivalent suite.
+
 ## AGENTS.md (the repo's agent-onboarding standard — authoritative for commands)
 
 {{agents_md}}

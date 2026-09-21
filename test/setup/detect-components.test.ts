@@ -88,12 +88,12 @@ test("python: runner detection precedence tox > nox > pytest-config > default", 
     detectComponents(fixture({ "setup.py": "", "tox.ini": "[tox]\n" })).components.find(
       (c) => c.kind === "python",
     )?.commands.test,
-  ).toBe("tox");
+  ).toMatchObject({ unresolved: expect.stringContaining("tox") });
   expect(
     detectComponents(fixture({ "setup.py": "", "noxfile.py": "" })).components.find(
       (c) => c.kind === "python",
     )?.commands.test,
-  ).toBe("nox");
+  ).toMatchObject({ unresolved: expect.stringContaining("nox") });
   expect(
     detectComponents(fixture({ "setup.py": "", "pytest.ini": "[pytest]\n" })).components.find(
       (c) => c.kind === "python",

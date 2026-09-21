@@ -67,7 +67,7 @@ export async function discoverComponents(
         commands[key] = value; // machine/scan command — keep
         continue;
       }
-      const scanVal = typeof scanCmds[key] === "string" ? (scanCmds[key] as string) : undefined;
+      const scanVal = scanCmds[key]; // unresolved intent must survive a rejected proposal
       const accept = isCommandSafe(value) && probeCommandExists(repoDir, value) && trusted;
       if (accept) {
         commands[key] = value;

@@ -2,13 +2,13 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCommand } from "../util/run-command.ts";
+import type { CmdRunner } from "../util/run-command.ts";
 import {
   type CheckExecutionPlan,
   executionCwd,
   interpretCheckExecution,
 } from "./check-execution.ts";
 import { type CheckFramework, type CoarseOrNone, interpretRunOutput } from "./check-selector.ts";
-import type { CmdRunner } from "./reuse.ts";
 
 export interface CheckRunResult {
   /** The coarse RED-first bucket, or `selected-none` (identity reject, §5.1). */

@@ -254,3 +254,50 @@ test("unknownRuntimeSections lists only the unknown flags", () => {
   expect(u).not.toContain("data");
   expect(u).not.toContain("topology");
 });
+
+test("unselected tox persists as unresolved; ordinary setup preserves explicit targets and force resets them", async () => {
+  const repo = gitRepo();
+  writeFileSync(join(repo, "setup.py"), "");
+  writeFileSync(
+    join(repo, "tox.ini"),
+    "[tox]\nenvlist = docs,lint,py311,py312\n[testenv]\ncommands = pytest {posargs}\n",
+  );
+  const out = join(mkdtempSync(join(tmpdir(), "styre-target-out-")), "profile.json");
+  const first = await runSetup({ repo, out, deps: fakeDeps() });
+  expect(first.unresolvedCommands.some((p) => p.startsWith("python.test:"))).toBe(true);
+  const py = first.profile.components.find((c) => c.kind === "python");
+  if (!py) throw new Error("missing detected Python component");
+  expect(py.commands.test).toMatchObject({ unresolved: expect.any(String) });
+  py.commands.test = "tox -e py311 -- -q";
+  first.profile.repoCommands.integration = "nox -s integration";
+  writeFileSync(out, JSON.stringify(first.profile));
+  const second = await runSetup({ repo, out, deps: fakeDeps() });
+  expect(second.profile.components.find((c) => c.kind === "python")?.commands.test).toBe(
+    "tox -e py311 -- -q",
+  );
+  expect(second.profile.repoCommands.integration).toBe("nox -s integration");
+  expect(second.unresolvedCommands).toEqual([]);
+  const reset = await runSetup({ repo, out, force: true, deps: fakeDeps() });
+  expect(reset.unresolvedCommands.some((p) => p.startsWith("python.test:"))).toBe(true);
+});
+
+test("setup never inherits another repository's commands from a shared output path", async () => {
+  const repo = gitRepo();
+  const other = gitRepo();
+  for (const path of [repo, other]) {
+    writeFileSync(join(path, "setup.py"), "");
+    writeFileSync(join(path, "tox.ini"), "[tox]\nenvlist=docs,unit\n");
+  }
+  const out = join(mkdtempSync(join(tmpdir(), "styre-target-identity-")), "profile.json");
+  const first = await runSetup({ repo, out, deps: fakeDeps() });
+  const py = first.profile.components.find((c) => c.kind === "python");
+  if (!py) throw new Error("missing Python component");
+  py.commands.test = "tox -e old-repository-suite";
+  first.profile.repoCommands.integration = "nox -s old-repository-integration";
+  writeFileSync(out, JSON.stringify(first.profile));
+  const second = await runSetup({ repo: other, out, deps: fakeDeps() });
+  expect(second.profile.components.find((c) => c.kind === "python")?.commands.test).toMatchObject({
+    unresolved: expect.any(String),
+  });
+  expect(second.profile.repoCommands.integration).toBeUndefined();
+});
