@@ -186,6 +186,8 @@ export const KarmaCompletionSchema = z
             skipped: count,
             total: count,
             error: z.boolean(),
+            completed: z.boolean(),
+            runtimeErrors: count,
             disconnected: z.boolean(),
           })
           .strict(),
@@ -212,12 +214,17 @@ export function karmaVerdict(
   if (
     r.browsers.length !== expectedBrowsers ||
     new Set(r.browsers.map((b) => b.id)).size !== expectedBrowsers ||
-    r.error ||
+    r.error !== r.browsers.some((b) => b.error) ||
     r.disconnected ||
     r.exitCode !== exitCode ||
     r.browsers.some(
       (b) =>
-        b.error ||
+        !b.completed ||
+        b.runtimeErrors > 0 ||
+        // Karma 4 Browser.onComplete sets error whenever success===0, even when every
+        // selected spec completed with an ordinary assertion failure. Preserve that raw
+        // flag, but distinguish it from observed browser_error events.
+        (b.error && !(b.success === 0 && b.failed > 0)) ||
         b.disconnected ||
         b.success + b.failed === 0 ||
         b.total !== b.success + b.failed + b.skipped,
@@ -243,8 +250,11 @@ if(returned && typeof returned.then==='function') throw Error('Async Karma confi
  config.basePath=path.resolve(path.dirname(original),config.basePath||'');
  config.exclude=(config.exclude||[]).concat(original);
  function StyreReporter(){
+  const completed=new Set(), runtimeErrors=new Map();
+  this.onBrowserComplete=function(browser){completed.add(String(browser.id));};
+  this.onBrowserError=function(browser){const id=String(browser.id);runtimeErrors.set(id,(runtimeErrors.get(id)||0)+1);};
   this.onRunComplete=function(browsers,result){
-   const rows=browsers.map(function(browser){const r=browser.lastResult;return {id:String(browser.id),name:browser.name,success:r.success,failed:r.failed,skipped:r.skipped,total:r.total,error:!!r.error,disconnected:!!r.disconnected};});
+   const rows=browsers.map(function(browser){const r=browser.lastResult;return {id:String(browser.id),name:browser.name,success:r.success,failed:r.failed,skipped:r.skipped,total:r.total,error:!!r.error,completed:completed.has(String(browser.id)),runtimeErrors:runtimeErrors.get(String(browser.id))||0,disconnected:!!r.disconnected};});
    const record={version:1,browsers:rows,success:result.success,failed:result.failed,exitCode:result.exitCode,error:!!result.error,disconnected:!!result.disconnected};
    const text=JSON.stringify(record); if(text.length>65536) throw Error('Karma completion exceeds evidence bound');
    fs.writeFileSync(${JSON.stringify(`${reportPath}.tmp`)},text,{mode:384,flag:'wx'});

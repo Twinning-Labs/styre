@@ -81,21 +81,47 @@ test.skipIf(!deps)(
       expect({ verdict: suiteResult(failedAssertion), observation: failedAssertion }).toMatchObject(
         { verdict: "fail" },
       );
+      writeFileSync(
+        join(root, "spec/example.js"),
+        "describe('example',()=>{it('false',()=>expect(1).toBe(2));afterAll(()=>{throw Error('afterAll runtime error');});});",
+      );
+      const runtimeError = await run();
+      expect({ verdict: suiteResult(runtimeError), observation: runtimeError }).toMatchObject({
+        verdict: "error",
+        observation: { karma: { completion: { browsers: [{ runtimeErrors: 1 }] } } },
+      });
       writeFileSync(join(root, "spec/example.js"), "");
       expect(suiteResult(await run())).toBe("error");
       writeFileSync(
         join(root, "spec/example.js"),
         "describe('example',()=>{it('hangs',()=>{while(true){}});});",
       );
+      let group: number | undefined;
       const timeout = await observeSuiteCommand({
         sha: "fixture-sha",
         command: "npm test",
         cwd: root,
         environment: c.testEnvironment,
         timeoutMs: 1000,
+        onSpawn: (pid) => {
+          group = pid;
+        },
       });
       expect(timeout.timedOut).toBe(true);
       expect(suiteResult(timeout)).toBe("error");
+      if (!group) throw Error("missing process group receipt");
+      let gone = false;
+      for (let attempt = 0; attempt < 40; attempt++) {
+        try {
+          process.kill(-group, 0);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+          gone = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(gone).toBe(true);
       writeFileSync(join(root, "karma.conf.js"), "throw Error('broken config');");
       expect(suiteResult(await run())).toBe("error");
     } finally {
@@ -188,6 +214,7 @@ test.skipIf(!deps)(
       expect(config.browsers).toEqual(["Firefox"]);
       const Reporter = config.plugins.at(-1)["reporter:styre-completion"][1];
       const reporter = new Reporter();
+      reporter.onBrowserComplete({ id: "browser" });
       reporter.onRunComplete(
         [
           {

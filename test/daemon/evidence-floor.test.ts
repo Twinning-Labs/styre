@@ -873,6 +873,8 @@ for (const passed of [true, false])
                 {
                   id: "1",
                   name: "Firefox",
+                  completed: true,
+                  runtimeErrors: 0,
                   success: passed ? 1 : 0,
                   failed: passed ? 0 : 1,
                   skipped: 0,

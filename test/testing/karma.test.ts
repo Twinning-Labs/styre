@@ -68,6 +68,8 @@ const completion = () => ({
     {
       id: "browser-1",
       name: "Firefox",
+      completed: true,
+      runtimeErrors: 0,
       success: 2,
       failed: 0,
       skipped: 0,
@@ -118,4 +120,21 @@ test("npm builtins cannot masquerade as script execution", () => {
   );
   c.commands.test = "npm install";
   expect(planTestEnvironment(root, c, "existing")?.adapter).toBe("unsupported");
+});
+
+test("Karma4 zero-success error flag differs from a browser runtime error", () => {
+  const r = completion();
+  r.browsers[0].success = 0;
+  r.browsers[0].failed = 2;
+  r.browsers[0].error = true;
+  r.success = 0;
+  r.failed = 2;
+  r.error = true;
+  r.exitCode = 1;
+  expect(karmaVerdict(r, 1, 1)).toBe("fail");
+  r.browsers[0].runtimeErrors = 1;
+  expect(karmaVerdict(r, 1, 1)).toBe("error");
+  r.browsers[0].runtimeErrors = 0;
+  r.browsers[0].completed = false;
+  expect(karmaVerdict(r, 1, 1)).toBe("error");
 });
