@@ -450,3 +450,88 @@ test("unchanged required contracts can resume merge; new head or failed snapshot
     f.db.close();
   }
 });
+
+for (const scenario of [
+  "current",
+  "stale-push",
+  "stale-pr",
+  "missing-push",
+  "other-branch",
+  "newer-stale-push",
+] as const)
+  test(`publication binds verified revision and successful branch push: ${scenario}`, async () => {
+    const f = fixture();
+    try {
+      const { enqueue, markSent, listPending } = await import(
+        "../../src/db/repos/projection-outbox.ts"
+      );
+      const { insertDispatch, completeDispatch } = await import("../../src/db/repos/dispatch.ts");
+      const { drainOutbox } = await import("../../src/daemon/projector.ts");
+      const { fakeIssueTracker } = await import(
+        "../../src/integrations/adapters/fake-issue-tracker.ts"
+      );
+      const { fakeForge } = await import("../../src/integrations/adapters/fake-forge.ts");
+      const dispatch = insertDispatch(f.db, {
+        ticketId: f.ticketId,
+        dispatchId: "verified",
+        seq: 1,
+      });
+      completeDispatch(f.db, dispatch.id, { outcome: "clean-success", branchHeadSha: "HEAD" });
+      f.insert();
+      const forge = fakeForge();
+      const ports = { issueTracker: fakeIssueTracker(), forge };
+      if (scenario === "stale-push") {
+        enqueue(f.db, {
+          ticketId: f.ticketId,
+          target: "forge",
+          op: "push",
+          payload: { branch: "fix/test", sha: "OLD" },
+          idempotencyKey: "push",
+        });
+        await drainOutbox(f.db, ports);
+        expect(forge.calls).toHaveLength(0);
+        expect(listPending(f.db)[0].error).toContain("publication target");
+        return;
+      }
+      if (scenario !== "missing-push") {
+        enqueue(f.db, {
+          ticketId: f.ticketId,
+          target: "forge",
+          op: "push",
+          payload: { branch: scenario === "other-branch" ? "fix/other" : "fix/test", sha: "HEAD" },
+          idempotencyKey: "push",
+        });
+        await drainOutbox(f.db, ports);
+        expect(forge.calls[0]?.method).toBe("push");
+      }
+      if (scenario === "newer-stale-push") {
+        enqueue(f.db, {
+          ticketId: f.ticketId,
+          target: "forge",
+          op: "push",
+          payload: { branch: "fix/test", sha: "OLD" },
+          idempotencyKey: "old-push",
+        });
+        markSent(f.db, listPending(f.db)[0].id); // historical later push invalidated the branch's known head
+      }
+      enqueue(f.db, {
+        ticketId: f.ticketId,
+        target: "forge",
+        op: "pr_create",
+        payload: {
+          branch: "fix/test",
+          base: "main",
+          title: "test",
+          body: "test",
+          sourceSha: scenario === "stale-pr" ? "OLD" : "HEAD",
+        },
+        idempotencyKey: "pr",
+      });
+      await drainOutbox(f.db, ports);
+      expect(forge.calls.some((c) => c.method === "ensurePr")).toBe(scenario === "current");
+      if (scenario !== "current")
+        expect(listPending(f.db)[0].error).toContain("forge projection blocked");
+    } finally {
+      f.db.close();
+    }
+  });

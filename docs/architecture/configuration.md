@@ -235,7 +235,9 @@ report to that declaration's digest. The evidence floor checks every required su
 removing a job or a report's requirement list cannot remove an obligation. Duplicate identities,
 missing/invalid receipts, changed commands/workspaces/contracts, and stale source revisions fail
 closed. Resumed review/merge stages and queued forge push/PR effects enforce the same required
-contract; changing policy cannot bypass it after leaving implementation. Documentation carry is one hop and must match the latest original integration's contract,
+contract; changing policy cannot bypass it after leaving implementation. Queued effects must name
+the verified source revision, and PR creation requires the latest successful push for its branch
+to match that revision. Documentation carry is one hop and must match the latest original integration's contract,
 result and execution records. This does not broaden which changes qualify as documentation-only.
 
 New suite observations contain a versioned generic receipt with an adapter protocol, expected
@@ -245,6 +247,9 @@ against the independent expectation. `process-v1` establishes command completion
 is **not** evidence of nonempty test collection or behavior. `karma-v1` additionally requires
 consistent, nonempty completion on the declared number of browsers. A process receipt cannot
 satisfy a structured contract, nor can the observed browser count replace the declared count.
+
+Profiles using `testPolicy` require a binary containing this capability contract. Older binaries
+may ignore unknown profile fields; downgrading is not a supported way to enforce these policies.
 
 Old process ledgers retain their existing weaker semantics. Old structured receipts remain
 inspectable, but a legacy required-suite record lacks an independent declaration and must be

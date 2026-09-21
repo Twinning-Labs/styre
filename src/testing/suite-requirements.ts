@@ -69,6 +69,16 @@ function detail(row?: GroundTruthSignalRow): Record<string, unknown> | null {
   }
 }
 
+/** Used after requiredSuiteProblem at publication boundaries. Invalid declarations never weaken policy. */
+export function hasRequiredSuites(signals: GroundTruthSignalRow[]): boolean {
+  const declaration = signals
+    .filter((s) => s.signal_type === "suite-requirements" && s.work_unit_id === null)
+    .at(-1);
+  if (!declaration) return false;
+  const parsed = SuiteRequirementsSchema.safeParse(detail(declaration));
+  return declaration.result !== "pass" || !parsed.success || parsed.data.requirements.length > 0;
+}
+
 /** Expected obligations are a separate runner-written signal, never inferred from a run report. */
 export function requiredSuiteProblem(
   signals: GroundTruthSignalRow[],

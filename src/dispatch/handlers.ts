@@ -2295,7 +2295,13 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       ticketId: ctx.ticket.id,
       target: "forge",
       op: "pr_create",
-      payload: { branch, base, title, body },
+      payload: {
+        branch,
+        base,
+        title,
+        body,
+        sourceSha: getLatestForTicket(ctx.db, ctx.ticket.id)?.branch_head_sha ?? null,
+      },
       idempotencyKey: `${ctx.ticket.ident}:pr_create:${branch}`,
     });
     return { enqueued: "pr_create" };
