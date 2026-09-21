@@ -77,7 +77,10 @@ test.skipIf(!deps)(
         join(root, "spec/example.js"),
         "describe('example',()=>{it('false',()=>expect(1).toBe(2));});",
       );
-      expect(suiteResult(await run())).toBe("fail");
+      const failedAssertion = await run();
+      expect({ verdict: suiteResult(failedAssertion), observation: failedAssertion }).toMatchObject(
+        { verdict: "fail" },
+      );
       writeFileSync(join(root, "spec/example.js"), "");
       expect(suiteResult(await run())).toBe("error");
       writeFileSync(
