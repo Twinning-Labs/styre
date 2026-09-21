@@ -185,5 +185,19 @@ hold a value no consumer switches on — coercing it would silently reinstate th
 | `prepare` | string? | Install command **executed** by the runner-owned `provision` step before the first verify. |
 | `dir` | string? | Module root relative to repo root; refined by `isSafeDir` (rejects empty/absolute/`..`). |
 
+Setup discovery validates component metadata separately from individual command proposals. The
+scan remains authoritative for component identity and machine command observations. Discovery may
+propose non-empty command strings (subject to the existing safety, existence, and trust checks), or
+omit unchanged slots. Exact echoes of scan `{ unresolved: ... }` / `{ unavailable: true }` objects
+retain the scan value; discovery cannot invent or change those declarations. An invalid command
+slot is rejected with an indexed diagnostic without discarding valid sibling commands or component
+roles. Invalid envelope/metadata or duplicate component names reject the entire discovery result
+and explicitly fall back to machine observations. Unknown component names are rejected.
+
+This recovery does not make unsupported test launchers runnable or classify an awkward product
+component as a fixture. Unresolved primary targets and unsupported environment adapters continue
+to block setup. Discovery diagnostics report field locations and validation codes, not rejected
+command values or raw model responses.
+
 At run time, `assertResolved` throws if any component lacks a resolved `build`/`test`/`check`
 command — a profile must be command-complete before a run proceeds.
