@@ -12,7 +12,13 @@ import { listPending } from "../../src/db/repos/signal.ts";
 import { getTicket, setTicketStage } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { carryVerifiedVerdictForward } from "../../src/dispatch/carry-forward.ts";
+import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
+import { suiteReceipt } from "../../src/testing/suite-adapters.ts";
+import {
+  declaredSuiteRequirements,
+  requirementsHash,
+} from "../../src/testing/suite-requirements.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 /**
@@ -893,12 +899,59 @@ for (const passed of [true, false])
         },
       },
     ];
+    const components = parseProfile({
+      slug: "fixture",
+      targetRepo: "/repo",
+      components: [
+        {
+          name: "browser",
+          kind: "node",
+          paths: ["**"],
+          commands: { test: "npm test" },
+          testEnvironment: {
+            version: 1,
+            adapter: "karma",
+            policy: "existing",
+            suiteCommand: "npm test",
+            manager: "npm",
+            configFile: "karma.conf.js",
+            browsers: ["Firefox"],
+          },
+        },
+      ],
+    }).components;
+    const contract = declaredSuiteRequirements(components, "/repo");
+    insertSignal(db, {
+      ticketId,
+      signalType: "suite-requirements",
+      result: "pass",
+      detail: contract,
+    });
+    const { karma, ...observation } = jobs[0].observation;
+    const genericJobs = [
+      {
+        ...jobs[0],
+        observation: {
+          ...observation,
+          suite: suiteReceipt(
+            "npm test",
+            "/repo",
+            contract.requirements[0].binding,
+            karma.completion,
+            observation,
+          ),
+        },
+      },
+    ];
     insertSignal(db, {
       ticketId,
       signalType: "integration",
       result: passed ? "pass" : "fail",
       branchHeadSha: "PRE",
-      detail: suiteDetail(jobs, { advisory: true, requiredSuites: ["browser:test"] }),
+      detail: suiteDetail(genericJobs, {
+        advisory: true,
+        suiteRequirementsHash: requirementsHash(contract),
+      }),
     });
     await succeed(db, ticketId, "docs:revise");
     const d = insertDispatch(db, { ticketId, dispatchId: "docs", seq: nextSeq(db, ticketId) });
@@ -906,4 +959,129 @@ for (const passed of [true, false])
     carryVerifiedVerdictForward(db, ticketId, "DOCS");
     expect(nextStepKey(db, ticketId).kind).toBe(passed ? "advance" : "escalate");
     db.close();
+  });
+
+for (const kind of ["python", "node"] as const)
+  test(`required ${kind} suite cannot be excused by green AC evidence or another passing job`, async () => {
+    const { db, ticketId } = await atTheTransition();
+    try {
+      ac(db, ticketId, 1, "SHIP");
+      gatePassed(db, ticketId, "SHIP");
+      const components = parseProfile({
+        slug: "fixture",
+        targetRepo: "/repo",
+        components: [
+          {
+            name: "required",
+            kind,
+            paths: ["**"],
+            commands: { test: "test -f regression" },
+            testPolicy: { suite: "required" },
+          },
+        ],
+      }).components;
+      const contract = declaredSuiteRequirements(components, "/repo");
+      insertSignal(db, {
+        ticketId,
+        signalType: "suite-requirements",
+        result: "pass",
+        detail: contract,
+      });
+      integration(db, ticketId, "SHIP", "pass", ranJobs(["other:test", "test", 0]), {
+        suiteRequirementsHash: requirementsHash(contract),
+        requiredSuites: [],
+      });
+      expect(nextStepKey(db, ticketId)).toMatchObject({
+        kind: "escalate",
+        signature: "evidence-floor",
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+test("resume at the transition synchronizes changed profile obligations before resolving", async () => {
+  const { db, ticketId } = await atTheTransition();
+  try {
+    integration(db, ticketId, "SHIP", "pass", ranJobs(["other:test", "test", 0]));
+    insertSignal(db, {
+      ticketId,
+      signalType: "suite-requirements",
+      result: "pass",
+      detail: { version: 1, requirements: [] },
+    });
+    expect(nextStepKey(db, ticketId)).toMatchObject({ kind: "advance" });
+    const { buildDispatchRegistry } = await import("../../src/dispatch/handlers.ts");
+    const { FakeAgentRunner } = await import("../../src/agent/fake-runner.ts");
+    const { DEFAULT_AGENT_CONFIG } = await import("../../src/config/agent-config.ts");
+    const registry = buildDispatchRegistry({
+      profile: parseProfile({
+        slug: "fixture",
+        targetRepo: "/repo",
+        components: [
+          {
+            name: "required",
+            kind: "python",
+            paths: ["**"],
+            commands: { test: "python3 -m pytest" },
+            testPolicy: { suite: "required" },
+          },
+        ],
+      }),
+      runner: new FakeAgentRunner(() => {
+        throw Error("must not dispatch");
+      }),
+      agentConfig: DEFAULT_AGENT_CONFIG,
+      worktreeRoot: "/new-checkout",
+    });
+    expect(await advanceOneStep(db, ticketId, registry)).toMatchObject({
+      kind: "escalated",
+      stepKey: "verify:integration",
+    });
+  } finally {
+    db.close();
+  }
+});
+
+for (const stage of ["review", "merge", "merge-after-push"] as const)
+  test(`resume in ${stage} cannot publish with newly required unmeasured suites`, async () => {
+    const { db, ticketId } = await atTheTransition();
+    try {
+      setTicketStage(db, ticketId, stage === "review" ? "review" : "merge");
+      if (stage === "merge-after-push") await succeed(db, ticketId, "merge:push");
+      integration(db, ticketId, "SHIP", "pass", ranJobs(["other:test", "test", 0]));
+      const { buildDispatchRegistry } = await import("../../src/dispatch/handlers.ts");
+      const { FakeAgentRunner } = await import("../../src/agent/fake-runner.ts");
+      const { DEFAULT_AGENT_CONFIG } = await import("../../src/config/agent-config.ts");
+      const registry = buildDispatchRegistry({
+        profile: parseProfile({
+          slug: "fixture",
+          targetRepo: "/repo",
+          components: [
+            {
+              name: "required",
+              kind: "python",
+              paths: ["**"],
+              commands: { test: "python3 -m pytest" },
+              testPolicy: { suite: "required" },
+            },
+          ],
+        }),
+        runner: new FakeAgentRunner(() => {
+          throw Error("must not dispatch");
+        }),
+        agentConfig: DEFAULT_AGENT_CONFIG,
+        worktreeRoot: "/new-checkout",
+      });
+      const outcome = await advanceOneStep(db, ticketId, registry);
+      expect(outcome).toMatchObject({
+        kind: "paused-noprogress",
+        reason: expect.stringContaining("Required suites"),
+      });
+      expect(
+        db.query("SELECT count(*) AS n FROM projection_outbox WHERE target='forge'").get(),
+      ).toEqual({ n: 0 });
+    } finally {
+      db.close();
+    }
   });

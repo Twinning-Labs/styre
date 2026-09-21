@@ -297,3 +297,21 @@ test("applyToolchainGate: a fully-equipped repo is returned unchanged, same obje
   expect(gate.profile).toBe(profile);
   expect(gate.unusable).toEqual([]);
 });
+
+test("missing tools cannot silently remove a required suite while another component is usable", () => {
+  const p = makeProfile([
+    { name: "api", kind: "python", paths: ["api/**"], commands: { test: "python3 -m pytest" } },
+    {
+      name: "web",
+      kind: "node",
+      paths: ["web/**"],
+      commands: { test: "npm test" },
+      testPolicy: { suite: "required" },
+    },
+  ]);
+  expect(() => applyToolchainGate(p, fakeProbe(["python3"]))).toThrow();
+  p.components[1].testPolicy = { suite: "advisory" };
+  expect(
+    applyToolchainGate(p, fakeProbe(["python3"])).profile.components.map((c) => c.name),
+  ).toEqual(["api"]);
+});

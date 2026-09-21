@@ -96,6 +96,14 @@ loop():                           # (commercial Control Plane: the multi-ticket 
 run concurrently; the runner journals each result as it returns. **No worker touches SQLite.**
 
 ### 2.3 the resolver + interpreter split (`src/daemon/`)
+Before resolving a step, the runner synchronizes the current profile's complete required-suite
+contract into SQLite through the registry's local snapshot callback. This callback runs on resume
+as well as fresh execution, performs no project commands or external effects, and pauses loudly
+if the contract cannot be established. The resolver continues to read SQLite only. Required suite
+receipts are validated against this independent declaration at the evidence floor; ordinary
+advisory suite verdicts retain their previous policy. See
+[configuration.md](configuration.md#suite-execution-versus-authored-checks).
+
 Two pure halves. **`nextStepKey(ticket)`** (`resolver.ts`) is a *pure predicate function*: it reads
 the ticket's `stage`, its work-unit states, and the `workflow_step` journal, and returns a
 **descriptor** — it never mutates. **`advanceOneStep`** (`advance.ts`) interprets the descriptor.

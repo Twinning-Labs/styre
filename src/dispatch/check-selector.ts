@@ -1,4 +1,6 @@
 import { basename, dirname } from "node:path";
+import { type TestPolicy, authoredChecksUnavailable } from "../testing/capabilities.ts";
+import type { TestEnvironmentPlan } from "../testing/environment-schema.ts";
 import type { CommandResult } from "../util/run-command.ts";
 import {
   CHECK_RULES,
@@ -44,12 +46,13 @@ export function frameworkFor(component: {
   kind: string;
   commands: Record<string, unknown>;
   testAction?: { framework: CheckFramework; launcher: string };
-  testEnvironment?: { adapter: string };
+  testEnvironment?: TestEnvironmentPlan;
+  testPolicy?: TestPolicy;
 }): CheckFramework | null {
   // A qualified `testAction` is a LOOKUP, not a guess (ENG-399). Setup resolved it by following
   // `npm run <script>` into package.json, which is where Node projects actually name their
   // framework — the regex below sees only `npm run test:ci` and returns null.
-  if (["unsupported", "karma"].includes(component.testEnvironment?.adapter ?? "")) return null;
+  if (authoredChecksUnavailable(component)) return null;
   if (component.testAction) return component.testAction.framework;
   const cmd = testCommandOf(component);
   switch (component.kind) {

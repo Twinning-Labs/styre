@@ -112,7 +112,17 @@ version failed. It lived in `verify:checks-gate`'s `onSucceed`, and the
 resolver only schedules that step when the ticket has active `ac_check` rows — so a ticket whose
 checks could not be authored at all — no runnable framework anywhere, or an empty ticket
 description — walked straight past it. (Not "no parseable checklist": a non-empty description
-always yields at least one `whole-description` criterion.) It holds when either
+always yields at least one `whole-description` criterion.) Before evaluating the alternatives below, the floor enforces the runner's independently recorded
+required-suite contract. The registry synchronizes that contract before resolution, including
+resume when no verification handler remains pending. Every required component suite must have a
+matching passing receipt at the shipping SHA or a validated one-hop documentation carry. Missing
+jobs, stale bindings, or failing required suites cannot be excused by another suite or AC. Suite
+support and obligation are separate; legacy suites remain advisory unless explicitly required,
+and supported suite-only components default to required. Process receipts establish only command
+completion; structured adapters may demand stronger evidence. See
+[configuration.md](configuration.md#suite-execution-versus-authored-checks).
+
+Once these requirements hold, the existing evidence floor holds when either
 
 - something EXECUTED at the sha being shipped and came back clean — `verify:integration` carrying a
   job its producer tagged `test` or `repo` (`repoCommands` is where a suite spanning components

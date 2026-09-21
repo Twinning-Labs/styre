@@ -18,6 +18,10 @@ export type StepHandler = (ctx: HandlerContext) => unknown | Promise<unknown>;
 /** Maps a stable `handlerKey` (derived from a concrete step_key) to its handler.
  *  The resolver (M2b) computes the handlerKey and looks the handler up here. */
 export class StepRegistry {
+  /** Runner-owned durable inputs, synchronized before resolution (including resume with no pending steps).
+   * Must not execute project commands or external effects. Test/synthetic registries need no snapshot. */
+  constructor(readonly synchronize: (db: Database, ticketId: number) => void = () => {}) {}
+
   private readonly handlers = new Map<string, StepHandler>();
 
   register(handlerKey: string, handler: StepHandler): void {

@@ -60,8 +60,8 @@ test.skipIf(!deps)(
         verdict: suiteResult(pass),
         stdout: pass.stdout,
         stderr: pass.stderr,
-        karma: pass.karma,
-      }).toMatchObject({ verdict: "pass", karma: { completion: { success: 1, failed: 0 } } });
+        suite: pass.suite,
+      }).toMatchObject({ verdict: "pass", suite: { payload: { success: 1, failed: 0 } } });
       expect(pass.command).toBe("npm test");
       const priorFirefox = process.env.FIREFOX_BIN;
       try {
@@ -88,7 +88,7 @@ test.skipIf(!deps)(
       const runtimeError = await run();
       expect({ verdict: suiteResult(runtimeError), observation: runtimeError }).toMatchObject({
         verdict: "error",
-        observation: { karma: { completion: { browsers: [{ runtimeErrors: 1 }] } } },
+        observation: { suite: { payload: { browsers: [{ runtimeErrors: 1 }] } } },
       });
       writeFileSync(join(root, "spec/example.js"), "");
       expect(suiteResult(await run())).toBe("error");
@@ -160,12 +160,12 @@ test.skipIf(!process.env.STYRE_KARMA_SPHINX)(
       verdict: suiteResult(run),
       stdout: run.stdout,
       stderr: run.stderr,
-      karma: run.karma,
+      suite: run.suite,
     }).toMatchObject({ verdict: "pass" });
     console.log(
       JSON.stringify({
         fixture: "Sphinx original baseline browser suite",
-        karma: run.karma,
+        suite: run.suite,
         timing: run.timing,
       }),
     );

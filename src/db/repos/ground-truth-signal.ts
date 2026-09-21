@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { SuiteObservationSchema, suiteResult } from "../../dispatch/suite-observation.ts";
 import type { SuiteObservation } from "../../dispatch/suite-observation.ts";
 import { nowUtc } from "../../util/time.ts";
 import { getLatestForTicket } from "./dispatch.ts";
@@ -466,7 +467,17 @@ export function executedJobs(row: GroundTruthSignalRow): RanJob[] {
 export function isExecutedPass(row: GroundTruthSignalRow): boolean {
   if (row.result !== "pass") return false;
   const jobs = executedJobs(row);
-  return jobs.length > 0 && jobs.every((j) => j.exitCode === 0 && j.timedOut !== true);
+  return (
+    jobs.length > 0 &&
+    jobs.every((j) => {
+      if (j.exitCode !== 0 || j.timedOut === true) return false;
+      if (j.observation === undefined) return true; // explicit legacy process-only evidence
+      const parsed = SuiteObservationSchema.safeParse(j.observation);
+      return (
+        parsed.success && parsed.data.exitCode === j.exitCode && suiteResult(parsed.data) === "pass"
+      );
+    })
+  );
 }
 
 /** Select AC evidence for the current ticket head, never merely the latest measured commit.

@@ -1,9 +1,14 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { z } from "zod";
 import type { TestEnvironmentPlan } from "../testing/environment-schema.ts";
-import { KarmaCompletionSchema, karmaReporterConfig, karmaVerdict } from "../testing/karma.ts";
+import {
+  LegacySuiteEvidenceSchema,
+  SuiteReceiptSchema,
+  legacySuiteVerdict,
+  prepareSuite,
+  receiptVerdict,
+  suiteBinding,
+  suiteReceipt,
+} from "../testing/suite-adapters.ts";
 import { runBoundedCommand } from "../util/run-bounded-command.ts";
 import type { CommandResult } from "../util/run-command.ts";
 
@@ -21,13 +26,9 @@ export const SuiteObservationSchema = z
     stderr: z.string(),
     outputTruncated: z.boolean(),
     executedCommand: z.string().optional(),
-    karma: z
-      .object({
-        verdict: z.enum(["pass", "fail", "error"]),
-        completion: KarmaCompletionSchema.optional(),
-        reason: z.string().optional(),
-      })
-      .optional(),
+    suite: SuiteReceiptSchema.optional(),
+    /** Legacy checkpoints only; new writes use suite. */
+    karma: LegacySuiteEvidenceSchema.optional(),
     // Optional for older checkpoints and synthetic observations, measured for native runs.
     timing: z
       .object({ durationMs: z.number().nonnegative(), timeoutMs: z.number().positive() })
@@ -87,52 +88,20 @@ export async function observeSuiteCommand(p: {
   onSettled?: () => void;
 }): Promise<SuiteObservation> {
   const started = performance.now();
-  let dir: string | undefined;
+  if (p.environment && p.environment.suiteCommand !== p.command)
+    throw Error("Suite command differs from its environment contract");
+  const binding = suiteBinding(p.environment);
+  const prepared = prepareSuite(p.command, p.cwd, binding);
   try {
-    let command = p.command;
-    let reportPath: string | undefined;
-    if (p.environment?.adapter === "karma") {
-      if (p.environment.suiteCommand !== p.command)
-        throw Error("Karma suite command differs from its environment contract");
-      dir = mkdtempSync(join(tmpdir(), "styre-karma-"));
-      reportPath = join(dir, "completion.json");
-      const wrapper = join(dir, "config.cjs");
-      writeFileSync(wrapper, karmaReporterConfig(p.cwd, p.environment, reportPath), {
-        mode: 0o600,
-      });
-      command = `${p.command} -- --single-run=true '${wrapper.replace(/'/g, `'\\''`)}'`;
-    }
-    const run = await runBoundedCommand(command, p);
-    let karma: SuiteObservation["karma"];
-    if (reportPath && p.environment?.adapter === "karma") {
-      let report: unknown;
-      try {
-        if (statSync(reportPath).size > 65536) throw Error("oversized completion");
-        report = JSON.parse(readFileSync(reportPath, "utf8"));
-      } catch {
-        /* absence/malformed evidence is an explicit execution error below */
-      }
-      const parsed = KarmaCompletionSchema.safeParse(report);
-      const verdict = run.timedOut
-        ? "error"
-        : karmaVerdict(report, run.exitCode, p.environment.browsers.length);
-      karma = {
-        verdict,
-        ...(parsed.success ? { completion: parsed.data } : {}),
-        ...(verdict === "error"
-          ? {
-              reason: "Karma did not complete a nonempty, consistent run on every declared browser",
-            }
-          : {}),
-      };
-    }
+    const run = await runBoundedCommand(prepared.command, p);
     return {
-      ...(karma ? { karma, executedCommand: command } : {}),
       ...suiteObservation({ sha: p.sha, command: p.command, cwd: p.cwd }, run),
+      suite: suiteReceipt(p.command, p.cwd, binding, prepared.read(), run),
+      executedCommand: prepared.command,
       timing: { durationMs: performance.now() - started, timeoutMs: p.timeoutMs },
     };
   } finally {
-    if (dir) rmSync(dir, { recursive: true, force: true });
+    prepared.cleanup();
     p.onSettled?.();
   }
 }
@@ -140,6 +109,8 @@ export async function observeSuiteCommand(p: {
 /** Keep the actual process exit separately from the qualified suite verdict. */
 export function suiteResult(observation: SuiteObservation): "pass" | "fail" | "error" {
   if (observation.timedOut || observation.exitCode === null) return "error";
-  if (observation.karma) return observation.karma.verdict;
+  if (observation.suite)
+    return receiptVerdict(observation.suite, observation.command, observation.cwd, observation);
+  if (observation.karma) return legacySuiteVerdict(observation.karma, observation);
   return observation.exitCode === 0 ? "pass" : "fail";
 }

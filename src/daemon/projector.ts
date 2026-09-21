@@ -1,6 +1,8 @@
 import type { Database } from "bun:sqlite";
 import { z } from "zod";
+import { getLatestForTicket } from "../db/repos/dispatch.ts";
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
+import { listByTicket as listGroundTruth } from "../db/repos/ground-truth-signal.ts";
 import {
   type OutboxRow,
   bumpAttempt,
@@ -17,6 +19,7 @@ import type { ForgePort } from "../integrations/forge.ts";
 import type { IssueState, IssueTrackerPort } from "../integrations/issue-tracker.ts";
 import { NotificationMessageSchema } from "../integrations/notifier.ts";
 import type { NotifierPort } from "../integrations/notifier.ts";
+import { hasRequiredSuites, requiredSuiteProblem } from "../testing/suite-requirements.ts";
 
 const PushPayload = z.object({ branch: z.string(), sha: z.string() });
 const PrCreatePayload = z.object({
@@ -113,6 +116,29 @@ async function applyRow(
       row.op === "push" ? PushPayload.parse(payload).sha : undefined,
     );
     if (unresolved) throw new Error(`forge projection blocked: ${unresolved}`);
+    const suiteSignals = listGroundTruth(db, row.ticket_id);
+    const head = getLatestForTicket(db, row.ticket_id)?.branch_head_sha ?? null;
+    const suiteProblem = requiredSuiteProblem(suiteSignals, head);
+    if (suiteProblem) throw new Error(`forge projection blocked: ${suiteProblem}`);
+    if (hasRequiredSuites(suiteSignals)) {
+      const targetSha = row.op === "push" ? PushPayload.parse(payload).sha : payload.sourceSha;
+      if (!head || targetSha !== head)
+        throw new Error(
+          "forge projection blocked: publication target differs from the verified source SHA",
+        );
+      if (row.op === "pr_create") {
+        const branch = PrCreatePayload.parse(payload).branch;
+        const pushed = db
+          .query<{ sha: string | null }, [number, string]>(
+            "SELECT json_extract(payload_json, '$.sha') AS sha FROM projection_outbox WHERE ticket_id=? AND target='forge' AND op='push' AND status='sent' AND json_extract(payload_json, '$.branch')=? ORDER BY id DESC LIMIT 1",
+          )
+          .get(row.ticket_id, branch);
+        if (pushed?.sha !== head)
+          throw new Error(
+            "forge projection blocked: required-suite PR has no matching successful branch push",
+          );
+      }
+    }
   }
 
   if (row.target === "issue_tracker") {

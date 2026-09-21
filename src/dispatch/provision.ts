@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import { existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { getByKey, resetAttempt, resetToPending } from "../db/repos/workflow-step.ts";
+import { testCapabilities } from "../testing/capabilities.ts";
 import type { Component } from "./profile.ts";
 
 /** One `prepare` install command to run, resolved against the worktree. */
@@ -58,7 +59,7 @@ export function planProvision(components: Component[], worktreePath: string): Pr
     if (!c.prepare || c.testEnvironment?.policy === "existing") continue;
     const cwd = join(
       worktreePath,
-      c.testEnvironment && ["node", "karma"].includes(c.testEnvironment.adapter)
+      c.testEnvironment && testCapabilities(c.testEnvironment).installScope === "workspace"
         ? c.testEnvironment.workspaceDir
         : (c.dir ?? ""),
     );

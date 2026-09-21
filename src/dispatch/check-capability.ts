@@ -1,3 +1,4 @@
+import { authoredChecksUnavailable } from "../testing/capabilities.ts";
 import type { CmdRunner } from "../util/run-command.ts";
 import { executionDirectories } from "./check-execution.ts";
 import { type CheckFramework, frameworkFor, launcherFor } from "./check-selector.ts";
@@ -75,9 +76,8 @@ export async function probeComponent(
       framework: null,
       runnable: false,
       detail:
-        component.testEnvironment?.adapter === "karma"
-          ? "Karma suite execution is supported; authored-check selection and identity are unsupported"
-          : `no test framework could be resolved for component \`${component.name}\` (${component.kind})`,
+        authoredChecksUnavailable(component) ??
+        `no test framework could be resolved for component \`${component.name}\` (${component.kind})`,
     };
   }
   let interp: string | undefined;

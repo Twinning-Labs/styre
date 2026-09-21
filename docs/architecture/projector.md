@@ -28,6 +28,9 @@ the merge path (control-loop §4) and never a signal. Builds on the outbox mecha
   runner *does* need (merged? human action?) enter as **delivered signals** (control-loop §7). CI
   status is not one of them: OSS takes a single best-effort t+0 read on the merge path and reports it
   as `ci_handoff` telemetry — never awaited, never a signal, never re-read.
+- **Required-suite guard.** Before draining forge push or PR creation, validate the current
+  independently recorded suite requirements against the shipping revision. Pending effects do not
+  bypass a changed or unmet contract on resume. This is separate from the review-ledger guard.
 - **Idempotent.** Two layers: the outbox row's `idempotency_key` (globally unique by construction →
   enqueue-twice is a no-op insert) **and** a per-adapter **probe** of external state before applying
   (§5).
