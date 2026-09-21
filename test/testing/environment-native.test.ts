@@ -31,7 +31,7 @@ for (const fw of ["jest", "vitest", "mocha"] as const)
         writeFileSync(
           join(root, config),
           fw === "jest"
-            ? "module.exports={testMatch:['**/test/*.test.js'],maxWorkers:1};"
+            ? "if(process.env.npm_lifecycle_event!=='test:unit')throw Error('script lifecycle lost');module.exports={testMatch:['**/test/*.test.js'],maxWorkers:1};"
             : fw === "vitest"
               ? "export default {test:{include:['test/*.test.js'],pool:'forks',poolOptions:{forks:{singleFork:true}}}};"
               : "{}",
