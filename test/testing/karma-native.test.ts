@@ -69,7 +69,7 @@ test.skipIf(!deps)(
         expect((await qualifyTestEnvironment(root, c)).status).toBe("requires-preparation");
         expect(suiteResult(await run())).toBe("error");
       } finally {
-        if (priorFirefox === undefined) delete process.env.FIREFOX_BIN;
+        if (priorFirefox === undefined) Reflect.deleteProperty(process.env, "FIREFOX_BIN");
         else process.env.FIREFOX_BIN = priorFirefox;
       }
       expect(readFileSync(join(root, "karma.conf.js"), "utf8")).toBe(config);
