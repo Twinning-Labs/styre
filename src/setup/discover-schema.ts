@@ -1,35 +1,108 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { ComponentRoleEnum } from "../dispatch/profile.ts";
 import type { Component } from "../dispatch/profile.ts";
 
-/** What the read-only discovery agent proposes. Refines the deterministic skeleton. */
-export const DiscoverSchema = z.object({
-  components: z.array(
-    z.object({
-      name: z.string().min(1),
-      /** Free-text stack description. Replaces the agent-authored `kind` (ENG-399): the prompt
-       *  asked for "a precise free-text stack label" while every consumer switched on a closed
-       *  set, so a good description (`browser-extension`) became an invalid discriminator. */
-      label: z.string().min(1).optional(),
-      /** ENG-425. What the component IS to the repo — the one judgment the agent could already
-       *  make but had nowhere to put. Optional: an agent that says nothing leaves the scan's
-       *  default (`primary`) in place, which is the pre-ENG-425 behaviour. */
-      role: ComponentRoleEnum.optional(),
-      paths: z.array(z.string().min(1)).min(1),
-      commands: z.record(z.string(), z.string()).default({}),
-    }),
-  ),
-  repoCommands: z.record(z.string(), z.string()).default({}),
-});
+/** Discovery envelope. Command slots are untrusted until normalizeDiscovery validates them;
+ * one bad slot must not discard independently valid component classifications. */
+export const DiscoverSchema = z
+  .object({
+    components: z.array(
+      z.object({
+        name: z.string().min(1),
+        /** Free-text stack description. Replaces the agent-authored `kind` (ENG-399): the prompt
+         *  asked for "a precise free-text stack label" while every consumer switched on a closed
+         *  set, so a good description (`browser-extension`) became an invalid discriminator. */
+        label: z.string().min(1).optional(),
+        /** ENG-425. What the component IS to the repo — the one judgment the agent could already
+         *  make but had nowhere to put. Optional: an agent that says nothing leaves the scan's
+         *  default (`primary`) in place, which is the pre-ENG-425 behaviour. */
+        role: ComponentRoleEnum.optional(),
+        paths: z.array(z.string().min(1)).min(1),
+        commands: z.record(z.string(), z.unknown()).default({}),
+      }),
+    ),
+    repoCommands: z.record(z.string(), z.unknown()).default({}),
+  })
+  .superRefine((value, ctx) => {
+    const names = new Set<string>();
+    value.components.forEach((component, index) => {
+      if (names.has(component.name))
+        ctx.addIssue({
+          code: "custom",
+          path: ["components", index, "name"],
+          message: "duplicate component identity",
+        });
+      names.add(component.name);
+    });
+  });
 export type Discovery = z.infer<typeof DiscoverSchema>;
+
+export type ComponentRefinement = Pick<Component, "name" | "paths" | "role" | "label"> & {
+  commands: Record<string, string>;
+};
+export interface DiscoveryDiagnostic {
+  path: string;
+  code: "unknown-component" | "invalid-command" | "observation-change-rejected";
+}
+
+/** Only executable string proposals may reach merge. An exact echo of a machine observation
+ * is a no-op, never permission for the agent to declare testing unavailable or resolved. */
+export function normalizeDiscovery(
+  scan: Component[],
+  proposal: Discovery,
+): {
+  components: ComponentRefinement[];
+  repoCommands: Record<string, string>;
+  diagnostics: DiscoveryDiagnostic[];
+} {
+  const byName = new Map(scan.map((c) => [c.name, c]));
+  const components: ComponentRefinement[] = [];
+  const diagnostics: DiscoveryDiagnostic[] = [];
+  proposal.components.forEach((candidate, index) => {
+    const original = byName.get(candidate.name);
+    if (!original) {
+      diagnostics.push({ path: `components[${index}]`, code: "unknown-component" });
+      return;
+    }
+    const commands: Record<string, string> = {};
+    Object.entries(candidate.commands).forEach(([key, value], slot) => {
+      if (typeof value === "string" && value.trim()) commands[key] = value;
+      else if (
+        value !== null &&
+        typeof value === "object" &&
+        isDeepStrictEqual(value, original.commands[key])
+      ) {
+        // Preserve the authoritative scan value by omitting the proposal slot.
+      } else
+        diagnostics.push({
+          path: `components[${index}].commands[${slot}]`,
+          code:
+            value !== null && typeof value === "object"
+              ? "observation-change-rejected"
+              : "invalid-command",
+        });
+    });
+    components.push({ ...candidate, commands });
+  });
+  const repoCommands: Record<string, string> = {};
+  Object.entries(proposal.repoCommands).forEach(([key, value], slot) => {
+    if (typeof value === "string" && value.trim()) repoCommands[key] = value;
+    else diagnostics.push({ path: `repoCommands[${slot}]`, code: "invalid-command" });
+  });
+  return { components, repoCommands, diagnostics };
+}
 
 /** Reconcile agent proposal against the deterministic scan. The scan is authoritative on which
  *  components exist (matched by name); the agent refines kind, paths, and commands of those it
  *  recognizes. Agent-only components (not in the scan) are dropped — the scan anchors existence;
  *  the agent does not invent stacks. A scan component the agent didn't mention survives as-is. */
-export function mergeComponents(scan: Component[], proposed: Component[]): Component[] {
+export function mergeComponents(
+  scan: Component[],
+  proposed: ReadonlyArray<Pick<Component, "name" | "paths" | "role" | "label" | "commands">>,
+): Component[] {
   const byName = new Map(proposed.map((p) => [p.name, p]));
   return scan.map((s) => {
     const p = byName.get(s.name);

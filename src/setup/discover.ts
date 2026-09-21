@@ -8,7 +8,12 @@ import { extractSidecar } from "../dispatch/sidecar.ts";
 import { allowlistFor } from "../dispatch/tool-allowlists.ts";
 import { readAgentsMd } from "./agents-md.ts";
 import { isCommandSafe } from "./command-safety.ts";
-import { DiscoverSchema, mergeComponents, probeCommandExists } from "./discover-schema.ts";
+import {
+  DiscoverSchema,
+  mergeComponents,
+  normalizeDiscovery,
+  probeCommandExists,
+} from "./discover-schema.ts";
 import { withTestActions } from "./test-action.ts";
 
 const DISCOVER_TIMEOUT_MS = 300_000;
@@ -40,7 +45,10 @@ export async function discoverComponents(
     agents_md: readAgentsMd(repoDir),
     environment_evidence: JSON.stringify(policy.environmentEvidence ?? []),
   });
-  if (!rendered.ok) return fallback;
+  if (!rendered.ok) {
+    warnings.push("setup discovery prompt could not be rendered; retaining machine observations.");
+    return fallback;
+  }
   const result = await deps.runner.run({
     prompt: rendered.prompt,
     model: modelForTier(deps.agentConfig, "standard"),
@@ -56,14 +64,38 @@ export async function discoverComponents(
   }
   const parsed = extractSidecar(result.stdout, DiscoverSchema, { fence: "styre-setup-discover" });
   if (!parsed.ok) {
-    warnings.push(`setup discovery invalid: ${parsed.reason}; retaining machine observations.`);
+    // Never log the raw payload or parser message: JSON errors can contain input values.
+    const location = parsed.issues
+      ?.slice(0, 8)
+      .map(
+        (issue) =>
+          `${issue.path
+            .map((part) =>
+              typeof part === "number"
+                ? `[${part}]`
+                : String(part)
+                    .replace(/[^a-zA-Z_-]/g, "?")
+                    .slice(0, 32),
+            )
+            .join(".")}: ${issue.code}`,
+      )
+      .join("; ");
+    warnings.push(
+      `setup discovery invalid: ${parsed.reason}${location ? ` (${location})` : ""}; retaining machine observations.`,
+    );
     return fallback;
   }
 
+  const proposal = normalizeDiscovery(scan.components, parsed.value);
+  for (const diagnostic of proposal.diagnostics)
+    warnings.push(
+      `setup discovery rejected ${diagnostic.path}: ${diagnostic.code}; retaining machine observation for that slot.`,
+    );
+
   const trusted = policy.interactive || policy.trustAgentCommands;
   const scanByName = new Map(scan.components.map((c) => [c.name, c]));
-  const agentByName = new Map((parsed.value.components as Component[]).map((c) => [c.name, c]));
-  const merged = mergeComponents(scan.components, parsed.value.components as Component[]);
+  const agentByName = new Map(proposal.components.map((c) => [c.name, c]));
+  const merged = mergeComponents(scan.components, proposal.components);
 
   const components = merged.map((c) => {
     const scanCmds = scanByName.get(c.name)?.commands ?? {};
@@ -71,7 +103,7 @@ export async function discoverComponents(
     const commands: Component["commands"] = {};
     for (const [key, value] of Object.entries(c.commands)) {
       if (typeof value !== "string") {
-        commands[key] = value; // { unavailable: true } — untouched
+        commands[key] = value; // scan observation; normalization never emits object overrides
         continue;
       }
       if (!(key in agentCmds)) {
@@ -107,7 +139,7 @@ export async function discoverComponents(
 
   // repoCommands: wholly agent-authored; previously unprobed + ungated (F2).
   const repoCommands: Record<string, string> = {};
-  for (const [name, cmd] of Object.entries(parsed.value.repoCommands)) {
+  for (const [name, cmd] of Object.entries(proposal.repoCommands)) {
     if (!isCommandSafe(cmd)) {
       warnings.push(`⚠ repoCommand ${name}: shell metacharacters — dropped.`);
       continue;

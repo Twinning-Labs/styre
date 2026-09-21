@@ -33,6 +33,11 @@ For each component, correct:
   primary and explain the doubt in `label`.
 - **commands**: map check-types (`build`/`test`/`check`/`lint`) to the real command, reading scripts
   wherever they live (e.g. a `lint:rust` script in package.json belongs to the Rust component).
+  Propose changed commands as non-empty strings. Omit unchanged command keys (`"commands": {}`
+  keeps every detected command). The draft's `{ "unresolved": "..." }` and `{ "unavailable": true }`
+  objects are read-only machine observations, not declarations you may invent or change.
+  An exact unchanged echo is accepted as retention, but omission is preferred. Component roles
+  are independent of command proposals: classify fixtures even when their commands remain unresolved.
 Also propose **repoCommands**: commands that span/own no single component (e.g. an end-to-end suite).
 
 A tox/nox configuration does not identify the intended test target. Read its configured commands,

@@ -2,7 +2,12 @@ import type { ZodType } from "zod";
 
 export type SidecarResult<T> =
   | { ok: true; value: T }
-  | { ok: false; reason: "absent" | "malformed"; detail: string };
+  | {
+      ok: false;
+      reason: "absent" | "malformed";
+      detail: string;
+      issues?: { code: string; path: PropertyKey[] }[];
+    };
 
 /** Extract + zod-validate an agent's structured-output sidecar block (control-loop §3a).
  *  A fenced ```<fence> ... ``` block holds JSON. Absent fence vs malformed JSON/shape are
@@ -27,7 +32,12 @@ export function extractSidecar<T>(
   }
   const result = schema.safeParse(parsed);
   if (!result.success) {
-    return { ok: false, reason: "malformed", detail: result.error.message };
+    return {
+      ok: false,
+      reason: "malformed",
+      detail: result.error.message,
+      issues: result.error.issues.map(({ code, path }) => ({ code, path })),
+    };
   }
   return { ok: true, value: result.data };
 }
