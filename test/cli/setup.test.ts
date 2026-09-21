@@ -268,12 +268,12 @@ test("unselected tox persists as unresolved; ordinary setup preserves explicit t
   const py = first.profile.components.find((c) => c.kind === "python");
   if (!py) throw new Error("missing detected Python component");
   expect(py.commands.test).toMatchObject({ unresolved: expect.any(String) });
-  py.commands.test = "tox -e py311 -- -q";
+  py.commands.test = "python3 -m tox -e py311";
   first.profile.repoCommands.integration = "nox -s integration";
   writeFileSync(out, JSON.stringify(first.profile));
   const second = await runSetup({ repo, out, deps: fakeDeps() });
   expect(second.profile.components.find((c) => c.kind === "python")?.commands.test).toBe(
-    "tox -e py311 -- -q",
+    "python3 -m tox -e py311",
   );
   expect(second.profile.repoCommands.integration).toBe("nox -s integration");
   expect(second.unresolvedCommands).toEqual([]);

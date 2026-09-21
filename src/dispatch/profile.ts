@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { parseConfigOrThrow } from "../config/parse-config.ts";
+import { TestEnvironmentPlanSchema } from "../testing/environment-schema.ts";
 
 export const PresenceEnum = z.enum(["present", "absent", "unknown"]);
 export const TopologyTypeEnum = z.enum([
@@ -226,6 +227,7 @@ export const ComponentSchema = z.object({
   /** Qualified test invocation. Absent → `frameworkFor` falls back to inferring from `kind` +
    *  the `test` command, which is the pre-ENG-399 behaviour and still correct when it resolves. */
   testAction: TestActionSchema.optional(),
+  testEnvironment: TestEnvironmentPlanSchema.optional(),
   paths: z.array(z.string().min(1)).min(1),
   commands: z.record(z.string(), CommandValueSchema).default({}),
   testFilePattern: z.string().optional(),

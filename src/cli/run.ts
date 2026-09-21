@@ -164,7 +164,20 @@ export async function runImpl(
     const loaded = loadRunProfile({ profile: args.profile, slug: args.slug });
     let profile: Profile = loaded.profile;
     const slug: string = loaded.slug;
-    if (!args.inspect) assertResolved(profile);
+    if (!args.inspect) {
+      const legacy = profile.components.filter(
+        (c) =>
+          ["python", "node", "sveltekit"].includes(c.kind) &&
+          typeof c.commands.test === "string" &&
+          !c.testEnvironment,
+      );
+      if (legacy.length)
+        throw usageError(
+          `Test environments need qualification: ${legacy.map((c) => c.name).join(", ")}`,
+          "Run styre setup to create test-environment plans on the execution host; inspection remains available.",
+        );
+      assertResolved(profile);
+    }
     if (loaded.nonPrimary.length > 0) {
       // NEVER SILENT (ENG-425). Said here for whoever is watching the run, and again in the PR
       // body via the `component-role` signal `provision` emits from `nonPrimaryComponents` —

@@ -10,6 +10,7 @@ import {
   provesBehavioralFailure,
 } from "./check-execution.ts";
 import { type CheckRunResult, runCheckExecution } from "./checks-run.ts";
+import type { Component } from "./profile.ts";
 import { type SuiteObservation, observeSuiteCommand } from "./suite-observation.ts";
 
 /**
@@ -131,6 +132,7 @@ export interface DeliveredTestParams {
   command?: string;
   dir?: string;
   plan?: CheckExecutionPlan;
+  components?: Component[];
   timeoutMs: number;
   run?: CmdRunner;
 }
@@ -155,6 +157,7 @@ export async function deliveredTestEvidenceAtBaseline(
     writeFileSync(target, readFileSync(p.sourcePath, "utf8"));
     const execution = await runCheckExecution({
       plan: parsed.data,
+      components: p.components,
       worktreePath: wt,
       timeoutMs: p.timeoutMs,
       run: p.run,

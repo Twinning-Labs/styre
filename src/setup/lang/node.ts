@@ -2,13 +2,17 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Component } from "../../dispatch/profile.ts";
 import { findManifests } from "../manifests.ts";
+import { nodeInstall, nodeManager } from "../node-manager.ts";
 import type { ComponentDraft, LangDef } from "./types.ts";
 
-export function nodePrepare(compDir: string): string {
-  if (existsSync(join(compDir, "yarn.lock"))) return "yarn install --frozen-lockfile";
-  if (existsSync(join(compDir, "pnpm-lock.yaml"))) return "pnpm install --frozen-lockfile";
-  if (existsSync(join(compDir, "package-lock.json"))) return "npm ci";
-  return "npm install";
+export function nodePrepare(compDir: string, repoDir = compDir): string | undefined {
+  const selection = nodeManager(repoDir, compDir);
+  if (
+    selection.manager === "npm" &&
+    existsSync(join(repoDir, selection.workspaceDir, "package-lock.json"))
+  )
+    return "npm ci";
+  return nodeInstall(selection);
 }
 
 export const nodeDef: LangDef = {
@@ -24,14 +28,29 @@ export const nodeDef: LangDef = {
           scripts?: Record<string, string>;
         };
       } catch {
-        // Malformed package.json — skip this component rather than crashing styre setup.
-        continue;
+        throw new Error(
+          `setup: invalid package.json at ${rel}; cannot determine this component's test environment`,
+        );
       }
       const scripts = pkg.scripts ?? {};
+      const manager = nodeManager(repoDir, join(repoDir, dir));
+      const pm = manager.manager;
       const commands: Component["commands"] = {};
-      if (scripts.build) commands.build = "npm run build";
-      if (scripts.test) commands.test = "npm run test";
-      if (scripts.check) commands.check = "npm run check";
+      if (scripts.build && pm) commands.build = `${pm} run build`;
+      const suites = Object.keys(scripts).filter(
+        (name) => /^test(?::[A-Za-z0-9:._-]+)?$/.test(name) && typeof scripts[name] === "string",
+      );
+      const selected = scripts.test ? "test" : suites.length === 1 ? suites[0] : undefined;
+      if (selected && pm) commands.test = `${pm} run ${selected}`;
+      else
+        commands.test = {
+          unresolved:
+            manager.reason ??
+            (suites.length > 1
+              ? `Multiple test scripts (${suites.join(", ")}); select the intended suite.`
+              : "No declared test script; configure a test-authoring workflow or explicitly mark testing unavailable."),
+        };
+      if (scripts.check && pm) commands.check = `${pm} run check`;
       const isRoot = dir === "";
       const fe =
         existsSync(join(repoDir, "svelte.config.js")) ||
@@ -43,7 +62,7 @@ export const nodeDef: LangDef = {
         // Co-located frontend: root package.json owns src/static, NOT a sibling rust src-tauri.
         paths: isRoot ? ["src/**", "static/**", "package.json"] : [`${dir}/**`],
         commands,
-        prepare: nodePrepare(isRoot ? repoDir : join(repoDir, dir)),
+        prepare: nodePrepare(isRoot ? repoDir : join(repoDir, dir), repoDir),
       });
     }
     return components;

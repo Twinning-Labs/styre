@@ -46,6 +46,12 @@ export function resolveCommands(
         : null;
       if (answer && answer.trim() !== "" && answer.trim().toLowerCase() !== "none") {
         commands[k] = k === "test" ? qualifyTestCommand(answer.trim()) : answer.trim();
+      } else if (k === "test" && answer?.trim().toLowerCase() !== "none") {
+        commands[k] = {
+          unresolved:
+            "No test command selected. Declare a suite or explicitly mark testing unavailable.",
+        };
+        warnings.push(`⚠ ${c.name}.test: unresolved (not unavailable).`);
       } else {
         commands[k] = { unavailable: true };
         warnings.push(`⚠ ${c.name}: no ${k} command — styre cannot ground-truth-${k} this stack.`);

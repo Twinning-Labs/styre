@@ -58,6 +58,7 @@ import {
 import { setPid } from "../db/repos/workflow-step.ts";
 import { StepExecutionError, StepPrerequisiteError } from "../engine/step-journal.ts";
 import { pythonImportName } from "../setup/lang/python.ts";
+import { requireTestEnvironment, testEnvironmentProblem } from "../testing/environment.ts";
 import { runCommand } from "../util/run-command.ts";
 import { nowUtc } from "../util/time.ts";
 import { type AdjClass, ChecksClassifyOutputSchema } from "./adjudicate-schema.ts";
@@ -368,6 +369,7 @@ async function reauthorCheckWrong(
         framework: replay.plan.framework,
         command: replay.command,
         executionPlan: replay.plan,
+        environment: replay.environment,
         acCheckId: row.id,
       },
     });
@@ -456,9 +458,34 @@ export function renderPrBody(
 export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   assertTestTargets(deps.profile);
   const registry = new StepRegistry();
+  async function environmentGate(ctx: HandlerContext, collect = false) {
+    if (!deps.profile.components.some((c) => c.testEnvironment)) return;
+    const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
+    ensureWorktree(repoPath, branch, worktreePath);
+    for (const c of deps.profile.components) {
+      const observation = await requireTestEnvironment(worktreePath, c, {
+        collect,
+        run: deps.runCheckCommand,
+      });
+      if (!observation) continue;
+      const ready = ["ready", "empty"].includes(observation.status);
+      insertSignal(ctx.db, {
+        ticketId: ctx.ticket.id,
+        workUnitId: ctx.workUnitId,
+        signalType: "test-environment",
+        result: ready ? "pass" : "error",
+        detail: observation,
+      });
+      if (!ready)
+        throw new StepExecutionError(
+          `Test environment ${c.name}: ${observation.status}: ${observation.reason}`,
+        );
+    }
+  }
 
-  registry.register("design:dispatch", async (ctx: HandlerContext) =>
-    runAgentDispatch(ctx, depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS), {
+  registry.register("design:dispatch", async (ctx: HandlerContext) => {
+    await environmentGate(ctx);
+    return runAgentDispatch(ctx, depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS), {
       handlerKey: "design:dispatch",
       template: DESIGN_TEMPLATE,
       vars: designVars(ctx.ticket, deps.profile, designFeedback(ctx.db, ctx.ticket.id)),
@@ -470,8 +497,8 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           );
         }
       },
-    }),
-  );
+    });
+  });
 
   registry.register("design:extract", async (ctx: HandlerContext) => {
     const { output } = await runAgentDispatch(
@@ -610,6 +637,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   });
 
   registry.register("checks:dispatch", async (ctx: HandlerContext) => {
+    await environmentGate(ctx);
     // deriveAndPersistAcs runs HERE, not in the resolver (resolver is pure, §2). Idempotent (§6).
     deriveAndPersistAcs(ctx.db, ctx.ticket.id);
     const allAcs = listAcs(ctx.db, ctx.ticket.id);
@@ -737,6 +765,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         framework: CheckFramework | null;
         command: string | null;
         executionPlan?: CheckExecutionPlan;
+        environment?: import("../testing/environment-schema.ts").EnvironmentObservation;
       }> = [];
       const covered = new Set<number>();
 
@@ -770,6 +799,9 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         }
 
         let executionPlan: CheckExecutionPlan | undefined;
+        let environment:
+          | import("../testing/environment-schema.ts").EnvironmentObservation
+          | undefined;
         let coarse: CoarseResult;
         let selector = testPath; // NOT-NULL fallback when no framework (decision 2)
         let rawOutput = "";
@@ -814,10 +846,12 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
             selector = executionPlan.runArgs;
             const res = await runCheckExecution({
               plan: executionPlan,
+              components: deps.profile.components,
               worktreePath,
               timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
               run,
             });
+            environment = res.environment;
             rawOutput = res.rawOutput;
             exitCode = res.exitCode;
             command = res.command;
@@ -906,6 +940,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           framework: fw,
           command,
           executionPlan,
+          environment,
         });
         covered.add(c.ac_id);
       }
@@ -958,6 +993,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
               framework: r.framework,
               command: r.command,
               executionPlan: r.executionPlan,
+              environment: r.environment,
               acCheckId: row.id,
             },
           });
@@ -1126,6 +1162,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   });
 
   registry.register("implement:dispatch", async (ctx: HandlerContext) => {
+    await environmentGate(ctx);
     if (ctx.workUnitId === null) {
       throw new Error("implement:dispatch: missing workUnitId");
     }
@@ -1260,6 +1297,11 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   registry.register("provision", async (ctx: HandlerContext) => {
     const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
     ensureWorktree(repoPath, branch, worktreePath);
+    for (const c of deps.profile.components) {
+      if (!c.testEnvironment) continue;
+      const problem = testEnvironmentProblem(worktreePath, c);
+      if (problem) throw new StepExecutionError(`Test environment ${c.name}: ${problem}`);
+    }
     // ENG-412: record what the run narrowed, ONCE, where a db + ticket finally exist (the
     // toolchain decision is made in `styre run` before either does). `advisory: true` routes it
     // into the PR's advisory block, so a reviewer sees that a component was skipped entirely
@@ -1414,6 +1456,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         }
       }
     }
+    await environmentGate(ctx, true);
     return { provisioned: actions.length };
   });
 
@@ -1480,6 +1523,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   });
 
   registry.register("verify:check", async (ctx: HandlerContext) => {
+    await environmentGate(ctx);
     if (ctx.workUnitId === null) {
       throw new Error("verify:check: missing workUnitId");
     }
@@ -1718,6 +1762,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
                   continue;
                 }
                 const evidence = await deliveredTestEvidenceAtBaseline({
+                  components: deps.profile.components,
                   repoPath,
                   baselineSha,
                   testFile,
@@ -1855,6 +1900,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   });
 
   registry.register("verify:integration", async (ctx: HandlerContext) => {
+    await environmentGate(ctx);
     const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
     ensureWorktree(repoPath, branch, worktreePath);
 
@@ -1946,6 +1992,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   });
 
   registry.register("verify:checks-gate", async (ctx: HandlerContext) => {
+    await environmentGate(ctx);
     const checks = listAcChecks(ctx.db, ctx.ticket.id);
     if (checks.length === 0) return { gated: 0, stillRed: 0 }; // no AC-checks → nothing to gate
     const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
@@ -2130,6 +2177,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   });
 
   registry.register("review", async (ctx: HandlerContext) => {
+    await environmentGate(ctx);
     const dispatchDeps = depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS);
     ensureWorktree(dispatchDeps.repoPath, dispatchDeps.branch, dispatchDeps.worktreePath);
     return runCodeReview(ctx, {

@@ -44,10 +44,12 @@ export function frameworkFor(component: {
   kind: string;
   commands: Record<string, unknown>;
   testAction?: { framework: CheckFramework; launcher: string };
+  testEnvironment?: { adapter: string };
 }): CheckFramework | null {
   // A qualified `testAction` is a LOOKUP, not a guess (ENG-399). Setup resolved it by following
   // `npm run <script>` into package.json, which is where Node projects actually name their
   // framework — the regex below sees only `npm run test:ci` and returns null.
+  if (component.testEnvironment?.adapter === "unsupported") return null;
   if (component.testAction) return component.testAction.framework;
   const cmd = testCommandOf(component);
   switch (component.kind) {

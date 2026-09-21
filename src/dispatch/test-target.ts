@@ -87,6 +87,8 @@ export function testTargetProblem(command: string): string | null {
           "--sitepackages",
           "--skip-pkg-install",
           "--no-recreate-provision",
+          "--current-env",
+          "--no-provision",
           "-q",
           "-v",
           "--quiet",
@@ -155,6 +157,16 @@ export function unresolvedTestTargets(
 ): string[] {
   const problems: string[] = [];
   for (const c of profile.components.filter(isPrimary)) {
+    if (c.testEnvironment?.adapter === "unsupported")
+      problems.push(`${c.name}.test: ${c.testEnvironment.reason}`);
+    if (
+      typeof c.commands.test === "string" &&
+      c.commands.test.includes("--current-env") &&
+      c.testEnvironment?.policy !== "existing"
+    )
+      problems.push(
+        `${c.name}.test: --current-env requires an explicit existing environment policy`,
+      );
     for (const [key, value] of Object.entries(c.commands)) {
       if (typeof value === "object" && "unresolved" in value)
         problems.push(`${c.name}.${key}: ${value.unresolved}`);
@@ -165,7 +177,9 @@ export function unresolvedTestTargets(
     }
   }
   for (const [name, command] of Object.entries(profile.repoCommands)) {
-    const problem = testTargetProblem(command);
+    const problem = command.includes("--current-env")
+      ? "Existing-environment execution requires a component testEnvironment contract"
+      : testTargetProblem(command);
     if (problem) problems.push(`repo.${name}: ${problem}`);
   }
   return problems;

@@ -22,6 +22,12 @@ import { resolveCommands } from "../setup/resolve-commands.ts";
 import { withTestActions } from "../setup/test-action.ts";
 import { createAnalytics } from "../telemetry/analytics/index.ts";
 import type { SetupInput } from "../telemetry/analytics/properties.ts";
+import type { EnvironmentObservation } from "../testing/environment-schema.ts";
+import {
+  inspectTestRuntime,
+  planTestEnvironment,
+  preparedToxCandidate,
+} from "../testing/environment.ts";
 import { agentCliError, usageError } from "./errors.ts";
 import { guard } from "./output.ts";
 
@@ -97,12 +103,14 @@ export async function runSetup(args: {
   force?: boolean;
   reprobe?: boolean;
   trustAgentCommands?: boolean;
+  testEnvironment?: "managed" | "existing";
   deps: EnrichDeps;
 }): Promise<{
   outPath: string;
   profile: Profile;
   needsInput: string[];
   unresolvedCommands: string[];
+  environmentEvidence: EnvironmentObservation[];
 }> {
   const repoDir = resolve(args.repo);
   if (!existsSync(repoDir)) throw new Error(`setup: repo path not found: ${repoDir}`);
@@ -135,13 +143,39 @@ export async function runSetup(args: {
       runtimeContext: mergeRuntimeContext(existing.runtimeContext, profile.runtimeContext),
     };
   }
+  const environmentEvidence: EnvironmentObservation[] = [];
+  for (const c of profile.components) {
+    if (!["python", "node", "sveltekit"].includes(c.kind)) continue;
+    const observation = await inspectTestRuntime(repoDir, c);
+    environmentEvidence.push(observation);
+    const policy =
+      args.testEnvironment ??
+      (!clean
+        ? existing?.components.find(
+            (p) =>
+              p.name === c.name &&
+              p.kind === c.kind &&
+              p.dir === c.dir &&
+              resolve(existing.targetRepo) === repoDir,
+          )?.testEnvironment?.policy
+        : undefined) ??
+      "managed";
+    if (
+      policy === "existing" &&
+      typeof c.commands.test === "object" &&
+      "unresolved" in c.commands.test
+    ) {
+      const candidate = await preparedToxCandidate(repoDir, c, observation);
+      if (candidate) c.commands.test = candidate;
+    }
+  }
   // Layer: agent-assisted discovery + interactive command-resolution ladder.
   const interactive = Boolean(process.stdin.isTTY);
   const discovered = await discoverComponents(
     repoDir,
     { components: profile.components, repoCommands: profile.repoCommands },
     { runner: args.deps.runner, agentConfig: args.deps.agentConfig },
-    { interactive, trustAgentCommands: args.trustAgentCommands === true },
+    { interactive, trustAgentCommands: args.trustAgentCommands === true, environmentEvidence },
   );
   for (const w of discovered.warnings) console.warn(w);
   for (const w of unrootedManifestWarnings(repoDir)) console.warn(w);
@@ -163,7 +197,30 @@ export async function runSetup(args: {
     interactive,
     ask: (q) => (interactive ? (globalThis.prompt(q) ?? null) : null),
   });
-  const components = withTestActions(repoDir, resolved);
+  const components = withTestActions(repoDir, resolved).map((c) => {
+    const policy =
+      args.testEnvironment ??
+      (preserveCommands
+        ? existing.components.find((p) => p.name === c.name && p.kind === c.kind && p.dir === c.dir)
+            ?.testEnvironment?.policy
+        : undefined) ??
+      "managed";
+    const plan = planTestEnvironment(repoDir, c, policy);
+    if (!plan) return c;
+    return {
+      ...c,
+      testEnvironment: plan,
+      ...(plan.adapter !== "unsupported"
+        ? {
+            testAction: {
+              ...c.testAction,
+              framework: plan.framework,
+              launcher: plan.checkLauncher,
+            },
+          }
+        : {}),
+    };
+  });
   const repoCommands = preserveCommands
     ? {
         ...existing.repoCommands,
@@ -206,11 +263,17 @@ export async function runSetup(args: {
 
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, `${JSON.stringify(profile, null, 2)}\n`);
+  writeFileSync(
+    `${outPath}.environment.json`,
+    `${JSON.stringify(environmentEvidence, null, 2)}\n`,
+    { mode: 0o600 },
+  );
   return {
     outPath,
     profile,
     needsInput: unknownRuntimeSections(profile),
     unresolvedCommands: unresolvedTestTargets(profile),
+    environmentEvidence,
   };
 }
 
@@ -263,6 +326,11 @@ export const setupCommand = defineCommand({
       type: "string",
       description: "Path to a runtime config.json (selects the agent provider)",
     },
+    "test-environment": {
+      type: "string",
+      description:
+        "managed (default): provision declared dependencies; existing: inspect and reuse without installation.",
+    },
     "trust-agent-commands": {
       type: "boolean",
       description:
@@ -281,6 +349,7 @@ export interface SetupArgs {
   reprobe?: boolean;
   config?: string;
   "trust-agent-commands"?: boolean;
+  "test-environment"?: string;
 }
 
 export async function setupImpl({ args }: { args: SetupArgs }): Promise<void> {
@@ -308,6 +377,11 @@ export async function setupImpl({ args }: { args: SetupArgs }): Promise<void> {
   const cliPreflight = preflightAgentCli(agentConfig);
   if (!cliPreflight.ok) throw agentCliError(cliPreflight);
   if (cliPreflight.unauthHint) process.stderr.write(`setup: ${cliPreflight.unauthHint}\n`);
+  if (
+    args["test-environment"] !== undefined &&
+    !["managed", "existing"].includes(args["test-environment"] ?? "")
+  )
+    throw usageError("test-environment must be managed or existing");
   const runner = resolveAgentRunner(agentConfig);
   const { outPath, profile, needsInput, unresolvedCommands } = await runSetup({
     repo,
@@ -317,6 +391,7 @@ export async function setupImpl({ args }: { args: SetupArgs }): Promise<void> {
     force: args.force,
     reprobe: args.reprobe,
     trustAgentCommands: args["trust-agent-commands"] === true,
+    testEnvironment: args["test-environment"] as "managed" | "existing" | undefined,
     deps: { runner, agentConfig },
   });
   process.stderr.write(`setup: wrote ${outPath}\n`);
