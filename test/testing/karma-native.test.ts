@@ -63,6 +63,15 @@ test.skipIf(!deps)(
         karma: pass.karma,
       }).toMatchObject({ verdict: "pass", karma: { completion: { success: 1, failed: 0 } } });
       expect(pass.command).toBe("npm test");
+      const priorFirefox = process.env.FIREFOX_BIN;
+      try {
+        process.env.FIREFOX_BIN = join(root, "missing-firefox");
+        expect((await qualifyTestEnvironment(root, c)).status).toBe("requires-preparation");
+        expect(suiteResult(await run())).toBe("error");
+      } finally {
+        if (priorFirefox === undefined) delete process.env.FIREFOX_BIN;
+        else process.env.FIREFOX_BIN = priorFirefox;
+      }
       expect(readFileSync(join(root, "karma.conf.js"), "utf8")).toBe(config);
       writeFileSync(
         join(root, "spec/example.js"),
