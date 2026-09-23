@@ -183,19 +183,24 @@ export function planTestEnvironment(
         framework: "pytest",
         checkLauncher: `${command}${policy === "managed" ? " --no-provision" : ""} --`,
       });
-    // Options here change only what pytest prints (verbosity, -r summary, --durations, header),
-    // never which tests run. --tb and -o stay out: --tb=no drops the `E` assertion lines that
-    // behavioral-failure evidence counts, and -o can rewrite addopts.
-    if (
-      /^(?:python3?|python3\.\d+) -m pytest(?: -q+| -v+| --verbose| --strict-markers| -r[fEsxXpPaAwN]+| --durations[= ]\d+| --no-header)*$/.test(
+    // Besides --strict-markers, these options change only what pytest prints, never which tests
+    // run. The suite runs verbatim (its protocol reads only the exit status). Single checks,
+    // collection probes and replays parse the output, so their launcher drops every print-only
+    // option: -rA prints passing tests' captured output where `E assert` lines are counted as
+    // evidence, and a -q stacked on the collection probe's own -q hides `N tests collected`.
+    // --tb and -o stay unsupported: --tb=no drops those `E` lines and -o can rewrite addopts.
+    const pytest =
+      /^((?:python3?|python3\.\d+) -m pytest)((?: -q+| -v+| --verbose| --strict-markers| -r[fEsxXpPaAwN]+| --durations[= ]\d+| --no-header)*)$/.exec(
         command,
-      )
-    )
+      );
+    if (pytest)
       return TestEnvironmentPlanSchema.parse({
         ...base,
         adapter: "python",
         framework: "pytest",
-        checkLauncher: command,
+        checkLauncher: /(?:^| )--strict-markers(?= |$)/.test(pytest[2])
+          ? `${pytest[1]} --strict-markers`
+          : pytest[1],
       });
     if (
       /^python3? \.\/tests\/runtests\.py --parallel 1$/.test(command) &&
