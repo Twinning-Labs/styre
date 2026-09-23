@@ -37,6 +37,7 @@ import { loadRunProfile } from "./load-profile.ts";
 import { guard } from "./output.ts";
 import { finishRunResult, parkDir } from "./park.ts";
 import { applyToolchainGate, formatUnusableComponents } from "./preflight.ts";
+import { confirmPrBase } from "./resolve-pr-base.ts";
 import { acquireRunLock, releaseRunLock, runLockStatus } from "./run-lock.ts";
 
 /** Exit codes this command can produce: 0 success · 1 abandoned (reserved terminal) ·
@@ -288,6 +289,7 @@ export async function runImpl(
     // Ports first (no DB dependency), then the single tracker read so we know the ident BEFORE
     // creating the DB — the SoT must live at the durable checkpoint from the first write.
     const ports = deps?.ports ?? makeProjectorPorts(runtimeConfig, profile);
+    await confirmPrBase(ports, profile);
     const ingested = await ports.issueTracker.fetchTicket(args.ticket);
     const ident = ingested.ident;
 

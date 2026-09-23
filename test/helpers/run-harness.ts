@@ -17,6 +17,7 @@ import type { ParkInfo } from "../../src/engine/park-signal.ts";
 import { fakeChecks } from "../../src/integrations/adapters/fake-checks.ts";
 import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
+import type { ForgePort } from "../../src/integrations/forge.ts";
 import { gitRepoWithProject } from "./git-project.ts";
 
 const PARK_SLUG = "test-project";
@@ -645,6 +646,8 @@ export interface FreshTicketRun {
 export async function runFreshTicket(opts?: {
   reuseStateOf?: FreshTicketRun;
   fresh?: boolean;
+  defaultBranch?: string;
+  forge?: ForgePort;
 }): Promise<FreshTicketRun> {
   const prevEnv = {
     state: process.env.XDG_STATE_HOME,
@@ -666,7 +669,7 @@ export async function runFreshTicket(opts?: {
     JSON.stringify({
       slug: FRESH_SLUG,
       targetRepo: repoDir,
-      defaultBranch: "main",
+      defaultBranch: opts?.defaultBranch ?? "main",
       checksSystem: "none",
       components: [],
     }),
@@ -709,7 +712,7 @@ export async function runFreshTicket(opts?: {
           url: null,
         },
       }),
-      forge: fakeForge(),
+      forge: opts?.forge ?? fakeForge(),
     };
     await runImpl(
       { args: { ticket: FRESH_IDENT, profile: profilePath, fresh: opts?.fresh } },
