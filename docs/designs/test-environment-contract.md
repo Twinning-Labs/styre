@@ -58,10 +58,16 @@ that the test bodies pass.
 
 ## Supported execution contexts
 
-Python supports explicit `python[3[.N]] -m pytest` with simple verbosity/strict-marker
-flags, the repository's Django runner, and one selected `python3 -m tox -e pyNN`
-context. Managed tox currently expects its default `.tox/pyNN/bin/python` layout.
-Existing tox uses `--current-env --no-provision`. Resolved tox must preserve failure status, run
+Python supports explicit `python[3[.N]] -m pytest` with `--strict-markers` and options that
+change only what pytest prints (`-q`/`-v` repeated, `--verbose`, `-r<chars>`, `--durations N`,
+`--no-header`). The suite command runs verbatim, since its protocol reads only the exit status.
+Single checks, collection probes and replays parse pytest's output, so their launcher keeps only
+the interpreter, `-m pytest` and `--strict-markers`: `-rA` prints passing tests' captured output,
+where `E assert` lines would count as behavioral evidence, and a `-q` stacked on the collection
+probe's own `-q` hides `N tests collected`. Options that select tests, stop early, load plugins
+or rewrite configuration stay unsupported, as does `--tb` (`--tb=no` removes those `E` lines).
+Python also supports the repository's Django runner and one selected `python3 -m tox -e pyNN`
+context. Managed tox currently expects its default `.tox/pyNN/bin/python` layout. Existing tox uses `--current-env --no-provision`. Resolved tox must preserve failure status, run
 one pytest command, forward a sentinel selector without extra default paths or
 filters, and have no pre/post commands or dependent environments. A temporary
 collection-only Python module observes the interpreter, packages, and source **inside

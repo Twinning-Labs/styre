@@ -49,6 +49,7 @@ import type { NonPrimaryComponent } from "./component-roles.ts";
 import { agentCliError, usageError } from "./errors.ts";
 import { exitCodeForOutcome } from "./outcome.ts";
 import { formatMessage } from "./output.ts";
+import { confirmPrBase } from "./resolve-pr-base.ts";
 import { acquireRunLock, releaseRunLock } from "./run-lock.ts";
 
 /**
@@ -335,6 +336,17 @@ export async function resumeRun(
       await assertInPlaceIdentity(project.target_repo, profile);
     }
 
+    // Confirm the PR base on the forge before the reconcile and the resume transaction below, so a
+    // forge failure leaves the checkpoint exactly as it was paused (after the in-place block, which
+    // re-applies profile.targetRepo for the forge ports).
+    const ports: ProjectorPorts = deps?.ports ?? makeProjectorPorts(runtimeConfig, profile);
+    try {
+      await confirmPrBase(ports, profile);
+    } catch (error) {
+      db.close();
+      throw error;
+    }
+
     // Mint the resumed run's worktree root once (in-place reuses the repo root) so the stale-worktree
     // reconcile and the dispatch registry below share it — and reconcile knows the real new target.
     const worktreeRoot = inPlace ? project.target_repo : mkdtempSync(join(tmpdir(), "styre-wt-"));
@@ -400,8 +412,6 @@ export async function resumeRun(
     })();
 
     recover(db, realRecoverDeps()); // resets the interrupted 'running' step → pending
-
-    const ports: ProjectorPorts = deps?.ports ?? makeProjectorPorts(runtimeConfig, profile);
 
     const registry: StepRegistry = deps?.buildRegistry
       ? deps.buildRegistry(resumeContext)

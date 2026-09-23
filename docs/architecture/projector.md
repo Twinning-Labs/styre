@@ -12,7 +12,10 @@ outward write path from the SQLite SoT. It drains [`schema.sql`](schema.sql)'s `
 and applies each row idempotently. It **never reads the tracker or forge to decide control flow** —
 the inbound facts the loop waits on (merge, human action) arrive as **signals** (control-loop §7),
 not through the projector. CI status is reported, not awaited: OSS takes one best-effort t+0 read on
-the merge path (control-loop §4) and never a signal. Builds on the outbox mechanics in
+the merge path (control-loop §4) and never a signal. One read happens before the loop starts, as
+a precondition like the toolchain preflight: `styre run` asks the forge whether the profile's
+`defaultBranch` exists (else takes the forge's default branch) so the PR request names a base the
+forge has. It settles one value before any step runs and never steers the loop. Builds on the outbox mechanics in
 [`control-loop.md`](control-loop.md) §5.
 
 ---

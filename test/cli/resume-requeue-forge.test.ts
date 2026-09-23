@@ -55,12 +55,17 @@ test("resume re-queues failed forge rows for the current head only, with the pro
         parseProfile({
           slug: parked.slug,
           targetRepo: repo,
-          defaultBranch: "main",
+          // The Sphinx case: the profile names a branch the forge lacks. The resume confirms the
+          // base on the forge first, so the re-queued request targets the branch that exists.
+          defaultBranch: "master",
           checksSystem: "none",
         }),
         DEFAULT_RUNTIME_CONFIG,
         {
-          ports: { issueTracker: fakeIssueTracker(), forge: fakeForge() },
+          ports: {
+            issueTracker: fakeIssueTracker(),
+            forge: fakeForge({ defaultBranch: "main", branches: ["main"] }),
+          },
           preflight: () => ({ ok: true, version: null }),
           buildRegistry: () => {
             throw new Error("stop before dispatch");
