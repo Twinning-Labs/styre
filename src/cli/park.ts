@@ -33,6 +33,7 @@ import { migrate } from "../db/migrate.ts";
 import { getLatestForTicket, getLatestWorktreePath } from "../db/repos/dispatch.ts";
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { getProject } from "../db/repos/project.ts";
+import { requeueFailedForge } from "../db/repos/projection-outbox.ts";
 import { ensureRunTable, getRun, insertRun, markResumed } from "../db/repos/run.ts";
 import { listPending, markConsumed } from "../db/repos/signal.ts";
 import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
@@ -395,6 +396,7 @@ export async function resumeRun(
 
       applyReviewResume(db, ticketId, runtimeConfig, reviewPlan);
       resumeVerificationRetries(db, ticketId);
+      requeueFailedForge(db, ticketId, profile.defaultBranch);
     })();
 
     recover(db, realRecoverDeps()); // resets the interrupted 'running' step → pending

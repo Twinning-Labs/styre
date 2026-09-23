@@ -73,3 +73,25 @@ export function markFailed(db: Database, id: number, error: string): void {
     $id: id,
   });
 }
+
+/** Resume retries: return this ticket's failed forge rows to pending with a fresh retry budget,
+ *  pointing a PR request at `prBase`. The payload is otherwise frozen at enqueue and a new enqueue
+ *  of the same idempotency key is ignored, so without this a failed PR request (e.g. rejected as
+ *  `base invalid`) could never be retried. The last error stays on the row for diagnosis. */
+export function requeueFailedForge(db: Database, ticketId: number, prBase: string): number {
+  const rows = db
+    .query<{ id: number; op: string; payload_json: string | null }, [number]>(
+      "SELECT id, op, payload_json FROM projection_outbox WHERE ticket_id = ? AND target = 'forge' AND status = 'failed'",
+    )
+    .all(ticketId);
+  for (const row of rows) {
+    const payload =
+      row.op === "pr_create" && row.payload_json !== null
+        ? JSON.stringify({ ...JSON.parse(row.payload_json), base: prBase })
+        : row.payload_json;
+    db.query(
+      "UPDATE projection_outbox SET status = 'pending', attempts = 0, payload_json = $payload WHERE id = $id",
+    ).run({ $payload: payload, $id: row.id });
+  }
+  return rows.length;
+}

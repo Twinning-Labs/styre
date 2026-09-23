@@ -211,7 +211,7 @@ convention, which is what lets a CI/fleet caller branch on them.
 
 | Code | Name | Meaning | Retryable? |
 |---|---|---|---|
-| `0` | success | The command did its job. For `run`: a PR is open and ready (`done` / `pr-ready`). Also returned by `--version`, `--help`, `run --resume --inspect`, and a `styre clean --purge` soft-skip on the default branch. | — |
+| `0` | success | The command did its job. For `run`: a PR is open and ready (`done` / `pr-ready`; `pr-ready` requires the forge to have returned the PR's URL — an undelivered PR request pauses the run instead, exit `75`). Also returned by `--version`, `--help`, `run --resume --inspect`, and a `styre clean --purge` soft-skip on the default branch. | — |
 | `1` | operational stop | `abandoned` — a reserved terminal outcome. **Not currently emitted by any run.** | No — a human should look at it. |
 | `64` | usage (`EX_USAGE`) | CLI misuse — e.g. `styre notify` without `--test`, `styre clean --all --purge`, or a fresh `styre run <ticket>` when a checkpoint already exists for that ident (`usageError` → `EXIT.USAGE`). A misuse error, not a run failure. | No — correct the invocation. |
 | `65` | resume refused (`EX_DATAERR`) | `run --resume`, refused because either the branch HEAD moved since the run paused and `--accept-head` was not passed, *or* concurrent-resume lock contention — another `styre run --resume` already holds this checkpoint. | Yes, deliberately — re-run with `--accept-head` (HEAD moved) or retry once the other resume releases the lock (contention), or `--inspect` (diagnose, exits `0`). |

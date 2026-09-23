@@ -84,7 +84,8 @@ drainOutbox(budget = OUTBOX_RETRY_BUDGET):        # OUTBOX_RETRY_BUDGET = 5
         # a structured telemetry note is committed WITH markSent so a crash-replay can't double-count
       COMMIT
       if row delivers a result: deliverSignal(row, ref)   # pr_create → external_pr_result (§7)
-    catch transient:
+    catch err:
+      if forge row and err.status == 422: fail + escalate now   # validation failure: permanent (§7)
       attempts += 1                                   # retried on the NEXT drain (no backoff)
       if attempts >= budget: escalate(row.ticket_id)  # §7 — external service down
 ```
@@ -137,4 +138,12 @@ cache optimization is deferred.
   projection (the row is durable; it drains when the service returns). A `notify`-target failure is
   the exception: it is retried but never pauses the ticket (a failed notification must not block a
   run).
+- **Permanent** (a forge validation failure, HTTP 422 — e.g. GitHub's `PullRequest base invalid`) →
+  the row fails and the run pauses on the first attempt: resending the same payload cannot succeed.
+- **`pr-ready` requires a delivered PR.** At the merge gate `styre run` drains a still-pending PR
+  request to an answer (bounded by the budget) and returns `pr-ready` only once `external_pr_result`
+  carries a URL; otherwise the run pauses (`needs_you`) with the recorded error.
+- **Resume retries.** `styre run --resume` returns the ticket's failed forge rows to `pending` with a
+  fresh budget, pointing a PR request at the profile's current `defaultBranch` (a payload is
+  otherwise frozen at enqueue, and a re-enqueue of the same idempotency key is ignored).
 - A projection failure **never** blocks control flow — the runner's loop runs on the SoT regardless.

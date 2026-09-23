@@ -15,7 +15,7 @@ import { createTelemetryEmitter } from "../telemetry/emitter.ts";
 import { tick } from "./loop.ts";
 import { createNotifier } from "./notify.ts";
 import { pauseTicket } from "./pause-ticket.ts";
-import { type ProjectorPorts, drainOutbox } from "./projector.ts";
+import { OUTBOX_RETRY_BUDGET, type ProjectorPorts, drainOutbox } from "./projector.ts";
 import type { StepRegistry } from "./step-registry.ts";
 
 export type RunOutcome = "pr-ready" | "done" | "paused" | "abandoned";
@@ -62,6 +62,24 @@ async function readCiState(
   } finally {
     clearTimeout(timer);
   }
+}
+
+function prRequestRow(db: Database, ticketId: number) {
+  return db
+    .query<{ status: string; error: string | null }, [number]>(
+      "SELECT status, error FROM projection_outbox WHERE ticket_id = ? AND target = 'forge' AND op = 'pr_create' ORDER BY id DESC LIMIT 1",
+    )
+    .get(ticketId);
+}
+function prRequestStatus(db: Database, ticketId: number): string | null {
+  return prRequestRow(db, ticketId)?.status ?? null;
+}
+function prRequestError(db: Database, ticketId: number): string | null {
+  return prRequestRow(db, ticketId)?.error ?? null;
+}
+function deliveredPrUrl(db: Database, ticketId: number): string | null {
+  const url = getDeliveredPayload(db, ticketId, "external_pr_result")?.url;
+  return typeof url === "string" && url.length > 0 ? url : null;
 }
 
 /** Drive ONE ticket through repeated ticks until a terminal state. `run` exits at PR-ready (the
@@ -113,6 +131,26 @@ export async function driveToTerminal(
     if (hasPendingHumanResume(db, opts.ticketId))
       return await finish({ outcome: "paused", reason: "needs_you", ...last });
     if (t.stage === "merge" && pending.some((s) => s.signal_type === "human_merge_approval")) {
+      // pr-ready means a PR exists. The request may still be retrying in the outbox (the per-tick
+      // drain would otherwise hit the idle-stall cap first): drain it to an answer here, bounded
+      // by the retry budget. Undelivered → the drainer has escalated (human_resume) when the row
+      // failed; any other undelivered state is paused explicitly. Never pr-ready without a URL.
+      for (
+        let k = 0;
+        k < OUTBOX_RETRY_BUDGET && prRequestStatus(db, opts.ticketId) === "pending";
+        k++
+      )
+        await drainOutbox(db, opts.ports);
+      if (!deliveredPrUrl(db, opts.ticketId)) {
+        if (!hasPendingHumanResume(db, opts.ticketId))
+          pauseTicket(
+            db,
+            opts.ticketId,
+            `the pull request was not delivered${prRequestError(db, opts.ticketId) ? `: ${prRequestError(db, opts.ticketId)}` : ""}`,
+          );
+        const status = getTicket(db, opts.ticketId)?.status ?? last.status;
+        return await finish({ outcome: "paused", reason: "needs_you", ...last, status });
+      }
       const pr = getDeliveredPayload(db, opts.ticketId, "external_pr_result");
       const sha = getLatestForTicket(db, opts.ticketId)?.branch_head_sha ?? null;
       const read = await readCiState(opts.ports, opts.profile.checksSystem, sha, ciReadTimeoutMs);

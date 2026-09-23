@@ -5,8 +5,10 @@ import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
+import { OUTBOX_RETRY_BUDGET } from "../../src/daemon/projector.ts";
 import { driveToTerminal } from "../../src/daemon/run-ticket.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
+import { requeueFailedForge } from "../../src/db/repos/projection-outbox.ts";
 import { insertPending } from "../../src/db/repos/signal.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
@@ -174,5 +176,116 @@ test("a non-merge terminal emits zero ci_handoffs", async () => {
   expect(r.outcome).toBe("paused");
   expect(r.reason).toBe("needs_you");
   expect(seen.filter((e) => e.type === "ci_handoff")).toHaveLength(0);
+  db.close();
+});
+
+/** A forge whose ensurePr fails `failures` times (then succeeds), or always when `failures` is
+ *  Infinity. `error` builds the thrown error. */
+function flakyForge(failures: number, error: () => Error) {
+  const forge = fakeForge();
+  const real = forge.ensurePr.bind(forge);
+  let attempts = 0;
+  forge.ensurePr = async (opts) => {
+    attempts++;
+    if (attempts <= failures) throw error();
+    return real(opts);
+  };
+  return { forge, attempts: () => attempts };
+}
+const rejected = () =>
+  Object.assign(new Error("GitHub Validation Failed: PullRequest base invalid"), { status: 422 });
+
+function prCreateRow(db: ReturnType<typeof makeTestDb>["db"]) {
+  return db
+    .query("SELECT status, attempts, error FROM projection_outbox WHERE op = 'pr_create'")
+    .get() as { status: string; attempts: number; error: string | null };
+}
+
+// The 20 Sept Sphinx run: GitHub rejected every PR request as `base invalid`, yet the run
+// returned pr-ready with no PR, because pr-ready fired while the request was still retrying.
+test("a PR request the forge rejects as invalid pauses as needs_you, never pr-ready", async () => {
+  const { db, ticketId } = makeTestDb();
+  seedAtMerge(db, ticketId);
+  const f = flakyForge(Number.POSITIVE_INFINITY, rejected);
+  const seen: TelemetryEvent[] = [];
+  const r = await driveToTerminal(db, reg(), {
+    ticketId,
+    config: DEFAULT_RUNTIME_CONFIG,
+    ports: { ...ports(), forge: f.forge },
+    profile,
+    emit: (e) => seen.push(e),
+  });
+  expect(r.outcome).toBe("paused");
+  expect(r.reason).toBe("needs_you");
+  expect(f.attempts()).toBe(1); // a validation failure is permanent: no retries
+  expect(prCreateRow(db).status).toBe("failed");
+  const escalated = db.query("SELECT reason FROM event_log WHERE kind = 'escalated'").all() as {
+    reason: string;
+  }[];
+  expect(escalated.some((e) => e.reason.includes("base invalid"))).toBe(true);
+  expect(seen.some((e) => e.type === "ci_handoff")).toBe(false);
+  db.close();
+});
+
+test("a PR request that keeps failing transiently exhausts its retries, then pauses as needs_you", async () => {
+  const { db, ticketId } = makeTestDb();
+  seedAtMerge(db, ticketId);
+  const f = flakyForge(Number.POSITIVE_INFINITY, () => new Error("ECONNRESET"));
+  const r = await driveToTerminal(db, reg(), {
+    ticketId,
+    config: DEFAULT_RUNTIME_CONFIG,
+    ports: { ...ports(), forge: f.forge },
+    profile,
+  });
+  expect(r.outcome).toBe("paused");
+  expect(r.reason).toBe("needs_you");
+  expect(f.attempts()).toBe(OUTBOX_RETRY_BUDGET);
+  expect(prCreateRow(db).status).toBe("failed");
+  db.close();
+});
+
+test("a PR request that succeeds after transient failures returns pr-ready with its URL", async () => {
+  const { db, ticketId } = makeTestDb();
+  seedAtMerge(db, ticketId);
+  const f = flakyForge(2, () => new Error("ECONNRESET"));
+  const seen: TelemetryEvent[] = [];
+  const r = await driveToTerminal(db, reg(), {
+    ticketId,
+    config: DEFAULT_RUNTIME_CONFIG,
+    ports: { ...ports(), forge: f.forge },
+    profile,
+    emit: (e) => seen.push(e),
+  });
+  expect(r.outcome).toBe("pr-ready");
+  expect(f.attempts()).toBe(3);
+  const h = seen.find((e) => e.type === "ci_handoff");
+  expect(h?.type === "ci_handoff" && h.pr_url).toContain("/pr/");
+  db.close();
+});
+
+test("a rejected PR request re-queued with a corrected base reaches pr-ready", async () => {
+  const { db, ticketId } = makeTestDb();
+  seedAtMerge(db, ticketId);
+  const first = await driveToTerminal(db, reg(), {
+    ticketId,
+    config: DEFAULT_RUNTIME_CONFIG,
+    ports: { ...ports(), forge: flakyForge(Number.POSITIVE_INFINITY, rejected).forge },
+    profile,
+  });
+  expect(first.outcome).toBe("paused");
+  // What `styre run --resume` does: consume the escalation, re-queue the failed forge rows.
+  db.query("UPDATE signal SET status = 'consumed' WHERE signal_type = 'human_resume'").run();
+  db.query("UPDATE ticket SET status = 'active' WHERE id = ?").run(ticketId);
+  expect(requeueFailedForge(db, ticketId, "trunk")).toBe(1);
+  const forge = fakeForge();
+  const second = await driveToTerminal(db, reg(), {
+    ticketId,
+    config: DEFAULT_RUNTIME_CONFIG,
+    ports: { ...ports(), forge },
+    profile,
+  });
+  expect(second.outcome).toBe("pr-ready");
+  const call = forge.calls.find((c) => c.method === "ensurePr");
+  expect((call?.args[0] as { base: string }).base).toBe("trunk");
   db.close();
 });
