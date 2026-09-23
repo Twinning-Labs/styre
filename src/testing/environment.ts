@@ -183,8 +183,13 @@ export function planTestEnvironment(
         framework: "pytest",
         checkLauncher: `${command}${policy === "managed" ? " --no-provision" : ""} --`,
       });
+    // Options here change only what pytest prints (verbosity, -r summary, --durations, header),
+    // never which tests run. --tb and -o stay out: --tb=no drops the `E` assertion lines that
+    // behavioral-failure evidence counts, and -o can rewrite addopts.
     if (
-      /^(?:python3?|python3\.\d+) -m pytest(?: -q| -v| --verbose| --strict-markers)*$/.test(command)
+      /^(?:python3?|python3\.\d+) -m pytest(?: -q+| -v+| --verbose| --strict-markers| -r[fEsxXpPaAwN]+| --durations[= ]\d+| --no-header)*$/.test(
+        command,
+      )
     )
       return TestEnvironmentPlanSchema.parse({
         ...base,

@@ -2,8 +2,17 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  provesBehavioralFailure,
+  resolveCheckExecution,
+} from "../../src/dispatch/check-execution.ts";
+import { runCheckExecution } from "../../src/dispatch/checks-run.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
-import { planTestEnvironment, qualifyTestEnvironment } from "../../src/testing/environment.ts";
+import {
+  planTestEnvironment,
+  qualifyTestEnvironment,
+  requireTestEnvironment,
+} from "../../src/testing/environment.ts";
 
 const deps = process.env.STYRE_ENV_NATIVE_NODE_DEPS;
 for (const fw of ["jest", "vitest", "mocha"] as const)
@@ -101,6 +110,60 @@ test.skipIf(!process.env.STYRE_ENV_NATIVE_PYTHON)(
       const bad = await qualifyTestEnvironment(root, c, { collect: true });
       expect(bad.status).toBe("error");
       expect(bad.probes?.some((p) => p.stdout.includes("ModuleNotFoundError"))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  30000,
+);
+
+test.skipIf(!process.env.STYRE_ENV_NATIVE_PYTHON)(
+  "native Python: reporting-only pytest options keep collection and check verdicts readable",
+  async () => {
+    // The launcher Sphinx's tox.ini implies. -rA adds a summary section and --durations a timing
+    // table; neither may change collection counts, GREEN/RED, or behavioral-failure evidence.
+    const launcher = "python3 -m pytest -rA --durations 25";
+    const root = mkdtempSync(join(tmpdir(), "styre-native-py-report-"));
+    try {
+      writeFileSync(join(root, "pytest.ini"), "[pytest]\n");
+      writeFileSync(
+        join(root, "test_example.py"),
+        "def test_pass():\n    assert 1 == 1\n\ndef test_fail():\n    assert 1 == 2\n",
+      );
+      const c = parseProfile({
+        slug: "native",
+        targetRepo: root,
+        components: [{ name: "app", kind: "python", paths: ["**"], commands: { test: launcher } }],
+      }).components[0];
+      c.testEnvironment = planTestEnvironment(root, c, "existing");
+      expect(c.testEnvironment?.adapter).toBe("python");
+      c.testAction = { framework: "pytest", launcher };
+      const qualified = await qualifyTestEnvironment(root, c, { collect: true });
+      expect(qualified.status).toBe("ready");
+      expect(qualified.collection?.count).toBe(2);
+      await requireTestEnvironment(root, c);
+      const run = async (testName: string) => {
+        const plan = resolveCheckExecution({
+          components: [c],
+          testFile: "test_example.py",
+          testName,
+        });
+        return {
+          plan,
+          result: await runCheckExecution({
+            plan,
+            components: [c],
+            worktreePath: root,
+            timeoutMs: 30000,
+          }),
+        };
+      };
+      const pass = await run("test_pass");
+      expect(pass.result.coarse).toBe("green");
+      expect(pass.result.command.startsWith(launcher)).toBe(true);
+      const fail = await run("test_fail");
+      expect(fail.result.coarse).toBe("red");
+      expect(provesBehavioralFailure(fail.plan, fail.result)).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

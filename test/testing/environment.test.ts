@@ -166,6 +166,35 @@ test.each([
   const r = fixture();
   expect(component(r, cmd).testEnvironment?.adapter).toBe("unsupported");
 });
+// Sphinx's tox.ini runs `pytest -rA --durations 25`; setup discovery proposed exactly that and
+// the launcher was rejected although these options change only what pytest prints.
+test.each([
+  "python3 -m pytest -rA --durations 25",
+  "python -m pytest -rA",
+  "python3 -m pytest --durations=10 -q",
+  "python3 -m pytest --no-header -rfE -vv",
+])("reporting-only pytest options keep a supported launcher: %s", (cmd) => {
+  const r = fixture();
+  const plan = component(r, cmd).testEnvironment;
+  expect(plan?.adapter).toBe("python");
+  expect(plan?.adapter === "python" && plan.framework).toBe("pytest");
+  expect(plan?.adapter === "python" && plan.checkLauncher).toBe(cmd);
+});
+// Options that select tests, stop early, load plugins, override ini settings or suppress the
+// assertion lines that behavioral-failure evidence counts must stay unsupported.
+test.each([
+  "python3 -m pytest -rA tests/unit",
+  "python3 -m pytest -rA -x",
+  "python3 -m pytest --tb=no -rA",
+  "python3 -m pytest -o addopts=-kold",
+  "python3 -m pytest -p xdist -rA",
+  "python3 -m pytest --durations",
+  "python3 -m pytest -r",
+  "python3 -m pytest -rA; rm -rf .",
+])("selection-affecting or malformed pytest options stay unsupported: %s", (cmd) => {
+  const r = fixture();
+  expect(component(r, cmd).testEnvironment?.adapter).toBe("unsupported");
+});
 test.each([
   "commands = pytest tests/ __styre_identity__.py",
   "commands = pytest -k old __styre_identity__.py",

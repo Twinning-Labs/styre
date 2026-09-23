@@ -58,9 +58,12 @@ that the test bodies pass.
 
 ## Supported execution contexts
 
-Python supports explicit `python[3[.N]] -m pytest` with simple verbosity/strict-marker
-flags, the repository's Django runner, and one selected `python3 -m tox -e pyNN`
-context. Managed tox currently expects its default `.tox/pyNN/bin/python` layout.
+Python supports explicit `python[3[.N]] -m pytest` with options that change only what
+pytest prints (`-q`/`-v` repeated, `--verbose`, `--strict-markers`, `-r<chars>`,
+`--durations N`, `--no-header`). Options that select tests, stop early, load plugins or
+rewrite configuration stay unsupported, as does `--tb`: `--tb=no` removes the `E` assertion
+lines that behavioral-failure evidence counts. Python also supports the repository's Django
+runner and one selected `python3 -m tox -e pyNN` context. Managed tox currently expects its default `.tox/pyNN/bin/python` layout.
 Existing tox uses `--current-env --no-provision`. Resolved tox must preserve failure status, run
 one pytest command, forward a sentinel selector without extra default paths or
 filters, and have no pre/post commands or dependent environments. A temporary
