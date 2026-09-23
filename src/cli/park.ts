@@ -48,6 +48,7 @@ import type { NonPrimaryComponent } from "./component-roles.ts";
 import { agentCliError, usageError } from "./errors.ts";
 import { exitCodeForOutcome } from "./outcome.ts";
 import { formatMessage } from "./output.ts";
+import { confirmPrBase } from "./resolve-pr-base.ts";
 import { acquireRunLock, releaseRunLock } from "./run-lock.ts";
 
 /**
@@ -400,6 +401,7 @@ export async function resumeRun(
     recover(db, realRecoverDeps()); // resets the interrupted 'running' step → pending
 
     const ports: ProjectorPorts = deps?.ports ?? makeProjectorPorts(runtimeConfig, profile);
+    await confirmPrBase(ports, profile);
 
     const registry: StepRegistry = deps?.buildRegistry
       ? deps.buildRegistry(resumeContext)

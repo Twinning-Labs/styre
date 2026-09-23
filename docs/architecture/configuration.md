@@ -162,7 +162,7 @@ hold a value no consumer switches on — coercing it would silently reinstate th
 | `schemaVersion` | literal `4` | Bumped on breaking profile changes; older versions are rejected, not migrated. |
 | `slug` | string | Project slug; drives the profile/config path and the checkpoint dir. |
 | `targetRepo` | string | Absolute repo path. Overwritten in memory by `--in-place` to the discovered git root. |
-| `defaultBranch` | string (`"main"`) | Detected from `origin/HEAD` → current branch → `"main"`. PR base. |
+| `defaultBranch` | string (`"main"`) | Detected from `origin/HEAD` → current branch → `"main"`. PR base. `styre run` (fresh and `--resume`) confirms it on the forge before any agent work: kept if the forge has a branch of exactly that name, otherwise replaced by the forge's default branch with a stderr notice. A local `origin/HEAD` can be stale (an image cloned from upstream), so the detected value alone is not trusted. |
 | `analyticsId` | string? | Stable random PostHog `project_id`; never encodes the slug/name. Generated at setup, preserved across `--force`/`--reprobe`. |
 | `checksSystem` | `"github" \| "external" \| "none"` | How CI checks are read. Overridable with `styre setup --checks`. |
 | `components` | `Component[]` | Detected stack components (see below). Drives verify routing, tool allowlists, provision. |

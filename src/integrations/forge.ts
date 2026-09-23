@@ -14,6 +14,10 @@ export interface ForgePort {
   /** Comment on a PR, deduped by idempotencyKey (adapter probes existing comments). Returns the
    *  created comment id/ref, or null if it already existed. */
   addPrComment(prRef: string, body: string, idempotencyKey: string): Promise<string | null>;
+  /** The repository's default branch as the forge records it (never a local ref guess). */
+  defaultBranch(): Promise<string>;
+  /** Whether `branch` exists on the forge. False only for a definite not-found. */
+  branchExists(branch: string): Promise<boolean>;
 }
 
 export type ForgeFactory = () => ForgePort;

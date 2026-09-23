@@ -169,5 +169,22 @@ export function githubForge(opts: { repoPath: string; token?: string }): ForgePo
       });
       return String(created.data.id);
     },
+
+    async defaultBranch(): Promise<string> {
+      const { data } = await octokit.repos.get({ owner, repo });
+      return data.default_branch;
+    },
+
+    async branchExists(branch: string): Promise<boolean> {
+      try {
+        // GitHub answers a renamed branch's old name with the new branch (200, `name` differs):
+        // Twinning-Labs/styre returns `main` for `master`. Only an exact name is the branch asked for.
+        const { data } = await octokit.repos.getBranch({ owner, repo, branch });
+        return data.name === branch;
+      } catch (err) {
+        if ((err as { status?: number }).status === 404) return false;
+        throw err;
+      }
+    },
   };
 }

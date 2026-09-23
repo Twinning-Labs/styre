@@ -2,7 +2,7 @@ import type { ForgePort } from "../forge.ts";
 
 /** In-memory recording ForgePort for tests (the fakeIssueTracker analogue). Stateful: tracks
  *  created PRs per branch so `ensurePr` can reconcile the body on reuse (mirrors the real adapter). */
-export function fakeForge(): ForgePort & {
+export function fakeForge(opts?: { defaultBranch?: string; branches?: string[] }): ForgePort & {
   calls: Array<{ method: string; args: unknown[] }>;
   prs: Map<string, { ref: string; url: string; body: string }>;
 } {
@@ -32,6 +32,13 @@ export function fakeForge(): ForgePort & {
     async addPrComment(prRef: string, body: string, idempotencyKey: string) {
       calls.push({ method: "addPrComment", args: [prRef, body, idempotencyKey] });
       return `fake-pr-comment-${calls.length}`;
+    },
+    async defaultBranch() {
+      return opts?.defaultBranch ?? "main";
+    },
+    // Without an explicit branch list every branch exists, so existing callers keep their base.
+    async branchExists(branch: string) {
+      return opts?.branches ? opts.branches.includes(branch) : true;
     },
   };
 }
