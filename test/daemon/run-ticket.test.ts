@@ -6,13 +6,14 @@ import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import { OUTBOX_RETRY_BUDGET } from "../../src/daemon/projector.ts";
-import { codeLoopback } from "../../src/daemon/review-verdict.ts";
+import { codeLoopback, redesignLoopback } from "../../src/daemon/review-verdict.ts";
 import { driveToTerminal } from "../../src/daemon/run-ticket.ts";
 import type { StepRegistry } from "../../src/daemon/step-registry.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
 import { requeueFailedForge } from "../../src/db/repos/projection-outbox.ts";
 import { insertPending } from "../../src/db/repos/signal.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
+import { insertPending as insertStep } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { fakeChecks } from "../../src/integrations/adapters/fake-checks.ts";
@@ -369,4 +370,54 @@ test("after a code loopback out of merge, the new head is pushed and the failed 
     .all() as { op: string }[];
   expect(order.map((r) => r.op).slice(-2)).toEqual(["push", "pr_create"]);
   db.close();
+});
+
+// pr-ready claims a PR showing the verified head. A PR request can succeed against a branch the
+// remote already has while the push of the current head is still failing: the PR then shows old
+// code. The push must be delivered at the current head too.
+test("a PR delivered while the current head's push keeps failing pauses as needs_you, never pr-ready", async () => {
+  const { db, ticketId } = makeTestDb();
+  seedAtMerge(db, ticketId);
+  const forge = fakeForge();
+  forge.push = async () => {
+    throw new Error("ECONNRESET on push");
+  };
+  const r = await driveToTerminal(db, reg(), {
+    ticketId,
+    config: DEFAULT_RUNTIME_CONFIG,
+    ports: { ...ports(), forge },
+    profile,
+  });
+  expect(r.outcome).toBe("paused");
+  expect(r.reason).toBe("needs_you");
+  const push = db.query("SELECT status FROM projection_outbox WHERE op = 'push'").get() as {
+    status: string;
+  };
+  expect(push.status).toBe("failed");
+  db.close();
+});
+
+test("both loopbacks reset the merge steps with a fresh attempt budget", () => {
+  for (const loopback of ["code", "design"] as const) {
+    const { db, ticketId } = makeTestDb();
+    db.query("UPDATE ticket SET stage = 'merge' WHERE id = ?").run(ticketId);
+    for (const key of ["merge:push", "merge:pr-ensure"]) {
+      const step = insertStep(db, { ticketId, stepKey: key, stepType: "merge" });
+      db.query("UPDATE workflow_step SET status = 'succeeded', attempt = 2 WHERE id = ?").run(
+        step.id,
+      );
+    }
+    if (loopback === "code") codeLoopback(db, ticketId, [], "sig", null);
+    else redesignLoopback(db, ticketId, "sig", [], null);
+    const steps = db
+      .query(
+        "SELECT step_key, status, attempt FROM workflow_step WHERE step_key LIKE 'merge:%' ORDER BY step_key",
+      )
+      .all();
+    expect(steps).toEqual([
+      { step_key: "merge:pr-ensure", status: "pending", attempt: 0 },
+      { step_key: "merge:push", status: "pending", attempt: 0 },
+    ]);
+    db.close();
+  }
 });

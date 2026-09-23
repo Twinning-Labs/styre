@@ -140,9 +140,11 @@ cache optimization is deferred.
   run).
 - **Permanent** (a forge validation failure, HTTP 422 — e.g. GitHub's `PullRequest base invalid`) →
   the row fails and the run pauses on the first attempt: resending the same payload cannot succeed.
-- **`pr-ready` requires a delivered PR.** At the merge gate `styre run` drains a still-pending PR
-  request to an answer (bounded by the budget) and returns `pr-ready` only once `external_pr_result`
-  carries a URL; otherwise the run pauses (`needs_you`) with the recorded error.
+- **`pr-ready` requires a delivered PR at the verified head.** At the merge gate `styre run` drains
+  a still-pending push and PR request to an answer (bounded by the budget) and returns `pr-ready`
+  only once `external_pr_result` carries a URL **and** the latest push was delivered at the current
+  branch head (a PR request can succeed against a branch the remote already has while the current
+  head's push fails); otherwise the run pauses (`needs_you`) with the recorded error.
 - **Resume retries.** `styre run --resume` returns the ticket's failed forge rows for the current
   branch head to `pending` with a fresh budget, pointing a PR request at the profile's current
   `defaultBranch`. Rows for a commit the branch has moved past stay failed (re-sending them would

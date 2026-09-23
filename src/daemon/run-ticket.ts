@@ -64,22 +64,31 @@ async function readCiState(
   }
 }
 
-function prRequestRow(db: Database, ticketId: number) {
+/** The latest forge row of `op` for this ticket (FIFO ids: the most recent enqueue). */
+function forgeRow(db: Database, ticketId: number, op: "push" | "pr_create") {
   return db
-    .query<{ status: string; error: string | null }, [number]>(
-      "SELECT status, error FROM projection_outbox WHERE ticket_id = ? AND target = 'forge' AND op = 'pr_create' ORDER BY id DESC LIMIT 1",
+    .query<{ status: string; error: string | null; payload_json: string | null }, [number, string]>(
+      "SELECT status, error, payload_json FROM projection_outbox WHERE ticket_id = ? AND target = 'forge' AND op = ? ORDER BY id DESC LIMIT 1",
     )
-    .get(ticketId);
+    .get(ticketId, op);
 }
-function prRequestStatus(db: Database, ticketId: number): string | null {
-  return prRequestRow(db, ticketId)?.status ?? null;
-}
-function prRequestError(db: Database, ticketId: number): string | null {
-  return prRequestRow(db, ticketId)?.error ?? null;
-}
-function deliveredPrUrl(db: Database, ticketId: number): string | null {
+
+/** Why the merge gate cannot claim pr-ready, or null when it can: the forge returned the PR's URL
+ *  and the latest push was delivered at the current head. (A ticket without a push row — only
+ *  test doubles that skip the push — is judged on the PR alone.) */
+function undeliveredReason(db: Database, ticketId: number): string | null {
   const url = getDeliveredPayload(db, ticketId, "external_pr_result")?.url;
-  return typeof url === "string" && url.length > 0 ? url : null;
+  if (typeof url !== "string" || url.length === 0) {
+    const error = forgeRow(db, ticketId, "pr_create")?.error;
+    return `the pull request was not delivered${error ? `: ${error}` : ""}`;
+  }
+  const push = forgeRow(db, ticketId, "push");
+  if (!push) return null;
+  const head = getLatestForTicket(db, ticketId)?.branch_head_sha ?? null;
+  const pushed = push.payload_json === null ? undefined : JSON.parse(push.payload_json).sha;
+  if (push.status !== "sent" || pushed !== head)
+    return `the branch push of the current head was not delivered${push.error ? `: ${push.error}` : ""}`;
+  return null;
 }
 
 /** Drive ONE ticket through repeated ticks until a terminal state. `run` exits at PR-ready (the
@@ -131,23 +140,23 @@ export async function driveToTerminal(
     if (hasPendingHumanResume(db, opts.ticketId))
       return await finish({ outcome: "paused", reason: "needs_you", ...last });
     if (t.stage === "merge" && pending.some((s) => s.signal_type === "human_merge_approval")) {
-      // pr-ready means a PR exists. The request may still be retrying in the outbox (the per-tick
-      // drain would otherwise hit the idle-stall cap first): drain it to an answer here, bounded
-      // by the retry budget. Undelivered → the drainer has escalated (human_resume) when the row
-      // failed; any other undelivered state is paused explicitly. Never pr-ready without a URL.
+      // pr-ready means a PR exists and shows the verified head. The push and the PR request may
+      // still be retrying in the outbox (the per-tick drain would otherwise hit the idle-stall cap
+      // first): drain both to an answer here, bounded by the retry budget. A PR request can
+      // succeed against a branch the remote already has while the current head's push fails, so
+      // the push must be delivered too. Undelivered → the drainer has escalated (human_resume)
+      // when a row failed; any other undelivered state is paused explicitly.
       for (
         let k = 0;
-        k < OUTBOX_RETRY_BUDGET && prRequestStatus(db, opts.ticketId) === "pending";
+        k < OUTBOX_RETRY_BUDGET &&
+        (forgeRow(db, opts.ticketId, "pr_create")?.status === "pending" ||
+          forgeRow(db, opts.ticketId, "push")?.status === "pending");
         k++
       )
         await drainOutbox(db, opts.ports);
-      if (!deliveredPrUrl(db, opts.ticketId)) {
-        if (!hasPendingHumanResume(db, opts.ticketId))
-          pauseTicket(
-            db,
-            opts.ticketId,
-            `the pull request was not delivered${prRequestError(db, opts.ticketId) ? `: ${prRequestError(db, opts.ticketId)}` : ""}`,
-          );
+      const undelivered = undeliveredReason(db, opts.ticketId);
+      if (undelivered) {
+        if (!hasPendingHumanResume(db, opts.ticketId)) pauseTicket(db, opts.ticketId, undelivered);
         const status = getTicket(db, opts.ticketId)?.status ?? last.status;
         return await finish({ outcome: "paused", reason: "needs_you", ...last, status });
       }
