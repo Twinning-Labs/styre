@@ -6,7 +6,9 @@ import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import { OUTBOX_RETRY_BUDGET } from "../../src/daemon/projector.ts";
+import { codeLoopback } from "../../src/daemon/review-verdict.ts";
 import { driveToTerminal } from "../../src/daemon/run-ticket.ts";
+import type { StepRegistry } from "../../src/daemon/step-registry.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
 import { requeueFailedForge } from "../../src/db/repos/projection-outbox.ts";
 import { insertPending } from "../../src/db/repos/signal.ts";
@@ -18,6 +20,7 @@ import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import type { TelemetryEvent } from "../../src/telemetry/events.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { skeletonRegistry } from "../helpers/skeleton-registry.ts";
 
 const profile = parseProfile({
   slug: "demo",
@@ -309,10 +312,11 @@ test("a merge gate with no PR request at all pauses as needs_you with a reason",
   db.close();
 });
 
-// After a failed PR request, the work can change (a resume with --accept-head, a loopback): when
-// merge:pr-ensure runs again at the new head, its request must replace the failed one. The key is
-// fixed per branch, so a plain INSERT OR IGNORE left the stale failed row in place for good.
-test("a PR request enqueued again after it failed replaces the failed one at the new head", async () => {
+// After a failed PR request the work can change: `--accept-head` on a moved HEAD sends the ticket
+// back through implement via codeLoopback. The new head must be pushed and the PR request re-issued
+// at it. The journal replays succeeded steps, so without a reset of the merge steps neither ran
+// again; and the PR request's key is fixed per branch, so a re-issue must replace the failed row.
+test("after a code loopback out of merge, the new head is pushed and the failed PR request is re-issued", async () => {
   const { db, ticketId } = makeTestDb();
   seedAtMerge(db, ticketId);
   const first = await driveToTerminal(db, reg(), {
@@ -322,27 +326,47 @@ test("a PR request enqueued again after it failed replaces the failed one at the
     profile,
   });
   expect(first.outcome).toBe("paused");
-  // The work moved on: a new commit, and the merge steps run again.
+  // What `styre run --resume --accept-head` does on a moved HEAD: consume the escalation, then the
+  // real code loopback back to implement.
   db.query("UPDATE signal SET status = 'consumed' WHERE signal_type = 'human_resume'").run();
-  db.query(
-    "UPDATE signal SET status = 'consumed' WHERE signal_type = 'human_merge_approval'",
-  ).run();
   db.query("UPDATE ticket SET status = 'active' WHERE id = ?").run(ticketId);
-  db.query("DELETE FROM workflow_step WHERE step_key LIKE 'merge:%'").run();
-  const d = insertDispatch(db, { ticketId, dispatchId: "d2", seq: nextSeq(db, ticketId) });
-  completeDispatch(db, d.id, { outcome: "clean-success", branchHeadSha: "sha2" });
+  codeLoopback(db, ticketId, [], "accept-head", null);
+  // Skeleton handlers re-implement and re-verify (new head "sha-skeleton"); the real merge
+  // handlers push and re-issue the PR request.
+  const skeleton = skeletonRegistry();
+  const real = reg();
+  const composite = new Proxy(skeleton, {
+    get(target, prop, receiver) {
+      if (prop === "resolve" || prop === "has")
+        return (k: string) => (k.startsWith("merge:") ? real[prop](k) : target[prop](k));
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as StepRegistry;
   const forge = fakeForge();
-  const second = await driveToTerminal(db, reg(), {
+  const second = await driveToTerminal(db, composite, {
     ticketId,
     config: DEFAULT_RUNTIME_CONFIG,
     ports: { ...ports(), forge },
     profile,
   });
   expect(second.outcome).toBe("pr-ready");
-  const row = db
-    .query("SELECT status, payload_json FROM projection_outbox WHERE op = 'pr_create'")
-    .get() as { status: string; payload_json: string };
-  expect(row.status).toBe("sent");
-  expect(JSON.parse(row.payload_json).sourceSha).toBe("sha2");
+  const pushes = forge.calls
+    .filter((c) => c.method === "push")
+    .map((c) => (c.args[0] as { sha: string }).sha);
+  expect(pushes).toEqual(["sha-skeleton"]);
+  const pr = db
+    .query("SELECT status, attempts, payload_json FROM projection_outbox WHERE op = 'pr_create'")
+    .all() as { status: string; attempts: number; payload_json: string }[];
+  expect(pr).toHaveLength(1);
+  expect(pr[0]?.status).toBe("sent");
+  expect(JSON.parse(pr[0]?.payload_json ?? "{}").sourceSha).toBe("sha-skeleton");
+  // The replaced request drained after the new push (fresh row), not before it.
+  const order = db
+    .query(
+      "SELECT op FROM projection_outbox WHERE target = 'forge' AND status = 'sent' ORDER BY sent_at, id",
+    )
+    .all() as { op: string }[];
+  expect(order.map((r) => r.op).slice(-2)).toEqual(["push", "pr_create"]);
   db.close();
 });

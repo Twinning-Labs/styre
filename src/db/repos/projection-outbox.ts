@@ -47,10 +47,12 @@ export function enqueue(
   });
 }
 
-/** `enqueue`, except that a FAILED row under the same key is replaced by this payload with a fresh
- *  retry budget. For effects re-issued when the work changes under a key that does not change with
- *  it (a PR request is keyed per branch): the step's new payload must supersede the one that
- *  failed, or the effect can never be retried. A pending or sent row is left untouched. */
+/** `enqueue`, except that a FAILED row under the same key is replaced by this payload: removed and
+ *  enqueued afresh (new id and created_at, fresh retry budget), so it drains after effects enqueued
+ *  before it — the push of the new head. For effects re-issued when the work changes under a key
+ *  that does not change with it (a PR request is keyed per branch): otherwise the new payload is
+ *  ignored behind the failed row and the effect can never be retried. The failure itself stays in
+ *  the event log (its escalation). A pending or sent row is left untouched. */
 export function enqueueReplacingFailed(
   db: Database,
   p: {
@@ -62,11 +64,8 @@ export function enqueueReplacingFailed(
   },
 ): void {
   db.query(
-    "UPDATE projection_outbox SET status = 'pending', attempts = 0, payload_json = $payload WHERE idempotency_key = $key AND status = 'failed'",
-  ).run({
-    $payload: p.payload === undefined ? null : JSON.stringify(p.payload),
-    $key: p.idempotencyKey,
-  });
+    "DELETE FROM projection_outbox WHERE ticket_id = $t AND idempotency_key = $key AND status = 'failed'",
+  ).run({ $t: p.ticketId, $key: p.idempotencyKey });
   enqueue(db, p);
 }
 

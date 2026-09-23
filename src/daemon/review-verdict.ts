@@ -90,6 +90,21 @@ function escalate(
   })();
 }
 
+/** A loopback sends the ticket back through implement/review, so the branch head will change: the
+ *  merge steps must run again to push that head and re-issue the PR request. The journal replays
+ *  a succeeded step's recorded result, so without this reset an `--accept-head` resume out of
+ *  merge never pushed the new commit and never re-issued a failed PR request. Before merge ran
+ *  these rows do not exist, so a review-stage loopback is unaffected. */
+export function resetMergeSteps(db: Database, ticketId: number): void {
+  for (const key of ["merge:push", "merge:pr-ensure"]) {
+    const step = getByKey(db, ticketId, key);
+    if (step) {
+      resetToPending(db, step.id);
+      resetAttempt(db, step.id);
+    }
+  }
+}
+
 export function codeLoopback(
   db: Database,
   ticketId: number,
@@ -125,6 +140,7 @@ export function codeLoopback(
       resetToPending(db, reviewStep.id);
     }
     resetTicketVerifySteps(db, ticketId);
+    resetMergeSteps(db, ticketId);
     setTicketStage(db, ticketId, "implement");
     appendEvent(db, {
       ticketId,
@@ -183,6 +199,7 @@ export function redesignLoopback(
       }
     }
     resetTicketVerifySteps(db, ticketId);
+    resetMergeSteps(db, ticketId);
     setTicketStage(db, ticketId, "design");
     appendEvent(db, {
       ticketId,

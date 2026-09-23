@@ -193,8 +193,8 @@ The `event_log.loop` value is one of `implement`, `design`, `integration`, `chec
 |---|---|---|
 | verify/completeness fail, unit-scope | the unit → `pending` **and all its steps** → `pending` (previously-passed checks re-run at the new commit) | `implement` |
 | integration throw | insert a `kind='reconcile'` unit depending on all others; reset the integration step, `verify:checks-gate` (attempt zeroed), `checks:arbitrate`, `checks:reauthor` | `integration` |
-| code-review blocking finding (non-plan-defect) | blamed unit(s) (or all, if a finding has no unit) + their steps; the `review` step; the ticket verify/gate steps (gate attempt zeroed); `stage='implement'` | `implement` |
-| plan-review blocking, or code-review `plan-defect` with `onPlanDefect='redesign'` | **delete all work_units**; reset+zero `design:dispatch`/`design:extract`/`design:review`/`review`; reset ticket verify steps; `stage='design'` | `design` |
+| code-review blocking finding (non-plan-defect) | blamed unit(s) (or all, if a finding has no unit) + their steps; the `review` step; the ticket verify/gate steps (gate attempt zeroed); `merge:push` + `merge:pr-ensure` (attempt zeroed — they exist only when the loopback leaves merge, e.g. an `--accept-head` resume, and must push the new head and re-issue the PR request); `stage='implement'` | `implement` |
+| plan-review blocking, or code-review `plan-defect` with `onPlanDefect='redesign'` | **delete all work_units**; reset+zero `design:dispatch`/`design:extract`/`design:review`/`review`; reset ticket verify steps; reset+zero `merge:push`/`merge:pr-ensure`; `stage='design'` | `design` |
 | `checks:classify` leaves unresolved checks | supersede flagged `ac_check`s; reset `checks:dispatch` + `checks:classify`; **no stage flip** | `checks` |
 | AC gate integrity-only still-red | all units → `pending` + their steps; the gate/arbiter/reauthor steps → `pending` (gate **attempt preserved** — it is the round counter) | `implement` |
 | arbiter `check-wrong` | reset `checks:reauthor` + `checks:arbitrate` | `reauthor` |

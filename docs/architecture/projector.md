@@ -146,6 +146,8 @@ cache optimization is deferred.
 - **Resume retries.** `styre run --resume` returns the ticket's failed forge rows for the current
   branch head to `pending` with a fresh budget, pointing a PR request at the profile's current
   `defaultBranch`. Rows for a commit the branch has moved past stay failed (re-sending them would
-  publish stale code). A PR request is keyed per branch, so when `merge:pr-ensure` runs again at a
-  new head its payload replaces a failed request instead of being ignored.
+  publish stale code). A loopback out of merge (e.g. `--resume --accept-head` on a moved HEAD) resets
+  `merge:push` and `merge:pr-ensure`, so the new head is pushed and the PR request re-issued; a PR
+  request is keyed per branch, so the re-issued one replaces a failed request (a fresh row, draining
+  after the new push) instead of being ignored.
 - A projection failure **never** blocks control flow — the runner's loop runs on the SoT regardless.
