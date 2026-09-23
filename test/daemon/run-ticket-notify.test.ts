@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { RuntimeConfigSchema } from "../../src/config/runtime-config.ts";
 import { driveToTerminal } from "../../src/daemon/run-ticket.ts";
-import { insertPending } from "../../src/db/repos/signal.ts";
+import { insertPending, recordDelivered } from "../../src/db/repos/signal.ts";
 import { setTicketStage, setTicketStatus } from "../../src/db/repos/ticket.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import { fakeNotifier } from "../../src/integrations/adapters/fake-notifier.ts";
@@ -48,6 +48,13 @@ test("a drive that reaches pr-ready delivers the terminal 'PR ready to merge' no
   // check (src/daemon/run-ticket.ts) then fires on the very first iteration, returning "pr-ready".
   setTicketStage(db, ticketId, "merge");
   insertPending(db, { ticketId, signalType: "human_merge_approval" });
+  // pr-ready requires a delivered PR (the forge's result, with its URL).
+  recordDelivered(db, {
+    ticketId,
+    signalType: "external_pr_result",
+    payload: { ref: "1", url: "https://fake/pr/1" },
+    idempotencyKey: "ENG-1:pr_result",
+  });
   const notifier = fakeNotifier();
   const config = RuntimeConfigSchema.parse({
     notifier: "slack",

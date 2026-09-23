@@ -115,7 +115,8 @@ switch descriptor.kind:
   'advance'       → write the stage transition (+ enqueue its projection in the same tx), recurse
   'mark-verified' → mark the work-unit verified, recurse
   'wait'          → await a signal (status='waiting'); the loop resumes on delivery (§7) — the only
-                    current instance (merge approval) resolves to `pr-ready`, not a `paused` outcome
+                    current instance (merge approval) resolves to `pr-ready` once the PR is delivered
+                    (an undelivered PR request pauses `needs_you` instead — projector.md §7)
   'escalate'      → status='waiting' + raise human_resume + an 'escalated' event
   'blocked'       → the run pauses (`paused`, reason `needs_you`) — no actionable unit and not all
                     verified; routes through `pauseTicket` (see execution-model.md)

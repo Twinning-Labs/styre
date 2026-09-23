@@ -47,6 +47,28 @@ export function enqueue(
   });
 }
 
+/** `enqueue`, except that a FAILED row under the same key is replaced by this payload: removed and
+ *  enqueued afresh (new id and created_at, fresh retry budget), so it drains after effects enqueued
+ *  before it — the push of the new head. For effects re-issued when the work changes under a key
+ *  that does not change with it (a PR request is keyed per branch): otherwise the new payload is
+ *  ignored behind the failed row and the effect can never be retried. The failure itself stays in
+ *  the event log (its escalation). A pending or sent row is left untouched. */
+export function enqueueReplacingFailed(
+  db: Database,
+  p: {
+    ticketId: number;
+    target: OutboxTarget;
+    op: string;
+    payload?: unknown;
+    idempotencyKey: string;
+  },
+): void {
+  db.query(
+    "DELETE FROM projection_outbox WHERE ticket_id = $t AND idempotency_key = $key AND status = 'failed'",
+  ).run({ $t: p.ticketId, $key: p.idempotencyKey });
+  enqueue(db, p);
+}
+
 export function listPending(db: Database): OutboxRow[] {
   return db
     .query<OutboxRow, []>(
@@ -72,4 +94,40 @@ export function markFailed(db: Database, id: number, error: string): void {
     $err: error,
     $id: id,
   });
+}
+
+/** Resume retries: return this ticket's failed forge rows for the CURRENT branch head to pending
+ *  with a fresh retry budget, pointing a PR request at `prBase`. The payload is otherwise frozen at
+ *  enqueue and a new enqueue of the same idempotency key is ignored, so without this a failed PR
+ *  request (e.g. rejected as `base invalid`) could never be retried. A push or PR request for a
+ *  commit the branch has moved past stays failed: re-sending it would publish stale code, and the
+ *  required-suite guard would block it on every drain. The last error stays on the row. */
+export function requeueFailedForge(
+  db: Database,
+  ticketId: number,
+  prBase: string,
+  headSha: string | null,
+): number {
+  const rows = db
+    .query<{ id: number; op: string; payload_json: string | null }, [number]>(
+      "SELECT id, op, payload_json FROM projection_outbox WHERE ticket_id = ? AND target = 'forge' AND status = 'failed'",
+    )
+    .all(ticketId);
+  let requeued = 0;
+  for (const row of rows) {
+    const payload = row.payload_json === null ? {} : JSON.parse(row.payload_json);
+    const commit =
+      row.op === "push" ? payload.sha : row.op === "pr_create" ? payload.sourceSha : undefined;
+    if ((row.op === "push" || row.op === "pr_create") && (headSha === null || commit !== headSha))
+      continue;
+    db.query(
+      "UPDATE projection_outbox SET status = 'pending', attempts = 0, payload_json = $payload WHERE id = $id",
+    ).run({
+      $payload:
+        row.op === "pr_create" ? JSON.stringify({ ...payload, base: prBase }) : row.payload_json,
+      $id: row.id,
+    });
+    requeued += 1;
+  }
+  return requeued;
 }

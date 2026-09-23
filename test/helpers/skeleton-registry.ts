@@ -8,6 +8,7 @@ import {
   nextSeq,
 } from "../../src/db/repos/dispatch.ts";
 import { insertSignal, suiteDetail } from "../../src/db/repos/ground-truth-signal.ts";
+import { recordDelivered } from "../../src/db/repos/signal.ts";
 import { setTicketTrack } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit, setStatus as setUnitStatus } from "../../src/db/repos/work-unit.ts";
 
@@ -85,7 +86,17 @@ export function skeletonRegistry(): StepRegistry {
   });
   r.register("review", () => ({ findings: 0 }));
   r.register("merge:push", () => ({ sha: "abc123" }));
-  r.register("merge:pr-ensure", () => ({ pr: 1 }));
+  // The state a real pr-ensure + outbox delivery leaves: the forge's PR result, with its URL.
+  // pr-ready requires it, so a stub that only returned `{ pr: 1 }` claimed a PR that never existed.
+  r.register("merge:pr-ensure", (ctx: HandlerContext) => {
+    recordDelivered(ctx.db, {
+      ticketId: ctx.ticket.id,
+      signalType: "external_pr_result",
+      payload: { ref: "1", url: "https://fake/pr/1" },
+      idempotencyKey: `${ctx.ticket.ident}:pr_result`,
+    });
+    return { pr: 1 };
+  });
   r.register("released:project", () => ({ released: true }));
   return r;
 }

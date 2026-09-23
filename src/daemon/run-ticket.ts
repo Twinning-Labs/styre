@@ -15,7 +15,7 @@ import { createTelemetryEmitter } from "../telemetry/emitter.ts";
 import { tick } from "./loop.ts";
 import { createNotifier } from "./notify.ts";
 import { pauseTicket } from "./pause-ticket.ts";
-import { type ProjectorPorts, drainOutbox } from "./projector.ts";
+import { OUTBOX_RETRY_BUDGET, type ProjectorPorts, drainOutbox } from "./projector.ts";
 import type { StepRegistry } from "./step-registry.ts";
 
 export type RunOutcome = "pr-ready" | "done" | "paused" | "abandoned";
@@ -62,6 +62,33 @@ async function readCiState(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** The latest forge row of `op` for this ticket (FIFO ids: the most recent enqueue). */
+function forgeRow(db: Database, ticketId: number, op: "push" | "pr_create") {
+  return db
+    .query<{ status: string; error: string | null; payload_json: string | null }, [number, string]>(
+      "SELECT status, error, payload_json FROM projection_outbox WHERE ticket_id = ? AND target = 'forge' AND op = ? ORDER BY id DESC LIMIT 1",
+    )
+    .get(ticketId, op);
+}
+
+/** Why the merge gate cannot claim pr-ready, or null when it can: the forge returned the PR's URL
+ *  and the latest push was delivered at the current head. (A ticket without a push row — only
+ *  test doubles that skip the push — is judged on the PR alone.) */
+function undeliveredReason(db: Database, ticketId: number): string | null {
+  const url = getDeliveredPayload(db, ticketId, "external_pr_result")?.url;
+  if (typeof url !== "string" || url.length === 0) {
+    const error = forgeRow(db, ticketId, "pr_create")?.error;
+    return `the pull request was not delivered${error ? `: ${error}` : ""}`;
+  }
+  const push = forgeRow(db, ticketId, "push");
+  if (!push) return null;
+  const head = getLatestForTicket(db, ticketId)?.branch_head_sha ?? null;
+  const pushed = push.payload_json === null ? undefined : JSON.parse(push.payload_json).sha;
+  if (push.status !== "sent" || pushed !== head)
+    return `the branch push of the current head was not delivered${push.error ? `: ${push.error}` : ""}`;
+  return null;
 }
 
 /** Drive ONE ticket through repeated ticks until a terminal state. `run` exits at PR-ready (the
@@ -113,6 +140,26 @@ export async function driveToTerminal(
     if (hasPendingHumanResume(db, opts.ticketId))
       return await finish({ outcome: "paused", reason: "needs_you", ...last });
     if (t.stage === "merge" && pending.some((s) => s.signal_type === "human_merge_approval")) {
+      // pr-ready means a PR exists and shows the verified head. The push and the PR request may
+      // still be retrying in the outbox (the per-tick drain would otherwise hit the idle-stall cap
+      // first): drain both to an answer here, bounded by the retry budget. A PR request can
+      // succeed against a branch the remote already has while the current head's push fails, so
+      // the push must be delivered too. Undelivered → the drainer has escalated (human_resume)
+      // when a row failed; any other undelivered state is paused explicitly.
+      for (
+        let k = 0;
+        k < OUTBOX_RETRY_BUDGET &&
+        (forgeRow(db, opts.ticketId, "pr_create")?.status === "pending" ||
+          forgeRow(db, opts.ticketId, "push")?.status === "pending");
+        k++
+      )
+        await drainOutbox(db, opts.ports);
+      const undelivered = undeliveredReason(db, opts.ticketId);
+      if (undelivered) {
+        if (!hasPendingHumanResume(db, opts.ticketId)) pauseTicket(db, opts.ticketId, undelivered);
+        const status = getTicket(db, opts.ticketId)?.status ?? last.status;
+        return await finish({ outcome: "paused", reason: "needs_you", ...last, status });
+      }
       const pr = getDeliveredPayload(db, opts.ticketId, "external_pr_result");
       const sha = getLatestForTicket(db, opts.ticketId)?.branch_head_sha ?? null;
       const read = await readCiState(opts.ports, opts.profile.checksSystem, sha, ciReadTimeoutMs);

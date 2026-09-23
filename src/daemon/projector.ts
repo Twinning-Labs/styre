@@ -255,7 +255,10 @@ export async function drainOutbox(
       sent += 1;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (row.attempts + 1 >= budget) {
+      // A forge validation failure (HTTP 422, e.g. `PullRequest base invalid`) is not transient:
+      // retrying the same payload cannot succeed, so fail and escalate on the first attempt.
+      const permanent = row.target === "forge" && (err as { status?: number }).status === 422;
+      if (permanent || row.attempts + 1 >= budget) {
         markFailed(db, row.id, message);
         if (row.target !== "notify") {
           escalateProjection(db, row.ticket_id, `projection failing: ${message}`);

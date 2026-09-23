@@ -87,7 +87,8 @@ drainOutbox(budget = OUTBOX_RETRY_BUDGET):        # OUTBOX_RETRY_BUDGET = 5
         # a structured telemetry note is committed WITH markSent so a crash-replay can't double-count
       COMMIT
       if row delivers a result: deliverSignal(row, ref)   # pr_create → external_pr_result (§7)
-    catch transient:
+    catch err:
+      if forge row and err.status == 422: fail + escalate now   # validation failure: permanent (§7)
       attempts += 1                                   # retried on the NEXT drain (no backoff)
       if attempts >= budget: escalate(row.ticket_id)  # §7 — external service down
 ```
@@ -140,4 +141,18 @@ cache optimization is deferred.
   projection (the row is durable; it drains when the service returns). A `notify`-target failure is
   the exception: it is retried but never pauses the ticket (a failed notification must not block a
   run).
+- **Permanent** (a forge validation failure, HTTP 422 — e.g. GitHub's `PullRequest base invalid`) →
+  the row fails and the run pauses on the first attempt: resending the same payload cannot succeed.
+- **`pr-ready` requires a delivered PR at the verified head.** At the merge gate `styre run` drains
+  a still-pending push and PR request to an answer (bounded by the budget) and returns `pr-ready`
+  only once `external_pr_result` carries a URL **and** the latest push was delivered at the current
+  branch head (a PR request can succeed against a branch the remote already has while the current
+  head's push fails); otherwise the run pauses (`needs_you`) with the recorded error.
+- **Resume retries.** `styre run --resume` returns the ticket's failed forge rows for the current
+  branch head to `pending` with a fresh budget, pointing a PR request at the profile's current
+  `defaultBranch`. Rows for a commit the branch has moved past stay failed (re-sending them would
+  publish stale code). A loopback out of merge (e.g. `--resume --accept-head` on a moved HEAD) resets
+  `merge:push` and `merge:pr-ensure`, so the new head is pushed and the PR request re-issued; a PR
+  request is keyed per branch, so the re-issued one replaces a failed request (a fresh row, draining
+  after the new push) instead of being ignored.
 - A projection failure **never** blocks control flow — the runner's loop runs on the SoT regardless.

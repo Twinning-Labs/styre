@@ -38,7 +38,7 @@ import {
   suiteDetail,
 } from "../db/repos/ground-truth-signal.ts";
 import { getProject } from "../db/repos/project.ts";
-import { enqueue } from "../db/repos/projection-outbox.ts";
+import { enqueue, enqueueReplacingFailed } from "../db/repos/projection-outbox.ts";
 import { insertFinding } from "../db/repos/review-finding.ts";
 import {
   assertExactFindingIds,
@@ -2291,7 +2291,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     const base = deps.profile.defaultBranch;
     const title = `${ctx.ticket.ident}${ctx.ticket.title ? ` ${ctx.ticket.title}` : ""}`;
     const body = renderPrBody(ctx.db, ctx.ticket);
-    enqueue(ctx.db, {
+    enqueueReplacingFailed(ctx.db, {
       ticketId: ctx.ticket.id,
       target: "forge",
       op: "pr_create",
