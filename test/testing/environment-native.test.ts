@@ -2,8 +2,17 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  provesBehavioralFailure,
+  resolveCheckExecution,
+} from "../../src/dispatch/check-execution.ts";
+import { runCheckExecution } from "../../src/dispatch/checks-run.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
-import { planTestEnvironment, qualifyTestEnvironment } from "../../src/testing/environment.ts";
+import {
+  planTestEnvironment,
+  qualifyTestEnvironment,
+  requireTestEnvironment,
+} from "../../src/testing/environment.ts";
 
 const deps = process.env.STYRE_ENV_NATIVE_NODE_DEPS;
 for (const fw of ["jest", "vitest", "mocha"] as const)
@@ -107,3 +116,88 @@ test.skipIf(!process.env.STYRE_ENV_NATIVE_PYTHON)(
   },
   30000,
 );
+
+for (const launcher of [
+  "python3 -m pytest -rA --durations 25",
+  "python3 -m pytest --durations=10 -q",
+])
+  test.skipIf(!process.env.STYRE_ENV_NATIVE_PYTHON)(
+    `native Python: reporting-only options keep verdicts readable: ${launcher}`,
+    async () => {
+      // -rA prints passing tests' captured output (a pytester-style inner failure here) where
+      // `E assert` lines are counted as evidence; a -q launcher stacked on the collection probe's
+      // own -q hides `N tests collected`. Neither may reach single-check or collection output.
+      const root = mkdtempSync(join(tmpdir(), "styre-native-py-report-"));
+      try {
+        writeFileSync(join(root, "pytest.ini"), "[pytest]\n");
+        writeFileSync(
+          join(root, "test_example.py"),
+          [
+            "def test_pass():",
+            "    assert 1 == 1",
+            "",
+            "def test_fail():",
+            "    assert 1 == 2",
+            "",
+            "def test_crash():",
+            "    raise AttributeError('not an assertion')",
+            "",
+          ].join("\n"),
+        );
+        // Replayed file-scoped (delivered-test binding): a passing pytester-style test prints an
+        // inner session's failure, and the only real failure is not an assertion.
+        writeFileSync(
+          join(root, "test_binding.py"),
+          [
+            "def test_prints_inner_failure():",
+            "    print('E       assert 1 == 2')",
+            "    print('=== 1 failed in 0.01s ===')",
+            "",
+            "def test_crash():",
+            "    raise AttributeError('not an assertion')",
+            "",
+          ].join("\n"),
+        );
+        const c = parseProfile({
+          slug: "native",
+          targetRepo: root,
+          components: [
+            { name: "app", kind: "python", paths: ["**"], commands: { test: launcher } },
+          ],
+        }).components[0];
+        const plan = planTestEnvironment(root, c, "existing");
+        if (plan?.adapter !== "python") throw Error("expected a supported pytest plan");
+        c.testEnvironment = plan;
+        c.testAction = { framework: "pytest", launcher: plan.checkLauncher };
+        const qualified = await qualifyTestEnvironment(root, c, { collect: true });
+        expect({ status: qualified.status, reason: qualified.reason }).toMatchObject({
+          status: "ready",
+        });
+        expect(qualified.collection?.count).toBe(5);
+        await requireTestEnvironment(root, c);
+        const run = async (testName?: string, testFile = "test_example.py") => {
+          const check = resolveCheckExecution({ components: [c], testFile, testName });
+          const result = await runCheckExecution({
+            plan: check,
+            components: [c],
+            worktreePath: root,
+            timeoutMs: 30000,
+          });
+          return { check, result };
+        };
+        expect((await run("test_pass")).result.coarse).toBe("green");
+        const fail = await run("test_fail");
+        expect(fail.result.coarse).toBe("red");
+        expect(provesBehavioralFailure(fail.check, fail.result)).toBe(true);
+        const crash = await run("test_crash");
+        expect(crash.result.coarse).toBe("red");
+        expect(provesBehavioralFailure(crash.check, crash.result)).toBe(false);
+        const binding = await run(undefined, "test_binding.py");
+        expect(binding.result.coarse).toBe("red");
+        expect(provesBehavioralFailure(binding.check, binding.result)).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    30000,
+  );
