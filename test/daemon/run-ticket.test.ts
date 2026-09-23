@@ -308,3 +308,41 @@ test("a merge gate with no PR request at all pauses as needs_you with a reason",
   expect(escalated.map((e) => e.reason)).toEqual(["the pull request was not delivered"]);
   db.close();
 });
+
+// After a failed PR request, the work can change (a resume with --accept-head, a loopback): when
+// merge:pr-ensure runs again at the new head, its request must replace the failed one. The key is
+// fixed per branch, so a plain INSERT OR IGNORE left the stale failed row in place for good.
+test("a PR request enqueued again after it failed replaces the failed one at the new head", async () => {
+  const { db, ticketId } = makeTestDb();
+  seedAtMerge(db, ticketId);
+  const first = await driveToTerminal(db, reg(), {
+    ticketId,
+    config: DEFAULT_RUNTIME_CONFIG,
+    ports: { ...ports(), forge: flakyForge(Number.POSITIVE_INFINITY, rejected).forge },
+    profile,
+  });
+  expect(first.outcome).toBe("paused");
+  // The work moved on: a new commit, and the merge steps run again.
+  db.query("UPDATE signal SET status = 'consumed' WHERE signal_type = 'human_resume'").run();
+  db.query(
+    "UPDATE signal SET status = 'consumed' WHERE signal_type = 'human_merge_approval'",
+  ).run();
+  db.query("UPDATE ticket SET status = 'active' WHERE id = ?").run(ticketId);
+  db.query("DELETE FROM workflow_step WHERE step_key LIKE 'merge:%'").run();
+  const d = insertDispatch(db, { ticketId, dispatchId: "d2", seq: nextSeq(db, ticketId) });
+  completeDispatch(db, d.id, { outcome: "clean-success", branchHeadSha: "sha2" });
+  const forge = fakeForge();
+  const second = await driveToTerminal(db, reg(), {
+    ticketId,
+    config: DEFAULT_RUNTIME_CONFIG,
+    ports: { ...ports(), forge },
+    profile,
+  });
+  expect(second.outcome).toBe("pr-ready");
+  const row = db
+    .query("SELECT status, payload_json FROM projection_outbox WHERE op = 'pr_create'")
+    .get() as { status: string; payload_json: string };
+  expect(row.status).toBe("sent");
+  expect(JSON.parse(row.payload_json).sourceSha).toBe("sha2");
+  db.close();
+});

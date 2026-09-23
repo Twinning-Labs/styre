@@ -143,7 +143,9 @@ cache optimization is deferred.
 - **`pr-ready` requires a delivered PR.** At the merge gate `styre run` drains a still-pending PR
   request to an answer (bounded by the budget) and returns `pr-ready` only once `external_pr_result`
   carries a URL; otherwise the run pauses (`needs_you`) with the recorded error.
-- **Resume retries.** `styre run --resume` returns the ticket's failed forge rows to `pending` with a
-  fresh budget, pointing a PR request at the profile's current `defaultBranch` (a payload is
-  otherwise frozen at enqueue, and a re-enqueue of the same idempotency key is ignored).
+- **Resume retries.** `styre run --resume` returns the ticket's failed forge rows for the current
+  branch head to `pending` with a fresh budget, pointing a PR request at the profile's current
+  `defaultBranch`. Rows for a commit the branch has moved past stay failed (re-sending them would
+  publish stale code). A PR request is keyed per branch, so when `merge:pr-ensure` runs again at a
+  new head its payload replaces a failed request instead of being ignored.
 - A projection failure **never** blocks control flow — the runner's loop runs on the SoT regardless.

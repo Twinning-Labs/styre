@@ -42,6 +42,12 @@ test("resume re-queues failed forge rows for the current head only, with the pro
       JSON.stringify({ branch: "feat/x", sha: "0".repeat(40) }),
       "k:push:old",
     );
+    failed.run(
+      parked.ticketId,
+      "push",
+      JSON.stringify({ branch: "feat/x", sha: head }),
+      "k:push:head",
+    );
     seed.close();
     await expect(
       resumeRun(
@@ -66,14 +72,18 @@ test("resume re-queues failed forge rows for the current head only, with the pro
     const row = db
       .query("SELECT status, attempts, payload_json FROM projection_outbox WHERE op = 'pr_create'")
       .get() as { status: string; attempts: number; payload_json: string };
-    const stale = db.query("SELECT status FROM projection_outbox WHERE op = 'push'").get() as {
-      status: string;
-    };
+    const pushes = Object.fromEntries(
+      (
+        db
+          .query("SELECT idempotency_key, status FROM projection_outbox WHERE op = 'push'")
+          .all() as { idempotency_key: string; status: string }[]
+      ).map((r) => [r.idempotency_key, r.status]),
+    );
     db.close();
     expect(row.status).toBe("pending");
     expect(row.attempts).toBe(0);
     expect(JSON.parse(row.payload_json).base).toBe("main");
-    expect(stale.status).toBe("failed");
+    expect(pushes).toEqual({ "k:push:old": "failed", "k:push:head": "pending" });
   } finally {
     if (prevState === undefined) Reflect.deleteProperty(process.env, "XDG_STATE_HOME");
     else process.env.XDG_STATE_HOME = prevState;
