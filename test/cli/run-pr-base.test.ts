@@ -78,3 +78,57 @@ test("a resumed run confirms the base on the forge before building its step regi
     cleanupParkedRun(parked);
   }
 });
+
+test("a forge failure on resume leaves the checkpoint as it was paused", async () => {
+  const parked = await runParkedTicket();
+  const prevState = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = join(parked.dumpDir, "..", "..", "..");
+  const dbPath = join(parked.dumpDir, "run.db");
+  const snapshot = () => {
+    const db = new Database(dbPath);
+    try {
+      return {
+        status: (db.query("SELECT status FROM ticket").get() as { status: string }).status,
+        resumedEvents: (
+          db.query("SELECT count(*) AS n FROM event_log WHERE kind = 'resumed'").get() as {
+            n: number;
+          }
+        ).n,
+        repo: (db.query("SELECT target_repo FROM project").get() as { target_repo: string })
+          .target_repo,
+      };
+    } finally {
+      db.close();
+    }
+  };
+  try {
+    const before = snapshot();
+    const forge = fakeForge();
+    forge.branchExists = async () => {
+      throw new Error("ECONNRESET simulated");
+    };
+    await expect(
+      resumeRun(
+        { resume: parked.ident },
+        parseProfile({ slug: parked.slug, targetRepo: before.repo, checksSystem: "none" }),
+        DEFAULT_RUNTIME_CONFIG,
+        {
+          ports: { issueTracker: fakeIssueTracker(), forge },
+          preflight: () => ({ ok: true, version: null }),
+          buildRegistry: () => {
+            throw new Error("must not be reached");
+          },
+        },
+      ),
+    ).rejects.toThrow("ECONNRESET simulated");
+    const after = snapshot();
+    expect({ status: after.status, resumedEvents: after.resumedEvents }).toEqual({
+      status: before.status,
+      resumedEvents: before.resumedEvents,
+    });
+  } finally {
+    if (prevState === undefined) Reflect.deleteProperty(process.env, "XDG_STATE_HOME");
+    else process.env.XDG_STATE_HOME = prevState;
+    cleanupParkedRun(parked);
+  }
+});
