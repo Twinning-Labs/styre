@@ -74,24 +74,38 @@ export function markFailed(db: Database, id: number, error: string): void {
   });
 }
 
-/** Resume retries: return this ticket's failed forge rows to pending with a fresh retry budget,
- *  pointing a PR request at `prBase`. The payload is otherwise frozen at enqueue and a new enqueue
- *  of the same idempotency key is ignored, so without this a failed PR request (e.g. rejected as
- *  `base invalid`) could never be retried. The last error stays on the row for diagnosis. */
-export function requeueFailedForge(db: Database, ticketId: number, prBase: string): number {
+/** Resume retries: return this ticket's failed forge rows for the CURRENT branch head to pending
+ *  with a fresh retry budget, pointing a PR request at `prBase`. The payload is otherwise frozen at
+ *  enqueue and a new enqueue of the same idempotency key is ignored, so without this a failed PR
+ *  request (e.g. rejected as `base invalid`) could never be retried. A push or PR request for a
+ *  commit the branch has moved past stays failed: re-sending it would publish stale code, and the
+ *  required-suite guard would block it on every drain. The last error stays on the row. */
+export function requeueFailedForge(
+  db: Database,
+  ticketId: number,
+  prBase: string,
+  headSha: string | null,
+): number {
   const rows = db
     .query<{ id: number; op: string; payload_json: string | null }, [number]>(
       "SELECT id, op, payload_json FROM projection_outbox WHERE ticket_id = ? AND target = 'forge' AND status = 'failed'",
     )
     .all(ticketId);
+  let requeued = 0;
   for (const row of rows) {
-    const payload =
-      row.op === "pr_create" && row.payload_json !== null
-        ? JSON.stringify({ ...JSON.parse(row.payload_json), base: prBase })
-        : row.payload_json;
+    const payload = row.payload_json === null ? {} : JSON.parse(row.payload_json);
+    const commit =
+      row.op === "push" ? payload.sha : row.op === "pr_create" ? payload.sourceSha : undefined;
+    if ((row.op === "push" || row.op === "pr_create") && (headSha === null || commit !== headSha))
+      continue;
     db.query(
       "UPDATE projection_outbox SET status = 'pending', attempts = 0, payload_json = $payload WHERE id = $id",
-    ).run({ $payload: payload, $id: row.id });
+    ).run({
+      $payload:
+        row.op === "pr_create" ? JSON.stringify({ ...payload, base: prBase }) : row.payload_json,
+      $id: row.id,
+    });
+    requeued += 1;
   }
-  return rows.length;
+  return requeued;
 }

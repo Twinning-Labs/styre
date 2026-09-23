@@ -91,3 +91,24 @@ test("a forge validation failure (422) fails the row and escalates on the first 
   expect(row.status).toBe("failed");
   expect(escalated.n).toBe(1);
 });
+
+test("a 422 from the issue tracker is not a forge validation failure: it still retries", async () => {
+  const { db, ticketId } = makeTestDb();
+  enqueue(db, {
+    ticketId,
+    target: "issue_tracker",
+    op: "add_comment",
+    payload: { body: "x" },
+    idempotencyKey: "c422",
+  });
+  const p = ports();
+  p.issueTracker.addComment = async () => {
+    throw Object.assign(new Error("tracker said 422"), { status: 422 });
+  };
+  await drainOutbox(db, p);
+  const row = db
+    .query("SELECT status, attempts FROM projection_outbox WHERE idempotency_key = 'c422'")
+    .get() as { status: string; attempts: number };
+  db.close();
+  expect(row).toEqual({ status: "pending", attempts: 1 });
+});

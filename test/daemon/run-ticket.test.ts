@@ -276,7 +276,7 @@ test("a rejected PR request re-queued with a corrected base reaches pr-ready", a
   // What `styre run --resume` does: consume the escalation, re-queue the failed forge rows.
   db.query("UPDATE signal SET status = 'consumed' WHERE signal_type = 'human_resume'").run();
   db.query("UPDATE ticket SET status = 'active' WHERE id = ?").run(ticketId);
-  expect(requeueFailedForge(db, ticketId, "trunk")).toBe(1);
+  expect(requeueFailedForge(db, ticketId, "trunk", "sha1")).toBe(1);
   const forge = fakeForge();
   const second = await driveToTerminal(db, reg(), {
     ticketId,
@@ -287,5 +287,24 @@ test("a rejected PR request re-queued with a corrected base reaches pr-ready", a
   expect(second.outcome).toBe("pr-ready");
   const call = forge.calls.find((c) => c.method === "ensurePr");
   expect((call?.args[0] as { base: string }).base).toBe("trunk");
+  db.close();
+});
+
+test("a merge gate with no PR request at all pauses as needs_you with a reason", async () => {
+  const { db, ticketId } = makeTestDb();
+  db.query("UPDATE ticket SET stage = 'merge' WHERE id = ?").run(ticketId);
+  insertPending(db, { ticketId, signalType: "human_merge_approval" });
+  const r = await driveToTerminal(db, {} as never, {
+    ticketId,
+    config: DEFAULT_RUNTIME_CONFIG,
+    ports: ports(),
+    profile,
+  });
+  expect(r.outcome).toBe("paused");
+  expect(r.reason).toBe("needs_you");
+  const escalated = db.query("SELECT reason FROM event_log WHERE kind = 'escalated'").all() as {
+    reason: string;
+  }[];
+  expect(escalated.map((e) => e.reason)).toEqual(["the pull request was not delivered"]);
   db.close();
 });

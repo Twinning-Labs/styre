@@ -396,7 +396,7 @@ export async function resumeRun(
 
       applyReviewResume(db, ticketId, runtimeConfig, reviewPlan);
       resumeVerificationRetries(db, ticketId);
-      requeueFailedForge(db, ticketId, profile.defaultBranch);
+      requeueFailedForge(db, ticketId, profile.defaultBranch, current);
     })();
 
     recover(db, realRecoverDeps()); // resets the interrupted 'running' step → pending
