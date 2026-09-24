@@ -27,10 +27,22 @@ When Styre drives a ticket, it dispatches agents to implement code. Those agents
 - **Tracker and forge credentials are stripped from the agent's environment.** The runner spawns the agent CLI with a scrubbed environment that removes `LINEAR_API_KEY`, `GITHUB_TOKEN`, and `JIRA_API_TOKEN` (`src/agent/agent-env.ts`, `AGENT_ENV_DENYLIST`). The agent cannot reach your tracker or code host.
 - **The provider (LLM) key is *retained* for the agent CLI — by necessity.** The agent CLI needs `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`) to authenticate its own model calls, so that key is *not* stripped from the agent spawn. It **is** stripped, along with every tracker/forge key, from **verify-time project commands** (`VERIFY_ENV_DENYLIST`) — the step that runs agent-authored code — so build/test execution never sees any Styre-held credential.
 - **The scrub is a denylist, not an allowlist.** Only the named keys above are removed. Any *other* secret in the runner's environment (`AWS_*`, `NPM_TOKEN`, CI tokens, etc.) is inherited by both the agent and verify subprocesses. If you run Styre in an environment holding secrets beyond the provider/tracker/forge keys, isolate it at the process/container boundary — the env scrub alone does not contain them.
-- **Worktree-only write surface.** The only thing an agent can write to is the isolated git worktree assigned for the run. It cannot push branches, open PRs, or modify repository settings.
+- **Each step gets exactly its tools, and file access is confined to the project folder (ENG-476).** Styre launches the Claude CLI with `--restricted --tools <exact set> --allowedTools <scoped permissions> --permission-mode dontAsk --strict-mcp-config` (`src/agent/providers/claude.ts`). In practice:
+  - a read-only step (review, plan review, classification) can only use `Read`, `Grep` and `Glob`, and only inside its working folder;
+  - a writing step can write only inside its worktree;
+  - shell access is limited to the profile's declared commands, and chained commands are refused;
+  - user, project and local Claude settings files are ignored, so a hostile `.claude/settings.json` in the target repository cannot widen a step;
+  - no MCP servers or plugins are loaded;
+  - an inherited permission mode (for example `auto`, when Styre runs inside a Claude Code session) is overridden.
+- **Confinement is verified, not assumed.** Before any run, the preflight checks that the installed `claude` lists every flag above in `--help`, and refuses otherwise. After every dispatch, Styre compares the tool set and permission mode the CLI reports in its init event with the step's allowlist; any difference, or a missing report, discards the attempt and stops the run as a prerequisite failure. `scripts/smoke-isolation.ts` checks this live against a hostile setup, alongside a control run that must leak.
+- **Codex is refused until it can be confined.** Its `read-only` sandbox still runs shell commands and read a planted file outside the project in testing. Styre refuses to run with `agent.provider: "codex"` (exit `78`) until permission profiles confine it (ENG-484).
 - **The runner commits.** Every git commit is performed by the Styre runner process — not by a dispatched agent — after validating the agent's output through a typed, schema-validated interface.
 
-The practical consequence: a compromised or misbehaving agent cannot reach your tracker or code host, push to remote, or take any action outside its worktree. It *does* hold the provider key it authenticates with, and inherits any non-Styre secret present in the runner's environment — treat both accordingly.
+The practical consequence: a compromised or misbehaving agent cannot reach your tracker or code host, push to remote, or use its file tools outside its worktree. Remaining gaps, stated plainly:
+
+- **Declared commands run unconfined.** A step allowed to run the project's test or build command runs it as an ordinary process on your machine. That process, and the agent-authored code it executes, can read and write anything your user can. Only container or operating-system isolation closes this.
+- **The environment is inherited.** The agent holds the provider key it authenticates with and inherits any non-Styre secret in the runner's environment (see above).
+- **Some configuration files cannot be edited by agents.** Restricted mode refuses agent writes to tool-configuration files such as `.claude/settings.json`, `.vscode/settings.json` and `.pre-commit-config.yaml`. A ticket that needs such a change must be finished by hand.
 
 ## Human gate
 

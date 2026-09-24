@@ -157,7 +157,8 @@ resolves the runtime config by merging:
 - `~/.config/styre/<slug>/config.json` — per-project override
 
 Per-project wins per setting; the `agent` block (provider + models) must be written complete.
-Example — use Codex everywhere by writing the full block once in the global file:
+Example — choose the provider and models by writing the full block once in the global file. (The
+`codex` provider is currently refused, because Styre cannot yet confine it; see `SECURITY.md`.)
 
     { "agent": { "provider": "codex", "command": "codex",
                  "models": { "deep": "…", "standard": "…", "cheap": "…" } } }

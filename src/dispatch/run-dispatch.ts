@@ -1,3 +1,4 @@
+import { capabilityFault } from "../agent/capabilities.ts";
 import type { AgentRunner } from "../agent/runner.ts";
 import { resolveTier } from "../agent/tiers.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
@@ -7,6 +8,7 @@ import { completeDispatch, insertDispatch, nextSeq } from "../db/repos/dispatch.
 import { appendEvent } from "../db/repos/event-log.ts";
 import { setPid } from "../db/repos/workflow-step.ts";
 import { ParkSignal } from "../engine/park-signal.ts";
+import { StepPrerequisiteError } from "../engine/step-journal.ts";
 import { nowUtc } from "../util/time.ts";
 import type { CommitScope } from "./commit-scope.ts";
 import type { Profile } from "./profile.ts";
@@ -162,10 +164,11 @@ export async function runAgentDispatch(
     worktreePath: deps.worktreePath,
   });
 
+  const allowedTools = allowlistFor(spec.handlerKey, { runnerCommands: spec.runnerCommands ?? [] });
   const result = await deps.runner.run({
     prompt,
     model,
-    allowedTools: allowlistFor(spec.handlerKey, { runnerCommands: spec.runnerCommands ?? [] }),
+    allowedTools,
     cwd: deps.worktreePath,
     timeoutMs: deps.timeoutMs,
     onSpawn: (pid) => setPid(ctx.db, ctx.step.id, pid),
@@ -190,6 +193,33 @@ export async function runAgentDispatch(
       `dispatch ${did} transport failure (exit ${result.exitCode}, timedOut=${result.timedOut})`,
     );
   }
+
+  // ENG-476: capability isolation is verified on every completed dispatch, never assumed. A fault
+  // means the provider did not confine the agent to this step's tools, so nothing it did can be
+  // trusted: undo the attempt and stop the run as a prerequisite failure (no retry — the same
+  // provider would fail the same way; an operator fixes the CLI or its setup, then resumes).
+  const fault = capabilityFault(allowedTools, result.capabilities);
+  if (fault !== null) {
+    completeDispatch(ctx.db, inserted.id, { outcome: "dispatch-failed", endedAt: nowUtc() });
+    undoAttempt(deps.worktreePath, untrackedBefore);
+    appendEvent(ctx.db, {
+      ticketId: ctx.ticket.id,
+      dispatchId: did,
+      kind: "note",
+      reason: "agent-capabilities-refused",
+      payload: { fault, tools: result.capabilities?.tools ?? null, allowed: allowedTools },
+    });
+    throw new StepPrerequisiteError(
+      `dispatch ${did}: the agent's capabilities could not be confirmed (${fault})`,
+    );
+  }
+  appendEvent(ctx.db, {
+    ticketId: ctx.ticket.id,
+    dispatchId: did,
+    kind: "note",
+    reason: "agent-capabilities",
+    payload: { tools: result.capabilities?.tools ?? null, allowed: allowedTools },
+  });
 
   // The worker's sanctioned throwaway drawer(s): delete every styre_scratch/ before judging/committing
   // so scratch is never an offender and never survives into a later broad test run (ENG-300). Runs on

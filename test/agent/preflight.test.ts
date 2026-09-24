@@ -14,6 +14,17 @@ const codexConfig: AgentConfig = {
 };
 const env = (e: Record<string, string>): NodeJS.ProcessEnv => e as NodeJS.ProcessEnv;
 
+/** `claude --help` excerpt carrying every flag the adapter pins (ENG-476). */
+const FULL_HELP = [
+  '  --output-format <format>  (choices: "text", "json", "stream-json")',
+  '  --permission-mode <mode>  (choices: "acceptEdits", "auto", "dontAsk", "plan")',
+  "  --restricted              Restricted mode: removes the built-in tools that run commands",
+  "  --strict-mcp-config       Only use MCP servers from --mcp-config",
+  "  --tools <tools...>        Specify the list of available tools from the built-in set.",
+  "  --allowedTools, --allowed-tools <tools...>",
+].join("\n");
+const fullHelp = () => ({ ok: true, output: FULL_HELP });
+
 test("parseCliVersion takes the LAST full MAJOR.MINOR.PATCH triple (skips leading date AND trailing 2-part noise)", () => {
   expect(parseCliVersion("2.1.216 (Claude Code)")).toEqual([2, 1, 216]);
   expect(parseCliVersion("codex-cli 0.144.6")).toEqual([0, 144, 6]);
@@ -40,24 +51,25 @@ test("missing binary → { ok:false, reason:'missing' }", () => {
 test("present + supported version → ok", () => {
   const r = preflightAgentCli(claudeConfig, {
     onPath: () => true,
-    runVersion: () => ({ ok: true, output: "2.1.216 (Claude Code)" }),
+    runVersion: () => ({ ok: true, output: "2.1.280 (Claude Code)" }),
+    runHelp: fullHelp,
     env: env({ ANTHROPIC_API_KEY: "x" }),
   });
-  expect(r).toEqual({ ok: true, version: "2.1.216" });
+  expect(r).toEqual({ ok: true, version: "2.1.280" });
 });
 
 test("present + below floor → unsupported-version with found/required", () => {
   const r = preflightAgentCli(claudeConfig, {
     onPath: () => true,
-    runVersion: () => ({ ok: true, output: "claude 2.0.9" }),
+    runVersion: () => ({ ok: true, output: "claude 2.1.216" }),
     env: env({ ANTHROPIC_API_KEY: "x" }),
   });
   expect(r).toEqual({
     ok: false,
     reason: "unsupported-version",
     command: "claude",
-    found: "2.0.9",
-    required: "2.1.200",
+    found: "2.1.216",
+    required: "2.1.280",
   });
 });
 
@@ -80,6 +92,7 @@ test("unparseable --version → fail-open (ok, version null)", () => {
   const r = preflightAgentCli(claudeConfig, {
     onPath: () => true,
     runVersion: () => ({ ok: true, output: "a future format with no dotted number" }),
+    runHelp: fullHelp,
     env: env({ ANTHROPIC_API_KEY: "x" }),
   });
   expect(r).toEqual({ ok: true, version: null });
@@ -88,9 +101,48 @@ test("unparseable --version → fail-open (ok, version null)", () => {
 test("present + required env key unset → ok with unauthHint", () => {
   const r = preflightAgentCli(claudeConfig, {
     onPath: () => true,
-    runVersion: () => ({ ok: true, output: "2.1.216" }),
+    runVersion: () => ({ ok: true, output: "2.1.280" }),
+    runHelp: fullHelp,
     env: env({}),
   });
   expect(r.ok).toBe(true);
   if (r.ok) expect(r.unauthHint).toMatch(/ANTHROPIC_API_KEY/);
+});
+
+test("claude whose --help lacks a pinned flag → missing-capability naming every missing flag (ENG-476)", () => {
+  const r = preflightAgentCli(claudeConfig, {
+    onPath: () => true,
+    runVersion: () => ({ ok: true, output: "2.1.280" }),
+    runHelp: () => ({
+      ok: true,
+      output: FULL_HELP.replace("--restricted", "--unrelated").replace("dontAsk", "manual"),
+    }),
+    env: env({ ANTHROPIC_API_KEY: "x" }),
+  });
+  expect(r).toEqual({
+    ok: false,
+    reason: "missing-capability",
+    command: "claude",
+    missing: ["--restricted", "dontAsk"],
+  });
+});
+
+test("claude --help that cannot be run → missing-capability (fail closed, never assumed)", () => {
+  const r = preflightAgentCli(claudeConfig, {
+    onPath: () => true,
+    runVersion: () => ({ ok: true, output: "2.1.280" }),
+    runHelp: () => ({ ok: false, output: "" }),
+    env: env({ ANTHROPIC_API_KEY: "x" }),
+  });
+  expect(r.ok).toBe(false);
+  if (!r.ok) expect(r.reason).toBe("missing-capability");
+});
+
+test("codex at a supported version → provider-not-enforceable (refused until ENG-484)", () => {
+  const r = preflightAgentCli(codexConfig, {
+    onPath: () => true,
+    runVersion: () => ({ ok: true, output: "codex-cli 0.156.1" }),
+    env: env({ OPENAI_API_KEY: "x" }),
+  });
+  expect(r).toEqual({ ok: false, reason: "provider-not-enforceable", command: "codex" });
 });

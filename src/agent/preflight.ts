@@ -1,5 +1,5 @@
 import { type AgentConfig, requiredEnvFor } from "../config/agent-config.ts";
-import { CLAUDE_MIN_CLI_VERSION } from "./providers/claude.ts";
+import { CLAUDE_MIN_CLI_VERSION, CLAUDE_REQUIRED_HELP_TOKENS } from "./providers/claude.ts";
 import { CODEX_MIN_CLI_VERSION } from "./providers/codex.ts";
 
 /** Result of probing the configured agent CLI before dispatch (ENG-326). `version: null` on the
@@ -7,7 +7,20 @@ import { CODEX_MIN_CLI_VERSION } from "./providers/codex.ts";
 export type AgentCliPreflight =
   | { ok: true; version: string | null; unauthHint?: string }
   | { ok: false; reason: "missing"; command: string }
-  | { ok: false; reason: "unsupported-version"; command: string; found: string; required: string };
+  | { ok: false; reason: "unsupported-version"; command: string; found: string; required: string }
+  | { ok: false; reason: "missing-capability"; command: string; missing: string[] }
+  | { ok: false; reason: "provider-not-enforceable"; command: string };
+
+/** Per-provider tokens `<cli> --help` must contain for the adapter's capability-isolation flags
+ *  to exist (ENG-476). Probed, not inferred from a version number: a flag either exists or not. */
+const PROVIDER_REQUIRED_HELP: Record<string, readonly string[]> = {
+  claude: CLAUDE_REQUIRED_HELP_TOKENS,
+};
+
+/** Providers Styre refuses to dispatch through because they cannot enforce a step's capability
+ *  table (ENG-476, operator decision 2026-09-24). Codex's `read-only` sandbox still runs shell
+ *  commands and reads outside the project; confinement via permission profiles is ENG-484. */
+const NOT_ENFORCEABLE_PROVIDERS = new Set(["codex"]);
 
 /** Per-provider minimum CLI version. Single source of truth = the adapter constants. */
 const PROVIDER_MIN_VERSION: Record<string, string> = {
@@ -41,6 +54,7 @@ export function compareVersions(a: Version, b: Version): number {
 interface PreflightDeps {
   onPath?: (command: string) => boolean;
   runVersion?: (command: string) => { ok: boolean; output: string };
+  runHelp?: (command: string) => { ok: boolean; output: string };
   env?: NodeJS.ProcessEnv;
 }
 
@@ -52,6 +66,12 @@ function defaultOnPath(command: string): boolean {
 
 function defaultRunVersion(command: string): { ok: boolean; output: string } {
   const r = Bun.spawnSync([command, "--version"], { timeout: 5_000 });
+  const dec = new TextDecoder();
+  return { ok: r.success, output: `${dec.decode(r.stdout)}${dec.decode(r.stderr)}` };
+}
+
+function defaultRunHelp(command: string): { ok: boolean; output: string } {
+  const r = Bun.spawnSync([command, "--help"], { timeout: 10_000 });
   const dec = new TextDecoder();
   return { ok: r.success, output: `${dec.decode(r.stdout)}${dec.decode(r.stderr)}` };
 }
@@ -73,6 +93,7 @@ export function preflightAgentCli(
 ): AgentCliPreflight {
   const onPath = deps.onPath ?? defaultOnPath;
   const runVersion = deps.runVersion ?? defaultRunVersion;
+  const runHelp = deps.runHelp ?? defaultRunHelp;
   const env = deps.env ?? process.env;
 
   // The default command equals the provider name for both built-in adapters (claude.ts:87 /
@@ -89,10 +110,8 @@ export function preflightAgentCli(
   if (!floor) return withHint(null); // unknown provider: no declared floor, PATH existence is all we assert
 
   const found = parseCliVersion(runVersion(command).output);
-  if (found === null) return withHint(null); // unparseable → fail-open
-
   const required = parseCliVersion(floor);
-  if (required && compareVersions(found, required) < 0) {
+  if (found !== null && required && compareVersions(found, required) < 0) {
     return {
       ok: false,
       reason: "unsupported-version",
@@ -101,5 +120,21 @@ export function preflightAgentCli(
       required: floor,
     };
   }
-  return withHint(found.join("."));
+
+  // ENG-476: a provider that cannot enforce a step's capability table is refused outright.
+  if (NOT_ENFORCEABLE_PROVIDERS.has(config.provider)) {
+    return { ok: false, reason: "provider-not-enforceable", command };
+  }
+
+  // ENG-476: the isolation flags must exist on THIS binary. Unlike the version floor (which fails
+  // open on an unreadable version), this fails closed: an unreadable or failing --help is treated
+  // as every flag missing, because dispatching without them silently drops the isolation.
+  const tokens = PROVIDER_REQUIRED_HELP[config.provider] ?? [];
+  if (tokens.length > 0) {
+    const help = runHelp(command);
+    const missing = help.ok ? tokens.filter((t) => !help.output.includes(t)) : [...tokens];
+    if (missing.length > 0) return { ok: false, reason: "missing-capability", command, missing };
+  }
+
+  return withHint(found === null ? null : found.join(".")); // unparseable version → fail-open
 }

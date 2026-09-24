@@ -8,6 +8,7 @@ import {
   buildClaudeArgs,
   claudeAgentRunner,
   parseClaudeJson,
+  parseClaudeStream,
 } from "../../../src/agent/providers/claude.ts";
 import { extractSidecar } from "../../../src/dispatch/sidecar.ts";
 
@@ -23,12 +24,57 @@ function fakeCli(name: string, body: string): string {
 
 const runInput = { prompt: "hi", model: "m", allowedTools: ["Read"], cwd, timeoutMs: 5000 };
 
-test("buildClaudeArgs assembles -p, json output, model, and allowed tools", () => {
-  const args = buildClaudeArgs({ model: "claude-opus-4-8", allowedTools: ["Read", "Write"] });
-  expect(args).toContain("-p");
-  expect(args).toContain("--model");
-  expect(args).toContain("claude-opus-4-8");
-  expect(args.join(" ")).toContain("Read");
+/** One `stream-json` line, as `claude -p --output-format stream-json --verbose` prints it. */
+const line = (o: unknown): string => JSON.stringify(o);
+const initLine = (tools: string[], permissionMode = "dontAsk"): string =>
+  line({ type: "system", subtype: "init", tools, permissionMode, mcp_servers: [] });
+const resultLine = (o: Record<string, unknown>): string =>
+  line({ type: "result", subtype: "success", ...o });
+/** A fake CLI body that prints the given stream lines verbatim. */
+const printLines = (lines: string[]): string => `cat <<'EOF'\n${lines.join("\n")}\nEOF`;
+
+test("buildClaudeArgs pins the exact tool set, a non-prompting mode, and no outside settings or servers (ENG-476)", () => {
+  const args = buildClaudeArgs({
+    model: "claude-opus-4-8",
+    allowedTools: ["Read", "Write", "Bash(npm test:*)"],
+  });
+  expect(args).toEqual([
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--model",
+    "claude-opus-4-8",
+    "--restricted",
+    "--tools",
+    "Bash,Read,Write",
+    "--allowedTools",
+    "Read Write Bash(npm test:*)",
+    "--permission-mode",
+    "dontAsk",
+    "--strict-mcp-config",
+  ]);
+});
+
+test("buildClaudeArgs passes an empty tool set explicitly, never omitting --tools", () => {
+  const args = buildClaudeArgs({ model: "m", allowedTools: [] });
+  expect(args[args.indexOf("--tools") + 1]).toBe("");
+});
+
+test("parseClaudeStream reads the init event's tools and mode and the final result envelope", () => {
+  const parsed = parseClaudeStream(
+    [
+      initLine(["Read", "Glob"]),
+      line({ type: "assistant", message: { content: [] } }),
+      resultLine({ result: "done", total_cost_usd: 0.25 }),
+    ].join("\n"),
+  );
+  expect(parsed.init).toEqual({ tools: ["Read", "Glob"], permissionMode: "dontAsk" });
+  expect(parsed.result).toMatchObject({ result: "done", total_cost_usd: 0.25 });
+});
+
+test("parseClaudeStream tolerates noise lines and reports absent events as null", () => {
+  expect(parseClaudeStream("not json\n\n")).toEqual({ init: null, result: null });
 });
 
 test("parseClaudeJson extracts usage incl. cache tokens, tolerating missing fields", () => {
@@ -64,7 +110,14 @@ test("parseClaudeJson extracts usage incl. cache tokens, tolerating missing fiel
 test("run captures a clean exit, parses usage, and journals the pid", async () => {
   const cli = fakeCli(
     "claude-ok",
-    'echo \'{"total_cost_usd":0.5,"usage":{"input_tokens":10,"output_tokens":3}}\'',
+    printLines([
+      initLine(["Read"]),
+      resultLine({
+        result: "ok",
+        total_cost_usd: 0.5,
+        usage: { input_tokens: 10, output_tokens: 3 },
+      }),
+    ]),
   );
   let pid: number | undefined;
   const r = await claudeAgentRunner(cli).run({
@@ -77,7 +130,37 @@ test("run captures a clean exit, parses usage, and journals the pid", async () =
   expect(r.exitCode).toBe(0);
   expect(r.timedOut).toBe(false);
   expect(r.costUsd).toBe(0.5);
+  expect(r.stdout).toBe("ok");
   expect(typeof pid).toBe("number");
+  expect(r.capabilities).toEqual({ tools: ["Read"], error: null });
+});
+
+test("run reports an enforcement error when the CLI emits no init event (tool set unverifiable)", async () => {
+  const cli = fakeCli("claude-noinit", printLines([resultLine({ result: "ok" })]));
+  const r = await claudeAgentRunner(cli).run({ ...runInput });
+  expect(r.capabilities?.tools).toBeNull();
+  expect(r.capabilities?.error).toContain("no init event");
+});
+
+test("run reports an enforcement error when the CLI ran in a different permission mode", async () => {
+  const cli = fakeCli(
+    "claude-auto",
+    printLines([initLine(["Read"], "auto"), resultLine({ result: "ok" })]),
+  );
+  const r = await claudeAgentRunner(cli).run({ ...runInput });
+  expect(r.capabilities?.tools).toEqual(["Read"]);
+  expect(r.capabilities?.error).toContain("permission mode 'auto'");
+});
+
+test("run passes the pinned argv to the CLI", async () => {
+  const argvFile = join(cwd, "argv.txt");
+  const cli = fakeCli(
+    "claude-argv",
+    `printf '%s\\n' "$@" > '${argvFile}'\n${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}`,
+  );
+  await claudeAgentRunner(cli).run({ ...runInput });
+  const argv = (await Bun.file(argvFile).text()).trim().split("\n");
+  expect(argv).toEqual(buildClaudeArgs({ model: "m", allowedTools: ["Read"] }));
 });
 
 // M1: the timeout is a HARD bound — a process that ignores SIGTERM must still be killed and the
@@ -119,9 +202,14 @@ test("assistantText unwraps the envelope result field, falling back to raw", () 
 
 test("a claude success carrying a sidecar block yields extractable stdout (regression)", async () => {
   const sidecar = `\`\`\`styre-sidecar\n${JSON.stringify({ n: 5 })}\n\`\`\``;
-  // real claude wraps assistant text (incl. the fenced block) inside the json envelope's `result`
-  const envelope = JSON.stringify({ result: `done\n${sidecar}`, usage: { input_tokens: 1 } });
-  const cli = fakeCli("claude-sidecar", `cat <<'EOF'\n${envelope}\nEOF`);
+  // real claude carries the assistant text (incl. the fenced block) in the final result event
+  const cli = fakeCli(
+    "claude-sidecar",
+    printLines([
+      initLine(["Read"]),
+      resultLine({ result: `done\n${sidecar}`, usage: { input_tokens: 1 } }),
+    ]),
+  );
   const r = await claudeAgentRunner(cli).run({ ...runInput });
   expect(r.completed).toBe(true);
   const parsed = extractSidecar(r.stdout, z.object({ n: z.number() }));

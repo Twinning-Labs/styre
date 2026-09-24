@@ -1,6 +1,8 @@
 import { join } from "node:path";
 import discoverTemplate from "../../prompts/setup-discover.md" with { type: "text" };
+import { capabilityFault } from "../agent/capabilities.ts";
 import type { AgentRunner } from "../agent/runner.ts";
+import { agentConfinementError } from "../cli/errors.ts";
 import { type AgentConfig, modelForTier } from "../config/agent-config.ts";
 import type { Component } from "../dispatch/profile.ts";
 import { renderPrompt } from "../dispatch/render-prompt.ts";
@@ -49,10 +51,11 @@ export async function discoverComponents(
     warnings.push("setup discovery prompt could not be rendered; retaining machine observations.");
     return fallback;
   }
+  const allowedTools = allowlistFor("setup:discover");
   const result = await deps.runner.run({
     prompt: rendered.prompt,
     model: modelForTier(deps.agentConfig, "standard"),
-    allowedTools: allowlistFor("setup:discover"),
+    allowedTools,
     cwd: repoDir,
     timeoutMs: DISCOVER_TIMEOUT_MS,
   });
@@ -62,6 +65,9 @@ export async function discoverComponents(
     );
     return fallback;
   }
+  // ENG-476: an unconfined agent is a hard stop, never the silent machine-observation fallback.
+  const fault = capabilityFault(allowedTools, result.capabilities);
+  if (fault !== null) throw agentConfinementError(fault);
   const parsed = extractSidecar(result.stdout, DiscoverSchema, { fence: "styre-setup-discover" });
   if (!parsed.ok) {
     // Never log the raw payload or parser message: JSON errors can contain input values.
