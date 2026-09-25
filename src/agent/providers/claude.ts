@@ -1,6 +1,10 @@
 import { agentEnv } from "../agent-env.ts";
 import { toolNamesFor, toolSetMismatch } from "../capabilities.ts";
-import { forwardTerminationSignals, killProcessGroup } from "../process-group.ts";
+import {
+  forwardTerminationSignals,
+  killProcessGroup,
+  terminateProcessGroup,
+} from "../process-group.ts";
 import type {
   AgentRunInput,
   AgentRunResult,
@@ -228,6 +232,7 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
       });
       let timer: ReturnType<typeof setTimeout> | undefined;
       let stopForwarding = () => {};
+      let spawnedPid: number | undefined;
       try {
         // The CLI leads its own process group (ENG-476), so every kill below reaches whatever it
         // started — including the real agent behind a wrapper script or version-manager shim.
@@ -239,6 +244,8 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
           stderr: "pipe",
           detached: true,
         });
+        spawnedPid = proc.pid;
+        // Startup-gate kill: no tool has run yet, so a hard kill loses nothing.
         const killGroup = () => killProcessGroup(proc.pid);
         // Detached, the agent no longer receives the terminal's Ctrl-C; forward it instead.
         stopForwarding = forwardTerminationSignals(proc.pid);
@@ -256,17 +263,32 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
         });
         const outcome = await Promise.race([proc.exited.then(() => "exited" as const), timeoutP]);
         if (outcome === "timeout") {
-          killGroup();
+          // A running agent is asked to stop first, so it can reap the tool commands it runs in
+          // their own process groups; SIGKILL follows only after the grace period.
+          await terminateProcessGroup(proc.pid, "SIGTERM", STOP_GRACE_MS);
+          stdoutRead.cancel();
+          stderrRead.cancel();
+          proc.unref();
           return transportFailure("dispatch timed out", true);
         }
         const exitCode = await proc.exited;
         // Reap anything the CLI left running in its group (it would hold the output pipes open),
         // then drain for a bounded time: a process that escaped the group can never hang the run.
-        killGroup();
+        await terminateProcessGroup(proc.pid, "SIGTERM", STOP_GRACE_MS);
+        let drainTimer: ReturnType<typeof setTimeout> | undefined;
         const drained = await Promise.race([
           Promise.all([stdoutRead.done, stderrRead.done]).then(() => true),
-          Bun.sleep(DRAIN_TIMEOUT_MS).then(() => false),
+          new Promise<boolean>((resolve) => {
+            drainTimer = setTimeout(() => resolve(false), DRAIN_TIMEOUT_MS);
+          }),
         ]);
+        clearTimeout(drainTimer);
+        if (!drained) {
+          // Never let a pipe held by an escaped process keep the runner alive.
+          stdoutRead.cancel();
+          stderrRead.cancel();
+          proc.unref();
+        }
         const stdout = stdoutRead.text();
         const stderr = drained
           ? stderrRead.text()
@@ -312,6 +334,9 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
             gate.fault() ?? (stream.init === null ? undefined : claudeCapabilities(stream.init)),
         };
       } catch (err) {
+        // Anything that throws after the spawn (e.g. the onSpawn journal write) must not leave
+        // an agent running while the attempt is undone and retried in the same worktree.
+        if (spawnedPid !== undefined) killProcessGroup(spawnedPid);
         return transportFailure(String(err), false);
       } finally {
         clearTimeout(timer);
@@ -359,19 +384,23 @@ export function startupGate(
 }
 
 /** How long to wait for the output pipes to close once the CLI has exited and its group has been
- *  killed. Only a process that escaped the group can hold them past this. */
+ *  reaped. Only a process that escaped the group can hold them past this. */
 const DRAIN_TIMEOUT_MS = 5_000;
 
+/** How long a running agent gets to stop (and reap its tools) before SIGKILL. */
+const STOP_GRACE_MS = 2_000;
+
 /** Read a byte stream, calling `onLine` for every complete line as it arrives. `text()` returns
- *  everything read so far, so a bounded drain can still use a partial read. */
+ *  everything read so far, so a bounded drain can still use a partial read; `cancel()` releases a
+ *  read that would otherwise keep the process alive. */
 function readLines(
   stream: ReadableStream<Uint8Array>,
   onLine: (line: string) => void,
-): { done: Promise<void>; text: () => string } {
+): { done: Promise<void>; text: () => string; cancel: () => void } {
   const decoder = new TextDecoder();
   let all = "";
+  const reader = stream.getReader();
   const done = (async () => {
-    const reader = stream.getReader();
     let pending = "";
     for (;;) {
       const { done: end, value } = await reader.read();
@@ -390,8 +419,16 @@ function readLines(
     all += tail;
     pending += tail;
     if (pending.trim() !== "") onLine(pending);
-  })();
-  return { done, text: () => all };
+  })().catch(() => {
+    // a cancelled read ends here; whatever was read so far stays in `all`
+  });
+  return {
+    done,
+    text: () => all,
+    cancel: () => {
+      reader.cancel().catch(() => {});
+    },
+  };
 }
 
 /** The lines of `stdout` that are not JSON events: the CLI's own plain-text messages. */

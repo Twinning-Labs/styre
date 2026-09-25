@@ -83,3 +83,22 @@ test("realRecoverDeps().kill takes down an orphaned agent's whole process group 
   await Bun.sleep(1500);
   expect(existsSync(marker)).toBe(false);
 });
+
+test("realRecoverDeps().kill honours a journaled NEGATIVE pid as a whole process group (review round 3)", async () => {
+  const { realRecoverDeps } = await import("../../src/daemon/recover.ts");
+  const { existsSync, mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const marker = join(mkdtempSync(join(tmpdir(), "styre-recover-neg-")), "suite-child-acted.txt");
+  // A verify suite journals -pid (handlers.ts / code-review.ts): the leader stays alive, and its
+  // child must not survive recovery either.
+  const suite = Bun.spawn(["sh", "-c", `(sleep 1; touch '${marker}') & echo started; wait`], {
+    detached: true,
+    stdout: "pipe",
+  });
+  await suite.stdout.getReader().read();
+  realRecoverDeps().kill(-suite.pid);
+  await suite.exited;
+  await Bun.sleep(1500);
+  expect(existsSync(marker)).toBe(false);
+});

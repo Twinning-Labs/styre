@@ -247,8 +247,10 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   frontmatter). The plan must *contain*, per work-unit, the facts S1b needs (kind, files, behavioral?
   + how tested, verify check-types, dependencies) — as prose, never as JSON. Sets `needs_docs`
   (whether the change is doc-impacting).
-- **Tools:** `Read`, `Grep`, `Glob`; `Write`/`Edit` **restricted to `docs/**`**; `WebSearch`,
-  `WebFetch`, Context7 (read-only). ❌ no `Bash`, no outward tools.
+- **Tools:** `Read`, `Grep`, `Glob`, `Write`, `Edit`, `WebSearch`, `WebFetch`
+  (`src/dispatch/tool-allowlists.ts`). The commit is scoped to `docs/plans/` by the runner
+  (`planScope`), not by the tool set. ❌ no `Bash`, no MCP servers (`--strict-mcp-config`); web access
+  is the one outward capability (see `SECURITY.md`).
 - **Failure → route:** D2/D3 in §8.
 
 **S1b · `design:extract`** — decomposition into `work_unit` rows (cheap tier; default Haiku 4.5, forced structured output)

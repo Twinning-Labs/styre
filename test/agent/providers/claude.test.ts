@@ -333,9 +333,8 @@ test("an unconfined agent behind a wrapper script is killed with its wrapper, be
   const wrapper = fakeCli("claude-wrapper", `'${inner}' "$@"\nexit $?`); // a child, not exec
   const start = Date.now();
   const r = await claudeAgentRunner(wrapper).run({ ...runInput });
-  expect(Date.now() - start).toBeLessThan(3000); // returned before the agent could act
-  await Bun.sleep(3500 - (Date.now() - start)); // then wait past the agent's delay
-  expect(existsSync(marker)).toBe(false);
+  await Bun.sleep(Math.max(0, 3500 - (Date.now() - start))); // wait past the agent's delay
+  expect(existsSync(marker)).toBe(false); // the agent never acted
   expect(r.capabilities?.error).toContain("stopped at startup: unexpected tools: Bash");
 });
 
@@ -350,3 +349,68 @@ test("a background process the CLI leaves behind does not keep the run waiting",
   expect(r.completed).toBe(true);
   expect(r.stdout).toBe("ok");
 });
+
+// Review round 3, finding 2: a running agent is stopped gracefully so it can reap the tool
+// commands it runs in their own process groups (as Claude Code does); only then SIGKILL.
+test("on timeout the agent is asked to stop first, so a tool it runs in its own group is reaped", async () => {
+  const childFile = join(cwd, "tool-child.pid");
+  const cli = fakeCli(
+    "claude-tool-child",
+    `${printLines([initLine(["Read"])])}\nset -m\n(sleep 30) &\nchild=$!\necho $child > '${childFile}'\ntrap 'kill $child; exit 0' TERM\nwait`,
+  );
+  const r = await claudeAgentRunner(cli).run({ ...runInput, timeoutMs: 1500 });
+  expect(r.timedOut).toBe(true);
+  const child = Number((await Bun.file(childFile).text()).trim());
+  await Bun.sleep(100);
+  let childAlive = true;
+  try {
+    process.kill(child, 0);
+  } catch {
+    childAlive = false;
+  }
+  expect(childAlive).toBe(false);
+});
+
+test("if recording the spawn fails, the already-started agent is killed, not left running", async () => {
+  const started = join(cwd, "onspawn-agent-started.txt");
+  const acted = join(cwd, "onspawn-agent-acted.txt");
+  const cli = fakeCli("claude-onspawn", `touch '${started}'\nsleep 1\ntouch '${acted}'`);
+  const r = await claudeAgentRunner(cli).run({
+    ...runInput,
+    onSpawn: () => {
+      throw new Error("journal write failed");
+    },
+  });
+  expect(r.completed).toBe(false);
+  // If the agent was already running when the kill landed, it must not get to act; if the kill
+  // landed before it started, it never runs at all. Either way `acted` must never appear.
+  await Bun.sleep(2500);
+  expect(existsSync(acted)).toBe(false);
+});
+
+test("a process that escaped the group and holds the output pipe does not keep the runner alive", async () => {
+  // python's setsid puts the holder in a new session, outside the CLI's process group.
+  const escaped = join(cwd, "holder-escaped.txt");
+  const cli = fakeCli(
+    "claude-escaper",
+    // The CLI exits only once the holder is established in its own session, outside the group.
+    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\npython3 -c 'import os,time\nif os.fork()==0:\n    os.setsid(); open("${escaped}","w").close(); time.sleep(20)' &\nwhile [ ! -f '${escaped}' ]; do sleep 0.05; done\nexit 0`,
+  );
+  const script = join(cwd, "escaper-runner.ts");
+  writeFileSync(
+    script,
+    `import { claudeAgentRunner } from ${JSON.stringify(join(import.meta.dir, "../../../src/agent/providers/claude.ts"))};
+const r = await claudeAgentRunner(${JSON.stringify(cli)}).run({ prompt: "x", model: "m", allowedTools: ["Read"], cwd: ${JSON.stringify(cwd)}, timeoutMs: 10000 });
+console.log(JSON.stringify({ completed: r.completed, stdout: r.stdout }));`,
+  );
+  const start = Date.now();
+  const proc = Bun.spawn(["bun", "run", script], { stdout: "pipe" });
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  // drain timeout (5s) plus startup, well under the escaped holder's 20s
+  expect(Date.now() - start).toBeLessThan(12000);
+  expect(JSON.parse(out.trim().split("\n").pop() ?? "{}")).toEqual({
+    completed: true,
+    stdout: "ok",
+  });
+}, 20000);

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { killProcessGroup } from "../../src/agent/process-group.ts";
+import { killProcessGroup, terminateProcessGroup } from "../../src/agent/process-group.ts";
 
 const dir = realpathSync(mkdtempSync(join(tmpdir(), "styre-pg-")));
 
@@ -56,5 +56,40 @@ await Bun.sleep(5000);
   const code = await runner.exited;
   await Bun.sleep(1500);
   expect(existsSync(marker)).toBe(false); // the agent group died with the runner
-  expect(runner.signalCode ?? code).not.toBe(0); // the runner still terminated, not swallowed
+  expect(code).not.toBe(0);
+  expect(runner.signalCode).toBe("SIGTERM"); // the runner terminated by the same signal, not swallowed
+});
+
+// Claude Code runs each Bash tool command in its OWN process group and reaps those groups when it
+// is asked to stop. A graceful terminate lets it; a bare SIGKILL of its group would orphan them.
+test("terminateProcessGroup lets the leader reap a child it runs in a separate group", async () => {
+  const leader = Bun.spawn(
+    [
+      "sh",
+      "-c",
+      "set -m; (sleep 30) & child=$!; trap 'kill $child; exit 0' TERM; echo $child; wait",
+    ],
+    { stdout: "pipe", detached: true },
+  );
+  const child = Number(
+    new TextDecoder().decode((await leader.stdout.getReader().read()).value).trim(),
+  );
+  expect(alive(child)).toBe(true);
+  await terminateProcessGroup(leader.pid, "SIGTERM", 2000);
+  await leader.exited;
+  await Bun.sleep(100);
+  expect(alive(child)).toBe(false);
+});
+
+test("terminateProcessGroup forces SIGKILL when the group ignores the signal past the grace period", async () => {
+  const leader = Bun.spawn(["sh", "-c", "trap '' TERM; echo up; sleep 30"], {
+    stdout: "pipe",
+    detached: true,
+  });
+  await leader.stdout.getReader().read();
+  const start = Date.now();
+  await terminateProcessGroup(leader.pid, "SIGTERM", 300);
+  await leader.exited;
+  expect(Date.now() - start).toBeLessThan(2000);
+  expect(leader.signalCode).toBe("SIGKILL");
 });

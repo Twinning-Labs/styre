@@ -52,8 +52,9 @@ export function realRecoverDeps(): RecoverDeps {
         return false;
       }
     },
-    // Agents lead their own process group (ENG-476), so kill the group: an orphaned agent's
-    // children (the real CLI behind a wrapper, tools it started) die with it.
+    // Agents lead their own process group (ENG-476), so kill that group: the real CLI behind a
+    // wrapper dies with it. A negative journaled pid (verify suites, review probes) is killed as
+    // the group it names. Tool commands Claude Code ran in their OWN groups are not reached here.
     kill: (pid: number) => killProcessGroup(pid),
   };
 }
