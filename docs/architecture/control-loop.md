@@ -202,8 +202,13 @@ Each step declares **Guard** (precondition to fire), **Input**, **Output** (post
 and **Failure → route** (see the Loopback Atlas, §8). An unmet guard *waits or pauses*, it does not
 fail.
 
-Capability frame (move 4) applies to every agent step: the **worktree is the only writable surface**;
-agents have **no outward tools** — no `gh`, no `git push`, no Linear, no ambient key, no `curl`.
+Capability frame (move 4) applies to every agent step, enforced by the provider adapter and verified
+at the start of every dispatch (ENG-476; see `SECURITY.md`): each step gets **exactly** the tools its
+allowlist names and its file tools are confined to its working folder, so the **worktree is the only
+place agent file tools can write** (declared commands still run as ordinary, unconfined processes);
+agents have **no tracker, forge or push tools** — no `gh`, no `git push`, no Linear, no ambient key,
+no `curl`. The one outward tool is web access in the design step (`WebSearch`/`WebFetch`), listed as a
+remaining gap in `SECURITY.md`.
 Every external effect is the runner's (§5). **The runner commits, not the agent** (`[CL-COMMIT]`):
 agents only edit files; the runner commits each dispatch's worktree changes with a deterministic
 message (incl. `dispatch_id`) and records the SHA — so agents need no git tool at all.
@@ -242,8 +247,10 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   frontmatter). The plan must *contain*, per work-unit, the facts S1b needs (kind, files, behavioral?
   + how tested, verify check-types, dependencies) — as prose, never as JSON. Sets `needs_docs`
   (whether the change is doc-impacting).
-- **Tools:** `Read`, `Grep`, `Glob`; `Write`/`Edit` **restricted to `docs/**`**; `WebSearch`,
-  `WebFetch`, Context7 (read-only). ❌ no `Bash`, no outward tools.
+- **Tools:** `Read`, `Grep`, `Glob`, `Write`, `Edit`, `WebSearch`, `WebFetch`
+  (`src/dispatch/tool-allowlists.ts`). The commit is scoped to `docs/plans/` by the runner
+  (`planScope`), not by the tool set. ❌ no `Bash`, no MCP servers (`--strict-mcp-config`); web access
+  is the one outward capability (see `SECURITY.md`).
 - **Failure → route:** D2/D3 in §8.
 
 **S1b · `design:extract`** — decomposition into `work_unit` rows (cheap tier; default Haiku 4.5, forced structured output)

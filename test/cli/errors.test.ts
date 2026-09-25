@@ -72,3 +72,23 @@ test("agentCliError(unsupported-version) → exit 69, upgrade headline naming fo
   expect(e.headline).toMatch(/'claude' 2\.0\.9 is below the supported minimum 2\.1\.200/);
   expect(e.recovery).toMatch(/Upgrade the 'claude' CLI to >= 2\.1\.200/);
 });
+
+test("agentCliError(missing-capability) → exit 69, names every missing isolation flag (ENG-476)", () => {
+  const e = agentCliError({
+    reason: "missing-capability",
+    command: "claude",
+    missing: ["--restricted", "dontAsk"],
+  });
+  expect(e.code).toBe(EXIT.TOOLCHAIN_MISSING);
+  expect(e.headline).toMatch(/'claude' lacks the flags Styre needs to confine agents/);
+  expect(e.detail).toContain("--restricted, dontAsk");
+  expect(e.recovery).toMatch(/Upgrade the 'claude' CLI/);
+});
+
+test("agentCliError(provider-not-enforceable) → exit 78 (a config choice), says why and what to use instead (ENG-476)", () => {
+  const e = agentCliError({ reason: "provider-not-enforceable", command: "codex" });
+  expect(e.code).toBe(EXIT.CONFIG);
+  expect(e.headline).toMatch(/Styre cannot confine agents run through 'codex'/);
+  expect(e.detail).toMatch(/read files outside the project/);
+  expect(e.recovery).toMatch(/agent\.provider.*claude/);
+});

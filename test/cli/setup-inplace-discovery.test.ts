@@ -11,8 +11,9 @@ import { type SetupArgs, setupImpl } from "../../src/cli/setup.ts";
 // `.styre-disposable` marker BEFORE runSetup's write-capable enrichment agent ever runs.
 //
 // Neither scenario is allowed to reach the real agent call (that would spawn a live `claude`
-// process). So each test unsets ANTHROPIC_API_KEY, which the wrapper checks immediately AFTER the
-// discovery+gate block and immediately BEFORE constructing the agent runner / calling `runSetup`.
+// process). So each test stubs the agent-CLI preflight (which runs first, ENG-476) and unsets
+// ANTHROPIC_API_KEY, which the wrapper checks after the discovery+gate block and the preflight and
+// immediately BEFORE constructing the agent runner / calling `runSetup`.
 // That makes the two failure modes mutually exclusive and individually diagnostic:
 //   - the marker error  → the gate ran and rejected BEFORE reaching the agent-key check (and thus
 //     before any enrichment call — enrichRuntimeContext/discoverComponents live inside runSetup,
@@ -62,7 +63,12 @@ async function invokeSetup(repo?: string): Promise<void> {
   delete process.env.ANTHROPIC_API_KEY;
   process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "styre-setup-xdg-empty-")); // no host config
   try {
-    await setupImpl({ args: { repo } as SetupArgs });
+    // The agent-CLI preflight is stubbed so the key guard is the last check before the agent
+    // call on every machine, whether or not a real `claude` is installed (CI has none).
+    await setupImpl(
+      { args: { repo } as SetupArgs },
+      { preflight: () => ({ ok: true, version: null }) },
+    );
   } finally {
     if (prevKey === undefined)
       // biome-ignore lint/performance/noDelete: restoring an unset env var requires delete

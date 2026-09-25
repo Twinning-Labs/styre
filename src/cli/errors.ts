@@ -85,7 +85,9 @@ export function noPrimaryComponentError(detail: string): StyreError {
 export function agentCliError(
   e:
     | { reason: "missing"; command: string }
-    | { reason: "unsupported-version"; command: string; found: string; required: string },
+    | { reason: "unsupported-version"; command: string; found: string; required: string }
+    | { reason: "missing-capability"; command: string; missing: string[] }
+    | { reason: "provider-not-enforceable"; command: string },
 ): StyreError {
   if (e.reason === "missing") {
     return new StyreError({
@@ -93,6 +95,22 @@ export function agentCliError(
       headline: `'${e.command}' is not installed or not on PATH`,
       detail: `Styre dispatches every agent run by shelling out to the '${e.command}' CLI.`,
       recovery: `Install the '${e.command}' CLI, or set agent.command in your profile, then re-run.`,
+    });
+  }
+  if (e.reason === "missing-capability") {
+    return new StyreError({
+      code: EXIT.TOOLCHAIN_MISSING,
+      headline: `'${e.command}' lacks the flags Styre needs to confine agents`,
+      detail: `Styre limits each agent step to an exact tool set inside the project folder, using these '${e.command}' options, which its --help does not list: ${e.missing.join(", ")}. Running without them would let agents read and write outside the project.`,
+      recovery: `Upgrade the '${e.command}' CLI to a version that supports them, then re-run.`,
+    });
+  }
+  if (e.reason === "provider-not-enforceable") {
+    return new StyreError({
+      code: EXIT.CONFIG,
+      headline: `Styre cannot confine agents run through '${e.command}' yet`,
+      detail: `Its read-only mode still runs shell commands and can read files outside the project, so Styre cannot guarantee each step's tool limits. Support returns once its sandbox profiles are enforced (ENG-484).`,
+      recovery: `Set agent.provider to "claude" in your Styre config, then re-run.`,
     });
   }
   return new StyreError({
@@ -125,4 +143,17 @@ export function errorKindForExit(code: number): string {
     default:
       return "other";
   }
+}
+
+/** ENG-476: a completed agent run whose confinement could not be confirmed (its provider reported
+ *  a different tool set, the wrong permission mode, or nothing at all). Nothing it produced is
+ *  used, and nothing is retried: the same CLI would fail the same way. */
+export function agentConfinementError(fault: string): StyreError {
+  return new StyreError({
+    code: EXIT.TOOLCHAIN_MISSING,
+    headline: "Styre could not confirm the agent was confined to its allowed tools",
+    detail: `The agent CLI's own report did not match what Styre asked for: ${fault}. Its output was discarded.`,
+    recovery:
+      "Check the agent CLI version and any settings that change its permissions, then re-run. If it persists, report it with this message.",
+  });
 }

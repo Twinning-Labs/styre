@@ -1,6 +1,8 @@
 import { join } from "node:path";
 import discoverTemplate from "../../prompts/setup-discover.md" with { type: "text" };
+import { launchAgent } from "../agent/launch.ts";
 import type { AgentRunner } from "../agent/runner.ts";
+import { agentConfinementError } from "../cli/errors.ts";
 import { type AgentConfig, modelForTier } from "../config/agent-config.ts";
 import type { Component } from "../dispatch/profile.ts";
 import { renderPrompt } from "../dispatch/render-prompt.ts";
@@ -49,13 +51,16 @@ export async function discoverComponents(
     warnings.push("setup discovery prompt could not be rendered; retaining machine observations.");
     return fallback;
   }
-  const result = await deps.runner.run({
+  const allowedTools = allowlistFor("setup:discover");
+  const { result, fault } = await launchAgent(deps.runner, {
     prompt: rendered.prompt,
     model: modelForTier(deps.agentConfig, "standard"),
-    allowedTools: allowlistFor("setup:discover"),
+    allowedTools,
     cwd: repoDir,
     timeoutMs: DISCOVER_TIMEOUT_MS,
   });
+  // ENG-476: an unconfined agent is a hard stop, never the silent machine-observation fallback.
+  if (fault !== null) throw agentConfinementError(fault);
   if (!result.completed || result.timedOut) {
     warnings.push(
       "setup discovery failed or timed out; retaining unresolved machine observations.",

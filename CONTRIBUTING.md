@@ -24,7 +24,7 @@ Read the architecture docs in order, starting at [`docs/architecture/README.md`]
 - **One-way projection.** The issue tracker (Linear/Jira) and forge (GitHub) are never read for control flow — they are write-only projections.
 - **Ground-truth verdicts.** Build/test/CI output decides outcomes; agent self-scoring is discarded.
 - **Clean-break stage vocab.** Stages are `design → implement → verify → review → merge → released`. No legacy gerund stages, no hardcoded `ui` stage.
-- **Capability isolation.** Agents get no `gh`/tracker/branch tools and no tracker/forge credentials in their environment; the worktree is their only writable surface. (See [`SECURITY.md`](SECURITY.md) for the exact env-scrub policy.)
+- **Capability isolation.** Agents get no `gh`/tracker/branch tools and no tracker/forge credentials in their environment; each step gets exactly its allowlisted tools, and the worktree is the only place their file tools can write. (See [`SECURITY.md`](SECURITY.md) for the exact env-scrub policy.)
 
 For the security and isolation model, see [`SECURITY.md`](SECURITY.md).
 

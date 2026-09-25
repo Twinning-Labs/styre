@@ -1,6 +1,8 @@
-/** Per-step tool allowlists (capability isolation, move 4 / control-loop §4). Tool-NAME sets
- *  passed to `claude -p --allowed-tools`. NO outward tools anywhere (no gh/git push/Linear/curl);
- *  the worktree is the only writable surface. */
+/** Per-step tool allowlists (capability isolation, move 4 / control-loop §4). Each entry is a
+ *  permission (`--allowedTools`); the tool SET the provider exposes is the unique names they imply
+ *  (`agent/capabilities.ts`, `--tools`), verified at the start of every dispatch (ENG-476). No
+ *  gh/git push/Linear tools anywhere; `design:dispatch` alone has web tools (WebSearch/WebFetch).
+ *  File tools write only inside the worktree; declared runner commands run as ordinary processes. */
 const READ_ONLY = ["Read", "Grep", "Glob"];
 
 // `implement:dispatch` and `checks:dispatch` get Bash scoped at dispatch time to the profile's

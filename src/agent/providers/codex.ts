@@ -2,7 +2,22 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { agentEnv } from "../agent-env.ts";
-import type { AgentRunInput, AgentRunResult, AgentRunner, FailureCause } from "../runner.ts";
+import type {
+  AgentRunInput,
+  AgentRunResult,
+  AgentRunner,
+  EffectiveCapabilities,
+  FailureCause,
+} from "../runner.ts";
+
+/** ENG-476: Codex's `read-only` sandbox still runs shell commands and reads outside the project,
+ *  and Styre does not yet build the permission profiles that would confine it (ENG-484). Every
+ *  completed run therefore reports that confinement is unconfirmed, and the core refuses it. The
+ *  preflight refuses Codex before any dispatch; this is the defense in depth behind it. */
+export const CODEX_CAPABILITIES: EffectiveCapabilities = {
+  tools: null,
+  error: "codex cannot yet confine a step to its tool set or to the project folder (ENG-484)",
+};
 
 /** DEC-CX-3: translate the provider-neutral tool allowlist to Codex's OS sandbox. Any write/exec
  *  token ⇒ workspace-write (writes confined to cwd); read-only otherwise. WebSearch/WebFetch ⇒
@@ -192,6 +207,7 @@ export function codexAgentRunner(command = "codex"): AgentRunner {
             stderr,
             timedOut: false,
             ...usage,
+            capabilities: CODEX_CAPABILITIES,
           };
         }
         if (exitCode === 0) {

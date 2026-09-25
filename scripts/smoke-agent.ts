@@ -4,6 +4,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { launchAgent } from "../src/agent/launch.ts";
 import { resolveAgentRunner } from "../src/agent/resolve.ts";
 import { resolveTier } from "../src/agent/tiers.ts";
 import { CODEX_PRESET, DEFAULT_AGENT_CONFIG, modelForTier } from "../src/config/agent-config.ts";
@@ -19,7 +20,7 @@ const config = provider === "codex" ? CODEX_PRESET : DEFAULT_AGENT_CONFIG;
 const runner = resolveAgentRunner(config);
 const wt = join(mkdtempSync(join(tmpdir(), "styre-smoke-")), "wt");
 ensureWorktree(repo, "feat/styre-smoke", wt);
-const result = await runner.run({
+const { result, fault } = await launchAgent(runner, {
   prompt: "Create a file HELLO.txt containing the word styre. Do not commit.",
   model: modelForTier(config, resolveTier("implement:dispatch")),
   allowedTools: allowlistFor("implement:dispatch"),
@@ -28,6 +29,7 @@ const result = await runner.run({
   onSpawn: (pid) => console.log("agent pid:", pid),
 });
 console.log("completed:", result.completed, "exit:", result.exitCode, "timedOut:", result.timedOut);
+console.log("confinement:", fault === null ? "confirmed" : `NOT confirmed — ${fault}`);
 console.log("usage:", {
   costUsd: result.costUsd,
   tokensIn: result.tokensIn,

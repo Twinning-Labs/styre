@@ -1,3 +1,4 @@
+import { launchAgent } from "../agent/launch.ts";
 import type { AgentRunner } from "../agent/runner.ts";
 import { resolveTier } from "../agent/tiers.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
@@ -7,6 +8,7 @@ import { completeDispatch, insertDispatch, nextSeq } from "../db/repos/dispatch.
 import { appendEvent } from "../db/repos/event-log.ts";
 import { setPid } from "../db/repos/workflow-step.ts";
 import { ParkSignal } from "../engine/park-signal.ts";
+import { StepPrerequisiteError } from "../engine/step-journal.ts";
 import { nowUtc } from "../util/time.ts";
 import type { CommitScope } from "./commit-scope.ts";
 import type { Profile } from "./profile.ts";
@@ -162,14 +164,45 @@ export async function runAgentDispatch(
     worktreePath: deps.worktreePath,
   });
 
-  const result = await deps.runner.run({
+  const allowedTools = allowlistFor(spec.handlerKey, { runnerCommands: spec.runnerCommands ?? [] });
+  const { result, fault } = await launchAgent(deps.runner, {
     prompt,
     model,
-    allowedTools: allowlistFor(spec.handlerKey, { runnerCommands: spec.runnerCommands ?? [] }),
+    allowedTools,
     cwd: deps.worktreePath,
     timeoutMs: deps.timeoutMs,
     onSpawn: (pid) => setPid(ctx.db, ctx.step.id, pid),
   });
+
+  // ENG-476: capability isolation is verified on every dispatch, never assumed — including a
+  // failed one the provider stopped for a wrong tool set. A fault means the agent was not confined
+  // to this step's tools, so nothing it did can be trusted: record the refusal, undo the attempt and
+  // stop the run as a prerequisite failure (no retry — the same provider would fail the same way;
+  // an operator fixes the CLI or its setup, then resumes).
+  if (fault !== null) {
+    appendEvent(ctx.db, {
+      ticketId: ctx.ticket.id,
+      dispatchId: did,
+      kind: "note",
+      // The fault names only tools and a permission mode, so it is safe to show in the run
+      // summary's timeline, which is where the operator sees why the run paused.
+      reason: `agent-capabilities-refused: ${fault}`,
+      payload: { fault, tools: result.capabilities?.tools ?? null, allowed: allowedTools },
+    });
+    completeDispatch(ctx.db, inserted.id, {
+      outcome: "dispatch-failed",
+      endedAt: nowUtc(),
+      costUsd: result.costUsd,
+      tokensIn: result.tokensIn,
+      tokensOut: result.tokensOut,
+      cacheRead: result.cacheRead ?? null,
+      cacheCreate: result.cacheCreate ?? null,
+    });
+    undoAttempt(deps.worktreePath, untrackedBefore);
+    throw new StepPrerequisiteError(
+      `the agent's confinement could not be confirmed, so its work was discarded: ${fault}`,
+    );
+  }
 
   if (!result.completed || result.timedOut) {
     // A timeout never carries a marker (no drained output) → always transient.
@@ -190,6 +223,14 @@ export async function runAgentDispatch(
       `dispatch ${did} transport failure (exit ${result.exitCode}, timedOut=${result.timedOut})`,
     );
   }
+
+  appendEvent(ctx.db, {
+    ticketId: ctx.ticket.id,
+    dispatchId: did,
+    kind: "note",
+    reason: "agent-capabilities",
+    payload: { tools: result.capabilities?.tools ?? null, allowed: allowedTools },
+  });
 
   // The worker's sanctioned throwaway drawer(s): delete every styre_scratch/ before judging/committing
   // so scratch is never an offender and never survives into a later broad test run (ENG-300). Runs on

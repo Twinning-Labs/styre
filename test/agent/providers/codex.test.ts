@@ -98,6 +98,10 @@ test("run reads the final message from --output-last-message and parses usage", 
   expect(r.tokensIn).toBe(10);
   expect(r.cacheRead).toBe(7);
   expect(r.costUsd).toBeNull();
+  // ENG-476: Codex cannot confine a step to its tool set (ENG-484), so every completed run says
+  // so and the core refuses it — defense in depth behind the preflight refusal.
+  expect(r.capabilities?.tools).toBeNull();
+  expect(r.capabilities?.error).toContain("ENG-484");
 });
 
 test("run SIGKILLs and returns promptly on a process that traps SIGTERM and hangs", async () => {

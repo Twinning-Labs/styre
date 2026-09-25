@@ -32,6 +32,18 @@ export interface AgentRunResult {
   cause?: FailureCause;
   /** For session-limit only: the provider's raw human reset text (display-only). */
   resetAt?: string | null;
+  /** ENG-476: what the agent was actually given, as the provider reports it. The core refuses a
+   *  completed dispatch whose report is absent, carries an error, or whose tool set differs from
+   *  the step's allowlist — capability isolation is verified, never assumed. */
+  capabilities?: EffectiveCapabilities;
+}
+
+/** The provider-reported effective capabilities of one dispatch (ENG-476). */
+export interface EffectiveCapabilities {
+  /** The tool names the agent could call, or null when the provider could not report them. */
+  tools: string[] | null;
+  /** Why enforcement could not be confirmed (e.g. the wrong permission mode), or null. */
+  error: string | null;
 }
 
 /** The provider-neutral agent boundary. The core depends only on this; a provider

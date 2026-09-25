@@ -33,7 +33,7 @@ function gitPathsZ(args: string[], cwd: string): string[] {
 }
 
 /** Create a worktree on `branch` (reset to current HEAD) if absent; reuse if present.
- *  The worktree is the agent's only writable surface (capability isolation, move 4).
+ *  The worktree is the only place the agent's file tools can write (capability isolation, move 4).
  *
  *  In-place mode (`worktreePath === repoPath`, i.e. the checkout is disposable — a single-use
  *  container): no separate worktree. Create/switch the branch directly in the repo root instead. */

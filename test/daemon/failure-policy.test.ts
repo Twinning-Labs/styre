@@ -540,3 +540,26 @@ test("whole-project failure spawns a reconcile unit and re-opens integration", (
   expect(reconcile.seq).toBe(2); // max(existing seq)+1; seeded one unit at seq 1
   expect(parseDependsOn(reconcile)).toEqual([1]); // depends on the single existing unit
 });
+
+test("a prerequisite failure (e.g. an unconfirmed agent confinement) escalates on its first attempt (ENG-476)", async () => {
+  const { StepPrerequisiteError } = await import("../../src/engine/step-journal.ts");
+  const { db, ticketId } = makeTestDb();
+  const step = insertPending(db, { ticketId, stepKey: "review", stepType: "dispatch" });
+  markRunning(db, step.id, { pid: 1 });
+  markFailed(
+    db,
+    step.id,
+    new StepPrerequisiteError(
+      "the agent's confinement could not be confirmed, so its work was discarded: unexpected tools: Bash",
+    ),
+  );
+  const failed = getStep(db, step.id);
+  if (!failed) throw new Error("no step");
+  expect(applyFailurePolicy(db, ticketId, failed).decision).toBe("escalated");
+  const escalated = listEvents(db, ticketId).find((e) => e.kind === "escalated");
+  // The terse reason is shown at the pause and sent to notifiers; the cause itself travels on the
+  // escalation signature and on the dispatch's own refusal note.
+  expect(escalated?.reason).toBe("step 'review' failed");
+  expect(escalated?.signature).toContain("unexpected tools: Bash");
+  db.close();
+});

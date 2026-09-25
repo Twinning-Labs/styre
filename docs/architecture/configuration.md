@@ -45,7 +45,7 @@ no partial inheritance from the binary default (see precedence below).
 ```jsonc
 {
   "agent": {
-    "provider": "claude",          // required; "claude" or "codex" are registered
+    "provider": "claude",          // required; "claude" (or "codex", currently refused: see below)
     "command": "claude",           // optional; the CLI binary name
     "models": {                    // all three tiers required when `agent` is present
       "deep": "claude-opus-4-8",
@@ -58,7 +58,9 @@ no partial inheritance from the binary default (see precedence below).
 
 Absent `agent` → the built-in **Claude preset** (`DEFAULT_AGENT_CONFIG`) shown above. A built-in
 **Codex preset** (`CODEX_PRESET`: `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna`) exists as a
-copy-paste template but is **not** auto-selected — you must write the block to use it.
+copy-paste template but is **not** auto-selected — you must write the block to use it. **Codex is
+currently refused** at run and setup start (exit `78`): its sandbox cannot yet confine a step to its
+tool set and to the project folder (ENG-476). Support returns with ENG-484.
 
 Models are chosen per **tier**, never hardcoded per step. The step→tier map is `src/agent/tiers.ts`:
 
