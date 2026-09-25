@@ -70,6 +70,15 @@ function defaultRunVersion(command: string): { ok: boolean; output: string } {
   return { ok: r.success, output: `${dec.decode(r.stdout)}${dec.decode(r.stderr)}` };
 }
 
+/** True when `help` lists `token`: a `--flag` must START an option line (optionally after a short
+ *  alias like `-p, `), so a flag merely named in another option's description does not count; any
+ *  other token (a choice such as `dontAsk`) may appear anywhere. */
+export function helpLists(help: string, token: string): boolean {
+  if (!token.startsWith("--")) return help.includes(token);
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\s*(?:-[A-Za-z], )?${escaped}(?=[\\s,=]|$)`, "m").test(help);
+}
+
 function defaultRunHelp(command: string): { ok: boolean; output: string } {
   const r = Bun.spawnSync([command, "--help"], { timeout: 10_000 });
   const dec = new TextDecoder();
@@ -100,6 +109,12 @@ export function preflightAgentCli(
   // codex.ts:128 factory defaults). config.command overrides it.
   const command = config.command ?? config.provider;
 
+  // ENG-476: a provider that cannot enforce a step's capability table is refused before anything
+  // else, so an operator is never told to install or upgrade a CLI Styre will then refuse anyway.
+  if (NOT_ENFORCEABLE_PROVIDERS.has(config.provider)) {
+    return { ok: false, reason: "provider-not-enforceable", command };
+  }
+
   if (!onPath(command)) return { ok: false, reason: "missing", command };
 
   const hint = unauthHintFor(config.provider, command, env);
@@ -121,18 +136,13 @@ export function preflightAgentCli(
     };
   }
 
-  // ENG-476: a provider that cannot enforce a step's capability table is refused outright.
-  if (NOT_ENFORCEABLE_PROVIDERS.has(config.provider)) {
-    return { ok: false, reason: "provider-not-enforceable", command };
-  }
-
   // ENG-476: the isolation flags must exist on THIS binary. Unlike the version floor (which fails
   // open on an unreadable version), this fails closed: an unreadable or failing --help is treated
   // as every flag missing, because dispatching without them silently drops the isolation.
   const tokens = PROVIDER_REQUIRED_HELP[config.provider] ?? [];
   if (tokens.length > 0) {
     const help = runHelp(command);
-    const missing = help.ok ? tokens.filter((t) => !help.output.includes(t)) : [...tokens];
+    const missing = help.ok ? tokens.filter((t) => !helpLists(help.output, t)) : [...tokens];
     if (missing.length > 0) return { ok: false, reason: "missing-capability", command, missing };
   }
 

@@ -75,8 +75,9 @@ These are the load-bearing NOTs. Code that violates them is wrong even if it wor
 
 - Agents have **no** `gh` or tracker tools; the runner strips `LINEAR_API_KEY`, `JIRA_API_TOKEN`,
   and `GITHUB_TOKEN` from their environment (the provider key is retained for the agent CLI's own
-  auth; verify-time commands strip that too). The worktree is the only writable surface available
-  to a worker.
+  auth; verify-time commands strip that too). Each step gets exactly its allowlisted tools, and the
+  worktree is the only place a worker's file tools can write (verified at the start of every
+  dispatch, ENG-476); declared commands still run as ordinary unconfined processes (`SECURITY.md`).
 
 - The runner's default response to an anomaly is **not** halt-to-human — it is loop (bounded
   retry against ground truth). Human gates are MERGE approval and escalations only.

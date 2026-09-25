@@ -1,5 +1,5 @@
 import setupEnrichTemplate from "../../prompts/setup-enrich.md" with { type: "text" };
-import { capabilityFault } from "../agent/capabilities.ts";
+import { launchAgent } from "../agent/launch.ts";
 import type { AgentRunner } from "../agent/runner.ts";
 import { agentConfinementError, configError } from "../cli/errors.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
@@ -66,17 +66,16 @@ export async function enrichRuntimeContext(
 
   let lastReason = "";
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    const result = await deps.runner.run({
+    const { result, fault } = await launchAgent(deps.runner, {
       prompt: prompt.prompt,
       model,
       allowedTools,
       cwd: repoDir,
       timeoutMs: ENRICH_TIMEOUT_MS,
     });
+    // ENG-476: an unconfined agent stops setup at once; retrying the same CLI cannot help.
+    if (fault !== null) throw agentConfinementError(fault);
     if (result.completed && !result.timedOut) {
-      // ENG-476: an unconfined agent stops setup at once; retrying the same CLI cannot help.
-      const fault = capabilityFault(allowedTools, result.capabilities);
-      if (fault !== null) throw agentConfinementError(fault);
       const parsed = extractSidecar(result.stdout, EnrichmentSchema, {
         fence: "styre-setup-enrich",
       });

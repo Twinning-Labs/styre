@@ -203,8 +203,9 @@ and **Failure → route** (see the Loopback Atlas, §8). An unmet guard *waits o
 fail.
 
 Capability frame (move 4) applies to every agent step, enforced by the provider adapter and verified
-on every dispatch (ENG-476; see `SECURITY.md`): each step gets **exactly** the tools its allowlist
-names, file tools are confined to its working folder, and the **worktree is the only writable surface**;
+at the start of every dispatch (ENG-476; see `SECURITY.md`): each step gets **exactly** the tools its
+allowlist names and its file tools are confined to its working folder, so the **worktree is the only
+place agent file tools can write** (declared commands still run as ordinary, unconfined processes);
 agents have **no outward tools** — no `gh`, no `git push`, no Linear, no ambient key, no `curl`.
 Every external effect is the runner's (§5). **The runner commits, not the agent** (`[CL-COMMIT]`):
 agents only edit files; the runner commits each dispatch's worktree changes with a deterministic

@@ -368,17 +368,18 @@ export async function setupImpl({ args }: { args: SetupArgs }): Promise<void> {
   const effSlug = args.slug && args.slug.length > 0 ? args.slug : deriveSlug(resolve(repo));
   const runtimeConfig = discoverRuntimeConfig({ explicitPath: args.config, slug: effSlug });
   const agentConfig = runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG;
+  // Probe the binary before the write-capable enrichment agent runs, so a refused provider or a
+  // missing/old CLI fails the setup gate with an actionable message instead of surfacing later as
+  // an opaque transient agent failure (ENG-326). It runs before the key check so a refused provider
+  // (ENG-476) is reported as such, not as a missing key.
+  const cliPreflight = preflightAgentCli(agentConfig);
+  if (!cliPreflight.ok) throw agentCliError(cliPreflight);
   const requiredKey = requiredEnvFor(agentConfig.provider);
   if (requiredKey && !process.env[requiredKey]) {
     throw new Error(
       `setup: ${requiredKey} is required for provider '${agentConfig.provider}' (runtime-context prose enrichment)`,
     );
   }
-  // The env key alone doesn't prove the CLI is usable. Probe the binary before the write-capable
-  // enrichment agent runs, so a missing/old CLI fails the setup gate with an actionable message
-  // instead of surfacing later as an opaque transient agent failure (ENG-326).
-  const cliPreflight = preflightAgentCli(agentConfig);
-  if (!cliPreflight.ok) throw agentCliError(cliPreflight);
   if (cliPreflight.unauthHint) process.stderr.write(`setup: ${cliPreflight.unauthHint}\n`);
   if (
     args["test-environment"] !== undefined &&

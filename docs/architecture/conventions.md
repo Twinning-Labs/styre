@@ -71,7 +71,7 @@ after use:
 
 | Prefix | Purpose |
 |---|---|
-| `styre-wt-*` | The dispatch **worktree** — the agent's only writable surface. |
+| `styre-wt-*` | The dispatch **worktree** — the only place the agent's file tools can write. |
 | `styre-inplace-*` | Identity-probe script dir for `--in-place` safety checks. |
 | `styre-reuse-*` | Env-reuse probe script dir. |
 | `styre-baseline-wt-*` | Replay-harness baseline worktree. |

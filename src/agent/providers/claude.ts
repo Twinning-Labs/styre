@@ -1,5 +1,5 @@
 import { agentEnv } from "../agent-env.ts";
-import { toolNamesFor } from "../capabilities.ts";
+import { toolNamesFor, toolSetMismatch } from "../capabilities.ts";
 import type {
   AgentRunInput,
   AgentRunResult,
@@ -70,28 +70,40 @@ export function parseClaudeStream(stdout: string): {
 } {
   let init: { tools: string[]; permissionMode: string | null } | null = null;
   let result: Record<string, unknown> | null = null;
-  for (const raw of stdout.split("\n")) {
-    const text = raw.trim();
-    if (text === "") continue;
-    let obj: Record<string, unknown>;
-    try {
-      obj = JSON.parse(text) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-    if (obj.type === "system" && obj.subtype === "init") {
-      const tools = Array.isArray(obj.tools)
-        ? obj.tools.filter((t): t is string => typeof t === "string")
-        : [];
-      init = {
-        tools,
-        permissionMode: typeof obj.permissionMode === "string" ? obj.permissionMode : null,
-      };
-    } else if (obj.type === "result") {
-      result = obj;
-    }
+  for (const line of stdout.split("\n")) {
+    const obj = parseJsonObject(line);
+    if (obj === null) continue;
+    if (obj.type === "system" && obj.subtype === "init") init = initFrom(obj);
+    else if (obj.type === "result") result = obj;
   }
   return { init, result };
+}
+
+/** A line parsed as a JSON object, or null for blank, non-JSON or non-object lines. */
+function parseJsonObject(line: string): Record<string, unknown> | null {
+  const text = line.trim();
+  if (text === "") return null;
+  try {
+    const value: unknown = JSON.parse(text);
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function initFrom(obj: Record<string, unknown>): {
+  tools: string[];
+  permissionMode: string | null;
+} {
+  const tools = Array.isArray(obj.tools)
+    ? obj.tools.filter((t): t is string => typeof t === "string")
+    : [];
+  return {
+    tools,
+    permissionMode: typeof obj.permissionMode === "string" ? obj.permissionMode : null,
+  };
 }
 
 /** What the CLI reports the agent was given (ENG-476). The tool set is compared against the
@@ -214,6 +226,12 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
         if (input.onSpawn && typeof proc.pid === "number") {
           input.onSpawn(proc.pid);
         }
+        // ENG-476: confinement is checked the moment the CLI reports it, not after the agent has
+        // worked. A wrong tool set or mode — or any agent action before the report — kills the
+        // process at once, so an unconfined agent never gets to act.
+        const gate = startupGate(toolNamesFor(input.allowedTools), () => proc.kill("SIGKILL"));
+        const stdoutP = readLines(proc.stdout, gate.onLine);
+        const stderrP = new Response(proc.stderr).text();
         const timeoutP = new Promise<"timeout">((resolve) => {
           timer = setTimeout(() => resolve("timeout"), input.timeoutMs);
         });
@@ -223,18 +241,19 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
           return transportFailure("dispatch timed out", true);
         }
         const exitCode = await proc.exited;
-        const [stdout, stderr] = await Promise.all([
-          new Response(proc.stdout).text(),
-          new Response(proc.stderr).text(),
-        ]);
+        const [stdout, stderr] = await Promise.all([stdoutP, stderrP]);
         const stream = parseClaudeStream(stdout);
-        // The result envelope is the one line the old `json` format printed; without it (a crash
-        // mid-stream) fall back to the raw text so a failure stays diagnosable.
-        const envelope = stream.result === null ? stdout : JSON.stringify(stream.result);
-        const usage = parseClaudeJson(envelope);
-        const finalText = assistantText(envelope); // usage stays parsed from the RAW envelope above
-        const capabilities = claudeCapabilities(stream.init);
-        if (exitCode === 0) {
+        const plainText = nonJsonLines(stdout);
+        // The final result event is the one line the old `json` format printed. Without it (a
+        // crash mid-stream) only the CLI's own plain-text lines are kept — never the transcript,
+        // whose tool results can hold file contents.
+        const envelope = stream.result === null ? null : JSON.stringify(stream.result);
+        const usage =
+          envelope === null
+            ? { costUsd: null, tokensIn: null, tokensOut: null, cacheRead: null, cacheCreate: null }
+            : parseClaudeJson(envelope);
+        const finalText = envelope === null ? plainText : assistantText(envelope);
+        if (exitCode === 0 && gate.fault() === null) {
           return {
             completed: true,
             exitCode,
@@ -242,10 +261,13 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
             stderr,
             timedOut: false,
             ...usage,
-            capabilities,
+            capabilities: claudeCapabilities(stream.init),
           };
         }
-        const { cause, resetAt } = classifyFailure(stderr, stdout);
+        // Classify from stderr and the result text only (review of ENG-476): tool results in the
+        // stream can quote a limit marker or carry secrets into the reset text.
+        const resultText = typeof stream.result?.result === "string" ? stream.result.result : "";
+        const { cause, resetAt } = classifyFailure(stderr, `${resultText}\n${plainText}`);
         return {
           completed: false,
           exitCode,
@@ -255,7 +277,10 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
           ...usage,
           cause,
           resetAt,
-          capabilities,
+          // A killed-at-startup run reports why; a run that died before reporting reports nothing
+          // (an ordinary failure, not a confinement fault); otherwise report what it had.
+          capabilities:
+            gate.fault() ?? (stream.init === null ? undefined : claudeCapabilities(stream.init)),
         };
       } catch (err) {
         return transportFailure(String(err), false);
@@ -264,4 +289,78 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
       }
     },
   };
+}
+
+/** Watches stream-json lines as they arrive (ENG-476). On the init event it checks the tool set
+ *  and permission mode; on an agent action (an `assistant` or `user` event) before any init it
+ *  treats the run as unverified. Either fault calls `kill` once and is reported by `fault()`. */
+export function startupGate(
+  expectedTools: readonly string[],
+  kill: () => void,
+): { onLine: (line: string) => void; fault: () => EffectiveCapabilities | null } {
+  let decided = false;
+  let fault: EffectiveCapabilities | null = null;
+  const stop = (f: EffectiveCapabilities) => {
+    fault = f;
+    decided = true;
+    kill();
+  };
+  return {
+    onLine(line: string) {
+      if (decided) return;
+      const obj = parseJsonObject(line);
+      if (obj === null) return;
+      if (obj.type === "system" && obj.subtype === "init") {
+        const caps = claudeCapabilities(initFrom(obj));
+        const problem = caps.error ?? toolSetMismatch(expectedTools, caps.tools ?? []);
+        if (problem !== null) {
+          stop({ tools: caps.tools, error: `stopped at startup: ${problem}` });
+        } else {
+          decided = true;
+        }
+        return;
+      }
+      if (obj.type === "assistant" || obj.type === "user") {
+        stop({ tools: null, error: "stopped: the agent acted before claude reported its tools" });
+      }
+    },
+    fault: () => fault,
+  };
+}
+
+/** Read a byte stream to text, calling `onLine` for every complete line as it arrives. */
+async function readLines(
+  stream: ReadableStream<Uint8Array>,
+  onLine: (line: string) => void,
+): Promise<string> {
+  const decoder = new TextDecoder();
+  const reader = stream.getReader();
+  let all = "";
+  let pending = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value, { stream: true });
+    all += chunk;
+    pending += chunk;
+    let nl = pending.indexOf("\n");
+    while (nl !== -1) {
+      onLine(pending.slice(0, nl));
+      pending = pending.slice(nl + 1);
+      nl = pending.indexOf("\n");
+    }
+  }
+  const tail = decoder.decode();
+  all += tail;
+  pending += tail;
+  if (pending.trim() !== "") onLine(pending);
+  return all;
+}
+
+/** The lines of `stdout` that are not JSON events: the CLI's own plain-text messages. */
+function nonJsonLines(stdout: string): string {
+  return stdout
+    .split("\n")
+    .filter((l) => l.trim() !== "" && parseJsonObject(l) === null)
+    .join("\n");
 }

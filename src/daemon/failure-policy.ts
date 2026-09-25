@@ -25,9 +25,12 @@ export interface FailurePolicyResult {
 
 export const DEFAULT_MAX_ATTEMPTS = 3;
 
+function errorMessage(step: WorkflowStepRow): string {
+  return step.error_json === null ? "" : (JSON.parse(step.error_json).message ?? "");
+}
+
 function failureSignature(step: WorkflowStepRow): string {
-  const message = step.error_json === null ? "" : (JSON.parse(step.error_json).message ?? "");
-  return `${step.step_key}:${message}`;
+  return `${step.step_key}:${errorMessage(step)}`;
 }
 
 /** The kind of the most recent recorded result for this verify step's check.
@@ -85,7 +88,11 @@ export function applyFailurePolicy(
         ticketId,
         dispatchId,
         kind: "escalated",
-        reason: `step '${step.step_key}' failed`,
+        // A prerequisite failure exists to tell an operator what to repair, so its message is the
+        // reason shown at the pause; an exhausted step keeps the terse form.
+        reason: prerequisite
+          ? `step '${step.step_key}' needs attention: ${errorMessage(step)}`
+          : `step '${step.step_key}' failed`,
         signature: failureSignature(step),
       });
     })();
@@ -107,7 +114,11 @@ export function applyFailurePolicy(
         ticketId,
         dispatchId,
         kind: "escalated",
-        reason: `step '${step.step_key}' failed`,
+        // A prerequisite failure exists to tell an operator what to repair, so its message is the
+        // reason shown at the pause; an exhausted step keeps the terse form.
+        reason: prerequisite
+          ? `step '${step.step_key}' needs attention: ${errorMessage(step)}`
+          : `step '${step.step_key}' failed`,
         signature: failureSignature(step),
       });
     })();

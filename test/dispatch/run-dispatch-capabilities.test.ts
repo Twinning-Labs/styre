@@ -144,3 +144,36 @@ test("FakeAgentRunner reports the step's own tool set by default, so existing te
   await call;
   db.close();
 });
+
+test("a FAILED dispatch the provider stopped for a wrong tool set is refused, not retried as transient", async () => {
+  const runner = rawRunner(() => ({
+    ...ok(),
+    completed: false,
+    exitCode: 137,
+    cause: "transient",
+    capabilities: {
+      tools: [...IMPLEMENT_TOOLS, "Bash"],
+      error: "stopped at startup: unexpected tools: Bash",
+    },
+  }));
+  const { db, ticketId, call } = await dispatchWith(runner);
+  const err = await call.catch((e: unknown) => e);
+  expect(err).toBeInstanceOf(StepPrerequisiteError);
+  expect(String(err)).toContain("stopped at startup");
+  const refused = listEvents(db, ticketId).find((e) => e.reason === "agent-capabilities-refused");
+  expect(JSON.parse(refused?.payload_json ?? "{}")).toMatchObject({
+    fault: "stopped at startup: unexpected tools: Bash",
+    tools: [...IMPLEMENT_TOOLS, "Bash"],
+  });
+  expect(listByTicket(db, ticketId)[0]?.cost_usd).toBe(0.1); // the paid run's cost is kept
+  db.close();
+});
+
+test("a failed dispatch with no capability report stays an ordinary transient failure", async () => {
+  const runner = rawRunner(() => ({ ...ok(), completed: false, exitCode: 1, cause: "transient" }));
+  const { db, call } = await dispatchWith(runner);
+  const err = await call.catch((e: unknown) => e);
+  expect(err).not.toBeInstanceOf(StepPrerequisiteError);
+  expect(String(err)).toContain("transport failure");
+  db.close();
+});

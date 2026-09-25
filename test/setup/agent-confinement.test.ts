@@ -61,9 +61,10 @@ test("enrichment refuses an unconfined agent on the first attempt, without retry
   expect(calls).toBe(1);
 });
 
-/** Every source file that launches an agent must check its confinement (ENG-476, class guard):
- *  a new call site that forgets the check fails this test rather than shipping unverified. */
-test("every agent launch site in src/ checks capabilityFault", () => {
+/** Every agent launch goes through `launchAgent` (ENG-476, class guard): outside the agent layer,
+ *  no source file may call `.run(` on a runner directly — a new call site that bypasses the
+ *  confinement check fails here instead of shipping unverified. */
+test("no source file outside the agent layer calls a runner's .run( directly", () => {
   const files: string[] = [];
   const walk = (dir: string) => {
     for (const name of readdirSync(dir)) {
@@ -72,9 +73,43 @@ test("every agent launch site in src/ checks capabilityFault", () => {
       else if (path.endsWith(".ts")) files.push(path);
     }
   };
-  walk(join(import.meta.dir, "../../src"));
-  const launchers = files.filter((f) => /\brunner\.run\(/.test(readFileSync(f, "utf8")));
-  expect(launchers.length).toBeGreaterThanOrEqual(3); // run-dispatch, discover, enrich — the guard must see them
-  const unchecked = launchers.filter((f) => !readFileSync(f, "utf8").includes("capabilityFault("));
-  expect(unchecked).toEqual([]);
+  const src = join(import.meta.dir, "../../src");
+  walk(src);
+  // The agent layer itself: the helper, the interface, the providers, the test double.
+  const agentLayer = new Set(
+    [
+      "agent/launch.ts",
+      "agent/runner.ts",
+      "agent/fake-runner.ts",
+      "agent/registry.ts",
+      "agent/resolve.ts",
+    ].map((f) => join(src, f)),
+  );
+  const direct = /\b\w*[Rr]unner\w*\s*\.\s*run\s*\(/;
+  const offenders = files.filter(
+    (f) =>
+      !agentLayer.has(f) &&
+      !f.includes(`${join(src, "agent", "providers")}`) &&
+      direct.test(readFileSync(f, "utf8")),
+  );
+  expect(offenders).toEqual([]);
+  // The guard must be able to see a violation: the helper itself matches the pattern.
+  expect(direct.test(readFileSync(join(src, "agent/launch.ts"), "utf8"))).toBe(true);
+});
+
+test("discovery also refuses a FAILED run its provider stopped for a wrong tool set", async () => {
+  const runner = new FakeAgentRunner(() => ({
+    ...widened,
+    completed: false,
+    exitCode: null,
+    capabilities: { tools: ["Read", "Bash"], error: "stopped at startup: unexpected tools: Bash" },
+  }));
+  const err = await discoverComponents(
+    process.cwd(),
+    { components: [], repoCommands: {} },
+    { runner, agentConfig: DEFAULT_AGENT_CONFIG },
+    { interactive: false, trustAgentCommands: true },
+  ).catch((e: unknown) => e);
+  expect(err).toBeInstanceOf(StyreError);
+  expect((err as StyreError).detail).toContain("stopped at startup");
 });

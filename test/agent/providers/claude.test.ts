@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -215,4 +215,108 @@ test("a claude success carrying a sidecar block yields extractable stdout (regre
   const parsed = extractSidecar(r.stdout, z.object({ n: z.number() }));
   expect(parsed.ok).toBe(true);
   if (parsed.ok) expect(parsed.value.n).toBe(5);
+});
+
+// Review finding 1: stream-json stdout carries every tool result (file contents included), so a
+// failure must be classified from stderr and the final result only — never the transcript.
+test("a limit marker quoted inside a tool result does not turn a server error into a pause", async () => {
+  const cli = fakeCli(
+    "claude-quoted-marker",
+    `${printLines([
+      initLine(["Read"]),
+      line({
+        type: "user",
+        message: {
+          content: [
+            { type: "tool_result", content: "/hit your session limit|usage limit reached/" },
+          ],
+        },
+      }),
+      resultLine({ is_error: true, result: "API Error: 500 Internal server error" }),
+    ])}\nexit 1`,
+  );
+  const r = await claudeAgentRunner(cli).run({ ...runInput });
+  expect(r.completed).toBe(false);
+  expect(r.cause).toBe("transient");
+  expect(r.resetAt).toBeNull();
+});
+
+test("the reset text comes from the result event, never from transcript content", async () => {
+  const cli = fakeCli(
+    "claude-reset-leak",
+    `${printLines([
+      initLine(["Read"]),
+      line({
+        type: "user",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              content: "git reset --hard HEAD then export DB_PASSWORD=hunter2",
+            },
+          ],
+        },
+      }),
+      resultLine({
+        is_error: true,
+        result: "You've hit your session limit · resets 3pm (Europe/Berlin)",
+      }),
+    ])}\nexit 1`,
+  );
+  const r = await claudeAgentRunner(cli).run({ ...runInput });
+  expect(r.cause).toBe("session-limit");
+  expect(r.resetAt).toBe("3pm (Europe/Berlin)");
+  expect(JSON.stringify(r)).not.toContain("hunter2");
+});
+
+test("a limit message the CLI prints as plain (non-JSON) stdout is still classified", async () => {
+  const cli = fakeCli(
+    "claude-plain-limit",
+    'echo "You\'ve hit your session limit · resets 9am"\nexit 1',
+  );
+  const r = await claudeAgentRunner(cli).run({ ...runInput });
+  expect(r.cause).toBe("session-limit");
+  expect(r.resetAt).toBe("9am");
+});
+
+// Review finding 2: confinement is enforced at startup, before the agent can act.
+test("an agent reported with an extra tool is killed at startup, before it can act", async () => {
+  const marker = join(cwd, "acted-after-bad-init.txt");
+  const cli = fakeCli(
+    "claude-wide-init",
+    `${printLines([initLine(["Read", "Bash"])])}\nsleep 5\ntouch '${marker}'\n${printLines([resultLine({ result: "ok" })])}`,
+  );
+  const start = Date.now();
+  const r = await claudeAgentRunner(cli).run({ ...runInput });
+  expect(Date.now() - start).toBeLessThan(3000); // killed on the init line, not after the sleep
+  expect(existsSync(marker)).toBe(false);
+  expect(r.completed).toBe(false);
+  expect(r.capabilities?.tools).toEqual(["Read", "Bash"]);
+  expect(r.capabilities?.error).toContain("stopped at startup: unexpected tools: Bash");
+});
+
+test("an agent that acts before claude reports its tools is killed", async () => {
+  const marker = join(cwd, "acted-before-init.txt");
+  const cli = fakeCli(
+    "claude-act-first",
+    `${printLines([line({ type: "assistant", message: { content: [] } })])}\nsleep 5\ntouch '${marker}'`,
+  );
+  const start = Date.now();
+  const r = await claudeAgentRunner(cli).run({ ...runInput });
+  expect(Date.now() - start).toBeLessThan(3000);
+  expect(existsSync(marker)).toBe(false);
+  expect(r.completed).toBe(false);
+  expect(r.capabilities?.error).toContain("acted before claude reported its tools");
+});
+
+test("a run that dies before reporting its tools is an ordinary failure, not a confinement fault", async () => {
+  const cli = fakeCli("claude-early-death", "echo 'API Error: overloaded' >&2\nexit 1");
+  const r = await claudeAgentRunner(cli).run({ ...runInput });
+  expect(r.completed).toBe(false);
+  expect(r.cause).toBe("transient");
+  expect(r.capabilities).toBeUndefined();
+});
+
+test("a null JSON line is ignored rather than crashing the parser", () => {
+  expect(parseClaudeStream(`null\n${initLine(["Read"])}`).init?.tools).toEqual(["Read"]);
 });

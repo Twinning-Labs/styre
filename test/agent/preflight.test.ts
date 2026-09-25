@@ -73,19 +73,15 @@ test("present + below floor → unsupported-version with found/required", () => 
   });
 });
 
-test("codex below its own floor → unsupported-version", () => {
-  const r = preflightAgentCli(codexConfig, {
+test("codex is refused before its install or version is examined, so the first error is the real one", () => {
+  const missing = preflightAgentCli(codexConfig, { onPath: () => false, env: env({}) });
+  expect(missing).toEqual({ ok: false, reason: "provider-not-enforceable", command: "codex" });
+  const old = preflightAgentCli(codexConfig, {
     onPath: () => true,
     runVersion: () => ({ ok: true, output: "codex-cli 0.139.0" }),
     env: env({ OPENAI_API_KEY: "x" }),
   });
-  expect(r).toEqual({
-    ok: false,
-    reason: "unsupported-version",
-    command: "codex",
-    found: "0.139.0",
-    required: "0.140.0",
-  });
+  expect(old).toEqual({ ok: false, reason: "provider-not-enforceable", command: "codex" });
 });
 
 test("unparseable --version → fail-open (ok, version null)", () => {
@@ -145,4 +141,23 @@ test("codex at a supported version → provider-not-enforceable (refused until E
     env: env({ OPENAI_API_KEY: "x" }),
   });
   expect(r).toEqual({ ok: false, reason: "provider-not-enforceable", command: "codex" });
+});
+
+test("a flag named only inside another option's description does not count as supported", () => {
+  const help = FULL_HELP.replace(
+    "  --tools <tools...>        Specify the list of available tools from the built-in set.",
+    "  --restricted-extra        Removes tools unless --tools names them.",
+  );
+  const r = preflightAgentCli(claudeConfig, {
+    onPath: () => true,
+    runVersion: () => ({ ok: true, output: "2.1.280" }),
+    runHelp: () => ({ ok: true, output: help }),
+    env: env({ ANTHROPIC_API_KEY: "x" }),
+  });
+  expect(r).toEqual({
+    ok: false,
+    reason: "missing-capability",
+    command: "claude",
+    missing: ["--tools"],
+  });
 });

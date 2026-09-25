@@ -1,4 +1,4 @@
-import { capabilityFault } from "../agent/capabilities.ts";
+import { launchAgent } from "../agent/launch.ts";
 import type { AgentRunner } from "../agent/runner.ts";
 import { resolveTier } from "../agent/tiers.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
@@ -165,7 +165,7 @@ export async function runAgentDispatch(
   });
 
   const allowedTools = allowlistFor(spec.handlerKey, { runnerCommands: spec.runnerCommands ?? [] });
-  const result = await deps.runner.run({
+  const { result, fault } = await launchAgent(deps.runner, {
     prompt,
     model,
     allowedTools,
@@ -173,6 +173,34 @@ export async function runAgentDispatch(
     timeoutMs: deps.timeoutMs,
     onSpawn: (pid) => setPid(ctx.db, ctx.step.id, pid),
   });
+
+  // ENG-476: capability isolation is verified on every dispatch, never assumed — including a
+  // failed one the provider stopped for a wrong tool set. A fault means the agent was not confined
+  // to this step's tools, so nothing it did can be trusted: record the refusal, undo the attempt and
+  // stop the run as a prerequisite failure (no retry — the same provider would fail the same way;
+  // an operator fixes the CLI or its setup, then resumes).
+  if (fault !== null) {
+    appendEvent(ctx.db, {
+      ticketId: ctx.ticket.id,
+      dispatchId: did,
+      kind: "note",
+      reason: "agent-capabilities-refused",
+      payload: { fault, tools: result.capabilities?.tools ?? null, allowed: allowedTools },
+    });
+    completeDispatch(ctx.db, inserted.id, {
+      outcome: "dispatch-failed",
+      endedAt: nowUtc(),
+      costUsd: result.costUsd,
+      tokensIn: result.tokensIn,
+      tokensOut: result.tokensOut,
+      cacheRead: result.cacheRead ?? null,
+      cacheCreate: result.cacheCreate ?? null,
+    });
+    undoAttempt(deps.worktreePath, untrackedBefore);
+    throw new StepPrerequisiteError(
+      `the agent's confinement could not be confirmed, so its work was discarded: ${fault}`,
+    );
+  }
 
   if (!result.completed || result.timedOut) {
     // A timeout never carries a marker (no drained output) → always transient.
@@ -194,25 +222,6 @@ export async function runAgentDispatch(
     );
   }
 
-  // ENG-476: capability isolation is verified on every completed dispatch, never assumed. A fault
-  // means the provider did not confine the agent to this step's tools, so nothing it did can be
-  // trusted: undo the attempt and stop the run as a prerequisite failure (no retry — the same
-  // provider would fail the same way; an operator fixes the CLI or its setup, then resumes).
-  const fault = capabilityFault(allowedTools, result.capabilities);
-  if (fault !== null) {
-    completeDispatch(ctx.db, inserted.id, { outcome: "dispatch-failed", endedAt: nowUtc() });
-    undoAttempt(deps.worktreePath, untrackedBefore);
-    appendEvent(ctx.db, {
-      ticketId: ctx.ticket.id,
-      dispatchId: did,
-      kind: "note",
-      reason: "agent-capabilities-refused",
-      payload: { fault, tools: result.capabilities?.tools ?? null, allowed: allowedTools },
-    });
-    throw new StepPrerequisiteError(
-      `dispatch ${did}: the agent's capabilities could not be confirmed (${fault})`,
-    );
-  }
   appendEvent(ctx.db, {
     ticketId: ctx.ticket.id,
     dispatchId: did,

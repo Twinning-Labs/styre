@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import discoverTemplate from "../../prompts/setup-discover.md" with { type: "text" };
-import { capabilityFault } from "../agent/capabilities.ts";
+import { launchAgent } from "../agent/launch.ts";
 import type { AgentRunner } from "../agent/runner.ts";
 import { agentConfinementError } from "../cli/errors.ts";
 import { type AgentConfig, modelForTier } from "../config/agent-config.ts";
@@ -52,22 +52,21 @@ export async function discoverComponents(
     return fallback;
   }
   const allowedTools = allowlistFor("setup:discover");
-  const result = await deps.runner.run({
+  const { result, fault } = await launchAgent(deps.runner, {
     prompt: rendered.prompt,
     model: modelForTier(deps.agentConfig, "standard"),
     allowedTools,
     cwd: repoDir,
     timeoutMs: DISCOVER_TIMEOUT_MS,
   });
+  // ENG-476: an unconfined agent is a hard stop, never the silent machine-observation fallback.
+  if (fault !== null) throw agentConfinementError(fault);
   if (!result.completed || result.timedOut) {
     warnings.push(
       "setup discovery failed or timed out; retaining unresolved machine observations.",
     );
     return fallback;
   }
-  // ENG-476: an unconfined agent is a hard stop, never the silent machine-observation fallback.
-  const fault = capabilityFault(allowedTools, result.capabilities);
-  if (fault !== null) throw agentConfinementError(fault);
   const parsed = extractSidecar(result.stdout, DiscoverSchema, { fence: "styre-setup-discover" });
   if (!parsed.ok) {
     // Never log the raw payload or parser message: JSON errors can contain input values.
