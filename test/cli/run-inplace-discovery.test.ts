@@ -62,7 +62,9 @@ async function invokeRun(profilePath: string): Promise<void> {
       } as RunArgs,
     });
   } finally {
-    if (prevTelemetry === undefined) process.env.STYRE_TELEMETRY = undefined;
+    if (prevTelemetry === undefined)
+      // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
+      delete process.env.STYRE_TELEMETRY;
     else process.env.STYRE_TELEMETRY = prevTelemetry;
     // Restore XDG with delete, NOT `= undefined`: the string "undefined" has length>0, so
     // configDir() would compute "undefined/styre" and leak it to later tests in the same process.
@@ -72,6 +74,28 @@ async function invokeRun(profilePath: string): Promise<void> {
     else process.env.XDG_CONFIG_HOME = prevXdg;
   }
 }
+
+test('invokeRun leaves STYRE_TELEMETRY unset when it was unset before, not the string "undefined"', async () => {
+  // invokeRun sets STYRE_TELEMETRY="0"; if its restore writes the string "undefined" instead of
+  // deleting the key, every later test in this process (and its child processes) inherits a
+  // STYRE_TELEMETRY that was never set by the caller.
+  const repo = makeRepo(true);
+  const prev = process.env.STYRE_TELEMETRY;
+  const prevCwd = process.cwd();
+  try {
+    // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
+    delete process.env.STYRE_TELEMETRY;
+    process.chdir(repo);
+    await expect(invokeRun(writeProfile(repo))).rejects.toThrow(/--ticket is required/);
+    expect("STYRE_TELEMETRY" in process.env).toBe(false);
+  } finally {
+    process.chdir(prevCwd);
+    if (prev === undefined)
+      // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
+      delete process.env.STYRE_TELEMETRY;
+    else process.env.STYRE_TELEMETRY = prev;
+  }
+});
 
 test("run --in-place: overrides profile.targetRepo with the cwd-discovered repo root, not the stale profile value", async () => {
   const cwdRepo = makeRepo(true); // has the marker — this is what discovery SHOULD return

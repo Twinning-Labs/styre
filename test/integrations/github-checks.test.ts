@@ -7,7 +7,9 @@ test("githubChecks throws a clear setup error when no token is available", () =>
   try {
     expect(() => githubChecks({ repoPath: "/tmp/does-not-matter" })).toThrow(/token/i);
   } finally {
-    if (prev === undefined) process.env.GITHUB_TOKEN = undefined as unknown as string;
+    if (prev === undefined)
+      // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
+      delete process.env.GITHUB_TOKEN;
     else process.env.GITHUB_TOKEN = prev;
   }
 });

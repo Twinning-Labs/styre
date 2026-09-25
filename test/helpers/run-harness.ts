@@ -148,7 +148,8 @@ export async function runParkedTicket(): Promise<ParkedRunResult> {
     process.exitCode = previousExitCode;
     // Restore XDG_STATE_HOME so the global side-effect doesn't leak to subsequent tests.
     if (prevXdgStateHome === undefined) {
-      process.env.XDG_STATE_HOME = undefined;
+      // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
+      delete process.env.XDG_STATE_HOME;
     } else {
       process.env.XDG_STATE_HOME = prevXdgStateHome;
     }
@@ -279,7 +280,8 @@ export async function runNeedsYouTicket(): Promise<ParkedRunResult> {
     process.exitCode = previousExitCode;
     // Restore XDG_STATE_HOME so the global side-effect doesn't leak to subsequent tests.
     if (prevXdgStateHome === undefined) {
-      process.env.XDG_STATE_HOME = undefined;
+      // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
+      delete process.env.XDG_STATE_HOME;
     } else {
       process.env.XDG_STATE_HOME = prevXdgStateHome;
     }
@@ -466,7 +468,8 @@ export async function resumeParkedTicket(
   } finally {
     process.exitCode = previousExitCode;
     if (prevXdgStateHome === undefined) {
-      process.env.XDG_STATE_HOME = undefined;
+      // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
+      delete process.env.XDG_STATE_HOME;
     } else {
       process.env.XDG_STATE_HOME = prevXdgStateHome;
     }

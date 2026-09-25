@@ -200,7 +200,8 @@ test("resumeRun wires resetProvisionForResume into the resume path (S4)", async 
     expect(observedStatus).toBe("pending");
   } finally {
     if (prevXdgStateHome === undefined) {
-      process.env.XDG_STATE_HOME = undefined;
+      // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
+      delete process.env.XDG_STATE_HOME;
     } else {
       process.env.XDG_STATE_HOME = prevXdgStateHome;
     }
@@ -266,7 +267,8 @@ test("resumeRun --inspect names a failed step, not (none), when no step is 'runn
   } finally {
     process.stderr.write = origStderrWrite;
     if (prevXdgStateHome === undefined) {
-      process.env.XDG_STATE_HOME = undefined;
+      // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
+      delete process.env.XDG_STATE_HOME;
     } else {
       process.env.XDG_STATE_HOME = prevXdgStateHome;
     }
