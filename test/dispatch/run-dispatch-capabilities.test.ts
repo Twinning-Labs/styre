@@ -160,7 +160,12 @@ test("a FAILED dispatch the provider stopped for a wrong tool set is refused, no
   const err = await call.catch((e: unknown) => e);
   expect(err).toBeInstanceOf(StepPrerequisiteError);
   expect(String(err)).toContain("stopped at startup");
-  const refused = listEvents(db, ticketId).find((e) => e.reason === "agent-capabilities-refused");
+  const refused = listEvents(db, ticketId).find((e) =>
+    e.reason?.startsWith("agent-capabilities-refused"),
+  );
+  expect(refused?.reason).toBe(
+    "agent-capabilities-refused: stopped at startup: unexpected tools: Bash",
+  );
   expect(JSON.parse(refused?.payload_json ?? "{}")).toMatchObject({
     fault: "stopped at startup: unexpected tools: Bash",
     tools: [...IMPLEMENT_TOOLS, "Bash"],

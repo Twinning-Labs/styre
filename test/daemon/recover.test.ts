@@ -65,3 +65,21 @@ test("recover leaves succeeded and pending steps untouched", () => {
   expect(result.reset).toBe(0);
   expect(doneAfter?.status).toBe("succeeded");
 });
+
+test("realRecoverDeps().kill takes down an orphaned agent's whole process group (ENG-476)", async () => {
+  const { realRecoverDeps } = await import("../../src/daemon/recover.ts");
+  const { existsSync, mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const marker = join(mkdtempSync(join(tmpdir(), "styre-recover-pg-")), "orphan-child-acted.txt");
+  // An agent (group leader) whose child would still act after the leader is gone.
+  const agent = Bun.spawn(["sh", "-c", `(sleep 1; touch '${marker}') & echo started; wait`], {
+    detached: true,
+    stdout: "pipe",
+  });
+  await agent.stdout.getReader().read(); // the child exists before recovery kills (else the probe is blind)
+  realRecoverDeps().kill(agent.pid);
+  await agent.exited;
+  await Bun.sleep(1500);
+  expect(existsSync(marker)).toBe(false);
+});

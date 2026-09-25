@@ -77,7 +77,7 @@ License: GPLv3.
 
 ## How it works
 
-Styre's trust story starts with capability isolation: dispatched agents get no `gh` or issue-tracker tools, and the runner strips the tracker/forge credentials (`LINEAR_API_KEY`, `JIRA_API_TOKEN`, `GITHUB_TOKEN`) from their environment — so an agent can't reach your tracker or code host. The agent CLI does keep the LLM provider key it needs to authenticate its own model calls; that key is additionally stripped from verify-time commands, which run agent-authored code. The worktree is the only writable surface. The runner (`styre run`) holds the outward credentials, commits the results, and is the sole writer to the SQLite state-of-truth. (Full model in [`SECURITY.md`](SECURITY.md).)
+Styre's trust story starts with capability isolation: dispatched agents get no `gh` or issue-tracker tools, and the runner strips the tracker/forge credentials (`LINEAR_API_KEY`, `JIRA_API_TOKEN`, `GITHUB_TOKEN`) from their environment — so an agent can't reach your tracker or code host. The agent CLI does keep the LLM provider key it needs to authenticate its own model calls; that key is additionally stripped from verify-time commands, which run agent-authored code. Each agent step gets exactly its allowlisted tools, and its file tools can write only inside the worktree; declared test and build commands still run as ordinary processes. The runner (`styre run`) holds the outward credentials, commits the results, and is the sole writer to the SQLite state-of-truth. (Full model in [`SECURITY.md`](SECURITY.md).)
 
 Each step in the control loop is journaled before it runs. If a step has already succeeded, replay returns the recorded result — the step never re-executes. This gives you crash-resume for free. Verdicts (design sound? tests green? acceptance criteria met? diff in scope?) come from build output, the test and acceptance-criteria gates, and an independent reviewer step — never from the agent self-reporting success. (CI is *reported* at PR-open, not used as a gate.)
 
@@ -197,7 +197,7 @@ Styre follows the XDG Base Directory spec (macOS and Linux alike) and honors `XD
 
 - `$XDG_CONFIG_HOME/styre/` (default `~/.config/styre/`) — `config.json` and per-project `profile.json`.
 - `$XDG_STATE_HOME/styre/` (default `~/.local/state/styre/`) — the SQLite DB, the telemetry id, and per-effort checkpoints (`<slug>/<ticket-ident>/`) — the live location a run journals to, reaped by `styre clean`.
-- Per-run worktrees and scratch live under the OS temp dir and are cleaned up; the agent's worktree is its only writable surface.
+- Per-run worktrees and scratch live under the OS temp dir and are cleaned up; the agent's worktree is the only place its file tools can write.
 
 The full path layout, the `.styre-disposable` marker, `AGENTS.md` ingestion, and the `styre_scratch/` drawer are in [`docs/architecture/conventions.md`](docs/architecture/conventions.md).
 

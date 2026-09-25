@@ -29,3 +29,12 @@ test("session-limit with no reset text yields resetAt null", () => {
   expect(r.cause).toBe("session-limit");
   expect(r.resetAt).toBeNull();
 });
+
+test("the reset text is taken only from the limit message's own line (review of ENG-476)", () => {
+  const r = classifyFailure(
+    "socket error: connection reset by peer",
+    "You've hit your session limit",
+  );
+  expect(r.cause).toBe("session-limit");
+  expect(r.resetAt).toBeNull();
+});

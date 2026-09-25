@@ -95,6 +95,18 @@ test("no source file outside the agent layer calls a runner's .run( directly", (
   expect(offenders).toEqual([]);
   // The guard must be able to see a violation: the helper itself matches the pattern.
   expect(direct.test(readFileSync(join(src, "agent/launch.ts"), "utf8"))).toBe(true);
+
+  // Stricter, name-independent rule: a file that handles an AgentRunner at all may not call any
+  // `.run(` / `?.run(` — which also catches aliases (`const r = deps.runner; r.run(`) and optional
+  // chaining. Known residual: destructuring (`const { run } = runner`) is not detected.
+  const anyRunCall = /(?:\?\.|\.)\s*run\s*\(/;
+  const handlers = files.filter(
+    (f) => f !== join(src, "agent/launch.ts") && readFileSync(f, "utf8").includes("AgentRunner"),
+  );
+  expect(handlers.length).toBeGreaterThanOrEqual(5); // run-dispatch, discover, enrich, cli wiring…
+  expect(handlers.filter((f) => anyRunCall.test(readFileSync(f, "utf8")))).toEqual([]);
+  expect(anyRunCall.test("const r = deps.runner; r.run(input)")).toBe(true); // sees aliases
+  expect(anyRunCall.test("deps.runner?.run(input)")).toBe(true); // sees optional chaining
 });
 
 test("discovery also refuses a FAILED run its provider stopped for a wrong tool set", async () => {

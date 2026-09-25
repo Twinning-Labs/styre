@@ -1,5 +1,6 @@
 import { agentEnv } from "../agent-env.ts";
 import { toolNamesFor, toolSetMismatch } from "../capabilities.ts";
+import { forwardTerminationSignals, killProcessGroup } from "../process-group.ts";
 import type {
   AgentRunInput,
   AgentRunResult,
@@ -49,17 +50,23 @@ export function buildClaudeArgs(input: { model: string; allowedTools: string[] }
   ];
 }
 
-/** The flags `buildClaudeArgs` depends on, as the preflight must find them in `claude --help`.
- *  `dontAsk` is a permission-mode choice, not a flag, but a CLI without it cannot honor the mode. */
-export const CLAUDE_REQUIRED_HELP_TOKENS = [
-  "--restricted",
-  "--tools",
-  "--allowedTools",
-  "--permission-mode",
-  "dontAsk",
-  "--strict-mcp-config",
-  "stream-json",
+/** The options `buildClaudeArgs` depends on, as the preflight must find them in `claude --help`:
+ *  each option must be listed, and where a value is pinned (`dontAsk`, `stream-json`) that value
+ *  must be among the option's listed choices. */
+export const CLAUDE_REQUIRED_HELP: readonly HelpRequirement[] = [
+  { option: "--restricted" },
+  { option: "--tools" },
+  { option: "--allowedTools" },
+  { option: "--permission-mode", choice: CLAUDE_PERMISSION_MODE },
+  { option: "--strict-mcp-config" },
+  { option: "--output-format", choice: "stream-json" },
 ];
+
+/** One option (and optionally one of its choices) a CLI's `--help` must list. */
+export interface HelpRequirement {
+  option: string;
+  choice?: string;
+}
 
 /** The init event and final result envelope of a `stream-json` run. Either is null when absent.
  *  Non-JSON lines are ignored (the CLI prints nothing else on stdout, but a partial write on a
@@ -166,13 +173,18 @@ export function assistantText(rawStdout: string): string {
 /** Map a Claude `claude -p` death to a provider-neutral cause (ENG-164). The ONLY place that
  *  knows Claude's marker strings. A session-limit death is a clean non-zero exit carrying the
  *  marker on stderr/stdout, so both streams are searched. */
+const SESSION_LIMIT = /hit your session limit|session limit|usage limit reached/i;
+
 export function classifyFailure(
   stderr: string,
   stdout: string,
 ): { cause: FailureCause; resetAt: string | null } {
   const text = `${stderr}\n${stdout}`;
-  if (/hit your session limit|session limit|usage limit reached/i.test(text)) {
-    const m = text.match(/resets?\s+([^\n]+)/i);
+  const limitLine = text.split("\n").find((l) => SESSION_LIMIT.test(l));
+  if (limitLine !== undefined) {
+    // The reset time is read from the limit message's own line only, never from unrelated text
+    // such as "connection reset by peer".
+    const m = limitLine.match(/resets?\s+(.+)/i);
     return { cause: "session-limit", resetAt: m ? m[1].trim() : null };
   }
   if (/out of credit|insufficient credit|credit balance is too low/i.test(text)) {
@@ -215,33 +227,50 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
         resetAt: null,
       });
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let stopForwarding = () => {};
       try {
+        // The CLI leads its own process group (ENG-476), so every kill below reaches whatever it
+        // started — including the real agent behind a wrapper script or version-manager shim.
         const proc = Bun.spawn([command, ...buildClaudeArgs(input)], {
           cwd: input.cwd,
           env: agentEnv(process.env),
           stdin: new TextEncoder().encode(input.prompt),
           stdout: "pipe",
           stderr: "pipe",
+          detached: true,
         });
+        const killGroup = () => killProcessGroup(proc.pid);
+        // Detached, the agent no longer receives the terminal's Ctrl-C; forward it instead.
+        stopForwarding = forwardTerminationSignals(proc.pid);
         if (input.onSpawn && typeof proc.pid === "number") {
           input.onSpawn(proc.pid);
         }
         // ENG-476: confinement is checked the moment the CLI reports it, not after the agent has
         // worked. A wrong tool set or mode — or any agent action before the report — kills the
-        // process at once, so an unconfined agent never gets to act.
-        const gate = startupGate(toolNamesFor(input.allowedTools), () => proc.kill("SIGKILL"));
-        const stdoutP = readLines(proc.stdout, gate.onLine);
-        const stderrP = new Response(proc.stderr).text();
+        // group at once, so an unconfined agent never gets to act.
+        const gate = startupGate(toolNamesFor(input.allowedTools), killGroup);
+        const stdoutRead = readLines(proc.stdout, gate.onLine);
+        const stderrRead = readLines(proc.stderr, () => {});
         const timeoutP = new Promise<"timeout">((resolve) => {
           timer = setTimeout(() => resolve("timeout"), input.timeoutMs);
         });
         const outcome = await Promise.race([proc.exited.then(() => "exited" as const), timeoutP]);
         if (outcome === "timeout") {
-          proc.kill("SIGKILL");
+          killGroup();
           return transportFailure("dispatch timed out", true);
         }
         const exitCode = await proc.exited;
-        const [stdout, stderr] = await Promise.all([stdoutP, stderrP]);
+        // Reap anything the CLI left running in its group (it would hold the output pipes open),
+        // then drain for a bounded time: a process that escaped the group can never hang the run.
+        killGroup();
+        const drained = await Promise.race([
+          Promise.all([stdoutRead.done, stderrRead.done]).then(() => true),
+          Bun.sleep(DRAIN_TIMEOUT_MS).then(() => false),
+        ]);
+        const stdout = stdoutRead.text();
+        const stderr = drained
+          ? stderrRead.text()
+          : `${stderrRead.text()}\n[output drain timed out]`;
         const stream = parseClaudeStream(stdout);
         const plainText = nonJsonLines(stdout);
         // The final result event is the one line the old `json` format printed. Without it (a
@@ -286,6 +315,7 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
         return transportFailure(String(err), false);
       } finally {
         clearTimeout(timer);
+        stopForwarding();
       }
     },
   };
@@ -328,33 +358,40 @@ export function startupGate(
   };
 }
 
-/** Read a byte stream to text, calling `onLine` for every complete line as it arrives. */
-async function readLines(
+/** How long to wait for the output pipes to close once the CLI has exited and its group has been
+ *  killed. Only a process that escaped the group can hold them past this. */
+const DRAIN_TIMEOUT_MS = 5_000;
+
+/** Read a byte stream, calling `onLine` for every complete line as it arrives. `text()` returns
+ *  everything read so far, so a bounded drain can still use a partial read. */
+function readLines(
   stream: ReadableStream<Uint8Array>,
   onLine: (line: string) => void,
-): Promise<string> {
+): { done: Promise<void>; text: () => string } {
   const decoder = new TextDecoder();
-  const reader = stream.getReader();
   let all = "";
-  let pending = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const chunk = decoder.decode(value, { stream: true });
-    all += chunk;
-    pending += chunk;
-    let nl = pending.indexOf("\n");
-    while (nl !== -1) {
-      onLine(pending.slice(0, nl));
-      pending = pending.slice(nl + 1);
-      nl = pending.indexOf("\n");
+  const done = (async () => {
+    const reader = stream.getReader();
+    let pending = "";
+    for (;;) {
+      const { done: end, value } = await reader.read();
+      if (end) break;
+      const chunk = decoder.decode(value, { stream: true });
+      all += chunk;
+      pending += chunk;
+      let nl = pending.indexOf("\n");
+      while (nl !== -1) {
+        onLine(pending.slice(0, nl));
+        pending = pending.slice(nl + 1);
+        nl = pending.indexOf("\n");
+      }
     }
-  }
-  const tail = decoder.decode();
-  all += tail;
-  pending += tail;
-  if (pending.trim() !== "") onLine(pending);
-  return all;
+    const tail = decoder.decode();
+    all += tail;
+    pending += tail;
+    if (pending.trim() !== "") onLine(pending);
+  })();
+  return { done, text: () => all };
 }
 
 /** The lines of `stdout` that are not JSON events: the CLI's own plain-text messages. */

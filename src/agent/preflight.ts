@@ -1,5 +1,9 @@
 import { type AgentConfig, requiredEnvFor } from "../config/agent-config.ts";
-import { CLAUDE_MIN_CLI_VERSION, CLAUDE_REQUIRED_HELP_TOKENS } from "./providers/claude.ts";
+import {
+  CLAUDE_MIN_CLI_VERSION,
+  CLAUDE_REQUIRED_HELP,
+  type HelpRequirement,
+} from "./providers/claude.ts";
 import { CODEX_MIN_CLI_VERSION } from "./providers/codex.ts";
 
 /** Result of probing the configured agent CLI before dispatch (ENG-326). `version: null` on the
@@ -11,10 +15,10 @@ export type AgentCliPreflight =
   | { ok: false; reason: "missing-capability"; command: string; missing: string[] }
   | { ok: false; reason: "provider-not-enforceable"; command: string };
 
-/** Per-provider tokens `<cli> --help` must contain for the adapter's capability-isolation flags
- *  to exist (ENG-476). Probed, not inferred from a version number: a flag either exists or not. */
-const PROVIDER_REQUIRED_HELP: Record<string, readonly string[]> = {
-  claude: CLAUDE_REQUIRED_HELP_TOKENS,
+/** Per-provider options `<cli> --help` must list for the adapter's capability-isolation flags to
+ *  exist (ENG-476). Probed, not inferred from a version number: an option either exists or not. */
+const PROVIDER_REQUIRED_HELP: Record<string, readonly HelpRequirement[]> = {
+  claude: CLAUDE_REQUIRED_HELP,
 };
 
 /** Providers Styre refuses to dispatch through because they cannot enforce a step's capability
@@ -70,13 +74,25 @@ function defaultRunVersion(command: string): { ok: boolean; output: string } {
   return { ok: r.success, output: `${dec.decode(r.stdout)}${dec.decode(r.stderr)}` };
 }
 
-/** True when `help` lists `token`: a `--flag` must START an option line (optionally after a short
- *  alias like `-p, `), so a flag merely named in another option's description does not count; any
- *  other token (a choice such as `dontAsk`) may appear anywhere. */
-export function helpLists(help: string, token: string): boolean {
-  if (!token.startsWith("--")) return help.includes(token);
-  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`^\\s*(?:-[A-Za-z], )?${escaped}(?=[\\s,=]|$)`, "m").test(help);
+/** The name a missing requirement is reported under, e.g. `--permission-mode dontAsk`. */
+export function requirementName(req: HelpRequirement): string {
+  return req.choice === undefined ? req.option : `${req.option} ${req.choice}`;
+}
+
+/** True when `help` lists the requirement. The option must start a line in the OPTION column —
+ *  exactly two spaces of indent, optionally after a short alias like `-p, ` — so a flag named in a
+ *  description, even at the start of a wrapped description line, does not count. A required choice
+ *  must appear within that option's own entry (up to the next option line). */
+export function helpLists(help: string, req: HelpRequirement): boolean {
+  const lines = help.split("\n");
+  const escaped = req.option.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const optionLine = new RegExp(`^ {2}(?:-[A-Za-z], )?${escaped}(?=[\\s,=]|$)`);
+  const start = lines.findIndex((l) => optionLine.test(l));
+  if (start === -1) return false;
+  if (req.choice === undefined) return true;
+  const nextOption = lines.findIndex((l, i) => i > start && /^ {2}-/.test(l));
+  const entry = lines.slice(start, nextOption === -1 ? undefined : nextOption).join("\n");
+  return entry.includes(req.choice);
 }
 
 function defaultRunHelp(command: string): { ok: boolean; output: string } {
@@ -142,7 +158,9 @@ export function preflightAgentCli(
   const tokens = PROVIDER_REQUIRED_HELP[config.provider] ?? [];
   if (tokens.length > 0) {
     const help = runHelp(command);
-    const missing = help.ok ? tokens.filter((t) => !helpLists(help.output, t)) : [...tokens];
+    const missing = (help.ok ? tokens.filter((t) => !helpLists(help.output, t)) : [...tokens]).map(
+      requirementName,
+    );
     if (missing.length > 0) return { ok: false, reason: "missing-capability", command, missing };
   }
 

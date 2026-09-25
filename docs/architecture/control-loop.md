@@ -206,7 +206,9 @@ Capability frame (move 4) applies to every agent step, enforced by the provider 
 at the start of every dispatch (ENG-476; see `SECURITY.md`): each step gets **exactly** the tools its
 allowlist names and its file tools are confined to its working folder, so the **worktree is the only
 place agent file tools can write** (declared commands still run as ordinary, unconfined processes);
-agents have **no outward tools** — no `gh`, no `git push`, no Linear, no ambient key, no `curl`.
+agents have **no tracker, forge or push tools** — no `gh`, no `git push`, no Linear, no ambient key,
+no `curl`. The one outward tool is web access in the design step (`WebSearch`/`WebFetch`), listed as a
+remaining gap in `SECURITY.md`.
 Every external effect is the runner's (§5). **The runner commits, not the agent** (`[CL-COMMIT]`):
 agents only edit files; the runner commits each dispatch's worktree changes with a deterministic
 message (incl. `dispatch_id`) and records the SHA — so agents need no git tool at all.

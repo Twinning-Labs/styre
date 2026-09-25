@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { killProcessGroup } from "../agent/process-group.ts";
 import * as steps from "../db/repos/workflow-step.ts";
 import { StepExecutionError } from "../engine/step-journal.ts";
 import { isSuiteStep } from "./verification-retry.ts";
@@ -39,7 +40,8 @@ export function recover(db: Database, deps: RecoverDeps): RecoverResult {
   return { reset: running.length, killed };
 }
 
-/** Production deps: liveness via signal 0 (throws if the pid is gone), SIGKILL to kill. */
+/** Production deps: liveness via signal 0 (throws if the pid is gone), SIGKILL to the pid's
+ *  process group (falling back to the pid alone) to kill. */
 export function realRecoverDeps(): RecoverDeps {
   return {
     isAlive: (pid: number) => {
@@ -50,12 +52,8 @@ export function realRecoverDeps(): RecoverDeps {
         return false;
       }
     },
-    kill: (pid: number) => {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // already gone — nothing to kill
-      }
-    },
+    // Agents lead their own process group (ENG-476), so kill the group: an orphaned agent's
+    // children (the real CLI behind a wrapper, tools it started) die with it.
+    kill: (pid: number) => killProcessGroup(pid),
   };
 }

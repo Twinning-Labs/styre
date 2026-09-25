@@ -320,3 +320,33 @@ test("a run that dies before reporting its tools is an ordinary failure, not a c
 test("a null JSON line is ignored rather than crashing the parser", () => {
   expect(parseClaudeStream(`null\n${initLine(["Read"])}`).init?.tools).toEqual(["Read"]);
 });
+
+// Second review, finding 1: the kill must reach the real agent even behind a wrapper or shim.
+test("an unconfined agent behind a wrapper script is killed with its wrapper, before it can act", async () => {
+  // The invariant is that the agent never acts, not a wall-clock bound: macOS scans a freshly
+  // written executable on first run, which can add over a second of startup.
+  const marker = join(cwd, "wrapped-agent-acted.txt");
+  const inner = fakeCli(
+    "claude-inner",
+    `${printLines([initLine(["Read", "Bash"])])}\nsleep 3\ntouch '${marker}'`,
+  );
+  const wrapper = fakeCli("claude-wrapper", `'${inner}' "$@"\nexit $?`); // a child, not exec
+  const start = Date.now();
+  const r = await claudeAgentRunner(wrapper).run({ ...runInput });
+  expect(Date.now() - start).toBeLessThan(3000); // returned before the agent could act
+  await Bun.sleep(3500 - (Date.now() - start)); // then wait past the agent's delay
+  expect(existsSync(marker)).toBe(false);
+  expect(r.capabilities?.error).toContain("stopped at startup: unexpected tools: Bash");
+});
+
+test("a background process the CLI leaves behind does not keep the run waiting", async () => {
+  const cli = fakeCli(
+    "claude-straggler",
+    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\n(sleep 30) &\nexit 0`,
+  );
+  const start = Date.now();
+  const r = await claudeAgentRunner(cli).run({ ...runInput });
+  expect(Date.now() - start).toBeLessThan(3000);
+  expect(r.completed).toBe(true);
+  expect(r.stdout).toBe("ok");
+});

@@ -184,7 +184,9 @@ export async function runAgentDispatch(
       ticketId: ctx.ticket.id,
       dispatchId: did,
       kind: "note",
-      reason: "agent-capabilities-refused",
+      // The fault names only tools and a permission mode, so it is safe to show in the run
+      // summary's timeline, which is where the operator sees why the run paused.
+      reason: `agent-capabilities-refused: ${fault}`,
       payload: { fault, tools: result.capabilities?.tools ?? null, allowed: allowedTools },
     });
     completeDispatch(ctx.db, inserted.id, {

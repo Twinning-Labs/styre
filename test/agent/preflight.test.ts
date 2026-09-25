@@ -119,7 +119,7 @@ test("claude whose --help lacks a pinned flag → missing-capability naming ever
     ok: false,
     reason: "missing-capability",
     command: "claude",
-    missing: ["--restricted", "dontAsk"],
+    missing: ["--restricted", "--permission-mode dontAsk"],
   });
 });
 
@@ -159,5 +159,40 @@ test("a flag named only inside another option's description does not count as su
     reason: "missing-capability",
     command: "claude",
     missing: ["--tools"],
+  });
+});
+
+test("a wrapped description line starting with a flag (the real 2.1.280 --help shape) does not count", () => {
+  const help = FULL_HELP.replace(
+    "  --tools <tools...>        Specify the list of available tools from the built-in set.",
+    "                                        --tools names them, and ignores user,",
+  );
+  const r = preflightAgentCli(claudeConfig, {
+    onPath: () => true,
+    runVersion: () => ({ ok: true, output: "2.1.280" }),
+    runHelp: () => ({ ok: true, output: help }),
+    env: env({ ANTHROPIC_API_KEY: "x" }),
+  });
+  expect(r).toEqual({
+    ok: false,
+    reason: "missing-capability",
+    command: "claude",
+    missing: ["--tools"],
+  });
+});
+
+test("a required choice counts only inside its own option, not anywhere in the help", () => {
+  const help = `${FULL_HELP.replace('"dontAsk", ', "")}\n  --other <x>  mentions dontAsk here`;
+  const r = preflightAgentCli(claudeConfig, {
+    onPath: () => true,
+    runVersion: () => ({ ok: true, output: "2.1.280" }),
+    runHelp: () => ({ ok: true, output: help }),
+    env: env({ ANTHROPIC_API_KEY: "x" }),
+  });
+  expect(r).toEqual({
+    ok: false,
+    reason: "missing-capability",
+    command: "claude",
+    missing: ["--permission-mode dontAsk"],
   });
 });
