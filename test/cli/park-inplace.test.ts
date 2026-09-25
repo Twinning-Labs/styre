@@ -168,7 +168,8 @@ test("resumeRun derives in-place from the persisted worktree path: skips wipe/re
     expect(provisionStep?.attempt).toBeGreaterThan(0); // untouched — resetProvisionForResume zeroes this
   } finally {
     if (prevXdgStateHome === undefined) {
-      process.env.XDG_STATE_HOME = undefined;
+      // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
+      delete process.env.XDG_STATE_HOME;
     } else {
       process.env.XDG_STATE_HOME = prevXdgStateHome;
     }
@@ -265,7 +266,8 @@ test("resumeRun re-checks in-place identity before mutating: throws when the act
     expect(headAfter).toBe("main");
   } finally {
     if (prevXdgStateHome === undefined) {
-      process.env.XDG_STATE_HOME = undefined;
+      // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
+      delete process.env.XDG_STATE_HOME;
     } else {
       process.env.XDG_STATE_HOME = prevXdgStateHome;
     }
@@ -364,7 +366,8 @@ test("resumeRun refuses in-place resume when the disposability marker is absent:
     expect(worktreeLines.length).toBe(1);
   } finally {
     if (prevXdgStateHome === undefined) {
-      process.env.XDG_STATE_HOME = undefined;
+      // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
+      delete process.env.XDG_STATE_HOME;
     } else {
       process.env.XDG_STATE_HOME = prevXdgStateHome;
     }
@@ -457,7 +460,8 @@ test("resumeRun with the marker present re-applies profile.targetRepo (the disco
     expect(profile.targetRepo).toBe(repoPath);
   } finally {
     if (prevXdgStateHome === undefined) {
-      process.env.XDG_STATE_HOME = undefined;
+      // biome-ignore lint/performance/noDelete: env must be truly unset, not the string "undefined"
+      delete process.env.XDG_STATE_HOME;
     } else {
       process.env.XDG_STATE_HOME = prevXdgStateHome;
     }
