@@ -416,10 +416,15 @@ function readLines(
   };
 }
 
-/** The lines of `stdout` that are not JSON events: the CLI's own plain-text messages. */
+/** The lines of `stdout` that are not JSON events: the CLI's own plain-text messages. A line that
+ *  starts with `{` is a stream event — possibly one cut off by a crash mid-write — never a plain
+ *  message, so it is excluded even when it does not parse: its content is transcript. */
 function nonJsonLines(stdout: string): string {
   return stdout
     .split("\n")
-    .filter((l) => l.trim() !== "" && parseJsonObject(l) === null)
+    .filter((l) => {
+      const text = l.trim();
+      return text !== "" && !text.startsWith("{");
+    })
     .join("\n");
 }

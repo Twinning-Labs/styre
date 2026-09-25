@@ -351,8 +351,8 @@ test("if recording the spawn fails, the already-started agent is killed, not lef
   expect(existsSync(acted)).toBe(false);
 });
 
-test("a process that escaped the group and holds the output pipe does not keep the runner alive", async () => {
-  // python's setsid puts the holder in a new session, outside the CLI's process group.
+test("a detached leftover process holding the output pipe does not keep the runner alive", async () => {
+  // python's setsid detaches the holder into a new session, so killing the CLI does not reach it.
   const escaped = join(cwd, "holder-escaped.txt");
   const cli = fakeCli(
     "claude-escaper",
@@ -377,3 +377,16 @@ console.log(JSON.stringify({ completed: r.completed, stdout: r.stdout }));`,
     stdout: "ok",
   });
 }, 20000);
+
+test("a transcript line cut off by a crash is never read as the CLI's own message", async () => {
+  // The CLI dies mid-write: the last line is an incomplete tool_result, not valid JSON.
+  const cli = fakeCli(
+    "claude-cut-line",
+    `${printLines([initLine(["Read"])])}\nprintf '%s' '{"type":"user","message":{"content":[{"type":"tool_result","content":"notes: usage limit reached, resets DB_PASSWORD=hunter2 and more'\nkill -9 $$`,
+  );
+  const r = await claudeAgentRunner(cli).run({ ...runInput });
+  expect(r.completed).toBe(false);
+  expect(r.cause).toBe("transient");
+  expect(r.resetAt).toBeNull();
+  expect(JSON.stringify(r)).not.toContain("hunter2");
+});

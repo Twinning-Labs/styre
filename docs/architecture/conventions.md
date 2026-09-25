@@ -90,7 +90,7 @@ a temp dir.
 | `.styre-disposable` | read | Disposability marker — a **regular file** (symlinks/dirs rejected). Required for `--in-place` and for a no-argument `styre setup`. Its presence asserts "this checkout may be rewritten." |
 | `AGENTS.md` | read | Command/context source ingested at setup. Must be a regular file (symlinks refused); capped at 16 KB. |
 | `**/styre_scratch/` | write + delete | The **scratch drawer** — an agent-created throwaway dir. Recursively swept and removed before commit-scope judging and before the broad verify run (skips `.git`/`node_modules`; never throws). It is always deleted, never persisted — there is no XDG scratch location. |
-| git worktree | write | `git worktree add -B <branch> <tmp>` from the repo root; the temp worktree is the agent's writable surface. |
+| git worktree | write | `git worktree add -B <branch> <tmp>` from the repo root; the temp worktree is the only place the agent's file tools can write. |
 | `docs/**`, root `README*`/`CHANGELOG*`/`CONTRIBUTING*`, `mkdocs.yml` | write | The `docs:revise` step's writable allowlist (`src/dispatch/docs-paths.ts`). Nested `src/docs/*` and co-located READMEs are excluded; `..` segments fail closed. |
 
 There are **no log files.** Styre never writes a log to disk: `styre run` puts NDJSON on stdout and
