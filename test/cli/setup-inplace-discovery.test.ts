@@ -55,13 +55,20 @@ function makeRepo(withMarker: boolean): string {
 
 /** Invoke the real CLI setup() function directly (bypassing citty's argv parsing — we construct
  *  the parsed-args shape ourselves), with ANTHROPIC_API_KEY forced unset so execution can never
- *  reach the real (live) agent call. */
-async function invokeSetup(repo?: string): Promise<void> {
+ *  reach the real (live) agent call. XDG_CONFIG_HOME is pointed at `xdgConfigHome` for the call
+ *  (a fresh empty dir by default, so no host config leaks in); a caller that asserts on what setup
+ *  wrote must pass its own dir, since that is the only one setup ever sees. */
+async function invokeSetup(repo?: string, xdgConfigHome?: string): Promise<void> {
   const prevKey = process.env.ANTHROPIC_API_KEY;
   const prevXdg = process.env.XDG_CONFIG_HOME;
   // biome-ignore lint/performance/noDelete: env var must be truly unset, not the string "undefined"
   delete process.env.ANTHROPIC_API_KEY;
-  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "styre-setup-xdg-empty-")); // no host config
+  let xdg = xdgConfigHome;
+  if (xdg === undefined) {
+    xdg = mkdtempSync(join(tmpdir(), "styre-setup-xdg-empty-")); // no host config
+    roots.push(xdg);
+  }
+  process.env.XDG_CONFIG_HOME = xdg;
   try {
     // The agent-CLI preflight is stubbed so the key guard is the last check before the agent
     // call on every machine, whether or not a real `claude` is installed (CI has none).
@@ -85,23 +92,19 @@ test("setup with no repo arg: without a marker, throws the disposability gate BE
   const cwdRepo = makeRepo(false); // no marker
   const cfg = mkdtempSync(join(tmpdir(), "styre-setup-inplace-disc-xdg-"));
   roots.push(cfg);
-  const prevXdg = process.env.XDG_CONFIG_HOME;
-  process.env.XDG_CONFIG_HOME = cfg;
 
   const prevCwd = process.cwd();
   process.chdir(cwdRepo);
   try {
-    await expect(invokeSetup(undefined)).rejects.toThrow(/disposable/);
+    // `cfg` is handed to invokeSetup so it is the XDG_CONFIG_HOME setup actually runs under;
+    // asserting on a dir setup never sees would pass no matter what setup wrote.
+    await expect(invokeSetup(undefined, cfg)).rejects.toThrow(/disposable/);
     // Falsifiable "enrichment did not run" signal: runSetup is the only thing that would write
     // under configDir() (its mkdirSync + writeFileSync happen at the very end of a successful
     // probe+enrich+discover pipeline). Since the gate threw first, nothing was ever written.
     expect(existsSync(join(cfg, "styre"))).toBe(false);
   } finally {
     process.chdir(prevCwd);
-    if (prevXdg === undefined)
-      // biome-ignore lint/performance/noDelete: process.env must be unset via delete
-      delete process.env.XDG_CONFIG_HOME;
-    else process.env.XDG_CONFIG_HOME = prevXdg;
   }
 });
 
