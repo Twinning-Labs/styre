@@ -355,7 +355,10 @@ export interface SetupArgs {
   "test-environment"?: string;
 }
 
-export async function setupImpl({ args }: { args: SetupArgs }): Promise<void> {
+export async function setupImpl(
+  { args }: { args: SetupArgs },
+  deps?: { preflight?: typeof preflightAgentCli },
+): Promise<void> {
   // No positional `repo`: discover the cwd repo and gate it on the disposability marker BEFORE
   // any write-capable enrichment agent call (runSetup's enrichRuntimeContext/discoverComponents).
   // An explicit `setup <repo>` requires no marker — the operator named the target.
@@ -372,7 +375,7 @@ export async function setupImpl({ args }: { args: SetupArgs }): Promise<void> {
   // missing/old CLI fails the setup gate with an actionable message instead of surfacing later as
   // an opaque transient agent failure (ENG-326). It runs before the key check so a refused provider
   // (ENG-476) is reported as such, not as a missing key.
-  const cliPreflight = preflightAgentCli(agentConfig);
+  const cliPreflight = (deps?.preflight ?? preflightAgentCli)(agentConfig);
   if (!cliPreflight.ok) throw agentCliError(cliPreflight);
   const requiredKey = requiredEnvFor(agentConfig.provider);
   if (requiredKey && !process.env[requiredKey]) {
