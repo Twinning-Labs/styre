@@ -182,13 +182,3 @@ test("a failed dispatch with no capability report stays an ordinary transient fa
   expect(String(err)).toContain("transport failure");
   db.close();
 });
-
-test("the agent's pid is cleared from the journal once the dispatch returns (review round 3)", async () => {
-  const { getById } = await import("../../src/db/repos/workflow-step.ts");
-  const runner = new FakeAgentRunner(() => ok()); // FakeAgentRunner journals pid 424242 on spawn
-  const { db, call } = await dispatchWith(runner);
-  await call;
-  const step = db.query("SELECT id FROM workflow_step LIMIT 1").get() as { id: number };
-  expect(getById(db, step.id)?.pid).toBeNull();
-  db.close();
-});

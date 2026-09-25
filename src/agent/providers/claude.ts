@@ -1,10 +1,5 @@
 import { agentEnv } from "../agent-env.ts";
 import { toolNamesFor, toolSetMismatch } from "../capabilities.ts";
-import {
-  forwardTerminationSignals,
-  killProcessGroup,
-  terminateProcessGroup,
-} from "../process-group.ts";
 import type {
   AgentRunInput,
   AgentRunResult,
@@ -231,31 +226,27 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
         resetAt: null,
       });
       let timer: ReturnType<typeof setTimeout> | undefined;
-      let stopForwarding = () => {};
-      let spawnedPid: number | undefined;
+      let spawned: { kill: (signal?: number | NodeJS.Signals) => void } | undefined;
       try {
-        // The CLI leads its own process group (ENG-476), so every kill below reaches whatever it
-        // started — including the real agent behind a wrapper script or version-manager shim.
+        // The CLI is killed as a single process. An agent behind a wrapper script that runs the
+        // real CLI as a child (not `exec`) is not reached by these kills: process-group handling
+        // is ENG-485, and SECURITY.md states the gap.
         const proc = Bun.spawn([command, ...buildClaudeArgs(input)], {
           cwd: input.cwd,
           env: agentEnv(process.env),
           stdin: new TextEncoder().encode(input.prompt),
           stdout: "pipe",
           stderr: "pipe",
-          detached: true,
         });
-        spawnedPid = proc.pid;
-        // Startup-gate kill: no tool has run yet, so a hard kill loses nothing.
-        const killGroup = () => killProcessGroup(proc.pid);
-        // Detached, the agent no longer receives the terminal's Ctrl-C; forward it instead.
-        stopForwarding = forwardTerminationSignals(proc.pid);
+        spawned = proc;
+        const kill = () => proc.kill("SIGKILL");
         if (input.onSpawn && typeof proc.pid === "number") {
           input.onSpawn(proc.pid);
         }
         // ENG-476: confinement is checked the moment the CLI reports it, not after the agent has
         // worked. A wrong tool set or mode — or any agent action before the report — kills the
-        // group at once, so an unconfined agent never gets to act.
-        const gate = startupGate(toolNamesFor(input.allowedTools), killGroup);
+        // CLI at once, so an unconfined agent never gets to act.
+        const gate = startupGate(toolNamesFor(input.allowedTools), kill);
         const stdoutRead = readLines(proc.stdout, gate.onLine);
         const stderrRead = readLines(proc.stderr, () => {});
         const timeoutP = new Promise<"timeout">((resolve) => {
@@ -263,18 +254,15 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
         });
         const outcome = await Promise.race([proc.exited.then(() => "exited" as const), timeoutP]);
         if (outcome === "timeout") {
-          // A running agent is asked to stop first, so it can reap the tool commands it runs in
-          // their own process groups; SIGKILL follows only after the grace period.
-          await terminateProcessGroup(proc.pid, "SIGTERM", STOP_GRACE_MS);
+          kill();
           stdoutRead.cancel();
           stderrRead.cancel();
           proc.unref();
           return transportFailure("dispatch timed out", true);
         }
         const exitCode = await proc.exited;
-        // Reap anything the CLI left running in its group (it would hold the output pipes open),
-        // then drain for a bounded time: a process that escaped the group can never hang the run.
-        await terminateProcessGroup(proc.pid, "SIGTERM", STOP_GRACE_MS);
+        // Drain for a bounded time: a process the CLI left behind that still holds the output pipes
+        // can never hang the run (stopping such leftovers is ENG-485).
         let drainTimer: ReturnType<typeof setTimeout> | undefined;
         const drained = await Promise.race([
           Promise.all([stdoutRead.done, stderrRead.done]).then(() => true),
@@ -284,7 +272,7 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
         ]);
         clearTimeout(drainTimer);
         if (!drained) {
-          // Never let a pipe held by an escaped process keep the runner alive.
+          // Never let a pipe held by a leftover process keep the runner alive.
           stdoutRead.cancel();
           stderrRead.cancel();
           proc.unref();
@@ -336,11 +324,10 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
       } catch (err) {
         // Anything that throws after the spawn (e.g. the onSpawn journal write) must not leave
         // an agent running while the attempt is undone and retried in the same worktree.
-        if (spawnedPid !== undefined) killProcessGroup(spawnedPid);
+        spawned?.kill("SIGKILL");
         return transportFailure(String(err), false);
       } finally {
         clearTimeout(timer);
-        stopForwarding();
       }
     },
   };
@@ -348,7 +335,8 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
 
 /** Watches stream-json lines as they arrive (ENG-476). On the init event it checks the tool set
  *  and permission mode; on an agent action (an `assistant` or `user` event) before any init it
- *  treats the run as unverified. Either fault calls `kill` once and is reported by `fault()`. */
+ *  treats the run as unverified. Either fault calls `kill` once (no tool has run yet, so a hard
+ *  kill loses nothing) and is reported by `fault()`. */
 export function startupGate(
   expectedTools: readonly string[],
   kill: () => void,
@@ -383,12 +371,9 @@ export function startupGate(
   };
 }
 
-/** How long to wait for the output pipes to close once the CLI has exited and its group has been
- *  reaped. Only a process that escaped the group can hold them past this. */
+/** How long to wait for the output pipes to close once the CLI has exited. Only a process the CLI
+ *  left behind can hold them past this. */
 const DRAIN_TIMEOUT_MS = 5_000;
-
-/** How long a running agent gets to stop (and reap its tools) before SIGKILL. */
-const STOP_GRACE_MS = 2_000;
 
 /** Read a byte stream, calling `onLine` for every complete line as it arrives. `text()` returns
  *  everything read so far, so a bounded drain can still use a partial read; `cancel()` releases a

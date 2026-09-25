@@ -173,10 +173,6 @@ export async function runAgentDispatch(
     timeoutMs: deps.timeoutMs,
     onSpawn: (pid) => setPid(ctx.db, ctx.step.id, pid),
   });
-  // The provider has reaped the agent's process group by the time it returns, so the journaled
-  // pid is stale: clear it, so a resume long after (a budget pause) can never have recovery kill
-  // whatever process — and, as a group, whatever job — has since reused that pid.
-  setPid(ctx.db, ctx.step.id, null);
 
   // ENG-476: capability isolation is verified on every dispatch, never assumed — including a
   // failed one the provider stopped for a wrong tool set. A fault means the agent was not confined
