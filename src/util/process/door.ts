@@ -133,6 +133,9 @@ export function launch(spec: LaunchSpec): LaunchHandle {
           deps: stopDeps,
         });
   const release = (rep: StopReport): StopReport => {
+    // A survivor still holds this subprocess; it must not keep Bun's event loop alive and stop
+    // Styre from exiting (the operator was told how to stop it).
+    if (rep.survivors.length > 0) proc.unref();
     if (rep.survivors.length === 0) {
       removeRecord(record); // may throw after its own deadline: a loud failure, never swallowed
       live.delete(handle);
@@ -210,6 +213,20 @@ export function runBlocking(
  *  and proc-table.ts may call it (source guard). */
 export function launchDiagnostic(argv: string[], opts: { timeoutMs: number }): BlockingResult {
   return spawnBlocking(argv, { timeoutMs: opts.timeoutMs });
+}
+
+/** The command line of a live process, for the operator-facing survivor line (spec section 7.3
+ *  names the survivor's own command, not the launch's). Truncated to 120 characters; `fallback`
+ *  (the launch record's command) is used only when the process table cannot be read. */
+export function describeProcess(pid: number, fallback: string): string {
+  let text = "";
+  try {
+    const r = spawnBlocking(["ps", "-o", "command=", "-p", String(pid)], { timeoutMs: 5_000 });
+    if (r.success) text = r.stdout.split("\n")[0]?.trim() ?? "";
+  } catch {
+    /* unreadable: use the fallback */
+  }
+  return (text === "" ? fallback : text).slice(0, 120);
 }
 
 export interface InFlightStep {

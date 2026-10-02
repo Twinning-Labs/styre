@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type LaunchHandle, launch } from "../../util/process/door.ts";
+import { type LaunchHandle, RunInterrupted, launch } from "../../util/process/door.ts";
 import { agentEnv } from "../agent-env.ts";
 import type {
   AgentRunInput,
@@ -243,6 +243,8 @@ export function codexAgentRunner(command = "codex"): AgentRunner {
           resetAt,
         };
       } catch (err) {
+        // The door was already closed: nothing was launched, and the run is being stopped.
+        if (err instanceof RunInterrupted) throw err;
         if (spawned) {
           const stopped = await spawned.stop("forced").catch((stopErr) => {
             process.stderr.write(`styre: stopping the agent failed: ${String(stopErr)}\n`);

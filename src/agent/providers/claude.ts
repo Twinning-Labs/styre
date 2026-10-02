@@ -1,4 +1,4 @@
-import { type LaunchHandle, launch } from "../../util/process/door.ts";
+import { type LaunchHandle, RunInterrupted, launch } from "../../util/process/door.ts";
 import { agentEnv } from "../agent-env.ts";
 import { toolNamesFor, toolSetMismatch } from "../capabilities.ts";
 import type {
@@ -338,6 +338,8 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
             gate.fault() ?? (stream.init === null ? undefined : claudeCapabilities(stream.init)),
         };
       } catch (err) {
+        // The door was already closed: nothing was launched, and the run is being stopped.
+        if (err instanceof RunInterrupted) throw err;
         // Anything that throws after the spawn must not leave an agent running while the attempt
         // is undone and retried in the same worktree.
         if (spawned) {

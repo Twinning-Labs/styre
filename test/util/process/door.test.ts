@@ -449,3 +449,41 @@ test("selfIdentity matches the process table and is stable", () => {
   }
   expect(door.selfIdentity()).toBe(me);
 });
+
+test("describeProcess names a live process's own command, truncated, and falls back only when unreadable", async () => {
+  const g = start(["sleep", "47"], "group");
+  // Right after the spawn the process may not have executed its program yet.
+  expect(await waitFor(() => door.describeProcess(g.proc.pid, "?") === "sleep 47")).toBe(true);
+  await g.stop("forced");
+  expect(
+    await waitFor(() => door.describeProcess(g.proc.pid, "the launch argv") === "the launch argv"),
+  ).toBe(true);
+  const long = start(["sh", "-c", `sleep 48 # ${"y".repeat(300)}`], "group");
+  expect(await waitFor(() => door.describeProcess(long.proc.pid, "z").length === 120)).toBe(true);
+  await long.stop("forced");
+});
+
+test("a stop that leaves a survivor unrefs the subprocess; a clean stop does not need to", async () => {
+  const g = start(["sleep", "30"], "group");
+  let calls = 0;
+  const unref = g.proc.unref.bind(g.proc);
+  g.proc.unref = () => {
+    calls++;
+    unref();
+  };
+  let t = 0;
+  door.__setStopDepsForTests({
+    list: listProcesses,
+    kill: () => {},
+    sleep: async () => {},
+    now: () => {
+      t += 250;
+      return t;
+    },
+  });
+  expect((await g.stop("forced")).survivors.length).toBe(1);
+  expect(calls).toBe(1);
+  door.__setStopDepsForTests(undefined);
+  expect((await g.stop("forced")).survivors).toEqual([]);
+  expect(calls).toBe(1);
+});

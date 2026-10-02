@@ -1,5 +1,11 @@
 import { verifyEnv } from "../agent/agent-env.ts";
-import { type LaunchContext, type LaunchHandle, RunInterrupted, launch } from "./process/door.ts";
+import {
+  type LaunchContext,
+  type LaunchHandle,
+  RunInterrupted,
+  describeProcess,
+  launch,
+} from "./process/door.ts";
 import { DRAIN_LIMIT_MS, readPipe } from "./process/read-pipe.ts";
 
 export { DRAIN_LIMIT_MS };
@@ -104,8 +110,9 @@ export async function runCommand(
  *  wording). Most callers look only at the exit code, so the note in the result is not enough. */
 export function reportSurvivors(h: LaunchHandle, survivors: { pid: number }[]): void {
   for (const p of survivors) {
+    const command = describeProcess(p.pid, h.record.command);
     process.stderr.write(
-      `styre: could not stop ${h.record.command} (pid ${p.pid}); stop it with: kill -9 ${p.pid}\n`,
+      `styre: could not stop ${command} (pid ${p.pid}); stop it with: kill -9 ${p.pid}\n`,
     );
   }
 }
