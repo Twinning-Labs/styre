@@ -1,0 +1,474 @@
+// ENG-485 section 9: the detached leftover check finds processes still running in a step's
+// worktree that started during the step and are not part of anything Styre runs. It reports them and
+// never stops them. Fixtures here are real detached `sleep` processes with a unique marker, found
+// and removed by that marker, even when a test fails.
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, realpathSync, symlinkSync } from "node:fs";
+import { join } from "node:path";
+import * as door from "../../src/util/process/door.ts";
+import {
+  LEFTOVER_TIMEOUT_MS,
+  type Leftover,
+  __setCwdReadersForTests,
+  checkLeftovers,
+  checkLeftoversInBackground,
+  findLeftovers,
+  formatLeftover,
+  pendingLeftoverChecks,
+} from "../../src/util/process/leftovers.ts";
+import { listProcesses, nowToken, probe } from "../../src/util/process/proc-table.ts";
+import {
+  cleanupFixtures,
+  folder,
+  isRunning,
+  leave,
+  marker,
+  pastToken,
+  until,
+} from "../helpers/leftover-fixtures.ts";
+
+const only = (r: Leftover[] | "skipped", m: string): Leftover[] => {
+  expect(r).not.toBe("skipped");
+  return (r as Leftover[]).filter((l) => l.command.includes(`sleep ${m}`));
+};
+const scan = (wt: string, since: string, extra: { until?: string } = {}) =>
+  findLeftovers({ worktree: wt, since, timeoutMs: 5000, viaDiagnostic: true, ...extra });
+/** Poll until the detached fixture shows up in the check, so the test never races the fork. */
+async function find(wt: string, since: string, m: string): Promise<Leftover | undefined> {
+  let hit: Leftover | undefined;
+  await until(() => {
+    hit = only(scan(wt, since), m)[0];
+    return hit !== undefined;
+  });
+  return hit;
+}
+beforeEach(() => {
+  door.__resetForTests();
+});
+afterEach(async () => {
+  __setCwdReadersForTests(undefined);
+  await pendingLeftoverChecks();
+  for (const h of door.liveLaunches()) await h.stop("forced").catch(() => {});
+  cleanupFixtures();
+  door.__resetForTests();
+});
+
+describe("what counts as a leftover (section 9.2)", () => {
+  test("a detached nohup process in the worktree is reported, and left running", async () => {
+    const wt = folder("styre wt "); // a space in the path (Review Focus 2)
+    const since = nowToken();
+    const m = marker();
+    await leave(wt, m);
+    const hit = await find(wt, since, m);
+    expect(hit).toBeDefined();
+    if (!hit) return;
+    expect(hit.cwd).toBe(realpathSync(wt));
+    expect(formatLeftover(hit)).toBe(
+      `styre: the agent left "${hit.command}" (pid ${hit.pid}) running in the worktree; stop it with: kill ${hit.pid} (if it is not yours)\n`,
+    );
+    // Reported, never stopped: it is alive after the check, and after a second check.
+    expect(probe(hit.pid).kind).toBe("alive");
+    scan(wt, since);
+    expect(probe(hit.pid)).toMatchObject({ kind: "alive", info: { state: "running" } });
+  });
+
+  test("a worktree reached through a symlink still matches (Review Focus 2)", async () => {
+    const real = folder("styre-real-");
+    const link = join(folder("styre-link-"), "wt");
+    symlinkSync(real, link);
+    const since = nowToken();
+    const m = marker();
+    await leave(real, m);
+    expect(await find(link, since, m)).toBeDefined();
+    // ... and the other way round: the process sits in the link, the folder given is the target.
+    const m2 = marker();
+    await leave(link, m2);
+    expect(await find(real, since, m2)).toBeDefined();
+  });
+
+  test("a working folder a reader names through a symlink is compared by its real path", async () => {
+    // lsof and /proc print real paths today; the comparison must not depend on that.
+    const real = folder("styre-real-");
+    const link = join(folder("styre-link-"), "wt");
+    symlinkSync(real, link);
+    const since = nowToken();
+    const m = marker();
+    await leave(real, m);
+    const hit = await find(real, since, m);
+    expect(hit).toBeDefined();
+    __setCwdReadersForTests({ sync: () => new Map([[hit?.pid ?? 0, link]]) });
+    expect(only(scan(real, since), m)).toHaveLength(1);
+  });
+
+  test("a process in a subfolder of the worktree is reported", async () => {
+    const wt = folder("styre-wt-");
+    const sub = join(wt, "a", "b");
+    mkdirSync(sub, { recursive: true });
+    const since = nowToken();
+    const m = marker();
+    await leave(sub, m);
+    expect(await find(wt, since, m)).toBeDefined();
+  });
+
+  test("a process in a sibling folder that only shares the name prefix is not reported", async () => {
+    const parent = folder("styre-parent-");
+    const wt = join(parent, "wt");
+    const sibling = join(parent, "wt-other");
+    mkdirSync(wt);
+    mkdirSync(sibling);
+    const since = nowToken();
+    const m = marker();
+    await leave(sibling, m);
+    const m2 = marker();
+    await leave(wt, m2);
+    // The in-folder fixture proves the check ran and saw processes; the sibling one is absent.
+    expect(await find(wt, since, m2)).toBeDefined();
+    expect(only(scan(wt, since), m)).toEqual([]);
+  });
+
+  test("a process that started before the window is not reported", async () => {
+    const wt = folder("styre-wt-");
+    const m = marker();
+    await leave(wt, m);
+    expect(await find(wt, "0", m)).toBeDefined(); // it is running, and seen with an open window
+    const after = nowToken();
+    await pastToken(after);
+    expect(only(scan(wt, nowToken()), m)).toEqual([]);
+  });
+
+  test("a process that started after the window ended is not reported", async () => {
+    const wt = folder("styre-wt-");
+    const end = nowToken();
+    await pastToken(end);
+    const m = marker();
+    await leave(wt, m);
+    expect(await find(wt, "0", m)).toBeDefined();
+    expect(only(scan(wt, "0", { until: end }), m)).toEqual([]);
+  });
+
+  test("Styre's own live launches, and everything they started, are not reported", async () => {
+    const wt = folder("styre-wt-");
+    const since = nowToken();
+    const mAgent = marker();
+    const mGroup = marker();
+    const base = { env: process.env, context: { ident: null, stepId: null, worktree: wt } };
+    const agent = door.launch({
+      ...base,
+      argv: ["sh", "-c", `sleep ${mAgent} & wait`],
+      cwd: wt,
+      kind: "agent",
+    });
+    const group = door.launch({
+      ...base,
+      argv: ["sh", "-c", `sleep ${mGroup} & wait`],
+      cwd: wt,
+      kind: "group",
+    });
+    // Wait for each fixture's child to exist, so the exclusion is tested against real descendants.
+    const seen = await until(() => [mAgent, mGroup].every(isRunning));
+    expect(seen).toBe(true);
+    const found = scan(wt, since);
+    expect(found).not.toBe("skipped");
+    const own = new Set([agent.proc.pid, group.proc.pid]);
+    expect((found as Leftover[]).filter((l) => own.has(l.pid))).toEqual([]);
+    expect(only(found, mAgent)).toEqual([]);
+    expect(only(found, mGroup)).toEqual([]);
+    await agent.stop("forced");
+    await group.stop("forced");
+  });
+
+  test("Styre itself is never reported, even when its own working folder is the worktree", () => {
+    const wt = folder("styre-wt-");
+    const saved = process.cwd();
+    try {
+      process.chdir(wt);
+      const found = scan(wt, "0");
+      expect(found).not.toBe("skipped");
+      expect((found as Leftover[]).some((l) => l.pid === process.pid)).toBe(false);
+    } finally {
+      process.chdir(saved);
+    }
+  });
+
+  test("a worktree that no longer exists has nothing to report", () => {
+    const gone = join(folder("styre-gone-"), "never-created");
+    expect(scan(gone, "0")).toEqual([]);
+  });
+
+  test("the command text is the process's own, cut to 120 characters", async () => {
+    const wt = folder("styre-wt-");
+    const since = nowToken();
+    const m = marker();
+    const sh = 'cd "$1" && nohup sh -c ": sleep $2 $3; sleep $2" >/dev/null 2>&1 &';
+    const p = Bun.spawn(["sh", "-c", sh, "sh", wt, m, "x".repeat(300)], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    await p.exited;
+    let hit: Leftover | undefined;
+    await until(() => {
+      hit = (scan(wt, since) as Leftover[]).find(
+        (l) => l.command.startsWith("sh -c") && l.command.includes(`sleep ${m}`),
+      );
+      return hit !== undefined;
+    });
+    expect(hit).toBeDefined();
+    expect(hit?.command.length).toBe(120);
+    expect(hit?.command.startsWith("sh -c")).toBe(true);
+  });
+});
+
+describe("the two ways to run lsof (section 9.1)", () => {
+  test("a check without viaDiagnostic finds the same leftover", async () => {
+    const wt = folder("styre wt ");
+    const since = nowToken();
+    const m = marker();
+    await leave(wt, m);
+    const r = findLeftovers({ worktree: wt, since, timeoutMs: 5000, viaDiagnostic: false });
+    expect(only(r, m)).toHaveLength(1);
+  });
+
+  test.skipIf(process.platform !== "darwin")(
+    "once a stop has begun the diagnostic form still works and the door form is refused",
+    async () => {
+      const wt = folder("styre-wt-");
+      const since = nowToken();
+      const m = marker();
+      await leave(wt, m);
+      door.beginStopping();
+      expect(only(scan(wt, since), m)).toHaveLength(1);
+      expect(() =>
+        findLeftovers({ worktree: wt, since, timeoutMs: 5000, viaDiagnostic: false }),
+      ).toThrow(door.RunInterrupted);
+    },
+  );
+});
+
+describe("a check that cannot finish is skipped, never hung and never thrown", () => {
+  test("a reader that times out gives skipped", () => {
+    __setCwdReadersForTests({ sync: () => "skipped" });
+    expect(scan(folder("styre-wt-"), "0")).toBe("skipped");
+  });
+
+  test.skipIf(process.platform !== "darwin")(
+    "a real lsof that exceeds its timeout gives skipped",
+    () => {
+      const t0 = Date.now();
+      const r = findLeftovers({
+        worktree: folder("styre-wt-"),
+        since: "0",
+        timeoutMs: 1,
+        viaDiagnostic: true,
+      });
+      expect(r).toBe("skipped");
+      expect(Date.now() - t0).toBeLessThan(4000);
+    },
+  );
+
+  test.skipIf(process.platform !== "darwin")(
+    "the background check's lsof launch that exceeds its timeout is skipped, stopped and released",
+    async () => {
+      const got: string[][] = [];
+      const t0 = Date.now();
+      await checkLeftoversInBackground({
+        worktree: folder("styre-wt-"),
+        since: "0",
+        timeoutMs: 1,
+        report: (l) => got.push(l),
+      });
+      expect(Date.now() - t0).toBeLessThan(4000);
+      expect(got.flat().join("")).toContain("skipped");
+      expect(door.liveLaunches()).toEqual([]);
+    },
+  );
+});
+
+describe("the check after an agent step runs in the background (section 9.1)", () => {
+  test("it reports what it finds through `report`, with the exact line", async () => {
+    const wt = folder("styre wt ");
+    const since = nowToken();
+    const m = marker();
+    await leave(wt, m);
+    expect(await find(wt, since, m)).toBeDefined();
+    const got: string[][] = [];
+    await checkLeftoversInBackground({ worktree: wt, since, report: (l) => got.push(l) });
+    const mine = got.flat().filter((l) => l.includes(`sleep ${m}`));
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatch(
+      /^styre: the agent left ".*sleep .*" \(pid \d+\) running in the worktree; stop it with: kill \d+ \(if it is not yours\)\n$/,
+    );
+    expect(door.liveLaunches()).toEqual([]); // a check that launched lsof released it
+  });
+
+  test("a clean worktree reports nothing", async () => {
+    const got: string[][] = [];
+    await checkLeftoversInBackground({
+      worktree: folder("styre-wt-"),
+      since: nowToken(),
+      report: (l) => got.push(l),
+    });
+    expect(got).toEqual([]);
+  });
+
+  test("it returns before the check finishes, and pendingLeftoverChecks waits for it", async () => {
+    let release: (v: Map<number, string>) => void = () => {};
+    __setCwdReadersForTests({
+      async: () =>
+        new Promise((r) => {
+          release = r;
+        }),
+    });
+    const p = checkLeftoversInBackground({
+      worktree: folder("styre-wt-"),
+      since: "0",
+      report: () => {},
+    });
+    let settled = false;
+    void p.then(() => {
+      settled = true;
+    });
+    let waited = false;
+    const pending = pendingLeftoverChecks().then(() => {
+      waited = true;
+    });
+    await Bun.sleep(100);
+    expect(settled).toBe(false);
+    expect(waited).toBe(false);
+    release(new Map());
+    await pending;
+    expect(waited).toBe(true);
+    expect(settled).toBe(true);
+  });
+
+  test("a check that timed out is reported as skipped", async () => {
+    __setCwdReadersForTests({ async: async () => "skipped" });
+    const got: string[][] = [];
+    await checkLeftoversInBackground({
+      worktree: folder("styre-wt-"),
+      since: "0",
+      report: (l) => got.push(l),
+    });
+    expect(got).toHaveLength(1);
+    expect(got[0]).toHaveLength(1);
+    expect(got[0][0]).toMatch(/^styre: .*skipped.*\n$/);
+  });
+
+  test("a reader that throws is reported as skipped, and never rejects", async () => {
+    __setCwdReadersForTests({
+      async: async () => {
+        throw new Error("boom");
+      },
+    });
+    const got: string[][] = [];
+    await checkLeftoversInBackground({
+      worktree: folder("styre-wt-"),
+      since: "0",
+      report: (l) => got.push(l),
+    });
+    await pendingLeftoverChecks();
+    expect(got.flat().join("")).toMatch(/skipped.*boom/);
+  });
+
+  test("once a stop has begun the check says nothing: the handler runs its own", async () => {
+    __setCwdReadersForTests({
+      async: async () => {
+        throw new door.RunInterrupted();
+      },
+    });
+    const got: string[][] = [];
+    await checkLeftoversInBackground({
+      worktree: folder("styre-wt-"),
+      since: "0",
+      report: (l) => got.push(l),
+    });
+    expect(got).toEqual([]);
+  });
+
+  test("the timeout constant is the section 9.1 value", () => {
+    expect(LEFTOVER_TIMEOUT_MS).toBe(5_000);
+  });
+});
+
+describe("checkLeftovers: the signal handler's step 5", () => {
+  test("it reports a leftover of each stopped agent launch, from that launch's own start", async () => {
+    const wt = folder("styre wt ");
+    const m = marker();
+    const agent = door.launch({
+      argv: ["sh", "-c", 'nohup sleep "$1" >/dev/null 2>&1 &', "sh", m],
+      cwd: wt,
+      env: process.env,
+      kind: "agent",
+      context: { ident: "ENG-1", stepId: 1, worktree: wt },
+    });
+    await agent.proc.exited;
+    await agent.finish();
+    let out: string[] = [];
+    await until(() => {
+      out = checkLeftovers({ stopped: [agent], timeoutMs: 5000 }).filter((l) =>
+        l.includes(`sleep ${m}`),
+      );
+      return out.length > 0;
+    });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatch(
+      /^styre: the agent left ".*sleep .*" \(pid \d+\) running in the worktree; stop it with: kill \d+ \(if it is not yours\)\n$/,
+    );
+    const pid = Number(/pid (\d+)/.exec(out[0])?.[1]);
+    expect(probe(pid).kind).toBe("alive"); // reported, not stopped
+  });
+
+  test("a launch that is not an agent, or has no worktree, is not checked", async () => {
+    const wt = folder("styre-wt-");
+    const m = marker();
+    await leave(wt, m);
+    const grp = door.launch({
+      argv: ["true"],
+      cwd: wt,
+      env: process.env,
+      kind: "group",
+      context: { ident: null, stepId: null, worktree: wt },
+    });
+    const bare = door.launch({
+      argv: ["true"],
+      cwd: wt,
+      env: process.env,
+      kind: "agent",
+      context: { ident: null, stepId: null, worktree: null },
+    });
+    await grp.proc.exited;
+    await bare.proc.exited;
+    expect(checkLeftovers({ stopped: [grp, bare], timeoutMs: 5000 })).toEqual([]);
+  });
+
+  test("a skipped check is said, not dropped", async () => {
+    __setCwdReadersForTests({ sync: () => "skipped" });
+    const wt = folder("styre-wt-");
+    const agent = door.launch({
+      argv: ["true"],
+      cwd: wt,
+      env: process.env,
+      kind: "agent",
+      context: { ident: "ENG-1", stepId: 1, worktree: wt },
+    });
+    await agent.proc.exited;
+    const out = checkLeftovers({ stopped: [agent], timeoutMs: 5000 });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatch(/^styre: .*skipped.*\n$/);
+  });
+});
+
+test("the listing the check reads is the same clock as a launch's start token", async () => {
+  // The window compares a launch's `record.startedAt` with other processes' start tokens.
+  const wt = folder("styre-wt-");
+  const h = door.launch({
+    argv: ["sleep", marker()],
+    cwd: wt,
+    env: process.env,
+    kind: "agent",
+    context: { ident: null, stepId: null, worktree: wt },
+  });
+  const me = listProcesses().find((p) => p.pid === h.proc.pid);
+  expect(me?.startedAt).toBe(h.record.startedAt);
+  await h.stop("forced");
+});

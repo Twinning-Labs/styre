@@ -12,6 +12,7 @@ import { branchPrefixFor } from "../integrations/ticket-source.ts";
 import type { IngestedTicket } from "../integrations/ticket-source.ts";
 import { type TelemetrySink, noopSink } from "../telemetry/emit.ts";
 import { createTelemetryEmitter } from "../telemetry/emitter.ts";
+import { pendingLeftoverChecks } from "../util/process/leftovers.ts";
 import { tick } from "./loop.ts";
 import { createNotifier } from "./notify.ts";
 import { pauseTicket } from "./pause-ticket.ts";
@@ -115,6 +116,9 @@ export async function driveToTerminal(
   const emitter = createTelemetryEmitter(opts.emit ?? noopSink, opts.config.pricing);
   const notifier = createNotifier(opts.config);
   const finish = async (result: RunResult): Promise<RunResult> => {
+    // The leftover checks started after agent steps write to this database; let them end first
+    // (each is bounded by its own timeout), before anything closes it.
+    await pendingLeftoverChecks();
     emitter.flushNew(db, opts.ticketId);
     emitter.emitSummary(db, opts.ticketId, result);
     notifier.sweepNew(db, opts.ticketId); // backstop: the per-tick sweep already caught these; re-sweep in case a terminal enqueued late events

@@ -30,7 +30,7 @@ import {
   preparedToxCandidate,
 } from "../testing/environment.ts";
 import { agentCliError, usageError } from "./errors.ts";
-import { guard } from "./output.ts";
+import { guardWithExitCheck } from "./exit-check.ts";
 
 const CHECKS = new Set(["github", "external", "none"]);
 
@@ -340,7 +340,8 @@ export const setupCommand = defineCommand({
         "Headless only: accept agent-refined command strings. These run as code at verify — the metacharacter filter is hygiene, not a sandbox. Use only on trusted repos / isolated environments. Off by default.",
     },
   },
-  run: (ctx) => guard("setup", () => setupImpl({ args: ctx.args as unknown as SetupArgs })),
+  run: (ctx) =>
+    guardWithExitCheck("setup", () => setupImpl({ args: ctx.args as unknown as SetupArgs })),
 });
 
 export interface SetupArgs {

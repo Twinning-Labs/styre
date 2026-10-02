@@ -34,8 +34,8 @@ import { nowUtc } from "../util/time.ts";
 import { formatNonPrimaryComponents, noPrimaryLeft } from "./component-roles.ts";
 import { noPrimaryComponentError } from "./errors.ts";
 import { EXIT, StyreError, agentCliError, errorKindForExit, usageError } from "./errors.ts";
+import { guardWithExitCheck } from "./exit-check.ts";
 import { loadRunProfile } from "./load-profile.ts";
-import { guard } from "./output.ts";
 import { finishRunResult, parkDir } from "./park.ts";
 import { applyToolchainGate, formatUnusableComponents } from "./preflight.ts";
 import { confirmPrBase } from "./resolve-pr-base.ts";
@@ -133,7 +133,7 @@ export const runCommand = defineCommand({
       description: "Discard an existing checkpoint for this ticket and start over",
     },
   },
-  run: (ctx) => guard("run", () => runImpl({ args: ctx.args as unknown as RunArgs })),
+  run: (ctx) => guardWithExitCheck("run", () => runImpl({ args: ctx.args as unknown as RunArgs })),
 });
 
 export async function runImpl(
