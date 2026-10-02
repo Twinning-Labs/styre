@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 import { join } from "node:path";
 import { openDb } from "../../src/db/client.ts";
 import * as door from "../../src/util/process/door.ts";
@@ -15,7 +15,10 @@ import {
 // flight records where that branch stood when the step started.
 
 beforeEach(() => door.__resetForTests());
-afterEach(() => door.__resetForTests());
+afterEach(() => {
+  mock.restore();
+  door.__resetForTests();
+});
 
 const git = (repo: string, ...args: string[]): string => {
   const r = Bun.spawnSync(["git", ...args], { cwd: repo });
@@ -25,6 +28,14 @@ const git = (repo: string, ...args: string[]): string => {
 
 test("styre run records the HEAD of the ticket branch, which has diverged from the default branch", async () => {
   const seen: Array<ReturnType<typeof door.inFlightStep>> = [];
+  // Every step registers itself, `provision` first. It runs before the ticket branch exists, so its
+  // headAtStart must be null; a reader of the checkout's HEAD would record a sha here instead.
+  const begun: Array<Parameters<typeof door.beginStep>[0]> = [];
+  const realBeginStep = door.beginStep;
+  const beginSpy = spyOn(door, "beginStep").mockImplementation((step) => {
+    begun.push(step);
+    realBeginStep(step);
+  });
   const run = await runFreshTicket({
     // The checkout sits on `dev`, one commit ahead of `main` (the profile's default branch), so
     // the ticket branch that `provision` creates from it starts somewhere `main` is not.
@@ -40,6 +51,9 @@ test("styre run records the HEAD of the ticket branch, which has diverged from t
   expect(ticketHead).not.toBe(defaultHead); // the setup really made them differ
   expect(seen[0]?.ident).toBe("ENG-1");
   expect(seen[0]?.headAtStart).toBe(ticketHead);
+  beginSpy.mockRestore();
+  expect(begun[0]?.headAtStart).toBeNull(); // provision: no ticket branch yet
+  expect(begun.at(-1)?.headAtStart).toBe(ticketHead); // the dispatch step
   run.cleanup();
 });
 
