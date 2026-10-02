@@ -12,6 +12,10 @@ import {
 } from "../../../src/agent/providers/claude.ts";
 import { extractSidecar } from "../../../src/dispatch/sidecar.ts";
 
+import { installVirtualGrace, resetDoorAfterEach } from "../../helpers/graceful-stop.ts";
+
+resetDoorAfterEach();
+
 const cwd = realpathSync(mkdtempSync(join(tmpdir(), "styre-claude-")));
 
 /** Write an executable stand-in for the `claude` CLI that ignores its argv and runs `body`. */
@@ -158,18 +162,33 @@ test("run passes the pinned argv to the CLI", async () => {
 
 // M1: the timeout is a HARD bound — a process that ignores SIGTERM must still be killed and the
 // call must return promptly (not hang on `proc.exited`).
-test("run SIGKILLs and returns promptly on a process that traps SIGTERM and hangs", async () => {
-  // trap '' TERM → ignore SIGTERM; then sleep far past the timeout. Only SIGKILL ends it.
-  const cli = fakeCli("claude-hang", "trap '' TERM\nsleep 30");
+test("a timeout stops a hung CLI gracefully: SIGTERM first, SIGKILL only after the grace period (ENG-485 6.3)", async () => {
+  // `trap '' TERM` is inherited by `sleep`, so neither process yields to SIGTERM and only the
+  // escalation can end them. The stop's clock is virtual, so the 5 second grace costs no real time;
+  // signals and the process table are real.
+  const rec = installVirtualGrace();
+  const ready = join(cwd, "claude-hang.ready");
+  const cli = fakeCli("claude-hang", `trap '' TERM\ntouch '${ready}'\nsleep 307`);
   const start = Date.now();
-  const r = await claudeAgentRunner(cli).run({ ...runInput, timeoutMs: 300 });
-  const elapsed = Date.now() - start;
+  const r = await claudeAgentRunner(cli).run({ ...runInput, timeoutMs: 1000 });
+  // The trap must be in place before the timeout, or SIGTERM would kill the CLI and the test would
+  // not be about the grace period. A slow machine fails here, with this message, not further down.
+  expect(existsSync(ready), "the hung CLI did not start within the timeout").toBe(true);
   expect(r.timedOut).toBe(true);
   expect(r.completed).toBe(false);
-  expect(elapsed).toBeLessThan(5000); // returned on the timer, not after the 30s sleep
   // ENG-164: timeout path must classify as transient with no reset date
   expect(r.cause).toBe("transient");
   expect(r.resetAt).toBeNull();
+  // Graceful first: the first signal is SIGTERM, and no SIGKILL until the grace has passed.
+  expect(rec.sent[0]?.sig).toBe("SIGTERM");
+  const firstKill = rec.sent.find((s) => s.sig === "SIGKILL");
+  expect(firstKill).toBeDefined();
+  // 5 s is the grace of ENG-485 D8, written out here so a changed constant is noticed.
+  expect((firstKill?.at ?? 0) - (rec.sent[0]?.at ?? 0)).toBeGreaterThanOrEqual(5_000);
+  // The hung CLI and its `sleep` are really gone, and the run did not wait out the 30 second sleep.
+  await Bun.sleep(100);
+  expect(Bun.spawnSync(["pgrep", "-f", "sleep 307"]).exitCode).not.toBe(0);
+  expect(Date.now() - start).toBeLessThan(4000); // real time; the grace was virtual
 });
 
 test("run classifies spawn failure as transient (non-existent command)", async () => {
