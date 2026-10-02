@@ -10,7 +10,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Worker } from "node:worker_threads";
 import * as rec from "../../../src/util/process/records.ts";
 
 let state: string;
@@ -295,47 +294,12 @@ test("an unwritable record folder fails loudly and leaves nothing behind", () =>
   expect(readdirSync(rec.processesDir())).toEqual([]);
 });
 
-/** Runs `body` while a second thread hammers the folder in the given mode; returns the shared flags. */
-async function withWorker(
-  mode: "flip" | "read",
-  dwellMicros: number,
-  body: (flag: Int32Array) => void,
-): Promise<Int32Array> {
-  const sab = new SharedArrayBuffer(16);
-  const flag = new Int32Array(sab);
-  const w = new Worker(new URL("./records-worker.ts", import.meta.url), {
-    workerData: { mode, sab, dwellMicros },
+test("the record is written to a temporary name and renamed, never written in place", () => {
+  // A directory squats on the temporary name this process would use. A write that goes through the
+  // temporary name must fail and leave no record; a write straight to the final name would succeed.
+  mkdirSync(join(rec.processesDir(), `.4242-123.000456.json.tmp-${process.pid}`), {
+    recursive: true,
   });
-  try {
-    const deadline = Date.now() + 10_000;
-    while (Atomics.load(flag, 1) === 0 && Date.now() < deadline)
-      await new Promise((res) => setTimeout(res, 5));
-    expect(Atomics.load(flag, 1)).toBe(1);
-    body(flag);
-  } finally {
-    Atomics.store(flag, 0, 1);
-    await w.terminate();
-  }
-  return flag;
-}
-
-test("removeRecord leaves neither name even while another thread claims and unclaims it (N9)", async () => {
-  await withWorker("flip", 80, () => {
-    for (let i = 0; i < 400; i++) {
-      rec.writeRecord(r());
-      for (let spin = 0; spin < (i % 7) * 50; spin++) rec.listRecords().length; // vary the timing
-      rec.removeRecord(r());
-      expect(readdirSync(rec.processesDir())).toEqual([]);
-    }
-  });
-});
-
-test("a reader never sees the record vanish while it is rewritten (the write is atomic)", async () => {
-  const big = { ...r(), command: "x".repeat(2_000_000) };
-  rec.writeRecord(big);
-  const flag = await withWorker("read", 0, (f) => {
-    Atomics.store(f, 2, 1);
-    for (let i = 0; i < 60; i++) rec.writeRecord(big);
-  });
-  expect(Atomics.load(flag, 3)).toBe(0);
+  expect(() => rec.writeRecord(r())).toThrow();
+  expect(readdirSync(rec.processesDir()).filter((n) => !n.startsWith("."))).toEqual([]);
 });
