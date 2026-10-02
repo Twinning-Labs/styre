@@ -3,7 +3,15 @@
 // (and nothing turns that into "no remote" or "no branch"), the baseline and replay worktree
 // removals are the cleanup calls that still run, and git output arrives intact.
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { preflightAgentCli } from "../../src/agent/preflight.ts";
@@ -220,15 +228,83 @@ test("replayCheckAtBaseline removes its worktree when the stop lands during the 
 
 test("the other worktree calls are not cleanup calls: a baseline checkout is refused during a stop", async () => {
   const r = repo();
-  door.beginStopping();
-  const obs = await runAtBaseline({
-    repoPath: r.path,
-    baselineSha: r.sha,
-    command: "true",
-    timeoutMs: 10_000,
+  // A git on PATH that logs every call, so the test sees what was started, not only what failed.
+  const shim = tmp("styre-git-shim-");
+  const log = join(shim, "calls.log");
+  const realGit = Bun.which("git");
+  writeFileSync(join(shim, "git"), `#!/bin/sh\necho "$@" >> '${log}'\nexec '${realGit}' "$@"\n`, {
+    mode: 0o755,
   });
-  expect(obs.execution).toBeNull(); // the add was refused, nothing ran
-  expect(obs.reason).toMatch(/Baseline execution unavailable: .*RunInterrupted|interrupted/);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${shim}:${savedPath}`;
+  try {
+    door.beginStopping();
+    const obs = await runAtBaseline({
+      repoPath: r.path,
+      baselineSha: r.sha,
+      command: "true",
+      timeoutMs: 10_000,
+    });
+    expect(obs.execution).toBeNull(); // the add was refused, nothing ran
+    expect(obs.reason).toMatch(/RunInterrupted|interrupted/);
+    expect(worktreesOf(r.path)).toHaveLength(1);
+    const calls = existsSync(log) ? readFileSync(log, "utf8").split("\n") : [];
+    expect(calls.filter((c) => c.startsWith("worktree add"))).toEqual([]); // never started
+    expect(calls.some((c) => c.startsWith("worktree remove"))).toBe(true); // the cleanup call ran
+  } finally {
+    process.env.PATH = savedPath;
+  }
+});
+
+test("replay and delivered test checkouts are refused during a stop, and nothing runs", async () => {
+  const r = repo();
+  const source = join(r.path, "delivered.py");
+  writeFileSync(source, "def test_bug(): assert False\n");
+  const plan = resolveCheckExecution({
+    components: [
+      {
+        name: "api",
+        kind: "python",
+        dir: "api",
+        paths: ["api/**"],
+        commands: {},
+        extensions: [".py"],
+      },
+    ],
+    testFile: "api/tests/test_bug.py",
+  });
+  let ran = 0;
+  const run = async () => {
+    ran++;
+    return { exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false };
+  };
+  door.beginStopping();
+  expect(
+    await deliveredTestEvidenceAtBaseline({
+      repoPath: r.path,
+      baselineSha: r.sha,
+      testFile: plan.testFile,
+      sourcePath: source,
+      plan,
+      timeoutMs: 1000,
+      run,
+    }),
+  ).toMatchObject({ verdict: "unknown" });
+  await expect(
+    replayCheckAtBaseline({
+      repoPath: r.path,
+      baselineSha: r.sha,
+      components: [
+        { name: "checks", kind: "python", paths: ["checks/**"], commands: {}, extensions: [".py"] },
+      ],
+      testFile: "checks/a_test.py",
+      testName: "test_ac",
+      content: "x",
+      timeoutMs: 5000,
+      run,
+    }),
+  ).rejects.toBeInstanceOf(door.RunInterrupted);
+  expect(ran).toBe(0);
   expect(worktreesOf(r.path)).toHaveLength(1);
 });
 
