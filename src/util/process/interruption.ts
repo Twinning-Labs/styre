@@ -1,6 +1,7 @@
 // ENG-485 section 7.3 step 6 and section 7.5: recording an interruption, and matching it on resume.
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
+import { branchNameFor } from "../../agent/branch.ts";
 import { completeDispatch, getLatestWorktreePath } from "../../db/repos/dispatch.ts";
 import { type EventLogRow, appendEvent } from "../../db/repos/event-log.ts";
 import { getProject } from "../../db/repos/project.ts";
@@ -138,16 +139,27 @@ export function findInterruption(db: Database, step: WorkflowStepRow): Interrupt
 
 /** Section 7.5 (R1). Worktree mode: nothing to undo, since resume rebuilt the worktree from the
  *  branch. In place: restore the checkout to its state before the dispatch, sparing the untracked
- *  files that were already there. Returns a line to print, or null. */
+ *  files that were already there, but only while the checkout is still on the ticket branch (the
+ *  same check as the reset: an operator who switched branches keeps their edits). A missing folder
+ *  or a failing undo never fails the resume, `--fresh` or `clean` (R21). Returns a line to print,
+ *  or null. */
 export function undoInterruptedEdits(
   p: InterruptionPayload,
-  mode: { inPlace: boolean; repoPath: string },
+  mode: { inPlace: boolean; repoPath: string; branch: string },
 ): string | null {
   if (!mode.inPlace || p.untrackedBefore === null || p.worktree === null) return null;
-  if (!existsSync(p.worktree)) {
-    return `styre: skipped undoing the interrupted step's edits: ${p.worktree} no longer exists`;
+  const skipped = (why: string) => `styre: skipped undoing the interrupted step's edits: ${why}`;
+  if (!existsSync(p.worktree)) return skipped(`${p.worktree} no longer exists`);
+  const on = gitOut(["symbolic-ref", "--quiet", "HEAD"], p.worktree);
+  if (on !== `refs/heads/${mode.branch}`) {
+    return skipped(`the checkout is on ${on ?? "a detached HEAD"}, not on ${mode.branch}`);
   }
-  undoAttempt(p.worktree, new Set(p.untrackedBefore));
+  try {
+    undoAttempt(p.worktree, new Set(p.untrackedBefore));
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    return `styre: could not undo the interrupted step's edits in ${p.worktree} (${why}); they remain`;
+  }
   return null;
 }
 
@@ -247,9 +259,13 @@ export function undoBeforeDiscard(dbPath: string, warn: (line: string) => void):
       if (!p) continue;
       const ticket = getTicket(db, step.ticket_id);
       const project = ticket ? getProject(db, ticket.project_id) : null;
-      if (!project) continue;
+      if (!ticket || !project) continue;
       const inPlace = getLatestWorktreePath(db, step.ticket_id) === project.target_repo;
-      const line = undoInterruptedEdits(p, { inPlace, repoPath: project.target_repo });
+      const line = undoInterruptedEdits(p, {
+        inPlace,
+        repoPath: project.target_repo,
+        branch: branchNameFor(ticket),
+      });
       if (line) warn(line);
     }
   } finally {

@@ -19,6 +19,12 @@ export interface RecoverCtx {
   warn: (line: string) => void;
 }
 
+/** Only the warning channel: a fresh run has no checkout to repair, but an older checkpoint
+ *  reused through --db still gets its warning (section 5.5). */
+export interface RecoverWarnOnly {
+  warn: (line: string) => void;
+}
+
 export interface RecoverResult {
   /** Steps left `running` that were returned to `pending`. */
   reset: number;
@@ -38,7 +44,8 @@ export interface RecoverResult {
  *    when that is safe;
  *  - otherwise it was a crash or a `kill -9`: a suite step keeps its consumed attempt and a typed
  *    error, so restarting cannot skip the bounded retry policy, and the step returns to `pending`. */
-export function recover(db: Database, ctx?: RecoverCtx): RecoverResult {
+export function recover(db: Database, ctx?: RecoverCtx | RecoverWarnOnly): RecoverResult {
+  const checkout = ctx && "repoPath" in ctx ? ctx : null;
   const running = steps.listByStatus(db, "running");
   let interrupted = 0;
   let warned = 0;
@@ -51,11 +58,11 @@ export function recover(db: Database, ctx?: RecoverCtx): RecoverResult {
     const p = findInterruption(db, step);
     if (p) {
       interrupted++;
-      if (ctx) {
-        const undo = undoInterruptedEdits(p, ctx);
-        if (undo) ctx.warn(undo);
-        const reset = resetBranchAfterInterruption(db, p, ctx);
-        if (reset) ctx.warn(reset);
+      if (checkout) {
+        const undo = undoInterruptedEdits(p, checkout);
+        if (undo) checkout.warn(undo);
+        const reset = resetBranchAfterInterruption(db, p, checkout);
+        if (reset) checkout.warn(reset);
       }
       steps.resetToPending(db, step.id);
       continue;

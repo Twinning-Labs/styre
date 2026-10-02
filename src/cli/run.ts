@@ -354,7 +354,8 @@ export async function runImpl(
     try {
       migrate(dbPath);
       const db = openDb(dbPath);
-      recover(db);
+      // A reused --db can be an older checkpoint: its warning goes to stderr (section 5.5).
+      recover(db, { warn: (line) => process.stderr.write(`${line}\n`) });
       // Mint the run identity before any telemetry emit. Guard on getRun===null so a reused --db
       // (non-ephemeral) doesn't insert a second run row.
       if (getRun(db) === null) {

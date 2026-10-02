@@ -137,6 +137,8 @@ export function makeGitProject(opts?: { mode?: "in-place" | "worktree" }): GitPr
   const B = git(repo, ["rev-parse", "HEAD"]);
   if (!inPlace) git(repo, ["checkout", "main"]);
   const db = openDb(t.path);
+  // The ticket's branch, as --fresh and clean derive it from the checkpoint.
+  db.query("UPDATE ticket SET branch_name = ? WHERE id = ?").run(branch, t.ticketId);
   completeDispatch(db, t.dispatchRowId, {
     outcome: "succeeded",
     branchHeadSha: B,

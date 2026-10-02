@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 // transaction through its own connection, and on --resume recover() matches it, so the interruption
 // is free: the attempt is given back, edits are undone in place, the branch goes back to where the
 // step started when that is safe. Anything unmatched takes the crash path. recover() kills nothing.
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -756,6 +756,7 @@ test("clean undoes an in-place interruption's edits before it removes the checkp
 async function freshOver(
   g: ReturnType<typeof makeGitProject>,
   before?: (checkpointDir: string) => void,
+  args: { fresh?: boolean; db?: string } = { fresh: true },
 ) {
   const SLUG = "test-project";
   const IDENT = "ENG-1";
@@ -780,9 +781,11 @@ async function freshOver(
     if (existsSync(from)) writeFileSync(join(checkpointDir, f), readFileSync(from));
   }
   before?.(checkpointDir);
+  // runImpl sets the process exit status (75 on a park): never let it leak into the test runner.
+  const previousExitCode = process.exitCode;
   try {
     await runImpl(
-      { args: { ticket: IDENT, profile: profilePath, fresh: true } },
+      { args: { ticket: IDENT, profile: profilePath, ...args } },
       {
         ports: {
           issueTracker: fakeIssueTracker({
@@ -813,6 +816,7 @@ async function freshOver(
       },
     );
   } finally {
+    process.exitCode = previousExitCode ?? 0;
     for (const [k, v] of [
       ["XDG_CONFIG_HOME", prev.config],
       ["STYRE_TELEMETRY", prev.telemetry],
@@ -912,4 +916,309 @@ test("styre run --resume --accept-head passes the flag to recover(): nothing is 
   } finally {
     cleanupParkedRun(parked);
   }
+});
+
+// ---- fix round 1: the recording and matching guards ----------------------------------------------
+
+const inFlightOf = (t: { stepId: number; startedAt: string }) => ({
+  stepId: t.stepId,
+  startedAt: t.startedAt,
+  ident: "ENG-1",
+  headAtStart: null,
+  headAtStop: null,
+});
+
+test("an in-flight step that is no longer running from the same start gets only the bare note", () => {
+  const variants: Array<[string, (db: Database, t: ReturnType<typeof makeTicketDb>) => string]> = [
+    [
+      "succeeded",
+      (db, t) => {
+        steps.markSucceeded(db, t.stepId, null);
+        return t.startedAt;
+      },
+    ],
+    [
+      "pending",
+      (db, t) => {
+        steps.resetToPending(db, t.stepId);
+        return t.startedAt;
+      },
+    ],
+    ["a different start", (_db, t) => `${t.startedAt.slice(0, -1)}9Z`],
+  ];
+  for (const [name, change] of variants) {
+    const t = makeTicketDb();
+    const db = openDb(t.path);
+    const startedAt = change(db, t);
+    const before = steps.getById(db, t.stepId);
+    db.close();
+    const row = recordInterruption(t.path, {
+      ticketId: t.ticketId,
+      signal: "SIGINT",
+      step: { ...inFlightOf(t), startedAt },
+      agent: {
+        ident: "ENG-1",
+        stepId: t.stepId,
+        worktree: "/w",
+        untrackedBefore: [],
+        dispatchRowId: t.dispatchRowId,
+      },
+    });
+    const after = new Database(t.path);
+    expect([name, JSON.parse(row?.payload_json as string)]).toEqual([
+      name,
+      { event: "interrupted", signal: "SIGINT" },
+    ]);
+    expect([name, steps.getById(after, t.stepId)?.attempt]).toEqual([name, before?.attempt]);
+    expect([name, dispatchRow(after, t.dispatchRowId)]).toEqual([
+      name,
+      { outcome: null, branch_head_sha: null, partial: 0 },
+    ]);
+    after.close();
+  }
+});
+
+test("a launch context from another step is not recorded, and its dispatch row is left open", () => {
+  const t = makeTicketDb();
+  const row = recordInterruption(t.path, {
+    ticketId: t.ticketId,
+    signal: "SIGINT",
+    step: inFlightOf(t),
+    agent: {
+      ident: "ENG-1",
+      stepId: t.stepId + 1,
+      worktree: "/w",
+      untrackedBefore: ["x"],
+      dispatchRowId: t.dispatchRowId,
+    },
+  });
+  expect(JSON.parse(row?.payload_json as string)).toMatchObject({
+    stepId: t.stepId,
+    worktree: null,
+    untrackedBefore: null,
+    dispatchRowId: null,
+  });
+  const db = new Database(t.path);
+  expect(dispatchRow(db, t.dispatchRowId)).toEqual({
+    outcome: null,
+    branch_head_sha: null,
+    partial: 0,
+  });
+  expect(steps.getById(db, t.stepId)?.attempt).toBe(1); // the step itself was still recorded
+  db.close();
+});
+
+test("the recording is one transaction: a failing append leaves the attempt and the dispatch as they were", () => {
+  const t = makeTicketDb();
+  // A ticket that does not exist breaks the note's foreign key, after the decrement has run.
+  expect(() =>
+    recordInterruption(t.path, {
+      ticketId: t.ticketId + 999,
+      signal: "SIGINT",
+      step: inFlightOf(t),
+      agent: {
+        ident: "ENG-1",
+        stepId: t.stepId,
+        worktree: "/w",
+        untrackedBefore: [],
+        dispatchRowId: t.dispatchRowId,
+      },
+    }),
+  ).toThrow();
+  const db = new Database(t.path);
+  expect(steps.getById(db, t.stepId)?.attempt).toBe(2);
+  expect(dispatchRow(db, t.dispatchRowId)).toEqual({
+    outcome: null,
+    branch_head_sha: null,
+    partial: 0,
+  });
+  db.close();
+});
+
+test("a note for another step, at the same attempt and start, does not match", () => {
+  const t = makeTicketDb({ stepKey: "verify:integration" });
+  const db = openDb(t.path);
+  const step = steps.getById(db, t.stepId) as steps.WorkflowStepRow;
+  appendEvent(db, {
+    ticketId: t.ticketId,
+    kind: "note",
+    reason: "interrupted",
+    payload: {
+      event: "interrupted",
+      stepId: t.stepId + 1,
+      attempt: step.attempt,
+      startedAt: t.startedAt,
+      signal: "SIGINT",
+      worktree: null,
+      untrackedBefore: null,
+      dispatchRowId: null,
+      headAtStart: null,
+      headAtStop: null,
+    },
+  });
+  expect(findInterruption(db, step)).toBeNull();
+  expect(recover(db).interrupted).toBe(0);
+  db.close();
+});
+
+test("a step that did not move the branch is not reset and marks nothing reverted, even when the head still stands there", () => {
+  const g = makeGitProject(); // the branch is at B
+  recordInterruption(g.dbPath, {
+    ticketId: g.ticketId,
+    signal: "SIGINT",
+    step: { ...inFlightOf(g), headAtStart: g.B, headAtStop: g.B },
+    agent: null,
+  });
+  const db = new Database(g.dbPath);
+  const out = recover(db, {
+    inPlace: true,
+    repoPath: g.repo,
+    branch: g.branch,
+    acceptHead: false,
+    ...quiet,
+  });
+  expect(out.interrupted).toBe(1);
+  expect(g.head()).toBe(g.B);
+  expect(dispatchRow(db, g.dispatchRowId)).toMatchObject({
+    outcome: "succeeded",
+    branch_head_sha: g.B,
+  });
+  expect(dispatchRow(db, g.earlierDispatchRowId)).toMatchObject({ outcome: "dispatch-failed" });
+  db.close();
+});
+
+// ---- fix round 1: R21 --------------------------------------------------------------------------
+
+/** An in-place interruption where the agent left a new file and an edit, with the run's checkout
+ *  then moved to main by the operator, who has their own edit and untracked file there. */
+function operatorOnMain() {
+  const g = interruptedInPlace();
+  git(g.repo, ["stash", "push", "--include-untracked", "-m", "agent"]); // keep main clean to switch
+  git(g.repo, ["checkout", "main"]);
+  writeFileSync(join(g.repo, "README.md"), "operator edit\n");
+  writeFileSync(join(g.repo, "operator-notes.txt"), "mine\n");
+  return g;
+}
+const operatorUntouched = (g: ReturnType<typeof makeGitProject>) => {
+  expect(readFileSync(join(g.repo, "README.md"), "utf8")).toBe("operator edit\n");
+  expect(existsSync(join(g.repo, "operator-notes.txt"))).toBe(true);
+  expect(git(g.repo, ["symbolic-ref", "HEAD"])).toBe("refs/heads/main");
+};
+
+test("R21: in place, recover skips the undo and says so when the checkout is not on the ticket branch", () => {
+  const g = operatorOnMain();
+  const lines: string[] = [];
+  const db = new Database(g.dbPath);
+  const out = recover(db, {
+    inPlace: true,
+    repoPath: g.repo,
+    branch: g.branch,
+    acceptHead: false,
+    warn: (l) => lines.push(l),
+  });
+  expect(out.interrupted).toBe(1);
+  operatorUntouched(g);
+  expect(lines.join("\n")).toContain("skipped undoing the interrupted step's edits");
+  expect(lines.join("\n")).toContain("not on b");
+  db.close();
+});
+
+test("R21: --fresh and clean skip the undo when the checkout is not on the ticket branch", () => {
+  const g = operatorOnMain();
+  const lines: string[] = [];
+  undoBeforeDiscard(g.dbPath, (l) => lines.push(l));
+  operatorUntouched(g);
+  expect(lines.join("\n")).toContain("skipped undoing the interrupted step's edits");
+  const err = spyOn(process.stderr, "write").mockImplementation(() => true);
+  try {
+    reapEffort(g.repo, {
+      branch: g.branch,
+      dir: dirname(g.dbPath),
+      ticketId: g.ticketId,
+      dbPath: g.dbPath,
+    });
+  } finally {
+    err.mockRestore();
+  }
+  operatorUntouched(g);
+});
+
+test("R21: a failing undo (a stale index.lock) warns and the resume goes on", () => {
+  const g = interruptedInPlace();
+  writeFileSync(join(g.repo, ".git", "index.lock"), "");
+  const lines: string[] = [];
+  const db = new Database(g.dbPath);
+  const out = recover(db, {
+    inPlace: true,
+    repoPath: g.repo,
+    branch: g.branch,
+    acceptHead: false,
+    warn: (l) => lines.push(l),
+  });
+  expect(out.interrupted).toBe(1);
+  expect(steps.getById(db, g.stepId)?.status).toBe("pending");
+  expect(lines.join("\n")).toContain("could not undo the interrupted step's edits");
+  expect(lines.join("\n")).toContain("index.lock");
+  db.close();
+});
+
+test("R21: a failing undo (a stale index.lock) warns and clean still removes the checkpoint", () => {
+  const g = interruptedInPlace();
+  writeFileSync(join(g.repo, ".git", "index.lock"), "");
+  const lines: string[] = [];
+  undoBeforeDiscard(g.dbPath, (l) => lines.push(l));
+  expect(lines.join("\n")).toContain("could not undo the interrupted step's edits");
+  const written: string[] = [];
+  const err = spyOn(process.stderr, "write").mockImplementation((chunk) => {
+    written.push(String(chunk));
+    return true;
+  });
+  try {
+    reapEffort(g.repo, {
+      branch: g.branch,
+      dir: dirname(g.dbPath),
+      ticketId: g.ticketId,
+      dbPath: g.dbPath,
+    });
+  } finally {
+    err.mockRestore();
+  }
+  expect(existsSync(dirname(g.dbPath))).toBe(false);
+  expect(written.join("")).toContain("could not undo the interrupted step's edits");
+});
+
+test("R21: a failing undo (a stale index.lock) warns and --fresh still starts over", async () => {
+  const g = interruptedInPlace();
+  writeFileSync(join(g.repo, ".git", "index.lock"), "");
+  const written: string[] = [];
+  const err = spyOn(process.stderr, "write").mockImplementation((chunk) => {
+    written.push(String(chunk));
+    return true;
+  });
+  try {
+    await freshOver(g);
+  } finally {
+    err.mockRestore();
+  }
+  expect(written.join("")).toContain("could not undo the interrupted step's edits");
+  expect(existsSync(join(parkDir("test-project", "ENG-1"), "run.db"))).toBe(true);
+});
+
+test("R21: a fresh run on a reused --db reports an older checkpoint's live pid on stderr", async () => {
+  const g = makeGitProject();
+  const dbPath = join(state, "reused", "run.db");
+  makeTicketDb({ path: dbPath, pid: process.pid, targetRepo: g.repo });
+  const written: string[] = [];
+  const err = spyOn(process.stderr, "write").mockImplementation((chunk) => {
+    written.push(String(chunk));
+    return true;
+  });
+  try {
+    await freshOver(g, undefined, { db: dbPath });
+  } finally {
+    err.mockRestore();
+  }
+  expect(written.join("")).toContain(
+    `pid ${process.pid} is alive but its identity cannot be confirmed`,
+  );
 });
