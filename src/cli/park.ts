@@ -18,7 +18,7 @@ import { stateDir } from "../config/paths.ts";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
 import type { ProjectorPorts } from "../daemon/projector.ts";
-import { realRecoverDeps, recover } from "../daemon/recover.ts";
+import { recover } from "../daemon/recover.ts";
 import {
   type ReviewResumePlan,
   applyReviewResume,
@@ -411,7 +411,17 @@ export async function resumeRun(
       requeueFailedForge(db, ticketId, profile.defaultBranch, current);
     })();
 
-    recover(db, realRecoverDeps()); // resets the interrupted 'running' step → pending
+    // Resets the interrupted 'running' step to pending. A recorded interruption is free: its attempt
+    // was given back, in-place edits are undone, and the branch returns to where the step started
+    // when that is safe (ENG-485 section 7.5). The old worktree is already gone (reconcile above),
+    // and the new one is created only when the step runs, so a worktree branch can move here.
+    recover(db, {
+      inPlace,
+      repoPath: project.target_repo,
+      branch,
+      acceptHead: args.acceptHead === true,
+      warn: (line) => process.stderr.write(`${line}\n`),
+    });
 
     const registry: StepRegistry = deps?.buildRegistry
       ? deps.buildRegistry(resumeContext)

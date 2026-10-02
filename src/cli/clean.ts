@@ -7,6 +7,7 @@ import { getLatestWorktreePath } from "../db/repos/dispatch.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
 import { deleteLocalBranch, deleteRemoteBranch, reconcileWorktree } from "../dispatch/worktree.ts";
+import { undoBeforeDiscard } from "../util/process/interruption.ts";
 import { classifyCheckpointDb, listCheckpoints } from "./checkpoints.ts";
 import { EXIT, StyreError, usageError } from "./errors.ts";
 import { guard } from "./output.ts";
@@ -40,6 +41,9 @@ export function reapEffort(targetRepo: string, c: EffortRef): void {
   } finally {
     db.close();
   }
+  // In place, an interrupted step's edits are still in the checkout: undo them before the
+  // checkpoint that names them is removed (ENG-485 section 7.5). Every caller checked the run lock.
+  undoBeforeDiscard(c.dbPath, (line) => process.stderr.write(`${line}\n`));
   // `join(c.dir, "wt")` is a non-repo sentinel path used only for reconcileWorktree's in-place
   // (`newWorktreePath === repoPath`) check — it is never created or written to. Same idiom as
   // resumeRun's `targetWorktreePath` (park.ts) / run.ts:252-258.

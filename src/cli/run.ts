@@ -13,7 +13,7 @@ import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { discoverRuntimeConfig } from "../config/discover.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
 import type { ProjectorPorts } from "../daemon/projector.ts";
-import { realRecoverDeps, recover } from "../daemon/recover.ts";
+import { recover } from "../daemon/recover.ts";
 import { runTicket } from "../daemon/run-ticket.ts";
 import { openDb } from "../db/client.ts";
 import { migrate } from "../db/migrate.ts";
@@ -29,6 +29,7 @@ import { type Analytics, createAnalytics } from "../telemetry/analytics/index.ts
 import { stdoutSink } from "../telemetry/emit.ts";
 import { buildSummary } from "../telemetry/emitter.ts";
 import type { TelemetryEvent } from "../telemetry/events.ts";
+import { undoBeforeDiscard } from "../util/process/interruption.ts";
 import { nowUtc } from "../util/time.ts";
 import { formatNonPrimaryComponents, noPrimaryLeft } from "./component-roles.ts";
 import { noPrimaryComponentError } from "./errors.ts";
@@ -313,6 +314,9 @@ export async function runImpl(
           "Wait for it to finish, or remove the stale lock if that process is gone.",
         );
       }
+      // In place, an interrupted step's edits are still in the checkout: undo them before the
+      // checkpoint that names them is discarded (ENG-485 section 7.5). After the live lock check.
+      undoBeforeDiscard(join(checkpointDir, "run.db"), (line) => process.stderr.write(`${line}\n`));
       // Free a styre-owned holder (the common post-park leftover: the worktree dir still present,
       // lock already released) via the liveness gate BEFORE the whole-dir delete — ensureWorktree's
       // later prunable-only retry would refuse a non-prunable one (ENG-385).
@@ -350,7 +354,7 @@ export async function runImpl(
     try {
       migrate(dbPath);
       const db = openDb(dbPath);
-      recover(db, realRecoverDeps());
+      recover(db);
       // Mint the run identity before any telemetry emit. Guard on getRun===null so a reused --db
       // (non-ephemeral) doesn't insert a second run row.
       if (getRun(db) === null) {
