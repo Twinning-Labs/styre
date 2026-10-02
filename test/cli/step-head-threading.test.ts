@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { join } from "node:path";
+import { openDb } from "../../src/db/client.ts";
 import * as door from "../../src/util/process/door.ts";
 import {
+  advanceBranchHead,
   cleanupParkedRun,
   resumeParkedTicket,
   runFreshTicket,
@@ -8,32 +11,57 @@ import {
 } from "../helpers/run-harness.ts";
 
 // ENG-485 section 7.5: `styre run` and `--resume` must hand the step journal a way to read the
-// ticket branch's HEAD, so the step in flight records where the branch stood when it started.
+// HEAD of the TICKET branch (not the default branch, not whatever the checkout has), so the step in
+// flight records where that branch stood when the step started.
 
 beforeEach(() => door.__resetForTests());
 afterEach(() => door.__resetForTests());
 
-const headOf = (repo: string, ref: string): string =>
-  Bun.spawnSync(["git", "rev-parse", ref], { cwd: repo }).stdout.toString().trim();
+const git = (repo: string, ...args: string[]): string => {
+  const r = Bun.spawnSync(["git", ...args], { cwd: repo });
+  if (!r.success) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+  return r.stdout.toString().trim();
+};
 
-test("styre run records the branch HEAD at the start of each step", async () => {
+test("styre run records the HEAD of the ticket branch, which has diverged from the default branch", async () => {
   const seen: Array<ReturnType<typeof door.inFlightStep>> = [];
-  const run = await runFreshTicket({ onDispatch: () => seen.push(door.inFlightStep()) });
+  const run = await runFreshTicket({
+    // The checkout sits on `dev`, one commit ahead of `main` (the profile's default branch), so
+    // the ticket branch that `provision` creates from it starts somewhere `main` is not.
+    repoSetup: (repo) => {
+      git(repo, "checkout", "-q", "-b", "dev");
+      git(repo, "commit", "-q", "--allow-empty", "-m", "dev work");
+    },
+    onDispatch: () => seen.push(door.inFlightStep()),
+  });
   expect(seen.length).toBeGreaterThan(0);
-  // `provision` has made the worktree and the branch before the first agent step starts.
-  const branchHead = headOf(run.repoDir, "feat/ENG-1");
-  expect(branchHead).toMatch(/^[0-9a-f]{40}$/);
+  const ticketHead = git(run.repoDir, "rev-parse", "feat/ENG-1");
+  const defaultHead = git(run.repoDir, "rev-parse", "main");
+  expect(ticketHead).not.toBe(defaultHead); // the setup really made them differ
   expect(seen[0]?.ident).toBe("ENG-1");
-  expect(seen[0]?.headAtStart).toBe(branchHead);
+  expect(seen[0]?.headAtStart).toBe(ticketHead);
   run.cleanup();
 });
 
-test("styre run --resume records the branch HEAD at the start of the resumed step", async () => {
+test("styre run --resume records the HEAD of the ticket branch, not the checkout's HEAD", async () => {
   const parked = await runParkedTicket();
+  advanceBranchHead(parked); // the ticket branch moves; the checkout's own HEAD does not
+  const dump = openDb(join(parked.dumpDir, "run.db"));
+  const repo = (
+    dump.query<{ target_repo: string }, []>("SELECT target_repo FROM project LIMIT 1").get() as {
+      target_repo: string;
+    }
+  ).target_repo;
+  dump.close();
+  const ticketHead = git(repo, "rev-parse", "feat/ENG-1"); // before the resumed run commits more
+  expect(ticketHead).not.toBe(git(repo, "rev-parse", "HEAD")); // the checkout is not on the ticket branch
   const seen: Array<ReturnType<typeof door.inFlightStep>> = [];
-  await resumeParkedTicket(parked, { onDispatch: () => seen.push(door.inFlightStep()) });
+  await resumeParkedTicket(parked, {
+    acceptHead: true,
+    onDispatch: () => seen.push(door.inFlightStep()),
+  });
   expect(seen.length).toBeGreaterThan(0);
   expect(seen[0]?.ident).toBe("ENG-1");
-  expect(seen[0]?.headAtStart).toMatch(/^[0-9a-f]{40}$/);
+  expect(seen[0]?.headAtStart).toBe(ticketHead);
   cleanupParkedRun(parked);
 });

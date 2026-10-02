@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +6,7 @@ import * as steps from "../../src/db/repos/workflow-step.ts";
 import { ParkSignal } from "../../src/engine/park-signal.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
 import * as door from "../../src/util/process/door.ts";
+import * as timeModule from "../../src/util/time.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 let state: string;
@@ -40,7 +41,14 @@ test("while stopping, a step that RETURNS is not recorded and RunInterrupted is 
   expect(row?.status).toBe("running");
   expect(row?.result_json).toBeNull();
   expect(row?.ended_at).toBeNull();
-  expect(door.inFlightStep()).toBeNull(); // the finally block still ran
+  // R18: the record stays for the signal handler to read while the door is stopping.
+  expect(door.inFlightStep()).toEqual({
+    stepId: row?.id as number,
+    startedAt: row?.started_at as string,
+    ident: String(ticketId),
+    headAtStart: "aaa",
+    headAtStop: "aaa",
+  });
   db.close();
 });
 
@@ -77,7 +85,7 @@ test("while stopping, a step that THROWS an ordinary error is not marked failed"
   expect(row?.status).toBe("running");
   expect(row?.error_json).toBeNull();
   expect(row?.attempt).toBe(1); // markFailed would also have been the only thing to touch this
-  expect(door.inFlightStep()).toBeNull();
+  expect(door.inFlightStep()).toMatchObject({ stepId: row?.id, startedAt: row?.started_at });
   db.close();
 });
 
@@ -99,13 +107,83 @@ test("while stopping, a ParkSignal is an interruption, not a park", async () => 
   db.close();
 });
 
-test("a stop that began BEFORE the step started still records nothing", async () => {
+test("a stop that began BEFORE the step started: RunInterrupted before markRunning, nothing written (B28)", async () => {
+  const { db, ticketId } = makeTestDb();
+  const pending = steps.insertPending(db, { ticketId, stepKey: "s", stepType: "t" });
+  const before = steps.getById(db, pending.id);
+  door.beginStopping();
+  let ran = false;
+  await expect(
+    runStep(db, {
+      ...base(ticketId),
+      execute: () => {
+        ran = true;
+        return 1;
+      },
+    }),
+  ).rejects.toBeInstanceOf(door.RunInterrupted);
+  expect(ran).toBe(false);
+  expect(steps.getById(db, pending.id)).toEqual(before); // still pending, attempt 0, no started_at
+  expect(before?.status).toBe("pending");
+  expect(door.inFlightStep()).toBeNull(); // nothing was registered
+  db.close();
+});
+
+test("a stop that began BEFORE a brand new step inserts no row either", async () => {
   const { db, ticketId } = makeTestDb();
   door.beginStopping();
   await expect(runStep(db, { ...base(ticketId), execute: () => 1 })).rejects.toBeInstanceOf(
     door.RunInterrupted,
   );
-  expect(steps.getByKey(db, ticketId, "s")?.status).toBe("running");
+  expect(steps.getByKey(db, ticketId, "s")).toBeNull();
+  db.close();
+});
+
+test("the in-flight step survives a stop that ends the step, as the handler needs it (R18 reviewer simulation)", async () => {
+  const { db, ticketId } = makeTestDb();
+  const snapshots: Array<ReturnType<typeof door.inFlightStep>> = [];
+  let handle: door.LaunchHandle | null = null;
+  const p = runStep(db, {
+    ...base(ticketId),
+    ident: "ENG-5",
+    readHead: () => "start",
+    execute: async () => {
+      door.noteHead("moved");
+      handle = door.launch({
+        argv: ["sleep", "30"],
+        cwd: process.cwd(),
+        env: process.env,
+        kind: "agent",
+        context: { ident: null, stepId: null, worktree: null },
+      });
+      // What launchAgent does when its subprocess ends because the handler stopped it.
+      await handle.proc.exited;
+      throw new door.RunInterrupted();
+    },
+  });
+  const settled = p.then(
+    () => null,
+    (e: unknown) => e,
+  ); // observed at once, so the rejection is never unhandled while the handler awaits the stop
+  // The signal handler: close the door, snapshot, stop the launch, then look again.
+  while (handle === null) await Bun.sleep(5);
+  const h = handle as door.LaunchHandle;
+  door.beginStopping();
+  snapshots.push(door.inFlightStep()); // step 1
+  await h.stop("graceful");
+  expect(await settled).toBeInstanceOf(door.RunInterrupted);
+  snapshots.push(door.inFlightStep()); // step 6, after runStep unwound
+  const row = steps.getByKey(db, ticketId, "s");
+  for (const snap of snapshots) {
+    expect(snap).toEqual({
+      stepId: row?.id as number,
+      startedAt: row?.started_at as string,
+      ident: "ENG-5",
+      headAtStart: "start",
+      headAtStop: "moved",
+    });
+  }
+  expect(row?.status).toBe("running");
   db.close();
 });
 
@@ -387,5 +465,52 @@ test("an ordinary error that surfaces after the step returned, while stopping, i
   const row = steps.getByKey(db, ticketId, "s");
   expect(row?.status).toBe("running"); // not failed, and markSucceeded was rolled back
   expect(row?.error_json).toBeNull();
+  db.close();
+});
+
+test("the in-flight startedAt is the row's started_at even when the clock moves on (B8)", async () => {
+  const { db, ticketId } = makeTestDb();
+  // An observable clock: every call returns a later instant than the one before it.
+  let tick = 0;
+  const clock = spyOn(timeModule, "nowUtc").mockImplementation(() => {
+    tick++;
+    return `2030-01-01T00:00:00.${String(tick).padStart(3, "0")}Z`;
+  });
+  try {
+    const box: { seen: ReturnType<typeof door.inFlightStep>; row: steps.WorkflowStepRow | null } = {
+      seen: null,
+      row: null,
+    };
+    await runStep(db, {
+      ...base(ticketId),
+      execute: (step) => {
+        box.seen = door.inFlightStep();
+        box.row = steps.getById(db, step.id);
+        return 1;
+      },
+    });
+    expect(box.row?.started_at).toMatch(/^2030-01-01T00:00:00\.\d{3}Z$/); // the seam was in use
+    expect(box.seen?.startedAt).toBe(box.row?.started_at as string);
+    // Prove the seam can tell the difference: a fresh read is a different value.
+    expect(timeModule.nowUtc()).not.toBe(box.row?.started_at as string);
+  } finally {
+    clock.mockRestore();
+  }
+  db.close();
+});
+
+test("a readHead that throws fails the step (not left running) and clears the in-flight step", async () => {
+  const { db, ticketId } = makeTestDb();
+  await expect(
+    runStep(db, {
+      ...base(ticketId),
+      readHead: () => {
+        throw new Error("cannot read head");
+      },
+      execute: () => 1,
+    }),
+  ).rejects.toThrow("cannot read head");
+  expect(steps.getByKey(db, ticketId, "s")?.status).toBe("failed");
+  expect(door.inFlightStep()).toBeNull();
   db.close();
 });

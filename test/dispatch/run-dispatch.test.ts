@@ -770,3 +770,44 @@ test("a rejected committed output is reset to the starting head and that head is
   expect(door.inFlightStep()?.headAtStop).toBe(start); // and the reset was reported
   door.__resetForTests();
 });
+
+test("a rejected committed output keeps untracked files that existed before the dispatch (no git clean)", async () => {
+  door.__resetForTests();
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-keep-untracked-${Date.now()}`);
+  ensureWorktree(repo, "feat/ENG-1", wt);
+  writeFileSync(join(wt, "operator-note.txt"), "left by an earlier step\n"); // untracked before
+  const runner = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "feature-keep.ts"), "export const x = 1;\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: '{}\n```styre-sidecar\n{"new_files":["feature-keep.ts"]}\n```',
+      stderr: "",
+      timedOut: false,
+      costUsd: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+    };
+  });
+  await expect(
+    runAgentDispatch(
+      ctxFor(db, ticketId),
+      { runner, ...depsFor(repo, wt) },
+      {
+        handlerKey: "implement:dispatch",
+        template: "implement {{ident}}",
+        vars: { ident: "ENG-1" },
+        commitScope: implementScope,
+        postcondition: () => {},
+        validateCommittedOutput: () => {
+          throw new Error("committed output rejected");
+        },
+      },
+    ),
+  ).rejects.toThrow("committed output rejected");
+  db.close();
+  expect(existsSync(join(wt, "operator-note.txt"))).toBe(true); // survived the reset and the undo
+  expect(existsSync(join(wt, "feature-keep.ts"))).toBe(false); // the rejected commit is gone
+});

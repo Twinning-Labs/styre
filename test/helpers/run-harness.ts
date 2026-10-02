@@ -662,6 +662,8 @@ export async function runFreshTicket(opts?: {
   forge?: ForgePort;
   /** Called inside the fake agent, so a test can observe the step in flight. */
   onDispatch?: () => void;
+  /** Runs on the new target repo before the run starts (for example to move its checked out branch). */
+  repoSetup?: (repoDir: string) => void;
 }): Promise<FreshTicketRun> {
   const prevEnv = {
     state: process.env.XDG_STATE_HOME,
@@ -676,6 +678,7 @@ export async function runFreshTicket(opts?: {
   // anyway since ports/runner are injected, but reading them would be non-hermetic).
   const configRoot = mkdtempSync(join(tmpdir(), "styre-fresh-config-"));
   const repoDir = freshGitRepo();
+  opts?.repoSetup?.(repoDir);
   const profileDir = mkdtempSync(join(tmpdir(), "styre-fresh-profile-"));
   const profilePath = join(profileDir, "profile.json");
   writeFileSync(

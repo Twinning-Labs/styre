@@ -1,7 +1,6 @@
 import type { Database } from "bun:sqlite";
 import * as steps from "../db/repos/workflow-step.ts";
 import { RunInterrupted, beginStep, endStep, isStopping } from "../util/process/door.ts";
-import { nowUtc } from "../util/time.ts";
 import { ParkSignal } from "./park-signal.ts";
 
 /** Thrown when a step is found 'running' — an in-flight or crash-interrupted run
@@ -86,6 +85,9 @@ export interface RunStepResult {
  *   This is why pure steps need no `running` journal for safety.
  */
 export async function runStep(db: Database, params: RunStepParams): Promise<RunStepResult> {
+  // A stop that began before the step did: write nothing (no row, no markRunning, no attempt) and
+  // start nothing. The step stays as it was, so resume runs it as if it had never been tried.
+  if (params.effectful && isStopping()) throw new RunInterrupted();
   const existing = steps.getByKey(db, params.ticketId, params.stepKey);
   const step =
     existing ??
@@ -127,7 +129,7 @@ export async function runStep(db: Database, params: RunStepParams): Promise<RunS
         stepId: step.id,
         // markRunning set started_at in the same statement as the status; the interruption note
         // is matched on this exact value.
-        startedAt: current.started_at ?? nowUtc(),
+        startedAt: requireStartedAt(current),
         ident: params.ident ?? String(params.ticketId),
         headAtStart: params.readHead?.() ?? null,
       });
@@ -171,6 +173,17 @@ export async function runStep(db: Database, params: RunStepParams): Promise<RunS
     steps.markFailed(db, step.id, err);
     throw err;
   } finally {
-    if (params.effectful) endStep();
+    // While a stop is in progress the record stays: the signal handler reads it after the stopped
+    // launch has already unwound this function, to write the interruption (ENG-485 section 7.5).
+    if (params.effectful && !isStopping()) endStep();
   }
+}
+
+/** `markRunning` sets `started_at` in the same statement as the status. A missing value afterwards
+ *  is a bug, and the interruption is matched on this exact value, so never invent one. */
+function requireStartedAt(row: steps.WorkflowStepRow): string {
+  if (row.started_at === null) {
+    throw new Error(`runStep: step ${row.id} has no started_at after markRunning`);
+  }
+  return row.started_at;
 }
