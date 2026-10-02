@@ -1,7 +1,7 @@
 # ENG-485 — Agent process lifecycle: stop, interrupt and recover whole process trees
 
 **Date:** 2026-10-02
-**Status:** Design (revision 5). The operator approved it section by section.
+**Status:** Design (revision 6). The operator approved it section by section.
 
 | Review round | Verdict | Findings | Answered in |
 |---|---|---|---|
@@ -9,8 +9,9 @@
 | 2 | revise | 1 critical, 5 major, 6 minor | revision 3, which simplifies the interruption handling at the operator's direction (D15) |
 | 3 | revise | 3 major, 6 minor | revision 4 |
 | 4 | revise | 1 major, 4 minor | revision 5 |
+| 5 | revise | 1 major, 4 minor | revision 6 |
 
-Every finding is answered in §15–§18. Next: review round 5, then operator review of this written spec,
+Every finding is answered in §15–§19. Next: review round 6, then operator review of this written spec,
 then the implementation plan.
 
 **Ticket:** ENG-485 (parent ENG-483). Follows ENG-476 (PR #151, merged), which removed an earlier
@@ -516,6 +517,10 @@ asked to settle, and nothing is handed back and forth. Everything below runs aga
      posts, tracker comments and PR updates (`src/daemon/projector.ts:160-205`). Without the check
      it would keep sending during the stop and could not record the delivery, so the row would be sent
      again on resume, and Slack posts have no idempotency key.
+
+     **The remaining limit:** a request already in flight when the stop begins can still complete.
+     Its delivery cannot be recorded, so it is sent again on resume. For Slack, that is at most one
+     duplicate post per interruption (review round 5).
    - **Not covered: plain file writes by run code,** such as clearing the agent's scratch folder.
      These touch only Styre's own working files, and resume rebuilds or resets them.
 2. **Send the stop signals, before writing anything.** For every launch in the set held in memory,
@@ -640,21 +645,47 @@ looks for a `note` event with reason `interrupted` whose payload matches the ste
 and `started_at` (review round 2, N3).
 - **If it matches, it was an interruption.** The attempt was already given back. `recover()` resets
   the step to `pending` without marking it failed, including suite steps.
-- **Returning the branch to where the step started** (review round 4, M1). A step can commit before it
-  finishes. The checks step commits the authored tests (`handlers.ts:702`), then runs them, and rolls
-  the branch back if they are rejected (`:1049-1066`). A stop during that run blocks the rollback,
-  because `git` is refused. So:
-  - `runStep` records the branch HEAD when it starts the step in flight, and the handler stores it in
-    the note.
-  - On a matched interruption, if the branch has moved since, `recover()` resets it to that HEAD and
-    marks the step's dispatches made since as `reverted`, as the checks step's own rollback does. That
-    keeps resume's "HEAD moved" check correct.
-  - In worktree mode it uses `git branch -f` on the branch. `recover()` runs after the old worktree is
-    removed and before the new one is created (`park.ts:363`, then `:414`). In place it uses
-    `git reset --hard` in the checkout, after the in-place undo below.
-  - Pushes are not affected. They happen only in the outbox drain, with `--force-with-lease` against
-    the last remote state Styre saw (`src/dispatch/worktree.ts:479`), so the redone step's commits
-    can still be pushed safely.
+- **Returning the branch to where the step started** (review round 4, M1; narrowed by round 5, N1).
+  A step can commit before it finishes. The checks step's author commits the authored tests inside
+  `runAgentDispatch` (`handlers.ts:778`, through `run-dispatch.ts:325`), then runs them, and rolls the
+  branch back if they are rejected (`handlers.ts:1049-1066`). A stop during that run blocks the
+  rollback, because `git` is refused.
+  - **What is recorded:**
+    - When `runStep` starts the step in flight, it records the branch HEAD as **`headAtStart`**. If the
+      branch does not exist yet (the first step in worktree mode creates it), there is no
+      `headAtStart`, and the branch is never reset for that step (N3).
+    - Every function that moves HEAD reports the new HEAD to the in-flight record: the runner's
+      commit (`worktree.ts:74-84`, which already returns the sha), `resetWorktreeHard`
+      (`worktree.ts:438`), and the reset in `run-dispatch.ts:354`.
+    - The handler stores both `headAtStart` and the latest reported HEAD, **`headAtStop`**, in the
+      note. Neither needs `git` at stop time.
+  - **When `recover()` resets.** All four conditions must hold:
+    - the interruption is matched;
+    - `headAtStart` exists, and `headAtStop` differs from it;
+    - the branch's current HEAD still equals `headAtStop`, so nobody but the step has moved it since;
+    - `--accept-head` was not given (N1).
+
+    Then it resets the branch to `headAtStart`. Otherwise it does not reset, and prints that the
+    step's commits remain under the current HEAD.
+  - **Marking the abandoned dispatches.** After a reset, `recover()` marks as `reverted` the dispatch
+    rows with `step_id` equal to the step's ID and `started_at` at or after the note's `started_at`
+    (N2), with `branchHeadSha` set to `headAtStart`. Those are the same values the checks step's own
+    rollback writes. Filtering on `step_id` alone would also catch earlier attempts of the same step.
+    This keeps resume's "HEAD moved" check correct.
+  - **How it resets:**
+    - In worktree mode, `git branch -f` on the branch, after the old worktree is removed and before
+      the new one is created (`park.ts:363`, then `:414`).
+    - If the branch is checked out in another worktree, for example the operator's main clone, `git`
+      refuses. `recover()` reports that and does not reset, rather than failing the resume (N4).
+    - In place, `git reset --hard` in the checkout, after the in-place undo below.
+  - **Pushes are not affected.** No step in flight ever has its own commits pushed or queued:
+    - pushes happen only in the outbox drain, after a step has succeeded;
+    - `merge:push` and `merge:pr-ensure` contain no `await`, so they are never the step in flight
+      across a signal (review round 5).
+
+    The drain pushes with `--force-with-lease`, where the lease is the remote branch head read just
+    before the push (`src/integrations/adapters/github.ts:105-115`, `worktree.ts:479`). So a redone
+    branch replaces Styre's own remote branch, and a concurrent foreign push is still rejected.
 - **Undoing the agent's edits depends on the mode** (review round 3, R1):
   - **Worktree mode:** nothing to undo. `resumeRun` removes the old worktree before `recover()` runs
     (`src/cli/park.ts:362-363`) and creates a fresh one from the branch, so the edits are already
@@ -675,6 +706,9 @@ and `started_at` (review round 2, N3).
   after `--fresh`;
 - an interruption during the checks step's test run, after its commit, leaves the branch at the
   step's starting HEAD after resume, with that dispatch marked `reverted` (M1);
+- the same interruption, followed by an operator commit and `--resume --accept-head`, keeps the
+  operator's commit and resets nothing (N1);
+- a branch checked out in another worktree makes `recover()` report and skip the reset (N4);
 - an interruption during the outbox drain sends nothing further, and prints no "internal error"
   (m1, m2);
 - a baseline worktree is removed even when the stop lands during its run (m3);
@@ -975,7 +1009,7 @@ and without it. This also settles bash 5's behaviour (§2.5).
 
 | Criterion | Where |
 |---|---|
-| Design brainstorm independently reviewed, no open critical or major findings, operator approved | this document, plus its review records (§15–§18) |
+| Design brainstorm independently reviewed, no open critical or major findings, operator approved | this document, plus its review records (§15–§19) |
 | Each stop trigger and forwarded signal: the agent and a tool command in its own group gone within grace, expected exit status, shown live | §11.2, §11.3. Amended: for Ctrl-\, the orphaned command is reported, not stopped (D13). For GitHub, the graceful stop needs `exec` (D14). |
 | An agent launched through a wrapper script stopped completely, live | §6.1, §11.3 |
 | Recovery kills exactly what the record names; `--fresh` and `clean` stop an orphan first; tests through real steps | §5.4, §8, §11.3. The ticket's "a group for negative pids, one process for positive pids" is superseded by the record's `kind` (§5.5). |
@@ -1040,3 +1074,14 @@ and without it. This also settles bash 5's behaviour (§2.5).
 | m2 | minor | The outbox drain keeps sending during the stop; the rule overstated its coverage | §7.3 step 1: the drain checks the door per row; the rule is reworded to the database, processes and `git` |
 | m3 | minor | Refusing `git` breaks the baseline worktree cleanup | §7.3 step 1: cleanup calls are permitted, listed by the source guard |
 | m4 | minor | The macOS `ps` fallback would be refused during a stop | §7.3 step 1: it goes through the diagnostic path |
+
+## 19. Review round 5: findings and answers
+
+| # | Severity | Finding | Answer |
+|---|---|---|---|
+| N1 | major | After `--accept-head`, the reset would discard the operator's accepted commits | §7.5: reset only if the current HEAD still equals `headAtStop` and `--accept-head` was not given |
+| N2 | minor | No defined query for "the step's dispatches made since" | §7.5: `step_id` and `started_at` at or after the note's `started_at` |
+| N3 | minor | No starting HEAD when the step creates the branch | §7.5: no `headAtStart`, so no reset |
+| N4 | minor | `git branch -f` refuses a branch checked out elsewhere | §7.5: report and skip |
+| N5 | minor | `handlers.ts:702` records the HEAD; it does not commit | §7.5 citation corrected (`:778` through `run-dispatch.ts:325`) |
+| m2 note | minor | One in-flight outbox request can still complete | §7.3 step 1: at most one duplicate Slack post, stated |
