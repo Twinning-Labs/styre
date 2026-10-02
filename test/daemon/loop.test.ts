@@ -5,6 +5,7 @@ import { insertTicket, setTicketStage } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit, setStatus as setUnitStatus } from "../../src/db/repos/work-unit.ts";
 import { getByKey } from "../../src/db/repos/workflow-step.ts";
 import { awaitSignal } from "../../src/engine/signals.ts";
+import * as door from "../../src/util/process/door.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 function registry(): StepRegistry {
@@ -62,4 +63,18 @@ test("tick surfaces a resolver dead-end as paused-noprogress, not as progress", 
   const summary = await tick(db, registry());
   db.close();
   expect(summary.advanced).toBe(0);
+});
+
+test("tick passes readHead down to the step it advances", async () => {
+  door.__resetForTests();
+  const { db } = makeTestDb();
+  const r = new StepRegistry();
+  let seen: string | null | undefined;
+  r.register("provision", () => {
+    seen = door.inFlightStep()?.headAtStart;
+    return {};
+  });
+  await tick(db, r, { readHead: () => "tickHead" });
+  db.close();
+  expect(seen).toBe("tickHead");
 });

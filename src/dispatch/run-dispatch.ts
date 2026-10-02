@@ -8,7 +8,7 @@ import { completeDispatch, insertDispatch, nextSeq } from "../db/repos/dispatch.
 import { appendEvent } from "../db/repos/event-log.ts";
 import { ParkSignal } from "../engine/park-signal.ts";
 import { StepPrerequisiteError } from "../engine/step-journal.ts";
-import { runBlocking } from "../util/process/door.ts";
+import { noteHead, runBlocking } from "../util/process/door.ts";
 import { nowUtc } from "../util/time.ts";
 import type { CommitScope } from "./commit-scope.ts";
 import type { Profile } from "./profile.ts";
@@ -366,6 +366,7 @@ export async function runAgentDispatch(
           throw new Error(
             `failed to revert invalid committed review evidence: ${reset.timedOut ? "timed out" : reset.stderr}`,
           );
+        noteHead(preHead); // the branch is back at its head before this dispatch (ENG-485 section 7.5)
       }
       undoAttempt(deps.worktreePath, untrackedBefore);
       completion.branchHeadSha = preHead;

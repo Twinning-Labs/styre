@@ -13,7 +13,6 @@ import {
 } from "../db/repos/review-round.ts";
 import { getTicket } from "../db/repos/ticket.ts";
 import { listByTicket as units } from "../db/repos/work-unit.ts";
-import { setPid } from "../db/repos/workflow-step.ts";
 import { StepPrerequisiteError } from "../engine/step-journal.ts";
 import { runBoundedCommand } from "../util/run-bounded-command.ts";
 import { commandFor } from "./components.ts";
@@ -149,7 +148,6 @@ export async function runCodeReview(
       cwd,
       timeoutMs: deps.timeoutMs,
     });
-    setPid(ctx.db, ctx.step.id, null);
     const moved = worktreeHead(deps.worktreePath) !== sha;
     const dirtied = pendingEntries(deps.worktreePath).some((e) => !e.isNew || !before.has(e.path));
     insertSignal(ctx.db, {

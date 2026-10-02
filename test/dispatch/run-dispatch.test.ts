@@ -15,6 +15,7 @@ import { checksScopeFor, implementScope } from "../../src/dispatch/commit-scope.
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runAgentDispatch } from "../../src/dispatch/run-dispatch.ts";
 import { ensureWorktree } from "../../src/dispatch/worktree.ts";
+import * as door from "../../src/util/process/door.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 function gitRepo(): string {
@@ -719,4 +720,53 @@ test("the agent is launched with the context the interruption record needs (ENG-
     dispatchRowId: row?.id,
   });
   expect(row?.id).toBeGreaterThan(0);
+});
+
+test("a rejected committed output is reset to the starting head and that head is reported (ENG-485 section 7.5)", async () => {
+  door.__resetForTests();
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-reset-note-${Date.now()}`);
+  ensureWorktree(repo, "feat/ENG-1", wt);
+  const head = (cwd: string) =>
+    Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd }).stdout.toString().trim();
+  const start = head(wt);
+  door.beginStep({ stepId: 1, startedAt: "t", ident: "ENG-1", headAtStart: start });
+  const runner = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "feature-note.ts"), "export const x = 1;\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: '{}\n```styre-sidecar\n{"new_files":["feature-note.ts"]}\n```',
+      stderr: "",
+      timedOut: false,
+      costUsd: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+    };
+  });
+  let reportedAfterCommit: string | null = null;
+  await expect(
+    runAgentDispatch(
+      ctxFor(db, ticketId),
+      { runner, ...depsFor(repo, wt) },
+      {
+        handlerKey: "implement:dispatch",
+        template: "implement {{ident}}",
+        vars: { ident: "ENG-1" },
+        commitScope: implementScope,
+        postcondition: () => {},
+        validateCommittedOutput: (_out, _wt, sha) => {
+          reportedAfterCommit = door.inFlightStep()?.headAtStop ?? null;
+          expect(sha).not.toBe(start);
+          throw new Error("committed output rejected");
+        },
+      },
+    ),
+  ).rejects.toThrow("committed output rejected");
+  db.close();
+  expect(reportedAfterCommit).not.toBe(start); // the runner's commit was reported
+  expect(head(wt)).toBe(start); // the branch went back
+  expect(door.inFlightStep()?.headAtStop).toBe(start); // and the reset was reported
+  door.__resetForTests();
 });

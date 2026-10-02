@@ -53,7 +53,7 @@ export async function advanceOneStep(
   db: Database,
   ticketId: number,
   registry: StepRegistry,
-  opts?: { config?: RuntimeConfig },
+  opts?: { config?: RuntimeConfig; readHead?: () => string | null },
 ): Promise<AdvanceOutcome> {
   try {
     registry.synchronize(db, ticketId);
@@ -144,6 +144,8 @@ export async function advanceOneStep(
         stepKey: d.stepKey,
         stepType: d.stepType,
         effectful: true,
+        ident: ticket.ident,
+        readHead: opts?.readHead,
         execute: (step) =>
           handler({
             db,

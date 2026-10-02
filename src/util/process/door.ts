@@ -80,6 +80,14 @@ export function __setStopDepsForTests(deps: StopDeps | undefined): void {
 
 export function launch(spec: LaunchSpec): LaunchHandle {
   if (stopping) throw new RunInterrupted();
+  // A caller with no ticket in hand (a command run by a helper) still belongs to the step in
+  // flight: name it, so group records and later sweep messages say which ticket they came from.
+  const step = inFlight;
+  const context: LaunchContext = {
+    ...spec.context,
+    ident: spec.context.ident ?? step?.ident ?? null,
+    stepId: spec.context.stepId ?? step?.stepId ?? null,
+  };
   const me = selfIdentity(); // read before spawning: a failure here must not leave a child behind
   const proc = Bun.spawn(spec.argv, {
     cwd: spec.cwd,
@@ -104,9 +112,9 @@ export function launch(spec: LaunchSpec): LaunchHandle {
       startedAt,
       bootId: bootId(),
       kind: spec.kind,
-      ident: spec.context.ident,
-      stepId: spec.context.stepId,
-      worktree: spec.context.worktree,
+      ident: context.ident,
+      stepId: context.stepId,
+      worktree: context.worktree,
       command: spec.argv.join(" ").slice(0, 200),
       owner: me,
     };
@@ -145,7 +153,7 @@ export function launch(spec: LaunchSpec): LaunchHandle {
   const handle: LaunchHandle = {
     proc,
     record,
-    context: spec.context,
+    context,
     interrupted: false,
     stop: async (how) => release(await doStop(how)),
     // Both kinds stop what is left, so a record is never released while anything it covers is alive

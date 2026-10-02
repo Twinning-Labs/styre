@@ -21,12 +21,14 @@ import {
   readDiscardedSources,
   reconcileWorktree,
   removeWorktree,
+  resetWorktreeHard,
   stagedIndexEmpty,
   sweepScratch,
   undoAttempt,
   worktreeHasChanges,
   worktreeHoldingBranch,
 } from "../../src/dispatch/worktree.ts";
+import * as door from "../../src/util/process/door.ts";
 
 const roots: string[] = [];
 afterAll(() => {
@@ -916,4 +918,89 @@ test("pushBranch publishes the reviewed commit even if the local branch advanced
   expect(run(["rev-parse", "HEAD"])).not.toBe(reviewed);
   pushBranch(repo, branch, undefined, reviewed);
   expect(remoteHead(repo, branch)).toBe(reviewed);
+});
+
+// --- ENG-485 section 7.5: every function that moves HEAD reports the new HEAD ---------------------
+
+function inFlight(headAtStart: string | null): void {
+  door.__resetForTests();
+  door.beginStep({ stepId: 1, startedAt: "t", ident: "ENG-1", headAtStart });
+}
+
+test("commitWorktree reports the new commit to the in-flight step", () => {
+  const repo = makeRepo();
+  const wt = join(repo, "..", `wt-${Date.now()}-note-c`);
+  roots.push(wt);
+  ensureWorktree(repo, "feat/eng-note-c", wt);
+  const start = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: wt }).stdout.toString().trim();
+  inFlight(start);
+  writeFileSync(join(wt, "file.txt"), "hello");
+  const result = commitWorktree(wt, "feat: noted", ["file.txt"]);
+  expect(result.changed).toBe(true);
+  expect(result.sha).not.toBe(start);
+  expect(door.inFlightStep()?.headAtStop).toBe(result.sha);
+  expect(door.inFlightStep()?.headAtStart).toBe(start);
+  door.__resetForTests();
+});
+
+test("commitWorktree with nothing to commit leaves the in-flight head alone", () => {
+  const repo = makeRepo();
+  const wt = join(repo, "..", `wt-${Date.now()}-note-n`);
+  roots.push(wt);
+  ensureWorktree(repo, "feat/eng-note-n", wt);
+  inFlight("aaa");
+  const result = commitWorktree(wt, "feat: nothing", []);
+  expect(result.changed).toBe(false);
+  expect(door.inFlightStep()?.headAtStop).toBe("aaa");
+  door.__resetForTests();
+});
+
+test("resetWorktreeHard reports the head it reset to", () => {
+  const repo = makeRepo();
+  const wt = join(repo, "..", `wt-${Date.now()}-note-r`);
+  roots.push(wt);
+  ensureWorktree(repo, "feat/eng-note-r", wt);
+  const start = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: wt }).stdout.toString().trim();
+  writeFileSync(join(wt, "file.txt"), "hello");
+  inFlight(start);
+  const moved = commitWorktree(wt, "feat: to be undone", ["file.txt"]).sha;
+  expect(door.inFlightStep()?.headAtStop).toBe(moved);
+  resetWorktreeHard(wt, start);
+  expect(door.inFlightStep()?.headAtStop).toBe(start);
+  expect(Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: wt }).stdout.toString().trim()).toBe(
+    start,
+  );
+  door.__resetForTests();
+});
+
+test("a failed reset does not report a head it never reached", () => {
+  const repo = makeRepo();
+  const wt = join(repo, "..", `wt-${Date.now()}-note-f`);
+  roots.push(wt);
+  ensureWorktree(repo, "feat/eng-note-f", wt);
+  inFlight("aaa");
+  expect(() => resetWorktreeHard(wt, "0000000000000000000000000000000000000000")).toThrow();
+  expect(door.inFlightStep()?.headAtStop).toBe("aaa");
+  door.__resetForTests();
+});
+
+test("with no step in flight the head reports do nothing and nothing throws", () => {
+  door.__resetForTests();
+  const repo = makeRepo();
+  const wt = join(repo, "..", `wt-${Date.now()}-note-x`);
+  roots.push(wt);
+  ensureWorktree(repo, "feat/eng-note-x", wt);
+  writeFileSync(join(wt, "file.txt"), "hello");
+  expect(commitWorktree(wt, "feat: no step", ["file.txt"]).changed).toBe(true);
+  expect(door.inFlightStep()).toBeNull();
+});
+
+test("ensureWorktree deliberately reports nothing (section 7.5: safe in both orders)", () => {
+  const repo = makeRepo();
+  const wt = join(repo, "..", `wt-${Date.now()}-note-e`);
+  roots.push(wt);
+  inFlight("aaa");
+  ensureWorktree(repo, "feat/eng-note-e", wt); // moves the branch with `worktree add -B`
+  expect(door.inFlightStep()?.headAtStop).toBe("aaa");
+  door.__resetForTests();
 });

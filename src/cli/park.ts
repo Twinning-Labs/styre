@@ -431,6 +431,8 @@ export async function resumeRun(
       ports,
       profile,
       emit: stdoutSink,
+      // ENG-485 section 7.5: where the ticket branch stands when each step starts.
+      readHead: () => branchHeadSha(project.target_repo, branch),
     });
     process.stderr.write(`${formatRunSummary(db, ticketId, result)}\n`);
 

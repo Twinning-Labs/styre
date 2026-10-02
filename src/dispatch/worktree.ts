@@ -1,7 +1,7 @@
 import { type Dirent, existsSync, lstatSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join, relative } from "node:path";
 import { runLockStatus } from "../cli/run-lock.ts";
-import { type BlockingResult, runBlocking } from "../util/process/door.ts";
+import { type BlockingResult, noteHead, runBlocking } from "../util/process/door.ts";
 
 /** Bounds for the blocking calls below (ENG-485 section 5.1). A healthy call never reaches them;
  *  a call that does is killed (SIGKILL, direct child only) and reported as a timeout. */
@@ -100,7 +100,9 @@ export function commitWorktree(
     return { sha: git(["rev-parse", "HEAD"], worktreePath), changed: false };
   }
   git(["commit", "-m", message], worktreePath, "tree"); // may run the repository's own hooks
-  return { sha: git(["rev-parse", "HEAD"], worktreePath), changed: true };
+  const sha = git(["rev-parse", "HEAD"], worktreePath);
+  noteHead(sha); // the step in flight moved the branch (ENG-485 section 7.5)
+  return { sha, changed: true };
 }
 
 export function removeWorktree(repoPath: string, worktreePath: string): void {
@@ -463,6 +465,7 @@ export function revertWorktree(worktreePath: string): void {
 export function resetWorktreeHard(worktreePath: string, sha: string): void {
   git(["reset", "--hard", sha], worktreePath, "tree");
   git(["clean", "-fd"], worktreePath, "tree");
+  noteHead(sha); // the branch is back at `sha` (ENG-485 section 7.5)
 }
 
 /** Delete the local branch if it exists; a missing branch is a silent success. */

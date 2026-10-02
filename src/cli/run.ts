@@ -21,7 +21,7 @@ import { getRun, insertRun } from "../db/repos/run.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { assertTestTargets } from "../dispatch/test-target.ts";
-import { reconcileWorktree } from "../dispatch/worktree.ts";
+import { branchHeadSha, reconcileWorktree } from "../dispatch/worktree.ts";
 import { assertSlackConfigured } from "../integrations/notifier.ts";
 import { branchPrefixFor } from "../integrations/ticket-source.ts";
 import type { AnalyticsClient } from "../telemetry/analytics/client.ts";
@@ -378,6 +378,11 @@ export async function runImpl(
         forge: runtimeConfig.forge,
       });
 
+      const runBranch = branchNameFor({
+        ident: ingested.ident,
+        branch_name: null,
+        branch_prefix: branchPrefixFor(ingested.typeLabel),
+      });
       const out = await runTicket({
         db,
         profile,
@@ -387,6 +392,8 @@ export async function runImpl(
         ticketRef: args.ticket,
         ingested,
         emit: stdoutSink,
+        // ENG-485 section 7.5: where the ticket branch stands when each step starts.
+        readHead: () => branchHeadSha(profile.targetRepo, runBranch),
       });
 
       a.runCompleted(

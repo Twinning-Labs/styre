@@ -170,11 +170,3 @@ export function listByStatus(db: Database, status: string): WorkflowStepRow[] {
     )
     .all(status);
 }
-
-export function setPid(db: Database, id: number, pid: number | null): void {
-  db.query("UPDATE workflow_step SET pid = $pid, updated_at = $now WHERE id = $id").run({
-    $pid: pid,
-    $now: nowUtc(),
-    $id: id,
-  });
-}

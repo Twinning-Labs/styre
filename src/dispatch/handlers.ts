@@ -55,7 +55,6 @@ import {
   setBaseSha,
   setStatus as setUnitStatus,
 } from "../db/repos/work-unit.ts";
-import { setPid } from "../db/repos/workflow-step.ts";
 import { StepExecutionError, StepPrerequisiteError } from "../engine/step-journal.ts";
 import { pythonImportName } from "../setup/lang/python.ts";
 import { authoredChecksUnavailable } from "../testing/capabilities.ts";
@@ -1748,7 +1747,6 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           command,
           environment,
           sha: worktreeHead(worktreePath),
-          onSettled: () => setPid(ctx.db, ctx.step.id, null),
           cwd: join(worktreePath, dir ?? ""),
           timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
         });
@@ -2004,7 +2002,6 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         command,
         environment,
         sha: worktreeHead(worktreePath),
-        onSettled: () => setPid(ctx.db, ctx.step.id, null),
         cwd: join(worktreePath, dir ?? ""),
         timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
       });
@@ -2027,7 +2024,6 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         baseline = await runAtBaseline({
           repoPath,
           baselineSha,
-          onSettled: () => setPid(ctx.db, ctx.step.id, null),
           command: job.command,
           dir: job.dir,
           timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,

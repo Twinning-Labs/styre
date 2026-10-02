@@ -106,6 +106,8 @@ export async function driveToTerminal(
     cap?: number;
     emit?: TelemetrySink;
     ciReadTimeoutMs?: number;
+    /** The ticket branch's HEAD, for the step in flight (ENG-485 section 7.5). */
+    readHead?: () => string | null;
   },
 ): Promise<RunResult> {
   const cap = opts.cap ?? DEFAULT_CAP;
@@ -126,6 +128,7 @@ export async function driveToTerminal(
     const r = await tick(db, registry, {
       config: opts.config,
       ports: opts.ports,
+      readHead: opts.readHead,
     });
     emitter.flushNew(db, opts.ticketId);
     notifier.sweepNew(db, opts.ticketId);
@@ -215,6 +218,8 @@ export async function runTicket(deps: {
   ticketRef: string;
   ingested?: IngestedTicket;
   emit?: TelemetrySink;
+  /** The ticket branch's HEAD, for the step in flight (ENG-485 section 7.5). */
+  readHead?: () => string | null;
 }): Promise<RunResult & { ticketId: number; summary: string }> {
   const ingested = deps.ingested ?? (await deps.ports.issueTracker.fetchTicket(deps.ticketRef));
   const projectId = insertProject(deps.db, {
@@ -237,6 +242,7 @@ export async function runTicket(deps: {
     ports: deps.ports,
     profile: deps.profile,
     emit: deps.emit,
+    readHead: deps.readHead,
   });
   return { ...result, ticketId, summary: formatRunSummary(deps.db, ticketId, result) };
 }
