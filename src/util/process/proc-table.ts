@@ -45,6 +45,8 @@ export function nowToken(): string {
     return String(Math.floor(uptime * clkTck));
   }
   const ms = Date.now();
+  // The ps fallback reports whole seconds, so "now" must be floored the same way to stay on its clock.
+  if (loadSysctl() === null) return `${Math.floor(ms / 1000)}.000000`;
   return `${Math.floor(ms / 1000)}.${String((ms % 1000) * 1000).padStart(6, "0")}`;
 }
 
@@ -93,11 +95,18 @@ const OFF_PGID = 564;
 const SZOMB = 5;
 const SSTOP = 4;
 
+let forcePsFallback = false;
+/** Test seam: make the macOS reader behave as if sysctl were unavailable, so the `ps` path runs. */
+export function _forcePsFallbackForTest(on: boolean): void {
+  forcePsFallback = on;
+}
+
 let sysctlFn:
   | ((mib: Int32Array, n: number, buf: Uint8Array | null, len: BigUint64Array) => number)
   | null
   | undefined;
 function loadSysctl() {
+  if (forcePsFallback) return null;
   if (sysctlFn !== undefined) return sysctlFn;
   try {
     const { dlopen, FFIType, ptr } = require("bun:ffi") as typeof import("bun:ffi");

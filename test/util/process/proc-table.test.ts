@@ -1,6 +1,7 @@
 // test/util/process/proc-table.test.ts
 import { afterEach, expect, test } from "bun:test";
 import {
+  _forcePsFallbackForTest,
   listProcesses,
   nowToken,
   probe,
@@ -10,6 +11,7 @@ import {
 
 const spawned: Bun.Subprocess[] = [];
 afterEach(() => {
+  _forcePsFallbackForTest(false);
   for (const p of spawned.splice(0))
     try {
       p.kill("SIGKILL");
@@ -58,36 +60,79 @@ test("an exited, unreaped child reads as a zombie", async () => {
   expect(p.kind === "gone" || (p.kind === "alive" && p.info.state === "zombie")).toBe(true);
 });
 
-test("nowToken orders after this process's start and before a child started later", async () => {
-  const before = nowToken();
-  const child = Bun.spawn(["sleep", "2"]);
+for (const forcePs of [false, true]) {
+  test(`nowToken orders before a child started later (ps fallback forced: ${forcePs})`, async () => {
+    _forcePsFallbackForTest(forcePs);
+    const before = nowToken();
+    if (forcePs && process.platform !== "linux") expect(before).toMatch(/^\d+\.000000$/);
+    const child = Bun.spawn(["sleep", "2"]);
+    spawned.push(child);
+    await Bun.sleep(50);
+    const c = probe(child.pid);
+    expect(c.kind).toBe("alive");
+    if (c.kind === "alive") {
+      expect(tokenValue(c.info.startedAt)).toBeGreaterThanOrEqual(
+        tokenValue(before) - 0.02 * (process.platform === "linux" ? 100 : 1),
+      );
+    }
+  });
+}
+
+test("the ps fallback ignores ambient locale and timezone", () => {
+  if (process.platform === "linux") return; // Linux reads /proc and never launches ps
+  const sysctl = probe(process.pid);
+  const saved = { lc: process.env.LC_ALL, tz: process.env.TZ };
+  process.env.LC_ALL = "fr_FR.UTF-8";
+  process.env.TZ = "Asia/Kolkata";
+  let viaPs: ReturnType<typeof probe>;
+  try {
+    _forcePsFallbackForTest(true);
+    viaPs = probe(process.pid);
+  } finally {
+    _forcePsFallbackForTest(false);
+    if (saved.lc === undefined) Reflect.deleteProperty(process.env, "LC_ALL");
+    else process.env.LC_ALL = saved.lc;
+    if (saved.tz === undefined) Reflect.deleteProperty(process.env, "TZ");
+    else process.env.TZ = saved.tz;
+  }
+  expect(sysctl.kind).toBe("alive");
+  expect(viaPs.kind).toBe("alive");
+  if (sysctl.kind === "alive" && viaPs.kind === "alive") {
+    expect(Math.floor(tokenValue(viaPs.info.startedAt))).toBe(
+      Math.floor(tokenValue(sysctl.info.startedAt)),
+    );
+  }
+});
+
+test("sameProcess is false when the start time or the pid differs (pid reuse defence)", () => {
+  const p = probe(process.pid);
+  expect(p.kind).toBe("alive");
+  if (p.kind !== "alive") return;
+  expect(sameProcess({ pid: p.info.pid, startedAt: p.info.startedAt }, p.info)).toBe(true);
+  expect(sameProcess({ pid: p.info.pid, startedAt: `${p.info.startedAt}1` }, p.info)).toBe(false);
+  expect(sameProcess({ pid: p.info.pid + 1, startedAt: p.info.startedAt }, p.info)).toBe(false);
+});
+
+function psPgid(pid: number): number {
+  return Number(
+    Bun.spawnSync(["ps", "-o", "pgid=", "-p", String(pid)])
+      .stdout.toString()
+      .trim(),
+  );
+}
+
+test("pgid matches ps for this process, and a detached child leads its own group", async () => {
+  const me = probe(process.pid);
+  expect(me.kind).toBe("alive");
+  if (me.kind === "alive") expect(me.info.pgid).toBe(psPgid(process.pid));
+  const child = Bun.spawn(["sleep", "5"], { detached: true });
   spawned.push(child);
   await Bun.sleep(50);
   const c = probe(child.pid);
   expect(c.kind).toBe("alive");
-  if (c.kind === "alive")
-    expect(tokenValue(c.info.startedAt)).toBeGreaterThanOrEqual(
-      tokenValue(before) - 0.02 * (process.platform === "linux" ? 100 : 1),
-    );
-});
-
-test("start times ignore locale and timezone", () => {
-  const saved = { lc: process.env.LC_ALL, tz: process.env.TZ };
-  const base = probe(process.pid);
-  process.env.LC_ALL = "fr_FR.UTF-8";
-  process.env.TZ = "Asia/Kolkata";
-  try {
-    const again = probe(process.pid);
-    expect(
-      again.kind === "alive" &&
-        base.kind === "alive" &&
-        again.info.startedAt === base.info.startedAt,
-    ).toBe(true);
-  } finally {
-    // Assigning undefined to process.env stores the string "undefined"; delete instead.
-    if (saved.lc === undefined) process.env.LC_ALL = undefined;
-    else process.env.LC_ALL = saved.lc;
-    if (saved.tz === undefined) process.env.TZ = undefined;
-    else process.env.TZ = saved.tz;
+  if (c.kind === "alive" && me.kind === "alive") {
+    expect(c.info.pgid).toBe(child.pid);
+    expect(c.info.pgid).not.toBe(me.info.pgid);
+    expect(c.info.pgid).toBe(psPgid(child.pid));
   }
 });
