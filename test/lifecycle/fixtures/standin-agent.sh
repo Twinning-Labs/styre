@@ -1,7 +1,7 @@
-#!/bin/sh
+#!/bin/bash
 # test/lifecycle/fixtures/standin-agent.sh: behaves like Claude Code where it matters (spec 11.1):
 # runs a command in its OWN group; on TERM/INT/HUP stops that group and exits; on QUIT dies at once.
-set -m                      # job control: the background job gets its own process group
+set -m                      # job control: the background job gets its own process group (bash, with or without a terminal)
 sleep "${STANDIN_SLEEP:-300}" &   # the "tool command", leading its own group; tests set a unique value
 TOOL=$!
 echo "tool $TOOL" >&2

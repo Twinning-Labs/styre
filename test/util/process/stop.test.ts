@@ -380,7 +380,7 @@ describe("stopGroup (simulated)", () => {
   test("an empty group returns at once and signals nothing (a normal finish pays nothing)", async () => {
     const w = new World().add(proc(30, 1, 30)); // some other group
     const rep = await stopGroup(20, "graceful", { graceMs: 5000, deps: w.deps });
-    expect(rep).toEqual({ stopped: [], survivors: [] });
+    expect(rep).toEqual({ stopped: [], survivors: [], failures: [] });
     expect(w.calls).toEqual([]);
     expect(w.clock).toBe(0);
   });
@@ -388,7 +388,7 @@ describe("stopGroup (simulated)", () => {
   test("a group holding only zombies is empty", async () => {
     const w = new World().add(proc(20, 1, 20, undefined, "zombie"));
     const rep = await stopGroup(20, "graceful", { graceMs: 5000, deps: w.deps });
-    expect(rep).toEqual({ stopped: [], survivors: [] });
+    expect(rep).toEqual({ stopped: [], survivors: [], failures: [] });
     expect(w.calls).toEqual([]);
   });
 
@@ -451,6 +451,185 @@ describe("stopGroup (simulated)", () => {
 });
 
 // ---------------------------------------------------------------------------------------------
+// Signalling failures are reported, never thrown (review round 1, Important 1 and 2)
+// ---------------------------------------------------------------------------------------------
+/** Deps whose kill records the call, then throws `code` for targets where `refuse` says so. */
+function refusing(
+  w: World,
+  code: string,
+  refuse: (target: number, sig: string) => boolean,
+): StopDeps {
+  const attempts: { target: number; sig: string }[] = [];
+  const deps: StopDeps = {
+    ...w.deps,
+    kill: (target, sig) => {
+      attempts.push({ target, sig });
+      if (refuse(target, sig)) throw Object.assign(new Error(`kill ${target}: ${code}`), { code });
+      w.deps.kill(target, sig);
+    },
+  };
+  (deps as StopDeps & { attempts: typeof attempts }).attempts = attempts;
+  return deps;
+}
+const attemptsOf = (d: StopDeps) =>
+  (d as StopDeps & { attempts: { target: number; sig: string }[] }).attempts;
+
+describe("signalling failures", () => {
+  const ROOT = { pid: 10, startedAt: proc(10, 1, 5).startedAt };
+
+  test("stopTree: a process that cannot be signalled (EPERM) does not stop the others being signalled", async () => {
+    // tree 10 -> {11, 12}; 11 refuses every signal; 12 ignores TERM and so needs SIGKILL.
+    const w = new World()
+      .add(proc(10, 1, 5))
+      .add(proc(11, 10, 5))
+      .add(proc(12, 10, 5), { onTerm: "ignore" });
+    const deps = refusing(w, "EPERM", (t) => t === 11);
+    const rep = await stopTree(ROOT, "graceful", { graceMs: 400, excludePgids: [5], deps });
+    const sent = attemptsOf(deps);
+    expect(sent.filter((a) => a.target === 12).map((a) => a.sig)).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(sent.filter((a) => a.target === 10).map((a) => a.sig)).toContain("SIGTERM");
+    expect(rep.survivors.map((p) => p.pid)).toEqual([11]);
+    expect(rep.failures.map((f) => [f.proc.pid, f.code])).toEqual([[11, "EPERM"]]);
+    expect(rep.stopped.map((p) => p.pid).sort()).toEqual([10, 12]);
+    expect(w.procs.has(12)).toBe(false);
+  });
+
+  test("stopTree: a failed signal to a process that then exits is not reported as a failure", async () => {
+    const w = new World().add(proc(10, 1, 5), { onTerm: "ignore" });
+    w.at(100, () => w.exit(10));
+    const deps = refusing(w, "EPERM", () => true);
+    const rep = await stopTree(ROOT, "graceful", { graceMs: 1000, excludePgids: [5], deps });
+    expect(rep.survivors).toEqual([]);
+    expect(rep.failures).toEqual([]);
+  });
+
+  test("stopTree: any other error code is reported the same way", async () => {
+    const w = new World().add(proc(10, 1, 5));
+    const deps = refusing(w, "EINVAL", () => true);
+    const rep = await stopTree(ROOT, "forced", { graceMs: 0, excludePgids: [5], deps });
+    expect(rep.survivors.map((p) => p.pid)).toEqual([10]);
+    expect(rep.failures.map((f) => f.code)).toEqual(["EINVAL"]);
+  });
+
+  test("stopGroup: EPERM from a group that died during the stop (macOS) is not an error", async () => {
+    // The members exit at 100 ms; the group signal throws EPERM, as macOS does for a group of zombies.
+    const w = new World().add(proc(20, 1, 20), { onTerm: "ignore" });
+    w.at(100, () => w.exit(20, true));
+    const deps = refusing(w, "EPERM", (t) => t < 0);
+    const rep = await stopGroup(20, "graceful", { graceMs: 1000, deps });
+    expect(rep.survivors).toEqual([]);
+    expect(rep.failures).toEqual([]);
+  });
+
+  test("stopGroup: EPERM on the final SIGKILL, from a group that has just died, is not an error", async () => {
+    // Group members die (zombie) the instant after the last poll; the group kill then throws EPERM.
+    const w = new World().add(proc(20, 1, 20), { onTerm: "ignore" });
+    const deps = refusing(w, "EPERM", (_t, sig) => {
+      if (sig === "SIGKILL") w.exit(20, true);
+      return sig === "SIGKILL";
+    });
+    const rep = await stopGroup(20, "graceful", { graceMs: 100, deps });
+    expect(rep.survivors).toEqual([]);
+    expect(rep.failures).toEqual([]);
+  });
+
+  test("stopGroup: EPERM for a group whose members are alive is a reported failure, and it still escalates", async () => {
+    const w = new World().add(proc(20, 1, 20)).add(proc(21, 1, 20));
+    const deps = refusing(w, "EPERM", (t) => t < 0);
+    const rep = await stopGroup(20, "graceful", { graceMs: 200, deps });
+    expect(attemptsOf(deps).map((a) => [a.target, a.sig])).toEqual([
+      [-20, "SIGTERM"],
+      [-20, "SIGKILL"],
+    ]);
+    expect(rep.survivors.map((p) => p.pid).sort()).toEqual([20, 21]);
+    expect(rep.failures.map((f) => [f.proc.pid, f.code]).sort()).toEqual([
+      [20, "EPERM"],
+      [21, "EPERM"],
+    ]);
+  });
+});
+
+describe("a target that would signal everyone is refused loudly (Ruling R9a)", () => {
+  const OWN = 777;
+  const ownWorld = () => new World().add(proc(process.pid, 1, OWN)).add(proc(20, 1, 20));
+
+  test("stopGroup refuses pgid 0, 1 and negative numbers, and sends nothing", async () => {
+    for (const bad of [0, 1, -1, -20]) {
+      const w = ownWorld();
+      await expect(stopGroup(bad, "forced", { graceMs: 0, deps: w.deps })).rejects.toThrow(/pgid/);
+      expect(w.calls).toEqual([]);
+    }
+  });
+
+  test("stopGroup refuses Styre's own group, and sends nothing", async () => {
+    const w = ownWorld();
+    await expect(stopGroup(OWN, "forced", { graceMs: 0, deps: w.deps })).rejects.toThrow(/own/);
+    expect(w.calls).toEqual([]);
+    // another group is fine
+    expect((await stopGroup(20, "forced", { graceMs: 0, deps: w.deps })).survivors).toEqual([]);
+  });
+
+  test("stopGroup with the real deps refuses pgid 1 before reading or signalling anything", async () => {
+    const sent: number[] = [];
+    await expect(
+      stopGroup(1, "graceful", {
+        graceMs: 0,
+        deps: { ...realStopDeps, kill: (t) => sent.push(t) },
+      }),
+    ).rejects.toThrow(/pgid/);
+    expect(sent).toEqual([]);
+  });
+
+  test("stopTree refuses a root that is init, Styre itself, or the leader of Styre's own group", async () => {
+    for (const rootPid of [0, 1, process.pid, OWN]) {
+      const w = ownWorld().add(proc(OWN, 1, OWN));
+      await expect(
+        stopTree({ pid: rootPid, startedAt: "x" }, "forced", {
+          graceMs: 0,
+          excludePgids: [OWN],
+          deps: w.deps,
+        }),
+      ).rejects.toThrow(/root/);
+      expect(w.calls).toEqual([]);
+    }
+  });
+});
+
+describe("the group the root itself belongs to is never taken in, whatever the caller passed (Ruling R9b)", () => {
+  const ROOT = { pid: 10, startedAt: proc(10, 1, 5).startedAt };
+  // 5 is a child of the root and leads group 5, which is the ROOT's own group; 60 is in it too.
+  const table = [proc(10, 1, 5), proc(5, 10, 5), proc(60, 1, 5)];
+
+  test("collectTree with no exclusions still leaves the root's own group alone", () => {
+    expect(
+      collectTree(ROOT, table, [])
+        .map((p) => p.pid)
+        .sort((a, b) => a - b),
+    ).toEqual([5, 10]);
+  });
+
+  test("stopTree with no exclusions never signals a bystander in the root's own group", async () => {
+    const w = new World();
+    for (const t of table) w.add(t, { onTerm: "ignore" });
+    await stopTree(ROOT, "graceful", { graceMs: 200, excludePgids: [], deps: w.deps });
+    expect(w.calls.map((c) => c.target)).not.toContain(60);
+    expect(w.procs.has(60)).toBe(true);
+  });
+
+  test("the root's group stays excluded after the root itself has left the table", async () => {
+    // Root 10 exits at 100 ms. A new bystander 61 then joins group 5, led by collected child 5.
+    const w = new World()
+      .add(proc(10, 1, 5), { onTerm: "ignore" })
+      .add(proc(5, 10, 5), { onTerm: "ignore" });
+    w.at(100, () => w.exit(10));
+    w.at(150, () => w.add(proc(61, 1, 5)));
+    await stopTree(ROOT, "graceful", { graceMs: 400, excludePgids: [], deps: w.deps });
+    expect(w.calls.map((c) => c.target)).not.toContain(61);
+    expect(w.procs.has(61)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
 // The real kill function
 // ---------------------------------------------------------------------------------------------
 describe("realStopDeps.kill", () => {
@@ -472,18 +651,32 @@ describe("realStopDeps.kill", () => {
 const FX = join(import.meta.dir, "../../lifecycle/fixtures");
 const livePids: number[] = [];
 const liveGroups: number[] = [];
+/** Roots of process trees a test started. Cleanup kills each whole tree (children and the groups
+ *  they lead), so a test that fails before it registers the tool command's group leaks nothing. */
+const liveRoots: number[] = [];
 afterEach(() => {
+  // Collect everything first, then kill: killing a parent first would orphan its children out of reach.
+  const table = listProcesses();
+  const own = table.find((q) => q.pid === process.pid)?.pgid;
+  const doomed = new Set<number>();
+  for (const pid of [...liveRoots.splice(0), ...livePids]) {
+    const r = table.find((q) => q.pid === pid);
+    if (!r) continue;
+    for (const q of collectTree(r, table, own === undefined ? [] : [own])) doomed.add(q.pid);
+  }
   for (const g of liveGroups.splice(0))
     try {
       process.kill(-g, "SIGKILL");
     } catch {}
-  for (const p of livePids.splice(0))
-    try {
-      process.kill(p, "SIGKILL");
-    } catch {}
+  for (const pid of [...doomed, ...livePids.splice(0)])
+    if (pid !== process.pid)
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {}
 });
 const track = <T extends { pid: number }>(p: T): T => {
   livePids.push(p.pid);
+  liveRoots.push(p.pid);
   return p;
 };
 const alive = (pid: number) => {
@@ -505,14 +698,37 @@ async function until<T>(what: string, f: () => T | undefined | false, ms = 15_00
     await Bun.sleep(20);
   }
 }
-const toolOf = (agentPid: number) =>
-  until("the tool command to start", () =>
-    listProcesses().find((p) => p.ppid === agentPid && p.pgid === p.pid),
+/** The tool command of a stand in agent: its child, which must lead a group of its own. Fails with a
+ *  plain message when job control is unavailable (a shell that cannot give the job its own group). */
+async function toolOf(agentPid: number): Promise<ProcInfo> {
+  const child = await until("the stand in agent's tool command to start", () =>
+    listProcesses().find((p) => p.ppid === agentPid),
   );
+  const leads = await until(
+    `the tool command (pid ${child.pid}) to lead a process group of its own: the stand in agent needs bash job control (set -m); a shell that cannot provide it leaves the command in the agent's group`,
+    () => listProcesses().find((p) => p.pid === child.pid && p.pgid === p.pid),
+    3_000,
+  );
+  liveGroups.push(leads.pid);
+  return leads;
+}
 let sleepSeed = 400_000 + (process.pid % 1000) * 7;
 const uniqueSleep = () => String(++sleepSeed);
 
 describe("stopTree and stopGroup on real processes", () => {
+  test("the stand in agent runs its tool command in a group of its own, even with no terminal", async () => {
+    const agent = track(
+      Bun.spawn([join(FX, "standin-agent.sh")], {
+        stdin: "ignore",
+        stderr: "ignore",
+        env: { ...process.env, STANDIN_SLEEP: uniqueSleep() },
+      }),
+    );
+    const tool = await toolOf(agent.pid);
+    expect(tool.pgid).toBe(tool.pid);
+    expect(tool.pgid).not.toBe(listProcesses().find((p) => p.pid === agent.pid)?.pgid);
+  });
+
   test("graceful stop: the agent and its tool command in its own group are gone", async () => {
     const agent = track(
       Bun.spawn([join(FX, "standin-agent.sh")], {
@@ -521,7 +737,6 @@ describe("stopTree and stopGroup on real processes", () => {
       }),
     );
     const tool = await toolOf(agent.pid);
-    liveGroups.push(tool.pid);
     const rep = await stopTree({ pid: agent.pid, startedAt: startOf(agent.pid) }, "graceful", {
       graceMs: 5000,
       excludePgids: [myPgid()],
@@ -555,8 +770,7 @@ describe("stopTree and stopGroup on real processes", () => {
       }),
     );
     const bystander = track(Bun.spawn(["sleep", "60"])); // same group as this test process
-    const tool = await toolOf(agent.pid);
-    liveGroups.push(tool.pid);
+    await toolOf(agent.pid);
     await stopTree({ pid: agent.pid, startedAt: startOf(agent.pid) }, "graceful", {
       graceMs: 2000,
       excludePgids: [myPgid()],
@@ -598,7 +812,7 @@ describe("stopTree and stopGroup on real processes", () => {
     });
     expect(performance.now() - t0).toBeLessThan(5000);
     expect(sent).toEqual([]);
-    expect(rep).toEqual({ stopped: [], survivors: [] });
+    expect(rep).toEqual({ stopped: [], survivors: [], failures: [] });
   });
 
   test("stopGroup stops a background child a command left in its group", async () => {
@@ -625,7 +839,7 @@ describe("stopTree and stopGroup on real processes", () => {
   /** A real zombie: a child in a group of its own that exited while its parent never waits. */
   async function zombieChild() {
     const parent = track(
-      Bun.spawn(["sh", "-c", "set -m; sh -c 'exit 0' & exec sleep 60"], { stdout: "ignore" }),
+      Bun.spawn(["bash", "-c", "set -m; bash -c 'exit 0' & exec sleep 60"], { stdout: "ignore" }),
     );
     const z = await until("a zombie child of the sleeping parent", () =>
       listProcesses().find((q) => q.ppid === parent.pid && q.state === "zombie"),
