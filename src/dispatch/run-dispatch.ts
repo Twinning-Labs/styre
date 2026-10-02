@@ -8,6 +8,7 @@ import { completeDispatch, insertDispatch, nextSeq } from "../db/repos/dispatch.
 import { appendEvent } from "../db/repos/event-log.ts";
 import { ParkSignal } from "../engine/park-signal.ts";
 import { StepPrerequisiteError } from "../engine/step-journal.ts";
+import { runBlocking } from "../util/process/door.ts";
 import { nowUtc } from "../util/time.ts";
 import type { CommitScope } from "./commit-scope.ts";
 import type { Profile } from "./profile.ts";
@@ -356,11 +357,15 @@ export async function runAgentDispatch(
       spec.validateCommittedOutput?.(result.stdout, deps.worktreePath, sha);
     } catch (error) {
       if (changed) {
-        const reset = Bun.spawnSync(["git", "reset", "--hard", preHead], {
+        // `reset --hard` writes the whole tree, so it gets the longer bound (ENG-485 section 5.1).
+        const reset = runBlocking(["git", "reset", "--hard", preHead], {
           cwd: deps.worktreePath,
+          timeoutMs: 120_000,
         });
         if (!reset.success)
-          throw new Error(`failed to revert invalid committed review evidence: ${reset.stderr}`);
+          throw new Error(
+            `failed to revert invalid committed review evidence: ${reset.timedOut ? "timed out" : reset.stderr}`,
+          );
       }
       undoAttempt(deps.worktreePath, untrackedBefore);
       completion.branchHeadSha = preHead;

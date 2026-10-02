@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { listByAc } from "../db/repos/ac-check.ts";
 import { signalForAcCheck } from "../db/repos/ground-truth-signal.ts";
+import { runBlocking } from "../util/process/door.ts";
 import type { CmdRunner } from "../util/run-command.ts";
 import { type CheckExecutionPlan, resolveCheckExecution } from "./check-execution.ts";
 import type { CoarseOrNone } from "./check-selector.ts";
@@ -11,9 +12,22 @@ import { type CheckRunResult, runCheckExecution } from "./checks-run.ts";
 import type { Component } from "./profile.ts";
 import { resolvePythonInterpreter } from "./provision.ts";
 
-function git(args: string[], cwd: string): { ok: boolean; out: string } {
-  const res = Bun.spawnSync(["git", ...args], { cwd });
-  return { ok: res.success, out: res.stdout.toString().trim() };
+/** Writing or deleting a whole tree can pass 30 seconds on a large repository (ENG-485 section 5.1). */
+const TREE_GIT_MS = 120_000;
+
+/** `cleanup` marks the worktree removal: it only releases what the run took, so the door lets it
+ *  through while a stop is in progress. */
+function git(
+  args: string[],
+  cwd: string,
+  opts: { cleanup?: boolean } = {},
+): { ok: boolean; out: string } {
+  const res = runBlocking(["git", ...args], {
+    cwd,
+    timeoutMs: TREE_GIT_MS,
+    cleanup: opts.cleanup,
+  });
+  return { ok: res.success, out: res.stdout.trim() };
 }
 
 /** §5.2: the ticket's frozen clean-HEAD baseline for an AC = the ORIGINAL (first, lowest-id) check's
@@ -85,7 +99,7 @@ export async function replayCheckEvidence(
     });
     return { ...result, plan };
   } finally {
-    git(["worktree", "remove", "--force", wt], p.repoPath);
+    git(["worktree", "remove", "--force", wt], p.repoPath, { cleanup: true });
     try {
       rmSync(wt, { recursive: true, force: true });
     } catch {

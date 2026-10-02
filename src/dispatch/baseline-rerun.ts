@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { listByTicket } from "../db/repos/ground-truth-signal.ts";
+import { runBlocking } from "../util/process/door.ts";
 import type { CmdRunner } from "../util/run-command.ts";
 import {
   type CheckExecutionPlan,
@@ -31,9 +32,26 @@ import { type SuiteObservation, observeSuiteCommand } from "./suite-observation.
  * a green advisory costs nothing.
  */
 
-function git(args: string[], cwd: string): { ok: boolean } {
-  return { ok: Bun.spawnSync(["git", ...args], { cwd }).success };
+/** `cleanup` marks a call that only releases what the run took (the worktree removal): the door
+ *  lets it through while a stop is in progress, so a baseline worktree is never left behind. A
+ *  checkout that writes the whole tree gets a longer bound than a probe (ENG-485 section 5.1). */
+function git(
+  args: string[],
+  cwd: string,
+  opts: { cleanup?: boolean; timeoutMs?: number } = {},
+): { ok: boolean } {
+  return {
+    ok: runBlocking(["git", ...args], {
+      cwd,
+      timeoutMs: opts.timeoutMs ?? 30_000,
+      cleanup: opts.cleanup,
+    }).success,
+  };
 }
+
+/** Writes a whole tree (`worktree add`) or deletes one (`worktree remove`): on a large repository
+ *  this can pass 30 seconds on a healthy disk. */
+const TREE_GIT_MS = 120_000;
 
 /**
  * The ticket's pre-implement clean HEAD: the sha the FIRST `ac-check-red-first` ran at, which is
@@ -76,14 +94,18 @@ export async function runAtBaseline(p: {
   let wt: string | undefined;
   try {
     wt = mkdtempSync(join(tmpdir(), "styre-baseline-adv-"));
-    if (!git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath).ok)
+    if (
+      !git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath, {
+        timeoutMs: TREE_GIT_MS,
+      }).ok
+    )
       return { ...result, reason: "Baseline checkout could not be prepared." };
-    const head = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: wt });
+    const head = runBlocking(["git", "rev-parse", "HEAD"], { cwd: wt, timeoutMs: 30_000 });
     if (!head.success) return { ...result, reason: "Baseline checkout HEAD could not be read." };
     result.execution = await observeSuiteCommand({
       command: p.command,
       onSettled: p.onSettled,
-      sha: head.stdout.toString().trim(),
+      sha: head.stdout.trim(),
       cwd: join(wt, p.dir ?? ""),
       timeoutMs: p.timeoutMs,
     });
@@ -92,7 +114,10 @@ export async function runAtBaseline(p: {
     return { ...result, reason: `Baseline execution unavailable: ${String(error).slice(0, 1000)}` };
   } finally {
     if (wt) {
-      git(["worktree", "remove", "--force", wt], p.repoPath);
+      git(["worktree", "remove", "--force", wt], p.repoPath, {
+        cleanup: true,
+        timeoutMs: TREE_GIT_MS,
+      });
       rmSync(wt, { recursive: true, force: true });
     }
   }
@@ -148,7 +173,11 @@ export async function deliveredTestEvidenceAtBaseline(
     return { verdict: "unknown", reason: `baseline execution failed: ${String(err)}` };
   }
   try {
-    if (!git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath).ok)
+    if (
+      !git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath, {
+        timeoutMs: TREE_GIT_MS,
+      }).ok
+    )
       return { verdict: "unknown", reason: "baseline worktree could not be prepared or executed" };
     const target = join(wt, p.testFile);
     mkdirSync(dirname(target), { recursive: true });
@@ -169,7 +198,10 @@ export async function deliveredTestEvidenceAtBaseline(
   } catch (err) {
     return { verdict: "unknown", reason: `baseline execution failed: ${String(err)}` };
   } finally {
-    git(["worktree", "remove", "--force", wt], p.repoPath);
+    git(["worktree", "remove", "--force", wt], p.repoPath, {
+      cleanup: true,
+      timeoutMs: TREE_GIT_MS,
+    });
     try {
       rmSync(wt, { recursive: true, force: true });
     } catch {

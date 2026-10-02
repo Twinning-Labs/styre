@@ -32,10 +32,10 @@
  * Expect: the branch pushes (or skips if already at sha); a PR is created or reused (re-running returns
  * the same ref/url); a comment is posted, and re-running the same idempotencyKey returns null (no dup).
  */
-import { execFileSync } from "node:child_process";
 import { Octokit } from "@octokit/rest";
 import { parseGitHubRemote } from "../../config/slug.ts";
 import { pushBranch } from "../../dispatch/worktree.ts";
+import { RunInterrupted, runBlocking } from "../../util/process/door.ts";
 import type { ForgePort } from "../forge.ts";
 
 export { parseGitHubRemote }; // re-exported so existing importers (probe, tests) are unchanged
@@ -49,10 +49,16 @@ export function projKeyTag(idempotencyKey: string): string {
 function resolveOwnerRepo(repoPath: string): { owner: string; repo: string } {
   let remoteUrl: string;
   try {
-    remoteUrl = execFileSync("git", ["-C", repoPath, "config", "--get", "remote.origin.url"], {
-      encoding: "utf8",
-    }).trim();
+    const r = runBlocking(["git", "-C", repoPath, "config", "--get", "remote.origin.url"], {
+      timeoutMs: 30_000,
+    });
+    if (!r.success)
+      throw new Error(
+        `git config exited ${r.exitCode}${r.timedOut ? " (timed out)" : ""}: ${r.stderr.trim()}`,
+      );
+    remoteUrl = r.stdout.trim();
   } catch (cause) {
+    if (cause instanceof RunInterrupted) throw cause; // a stop in progress, not a missing remote
     throw new Error(
       `githubForge: could not read remote.origin.url for repo at ${repoPath} (is it a git checkout with an 'origin' remote?)`,
       { cause },

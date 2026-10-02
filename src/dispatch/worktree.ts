@@ -1,14 +1,29 @@
 import { type Dirent, existsSync, lstatSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join, relative } from "node:path";
 import { runLockStatus } from "../cli/run-lock.ts";
+import { type BlockingResult, runBlocking } from "../util/process/door.ts";
+
+/** Bounds for the blocking calls below (ENG-485 section 5.1). A healthy call never reaches them;
+ *  a call that does is killed (SIGKILL, direct child only) and reported as a timeout. */
+const LOCAL_GIT_MS = 30_000;
+/** Commands that write or delete a whole working tree can pass 30 seconds on a large repository. */
+const TREE_GIT_MS = 120_000;
+/** `ls-remote`, `push`: a slow network is not a failure, but nothing may wait forever. */
+const NETWORK_GIT_MS = 120_000;
+
+/** Why a git call failed, for an error message: the timeout is named, because a killed call has no
+ *  stderr of its own. */
+function why(res: BlockingResult, timeoutMs: number): string {
+  return res.timedOut ? `timed out after ${timeoutMs} ms` : res.stderr.trim();
+}
 
 /** Run git in `cwd`, returning trimmed stdout; throws on failure. */
-function git(args: string[], cwd: string): string {
-  const res = Bun.spawnSync(["git", ...args], { cwd });
+function git(args: string[], cwd: string, timeoutMs: number = LOCAL_GIT_MS): string {
+  const res = runBlocking(["git", ...args], { cwd, timeoutMs });
   if (!res.success) {
-    throw new Error(`git ${args.join(" ")} failed: ${res.stderr.toString().trim()}`);
+    throw new Error(`git ${args.join(" ")} failed: ${why(res, timeoutMs)}`);
   }
-  return res.stdout.toString().trim();
+  return res.stdout.trim();
 }
 
 /** Run a git command whose output is a NUL-delimited path list, returning the raw paths (ENG-363).
@@ -41,14 +56,14 @@ export function ensureWorktree(repoPath: string, branch: string, worktreePath: s
   if (worktreePath === repoPath) {
     // Called ~6x/unit; `checkout -B` resets the ref to HEAD each time, so skip when already on it.
     if (git(["rev-parse", "--abbrev-ref", "HEAD"], repoPath) === branch) return;
-    git(["checkout", "-B", branch], repoPath);
+    git(["checkout", "-B", branch], repoPath, TREE_GIT_MS);
     return;
   }
   if (existsSync(join(worktreePath, ".git"))) {
     return;
   }
   try {
-    git(["worktree", "add", "-B", branch, worktreePath], repoPath);
+    git(["worktree", "add", "-B", branch, worktreePath], repoPath, TREE_GIT_MS);
   } catch (err) {
     // The add fails when `branch` is still held by a leftover worktree — a non-`done` run that never
     // freed it (the "worktree already used by worktree" collision, ENG-381). If a holder exists, free
@@ -56,7 +71,7 @@ export function ensureWorktree(repoPath: string, branch: string, worktreePath: s
     // than destroy it. Any other add failure (no holder → a real git error) re-throws unchanged.
     if (worktreeHoldingBranch(repoPath, branch) === null) throw err;
     reconcileWorktree(repoPath, branch, undefined, worktreePath);
-    git(["worktree", "add", "-B", branch, worktreePath], repoPath);
+    git(["worktree", "add", "-B", branch, worktreePath], repoPath, TREE_GIT_MS);
   }
 }
 
@@ -74,18 +89,18 @@ export function commitWorktree(
   message: string,
   newPaths: string[],
 ): { sha: string; changed: boolean } {
-  git(["add", "-u"], worktreePath);
-  if (newPaths.length > 0) git(["add", "--", ...newPaths], worktreePath);
+  git(["add", "-u"], worktreePath, TREE_GIT_MS);
+  if (newPaths.length > 0) git(["add", "--", ...newPaths], worktreePath, TREE_GIT_MS);
   if (stagedIndexEmpty(worktreePath)) {
     return { sha: git(["rev-parse", "HEAD"], worktreePath), changed: false };
   }
-  git(["commit", "-m", message], worktreePath);
+  git(["commit", "-m", message], worktreePath, TREE_GIT_MS); // may run the repository's own hooks
   return { sha: git(["rev-parse", "HEAD"], worktreePath), changed: true };
 }
 
 export function removeWorktree(repoPath: string, worktreePath: string): void {
   if (worktreePath === repoPath) return; // in-place: never remove the repo root
-  git(["worktree", "remove", "--force", worktreePath], repoPath);
+  git(["worktree", "remove", "--force", worktreePath], repoPath, TREE_GIT_MS);
 }
 
 /** One worktree registered in a repo, as reported by `git worktree list --porcelain`. */
@@ -288,8 +303,11 @@ export function addedFilesAt(sha: string, worktreePath: string): string[] {
  *  present in the committed added file (every line of an added file is a `+` line, so "on a `+`
  *  line" reduces to substring presence — M2a plan-time decision 2). */
 export function fileContentAt(sha: string, file: string, worktreePath: string): string | null {
-  const res = Bun.spawnSync(["git", "show", `${sha}:${file}`], { cwd: worktreePath });
-  return res.success ? res.stdout.toString() : null;
+  const res = runBlocking(["git", "show", `${sha}:${file}`], {
+    cwd: worktreePath,
+    timeoutMs: LOCAL_GIT_MS,
+  });
+  return res.success ? res.stdout : null;
 }
 
 /** Like the module-private `git`, but returns RAW stdout (NO trim). Required for `--porcelain -z`
@@ -297,11 +315,11 @@ export function fileContentAt(sha: string, file: string, worktreePath: string): 
  *  `git()` `.trim()` would strip that space off the FIRST entry, corrupting its path (review
  *  Blocker-1). Mirrors `git`'s spawn + error handling. */
 function gitRaw(args: string[], cwd: string): string {
-  const res = Bun.spawnSync(["git", ...args], { cwd });
+  const res = runBlocking(["git", ...args], { cwd, timeoutMs: LOCAL_GIT_MS });
   if (!res.success) {
-    throw new Error(`git ${args.join(" ")} failed: ${res.stderr.toString().trim()}`);
+    throw new Error(`git ${args.join(" ")} failed: ${why(res, LOCAL_GIT_MS)}`);
   }
-  return res.stdout.toString();
+  return res.stdout;
 }
 
 /** The current HEAD commit sha of the worktree. */
@@ -361,11 +379,14 @@ export function pendingChanges(worktreePath: string): string[] {
  *  Measuring the index (not `git status --porcelain`, which also reports untracked files) is what
  *  lets a read-only step with an untracked stray return changed=false instead of committing empty. */
 export function stagedIndexEmpty(worktreePath: string): boolean {
-  const res = Bun.spawnSync(["git", "diff", "--cached", "--quiet"], { cwd: worktreePath });
+  const res = runBlocking(["git", "diff", "--cached", "--quiet"], {
+    cwd: worktreePath,
+    timeoutMs: LOCAL_GIT_MS,
+  });
   if (res.exitCode === 0) return true;
   if (res.exitCode === 1) return false;
   throw new Error(
-    `git diff --cached --quiet failed (exit ${res.exitCode}): ${res.stderr.toString().trim()}`,
+    `git diff --cached --quiet failed (exit ${res.exitCode}): ${why(res, LOCAL_GIT_MS)}`,
   );
 }
 
@@ -374,11 +395,11 @@ export function stagedIndexEmpty(worktreePath: string): boolean {
  *  (an earlier stray, provision's `*.egg-info`) is spared — a blanket `git clean` would delete it and
  *  break the editable install. Called on every pre-commit failure exit so retries start clean. */
 export function undoAttempt(worktreePath: string, untrackedBefore: Set<string>): void {
-  git(["checkout", "--", "."], worktreePath);
+  git(["checkout", "--", "."], worktreePath, TREE_GIT_MS);
   const strays = pendingEntries(worktreePath)
     .filter((e) => e.isNew && !untrackedBefore.has(e.path))
     .map((e) => e.path);
-  if (strays.length > 0) git(["clean", "-fd", "--", ...strays], worktreePath);
+  if (strays.length > 0) git(["clean", "-fd", "--", ...strays], worktreePath, TREE_GIT_MS);
 }
 
 /** Delete the named untracked files from the worktree — the discard disposition (checks): each path
@@ -387,7 +408,7 @@ export function undoAttempt(worktreePath: string, untrackedBefore: Set<string>):
  *  exactly these pathspecs so pre-existing cruft is spared. No-op / never throws on empty input. */
 export function discardPaths(worktreePath: string, paths: string[]): void {
   if (paths.length === 0) return;
-  git(["clean", "-fd", "--", ...paths], worktreePath);
+  git(["clean", "-fd", "--", ...paths], worktreePath, TREE_GIT_MS);
 }
 
 /** The largest single discarded file worth holding in memory for the symbol tier. A source helper is
@@ -425,8 +446,8 @@ export function readDiscardedSources(worktreePath: string, paths: string[]): Map
  *  `git clean -fd` (no `-x`) spares ignored files, so the ephemeral SQLite under XDG state is
  *  untouched even when `worktreePath === repoPath` (in-place). */
 export function revertWorktree(worktreePath: string): void {
-  git(["checkout", "--", "."], worktreePath);
-  git(["clean", "-fd"], worktreePath);
+  git(["checkout", "--", "."], worktreePath, TREE_GIT_MS);
+  git(["clean", "-fd"], worktreePath, TREE_GIT_MS);
 }
 
 /** Roll the branch back to `sha` (`git reset --hard`), discarding any commit(s) after it AND the
@@ -435,25 +456,38 @@ export function revertWorktree(worktreePath: string): void {
  *  (no `-x`) then removes any newly-untracked files the reset surfaced, sparing ignored files
  *  (the ephemeral SQLite under XDG state) in in-place mode. */
 export function resetWorktreeHard(worktreePath: string, sha: string): void {
-  git(["reset", "--hard", sha], worktreePath);
-  git(["clean", "-fd"], worktreePath);
+  git(["reset", "--hard", sha], worktreePath, TREE_GIT_MS);
+  git(["clean", "-fd"], worktreePath, TREE_GIT_MS);
 }
 
 /** Delete the local branch if it exists; a missing branch is a silent success. */
 export function deleteLocalBranch(repoPath: string, branch: string): void {
-  Bun.spawnSync(["git", "branch", "-D", branch], { cwd: repoPath }); // ignore exit (absent = fine)
+  runBlocking(["git", "branch", "-D", branch], { cwd: repoPath, timeoutMs: LOCAL_GIT_MS }); // ignore exit (absent = fine)
 }
 
 /** Delete the remote branch (closing its PR) if it exists; a missing remote ref is a silent
  *  success. Existence is probed first (locale-proof — no stderr parsing); a real delete failure
  *  is a non-fatal warning (the effort reap already succeeded), never thrown. */
 export function deleteRemoteBranch(repoPath: string, branch: string): void {
-  const ls = Bun.spawnSync(["git", "ls-remote", "--heads", "origin", branch], { cwd: repoPath });
-  if (ls.exitCode !== 0 || ls.stdout.toString().trim() === "") return; // no remote / branch absent → silent
-  const res = Bun.spawnSync(["git", "push", "origin", "--delete", branch], { cwd: repoPath });
+  const ls = runBlocking(["git", "ls-remote", "--heads", "origin", branch], {
+    cwd: repoPath,
+    timeoutMs: NETWORK_GIT_MS,
+  });
+  if (ls.timedOut) {
+    // Not "branch absent": the probe never answered, so say the remote branch may still be there.
+    process.stderr.write(
+      `styre clean: could not delete remote branch ${branch}: ${why(ls, NETWORK_GIT_MS)}\n`,
+    );
+    return;
+  }
+  if (ls.exitCode !== 0 || ls.stdout.trim() === "") return; // no remote / branch absent → silent
+  const res = runBlocking(["git", "push", "origin", "--delete", branch], {
+    cwd: repoPath,
+    timeoutMs: NETWORK_GIT_MS,
+  });
   if (res.exitCode !== 0) {
     process.stderr.write(
-      `styre clean: could not delete remote branch ${branch}: ${res.stderr.toString().trim()}\n`,
+      `styre clean: could not delete remote branch ${branch}: ${why(res, NETWORK_GIT_MS)}\n`,
     );
   }
 }
@@ -477,9 +511,9 @@ export function pushBranch(
     expectedRemoteSha === undefined
       ? ["push", "origin", refspec]
       : ["push", `--force-with-lease=${branch}:${expectedRemoteSha}`, "origin", refspec];
-  const res = Bun.spawnSync(["git", ...args], { cwd: repoPath });
+  const res = runBlocking(["git", ...args], { cwd: repoPath, timeoutMs: NETWORK_GIT_MS });
   if (!res.success) {
-    const stderr = res.stderr.toString().trim();
+    const stderr = why(res, NETWORK_GIT_MS);
     const ctx =
       expectedRemoteSha === undefined
         ? `git push failed for ${branch}`

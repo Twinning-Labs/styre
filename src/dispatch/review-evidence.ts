@@ -3,6 +3,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { z } from "zod";
 import { listByTicket } from "../db/repos/ground-truth-signal.ts";
+import { runBlocking } from "../util/process/door.ts";
 import type { ReviewEvidenceSchema } from "./review-schema.ts";
 
 /** Verify citation existence/provenance, not its semantic truth. That remains the independent reviewer's job. */
@@ -25,10 +26,13 @@ export function validateReviewEvidence(
         throw new Error("review evidence path escapes repository or is not a file");
       let source = readFileSync(target, "utf8");
       if (committed) {
-        const blob = Bun.spawnSync(["git", "show", `${sha}:${rel}`], { cwd: root });
+        const blob = runBlocking(["git", "show", `${sha}:${rel}`], {
+          cwd: root,
+          timeoutMs: 30_000,
+        });
         if (!blob.success)
           throw new Error("review source evidence is absent from the recorded commit");
-        source = blob.stdout.toString();
+        source = blob.stdout;
       }
       if (e.line > source.split("\n").length)
         throw new Error("review evidence cites a nonexistent source line");

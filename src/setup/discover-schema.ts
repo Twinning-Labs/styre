@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { ComponentRoleEnum } from "../dispatch/profile.ts";
 import type { Component } from "../dispatch/profile.ts";
+import { runBlocking } from "../util/process/door.ts";
 
 /** Discovery envelope. Command slots are untrusted until normalizeDiscovery validates them;
  * one bad slot must not discard independently valid component classifications. */
@@ -197,7 +198,8 @@ function hasScript(repoDir: string, name: string): boolean {
 }
 
 function onPath(repoDir: string, bin: string): boolean {
-  return Bun.spawnSync(["sh", "-c", 'command -v "$1"', "sh", bin], { cwd: repoDir }).success;
+  return runBlocking(["sh", "-c", 'command -v "$1"', "sh", bin], { cwd: repoDir, timeoutMs: 5_000 })
+    .success;
 }
 
 function inLocalBin(repoDir: string, bin: string): boolean {
