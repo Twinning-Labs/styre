@@ -1,14 +1,15 @@
 # ENG-485 — Agent process lifecycle: stop, interrupt and recover whole process trees
 
 **Date:** 2026-10-02
-**Status:** Design (revision 3). The operator approved it section by section.
+**Status:** Design (revision 4). The operator approved it section by section.
 
 | Review round | Verdict | Findings | Answered in |
 |---|---|---|---|
 | 1 | revise | 1 critical, 11 major | revision 2 |
 | 2 | revise | 1 critical, 5 major, 6 minor | revision 3, which simplifies the interruption handling at the operator's direction (D15) |
+| 3 | revise | 3 major, 6 minor | revision 4 |
 
-Every finding is answered in §15. Next: review round 3, then operator review of this written spec,
+Every finding is answered in §15–§17. Next: review round 4, then operator review of this written spec,
 then the implementation plan.
 
 **Ticket:** ENG-485 (parent ENG-483). Follows ENG-476 (PR #151, merged), which removed an earlier
@@ -265,6 +266,7 @@ process.
 
 **`runBlocking(...)`: a blocking call.**
 - Used by today's `Bun.spawnSync` sites (`git`, `command -v`, version probes).
+- When the door is closed, it starts nothing and throws `RunInterrupted`, like `launch` (§7.3 step 1).
 - It takes a required timeout, so a signal arriving during a blocking call waits at most that long
   for the handler to run. The plan sets each call site's value; network `git` calls get one for the
   first time.
@@ -288,7 +290,10 @@ For each long-running launch:
   - **macOS:** the microsecond start time from the kernel's process table, read with
     `sysctl(KERN_PROC)` through `bun:ffi`. Unlike `proc_pidinfo`, this sees processes owned by other
     users, so a descendant running under `sudo` is never mistaken for "gone" (§2.6).
-    - The plan's first task proves it works in a compiled binary.
+    - The plan's first task proves it works in a compiled binary on both arm64 and x86_64. Review
+      round 3 confirmed the struct offsets on arm64 only.
+    - A missing pid returns success with a length of 0, not an error, so "gone" is judged on the
+      returned length (review round 3, R9).
     - The fallback is `ps -o lstart=` run under `LC_ALL=C TZ=UTC`, at whole second resolution.
   - **On both platforms,** "no such process" is told apart from "not allowed to look". A process
     Styre may not inspect is reported as such, never counted as gone.
@@ -375,6 +380,12 @@ own, and those commands are the agent's children while the agent lives.
    so they are taken in. Group membership survives the death of a parent, so a command whose agent
    has died is still found through its group, provided the agent was alive at an earlier listing.
 
+   **A known limit** (review round 3, R8). A command group whose leader has already exited before
+   the handler's first listing is not taken in, because nothing then links it to the agent. Its
+   members are usually stopped by Claude Code itself on SIGTERM (§2.2). Otherwise §9's check reports
+   them. The live tests confirm that Claude Code's command groups are led by its direct children, and
+   record the CLI version they ran against.
+
    **Which groups are never taken in** (review round 2, N1):
    - The group the agent itself belongs to: Styre's, or whatever Styre inherited from a script that
      started it.
@@ -424,10 +435,12 @@ This fixes today's hang, where a background child holding the output pipe kept `
 with no limit (§2.6). It also stops a server that a test left behind; in `runBoundedCommand` today, a
 leftover like that turns a suite that passed into a timeout.
 
-**Provisioning is the exception.** Its purpose can be to start a service that later commands need,
-such as a database. So after provisioning exits normally, its group is not stopped. Its output is
-still read under the 5 s limit, so a service it started cannot hang Styre. A timeout or a signal
-still stops its group as usual.
+**No exceptions, including provisioning** (review round 3, R2, which removed an exception revision 3
+had added):
+- Provisioning runs the profile's `prepare` commands (`src/dispatch/handlers.ts:1394,1472,1480`), such
+  as `npm ci` and `pip install -e .`. None of these is meant to leave a process behind.
+- A service that daemonizes itself leaves the group and survives. One that stays in the group is a
+  leftover like any other, and is stopped.
 
 **A consequence of the group:** the terminal's Ctrl-C no longer reaches these commands directly. The
 handlers in §7 stop them. A group of its own also has no controlling terminal. A command that opens
@@ -442,7 +455,7 @@ handlers in §7 stop them. A group of its own also has no controlling terminal. 
 | ENG-476 startup refusal | forced, on everything collected. No tool has run yet, and a wrapper is now covered. |
 | Ctrl-C, Ctrl-\, `kill`, closed terminal, CI cancel | graceful (§7); forced on a second signal |
 | Agent exits normally | nothing extra. The record is removed, and §9's check runs off the critical path. |
-| Command finishes normally | the group is checked: if empty, nothing more; if not, stopped (except provisioning), then output read for at most 5 s |
+| Command finishes normally | the group is checked: if empty, nothing more; if not, stopped, then output read for at most 5 s |
 | Sweep of an orphan after `kill -9` | graceful, after the identity check (§8) |
 
 ### 6.4 Why 5 seconds
@@ -479,10 +492,19 @@ The handler owns the whole interruption: stopping, recording and exiting. The ru
 asked to settle, and nothing is handed back and forth. Everything below runs against one deadline:
 6.5 s after the first signal (§7.4).
 
-1. **Close the door.** Mark it `stopping`.
-   - `launch` now starts nothing and throws `RunInterrupted`. Only the handler's own diagnostic
+1. **Close the door.** Mark it `stopping`. From this moment the run code can neither record nor
+   change anything (review round 3, R3). Two choke points enforce this:
+   - **The door refuses every launch and every blocking call** with `RunInterrupted`. That covers
+     the run code's `git` commands, such as a worktree reset. Only the handler's own diagnostic
      launches still work (§5.1).
-   - The journal now records nothing (§7.5).
+   - **The run's database connection becomes read only** (`PRAGMA query_only = ON`). Every write the
+     run code attempts, transactions included, fails with "attempt to write a readonly database".
+     The handler writes through a second connection of its own (step 6). Both behaviours were checked
+     in Bun on 2026-10-02.
+
+     A signal handler cannot run while a synchronous `db.transaction` is in progress (review round 3,
+     `txsig.ts`), and every transaction in `src/` is synchronous. So the switch never lands halfway
+     through a write.
 2. **Send the stop signals, before writing anything.** For every launch in the set held in memory,
    start its graceful stop (§6). The signals go out synchronously, before any output, because a
    write after hangup used to end Styre (§2.5).
@@ -499,20 +521,32 @@ asked to settle, and nothing is handed back and forth. Everything below runs aga
    `lsof` with a timeout of whatever remains before the deadline minus 1 s. If there is not enough
    time, the check is skipped and the skip is reported. This is how Ctrl-\'s orphaned command gets
    reported (D13).
-6. **Record the interruption: `styre run` only, in one synchronous transaction.** Run code cannot
-   interleave with it, because bun:sqlite transactions are synchronous. For every step left
-   `running`:
+6. **Record the interruption: `styre run` only, in one synchronous transaction, through the
+   handler's own connection.** Run code cannot interleave with it, because bun:sqlite transactions
+   are synchronous.
+
+   It acts on **the step in flight**, which `runStep` registers with the door in memory when it
+   starts executing and clears when it finishes. It does not act on every step left `running`: a budget
+   pause also leaves its step `running` and has already given its attempt back (review round 3, R5).
+   If no step is in flight, nothing is written beyond the event. For the step in flight:
    - give back the attempt that `markRunning` counted (`decrementAttempt`), as a budget pause does;
-   - append an event of the existing kind `note`, with reason `interrupted`, and a payload holding:
-     the step's ID, its attempt number, its `started_at`, the signal, the worktree, and the dispatch's
-     `untrackedBefore` list and dispatch ID if it was an agent dispatch. No schema change is needed
-     (§2.6).
-   - close an open dispatch row as `interrupted`, with `partial = 1` and whatever usage is known.
+   - append an event of the existing kind `note`, with reason `interrupted`. No schema change is
+     needed (§2.6). The payload holds:
+     - the step's ID and its `started_at`;
+     - its attempt number **after** the decrement, written in the same transaction, which is the value
+       `recover()` will find on the step (review round 3, R6);
+     - the signal and the worktree path;
+     - for an agent dispatch, its `untrackedBefore` list and dispatch ID.
+   - close the step's open dispatch row as `interrupted`, with `partial = 1` and whatever usage is
+     known.
 
    The ticket stays `active`, which `styre ls` already shows as "interrupted mid-run". If the run
    database is not open yet, or is already closed, this step is skipped.
-7. **Write the telemetry event** for the interruption directly to stdout as one NDJSON line, and
-   report the outcome on stderr:
+7. **Write the telemetry event** for the interruption to stdout. It is the `note` row from step 6,
+   emitted as an ordinary `event` line in the existing telemetry schema (`src/telemetry/events.ts`),
+   with no new event type (review round 3, R4). When the run resumes, the emitter emits that row
+   again; the telemetry contract already allows repeats (`emitter.ts:247`). Then report the outcome on
+   stderr:
    ```
    styre: stopped the agent (pid 1234) and 2 of its commands.
    styre: run interrupted; resume with: styre run --resume ENG-123
@@ -520,8 +554,9 @@ asked to settle, and nothing is handed back and forth. Everything below runs aga
    For each survivor or leftover found:
    `styre: could not stop node server.js (pid 4321); stop it with: kill -9 4321`.
 8. **Exit as Styre would have without a handler.**
-   1. Release the run lock.
-   2. Shut analytics down, bounded by the time left before the deadline, or skip it if none is left.
+   1. Shut analytics down, bounded by the time left before the deadline, or skip it if none is left.
+   2. Release the run lock, as the last thing before the exit, so a `--resume` started meanwhile
+      cannot overlap the dying run (review round 3, R7).
    3. Remove the handlers and send Styre the first signal it received again. Shells and CI then see
       "terminated by signal": 130 for SIGINT, 143 for SIGTERM, 129 for SIGHUP, 131 for SIGQUIT.
    4. If Styre is still alive after that, it is a container's first process (§2.5). It then calls
@@ -558,7 +593,9 @@ shortens or skips itself to fit:
 ### 7.5 The run code during a stop (D12, D15)
 
 The handler's waits use `await`, so the run code keeps running in between until Styre exits. Rule:
-**while the door is `stopping`, nothing the run code does is recorded.**
+**while the door is `stopping`, the run code can neither record nor change anything.** It is enforced
+at the two choke points of §7.3 step 1: the door, and the read-only database connection. The points
+below make the run code fail fast and cleanly rather than relying on those refusals alone.
 
 - **Launch handles** stopped by the handler resolve with an `interrupted` marker. **`launchAgent`
   itself** turns that marker into `RunInterrupted`, so `styre run` and `styre setup` share the
@@ -570,28 +607,44 @@ The handler's waits use `await`, so the run code keeps running in between until 
   - `deliveredTestEvidenceAtBaseline` (`:149`);
   - the Claude adapter's own catch (`claude.ts:323-327`).
 - **`styre setup` checks the door before each write** it makes (`profile.json`, configuration), and
-  throws `RunInterrupted` instead of writing.
+  throws `RunInterrupted` instead of writing. Setup has no database, so this check is its choke point
+  for file writes.
 - **The top of `styre run` and `styre setup`** catches `RunInterrupted` and does nothing. The handler
   owns the exit.
 - **The cost, accepted and documented** (review round 2, N11). A step whose work finished during the
   few seconds of a stop is not recorded, so it is redone on resume. That window is the same as a
-  crash between the step's work and its journal write. The plan checks that redoing an agent dispatch
-  whose commit already landed behaves as it does after such a crash. If it does not, that is an
-  existing crash bug, filed separately.
+  crash between the step's work and its journal write.
+
+  For an agent dispatch, review round 3 checked that `run-dispatch.ts:226-372` contains no `await`.
+  So the runner's commit (`:325`) and the dispatch row's completion (`:369`) happen together,
+  synchronously, and a signal cannot fall between them.
 
 **On `--resume`, `recover()` tells an interruption from a crash.** For each step left `running`, it
 looks for a `note` event with reason `interrupted` whose payload matches the step's ID, attempt number
 and `started_at` (review round 2, N3).
-- **If it matches, it was an interruption.** The attempt was already given back. If the payload holds
-  an `untrackedBefore` list, `recover()` undoes the agent's edits in the worktree with `undoAttempt`.
-  It then resets the step to `pending` without marking it failed, including suite steps.
+- **If it matches, it was an interruption.** The attempt was already given back. `recover()` resets
+  the step to `pending` without marking it failed, including suite steps.
+- **Undoing the agent's edits depends on the mode** (review round 3, R1):
+  - **Worktree mode:** nothing to undo. `resumeRun` removes the old worktree before `recover()` runs
+    (`src/cli/park.ts:362-363`) and creates a fresh one from the branch, so the edits are already
+    gone. Running `undoAttempt` there would throw, because `Bun.spawnSync` throws on a missing
+    folder.
+  - **In-place mode:** the checkout is the same folder, so `recover()` runs `undoAttempt` with the
+    saved `untrackedBefore` list.
+  - **If the recorded folder no longer exists,** the undo is skipped, and Styre says so.
+  - **`--fresh` and `clean` in in-place mode** run the same undo before they discard the
+    checkpoint. Otherwise the agent's new files would stay in the checkout, and the next run would
+    count them as files that were already there.
 - **Otherwise it was a crash or a `kill -9`,** and today's crash handling applies unchanged.
 
 **A test interrupts at every launch site, and between launches,** then resumes. It asserts:
 - the step is redone and the attempt count equals its value before the interrupted attempt;
 - the dispatch row is closed as `interrupted`;
-- the worktree is back to its state before the dispatch;
-- no result was journaled during the stop;
+- in in-place mode, the checkout is back to its state before the dispatch, both after `--resume` and
+  after `--fresh`;
+- worktree mode resumes without trying to undo anything;
+- nothing at all was written to the run database by run code during the stop: no step status, no
+  evidence row, no dispatch change, and no worktree reset (R3);
 - setup wrote nothing.
 
 ### 7.6 Cases with known limits, documented
@@ -825,8 +878,8 @@ and without it. This also settles bash 5's behaviour (§2.5).
   group does not get that group stopped.
 - **No hang from a background child (N6).** `runCommand` with a background child that holds the pipe
   returns within its timeout plus the 5 s output limit.
-- **Provisioning keeps its services (N6).** A service a provisioning command starts survives that
-  command's normal exit, but is stopped on timeout or signal.
+- **Provisioning leftovers are stopped (R2).** A process a provisioning command leaves in its group
+  is stopped after the command exits; one that daemonizes itself survives.
 - **Another user's process is not "gone" (N8).** A descendant running as another user is reported as
   not inspectable, never as gone.
 - **Ctrl-\ is reported on macOS (N4).** The orphaned command is reported through the diagnostic
@@ -886,7 +939,7 @@ and without it. This also settles bash 5's behaviour (§2.5).
 
 | Criterion | Where |
 |---|---|
-| Design brainstorm independently reviewed, no open critical or major findings, operator approved | this document, plus its review records (§15, §16) |
+| Design brainstorm independently reviewed, no open critical or major findings, operator approved | this document, plus its review records (§15–§17) |
 | Each stop trigger and forwarded signal: the agent and a tool command in its own group gone within grace, expected exit status, shown live | §11.2, §11.3. Amended: for Ctrl-\, the orphaned command is reported, not stopped (D13). For GitHub, the graceful stop needs `exec` (D14). |
 | An agent launched through a wrapper script stopped completely, live | §6.1, §11.3 |
 | Recovery kills exactly what the record names; `--fresh` and `clean` stop an orphan first; tests through real steps | §5.4, §8, §11.3. The ticket's "a group for negative pids, one process for positive pids" is superseded by the record's `kind` (§5.5). |
@@ -927,3 +980,17 @@ and without it. This also settles bash 5's behaviour (§2.5).
 | N10 | minor | The handler's real worst case exceeded 7.5 s | §7.4 one 6.5 s deadline; each step shortens or skips |
 | N11 | minor | The central check discards work that finished cleanly | D15: accepted and documented cost, equal to a crash at that point (§7.5) |
 | N12 | minor | The warning for older checkpoints could fire for new checkpoints | §5.5: new code journals no pids; warn only on a non-null pid |
+
+## 17. Review round 3: findings and answers
+
+| # | Severity | Finding | Answer |
+|---|---|---|---|
+| R1 | major | `recover()` undid edits in a worktree resume had already deleted, so `--resume` would crash; in place, `--fresh` and `clean` left the edits | §7.5: undo only in place; skip with a message if the folder is gone; `--fresh` and `clean` undo first in place |
+| R2 | major | The provisioning exception contradicted §5.3, §7.3 and §7.7, with no contract | §6.2: exception removed; provisioning is treated like every command |
+| R3 | major | "Nothing is recorded while stopping" was enforced only for step status | §7.3 step 1: the door refuses blocking calls too, and the run's database connection becomes read only; the handler writes through its own connection |
+| R4 | minor | The handler's NDJSON line had no defined shape | §7.3 step 7: the `note` row as an ordinary `event` line |
+| R5 | minor | Decrementing every `running` step could give back a paused step's attempt twice | §7.3 step 6: only the step in flight, registered in memory by `runStep` |
+| R6 | minor | Which attempt value the note stores was unstated | §7.3 step 6: the value after the decrement |
+| R7 | minor | The run lock was released before the analytics shutdown | §7.3 step 8: the lock is released last |
+| R8 | minor | A command group whose leader exited before the first listing is not taken in | §6.1: documented limit; the live tests confirm group leadership and record the CLI version |
+| R9 | minor | `sysctl` details: a missing pid returns length 0; offsets verified on arm64 only | §5.2 |
