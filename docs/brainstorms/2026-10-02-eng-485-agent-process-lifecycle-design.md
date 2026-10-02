@@ -1,7 +1,7 @@
 # ENG-485 — Agent process lifecycle: stop, interrupt and recover whole process trees
 
 **Date:** 2026-10-02
-**Status:** Design (revision 6). The operator approved it section by section.
+**Status:** Design (revision 7). The operator approved it section by section.
 
 | Review round | Verdict | Findings | Answered in |
 |---|---|---|---|
@@ -10,9 +10,10 @@
 | 3 | revise | 3 major, 6 minor | revision 4 |
 | 4 | revise | 1 major, 4 minor | revision 5 |
 | 5 | revise | 1 major, 4 minor | revision 6 |
+| 6 | **ship** | 3 minor notes | revision 7 (two notes applied; the third is an existing defect outside ENG-485, filed separately) |
 
-Every finding is answered in §15–§19. Next: review round 6, then operator review of this written spec,
-then the implementation plan.
+Every finding is answered in §15–§19. Next: confirmation of revision 7's two small edits, then
+operator review of this written spec, then the implementation plan.
 
 **Ticket:** ENG-485 (parent ENG-483). Follows ENG-476 (PR #151, merged), which removed an earlier
 process group attempt from its scope. That attempt is kept on local branch
@@ -657,6 +658,14 @@ and `started_at` (review round 2, N3).
     - Every function that moves HEAD reports the new HEAD to the in-flight record: the runner's
       commit (`worktree.ts:74-84`, which already returns the sha), `resetWorktreeHard`
       (`worktree.ts:438`), and the reset in `run-dispatch.ts:354`.
+    - **Deliberately not reporting:** `ensureWorktree`'s `checkout -B` (`worktree.ts:44`) and
+      `worktree add -B` (`:51`, `:59`) also move the branch (review round 6). They are left
+      unreported on purpose, because the failure is safe in both orders:
+      - if one runs after the last report, the current HEAD no longer equals `headAtStop`, so
+        `recover()` skips the reset;
+      - if one runs before a commit, the commit's report replaces it.
+    - There is no rebase, merge or cherry-pick in `src/`. Baseline and replay worktrees use
+      `worktree add --detach`, which leaves the ticket branch alone.
     - The handler stores both `headAtStart` and the latest reported HEAD, **`headAtStop`**, in the
       note. Neither needs `git` at stop time.
   - **When `recover()` resets.** All four conditions must hold:
@@ -974,6 +983,8 @@ and without it. This also settles bash 5's behaviour (§2.5).
   - 50 normal dispatches with the stand-in agent, median before and after;
   - the sweep's cost with an empty folder;
   - the cost of the group check after a command finishes normally;
+  - the cost of recording `headAtStart`: one blocking `git rev-parse` per step. `runStep` lives in
+    `src/engine` and does not know the repo or branch, so they are injected (review round 6);
   - confirmation that §9's check does not lengthen a step.
 
 ## 12. Documentation, in the same PR
