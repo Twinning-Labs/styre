@@ -46,22 +46,17 @@ test("bounded observations retain both output channels and expose truncation", (
   expect(o.stderr).toBe("stderr");
 });
 
-test("native suite runner captures stdout/stderr and exposes the process recovery hook", async () => {
-  let pid = 0;
+test("native suite runner captures stdout/stderr and reports settling", async () => {
   let settled = false;
   const o = await observeSuiteCommand({
     ...context,
     cwd: process.cwd(),
     command: "echo failing-test-output; echo setup-diagnostic >&2; exit 1",
     timeoutMs: 5000,
-    onSpawn: (p) => {
-      pid = p;
-    },
     onSettled: () => {
       settled = true;
     },
   });
-  expect(pid).toBeGreaterThan(0);
   expect(settled).toBe(true);
   expect(o.stdout).toContain("failing-test-output");
   expect(o.stderr).toContain("setup-diagnostic");

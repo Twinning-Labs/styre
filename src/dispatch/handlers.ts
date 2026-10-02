@@ -1748,7 +1748,6 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
           command,
           environment,
           sha: worktreeHead(worktreePath),
-          onSpawn: (pid) => setPid(ctx.db, ctx.step.id, -pid),
           onSettled: () => setPid(ctx.db, ctx.step.id, null),
           cwd: join(worktreePath, dir ?? ""),
           timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
@@ -2005,7 +2004,6 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         command,
         environment,
         sha: worktreeHead(worktreePath),
-        onSpawn: (pid) => setPid(ctx.db, ctx.step.id, -pid),
         onSettled: () => setPid(ctx.db, ctx.step.id, null),
         cwd: join(worktreePath, dir ?? ""),
         timeoutMs: deps.timeoutMs ?? VERIFY_TIMEOUT_MS,
@@ -2029,7 +2027,6 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
         baseline = await runAtBaseline({
           repoPath,
           baselineSha,
-          onSpawn: (pid) => setPid(ctx.db, ctx.step.id, -pid),
           onSettled: () => setPid(ctx.db, ctx.step.id, null),
           command: job.command,
           dir: job.dir,

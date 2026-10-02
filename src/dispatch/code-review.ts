@@ -148,9 +148,6 @@ export async function runCodeReview(
     const run = await (deps.executeProbe ?? runBoundedCommand)(job.command, {
       cwd,
       timeoutMs: deps.timeoutMs,
-      // Negative PID deliberately journals the detached process GROUP. Recovery's signal-0/kill
-      // then reaches descendants even when the original shell leader has already exited.
-      onSpawn: (pid) => setPid(ctx.db, ctx.step.id, -pid),
     });
     setPid(ctx.db, ctx.step.id, null);
     const moved = worktreeHead(deps.worktreePath) !== sha;

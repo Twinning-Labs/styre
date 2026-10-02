@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { realRecoverDeps, recover } from "../../src/daemon/recover.ts";
 import { getById, insertPending, markRunning } from "../../src/db/repos/workflow-step.ts";
 import { runBoundedCommand } from "../../src/util/run-bounded-command.ts";
+import { commandLifecycleTests } from "../helpers/command-lifecycle.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -36,28 +37,43 @@ test("preserves command output and nonzero exit status", async () => {
   });
 });
 
-test.each(["wait", "exit 0"])(
-  "timeout kills descendants and bounds inherited pipes when the shell uses %s",
-  async (ending) => {
-    await withDirectory(async (cwd) => {
-      const start = performance.now();
-      // A child inherits the pipe even if the shell exits. Killing only the shell would
-      // return eventually but leave this child able to modify the reviewed worktree.
-      const result = await runBoundedCommand(
-        `printf ready; (sleep 0.8; printf survived > descendant-survived) & ${ending}`,
-        { cwd, timeoutMs: 200 },
-      );
-      const elapsed = performance.now() - start;
-      expect(result.timedOut).toBe(true);
-      expect(result.exitCode).toBeNull();
-      expect(result.stdout).toBe("ready");
-      expect(elapsed).toBeLessThan(750);
-      // Check the externally visible consequence, not just whether SIGKILL was invoked.
-      await delay(950);
-      expect(existsSync(join(cwd, "descendant-survived"))).toBe(false);
-    });
-  },
-);
+test("timeout kills descendants and bounds inherited pipes while the shell waits", async () => {
+  await withDirectory(async (cwd) => {
+    const start = performance.now();
+    // A child inherits the pipe. Killing only the shell would leave this child able to modify the
+    // reviewed worktree.
+    const result = await runBoundedCommand(
+      "printf ready; (sleep 0.8; printf survived > descendant-survived) & wait",
+      { cwd, timeoutMs: 200 },
+    );
+    const elapsed = performance.now() - start;
+    expect(result.timedOut).toBe(true);
+    expect(result.exitCode).toBeNull();
+    expect(result.stdout).toBe("ready");
+    expect(elapsed).toBeLessThan(750);
+    // Check the externally visible consequence, not just whether SIGKILL was invoked.
+    await delay(950);
+    expect(existsSync(join(cwd, "descendant-survived"))).toBe(false);
+  });
+});
+
+test("a shell that exits while its child still runs is a completed command, and the child is stopped", async () => {
+  await withDirectory(async (cwd) => {
+    const start = performance.now();
+    // Before ENG-485 this was a timeout, because the child held the output pipe open. The shell
+    // finished on its own, so the command is complete; what it left behind is stopped.
+    const result = await runBoundedCommand(
+      "printf ready; (sleep 0.8; printf survived > descendant-survived) & exit 0",
+      { cwd, timeoutMs: 5000 },
+    );
+    expect(result.timedOut).toBe(false);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("ready");
+    expect(performance.now() - start).toBeLessThan(2500);
+    await delay(950);
+    expect(existsSync(join(cwd, "descendant-survived"))).toBe(false);
+  });
+});
 
 test("caps both output streams while draining them to completion", async () => {
   await withDirectory(async (cwd) => {
@@ -78,27 +94,6 @@ test("caps both output streams while draining them to completion", async () => {
     expect(result.stdout.endsWith("END")).toBe(true);
     expect(result.stderr.startsWith("FIRST")).toBe(true);
     expect(result.stderr.endsWith("LAST")).toBe(true);
-  });
-});
-
-test("PID journal failure aborts the child before returning an error result", async () => {
-  await withDirectory(async (cwd) => {
-    let journalCalled = false;
-    const result = await runBoundedCommand("sleep 0.3; printf survived > journal-survived", {
-      cwd,
-      timeoutMs: 5000,
-      onSpawn: (pid) => {
-        expect(pid).toBeGreaterThan(0);
-        journalCalled = true;
-        throw new Error("synthetic journal failure");
-      },
-    });
-    expect(journalCalled).toBe(true);
-    expect(result.exitCode).toBeNull();
-    expect(result.timedOut).toBe(false);
-    expect(result.stderr).toContain("PID journaling failed: Error: synthetic journal failure");
-    await delay(450);
-    expect(existsSync(join(cwd, "journal-survived"))).toBe(false);
   });
 });
 
@@ -149,3 +144,5 @@ test("recovery kills a journaled process group after its shell leader has exited
     }
   });
 });
+
+commandLifecycleTests("runBoundedCommand", runBoundedCommand);

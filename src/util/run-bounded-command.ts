@@ -1,77 +1,88 @@
-import { spawn } from "node:child_process";
 import { verifyEnv } from "../agent/agent-env.ts";
-import type { CommandResult } from "./run-command.ts";
+import { type LaunchHandle, RunInterrupted, launch } from "./process/door.ts";
+import { DRAIN_LIMIT_MS, readPipe } from "./process/read-pipe.ts";
+import { type CommandResult, survivorNote } from "./run-command.ts";
 
-/** POSIX review probes: cap the entire process/pipe lifetime and captured output. A process group
- * lets timeout cleanup reach ordinary descendants; this is not an OS sandbox against hostile code. */
-export function runBoundedCommand(
+/** POSIX review probes: cap the entire process and pipe lifetime and the captured output.
+ *
+ *  The command leads a process group of its own (through the door, ENG-485 section 6.2). A timeout
+ *  or a stop reaches every member of the group, and after a normal exit anything left running is
+ *  stopped before the rest of the output is read, for at most DRAIN_LIMIT_MS. This is not an OS
+ *  sandbox against hostile code. Throws RunInterrupted when the stop handler stopped the command or
+ *  the door was already closed. stdin is ignored. */
+export async function runBoundedCommand(
   command: string,
-  opts: { cwd: string; timeoutMs: number; onSpawn?: (pid: number) => void },
+  opts: { cwd: string; timeoutMs: number },
 ): Promise<CommandResult & { truncated: boolean }> {
-  return new Promise((resolve) => {
-    const proc = spawn("sh", ["-c", command], {
+  let h: LaunchHandle;
+  try {
+    h = launch({
+      argv: ["sh", "-c", command],
       cwd: opts.cwd,
       env: verifyEnv(process.env),
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
+      kind: "group",
+      context: { ident: null, stepId: null, worktree: opts.cwd },
     });
-    let stdout = "";
-    let stderr = "";
-    let truncated = false;
-    let settled = false;
-    const cap = 64 * 1024;
-    // Keep the beginning AND latest output. Retaining only a prefix hides the command phase
-    // active at timeout, even when downstream diagnostics ask for the log's tail.
-    const capture = (previous: string, next: string) => {
-      const combined = previous + next;
-      if (combined.length <= cap) return combined;
-      truncated = true;
-      return combined.slice(0, cap / 2) + combined.slice(-cap / 2);
-    };
-    const finish = (exitCode: number | null, timedOut: boolean, error?: string) => {
-      let resultExitCode = exitCode;
-      let resultError = error;
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (proc.pid) {
-        try {
-          process.kill(-proc.pid, "SIGKILL");
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== "ESRCH") {
-            resultError = `process-group cleanup failed: ${String(err)}`;
-            resultExitCode = null;
-          }
-        }
-      }
-      proc.stdout.destroy();
-      proc.stderr.destroy();
-      proc.unref();
-      resolve({
-        exitCode: resultExitCode,
-        timedOut,
-        stdout,
-        stderr: resultError ? `${stderr}\n${resultError}` : stderr,
-        truncated,
-      });
-    };
-    const timer = setTimeout(() => finish(null, true), opts.timeoutMs);
-    proc.stdout.on("data", (chunk: Buffer) => {
-      const text = chunk.toString();
-      stdout = capture(stdout, text);
-    });
-    proc.stderr.on("data", (chunk: Buffer) => {
-      const text = chunk.toString();
-      stderr = capture(stderr, text);
-    });
-    proc.on("error", (err) => finish(null, false, String(err)));
-    proc.on("close", (code) => finish(code, false));
-    if (proc.pid) {
-      try {
-        opts.onSpawn?.(proc.pid);
-      } catch (error) {
-        finish(null, false, `PID journaling failed: ${String(error)}`);
-      }
-    }
+  } catch (error) {
+    if (error instanceof RunInterrupted) throw error;
+    return { exitCode: null, timedOut: false, stdout: "", stderr: String(error), truncated: false };
+  }
+  let stdout = "";
+  let stderr = "";
+  let truncated = false;
+  const cap = 64 * 1024;
+  // Keep the beginning AND latest output. Retaining only a prefix hides the command phase
+  // active at timeout, even when downstream diagnostics ask for the log's tail.
+  const capture = (previous: string, next: string) => {
+    const combined = previous + next;
+    if (combined.length <= cap) return combined;
+    truncated = true;
+    return combined.slice(0, cap / 2) + combined.slice(-cap / 2);
+  };
+  const out = readPipe(h.proc.stdout, (t) => {
+    stdout = capture(stdout, t);
   });
+  const err = readPipe(h.proc.stderr, (t) => {
+    stderr = capture(stderr, t);
+  });
+  const result = (
+    exitCode: number | null,
+    timedOut: boolean,
+    notes: string[],
+  ): CommandResult & { truncated: boolean } => ({
+    exitCode,
+    timedOut,
+    stdout,
+    stderr: notes.length ? [stderr, ...notes].filter(Boolean).join("\n") : stderr,
+    truncated,
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const outcome = await Promise.race([
+      h.proc.exited.then(() => "exited" as const),
+      new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), opts.timeoutMs);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (h.interrupted) throw new RunInterrupted();
+    const rep = outcome === "timeout" ? await h.stop("graceful") : await h.finish();
+    if (h.interrupted) throw new RunInterrupted();
+    const [outDone, errDone] = await Promise.all([
+      out.finish(DRAIN_LIMIT_MS),
+      err.finish(DRAIN_LIMIT_MS),
+    ]);
+    if (!(outDone && errDone)) truncated = true;
+    const notes = [
+      outDone && errDone ? "" : "[output read limit reached]",
+      survivorNote(rep.survivors),
+    ].filter(Boolean);
+    // A command killed by a signal has no exit code of its own (Bun reports 128 + n for it).
+    const code = outcome === "timeout" || h.proc.signalCode ? null : h.proc.exitCode;
+    return result(code, outcome === "timeout", notes);
+  } finally {
+    clearTimeout(timer);
+    out.cancel();
+    err.cancel();
+  }
 }

@@ -63,7 +63,6 @@ export async function runAtBaseline(p: {
   command: string;
   dir?: string;
   timeoutMs: number;
-  onSpawn?: (pid: number) => void;
   onSettled?: () => void;
 }): Promise<BaselineObservation> {
   const result: BaselineObservation = {
@@ -83,7 +82,6 @@ export async function runAtBaseline(p: {
     if (!head.success) return { ...result, reason: "Baseline checkout HEAD could not be read." };
     result.execution = await observeSuiteCommand({
       command: p.command,
-      onSpawn: p.onSpawn,
       onSettled: p.onSettled,
       sha: head.stdout.toString().trim(),
       cwd: join(wt, p.dir ?? ""),
