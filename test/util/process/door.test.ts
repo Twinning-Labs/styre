@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as door from "../../../src/util/process/door.ts";
@@ -219,6 +219,62 @@ test("a stop signal in flight (stopAbort.forced) cuts a graceful stop's wait sho
   expect(listRecords()).toEqual([]);
 });
 
+test("a launch starts in the cwd it was given, for both kinds", async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "styre-door-cwd-")));
+  try {
+    for (const kind of ["group", "agent"] as const) {
+      const h = door.launch({ argv: ["pwd"], cwd: dir, env: process.env, kind, context: ctx });
+      const out = await new Response(h.proc.stdout).text();
+      await h.proc.exited;
+      await h.finish();
+      expect(realpathSync(out.trim())).toBe(dir);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("finish on a live agent stops it, and only then releases the record", async () => {
+  const a = start(["sleep", "30"], "agent");
+  const alive = () => listProcesses().some((p) => p.pid === a.proc.pid && p.state !== "zombie");
+  expect(alive()).toBe(true);
+  const rep = await a.finish();
+  expect(rep.survivors).toEqual([]);
+  expect(alive()).toBe(false);
+  expect(door.liveLaunches()).toEqual([]);
+  expect(listRecords()).toEqual([]);
+});
+
+test("a finish that leaves a survivor keeps the record and the live entry", async () => {
+  const a = start(["sleep", "30"], "agent");
+  let t = 0;
+  door.__setStopDepsForTests({
+    list: listProcesses,
+    kill: () => {},
+    sleep: async () => {},
+    now: () => {
+      t += 250;
+      return t;
+    },
+  });
+  const rep = await a.finish();
+  expect(rep.survivors.length).toBeGreaterThan(0);
+  expect(door.liveLaunches()).toContain(a);
+  expect(listRecords().map((l) => l.record.pid)).toEqual([a.proc.pid]);
+});
+
+test("a stop signal in flight (stopAbort.forced) also cuts a graceful AGENT stop short", async () => {
+  // The agent's shell ignores SIGTERM and respawns its child, so only SIGKILL ends it.
+  const a = start(sh("trap '' TERM; while :; do sleep 1; done"), "agent");
+  await Bun.sleep(300); // let the trap install
+  door.stopAbort.forced = true;
+  const t0 = Date.now();
+  const rep = await a.stop("graceful");
+  expect(rep.survivors).toEqual([]);
+  expect(Date.now() - t0).toBeLessThan(door.GRACE_MS - 1_500);
+  expect(listRecords()).toEqual([]);
+});
+
 test("a launch passes its stdin and env through, an undefined env value is left unset", async () => {
   const h = start(sh('cat; echo "[$KEPT][${DROPPED-unset}]"'), "group", {
     PATH: process.env.PATH,
@@ -321,7 +377,7 @@ test("runBlocking reports output, status, env, cwd and stdin; a normal or signal
   expect(ok.exitCode).toBe(3);
   expect(ok.success).toBe(false);
   expect(ok.timedOut).toBe(false);
-  expect(ok.stdout.split("\n").slice(1)).toEqual(["from-env", "piped", ""]);
+  expect(ok.stdout.split("\n")).toEqual([realpathSync(tmpdir()), "from-env", "piped", ""]);
   expect(ok.stderr).toBe("err\n");
   const sig = door.runBlocking(sh("kill -TERM $$"), { timeoutMs: 10_000 });
   expect(sig.timedOut).toBe(false);

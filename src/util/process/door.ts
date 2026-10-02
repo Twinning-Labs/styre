@@ -63,7 +63,7 @@ export interface LaunchHandle {
   interrupted: boolean;
   /** Stop the launch. The record is removed only when nothing is left alive (section 5.3). */
   stop(how: "graceful" | "forced"): Promise<StopReport>;
-  /** After the leader exited: stop what it left behind (a command group) and release the record. */
+  /** Stop whatever is left of the launch (graceful), then release the record if nothing survives. */
   finish(): Promise<StopReport>;
 }
 
@@ -145,12 +145,9 @@ export function launch(spec: LaunchSpec): LaunchHandle {
     context: spec.context,
     interrupted: false,
     stop: async (how) => release(await doStop(how)),
-    finish: async () =>
-      release(
-        spec.kind === "group"
-          ? await doStop("graceful")
-          : { stopped: [], survivors: [], failures: [] },
-      ),
+    // Both kinds stop what is left, so a record is never released while anything it covers is alive
+    // (section 5.3). An agent or a group that already exited returns at once.
+    finish: async () => release(await doStop("graceful")),
   };
   live.add(handle);
   return handle;
