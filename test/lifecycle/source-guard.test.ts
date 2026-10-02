@@ -3,29 +3,47 @@
 // machinery. The check parses imports and calls with the TypeScript compiler API, so text inside a
 // string (the generated script in src/testing/karma.ts) is not a false hit.
 //
-// What it enforces outside the allowed files (it is an allow list, not a deny list of spellings):
+// SCOPE (controller ruling R17). This guard catches ACCIDENTAL direct process starts and unbounded
+// blocking calls in our own, trusted source. It is not a sandbox against code written to evade it.
+// It claims only the checks below, and the stated limits are real limits.
+//
+// What it checks outside the allowed files (an allow list, not a deny list of spellings):
 //   - the identifier `Bun` may appear only as `Bun.<member>` for the members src uses today
 //     (BUN_MEMBERS); a bare, aliased, passed, destructured or computed `Bun` is an offence, and so is
 //     any `.Bun` member or `["Bun"]` access, and any use of `globalThis` other than `globalThis.prompt`;
 //   - imports of "bun" are type only or named members from BUN_NAMED_IMPORTS; "bun:" modules other
 //     than bun:sqlite and bun:test (bun:ffi) are refused;
-//   - child_process, node:module (createRequire) and the identifier `createRequire` are refused;
+//   - child_process, node:module (createRequire), the identifier `createRequire`, and
+//     `getBuiltinModule` (any use except a call with a string literal naming a module that is not
+//     child_process or module) are refused;
 //   - `require` may only be called directly with one string literal, `import()` takes only a string
-//     literal, `import.meta.require` and `eval` / `Function` are refused;
+//     literal, and `import.meta.require` (property access spelling), a direct call of `eval`,
+//     `Function(...)`, `new Function(...)` and `process.binding / dlopen / mainModule` (the literal
+//     `process.<name>` spelling) are refused;
 //   - `launchDiagnostic` may not appear anywhere (identifier or any string) outside its callers, and
 //     the door module may not be imported as a namespace or default, or re-exported with `export *`,
-//     outside them;
-//   - every `runBlocking` call, however it is reached, has a literal or same file or allow listed
-//     constant timeout in range.
+//     or loaded dynamically, outside them;
+//   - `runBlocking` may only be CALLED (directly, through `ns.runBlocking`, `ns["runBlocking"]`, or
+//     the local name of `import { runBlocking as x }`) or named in an import: passing, aliasing,
+//     `.call`, `.apply` and re-exporting it are refused. Every call has an options object literal,
+//     without a spread, whose `timeoutMs` is a numeric literal, a top level `const` numeric literal
+//     in the same file, or an exported numeric `const` of an allow listed module, in (0, 120 000],
+//     alone or in the branches of a conditional. A constant whose name is declared more than once in
+//     the file (shadowed by a parameter, a local, a destructured name) is not trusted.
 //
-// STATED LIMITS. A static scan cannot prove these forms, and nothing here claims to:
-//   - a runtime built name: `d["launch" + "Diagnostic"]` on a value that came from an allowed
-//     indirection, or `Reflect.get(obj, name)` where `obj` is not `Bun` or the door itself;
-//   - starting a process through a native addon, `process.binding`, or a worker that loads one;
-//   - code outside src/ (tests, scripts) and generated code written to disk and run later (the string
-//     in src/testing/karma.ts is such a script and is reviewed by hand);
-//   - a timeout made valid by a same file `const` that a later line reassigns through `let` aliasing.
-// The runtime half of the guarantee is the door's own tests; the scan only closes the plain forms.
+// STATED LIMITS. These forms are NOT refused, and nothing here claims they are:
+//   - indirect eval: `const e = eval; e(...)`, `(0, eval)(...)`;
+//   - the Function constructor reached through an instance: `(() => {}).constructor(...)`;
+//   - `import.meta["require"]` (element access), and `process.binding` / `process.dlopen` /
+//     `process.mainModule` reached through an alias or an element access (`const p = process; ...`,
+//     `process["binding"]`);
+//   - a runtime built name: `d["launch" + "Diagnostic"]` on a value that came through an indirection
+//     the scan does not follow, or `Reflect.get(obj, name)` where `obj` is not `Bun` or the door;
+//   - a native addon, or a worker that loads one;
+//   - code outside src/ (tests, scripts) and code generated to disk and run later (the string in
+//     src/testing/karma.ts is such a script and is reviewed by hand);
+//   - a call to a function that wraps runBlocking in another module is checked in that module only.
+// The runtime half of the guarantee is the door's own tests. The scan only closes the plain forms.
 import { expect, test } from "bun:test";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, posix, relative } from "node:path";
@@ -56,6 +74,8 @@ const BUN_MEMBERS = new Set(["TOML", "YAML", "Glob", "which", "sleep", "file", "
 const BUN_NAMED_IMPORTS = new Set(["TOML", "YAML", "Glob", "which", "sleep", "file"]);
 /** "bun:" modules src may import; bun:ffi (a way to call into libc) is not one of them. */
 const BUN_SCHEME_OK = new Set(["bun:sqlite", "bun:test"]);
+/** Builtin modules that may never be loaded through process.getBuiltinModule. */
+const BLOCKED_BUILTINS = new Set(["child_process", "node:child_process", "module", "node:module"]);
 const GLOBALTHIS_MEMBERS = new Set(["prompt"]);
 const isDoorSpec = (s: string): boolean => /(^|\/)door(\.[cm]?[jt]s)?$/.test(s);
 const lit = (n: ts.Node | undefined): string | undefined =>
@@ -214,6 +234,26 @@ function offences(rel: string, text: string): string[] {
       }
       if (!diagOk && n.text === "launchDiagnostic") flag(n, "names launchDiagnostic");
     }
+    // process.getBuiltinModule("node:child_process") is a require that needs no import. Only a call
+    // `x.getBuiltinModule("<string literal>")` for a module that is not blocked is accepted.
+    if (!spawnOk) {
+      const isName =
+        (ts.isIdentifier(n) && n.text === "getBuiltinModule") ||
+        (ts.isStringLiteralLike(n) && n.text === "getBuiltinModule");
+      if (isName) {
+        const access = ts.isIdentifier(n) ? n.parent : undefined;
+        const call =
+          access && ts.isPropertyAccessExpression(access) && access.name === n
+            ? access.parent
+            : undefined;
+        const arg =
+          call && ts.isCallExpression(call) && call.expression === access
+            ? lit(call.arguments[0])
+            : undefined;
+        if (arg === undefined || BLOCKED_BUILTINS.has(arg))
+          flag(n, "uses getBuiltinModule beyond an allowed literal");
+      }
+    }
     if (!spawnOk && ts.isElementAccessExpression(n) && lit(n.argumentExpression) === "Bun")
       flag(n, 'reaches Bun through ["Bun"]');
     if (
@@ -335,6 +375,24 @@ test.each([
   ["the Function constructor", "new Function('return Bun')().spawnSync(['true']);"],
   ["Function called", "Function('return Bun')().spawnSync(['true']);"],
   ["process.binding", "process.binding('spawn_sync');"],
+  [
+    "process.getBuiltinModule child_process",
+    "process.getBuiltinModule('node:child_process').spawnSync(['true']);",
+  ],
+  ["process.getBuiltinModule bare name", "process.getBuiltinModule('child_process');"],
+  [
+    "process.getBuiltinModule node:module",
+    "process.getBuiltinModule('node:module').createRequire(import.meta.url);",
+  ],
+  ["process.getBuiltinModule built name", "process.getBuiltinModule('node:' + 'child_process');"],
+  [
+    "process.getBuiltinModule aliased",
+    "const g = process.getBuiltinModule; g('node:child_process');",
+  ],
+  [
+    "process.getBuiltinModule by element access",
+    "process['getBuiltinModule']('node:child_process');",
+  ],
 ])("the guard rejects %s", (_name, source) => {
   expect(offences(NEG, source).length).toBeGreaterThanOrEqual(1);
 });
@@ -410,6 +468,8 @@ test("what src is allowed to do is not a hit", () => {
     "import { runBlocking } from '../util/process/door.ts'; runBlocking(['git'], { timeoutMs: 1 });",
     "import { RunInterrupted, type BlockingResult } from '../util/process/door.ts';",
     "import * as fs from 'node:fs'; import { createHash } from 'node:crypto';",
+    "const fs = process.getBuiltinModule('node:fs');",
+    "import { runBlocking as rb } from '../util/process/door.ts'; rb(['git'], { timeoutMs: 30_000 });",
   ];
   for (const src of fine) expect(offences(NEG, src), src).toEqual([]);
 });
@@ -486,6 +546,29 @@ function timeoutProblems(rel: string, text: string): string[] {
       if (v !== undefined) known.set(el.name.text, v);
     }
   }
+  // How many times each name is declared anywhere in the file (variables, parameters, destructured
+  // names, functions, classes, imports, catch variables). A constant is trusted only when its name
+  // has exactly one declaration, so no inner scope can shadow it with a different value.
+  const declared = new Map<string, number>();
+  const declare = (name: ts.BindingName | ts.Identifier | undefined): void => {
+    if (!name) return;
+    if (ts.isIdentifier(name)) declared.set(name.text, (declared.get(name.text) ?? 0) + 1);
+    else for (const el of name.elements) if (ts.isBindingElement(el)) declare(el.name);
+  };
+  // Local names that stand for runBlocking: `runBlocking` itself and any `import { runBlocking as x }`.
+  const rbNames = new Set(["runBlocking"]);
+  const scan = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n) || ts.isParameter(n)) declare(n.name);
+    else if (ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) declare(n.name);
+    else if (ts.isImportSpecifier(n) || ts.isNamespaceImport(n)) declare(n.name);
+    else if (ts.isImportClause(n)) declare(n.name);
+    else if (ts.isCatchClause(n) && n.variableDeclaration) declare(n.variableDeclaration.name);
+    if (ts.isImportSpecifier(n) && (n.propertyName ?? n.name).text === "runBlocking")
+      rbNames.add(n.name.text);
+    ts.forEachChild(n, scan);
+  };
+  scan(sf);
+  for (const name of [...known.keys()]) if ((declared.get(name) ?? 0) !== 1) known.delete(name);
   const values = (e: ts.Expression): number[] | undefined => {
     if (ts.isParenthesizedExpression(e)) return values(e.expression);
     const n = numberOf(e);
@@ -499,7 +582,7 @@ function timeoutProblems(rel: string, text: string): string[] {
     return undefined;
   };
   const isRunBlocking = (callee: ts.Expression): boolean =>
-    (ts.isIdentifier(callee) && callee.text === "runBlocking") ||
+    (ts.isIdentifier(callee) && rbNames.has(callee.text)) ||
     (ts.isPropertyAccessExpression(callee) && callee.name.text === "runBlocking") ||
     (ts.isElementAccessExpression(callee) && lit(callee.argumentExpression) === "runBlocking");
   const out: string[] = [];
@@ -529,6 +612,27 @@ function timeoutProblems(rel: string, text: string): string[] {
         else if (vs.some((v) => !(v > 0 && v <= MAX_TIMEOUT_MS)))
           out.push(`${at}: timeoutMs ${vs.join(" or ")} is outside (0, ${MAX_TIMEOUT_MS}]`);
       }
+    }
+    // runBlocking may only be CALLED here (or named in an import). Passing it, aliasing it, `.call`,
+    // `.apply`, or re-exporting it would put a call beyond this check.
+    const mentions =
+      (ts.isIdentifier(n) && rbNames.has(n.text)) ||
+      (ts.isStringLiteralLike(n) &&
+        ts.isElementAccessExpression(n.parent) &&
+        n.text === "runBlocking");
+    if (mentions) {
+      const ref =
+        ts.isIdentifier(n) && ts.isPropertyAccessExpression(n.parent) && n.parent.name === n
+          ? n.parent
+          : ts.isStringLiteralLike(n) && ts.isElementAccessExpression(n.parent)
+            ? n.parent
+            : n;
+      const called = ts.isCallExpression(ref.parent) && ref.parent.expression === ref;
+      const imported = ts.isImportSpecifier(ref.parent);
+      if (!called && !imported)
+        out.push(
+          `${rel}:${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}: runBlocking is not called directly`,
+        );
     }
     ts.forEachChild(n, visit);
   };
@@ -578,6 +682,51 @@ test.each([
   ["a namespace call with arithmetic", "door.runBlocking(['git'], { timeoutMs: 60 * 60_000 });"],
   ["an element access call", "door['runBlocking'](['git'], { cwd });"],
   [
+    "an aliased import with arithmetic",
+    "import { runBlocking as rb } from '../util/process/door.ts'; rb(['git'], { timeoutMs: 60 * 60_000 });",
+  ],
+  [
+    "an aliased import without a timeout",
+    "import { runBlocking as rb } from '../util/process/door.ts'; rb(['git'], { cwd });",
+  ],
+  [
+    "an aliased import via a parameter",
+    "import { runBlocking as rb } from '../util/process/door.ts'; function f(t: number) { rb(['git'], { timeoutMs: t }); }",
+  ],
+  [
+    "a variable alias of runBlocking",
+    "const r = runBlocking; r(['git'], { timeoutMs: 60 * 60_000 });",
+  ],
+  ["a variable alias of a namespace member", "const r = door.runBlocking; r(['git']);"],
+  ["runBlocking.call", "runBlocking.call(null, ['git'], { timeoutMs: 60 * 60_000 });"],
+  ["runBlocking.apply", "runBlocking.apply(null, [['git'], { timeoutMs: 60 * 60_000 }]);"],
+  ["runBlocking passed as an argument", "run(runBlocking);"],
+  [
+    "an aliased runBlocking passed as an argument",
+    "import { runBlocking as rb } from '../util/process/door.ts'; run(rb);",
+  ],
+  ["a re-export of runBlocking", "export { runBlocking } from '../util/process/door.ts';"],
+  [
+    "a renamed re-export of runBlocking",
+    "import { runBlocking } from '../util/process/door.ts'; export { runBlocking as rb };",
+  ],
+  [
+    "a shadowing local constant",
+    "const T = 1000;\nfunction f() { const T = 99_999_999; runBlocking(['git'], { timeoutMs: T }); }",
+  ],
+  [
+    "a shadowing parameter",
+    "const T = 1000;\nfunction f(T: number) { runBlocking(['git'], { timeoutMs: T }); }",
+  ],
+  [
+    "a shadowing destructured name",
+    "const T = 1000;\nfunction f(o: any) { const { T } = o; runBlocking(['git'], { timeoutMs: T }); }",
+  ],
+  [
+    "a shorthand shadowed by a parameter",
+    "const timeoutMs = 1000;\nfunction f(timeoutMs: number) { runBlocking(['git'], { timeoutMs }); }",
+  ],
+  [
     "an imported constant from a module not on the list",
     "import { MS } from './consts.ts'; runBlocking(['git'], { timeoutMs: MS });",
   ],
@@ -600,6 +749,14 @@ test.each([
   [
     "a conditional between bounded constants",
     "const A = 30_000; const B = 120_000;\nrunBlocking(['git'], { timeoutMs: c ? A : B });",
+  ],
+  [
+    "an aliased import with a literal",
+    "import { runBlocking as rb } from '../util/process/door.ts'; rb(['git'], { timeoutMs: 5_000 });",
+  ],
+  [
+    "a constant used where nothing shadows it",
+    "const T = 1000;\nfunction f() { const U = 5; runBlocking(['git'], { timeoutMs: T }); }",
   ],
   ["a namespace call with a literal", "door.runBlocking(['git'], { timeoutMs: 5_000 });"],
   [
