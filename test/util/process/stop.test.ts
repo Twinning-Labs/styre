@@ -380,7 +380,7 @@ describe("stopGroup (simulated)", () => {
   test("an empty group returns at once and signals nothing (a normal finish pays nothing)", async () => {
     const w = new World().add(proc(30, 1, 30)); // some other group
     const rep = await stopGroup(20, "graceful", { graceMs: 5000, deps: w.deps });
-    expect(rep).toEqual({ stopped: [], survivors: [], failures: [] });
+    expect(rep).toEqual({ stopped: [], survivors: [], signalled: [], failures: [] });
     expect(w.calls).toEqual([]);
     expect(w.clock).toBe(0);
   });
@@ -388,7 +388,7 @@ describe("stopGroup (simulated)", () => {
   test("a group holding only zombies is empty", async () => {
     const w = new World().add(proc(20, 1, 20, undefined, "zombie"));
     const rep = await stopGroup(20, "graceful", { graceMs: 5000, deps: w.deps });
-    expect(rep).toEqual({ stopped: [], survivors: [], failures: [] });
+    expect(rep).toEqual({ stopped: [], survivors: [], signalled: [], failures: [] });
     expect(w.calls).toEqual([]);
   });
 
@@ -812,7 +812,7 @@ describe("stopTree and stopGroup on real processes", () => {
     });
     expect(performance.now() - t0).toBeLessThan(5000);
     expect(sent).toEqual([]);
-    expect(rep).toEqual({ stopped: [], survivors: [], failures: [] });
+    expect(rep).toEqual({ stopped: [], survivors: [], signalled: [], failures: [] });
   });
 
   test("stopGroup stops a background child a command left in its group", async () => {
@@ -866,4 +866,65 @@ describe("stopTree and stopGroup on real processes", () => {
     expect(performance.now() - t0).toBeLessThan(10_000);
     expect(rep.survivors).toEqual([]);
   }, 40_000);
+});
+
+// ---------------------------------------------------------------------------------------------
+// `signalled`: exactly the processes a signal was sent to (Task 10's "<n> of its commands" count)
+// ---------------------------------------------------------------------------------------------
+describe("signalled lists only processes a signal was actually sent to", () => {
+  test("stopTree: a zombie in the tree is collected as stopped but was never signalled", async () => {
+    const w = new World()
+      .add(proc(10, 1, 5))
+      .add(proc(11, 10, 5, undefined, "zombie"))
+      .add(proc(12, 10, 5));
+    const rep = await stopTree({ pid: 10, startedAt: proc(10, 1, 5).startedAt }, "graceful", {
+      graceMs: 1000,
+      excludePgids: [5],
+      deps: w.deps,
+    });
+    expect(rep.stopped.map((p) => p.pid).sort()).toEqual([10, 11, 12]);
+    expect(rep.signalled.map((p) => p.pid).sort()).toEqual([10, 12]);
+  });
+
+  test("stopTree: a process whose signal failed is not counted as signalled", async () => {
+    const w = new World().add(proc(10, 1, 5)).add(proc(12, 10, 5));
+    const deps: StopDeps = {
+      ...w.deps,
+      kill: (t, s) => {
+        if (t === 12) throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+        w.deps.kill(t, s);
+      },
+    };
+    w.at(10, () => w.exit(12)); // it exits on its own during the wait
+    const rep = await stopTree({ pid: 10, startedAt: proc(10, 1, 5).startedAt }, "graceful", {
+      graceMs: 1000,
+      excludePgids: [5],
+      deps,
+    });
+    expect(rep.survivors).toEqual([]);
+    expect(rep.signalled.map((p) => p.pid)).toEqual([10]);
+  });
+
+  test("stopGroup: only the live members at the moment of a group signal are signalled", async () => {
+    const w = new World()
+      .add(proc(20, 1, 20))
+      .add(proc(21, 20, 20, undefined, "zombie"))
+      .add(proc(22, 20, 20));
+    const rep = await stopGroup(20, "graceful", { graceMs: 1000, deps: w.deps });
+    expect(rep.survivors).toEqual([]);
+    expect(rep.signalled.map((p) => p.pid).sort()).toEqual([20, 22]);
+  });
+
+  test("stopGroup: a refused group signal signals nobody", async () => {
+    const w = new World().add(proc(20, 1, 20), { onKill: "ignore", onTerm: "ignore" });
+    const deps: StopDeps = {
+      ...w.deps,
+      kill: () => {
+        throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+      },
+    };
+    const rep = await stopGroup(20, "forced", { graceMs: 1000, deps });
+    expect(rep.signalled).toEqual([]);
+    expect(rep.survivors.map((p) => p.pid)).toEqual([20]);
+  });
 });

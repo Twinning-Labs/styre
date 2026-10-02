@@ -3,7 +3,7 @@ import type { StopReport } from "../util/process/stop.ts";
 import { reportSurvivors } from "../util/run-command.ts";
 
 /** What a stop reports when it threw before it could count anything. */
-export const emptyStop: StopReport = { stopped: [], survivors: [], failures: [] };
+export const emptyStop: StopReport = { stopped: [], survivors: [], signalled: [], failures: [] };
 
 /** A stop that left processes alive is never hidden (ENG-485 section 9.4): say so on Styre's
  *  stderr, with the line the operator can act on. Shared by every agent adapter. */

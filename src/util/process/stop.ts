@@ -6,8 +6,15 @@ import { type ProcInfo, listProcesses } from "./proc-table.ts";
  * zombie (spec 2.5).
  */
 export interface StopReport {
+  /** Everything the stop collected that is no longer alive, including processes that were already
+   *  gone (or zombies) before any signal: use `signalled` to count what the stop itself ended. */
   stopped: ProcInfo[];
   survivors: ProcInfo[];
+  /** The processes a signal was actually sent to without error (a group signal counts for the
+   *  live members listed just before it). Zombies and processes already gone are never in it. A
+   *  process that exits between the listing and the signal can still appear (ESRCH is not an
+   *  error), a window of microseconds. */
+  signalled: ProcInfo[];
   /** Why a survivor could not be signalled (for example EPERM), one entry per survivor that a
    *  signal failed for. Only processes still alive at the end appear: a refusal that did not
    *  matter, because the process exited anyway, is not a failure. */
@@ -155,9 +162,11 @@ export async function stopTree(
   }
   const seen = new Map<string, ProcInfo>();
   const failed = new Map<string, string>();
+  const signalled = new Map<string, ProcInfo>();
   const send = (p: ProcInfo, sig: NodeJS.Signals): void => {
     try {
       d.kill(p.pid, sig);
+      signalled.set(key(p), p);
     } catch (err) {
       failed.set(key(p), errCode(err)); // keep signalling the others; the final listing decides
     }
@@ -168,6 +177,7 @@ export async function stopTree(
     return {
       stopped: [...seen.values()].filter((p) => !left.has(key(p))),
       survivors,
+      signalled: [...signalled.values()],
       failures: survivors.flatMap((p) => {
         const code = failed.get(key(p));
         return code === undefined ? [] : [{ proc: p, code }];
@@ -223,17 +233,19 @@ export async function stopGroup(
     throw new Error(`stopGroup: refusing pgid ${pgid}: it is Styre's own group`);
   }
   const first = groupMembers(pgid, firstTable);
-  if (first.length === 0) return { stopped: [], survivors: [], failures: [] };
+  if (first.length === 0) return { stopped: [], survivors: [], signalled: [], failures: [] };
   const seen = new Map(first.map((p) => [key(p), p]));
+  const signalled = new Map<string, ProcInfo>();
 
   // A refused or failed group signal is recorded, not thrown. On macOS a group that holds only
   // zombies answers EPERM, and a group that emptied during the stop answers ESRCH or EPERM; the
   // listings below decide whether anything is really left, so a group that died is simply gone.
   let lastError: string | undefined;
-  const send = (sig: NodeJS.Signals): void => {
+  const send = (sig: NodeJS.Signals, members: ProcInfo[]): void => {
     try {
       d.kill(-pgid, sig);
       lastError = undefined;
+      for (const p of members) signalled.set(key(p), p);
     } catch (err) {
       lastError = errCode(err);
     }
@@ -243,6 +255,7 @@ export async function stopGroup(
     return {
       stopped: [...seen.values()].filter((p) => !left.has(key(p))),
       survivors,
+      signalled: [...signalled.values()],
       failures:
         lastError === undefined
           ? []
@@ -251,7 +264,7 @@ export async function stopGroup(
   };
 
   if (how === "graceful") {
-    send("SIGTERM");
+    send("SIGTERM", first);
     const deadline = d.now() + opts.graceMs;
     while (d.now() < deadline && !opts.abort?.forced) {
       const members = groupMembers(pgid, d.list());
@@ -264,7 +277,7 @@ export async function stopGroup(
   const before = groupMembers(pgid, d.list());
   if (before.length === 0) return report([]); // it emptied after the last poll: nothing to kill
   for (const p of before) seen.set(key(p), p);
-  send("SIGKILL");
+  send("SIGKILL", before);
 
   const confirmBy = d.now() + CONFIRM_MS;
   let survivors = groupMembers(pgid, d.list());
