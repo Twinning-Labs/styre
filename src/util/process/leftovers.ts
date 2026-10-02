@@ -36,8 +36,9 @@ export function formatLeftover(l: Leftover): string {
   return `styre: the agent left "${l.command}" (pid ${l.pid}) running in the worktree; stop it with: kill ${l.pid} (if it is not yours)\n`;
 }
 
-/** Said when a check could not finish, so a missing report is never read as a clean worktree. */
-function skippedLine(why: string): string {
+/** Said when a check could not finish, so a missing report is never read as a clean worktree. The
+ *  signal handler uses it too, when no time is left for the check. */
+export function skippedLine(why: string): string {
   return `styre: skipped the check for processes the agent left running in the worktree (${why})\n`;
 }
 

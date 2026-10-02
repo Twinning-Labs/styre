@@ -236,11 +236,12 @@ export function launchDiagnostic(
 
 /** The command line of a live process, for the operator-facing survivor line (spec section 7.3
  *  names the survivor's own command, not the launch's). Truncated to 120 characters; `fallback`
- *  (the launch record's command) is used only when the process table cannot be read. */
-export function describeProcess(pid: number, fallback: string): string {
+ *  (the launch record's command) is used only when the process table cannot be read. `timeoutMs`
+ *  bounds the `ps` call (the signal handler passes what is left of its deadline). */
+export function describeProcess(pid: number, fallback: string, timeoutMs = 5_000): string {
   let text = "";
   try {
-    const r = spawnBlocking(["ps", "-o", "command=", "-p", String(pid)], { timeoutMs: 5_000 });
+    const r = spawnBlocking(["ps", "-o", "command=", "-p", String(pid)], { timeoutMs });
     if (r.success) text = r.stdout.split("\n")[0]?.trim() ?? "";
   } catch {
     /* unreadable: use the fallback */
