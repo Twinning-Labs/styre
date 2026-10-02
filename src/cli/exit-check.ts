@@ -5,11 +5,12 @@ import { EXIT } from "./errors.ts";
 import { guard } from "./output.ts";
 
 /**
- * The check on a normal exit of `styre run` and `styre setup` (ENG-485 section 7.7). It first waits
- * for the leftover checks still running in the background, each bounded by its own timeout (a check
+ * The check at the end of `styre run` and `styre setup` (ENG-485 section 7.7). It first waits for
+ * the leftover checks still running in the background, each bounded by its own timeout (a check
  * that timed out has said so and is not a leak). It then asserts that the set of launches held in
- * memory is empty. A launch still there is a bug: Styre stops it, says what it stopped, and exits
- * with EXIT.INTERNAL, so a leak is never silent.
+ * memory is empty. A launch still there is a bug: Styre stops it, says what it stopped, and makes
+ * the exit status EXIT.INTERNAL, so a leak is never silent. It never replaces a status that already
+ * says something (75 paused, 65, 64, 1, or any error's own code): it only turns success into 70.
  */
 export async function assertNoLeakedLaunches(): Promise<void> {
   await pendingLeftoverChecks();
@@ -23,17 +24,12 @@ export async function assertNoLeakedLaunches(): Promise<void> {
     );
     reportSurvivors(h, report.survivors);
   }
-  process.exitCode = EXIT.INTERNAL;
+  if (process.exitCode === undefined || process.exitCode === 0) process.exitCode = EXIT.INTERNAL;
 }
 
-/** `guard`, plus the normal exit check. A command that threw is not a normal exit: the error
- *  boundary has already chosen its exit code. */
-export function guardWithExitCheck(cmd: string, body: () => Promise<void>): Promise<void> {
-  let ok = false;
-  return guard(cmd, async () => {
-    await body();
-    ok = true;
-  }).then(async () => {
-    if (ok) await assertNoLeakedLaunches();
-  });
+/** `guard`, plus the exit check. The check also runs when the command threw: a leaked launch is
+ *  stopped and named either way, and the error boundary's exit code stands. */
+export async function guardWithExitCheck(cmd: string, body: () => Promise<void>): Promise<void> {
+  await guard(cmd, body);
+  await assertNoLeakedLaunches();
 }

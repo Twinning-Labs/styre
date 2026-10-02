@@ -3,17 +3,28 @@
 // never stops them. Fixtures here are real detached `sleep` processes with a unique marker, found
 // and removed by that marker, even when a test fails.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, realpathSync, symlinkSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import * as door from "../../src/util/process/door.ts";
 import {
   LEFTOVER_TIMEOUT_MS,
   type Leftover,
   __setCwdReadersForTests,
+  __setLsofPathForTests,
   checkLeftovers,
   checkLeftoversInBackground,
+  commandFromCmdline,
+  decodeLsofName,
   findLeftovers,
   formatLeftover,
+  lsofEnv,
   pendingLeftoverChecks,
 } from "../../src/util/process/leftovers.ts";
 import { listProcesses, nowToken, probe } from "../../src/util/process/proc-table.ts";
@@ -47,6 +58,7 @@ beforeEach(() => {
 });
 afterEach(async () => {
   __setCwdReadersForTests(undefined);
+  __setLsofPathForTests(undefined);
   await pendingLeftoverChecks();
   for (const h of door.liveLaunches()) await h.stop("forced").catch(() => {});
   cleanupFixtures();
@@ -471,4 +483,286 @@ test("the listing the check reads is the same clock as a launch's start token", 
   const me = listProcesses().find((p) => p.pid === h.proc.pid);
   expect(me?.startedAt).toBe(h.record.startedAt);
   await h.stop("forced");
+});
+
+// ---- fix round 1 ---------------------------------------------------------------------------------
+
+/** The report lines the background check gives for a worktree. */
+async function background(wt: string, since: string, timeoutMs?: number): Promise<string[]> {
+  const got: string[][] = [];
+  await checkLeftoversInBackground({
+    worktree: wt,
+    since,
+    timeoutMs,
+    report: (l) => got.push(l),
+  });
+  return got.flat();
+}
+
+describe("lsof prints odd bytes escaped; the check decodes them (review round 1, important 1)", () => {
+  test.each([
+    ["a UTF-8 letter as hex escapes", "/w\\xc3\\xa9 dir", "/wé dir"],
+    ["a tab", "/tab\\tdir", "/tab\tdir"],
+    ["a newline", "/a\\nb", "/a\nb"],
+    ["a carriage return, backspace and form feed", "/a\\rb\\bc\\fd", "/a\rb\bc\fd"],
+    ["a backslash", "/a\\\\b", "/a\\b"],
+    ["a control character as ^X", "/a^Ib^[c", "/a\tb\x1bc"],
+    ["plain text, spaces and raw UTF-8 untouched", "/plain dir/é", "/plain dir/é"],
+  ])("decodes %s", (_name, raw, want) => {
+    expect(decodeLsofName(raw)).toBe(want);
+  });
+
+  test("lsof gets one fixed locale, whatever the caller's", () => {
+    expect(lsofEnv().LC_ALL).toBe("C");
+    expect(lsofEnv().LANG).toBeUndefined();
+  });
+
+  test.each([
+    ["non-ASCII", "styre wé dir "],
+    ["a tab", "styre\ttab dir "],
+    ["a plain control", "styre plain dir "],
+  ])(
+    "a worktree with %s in its path is found, by the diagnostic check and the background check",
+    async (_n, prefix) => {
+      const wt = folder(prefix);
+      const since = nowToken();
+      const m = marker();
+      await leave(wt, m);
+      expect(only(scan(wt, since), m)).toHaveLength(1);
+      expect((await background(wt, since)).filter((l) => l.includes(`sleep ${m}`))).toHaveLength(1);
+    },
+  );
+
+  /** A stand in for lsof that records the locale it was given. */
+  function fakeLsof(): { seen: () => string } {
+    const dir = folder("styre-fake-lsof-");
+    const exe = join(dir, "lsof");
+    writeFileSync(
+      exe,
+      `#!/bin/sh\nprintf '%s' "$LC_ALL" > "${dir}/seen"\nprintf 'p%s\\nn/\\n' "$$"\n`,
+    );
+    chmodSync(exe, 0o755);
+    __setLsofPathForTests(exe);
+    return { seen: () => readFileSync(join(dir, "seen"), "utf8") };
+  }
+  test.skipIf(process.platform !== "darwin")(
+    "every lsof path runs with LC_ALL=C even when the environment says otherwise",
+    async () => {
+      const savedAll = process.env.LC_ALL;
+      process.env.LC_ALL = "en_US.UTF-8";
+      try {
+        const wt = folder("styre-wt-");
+        const f = fakeLsof();
+        findLeftovers({ worktree: wt, since: "0", timeoutMs: 5000, viaDiagnostic: true });
+        expect(f.seen()).toBe("C");
+        writeFileSync(join(wt, "x"), "");
+        findLeftovers({ worktree: wt, since: "0", timeoutMs: 5000, viaDiagnostic: false });
+        expect(f.seen()).toBe("C");
+        await background(wt, "0");
+        expect(f.seen()).toBe("C");
+      } finally {
+        if (savedAll === undefined) Reflect.deleteProperty(process.env, "LC_ALL");
+        else process.env.LC_ALL = savedAll;
+      }
+    },
+  );
+});
+
+describe("checkLeftovers is the handler's entry (review round 1, important 2)", () => {
+  test("it works with the door closed: no throw, and the leftover is still found", async () => {
+    const wt = folder("styre wt ");
+    const m = marker();
+    const agent = door.launch({
+      argv: ["sh", "-c", 'nohup sleep "$1" >/dev/null 2>&1 &', "sh", m],
+      cwd: wt,
+      env: process.env,
+      kind: "agent",
+      context: { ident: "ENG-1", stepId: 1, worktree: wt },
+    });
+    await agent.proc.exited;
+    expect(await until(() => isRunning(m))).toBe(true);
+    await agent.finish();
+    door.beginStopping();
+    let out: string[] = [];
+    expect(() => {
+      out = checkLeftovers({ stopped: [agent], timeoutMs: 5000 });
+    }).not.toThrow();
+    expect(out.filter((l) => l.includes(`sleep ${m}`))).toHaveLength(1);
+  });
+
+  test("a process that was already in the worktree before the agent launch is not reported", async () => {
+    const wt = folder("styre-wt-");
+    const before = marker();
+    await leave(wt, before); // the developer's own, running before the step
+    await pastToken(nowToken());
+    const mine = marker();
+    const agent = door.launch({
+      argv: ["sh", "-c", 'nohup sleep "$1" >/dev/null 2>&1 &', "sh", mine],
+      cwd: wt,
+      env: process.env,
+      kind: "agent",
+      context: { ident: "ENG-1", stepId: 1, worktree: wt },
+    });
+    await agent.proc.exited;
+    expect(await until(() => isRunning(mine))).toBe(true);
+    await agent.finish();
+    const out = checkLeftovers({ stopped: [agent], timeoutMs: 5000 });
+    expect(out.filter((l) => l.includes(`sleep ${mine}`))).toHaveLength(1); // the check ran
+    expect(out.filter((l) => l.includes(`sleep ${before}`))).toEqual([]);
+  });
+});
+
+describe("a reorphaned member of a live command group is not a leftover (R24 part 1)", () => {
+  test("the leader is still running", async () => {
+    const wt = folder("styre-wt-");
+    const since = nowToken();
+    const m = marker();
+    const g = door.launch({
+      argv: ["sh", "-c", `(sleep ${m} &); sleep ${marker()}`],
+      cwd: wt,
+      env: process.env,
+      kind: "group",
+      context: { ident: null, stepId: null, worktree: wt },
+    });
+    expect(await until(() => isRunning(m))).toBe(true);
+    expect(only(scan(wt, since), m)).toEqual([]);
+    await g.stop("forced");
+  });
+
+  test("the leader has already exited, its record is still held", async () => {
+    const wt = folder("styre-wt-");
+    const since = nowToken();
+    const m = marker();
+    const g = door.launch({
+      argv: ["sh", "-c", `(sleep ${m} &); exit 0`],
+      cwd: wt,
+      env: process.env,
+      kind: "group",
+      context: { ident: null, stepId: null, worktree: wt },
+    });
+    await g.proc.exited;
+    expect(await until(() => isRunning(m))).toBe(true);
+    expect(door.liveLaunches()).toHaveLength(1);
+    expect(only(scan(wt, since), m)).toEqual([]);
+    await g.stop("forced");
+  });
+});
+
+describe("a check overtaken by a stop, and a check that failed (R24 part 2)", () => {
+  test("a stop that begins during the check ends it silently: no line, no report", async () => {
+    __setCwdReadersForTests({
+      async: async () => {
+        door.beginStopping();
+        return "skipped";
+      },
+    });
+    expect(await background(folder("styre-wt-"), "0")).toEqual([]);
+  });
+
+  test("a failure caused by the stop (not a timeout) is silent too", async () => {
+    __setCwdReadersForTests({
+      async: async () => {
+        door.beginStopping();
+        throw new Error("the lsof launch was killed by the stop");
+      },
+    });
+    expect(await background(folder("styre-wt-"), "0")).toEqual([]);
+  });
+
+  test("a stop that begins during the check hides a finding too: the handler reports it", async () => {
+    __setCwdReadersForTests({
+      async: async () => {
+        door.beginStopping();
+        return new Map([[process.ppid, "/"]]);
+      },
+    });
+    expect(await background(folder("styre-wt-"), "0")).toEqual([]);
+  });
+});
+
+describe.skipIf(process.platform !== "darwin")(
+  "a failed or unstartable lsof is skipped with its real reason, never a clean result (R24 parts 2 and 5)",
+  () => {
+    function shim(body: string): string {
+      const dir = folder("styre-fake-lsof-");
+      const exe = join(dir, "lsof");
+      writeFileSync(exe, `#!/bin/sh\n${body}\n`);
+      chmodSync(exe, 0o755);
+      return exe;
+    }
+    const paths: [string, () => string, RegExp][] = [
+      ["exits 1 with empty output", () => shim("echo boom >&2; exit 1"), /status 1.*boom/],
+      ["is not there", () => join(folder("styre-none-"), "no-such-lsof"), /lsof/],
+    ];
+    test.each(paths)("lsof that %s: the diagnostic check", (_n, make) => {
+      __setLsofPathForTests(make());
+      expect(scan(folder("styre-wt-"), "0")).toBe("skipped");
+    });
+    test.each(paths)("lsof that %s: the door form of the sync check", (_n, make) => {
+      __setLsofPathForTests(make());
+      expect(
+        findLeftovers({
+          worktree: folder("styre-wt-"),
+          since: "0",
+          timeoutMs: 5000,
+          viaDiagnostic: false,
+        }),
+      ).toBe("skipped");
+    });
+    test.each(paths)(
+      "lsof that %s: the background check says so, with the reason",
+      async (_n, make, why) => {
+        __setLsofPathForTests(make());
+        const lines = await background(folder("styre-wt-"), "0");
+        expect(lines).toHaveLength(1);
+        expect(lines[0]).toMatch(/^styre: skipped the check .*\(/);
+        expect(lines[0]).toMatch(why);
+        expect(lines[0]).not.toContain("did not finish in time");
+        expect(door.liveLaunches()).toEqual([]);
+      },
+    );
+    test("a timeout names the timeout", async () => {
+      __setLsofPathForTests(shim("sleep 30"));
+      const lines = await background(folder("styre-wt-"), "0", 300);
+      const line = lines[0] ?? "";
+      expect(line).toMatch(/did not finish/);
+      expect(door.liveLaunches()).toEqual([]);
+    });
+    test("lsof is found without a PATH (the absolute system path is used)", async () => {
+      const savedPath = process.env.PATH;
+      process.env.PATH = "/usr/bin:/bin"; // has sh and ps, not /usr/sbin
+      try {
+        const wt = folder("styre-wt-");
+        const since = nowToken();
+        const m = marker();
+        await leave(wt, m);
+        expect(only(scan(wt, since), m)).toHaveLength(1);
+        expect((await background(wt, since)).filter((l) => l.includes(`sleep ${m}`))).toHaveLength(
+          1,
+        );
+      } finally {
+        process.env.PATH = savedPath;
+      }
+    });
+  },
+);
+
+describe("the command text (R24 part 4)", () => {
+  test("a Linux cmdline is NUL separated, joined with spaces, cut to 120", () => {
+    expect(commandFromCmdline("node\0server.js\0--port=80\0")).toBe("node server.js --port=80");
+    expect(commandFromCmdline(`sh\0-c\0${"x".repeat(300)}\0`).length).toBe(120);
+    expect(commandFromCmdline("")).toBe("");
+  });
+
+  test.skipIf(process.platform !== "linux")(
+    "on Linux a reported leftover's command comes from /proc",
+    async () => {
+      const wt = folder("styre-wt-");
+      const since = nowToken();
+      const m = marker();
+      await leave(wt, m);
+      const hit = await find(wt, since, m);
+      expect(hit?.command).toBe(`sleep ${m}`);
+    },
+  );
 });

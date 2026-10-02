@@ -11,9 +11,12 @@ import {
   checkLeftoversInBackground,
   pendingLeftoverChecks,
 } from "../../src/util/process/leftovers.ts";
+import { listRecords } from "../../src/util/process/records.ts";
 import { cleanupFixtures, folder, isRunning, marker, until } from "../helpers/leftover-fixtures.ts";
 
 const savedExit = process.exitCode;
+/** `process.exitCode` as read after an assignment of `undefined` (the type narrows otherwise). */
+const exitCode = (): number | undefined => process.exitCode as number | undefined;
 let stderr: string[];
 beforeEach(() => {
   door.__resetForTests();
@@ -48,23 +51,46 @@ function leak(m: string) {
 test("with no launch left, a normal exit keeps its exit code", async () => {
   process.exitCode = 75;
   await assertNoLeakedLaunches();
-  expect(process.exitCode).toBe(75);
+  expect(exitCode()).toBe(75);
   expect(stderr).toEqual([]);
 });
 
-test("a launch still live is stopped, named, and the exit code becomes 70", async () => {
+test("a launch still live is stopped, named, and an unset exit code becomes 70", async () => {
+  process.exitCode = undefined;
   const m = marker();
   const h = leak(m);
   const pid = h.proc.pid;
   expect(await until(() => isRunning(m))).toBe(true);
   await assertNoLeakedLaunches();
-  expect(process.exitCode).toBe(EXIT.INTERNAL);
+  expect(exitCode()).toBe(EXIT.INTERNAL);
   expect(EXIT.INTERNAL).toBe(70);
   expect(stderr.join("")).toContain(`sleep ${m}`);
   expect(stderr.join("")).toContain(`(pid ${pid})`);
   expect(door.liveLaunches()).toEqual([]);
   expect(isRunning(m)).toBe(false); // stopped, not left
 });
+
+test("a zero exit code becomes 70 too", async () => {
+  process.exitCode = 0;
+  leak(marker());
+  await assertNoLeakedLaunches();
+  expect(exitCode()).toBe(70);
+});
+
+test.each([75, 65, 64, 1])(
+  "an exit code already set to %d is never overwritten, and the leak is still stopped and printed (R22)",
+  async (code) => {
+    process.exitCode = code;
+    const m = marker();
+    leak(m);
+    expect(await until(() => isRunning(m))).toBe(true);
+    await assertNoLeakedLaunches();
+    expect(exitCode()).toBe(code);
+    expect(stderr.join("")).toContain(`sleep ${m}`);
+    expect(door.liveLaunches()).toEqual([]);
+    expect(isRunning(m)).toBe(false);
+  },
+);
 
 test("it waits for a check still running, and that check's own launch is not a leak", async () => {
   const m = marker();
@@ -81,7 +107,7 @@ test("it waits for a check still running, and that check's own launch is not a l
   void checkLeftoversInBackground({ worktree: folder("styre-wt-"), since: "0", report: () => {} });
   await until(() => inner !== undefined);
   await assertNoLeakedLaunches();
-  expect(process.exitCode).toBe(0);
+  expect(exitCode()).toBe(0);
   expect(door.liveLaunches()).toEqual([]);
 });
 
@@ -95,7 +121,7 @@ test("a check that timed out is reported as skipped and is not a leak", async ()
   });
   await assertNoLeakedLaunches();
   expect(lines.flat().join("")).toContain("skipped");
-  expect(process.exitCode).toBe(0);
+  expect(exitCode()).toBe(0);
 });
 
 test("guardWithExitCheck: a normal exit with a leak exits 70", async () => {
@@ -103,7 +129,7 @@ test("guardWithExitCheck: a normal exit with a leak exits 70", async () => {
   await guardWithExitCheck("run", async () => {
     leak(m);
   });
-  expect(process.exitCode).toBe(70);
+  expect(exitCode()).toBe(70);
   expect(door.liveLaunches()).toEqual([]);
 });
 
@@ -111,16 +137,31 @@ test("guardWithExitCheck: a normal exit without a leak keeps the code the comman
   await guardWithExitCheck("run", async () => {
     process.exitCode = 75;
   });
-  expect(process.exitCode).toBe(75);
+  expect(exitCode()).toBe(75);
 });
 
-test("guardWithExitCheck: a command that threw is not a normal exit; its own code stands", async () => {
+test("guardWithExitCheck: a command that leaked a launch and threw: the leak is stopped and printed, its record removed, the error's exit code kept (R23)", async () => {
+  process.exitCode = undefined;
   const m = marker();
   await guardWithExitCheck("run", async () => {
     leak(m);
     throw usageError("bad flag");
   });
-  expect(process.exitCode).toBe(EXIT.USAGE);
+  expect(exitCode()).toBe(EXIT.USAGE);
+  expect(stderr.join("")).toContain(`sleep ${m}`);
+  expect(door.liveLaunches()).toEqual([]);
+  expect(isRunning(m)).toBe(false);
+  expect(listRecords().filter((r) => r.record.command.includes(m))).toEqual([]);
+});
+
+test("guardWithExitCheck: an internal error that leaked keeps its own exit code too", async () => {
+  process.exitCode = undefined;
+  await guardWithExitCheck("run", async () => {
+    leak(marker());
+    throw new Error("boom");
+  });
+  expect(exitCode()).toBe(EXIT.INTERNAL);
+  expect(door.liveLaunches()).toEqual([]);
 });
 
 test("styre run and styre setup both use the exit check", () => {

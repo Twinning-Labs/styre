@@ -227,8 +227,11 @@ export function runBlocking(
 
 /** Works while the door is closed and is never recorded. Only signals.ts, sweep.ts, leftovers.ts
  *  and proc-table.ts may call it (source guard). */
-export function launchDiagnostic(argv: string[], opts: { timeoutMs: number }): BlockingResult {
-  return spawnBlocking(argv, { timeoutMs: opts.timeoutMs });
+export function launchDiagnostic(
+  argv: string[],
+  opts: { timeoutMs: number; env?: Record<string, string | undefined> },
+): BlockingResult {
+  return spawnBlocking(argv, { timeoutMs: opts.timeoutMs, env: opts.env });
 }
 
 /** The command line of a live process, for the operator-facing survivor line (spec section 7.3
