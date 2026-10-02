@@ -6,7 +6,6 @@ import { modelForTier } from "../config/agent-config.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../db/repos/dispatch.ts";
 import { appendEvent } from "../db/repos/event-log.ts";
-import { setPid } from "../db/repos/workflow-step.ts";
 import { ParkSignal } from "../engine/park-signal.ts";
 import { StepPrerequisiteError } from "../engine/step-journal.ts";
 import { nowUtc } from "../util/time.ts";
@@ -171,7 +170,13 @@ export async function runAgentDispatch(
     allowedTools,
     cwd: deps.worktreePath,
     timeoutMs: deps.timeoutMs,
-    onSpawn: (pid) => setPid(ctx.db, ctx.step.id, pid),
+    context: {
+      ident: ctx.ticket.ident,
+      stepId: ctx.step.id,
+      worktree: deps.worktreePath,
+      untrackedBefore: [...untrackedBefore],
+      dispatchRowId: inserted.id,
+    },
   });
 
   // ENG-476: capability isolation is verified on every dispatch, never assumed — including a

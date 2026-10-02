@@ -107,7 +107,7 @@ test("parseClaudeJson extracts usage incl. cache tokens, tolerating missing fiel
   });
 });
 
-test("run captures a clean exit, parses usage, and journals the pid", async () => {
+test("run captures a clean exit and parses usage", async () => {
   const cli = fakeCli(
     "claude-ok",
     printLines([
@@ -119,19 +119,12 @@ test("run captures a clean exit, parses usage, and journals the pid", async () =
       }),
     ]),
   );
-  let pid: number | undefined;
-  const r = await claudeAgentRunner(cli).run({
-    ...runInput,
-    onSpawn: (p) => {
-      pid = p;
-    },
-  });
+  const r = await claudeAgentRunner(cli).run({ ...runInput });
   expect(r.completed).toBe(true);
   expect(r.exitCode).toBe(0);
   expect(r.timedOut).toBe(false);
   expect(r.costUsd).toBe(0.5);
   expect(r.stdout).toBe("ok");
-  expect(typeof pid).toBe("number");
   expect(r.capabilities).toEqual({ tools: ["Read"], error: null });
 });
 
@@ -333,23 +326,6 @@ test("a background process the CLI leaves behind cannot hang the run: the drain 
   expect(r.completed).toBe(true);
   expect(r.stdout).toBe("ok");
 }, 15000);
-
-test("if recording the spawn fails, the already-started agent is killed, not left running", async () => {
-  const started = join(cwd, "onspawn-agent-started.txt");
-  const acted = join(cwd, "onspawn-agent-acted.txt");
-  const cli = fakeCli("claude-onspawn", `touch '${started}'\nsleep 1\ntouch '${acted}'`);
-  const r = await claudeAgentRunner(cli).run({
-    ...runInput,
-    onSpawn: () => {
-      throw new Error("journal write failed");
-    },
-  });
-  expect(r.completed).toBe(false);
-  // If the agent was already running when the kill landed, it must not get to act; if the kill
-  // landed before it started, it never runs at all. Either way `acted` must never appear.
-  await Bun.sleep(2500);
-  expect(existsSync(acted)).toBe(false);
-});
 
 test("a detached leftover process holding the output pipe does not keep the runner alive", async () => {
   // python's setsid detaches the holder into a new session, so killing the CLI does not reach it.

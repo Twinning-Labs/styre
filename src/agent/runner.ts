@@ -1,3 +1,5 @@
+import type { LaunchContext } from "../util/process/door.ts";
+
 /** Provider-neutral classification of a non-completing dispatch (control-loop §3a / ENG-164).
  *  Only a provider adapter sets this; the core routes on it and never matches provider strings. */
 export type FailureCause = "session-limit" | "out-of-credits" | "transient";
@@ -8,7 +10,9 @@ export interface AgentRunInput {
   allowedTools: string[];
   cwd: string;
   timeoutMs: number;
-  onSpawn?: (pid: number) => void;
+  /** What the launch record says about this dispatch (ENG-485). The interruption record reads
+   *  `untrackedBefore` and `dispatchRowId` from it. Absent: the adapter records only the cwd. */
+  context?: LaunchContext;
 }
 
 export interface AgentRunResult {
@@ -36,6 +40,9 @@ export interface AgentRunResult {
    *  completed dispatch whose report is absent, carries an error, or whose tool set differs from
    *  the step's allowlist — capability isolation is verified, never assumed. */
   capabilities?: EffectiveCapabilities;
+  /** Set when the signal handler stopped this agent (ENG-485 section 7.5). `launchAgent` turns it
+   *  into a thrown `RunInterrupted`; no caller reads the rest of the result. */
+  interrupted?: true;
 }
 
 /** The provider-reported effective capabilities of one dispatch (ENG-476). */

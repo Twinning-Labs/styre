@@ -25,7 +25,10 @@ export function recover(db: Database, deps: RecoverDeps): RecoverResult {
   const running = steps.listByStatus(db, "running");
   let killed = 0;
   for (const step of running) {
-    if (step.pid !== null && deps.isAlive(step.pid)) {
+    // The step journal records Styre's own pid on an effectful step. Dispatches used to overwrite
+    // it with the agent's pid; now they do not (ENG-485), so a resume in the same process would
+    // otherwise SIGKILL Styre itself. Never signal this process.
+    if (step.pid !== null && step.pid !== process.pid && deps.isAlive(step.pid)) {
       deps.kill(step.pid);
       killed++;
     }

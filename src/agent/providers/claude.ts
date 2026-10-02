@@ -1,3 +1,4 @@
+import { type LaunchHandle, launch } from "../../util/process/door.ts";
 import { agentEnv } from "../agent-env.ts";
 import { toolNamesFor, toolSetMismatch } from "../capabilities.ts";
 import type {
@@ -7,6 +8,7 @@ import type {
   EffectiveCapabilities,
   FailureCause,
 } from "../runner.ts";
+import { emptyStop, reportStop } from "../stop-report.ts";
 
 // agentEnv keeps ANTHROPIC_API_KEY for the agent CLI; the verify sink (run-command.ts) uses the
 // stricter verifyEnv (also strips ANTHROPIC_API_KEY). See ../agent-env.ts.
@@ -199,9 +201,11 @@ export function classifyFailure(
  *  Timeout is a HARD progress bound (mirrors util/run-command.ts): we race `proc.exited` against
  *  the timer rather than awaiting it unconditionally, so a `claude` (or forked child holding the
  *  stdout pipe) that ignores SIGTERM or wedges in IO can never hang the single-threaded run loop.
- *  On timeout we SIGKILL and resolve PROMPTLY — without awaiting `proc.exited` or draining pipes,
- *  either of which can stall on the same wedged child. The normal path drains stdout/stderr
- *  concurrently with the exit wait (avoids the large-output pipe-buffer deadlock). */
+ *  On timeout the door stops the agent GRACEFULLY (SIGTERM, then SIGKILL after the grace period):
+ *  Claude Code then shuts down the command groups of its own tools, which a forced kill would
+ *  orphan (ENG-485 section 6.3). The ENG-476 startup refusal is the opposite: no tool has run, so
+ *  the whole tree is killed at once. The normal path drains stdout/stderr concurrently with the
+ *  exit wait (avoids the large-output pipe-buffer deadlock). */
 /** Minimum `claude` CLI version this adapter's flag surface is verified against (ENG-326). Raised
  *  to 2.1.280 by ENG-476: the capability-isolation flags were verified live on exactly that
  *  version (`scripts/smoke-isolation.ts`); older versions are not claimed. The preflight also
@@ -226,23 +230,25 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
         resetAt: null,
       });
       let timer: ReturnType<typeof setTimeout> | undefined;
-      let spawned: { kill: (signal?: number | NodeJS.Signals) => void } | undefined;
+      let spawned: LaunchHandle | undefined;
       try {
-        // The CLI is killed as a single process. An agent behind a wrapper script that runs the
-        // real CLI as a child (not `exec`) is not reached by these kills: process-group handling
-        // is ENG-485, and SECURITY.md states the gap.
-        const proc = Bun.spawn([command, ...buildClaudeArgs(input)], {
+        // The agent stays in Styre's terminal group (ENG-485 D4). Stops reach a wrapper's child
+        // and the agent's own command groups through the door (section 6.1).
+        const h = launch({
+          argv: [command, ...buildClaudeArgs(input)],
           cwd: input.cwd,
           env: agentEnv(process.env),
           stdin: new TextEncoder().encode(input.prompt),
-          stdout: "pipe",
-          stderr: "pipe",
+          kind: "agent",
+          context: input.context ?? { ident: null, stepId: null, worktree: input.cwd },
         });
-        spawned = proc;
-        const kill = () => proc.kill("SIGKILL");
-        if (input.onSpawn && typeof proc.pid === "number") {
-          input.onSpawn(proc.pid);
-        }
+        const proc = h.proc;
+        spawned = h;
+        const kill = () => {
+          // Startup refusal: no tool has run yet, so nothing is lost by a forced stop. A failure
+          // here is not swallowed: finish() below stops what is left and reports it.
+          void h.stop("forced").catch(() => {});
+        };
         // ENG-476: confinement is checked the moment the CLI reports it, not after the agent has
         // worked. A wrong tool set or mode — or any agent action before the report — kills the
         // CLI at once, so an unconfined agent never gets to act.
@@ -254,15 +260,25 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
         });
         const outcome = await Promise.race([proc.exited.then(() => "exited" as const), timeoutP]);
         if (outcome === "timeout") {
-          kill();
+          reportStop(h, await h.stop("graceful"));
           stdoutRead.cancel();
           stderrRead.cancel();
-          proc.unref();
+          if (h.interrupted)
+            return { ...transportFailure("interrupted", false), interrupted: true };
           return transportFailure("dispatch timed out", true);
         }
         const exitCode = await proc.exited;
+        // Stop whatever the agent left running before reading its output: a leftover holding the
+        // pipes would otherwise cost the whole drain bound, and one that outlives the run is the
+        // orphan this ticket exists to remove.
+        reportStop(h, await h.finish());
+        if (h.interrupted) {
+          stdoutRead.cancel();
+          stderrRead.cancel();
+          return { ...transportFailure("interrupted", false), interrupted: true };
+        }
         // Drain for a bounded time: a process the CLI left behind that still holds the output pipes
-        // can never hang the run (stopping such leftovers is ENG-485).
+        // (one the stop above could not reach, such as a new session) can never hang the run.
         let drainTimer: ReturnType<typeof setTimeout> | undefined;
         const drained = await Promise.race([
           Promise.all([stdoutRead.done, stderrRead.done]).then(() => true),
@@ -322,9 +338,15 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
             gate.fault() ?? (stream.init === null ? undefined : claudeCapabilities(stream.init)),
         };
       } catch (err) {
-        // Anything that throws after the spawn (e.g. the onSpawn journal write) must not leave
-        // an agent running while the attempt is undone and retried in the same worktree.
-        spawned?.kill("SIGKILL");
+        // Anything that throws after the spawn must not leave an agent running while the attempt
+        // is undone and retried in the same worktree.
+        if (spawned) {
+          const stopped = await spawned.stop("forced").catch((stopErr) => {
+            process.stderr.write(`styre: stopping the agent failed: ${String(stopErr)}\n`);
+            return emptyStop;
+          });
+          reportStop(spawned, stopped);
+        }
         return transportFailure(String(err), false);
       } finally {
         clearTimeout(timer);

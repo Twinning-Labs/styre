@@ -65,3 +65,17 @@ test("recover leaves succeeded and pending steps untouched", () => {
   expect(result.reset).toBe(0);
   expect(doneAfter?.status).toBe("succeeded");
 });
+
+test("recover never signals Styre's own pid, which the step journal records on an effectful step", () => {
+  const { db, ticketId } = makeTestDb();
+  const step = steps.insertPending(db, {
+    ticketId,
+    stepKey: "implement:dispatch",
+    stepType: "dispatch",
+  });
+  steps.markRunning(db, step.id, { pid: process.pid });
+  const { deps, killed } = fixedDeps(new Set([process.pid]));
+  expect(recover(db, deps)).toEqual({ reset: 1, killed: 0 });
+  expect(killed).toEqual([]);
+  db.close();
+});

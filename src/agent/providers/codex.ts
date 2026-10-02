@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type LaunchHandle, launch } from "../../util/process/door.ts";
 import { agentEnv } from "../agent-env.ts";
 import type {
   AgentRunInput,
@@ -9,6 +10,7 @@ import type {
   EffectiveCapabilities,
   FailureCause,
 } from "../runner.ts";
+import { emptyStop, reportStop } from "../stop-report.ts";
 
 /** ENG-476: Codex's `read-only` sandbox still runs shell commands and reads outside the project,
  *  and Styre does not yet build the permission profiles that would confine it (ENG-484). Every
@@ -164,6 +166,7 @@ export function codexAgentRunner(command = "codex"): AgentRunner {
       const msgDir = mkdtempSync(join(tmpdir(), "styre-codex-msg-"));
       const outputPath = join(msgDir, "final.txt");
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let spawned: LaunchHandle | undefined;
       try {
         const codexArgs = buildCodexArgs({
           model: input.model,
@@ -171,23 +174,31 @@ export function codexAgentRunner(command = "codex"): AgentRunner {
           cwd: input.cwd,
           outputPath,
         });
-        const proc = Bun.spawn([command, ...codexArgs], {
+        // Through the door like every agent (ENG-485): the agent stays in Styre's terminal group,
+        // and stops reach a wrapper's child and the agent's own command groups.
+        const h = launch({
+          argv: [command, ...codexArgs],
           cwd: input.cwd,
           env: agentEnv(process.env),
           stdin: new TextEncoder().encode(input.prompt),
-          stdout: "pipe",
-          stderr: "pipe",
+          kind: "agent",
+          context: input.context ?? { ident: null, stepId: null, worktree: input.cwd },
         });
-        if (input.onSpawn && typeof proc.pid === "number") input.onSpawn(proc.pid);
+        const proc = h.proc;
+        spawned = h;
         const timeoutP = new Promise<"timeout">((resolve) => {
           timer = setTimeout(() => resolve("timeout"), input.timeoutMs);
         });
         const outcome = await Promise.race([proc.exited.then(() => "exited" as const), timeoutP]);
         if (outcome === "timeout") {
-          proc.kill("SIGKILL");
+          reportStop(h, await h.stop("graceful"));
+          if (h.interrupted)
+            return { ...transportFailure("interrupted", false), interrupted: true };
           return transportFailure("dispatch timed out", true);
         }
         const exitCode = await proc.exited;
+        reportStop(h, await h.finish());
+        if (h.interrupted) return { ...transportFailure("interrupted", false), interrupted: true };
         const [rawStdout, stderr] = await Promise.all([
           new Response(proc.stdout).text(),
           new Response(proc.stderr).text(),
@@ -232,6 +243,13 @@ export function codexAgentRunner(command = "codex"): AgentRunner {
           resetAt,
         };
       } catch (err) {
+        if (spawned) {
+          const stopped = await spawned.stop("forced").catch((stopErr) => {
+            process.stderr.write(`styre: stopping the agent failed: ${String(stopErr)}\n`);
+            return emptyStop;
+          });
+          reportStop(spawned, stopped);
+        }
         return transportFailure(String(err), false);
       } finally {
         clearTimeout(timer);

@@ -14,6 +14,7 @@ import type { CommitScope } from "../../src/dispatch/commit-scope.ts";
 import { checksScopeFor, implementScope } from "../../src/dispatch/commit-scope.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runAgentDispatch } from "../../src/dispatch/run-dispatch.ts";
+import { ensureWorktree } from "../../src/dispatch/worktree.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 function gitRepo(): string {
@@ -679,4 +680,43 @@ test("default disposition is reject", async () => {
   });
   await expect(promise).rejects.toThrow(/out-of-scope files/);
   db.close();
+});
+
+test("the agent is launched with the context the interruption record needs (ENG-485 R3)", async () => {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = join(repo, "..", `wt-context-${Date.now()}`);
+  ensureWorktree(repo, "feat/ENG-1", wt);
+  writeFileSync(join(wt, "stray-before.txt"), "left by an earlier step\n"); // untracked before the dispatch
+  const runner = new FakeAgentRunner(() => ({
+    completed: true,
+    exitCode: 0,
+    stdout: "ok",
+    stderr: "",
+    timedOut: false,
+    costUsd: 0,
+    tokensIn: 0,
+    tokensOut: 0,
+  }));
+  const ctx = ctxFor(db, ticketId);
+  await runAgentDispatch(
+    ctx,
+    { runner, ...depsFor(repo, wt) },
+    {
+      handlerKey: "implement:dispatch",
+      template: "implement {{ident}}",
+      vars: { ident: "ENG-1" },
+      postcondition: () => {},
+    },
+  );
+  const row = listByTicket(db, ticketId)[0];
+  db.close();
+  expect(runner.inputs[0]?.context).toEqual({
+    ident: ctx.ticket.ident,
+    stepId: ctx.step.id,
+    worktree: wt,
+    untrackedBefore: ["stray-before.txt"],
+    dispatchRowId: row?.id,
+  });
+  expect(row?.id).toBeGreaterThan(0);
 });

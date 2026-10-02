@@ -26,7 +26,6 @@ const { result, fault } = await launchAgent(runner, {
   allowedTools: allowlistFor("implement:dispatch"),
   cwd: wt,
   timeoutMs: 5 * 60 * 1000,
-  onSpawn: (pid) => console.log("agent pid:", pid),
 });
 console.log("completed:", result.completed, "exit:", result.exitCode, "timedOut:", result.timedOut);
 console.log("confinement:", fault === null ? "confirmed" : `NOT confirmed — ${fault}`);
