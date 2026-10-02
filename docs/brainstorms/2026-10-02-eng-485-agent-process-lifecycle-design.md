@@ -1,15 +1,16 @@
 # ENG-485 — Agent process lifecycle: stop, interrupt and recover whole process trees
 
 **Date:** 2026-10-02
-**Status:** Design (revision 4). The operator approved it section by section.
+**Status:** Design (revision 5). The operator approved it section by section.
 
 | Review round | Verdict | Findings | Answered in |
 |---|---|---|---|
 | 1 | revise | 1 critical, 11 major | revision 2 |
 | 2 | revise | 1 critical, 5 major, 6 minor | revision 3, which simplifies the interruption handling at the operator's direction (D15) |
 | 3 | revise | 3 major, 6 minor | revision 4 |
+| 4 | revise | 1 major, 4 minor | revision 5 |
 
-Every finding is answered in §15–§17. Next: review round 4, then operator review of this written spec,
+Every finding is answered in §15–§18. Next: review round 5, then operator review of this written spec,
 then the implementation plan.
 
 **Ticket:** ENG-485 (parent ENG-483). Follows ENG-476 (PR #151, merged), which removed an earlier
@@ -492,11 +493,17 @@ The handler owns the whole interruption: stopping, recording and exiting. The ru
 asked to settle, and nothing is handed back and forth. Everything below runs against one deadline:
 6.5 s after the first signal (§7.4).
 
-1. **Close the door.** Mark it `stopping`. From this moment the run code can neither record nor
-   change anything (review round 3, R3). Two choke points enforce this:
+1. **Close the door.** Mark it `stopping`. From this moment the run code can neither write to the
+   run database, nor start a process, nor run `git` (review round 3, R3). It does not cover every
+   effect: see the outbox and file writes below. Two choke points enforce this:
    - **The door refuses every launch and every blocking call** with `RunInterrupted`. That covers
-     the run code's `git` commands, such as a worktree reset. Only the handler's own diagnostic
-     launches still work (§5.1).
+     the run code's `git` commands, such as a worktree reset. Two kinds of call still work:
+     - the handler's and the sweep's diagnostic launches, including the macOS `ps` fallback of §5.2
+       (review round 4, m4);
+     - blocking calls marked as cleanup, which only release something the run had taken, such as
+       `git worktree remove` for a baseline worktree (`src/dispatch/baseline-rerun.ts:96-99,170-176`).
+       Without this, refusing that call would leave a `styre-baseline-*` worktree registered in the
+       target repo (review round 4, m3). The source guard lists the permitted cleanup calls.
    - **The run's database connection becomes read only** (`PRAGMA query_only = ON`). Every write the
      run code attempts, transactions included, fails with "attempt to write a readonly database".
      The handler writes through a second connection of its own (step 6). Both behaviours were checked
@@ -505,6 +512,12 @@ asked to settle, and nothing is handed back and forth. Everything below runs aga
      A signal handler cannot run while a synchronous `db.transaction` is in progress (review round 3,
      `txsig.ts`), and every transaction in `src/` is synchronous. So the switch never lands halfway
      through a write.
+   - **The outbox drain checks the door before each row** (review round 4, m2). It sends Slack
+     posts, tracker comments and PR updates (`src/daemon/projector.ts:160-205`). Without the check
+     it would keep sending during the stop and could not record the delivery, so the row would be sent
+     again on resume, and Slack posts have no idempotency key.
+   - **Not covered: plain file writes by run code,** such as clearing the agent's scratch folder.
+     These touch only Styre's own working files, and resume rebuilds or resets them.
 2. **Send the stop signals, before writing anything.** For every launch in the set held in memory,
    start its graceful stop (§6). The signals go out synchronously, before any output, because a
    write after hangup used to end Styre (§2.5).
@@ -609,8 +622,11 @@ below make the run code fail fast and cleanly rather than relying on those refus
 - **`styre setup` checks the door before each write** it makes (`profile.json`, configuration), and
   throws `RunInterrupted` instead of writing. Setup has no database, so this check is its choke point
   for file writes.
-- **The top of `styre run` and `styre setup`** catches `RunInterrupted` and does nothing. The handler
-  owns the exit.
+- **The top of `styre run` and `styre setup`** treats any error raised while the door is `stopping`
+  as an interruption, whatever its type, and does nothing. The handler owns the exit. A refused write
+  raises SQLite's own "readonly database" error, not `RunInterrupted`. Without this rule, such an
+  error from outside `runStep` (the notifier's `enqueue`, the outbox drain) would print "internal
+  error — please report" and send a false `cli_error` analytics event (review round 4, m1).
 - **The cost, accepted and documented** (review round 2, N11). A step whose work finished during the
   few seconds of a stop is not recorded, so it is redone on resume. That window is the same as a
   crash between the step's work and its journal write.
@@ -624,6 +640,21 @@ looks for a `note` event with reason `interrupted` whose payload matches the ste
 and `started_at` (review round 2, N3).
 - **If it matches, it was an interruption.** The attempt was already given back. `recover()` resets
   the step to `pending` without marking it failed, including suite steps.
+- **Returning the branch to where the step started** (review round 4, M1). A step can commit before it
+  finishes. The checks step commits the authored tests (`handlers.ts:702`), then runs them, and rolls
+  the branch back if they are rejected (`:1049-1066`). A stop during that run blocks the rollback,
+  because `git` is refused. So:
+  - `runStep` records the branch HEAD when it starts the step in flight, and the handler stores it in
+    the note.
+  - On a matched interruption, if the branch has moved since, `recover()` resets it to that HEAD and
+    marks the step's dispatches made since as `reverted`, as the checks step's own rollback does. That
+    keeps resume's "HEAD moved" check correct.
+  - In worktree mode it uses `git branch -f` on the branch. `recover()` runs after the old worktree is
+    removed and before the new one is created (`park.ts:363`, then `:414`). In place it uses
+    `git reset --hard` in the checkout, after the in-place undo below.
+  - Pushes are not affected. They happen only in the outbox drain, with `--force-with-lease` against
+    the last remote state Styre saw (`src/dispatch/worktree.ts:479`), so the redone step's commits
+    can still be pushed safely.
 - **Undoing the agent's edits depends on the mode** (review round 3, R1):
   - **Worktree mode:** nothing to undo. `resumeRun` removes the old worktree before `recover()` runs
     (`src/cli/park.ts:362-363`) and creates a fresh one from the branch, so the edits are already
@@ -642,6 +673,11 @@ and `started_at` (review round 2, N3).
 - the dispatch row is closed as `interrupted`;
 - in in-place mode, the checkout is back to its state before the dispatch, both after `--resume` and
   after `--fresh`;
+- an interruption during the checks step's test run, after its commit, leaves the branch at the
+  step's starting HEAD after resume, with that dispatch marked `reverted` (M1);
+- an interruption during the outbox drain sends nothing further, and prints no "internal error"
+  (m1, m2);
+- a baseline worktree is removed even when the stop lands during its run (m3);
 - worktree mode resumes without trying to undo anything;
 - nothing at all was written to the run database by run code during the stop: no step status, no
   evidence row, no dispatch change, and no worktree reset (R3);
@@ -939,7 +975,7 @@ and without it. This also settles bash 5's behaviour (§2.5).
 
 | Criterion | Where |
 |---|---|
-| Design brainstorm independently reviewed, no open critical or major findings, operator approved | this document, plus its review records (§15–§17) |
+| Design brainstorm independently reviewed, no open critical or major findings, operator approved | this document, plus its review records (§15–§18) |
 | Each stop trigger and forwarded signal: the agent and a tool command in its own group gone within grace, expected exit status, shown live | §11.2, §11.3. Amended: for Ctrl-\, the orphaned command is reported, not stopped (D13). For GitHub, the graceful stop needs `exec` (D14). |
 | An agent launched through a wrapper script stopped completely, live | §6.1, §11.3 |
 | Recovery kills exactly what the record names; `--fresh` and `clean` stop an orphan first; tests through real steps | §5.4, §8, §11.3. The ticket's "a group for negative pids, one process for positive pids" is superseded by the record's `kind` (§5.5). |
@@ -994,3 +1030,13 @@ and without it. This also settles bash 5's behaviour (§2.5).
 | R7 | minor | The run lock was released before the analytics shutdown | §7.3 step 8: the lock is released last |
 | R8 | minor | A command group whose leader exited before the first listing is not taken in | §6.1: documented limit; the live tests confirm group leadership and record the CLI version |
 | R9 | minor | `sysctl` details: a missing pid returns length 0; offsets verified on arm64 only | §5.2 |
+
+## 18. Review round 4: findings and answers
+
+| # | Severity | Finding | Answer |
+|---|---|---|---|
+| M1 | major | An interruption after the checks step's commit leaves unvalidated tests on the branch, because the rollback's `git` call is refused | §7.5: `runStep` records the step's starting HEAD; on a matched interruption `recover()` returns the branch there and marks later dispatches `reverted` |
+| m1 | minor | A refused write outside `runStep` prints "internal error — please report" | §7.5: any error while `stopping` is an interruption |
+| m2 | minor | The outbox drain keeps sending during the stop; the rule overstated its coverage | §7.3 step 1: the drain checks the door per row; the rule is reworded to the database, processes and `git` |
+| m3 | minor | Refusing `git` breaks the baseline worktree cleanup | §7.3 step 1: cleanup calls are permitted, listed by the source guard |
+| m4 | minor | The macOS `ps` fallback would be refused during a stop | §7.3 step 1: it goes through the diagnostic path |
