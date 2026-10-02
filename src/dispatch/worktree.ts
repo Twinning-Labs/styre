@@ -18,10 +18,15 @@ function why(res: BlockingResult, timeoutMs: number): string {
 }
 
 /** Run git in `cwd`, returning trimmed stdout; throws on failure. */
-function git(args: string[], cwd: string, timeoutMs: number = LOCAL_GIT_MS): string {
-  const res = runBlocking(["git", ...args], { cwd, timeoutMs });
+function git(args: string[], cwd: string, bound: "local" | "tree" = "local"): string {
+  const res = runBlocking(["git", ...args], {
+    cwd,
+    timeoutMs: bound === "tree" ? TREE_GIT_MS : LOCAL_GIT_MS,
+  });
   if (!res.success) {
-    throw new Error(`git ${args.join(" ")} failed: ${why(res, timeoutMs)}`);
+    throw new Error(
+      `git ${args.join(" ")} failed: ${why(res, bound === "tree" ? TREE_GIT_MS : LOCAL_GIT_MS)}`,
+    );
   }
   return res.stdout.trim();
 }
@@ -56,14 +61,14 @@ export function ensureWorktree(repoPath: string, branch: string, worktreePath: s
   if (worktreePath === repoPath) {
     // Called ~6x/unit; `checkout -B` resets the ref to HEAD each time, so skip when already on it.
     if (git(["rev-parse", "--abbrev-ref", "HEAD"], repoPath) === branch) return;
-    git(["checkout", "-B", branch], repoPath, TREE_GIT_MS);
+    git(["checkout", "-B", branch], repoPath, "tree");
     return;
   }
   if (existsSync(join(worktreePath, ".git"))) {
     return;
   }
   try {
-    git(["worktree", "add", "-B", branch, worktreePath], repoPath, TREE_GIT_MS);
+    git(["worktree", "add", "-B", branch, worktreePath], repoPath, "tree");
   } catch (err) {
     // The add fails when `branch` is still held by a leftover worktree — a non-`done` run that never
     // freed it (the "worktree already used by worktree" collision, ENG-381). If a holder exists, free
@@ -71,7 +76,7 @@ export function ensureWorktree(repoPath: string, branch: string, worktreePath: s
     // than destroy it. Any other add failure (no holder → a real git error) re-throws unchanged.
     if (worktreeHoldingBranch(repoPath, branch) === null) throw err;
     reconcileWorktree(repoPath, branch, undefined, worktreePath);
-    git(["worktree", "add", "-B", branch, worktreePath], repoPath, TREE_GIT_MS);
+    git(["worktree", "add", "-B", branch, worktreePath], repoPath, "tree");
   }
 }
 
@@ -89,18 +94,18 @@ export function commitWorktree(
   message: string,
   newPaths: string[],
 ): { sha: string; changed: boolean } {
-  git(["add", "-u"], worktreePath, TREE_GIT_MS);
-  if (newPaths.length > 0) git(["add", "--", ...newPaths], worktreePath, TREE_GIT_MS);
+  git(["add", "-u"], worktreePath, "tree");
+  if (newPaths.length > 0) git(["add", "--", ...newPaths], worktreePath, "tree");
   if (stagedIndexEmpty(worktreePath)) {
     return { sha: git(["rev-parse", "HEAD"], worktreePath), changed: false };
   }
-  git(["commit", "-m", message], worktreePath, TREE_GIT_MS); // may run the repository's own hooks
+  git(["commit", "-m", message], worktreePath, "tree"); // may run the repository's own hooks
   return { sha: git(["rev-parse", "HEAD"], worktreePath), changed: true };
 }
 
 export function removeWorktree(repoPath: string, worktreePath: string): void {
   if (worktreePath === repoPath) return; // in-place: never remove the repo root
-  git(["worktree", "remove", "--force", worktreePath], repoPath, TREE_GIT_MS);
+  git(["worktree", "remove", "--force", worktreePath], repoPath, "tree");
 }
 
 /** One worktree registered in a repo, as reported by `git worktree list --porcelain`. */
@@ -395,11 +400,11 @@ export function stagedIndexEmpty(worktreePath: string): boolean {
  *  (an earlier stray, provision's `*.egg-info`) is spared — a blanket `git clean` would delete it and
  *  break the editable install. Called on every pre-commit failure exit so retries start clean. */
 export function undoAttempt(worktreePath: string, untrackedBefore: Set<string>): void {
-  git(["checkout", "--", "."], worktreePath, TREE_GIT_MS);
+  git(["checkout", "--", "."], worktreePath, "tree");
   const strays = pendingEntries(worktreePath)
     .filter((e) => e.isNew && !untrackedBefore.has(e.path))
     .map((e) => e.path);
-  if (strays.length > 0) git(["clean", "-fd", "--", ...strays], worktreePath, TREE_GIT_MS);
+  if (strays.length > 0) git(["clean", "-fd", "--", ...strays], worktreePath, "tree");
 }
 
 /** Delete the named untracked files from the worktree — the discard disposition (checks): each path
@@ -408,7 +413,7 @@ export function undoAttempt(worktreePath: string, untrackedBefore: Set<string>):
  *  exactly these pathspecs so pre-existing cruft is spared. No-op / never throws on empty input. */
 export function discardPaths(worktreePath: string, paths: string[]): void {
   if (paths.length === 0) return;
-  git(["clean", "-fd", "--", ...paths], worktreePath, TREE_GIT_MS);
+  git(["clean", "-fd", "--", ...paths], worktreePath, "tree");
 }
 
 /** The largest single discarded file worth holding in memory for the symbol tier. A source helper is
@@ -446,8 +451,8 @@ export function readDiscardedSources(worktreePath: string, paths: string[]): Map
  *  `git clean -fd` (no `-x`) spares ignored files, so the ephemeral SQLite under XDG state is
  *  untouched even when `worktreePath === repoPath` (in-place). */
 export function revertWorktree(worktreePath: string): void {
-  git(["checkout", "--", "."], worktreePath, TREE_GIT_MS);
-  git(["clean", "-fd"], worktreePath, TREE_GIT_MS);
+  git(["checkout", "--", "."], worktreePath, "tree");
+  git(["clean", "-fd"], worktreePath, "tree");
 }
 
 /** Roll the branch back to `sha` (`git reset --hard`), discarding any commit(s) after it AND the
@@ -456,8 +461,8 @@ export function revertWorktree(worktreePath: string): void {
  *  (no `-x`) then removes any newly-untracked files the reset surfaced, sparing ignored files
  *  (the ephemeral SQLite under XDG state) in in-place mode. */
 export function resetWorktreeHard(worktreePath: string, sha: string): void {
-  git(["reset", "--hard", sha], worktreePath, TREE_GIT_MS);
-  git(["clean", "-fd"], worktreePath, TREE_GIT_MS);
+  git(["reset", "--hard", sha], worktreePath, "tree");
+  git(["clean", "-fd"], worktreePath, "tree");
 }
 
 /** Delete the local branch if it exists; a missing branch is a silent success. */

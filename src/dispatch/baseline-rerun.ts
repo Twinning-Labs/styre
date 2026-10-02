@@ -38,12 +38,12 @@ import { type SuiteObservation, observeSuiteCommand } from "./suite-observation.
 function git(
   args: string[],
   cwd: string,
-  opts: { cleanup?: boolean; timeoutMs?: number } = {},
+  opts: { cleanup?: boolean; tree?: boolean } = {},
 ): { ok: boolean } {
   return {
     ok: runBlocking(["git", ...args], {
       cwd,
-      timeoutMs: opts.timeoutMs ?? 30_000,
+      timeoutMs: opts.tree ? TREE_GIT_MS : 30_000,
       cleanup: opts.cleanup,
     }).success,
   };
@@ -96,7 +96,7 @@ export async function runAtBaseline(p: {
     wt = mkdtempSync(join(tmpdir(), "styre-baseline-adv-"));
     if (
       !git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath, {
-        timeoutMs: TREE_GIT_MS,
+        tree: true,
       }).ok
     )
       return { ...result, reason: "Baseline checkout could not be prepared." };
@@ -116,7 +116,7 @@ export async function runAtBaseline(p: {
     if (wt) {
       git(["worktree", "remove", "--force", wt], p.repoPath, {
         cleanup: true,
-        timeoutMs: TREE_GIT_MS,
+        tree: true,
       });
       rmSync(wt, { recursive: true, force: true });
     }
@@ -175,7 +175,7 @@ export async function deliveredTestEvidenceAtBaseline(
   try {
     if (
       !git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath, {
-        timeoutMs: TREE_GIT_MS,
+        tree: true,
       }).ok
     )
       return { verdict: "unknown", reason: "baseline worktree could not be prepared or executed" };
@@ -200,7 +200,7 @@ export async function deliveredTestEvidenceAtBaseline(
   } finally {
     git(["worktree", "remove", "--force", wt], p.repoPath, {
       cleanup: true,
-      timeoutMs: TREE_GIT_MS,
+      tree: true,
     });
     try {
       rmSync(wt, { recursive: true, force: true });

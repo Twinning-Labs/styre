@@ -2,9 +2,33 @@
 // (proc-table.ts) may start a process, and `launchDiagnostic` may be named only by the stop
 // machinery. The check parses imports and calls with the TypeScript compiler API, so text inside a
 // string (the generated script in src/testing/karma.ts) is not a false hit.
+//
+// What it enforces outside the allowed files (it is an allow list, not a deny list of spellings):
+//   - the identifier `Bun` may appear only as `Bun.<member>` for the members src uses today
+//     (BUN_MEMBERS); a bare, aliased, passed, destructured or computed `Bun` is an offence, and so is
+//     any `.Bun` member or `["Bun"]` access, and any use of `globalThis` other than `globalThis.prompt`;
+//   - imports of "bun" are type only or named members from BUN_NAMED_IMPORTS; "bun:" modules other
+//     than bun:sqlite and bun:test (bun:ffi) are refused;
+//   - child_process, node:module (createRequire) and the identifier `createRequire` are refused;
+//   - `require` may only be called directly with one string literal, `import()` takes only a string
+//     literal, `import.meta.require` and `eval` / `Function` are refused;
+//   - `launchDiagnostic` may not appear anywhere (identifier or any string) outside its callers, and
+//     the door module may not be imported as a namespace or default, or re-exported with `export *`,
+//     outside them;
+//   - every `runBlocking` call, however it is reached, has a literal or same file or allow listed
+//     constant timeout in range.
+//
+// STATED LIMITS. A static scan cannot prove these forms, and nothing here claims to:
+//   - a runtime built name: `d["launch" + "Diagnostic"]` on a value that came from an allowed
+//     indirection, or `Reflect.get(obj, name)` where `obj` is not `Bun` or the door itself;
+//   - starting a process through a native addon, `process.binding`, or a worker that loads one;
+//   - code outside src/ (tests, scripts) and generated code written to disk and run later (the string
+//     in src/testing/karma.ts is such a script and is reviewed by hand);
+//   - a timeout made valid by a same file `const` that a later line reassigns through `let` aliasing.
+// The runtime half of the guarantee is the door's own tests; the scan only closes the plain forms.
 import { expect, test } from "bun:test";
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, posix, relative } from "node:path";
 import ts from "typescript";
 
 const ROOT = join(import.meta.dir, "../..");
@@ -17,8 +41,6 @@ const DIAG_ALLOWED = new Set([
   "src/util/process/proc-table.ts",
 ]);
 const CHILD = new Set(["child_process", "node:child_process"]);
-/** Members of the `Bun` global (or named exports of the `bun` module) that start a process. */
-const BUN_STARTERS = new Set(["spawn", "spawnSync", "$"]);
 
 function files(dir: string): string[] {
   return readdirSync(dir).flatMap((n) => {
@@ -28,8 +50,16 @@ function files(dir: string): string[] {
   });
 }
 
-const isChild = (n: ts.Node | undefined): boolean =>
-  n !== undefined && ts.isStringLiteralLike(n) && CHILD.has(n.text);
+/** Members of the `Bun` global that src may use today. Widening this list is a visible change. */
+const BUN_MEMBERS = new Set(["TOML", "YAML", "Glob", "which", "sleep", "file", "Subprocess"]);
+/** Named imports from the "bun" module that do not start a process. */
+const BUN_NAMED_IMPORTS = new Set(["TOML", "YAML", "Glob", "which", "sleep", "file"]);
+/** "bun:" modules src may import; bun:ffi (a way to call into libc) is not one of them. */
+const BUN_SCHEME_OK = new Set(["bun:sqlite", "bun:test"]);
+const GLOBALTHIS_MEMBERS = new Set(["prompt"]);
+const isDoorSpec = (s: string): boolean => /(^|\/)door(\.[cm]?[jt]s)?$/.test(s);
+const lit = (n: ts.Node | undefined): string | undefined =>
+  n !== undefined && ts.isStringLiteralLike(n) ? n.text : undefined;
 
 /** Every way a source file can start a process or name `launchDiagnostic` where it may not. */
 function offences(rel: string, text: string): string[] {
@@ -37,75 +67,174 @@ function offences(rel: string, text: string): string[] {
   const out: string[] = [];
   const spawnOk = SPAWN_ALLOWED.has(rel);
   const diagOk = DIAG_ALLOWED.has(rel);
-  const at = (n: ts.Node): string =>
-    `${rel}:${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}`;
   const flag = (n: ts.Node, what: string): void => {
-    out.push(`${at(n)}: ${what}`);
+    out.push(`${rel}:${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}: ${what}`);
   };
-  const visit = (n: ts.Node): void => {
+
+  /** A module specifier reached by import, export from, import equals, import() or require(). */
+  const checkSpecifier = (n: ts.Node, spec: string, how: "static" | "dynamic"): void => {
     if (!spawnOk) {
-      // import ... from "node:child_process" / export ... from / import x = require()
-      if ((ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) && isChild(n.moduleSpecifier))
-        flag(n, "imports child_process");
-      if (ts.isExternalModuleReference(n) && isChild(n.expression))
-        flag(n, "requires child_process");
-      if (ts.isCallExpression(n) && isChild(n.arguments[0])) {
-        const callee = n.expression;
-        if (
-          n.expression.kind === ts.SyntaxKind.ImportKeyword ||
-          (ts.isIdentifier(callee) && callee.text === "require") ||
-          (ts.isPropertyAccessExpression(callee) && callee.name.text === "require")
-        )
-          flag(n, "loads child_process");
-      }
-      // import { spawn, spawnSync, $ } from "bun"
-      if (
-        ts.isImportDeclaration(n) &&
-        ts.isStringLiteral(n.moduleSpecifier) &&
-        n.moduleSpecifier.text === "bun" &&
-        n.importClause?.namedBindings &&
-        ts.isNamedImports(n.importClause.namedBindings)
-      )
-        for (const el of n.importClause.namedBindings.elements)
-          if (BUN_STARTERS.has((el.propertyName ?? el.name).text))
-            flag(el, `imports ${(el.propertyName ?? el.name).text} from bun`);
-      // Bun.spawn / Bun.spawnSync / Bun.$ as a call, an alias, or a callback; also globalThis.Bun.*
-      if (ts.isPropertyAccessExpression(n) && BUN_STARTERS.has(n.name.text)) {
-        const e = n.expression;
-        if (
-          (ts.isIdentifier(e) && e.text === "Bun") ||
-          (ts.isPropertyAccessExpression(e) && e.name.text === "Bun")
-        )
-          flag(n, `uses Bun.${n.name.text}`);
-      }
-      if (
-        ts.isElementAccessExpression(n) &&
-        ts.isIdentifier(n.expression) &&
-        n.expression.text === "Bun" &&
-        ts.isStringLiteralLike(n.argumentExpression) &&
-        BUN_STARTERS.has(n.argumentExpression.text)
-      )
-        flag(n, `uses Bun[${JSON.stringify(n.argumentExpression.text)}]`);
-      // const { spawnSync } = Bun
-      if (
-        ts.isVariableDeclaration(n) &&
-        ts.isObjectBindingPattern(n.name) &&
-        n.initializer &&
-        ts.isIdentifier(n.initializer) &&
-        n.initializer.text === "Bun" &&
-        n.name.elements.some((el) => BUN_STARTERS.has((el.propertyName ?? el.name).getText(sf)))
-      )
-        flag(n, "destructures a process starter from Bun");
+      if (CHILD.has(spec)) flag(n, "loads child_process");
+      if (spec === "module" || spec === "node:module") flag(n, `loads ${spec} (createRequire)`);
+      if (spec.startsWith("bun:") && !BUN_SCHEME_OK.has(spec)) flag(n, `loads ${spec}`);
+      if (spec === "bun" && how === "dynamic") flag(n, 'loads "bun" dynamically');
     }
-    if (!diagOk) {
-      if (ts.isIdentifier(n) && n.text === "launchDiagnostic") flag(n, "names launchDiagnostic");
-      if (
-        ts.isElementAccessExpression(n) &&
-        ts.isStringLiteralLike(n.argumentExpression) &&
-        n.argumentExpression.text === "launchDiagnostic"
-      )
-        flag(n, "names launchDiagnostic");
+    if (!diagOk && how === "dynamic" && isDoorSpec(spec)) flag(n, "loads the door dynamically");
+  };
+
+  const visit = (n: ts.Node): void => {
+    // ---- modules --------------------------------------------------------------------------------
+    if (ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) {
+      const spec = lit(n.moduleSpecifier);
+      if (spec !== undefined) {
+        checkSpecifier(n, spec, "static");
+        if (
+          !spawnOk &&
+          ts.isImportDeclaration(n) &&
+          spec === "bun" &&
+          !n.importClause?.isTypeOnly
+        ) {
+          const nb = n.importClause?.namedBindings;
+          if (n.importClause?.name) flag(n, 'default import of "bun"');
+          if (nb && ts.isNamespaceImport(nb)) flag(n, 'namespace import of "bun"');
+          if (nb && ts.isNamedImports(nb))
+            for (const el of nb.elements)
+              if (!el.isTypeOnly && !BUN_NAMED_IMPORTS.has((el.propertyName ?? el.name).text))
+                flag(el, `imports ${(el.propertyName ?? el.name).text} from bun`);
+        }
+        if (!spawnOk && ts.isExportDeclaration(n) && spec === "bun" && !n.isTypeOnly)
+          flag(n, 'exports from "bun"');
+        if (!diagOk && isDoorSpec(spec)) {
+          if (
+            ts.isImportDeclaration(n) &&
+            (n.importClause?.name ||
+              (n.importClause?.namedBindings &&
+                ts.isNamespaceImport(n.importClause.namedBindings))) &&
+            !n.importClause.isTypeOnly
+          )
+            flag(n, "imports the door as a namespace or default");
+          if (ts.isExportDeclaration(n) && !n.exportClause) flag(n, "re-exports the whole door");
+          if (ts.isExportDeclaration(n) && n.exportClause && ts.isNamespaceExport(n.exportClause))
+            flag(n, "re-exports the whole door");
+        }
+      }
     }
+    if (ts.isExternalModuleReference(n)) {
+      const spec = lit(n.expression);
+      if (spec !== undefined) checkSpecifier(n, spec, "dynamic");
+      else flag(n, "import equals with a computed module");
+    }
+    if (ts.isCallExpression(n)) {
+      const callee = n.expression;
+      if (callee.kind === ts.SyntaxKind.ImportKeyword) {
+        const spec = lit(n.arguments[0]);
+        if (spec === undefined) {
+          if (!spawnOk) flag(n, "import() with an argument that is not a string literal");
+        } else checkSpecifier(n, spec, "dynamic");
+      }
+      if (ts.isIdentifier(callee) && callee.text === "require") {
+        const spec = n.arguments.length === 1 ? lit(n.arguments[0]) : undefined;
+        if (spec === undefined) {
+          if (!spawnOk) flag(n, "require() without a single string literal");
+        } else checkSpecifier(n, spec, "dynamic");
+      }
+      if (
+        !spawnOk &&
+        ts.isIdentifier(callee) &&
+        (callee.text === "eval" || callee.text === "Function")
+      )
+        flag(n, `calls ${callee.text}`);
+    }
+    if (
+      !spawnOk &&
+      ts.isNewExpression(n) &&
+      ts.isIdentifier(n.expression) &&
+      n.expression.text === "Function"
+    )
+      flag(n, "constructs a Function");
+
+    // ---- identifiers ----------------------------------------------------------------------------
+    if (ts.isIdentifier(n)) {
+      const parent = n.parent;
+      if (!spawnOk) {
+        if (n.text === "createRequire") flag(n, "names createRequire");
+        if (n.text === "require") {
+          const calledDirectly = ts.isCallExpression(parent) && parent.expression === n;
+          const memberName = ts.isPropertyAccessExpression(parent) && parent.name === n;
+          const keyName = ts.isPropertyAssignment(parent) && parent.name === n;
+          if (!calledDirectly && !memberName && !keyName)
+            flag(n, "uses require other than as a direct call");
+        }
+        if (n.text === "Bun") {
+          const member =
+            ts.isPropertyAccessExpression(parent) && parent.expression === n
+              ? parent.name.text
+              : ts.isElementAccessExpression(parent) && parent.expression === n
+                ? lit(parent.argumentExpression)
+                : ts.isQualifiedName(parent) && parent.left === n
+                  ? parent.right.text
+                  : undefined;
+          const isMemberName = ts.isPropertyAccessExpression(parent) && parent.name === n;
+          if (isMemberName) flag(n, "reaches Bun through a member (.Bun)");
+          else if (member === undefined || !BUN_MEMBERS.has(member))
+            flag(
+              n,
+              member === undefined ? "uses Bun other than as Bun.<member>" : `uses Bun.${member}`,
+            );
+        }
+        if (n.text === "globalThis") {
+          const member =
+            ts.isPropertyAccessExpression(parent) && parent.expression === n
+              ? parent.name.text
+              : ts.isElementAccessExpression(parent) && parent.expression === n
+                ? lit(parent.argumentExpression)
+                : undefined;
+          if (member === undefined || !GLOBALTHIS_MEMBERS.has(member))
+            flag(n, `uses globalThis${member === undefined ? "" : `.${member}`}`);
+        }
+        if (
+          (n.text === "global" || n.text === "self" || n.text === "window") &&
+          ((ts.isPropertyAccessExpression(parent) &&
+            parent.expression === n &&
+            parent.name.text === "Bun") ||
+            (ts.isElementAccessExpression(parent) &&
+              parent.expression === n &&
+              lit(parent.argumentExpression) !== "prompt"))
+        )
+          flag(n, `reaches Bun through ${n.text}`);
+        if (n.text === "binding" || n.text === "dlopen" || n.text === "mainModule") {
+          if (
+            ts.isPropertyAccessExpression(parent) &&
+            parent.name === n &&
+            ts.isIdentifier(parent.expression) &&
+            parent.expression.text === "process"
+          )
+            flag(n, `uses process.${n.text}`);
+        }
+      }
+      if (!diagOk && n.text === "launchDiagnostic") flag(n, "names launchDiagnostic");
+    }
+    if (!spawnOk && ts.isElementAccessExpression(n) && lit(n.argumentExpression) === "Bun")
+      flag(n, 'reaches Bun through ["Bun"]');
+    if (
+      !spawnOk &&
+      ts.isMetaProperty(n) &&
+      ts.isPropertyAccessExpression(n.parent) &&
+      n.parent.name.text === "require"
+    )
+      flag(n, "uses import.meta.require");
+    if (
+      !spawnOk &&
+      ts.isPropertyAccessExpression(n) &&
+      n.name.text === "require" &&
+      ts.isIdentifier(n.expression) &&
+      n.expression.text === "module"
+    )
+      flag(n, "uses module.require");
+    // A string that is exactly the name, in any position: computed key, string keyed destructuring,
+    // `export { x as "launchDiagnostic" }`, an import specifier written as a string.
+    if (!diagOk && ts.isStringLiteralLike(n) && n.text === "launchDiagnostic")
+      flag(n, "names launchDiagnostic as a string");
     ts.forEachChild(n, visit);
   };
   visit(sf);
@@ -130,16 +259,46 @@ test("the door and the process table are the only files that start processes", (
   );
 });
 
+const NEG = "src/dispatch/anything.ts";
+
 test.each([
+  // direct forms
   ["Bun.spawnSync", "export const x = () => Bun.spawnSync(['true']);"],
   ["Bun.spawn", "export const x = () => Bun.spawn(['true']);"],
   ["Bun.$ shell", "export const x = () => Bun.$`true`;"],
   ["an alias of Bun.spawnSync", "const s = Bun.spawnSync; s(['true']);"],
-  ["globalThis.Bun.spawn", "globalThis.Bun.spawn(['true']);"],
   ["Bun element access", "Bun['spawnSync'](['true']);"],
   ["destructuring from Bun", "const { spawnSync } = Bun; spawnSync(['true']);"],
+  // a bare Bun
+  ["a bare alias of Bun", "const B = Bun; B.spawnSync(['true']);"],
+  ["Bun passed as an argument", "run(Bun);"],
+  ["Reflect.get on Bun", "Reflect.get(Bun, 'spawnSync')(['true']);"],
+  ["Reflect.get on Bun with a built name", "Reflect.get(Bun, 'spawn' + 'Sync')(['true']);"],
+  ["Bun in a computed element access", "Bun['spawn' + 'Sync'](['true']);"],
+  ["typeof Bun", "type T = typeof Bun;"],
+  // through the global object
+  ["globalThis.Bun.spawn", "globalThis.Bun.spawn(['true']);"],
+  [
+    "a destructure from globalThis.Bun",
+    "const { spawnSync } = globalThis.Bun; spawnSync(['true']);",
+  ],
+  ["a cast globalThis element access", "(globalThis as any)['Bun'].spawnSync(['true']);"],
+  ["globalThis with a computed key", "(globalThis as any)['Bu' + 'n'].spawnSync(['true']);"],
+  ["a bare globalThis", "const g = globalThis; g.Bun.spawnSync(['true']);"],
+  ["a .Bun member of another object", "const g = other; g.Bun.spawnSync(['true']);"],
+  ["global.Bun", "global.Bun.spawnSync(['true']);"],
+  ["self.Bun", "self.Bun.spawnSync(['true']);"],
+  ["an element access with 'Bun' on anything", "thing['Bun'].spawnSync(['true']);"],
+  // the "bun" module
   ["a named import from bun", "import { spawn } from 'bun'; spawn(['true']);"],
   ["a renamed import from bun", "import { $ as sh } from 'bun'; sh`true`;"],
+  ["a namespace import of bun", "import * as bun from 'bun'; bun.spawnSync(['true']);"],
+  ["a default import of bun", "import b from 'bun'; b.spawnSync(['true']);"],
+  ["a dynamic import of bun", "const b = await import('bun'); b.spawnSync(['true']);"],
+  ["a re-export from bun", "export { spawnSync } from 'bun';"],
+  ["bun:ffi", "import { dlopen } from 'bun:ffi';"],
+  ["a bun:ffi require", "const f = require('bun:ffi');"],
+  // child_process, however loaded
   [
     "a child_process import",
     "import { execFileSync } from 'node:child_process'; execFileSync('true');",
@@ -150,8 +309,34 @@ test.each([
   ["a child_process require", "const cp = require('node:child_process');"],
   ["a child_process import require", "import cp = require('child_process');"],
   ["a dynamic child_process import", "const cp = await import('node:child_process');"],
+  ["a built dynamic import", "const cp = await import('node:' + 'child_process');"],
+  ["a variable dynamic import", "const m = 'node:child_process'; await import(m);"],
+  ["a template dynamic import", "await import(`node:${'child_process'}`);"],
+  [
+    "createRequire from node:module",
+    "import { createRequire } from 'node:module'; createRequire(import.meta.url)('node:child_process');",
+  ],
+  ["createRequire from module", "import { createRequire } from 'module';"],
+  [
+    "a module namespace createRequire",
+    "import * as m from 'node:module'; m.createRequire(import.meta.url);",
+  ],
+  [
+    "createRequire with no import",
+    "declare const createRequire: any; createRequire(import.meta.url)('child_process');",
+  ],
+  ["an aliased require", "const r = require; r('child_process');"],
+  ["require with a built name", "require('child_' + 'process');"],
+  ["require with a variable", "const n = 'child_process'; require(n);"],
+  ["require.main", "require.main;"],
+  ["module.require", "module.require('child_process');"],
+  ["import.meta.require", "import.meta.require('child_process');"],
+  ["eval", "eval('Bun.spawnSync(1)');"],
+  ["the Function constructor", "new Function('return Bun')().spawnSync(['true']);"],
+  ["Function called", "Function('return Bun')().spawnSync(['true']);"],
+  ["process.binding", "process.binding('spawn_sync');"],
 ])("the guard rejects %s", (_name, source) => {
-  expect(offences("src/dispatch/anything.ts", source).length).toBeGreaterThanOrEqual(1);
+  expect(offences(NEG, source).length).toBeGreaterThanOrEqual(1);
 });
 
 test.each([
@@ -172,73 +357,177 @@ test.each([
     "import { launchDiagnostic as ld } from './door.ts'; ld(['ps'], { timeoutMs: 1 });",
   ],
   ["a re-export", "export { launchDiagnostic } from './door.ts';"],
-])("the guard rejects launchDiagnostic named from run code: %s", (_name, source) => {
-  expect(offences("src/dispatch/anything.ts", source).length).toBeGreaterThanOrEqual(1);
-  // stop.ts and records.ts belong to the process folder but are not on the list.
-  expect(offences("src/util/process/stop.ts", source).length).toBeGreaterThanOrEqual(1);
-  expect(offences("src/util/process/signals.ts", source)).toEqual([]);
-  expect(offences("src/util/process/sweep.ts", source)).toEqual([]);
-  expect(offences("src/util/process/leftovers.ts", source)).toEqual([]);
+  [
+    "a string keyed destructure",
+    "import * as door from './door.ts'; const { 'launchDiagnostic': ld } = door;",
+  ],
+  ["a computed string key", "declare const door: any; const { ['launchDiagnostic']: ld } = door;"],
+  ["a string import name", "import { 'launchDiagnostic' as ld } from './door.ts';"],
+  ["a string export name", "const x = 1; export { x as 'launchDiagnostic' };"],
+  ["a namespace import of the door", "import * as door from './door.ts'; export const f = door;"],
+  ["a default style import of the door", "import door from './door.ts'; export const f = door;"],
+  ["a whole door re-export", "export * from './door.ts';"],
+  ["a namespace door re-export", "export * as door from './door.ts';"],
+  [
+    "a dynamic import of the door",
+    "const d = await import('./door.ts'); d.runBlocking([], { timeoutMs: 1 });",
+  ],
+])(
+  "the guard rejects launchDiagnostic or the whole door reached from run code: %s",
+  (_name, source) => {
+    expect(offences(NEG, source).length).toBeGreaterThanOrEqual(1);
+    // stop.ts and records.ts belong to the process folder but are not on the list.
+    expect(offences("src/util/process/stop.ts", source).length).toBeGreaterThanOrEqual(1);
+  },
+);
+
+test.each([
+  [
+    "a call",
+    "import { launchDiagnostic } from './door.ts'; launchDiagnostic(['ps'], { timeoutMs: 1 });",
+  ],
+  [
+    "a namespace member",
+    "import * as d from './door.ts'; d.launchDiagnostic(['ps'], { timeoutMs: 1 });",
+  ],
+  ["a string key", "import * as d from './door.ts'; const { 'launchDiagnostic': ld } = d;"],
+])("the stop machinery may use launchDiagnostic: %s", (_name, source) => {
+  for (const f of ["signals", "sweep", "leftovers"])
+    expect(offences(`src/util/process/${f}.ts`, source)).toEqual([]);
 });
 
-test("text inside a string or a comment is not a hit (the generated script in src/testing/karma.ts)", () => {
+test("what src is allowed to do is not a hit", () => {
+  const fine = [
+    "import type { Database } from 'bun:sqlite'; import { Database as D } from 'bun:sqlite';",
+    "import type { Subprocess } from 'bun';",
+    "import { type Subprocess, file } from 'bun'; file('a');",
+    "const t = Bun.TOML.parse('a=1'); const y = Bun.YAML.parse('a: 1'); new Bun.Glob('*').match('a');",
+    "Bun.which('git'); Bun.sleep(1); Bun.file('a'); Bun['file']('a');",
+    "let p: Bun.Subprocess<'pipe', 'pipe', 'pipe'>;",
+    "const ok = globalThis.prompt('q'); globalThis['prompt']('q');",
+    "const { runCommand } = await import('../util/run-command.ts'); type T = import('../x.ts').Y;",
+    "const j = { require: 1 }; j.require; const e = j?.require?.['x'];",
+    "import { runBlocking } from '../util/process/door.ts'; runBlocking(['git'], { timeoutMs: 1 });",
+    "import { RunInterrupted, type BlockingResult } from '../util/process/door.ts';",
+    "import * as fs from 'node:fs'; import { createHash } from 'node:crypto';",
+  ];
+  for (const src of fine) expect(offences(NEG, src), src).toEqual([]);
+});
+
+test("text inside a string, a comment or a template is not a hit (the generated script in src/testing/karma.ts)", () => {
   const karma = readFileSync(join(ROOT, "src/testing/karma.ts"), "utf8");
   expect(karma).toContain("require('child_process')"); // the fixture this test is about
   expect(offences("src/testing/karma.ts", karma)).toEqual([]);
   expect(
     offences(
       "src/x.ts",
-      "// Bun.spawnSync is not called here\n/* launchDiagnostic */\nexport const s = \"Bun.spawn(['x']) launchDiagnostic child_process\";\nexport const t = `import cp from 'node:child_process'`;",
+      "// Bun.spawnSync is not called here\n/** Bun launchDiagnostic createRequire */\nexport const s = \"Bun.spawn(['x']) launchDiagnostic child_process\";\nexport const t = `import cp from 'node:child_process'; const B = Bun`;",
     ),
   ).toEqual([]);
 });
 
-test("a Bun-like member that is not a process starter is not a hit", () => {
-  expect(
-    offences("src/x.ts", "Bun.write('a', 'b'); Bun.file('a'); Bun.sleep(1); other.spawn(1);"),
-  ).toEqual([]);
+test("the allowed files may spawn and may name launchDiagnostic", () => {
+  const src =
+    "Bun.spawn(['x']); Bun.spawnSync(['x']); const B = Bun; require('node:child_process');";
+  expect(offences("src/util/process/door.ts", src)).toEqual([]);
+  expect(offences("src/util/process/proc-table.ts", src)).toEqual([]);
 });
 
 // --- every blocking call states its timeout (spec section 5.1: "a required timeout") ---------------
 
 /** The longest bound any call site may use: network git and tree writing (Task 7). */
 const MAX_TIMEOUT_MS = 120_000;
+/** Modules whose exported numeric constants may be imported as a timeout. */
+const TIMEOUT_MODULES = new Set(["src/util/process/door.ts"]);
 
-/** Problems with the `timeoutMs` of each `runBlocking(...)` call in `text`: absent, not a positive
- *  bounded number, or (when it names a constant of the same file) a constant that is not one. A
- *  parameter that a helper passes through is accepted: the helper's callers are checked by tsc. */
+const numberOf = (e: ts.Expression): number | undefined =>
+  ts.isNumericLiteral(e) ? Number(e.text.replaceAll("_", "")) : undefined;
+
+/** Top level `const NAME = <number literal>` of a source file; `exported` limits it to exports. */
+function topLevelConsts(sf: ts.SourceFile, exported: boolean): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const st of sf.statements) {
+    if (!ts.isVariableStatement(st)) continue;
+    const isExport = st.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword) ?? false;
+    if (exported && !isExport) continue;
+    if (!(st.declarationList.flags & ts.NodeFlags.Const)) continue;
+    for (const d of st.declarationList.declarations) {
+      const v = d.initializer && numberOf(d.initializer);
+      if (ts.isIdentifier(d.name) && v !== undefined) out.set(d.name.text, v);
+    }
+  }
+  return out;
+}
+
+/** Problems with the `timeoutMs` of each `runBlocking(...)` call in `text`, however it is reached
+ *  (`runBlocking(`, `ns.runBlocking(`, `ns["runBlocking"](`). A timeout is accepted only as a numeric
+ *  literal, a same file top level `const` numeric literal, or an exported numeric constant imported
+ *  from TIMEOUT_MODULES, in (0, MAX_TIMEOUT_MS], alone or in the branches of a conditional. Anything
+ *  else, including arithmetic, a parameter or a spread, is a problem. */
 function timeoutProblems(rel: string, text: string): string[] {
   const sf = ts.createSourceFile(rel, text, ts.ScriptTarget.Latest, true);
-  const consts = new Map<string, number>();
-  for (const st of sf.statements)
-    if (ts.isVariableStatement(st))
-      for (const d of st.declarationList.declarations)
-        if (ts.isIdentifier(d.name) && d.initializer && ts.isNumericLiteral(d.initializer))
-          consts.set(d.name.text, Number(d.initializer.text.replaceAll("_", "")));
+  const known = new Map(topLevelConsts(sf, false));
+  for (const st of sf.statements) {
+    if (!ts.isImportDeclaration(st) || !ts.isStringLiteral(st.moduleSpecifier)) continue;
+    const target = posix.normalize(posix.join(posix.dirname(rel), st.moduleSpecifier.text));
+    const nb = st.importClause?.namedBindings;
+    if (!TIMEOUT_MODULES.has(target) || !nb || !ts.isNamedImports(nb)) continue;
+    const exported = topLevelConsts(
+      ts.createSourceFile(
+        target,
+        readFileSync(join(ROOT, target), "utf8"),
+        ts.ScriptTarget.Latest,
+        true,
+      ),
+      true,
+    );
+    for (const el of nb.elements) {
+      const v = exported.get((el.propertyName ?? el.name).text);
+      if (v !== undefined) known.set(el.name.text, v);
+    }
+  }
+  const values = (e: ts.Expression): number[] | undefined => {
+    if (ts.isParenthesizedExpression(e)) return values(e.expression);
+    const n = numberOf(e);
+    if (n !== undefined) return [n];
+    if (ts.isIdentifier(e)) return known.has(e.text) ? [known.get(e.text) as number] : undefined;
+    if (ts.isConditionalExpression(e)) {
+      const a = values(e.whenTrue);
+      const b = values(e.whenFalse);
+      return a && b ? [...a, ...b] : undefined;
+    }
+    return undefined;
+  };
+  const isRunBlocking = (callee: ts.Expression): boolean =>
+    (ts.isIdentifier(callee) && callee.text === "runBlocking") ||
+    (ts.isPropertyAccessExpression(callee) && callee.name.text === "runBlocking") ||
+    (ts.isElementAccessExpression(callee) && lit(callee.argumentExpression) === "runBlocking");
   const out: string[] = [];
   const visit = (n: ts.Node): void => {
-    if (
-      ts.isCallExpression(n) &&
-      ts.isIdentifier(n.expression) &&
-      n.expression.text === "runBlocking"
-    ) {
-      const line = sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+    if (ts.isCallExpression(n) && isRunBlocking(n.expression)) {
+      const at = `${rel}:${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}`;
       const opts = n.arguments[1];
-      const prop =
-        opts && ts.isObjectLiteralExpression(opts)
-          ? opts.properties.find((p) => p.name !== undefined && p.name.getText(sf) === "timeoutMs")
-          : undefined;
-      if (!prop) out.push(`${rel}:${line}: runBlocking without an explicit timeoutMs`);
-      else {
-        const v = ts.isPropertyAssignment(prop) ? prop.initializer : undefined;
-        const num =
-          v && ts.isNumericLiteral(v)
-            ? Number(v.text.replaceAll("_", ""))
-            : v && ts.isIdentifier(v)
-              ? consts.get(v.text)
+      if (!opts || !ts.isObjectLiteralExpression(opts)) {
+        out.push(`${at}: runBlocking without an options object literal`);
+      } else {
+        if (opts.properties.some((p) => ts.isSpreadAssignment(p)))
+          out.push(`${at}: runBlocking options with a spread`);
+        const prop = opts.properties.find(
+          (p) => p.name !== undefined && p.name.getText(sf) === "timeoutMs",
+        );
+        const expr = !prop
+          ? undefined
+          : ts.isPropertyAssignment(prop)
+            ? prop.initializer
+            : ts.isShorthandPropertyAssignment(prop)
+              ? prop.name
               : undefined;
-        if (num !== undefined && !(num > 0 && num <= MAX_TIMEOUT_MS))
-          out.push(`${rel}:${line}: timeoutMs ${num} is outside (0, ${MAX_TIMEOUT_MS}]`);
+        const vs = expr && values(expr);
+        if (!expr) out.push(`${at}: runBlocking without an explicit timeoutMs`);
+        else if (!vs)
+          out.push(`${at}: timeoutMs is not a literal or a known constant: ${expr.getText(sf)}`);
+        else if (vs.some((v) => !(v > 0 && v <= MAX_TIMEOUT_MS)))
+          out.push(`${at}: timeoutMs ${vs.join(" or ")} is outside (0, ${MAX_TIMEOUT_MS}]`);
       }
     }
     ts.forEachChild(n, visit);
@@ -255,14 +544,68 @@ test("every runBlocking call outside the door states a bounded timeout", () => {
   expect(problems).toEqual([]);
 });
 
-test("the timeout check can fail: a missing, zero, or unbounded timeout is reported", () => {
-  const t = (src: string) => timeoutProblems("src/x.ts", src);
-  expect(t("runBlocking(['git'], { cwd });")).toHaveLength(1);
-  expect(t("runBlocking(['git']);")).toHaveLength(1);
-  expect(t("runBlocking(['git'], { timeoutMs: 0 });")).toHaveLength(1);
-  expect(t("runBlocking(['git'], { timeoutMs: 3_600_000 });")).toHaveLength(1);
-  expect(t("const SLOW = 999_999;\nrunBlocking(['git'], { timeoutMs: SLOW });")).toHaveLength(1);
-  expect(t("runBlocking(['git'], { timeoutMs: 30_000 });")).toEqual([]);
-  expect(t("const OK = 120_000;\nrunBlocking(['git'], { cwd, timeoutMs: OK });")).toEqual([]);
-  expect(t("function f(timeoutMs: number) { runBlocking(['git'], { timeoutMs }); }")).toEqual([]);
+test.each([
+  ["no options", "runBlocking(['git']);"],
+  ["no timeout", "runBlocking(['git'], { cwd });"],
+  ["a zero timeout", "runBlocking(['git'], { timeoutMs: 0 });"],
+  ["an unbounded literal", "runBlocking(['git'], { timeoutMs: 3_600_000 });"],
+  ["arithmetic", "runBlocking(['git'], { timeoutMs: 60 * 60_000 });"],
+  ["arithmetic on a constant", "const A = 1000; runBlocking(['git'], { timeoutMs: A * 60 });"],
+  [
+    "an unbounded same file constant",
+    "const SLOW = 999_999;\nrunBlocking(['git'], { timeoutMs: SLOW });",
+  ],
+  ["a parameter", "function f(timeoutMs: number) { runBlocking(['git'], { timeoutMs }); }"],
+  [
+    "a property of an argument",
+    "function f(o: any) { runBlocking(['git'], { timeoutMs: o.ms }); }",
+  ],
+  [
+    "a defaulted expression",
+    "function f(o: any) { runBlocking(['git'], { timeoutMs: o.ms ?? 30_000 }); }",
+  ],
+  ["a let variable", "let t = 1000; runBlocking(['git'], { timeoutMs: t });"],
+  [
+    "a conditional with a bad branch",
+    "const A = 5; runBlocking(['git'], { timeoutMs: c ? A : x });",
+  ],
+  ["a spread of options", "runBlocking(['git'], { timeoutMs: 1000, ...more });"],
+  ["an options variable", "const o = { timeoutMs: 1000 }; runBlocking(['git'], o);"],
+  [
+    "a namespace call",
+    "import * as door from '../util/process/door.ts'; door.runBlocking(['git'], { cwd });",
+  ],
+  ["a namespace call with arithmetic", "door.runBlocking(['git'], { timeoutMs: 60 * 60_000 });"],
+  ["an element access call", "door['runBlocking'](['git'], { cwd });"],
+  [
+    "an imported constant from a module not on the list",
+    "import { MS } from './consts.ts'; runBlocking(['git'], { timeoutMs: MS });",
+  ],
+  [
+    "an imported name that door does not export",
+    "import { NOPE } from '../util/process/door.ts'; runBlocking(['git'], { timeoutMs: NOPE });",
+  ],
+])("the timeout check rejects %s", (_name, source) => {
+  expect(timeoutProblems("src/dispatch/x.ts", source).length).toBeGreaterThanOrEqual(1);
+});
+
+test.each([
+  ["a literal", "runBlocking(['git'], { timeoutMs: 30_000 });"],
+  ["the largest bound", "runBlocking(['git'], { timeoutMs: 120_000 });"],
+  ["a same file constant", "const OK = 120_000;\nrunBlocking(['git'], { cwd, timeoutMs: OK });"],
+  [
+    "a shorthand of a same file constant",
+    "const timeoutMs = 5_000;\nrunBlocking(['git'], { timeoutMs });",
+  ],
+  [
+    "a conditional between bounded constants",
+    "const A = 30_000; const B = 120_000;\nrunBlocking(['git'], { timeoutMs: c ? A : B });",
+  ],
+  ["a namespace call with a literal", "door.runBlocking(['git'], { timeoutMs: 5_000 });"],
+  [
+    "an imported constant from an allowed module",
+    "import { GRACE_MS } from '../util/process/door.ts'; runBlocking(['git'], { timeoutMs: GRACE_MS });",
+  ],
+])("the timeout check accepts %s", (_name, source) => {
+  expect(timeoutProblems("src/dispatch/x.ts", source)).toEqual([]);
 });

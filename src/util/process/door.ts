@@ -193,6 +193,13 @@ function spawnBlocking(
   };
 }
 
+/** Test seam: replaces the process start of `runBlocking` (not of `launchDiagnostic`), so a test can
+ *  hand a call site a timed out or failed result. Production never sets it. */
+let blockingOverride: ((argv: string[], opts: { timeoutMs: number }) => BlockingResult) | undefined;
+export function __setBlockingForTests(fn: typeof blockingOverride): void {
+  blockingOverride = fn;
+}
+
 /** A blocking call, such as `git`. Refused once a stop has begun, unless it is marked `cleanup`
  *  (it only releases something the run had taken). */
 export function runBlocking(
@@ -206,6 +213,7 @@ export function runBlocking(
   },
 ): BlockingResult {
   if (stopping && !opts.cleanup) throw new RunInterrupted();
+  if (blockingOverride) return blockingOverride(argv, opts);
   return spawnBlocking(argv, opts);
 }
 
@@ -259,4 +267,5 @@ export function __resetForTests(): void {
   inFlight = null;
   self = null;
   stopDeps = undefined;
+  blockingOverride = undefined;
 }
