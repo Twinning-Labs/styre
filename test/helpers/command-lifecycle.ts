@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as door from "../../src/util/process/door.ts";
@@ -211,6 +211,86 @@ export function commandLifecycleTests(name: string, run: Run): void {
       const pid = remember();
       expect(r.timedOut).toBe(true);
       expect(r.stderr).toContain(String(pid));
+    });
+
+    test("a stop that arrives while leftovers are being stopped still throws RunInterrupted", async () => {
+      // The leftover ignores TERM, so finish() waits out its grace period. The handler stops the
+      // launch during that wait: the runner must not report a result after that.
+      const p = run(`(trap '' TERM; sleep 30) & echo $! > "${pidFile()}"; exit 0`, {
+        cwd: dir,
+        timeoutMs: 60_000,
+      });
+      const settled = p.then(
+        () => "resolved",
+        (e) => e,
+      );
+      expect(
+        await waitFor(
+          () => existsSync(pidFile()) && readFileSync(pidFile(), "utf8").includes("\n"),
+        ),
+      ).toBe(true);
+      remember();
+      await Bun.sleep(400); // the shell has exited and finish() is in its grace wait
+      for (const h of door.liveLaunches()) {
+        h.interrupted = true;
+        await h.stop("forced");
+      }
+      expect(await settled).toBeInstanceOf(door.RunInterrupted);
+    }, 15_000);
+
+    test("a timeout stop is graceful: a TERM trap in the command runs", async () => {
+      const marker = join(dir, "term-seen");
+      const r = await run(`trap 'echo term > "${marker}"; exit 0' TERM; sleep 30 & wait`, {
+        cwd: dir,
+        timeoutMs: 700,
+      });
+      expect(r.timedOut).toBe(true);
+      expect(existsSync(marker)).toBe(true);
+    });
+
+    test("the command runs without the daemon's credentials", async () => {
+      const keys = ["GITHUB_TOKEN", "LINEAR_API_KEY", "ANTHROPIC_API_KEY"] as const;
+      const before = keys.map((k) => process.env[k]);
+      for (const k of keys) process.env[k] = `secret-${k}`;
+      try {
+        const r = await run(
+          'printf "[%s][%s][%s]" "$GITHUB_TOKEN" "$LINEAR_API_KEY" "$ANTHROPIC_API_KEY"',
+          {
+            cwd: dir,
+            timeoutMs: 5000,
+          },
+        );
+        expect(r.stdout).toBe("[][][]");
+      } finally {
+        keys.forEach((k, i) => {
+          const v = before[i];
+          if (v === undefined) Reflect.deleteProperty(process.env, k);
+          else process.env[k] = v;
+        });
+      }
+    });
+
+    test("survivors are also reported on Styre's stderr, in the spec's words", async () => {
+      door.__setStopDepsForTests(deaf());
+      const lines: string[] = [];
+      const realWrite = process.stderr.write.bind(process.stderr);
+      process.stderr.write = ((chunk: string | Uint8Array) => {
+        lines.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write;
+      let pid: number;
+      try {
+        await run(`sleep 30 >/dev/null 2>&1 & echo $! > "${pidFile()}"; exit 0`, {
+          cwd: dir,
+          timeoutMs: 5000,
+        });
+        pid = remember();
+      } finally {
+        process.stderr.write = realWrite;
+      }
+      const text = lines.join("");
+      expect(text).toContain("styre: could not stop ");
+      expect(text).toContain(`(pid ${pid}); stop it with: kill -9 ${pid}`);
     });
 
     test("a command killed by a signal reports no exit code of its own where the runner did before", async () => {

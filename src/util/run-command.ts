@@ -23,7 +23,12 @@ export interface CommandResult {
  *  anything the command left running is stopped BEFORE the output is read, and the rest of the output
  *  is read for at most DRAIN_LIMIT_MS, so a background child holding the pipe can never hang the
  *  caller. Output is read while the command runs, so a large output cannot stall it. Throws
- *  RunInterrupted when the stop handler stopped the command or the door was already closed. */
+ *  RunInterrupted when the stop handler stopped the command or the door was already closed.
+ *
+ *  A known limit (spec 6.2, R11): a command in a group of its own has no controlling terminal, so
+ *  one that opens /dev/tty (sudo, an ssh passphrase or host key prompt, a git username prompt)
+ *  fails at once with ENXIO instead of prompting. Styre's own commands never do this; commands from
+ *  the project profile or an agent might. */
 export async function runCommand(
   command: string,
   opts: { cwd: string; timeoutMs: number; context?: LaunchContext },
@@ -62,6 +67,7 @@ export async function runCommand(
     if (outcome === "timeout") {
       const rep = await h.stop("graceful");
       if (h.interrupted) throw new RunInterrupted();
+      reportSurvivors(h, rep.survivors);
       return {
         exitCode: null,
         stdout: "",
@@ -72,6 +78,7 @@ export async function runCommand(
     const exitCode = await h.proc.exited;
     const rep = await h.finish(); // check the group and stop leftovers, THEN read the rest
     if (h.interrupted) throw new RunInterrupted();
+    reportSurvivors(h, rep.survivors);
     const [outDone, errDone] = await Promise.all([
       out.finish(DRAIN_LIMIT_MS),
       err.finish(DRAIN_LIMIT_MS),
@@ -90,6 +97,16 @@ export async function runCommand(
     clearTimeout(timer);
     out.cancel();
     err.cancel();
+  }
+}
+
+/** Tell the operator, on Styre's own stderr, about each process a stop could not end (spec 9.4
+ *  wording). Most callers look only at the exit code, so the note in the result is not enough. */
+export function reportSurvivors(h: LaunchHandle, survivors: { pid: number }[]): void {
+  for (const p of survivors) {
+    process.stderr.write(
+      `styre: could not stop ${h.record.command} (pid ${p.pid}); stop it with: kill -9 ${p.pid}\n`,
+    );
   }
 }
 

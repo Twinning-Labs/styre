@@ -1,7 +1,7 @@
 import { verifyEnv } from "../agent/agent-env.ts";
 import { type LaunchHandle, RunInterrupted, launch } from "./process/door.ts";
 import { DRAIN_LIMIT_MS, readPipe } from "./process/read-pipe.ts";
-import { type CommandResult, survivorNote } from "./run-command.ts";
+import { type CommandResult, reportSurvivors, survivorNote } from "./run-command.ts";
 
 /** POSIX review probes: cap the entire process and pipe lifetime and the captured output.
  *
@@ -68,6 +68,7 @@ export async function runBoundedCommand(
     if (h.interrupted) throw new RunInterrupted();
     const rep = outcome === "timeout" ? await h.stop("graceful") : await h.finish();
     if (h.interrupted) throw new RunInterrupted();
+    reportSurvivors(h, rep.survivors);
     const [outDone, errDone] = await Promise.all([
       out.finish(DRAIN_LIMIT_MS),
       err.finish(DRAIN_LIMIT_MS),
