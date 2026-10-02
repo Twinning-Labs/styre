@@ -212,9 +212,9 @@ test("a stop that leaves survivors is reported on stderr and never hangs", async
   const text = lines.join("");
   // Each line names the survivor's own command (spec 7.3), not the launch's argv.
   expect(text).toMatch(/styre: could not stop sleep 309 \(pid \d+\); stop it with: kill -9 \d+/);
-  expect(text).toMatch(
-    /styre: could not stop \S*bash \S*standin-agent\.sh .*\(pid \d+\); stop it with: kill -9 \d+/,
-  );
+  // The agent's own line: its command is cut to 120 characters, so a long checkout path hides the
+  // script name. Match only the start and the tail, never the path.
+  expect(text).toMatch(/styre: could not stop \S*bash .*\(pid \d+\); stop it with: kill -9 \d+/);
   // The sleep line does not borrow the agent's argv (the Claude flags are the agent's own).
   expect(text.split("\n").find((l) => l.includes("sleep 309"))).not.toContain("--output-format");
 });
