@@ -687,16 +687,15 @@ describe("installing the handlers", () => {
 
   test("listens for the four signals, guards stdout and stderr, and dispose removes the listeners", () => {
     const before = counts();
-    const errBefore = [
-      process.stdout.listenerCount("error"),
-      process.stderr.listenerCount("error"),
-    ];
     // Injected re-raise and exit: a stray signal during the test must not end the test run.
     const h = installStopHandlers({ command: "run", run: null }, deps().d);
     try {
       expect(counts()).toEqual(before.map((n) => n + 1));
-      expect(process.stdout.listenerCount("error")).toBeGreaterThanOrEqual((errBefore[0] ?? 0) + 1);
-      expect(process.stderr.listenerCount("error")).toBeGreaterThanOrEqual((errBefore[1] ?? 0) + 1);
+      // The stream guards are added once per process, by whichever install comes first: an earlier
+      // test file in the same run (styre run and setup install the handlers) may already have
+      // added them. The real process tests below prove what they do.
+      expect(process.stdout.listenerCount("error")).toBeGreaterThanOrEqual(1);
+      expect(process.stderr.listenerCount("error")).toBeGreaterThanOrEqual(1);
     } finally {
       h.dispose();
     }

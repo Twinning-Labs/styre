@@ -224,6 +224,9 @@ export async function runTicket(deps: {
   emit?: TelemetrySink;
   /** The ticket branch's HEAD, for the step in flight (ENG-485 section 7.5). */
   readHead?: () => string | null;
+  /** Called with the ticket row's id as soon as it exists, before any step runs (ENG-485: the
+   *  stop handler needs it to record an interruption). */
+  onTicket?: (ticketId: number) => void;
 }): Promise<RunResult & { ticketId: number; summary: string }> {
   const ingested = deps.ingested ?? (await deps.ports.issueTracker.fetchTicket(deps.ticketRef));
   const projectId = insertProject(deps.db, {
@@ -240,6 +243,7 @@ export async function runTicket(deps: {
     branchPrefix: branchPrefixFor(ingested.typeLabel),
     externalId: ingested.externalId,
   });
+  deps.onTicket?.(ticketId);
   const result = await driveToTerminal(deps.db, deps.registry, {
     ticketId,
     config: deps.runtimeConfig,

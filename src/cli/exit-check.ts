@@ -1,4 +1,4 @@
-import { describeProcess, liveLaunches } from "../util/process/door.ts";
+import { describeProcess, isStopping, liveLaunches } from "../util/process/door.ts";
 import { pendingLeftoverChecks } from "../util/process/leftovers.ts";
 import { reportSurvivors } from "../util/run-command.ts";
 import { EXIT } from "./errors.ts";
@@ -11,8 +11,11 @@ import { guard } from "./output.ts";
  * memory is empty. A launch still there is a bug: Styre stops it, says what it stopped, and makes
  * the exit status EXIT.INTERNAL, so a leak is never silent. It never replaces a status that already
  * says something (75 paused, 65, 64, 1, or any error's own code): it only turns success into 70.
+ * While a stop is in progress it does nothing: the launches still live are the stop handler's, which
+ * is stopping them and owns the exit (section 7.3).
  */
 export async function assertNoLeakedLaunches(): Promise<void> {
+  if (isStopping()) return;
   await pendingLeftoverChecks();
   const leaked = liveLaunches();
   if (leaked.length === 0) return;

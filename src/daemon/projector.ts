@@ -20,6 +20,7 @@ import type { IssueState, IssueTrackerPort } from "../integrations/issue-tracker
 import { NotificationMessageSchema } from "../integrations/notifier.ts";
 import type { NotifierPort } from "../integrations/notifier.ts";
 import { hasRequiredSuites, requiredSuiteProblem } from "../testing/suite-requirements.ts";
+import { isStopping } from "../util/process/door.ts";
 
 const PushPayload = z.object({ branch: z.string(), sha: z.string() });
 const PrCreatePayload = z.object({
@@ -236,6 +237,10 @@ export async function drainOutbox(
   let sent = 0;
   let failed = 0;
   for (const row of listPending(db)) {
+    // ENG-485 section 7.3 step 1 (m2): once a stop begins nothing more is sent. A delivery could
+    // not be recorded (the run's connection is read only), so it would be sent again on resume,
+    // and a Slack post has no idempotency key. A request already in flight can still complete.
+    if (isStopping()) break;
     try {
       const result = await applyRow(db, row, ports);
       db.transaction(() => {

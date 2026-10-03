@@ -20,7 +20,7 @@ import { mergeRuntimeContext } from "../setup/merge.ts";
 import { probeProfile } from "../setup/probe.ts";
 import { resolveCommands } from "../setup/resolve-commands.ts";
 import { withTestActions } from "../setup/test-action.ts";
-import { createAnalytics } from "../telemetry/analytics/index.ts";
+import { type Analytics, createAnalytics } from "../telemetry/analytics/index.ts";
 import type { SetupInput } from "../telemetry/analytics/properties.ts";
 import { testCapabilities } from "../testing/capabilities.ts";
 import type { EnvironmentObservation } from "../testing/environment-schema.ts";
@@ -29,6 +29,12 @@ import {
   planTestEnvironment,
   preparedToxCandidate,
 } from "../testing/environment.ts";
+import { RunInterrupted, isStopping } from "../util/process/door.ts";
+import {
+  type HandlerDeps,
+  installStopHandlers,
+  suspendStopHandlers,
+} from "../util/process/signals.ts";
 import { agentCliError, usageError } from "./errors.ts";
 import { guardWithExitCheck } from "./exit-check.ts";
 
@@ -195,10 +201,17 @@ export async function runSetup(args: {
       ? { ...configured, commands: { ...c.commands, test } }
       : configured;
   });
-  const { components: resolved, warnings } = resolveCommands(candidates, {
-    interactive,
-    ask: (q) => (interactive ? (globalThis.prompt(q) ?? null) : null),
-  });
+  const resolveAll = () =>
+    resolveCommands(candidates, {
+      interactive,
+      ask: (q) => (interactive ? (globalThis.prompt(q) ?? null) : null),
+    });
+  // ENG-485 section 7.1: a blocking prompt would hold a signal until Enter, so the handlers are
+  // removed while setup waits at one (it launches nothing then) and Ctrl-C ends setup at once.
+  // resolveCommands only asks and computes, so it is suspended as a whole.
+  const { components: resolved, warnings } = interactive
+    ? await suspendStopHandlers(resolveAll)
+    : resolveAll();
   const components = withTestActions(repoDir, resolved).map((c) => {
     const policy =
       args.testEnvironment ??
@@ -256,7 +269,9 @@ export async function runSetup(args: {
     for (const [name, cmd] of Object.entries(repoCommands)) {
       process.stderr.write(`  repo.${name}: ${cmd}\n`);
     }
-    const ok = globalThis.prompt("Approve these components (commands + paths)? [y/N]");
+    const ok = await suspendStopHandlers(() =>
+      globalThis.prompt("Approve these components (commands + paths)? [y/N]"),
+    );
     if (ok?.trim().toLowerCase() !== "y") {
       throw new Error("setup aborted: operator did not approve the command list");
     }
@@ -264,8 +279,12 @@ export async function runSetup(args: {
 
   profile = ensureAnalyticsId({ ...profile, components, repoCommands }, priorAnalyticsId);
 
+  // Section 7.5: setup has no database, so its file writes are its choke point. A stop refuses
+  // each write instead of making it.
+  if (isStopping()) throw new RunInterrupted();
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, `${JSON.stringify(profile, null, 2)}\n`);
+  if (isStopping()) throw new RunInterrupted();
   writeFileSync(
     `${outPath}.environment.json`,
     `${JSON.stringify(environmentEvidence, null, 2)}\n`,
@@ -358,7 +377,39 @@ export interface SetupArgs {
 
 export async function setupImpl(
   { args }: { args: SetupArgs },
-  deps?: { preflight?: typeof preflightAgentCli },
+  deps?: {
+    preflight?: typeof preflightAgentCli;
+    /** Replaces parts of the stop handler's real dependencies (tests: no real re-raise or exit). */
+    stopHandlerDeps?: Partial<HandlerDeps>;
+  },
+): Promise<void> {
+  let analytics: Analytics | undefined;
+  // ENG-485 section 7.1: installed before anything else, so before any launch (the slug's git call,
+  // the agent CLI preflight, the enrichment agent). From a signal on, the handler owns the exit.
+  const stop = installStopHandlers(
+    {
+      command: "setup",
+      run: null,
+      shutdownAnalytics: async () => {
+        await analytics?.shutdown();
+      },
+    },
+    deps?.stopHandlerDeps,
+  );
+  try {
+    await setupBody(args, deps, (a) => {
+      analytics = a;
+    });
+  } finally {
+    // During a stop the handler keeps its listeners: a second signal forces.
+    if (!isStopping()) stop.dispose();
+  }
+}
+
+async function setupBody(
+  args: SetupArgs,
+  deps: { preflight?: typeof preflightAgentCli } | undefined,
+  onAnalytics: (a: Analytics) => void,
 ): Promise<void> {
   // No positional `repo`: discover the cwd repo and gate it on the disposability marker BEFORE
   // any write-capable enrichment agent call (runSetup's enrichRuntimeContext/discoverComponents).
@@ -420,6 +471,7 @@ export async function setupImpl(
 
   try {
     const analytics = createAnalytics(DEFAULT_RUNTIME_CONFIG);
+    onAnalytics(analytics);
     analytics.setupCompleted(deriveSetupInput(profile));
     await analytics.shutdown();
   } catch {

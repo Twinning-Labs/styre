@@ -3,13 +3,16 @@
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import type { ProjectorPorts } from "../../src/daemon/projector.ts";
 import { openDb } from "../../src/db/client.ts";
 import { migrate } from "../../src/db/migrate.ts";
 import { completeDispatch, insertDispatch } from "../../src/db/repos/dispatch.ts";
 import { insertProject } from "../../src/db/repos/project.ts";
+import { enqueue } from "../../src/db/repos/projection-outbox.ts";
 import { insertRun } from "../../src/db/repos/run.ts";
 import { insertTicket } from "../../src/db/repos/ticket.ts";
 import * as steps from "../../src/db/repos/workflow-step.ts";
+import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import { nowUtc } from "../../src/util/time.ts";
 
 export interface TicketDb {
@@ -177,5 +180,52 @@ export function makeGitProject(opts?: { mode?: "in-place" | "worktree" }): GitPr
       git(repo, ["update-ref", `refs/heads/${branch}`, sha]);
       return sha;
     },
+  };
+}
+
+/** A run database with three pending outbox rows (tracker comments) and ports that count the
+ *  calls they receive. `onCall` runs inside each call, before it returns (a test can begin a stop
+ *  there). The caller closes `db`. */
+export function makeOutboxDb(opts?: { onCall?: (n: number) => void }): {
+  db: ReturnType<typeof openDb>;
+  ticketId: number;
+  ports: ProjectorPorts;
+  calls(): number;
+  pending(): number;
+} {
+  const path = join(mkdtempSync(join(tmpdir(), "styre-outbox-")), "run.db");
+  migrate(path);
+  const db = openDb(path);
+  const projectId = insertProject(db, { slug: "test-project", targetRepo: "/tmp/repo" });
+  const ticketId = insertTicket(db, { projectId, ident: "ENG-1" });
+  insertRun(db, { runId: "test-run-0001", startedAt: nowUtc(), provider: "claude" });
+  for (const n of [1, 2, 3]) {
+    enqueue(db, {
+      ticketId,
+      target: "issue_tracker",
+      op: "add_comment",
+      payload: { body: `comment ${n}` },
+      idempotencyKey: `k-${n}`,
+    });
+  }
+  const tracker = fakeIssueTracker();
+  let n = 0;
+  const addComment = tracker.addComment.bind(tracker);
+  tracker.addComment = async (ref, body, key) => {
+    n++;
+    opts?.onCall?.(n);
+    return addComment(ref, body, key);
+  };
+  return {
+    db,
+    ticketId,
+    ports: { issueTracker: tracker },
+    calls: () => n,
+    pending: () =>
+      db
+        .query<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM projection_outbox WHERE status = 'pending'",
+        )
+        .get()?.n ?? -1,
   };
 }
