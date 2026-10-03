@@ -305,16 +305,35 @@ function select(
   return found;
 }
 
+/** This process's ancestors (its parent, the parent's parent, and so on), read from one listing by
+ *  parent links. The chain stops at the system process, at a pid missing from the listing, or at a
+ *  loop. */
+export function ancestorPids(table: ProcInfo[], from: number = process.pid): Set<number> {
+  const parent = new Map(table.map((p) => [p.pid, p.ppid]));
+  const out = new Set<number>();
+  let pid = parent.get(from);
+  while (pid !== undefined && pid > 1 && !out.has(pid)) {
+    out.add(pid);
+    pid = parent.get(pid);
+  }
+  return out;
+}
+
 function scanSync(a: {
   worktree: string;
   since: string;
   until?: string;
   timeoutMs: number;
   viaDiagnostic: boolean;
+  /** Leave out the chain of processes that started this Styre (R30). The sweep sets it: its window
+   *  reaches back to an orphan's start, so the shell that ran this command from inside the worktree
+   *  is in it. */
+  excludeOwnAncestors?: boolean;
 }): Leftover[] | Skip {
   const until = a.until ?? nowToken();
   const table = listProcesses();
-  const candidates = inWindow(table, a.since, until);
+  const mine = a.excludeOwnAncestors ? ancestorPids(table) : new Set<number>();
+  const candidates = inWindow(table, a.since, until).filter((p) => !mine.has(p.pid));
   const cwds = syncCwds(
     { timeoutMs: a.timeoutMs, pids: candidates.map((p) => p.pid) },
     a.viaDiagnostic,
@@ -345,6 +364,7 @@ export function findLeftoversOrReason(a: {
   since: string;
   timeoutMs: number;
   viaDiagnostic: boolean;
+  excludeOwnAncestors?: boolean;
 }): Leftover[] | { skipped: string } {
   return scanSync(a);
 }

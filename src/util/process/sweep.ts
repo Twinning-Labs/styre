@@ -273,6 +273,9 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
         since: from,
         timeoutMs: LEFTOVER_TIMEOUT_MS,
         viaDiagnostic: true,
+        // The shell that started this command may be running in the worktree and started inside
+        // the window: it is not something the agent left (R30).
+        excludeOwnAncestors: true,
       });
     } catch (e) {
       found = { skipped: errText(e) };

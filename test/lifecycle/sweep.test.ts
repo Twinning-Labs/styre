@@ -8,7 +8,11 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as door from "../../src/util/process/door.ts";
-import { __setCwdReadersForTests, formatLeftover } from "../../src/util/process/leftovers.ts";
+import {
+  __setCwdReadersForTests,
+  ancestorPids,
+  formatLeftover,
+} from "../../src/util/process/leftovers.ts";
 import * as procTable from "../../src/util/process/proc-table.ts";
 import {
   bootId,
@@ -25,6 +29,7 @@ import {
   recordFileName,
   writeRecord,
 } from "../../src/util/process/records.ts";
+import * as records from "../../src/util/process/records.ts";
 import type { StopReport } from "../../src/util/process/stop.ts";
 import { aliveFrom, sweepOrphans } from "../../src/util/process/sweep.ts";
 
@@ -406,6 +411,9 @@ describe("what the sweep leaves alone", () => {
 // ---- the exclusion of groups (Review Focus 1, N1) ----------------------------------------------
 
 describe("groups that are never expanded", () => {
+  // This is the end to end form of N1. It does NOT prove that the owner's group is excluded: stopTree
+  // already never expands the root's own group, and here the agent's group IS the owner's. The seam
+  // test below, which reads the exclusion set the sweep passes, is the one that proves it.
   test("a script that started Styre without job control survives the sweep (N1)", async () => {
     // The script and the agent share a group whose id is the script's pid.
     // The script goes on after its agent ends (its own `sleep`), as a CI script would. It writes the
@@ -509,6 +517,34 @@ describe("groups that are never expanded", () => {
 // ---- failures are loud and keep the record -----------------------------------------------------
 
 describe("a stop that fails", () => {
+  test("any other failure on one record (a removal that throws) is said, keeps the record, and the sweep goes on", async () => {
+    const owner = await deadOwner();
+    const first = spawn(["sleep", NAP]);
+    const f = startOf(first.pid);
+    writeRecord(rec(f, owner, { ident: "ENG-21" }));
+    const second = spawn(["sleep", NAP]);
+    const g = startOf(second.pid);
+    writeRecord(rec(g, owner, { ident: "ENG-22" }));
+    const real = records.removeRecord;
+    const remove = spyOn(records, "removeRecord").mockImplementation((r, o) => {
+      if (r.pid === f.pid) throw new Error("the disk said no");
+      real(r, o);
+    });
+    try {
+      const out = collect();
+      const r = await sweepOrphans({ stderr: out.stderr });
+      expect(r.failed.map((x) => x.pid)).toEqual([f.pid]);
+      expect(r.stopped.map((x) => x.pid).sort()).toEqual([f.pid, g.pid].sort());
+      expect(out.lines).toContain(
+        `styre: could not finish with the launch record for pid ${f.pid} from ENG-21: the disk said no\n`,
+      );
+      expect(out.lines).toContain(orphanLine("ENG-22", g.pid));
+      expect(listRecords().map((x) => [x.record.pid, x.claimedBy])).toEqual([[f.pid, null]]);
+    } finally {
+      remove.mockRestore();
+    }
+  });
+
   test("a stop that throws (an unsafe target) is said, the record kept unclaimed, and the sweep goes on", async () => {
     const owner = await deadOwner();
     // A record naming this very process: stopTree refuses Styre itself by throwing.
@@ -555,6 +591,32 @@ describe("a stop that fails", () => {
 // ---- the claim protocol ------------------------------------------------------------------------
 
 describe("claims", () => {
+  test("a claim that fails because a live peer renamed the record first is skipped (section 8 step 1)", async () => {
+    const owner = await deadOwner();
+    const peer = spawn(["sleep", NAP]); // a live command, mid sweep
+    const p = startOf(peer.pid);
+    const agent = spawn(["sleep", NAP]);
+    const a = startOf(agent.pid);
+    writeRecord(rec(a, owner));
+    // The sweep's listing was taken just before the peer claimed the record.
+    const stale = records.scanRecords();
+    const first = stale.listed[0];
+    if (!first) throw new Error("no record");
+    const held = claim(first, p);
+    if (!held) throw new Error("the peer's claim failed");
+    const scan = spyOn(records, "scanRecords").mockImplementation(() => stale);
+    try {
+      const out = collect();
+      const r = await sweepOrphans({ stderr: out.stderr });
+      expect(r).toEqual({ stopped: [], failed: [], stale: 0, leftoverLines: [] });
+      expect(out.lines).toEqual([]);
+    } finally {
+      scan.mockRestore();
+    }
+    expect(isGone(agent.pid)).toBe(false);
+    expect(files()).toEqual([held.file]);
+  });
+
   test("a claim left by a dead sweeper is retaken (finding 8)", async () => {
     const owner = await deadOwner();
     const sweeper = await deadOwner();
@@ -648,6 +710,81 @@ describe("claims", () => {
 // ---- the leftover check from the sweep (section 9.1) -------------------------------------------
 
 describe("the leftover check", () => {
+  test("the ancestors of this process are read from parent links, stopping at the system process", () => {
+    const row = (pid: number, ppid: number) => ({
+      pid,
+      ppid,
+      pgid: pid,
+      startedAt: "1",
+      state: "running" as const,
+    });
+    const table = [row(1, 0), row(10, 1), row(20, 10), row(30, 20), row(40, 30), row(99, 20)];
+    expect([...ancestorPids(table, 40)].sort((x, y) => x - y)).toEqual([10, 20, 30]);
+    expect([...ancestorPids([row(5, 6), row(6, 5)], 5)].sort()).toEqual([5, 6]); // a loop ends
+    expect(ancestorPids(table, 7)).toEqual(new Set()); // not in the listing
+  });
+
+  test("the shell that started this command in the worktree is not reported as a leftover (R30)", async () => {
+    const worktree = fs.realpathSync(mkdtempSync(join(tmpdir(), "styre-sweep-wt-")));
+    try {
+      const owner = await deadOwner();
+      const gone = await deadOwner(); // an orphan that had already exited, in this worktree
+      await until(() => tokenValue(nowToken()) > tokenValue(gone.startedAt));
+      // A real leftover in the worktree, as a control: it must still be reported.
+      const sh = Bun.spawn(
+        [
+          "sh",
+          "-c",
+          `cd "$1" || exit 1; nohup sleep ${NAP} </dev/null >/dev/null 2>&1 & echo $!`,
+          "sh",
+          worktree,
+        ],
+        { stdout: "pipe", stderr: "ignore" },
+      );
+      const left = Number((await new Response(sh.stdout).text()).trim());
+      mine.push(left);
+      await sh.exited;
+      writeRecord(rec(gone, owner, { worktree }));
+      // The sweeping command runs from a shell in the worktree; `; true` keeps the shell from
+      // replacing itself with the command, so it stays the command's parent.
+      const script = join(state, "sweep-lines.ts");
+      writeFileSync(
+        script,
+        [
+          `import { sweepOrphans } from ${JSON.stringify(join(import.meta.dir, "../../src/util/process/sweep.ts"))};`,
+          "const r = await sweepOrphans({ stderr: () => {} });",
+          "process.stdout.write(JSON.stringify(r.leftoverLines));",
+          "",
+        ].join("\n"),
+      );
+      const runner = Bun.spawn(
+        [
+          "sh",
+          "-c",
+          'echo $$ >&2; cd "$1" && "$2" "$3"; true',
+          "sh",
+          worktree,
+          process.execPath,
+          script,
+        ],
+        { env: { ...process.env, XDG_STATE_HOME: state }, stdout: "pipe", stderr: "pipe" },
+      );
+      mine.push(runner.pid);
+      const [out, err] = await Promise.all([
+        new Response(runner.stdout).text(),
+        new Response(runner.stderr).text(),
+        runner.exited,
+      ]);
+      const shellPid = Number(err.trim().split("\n")[0]);
+      expect(shellPid).toBe(runner.pid);
+      const lines = JSON.parse(out) as string[];
+      expect(lines.some((l) => l.includes(`(pid ${left})`))).toBe(true);
+      expect(lines.filter((l) => l.includes(`(pid ${shellPid})`))).toEqual([]);
+    } finally {
+      rmSync(worktree, { recursive: true, force: true });
+    }
+  });
+
   test("after stopping an orphan, what it left in its worktree is reported, never stopped", async () => {
     const worktree = fs.realpathSync(mkdtempSync(join(tmpdir(), "styre-sweep-wt-")));
     try {

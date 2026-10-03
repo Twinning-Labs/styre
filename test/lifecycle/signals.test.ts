@@ -759,6 +759,9 @@ describe("installing the handlers", () => {
 describe("a real process with the handlers installed", () => {
   async function child(mode = "plain") {
     const p = Bun.spawn(["bun", join(FX, "signal-child.ts"), mode], {
+      // Bun.spawn's default environment is the one Bun started with, which lacks the preload's test
+      // state folder: pass this process's, so no launch record reaches the operator's real one (R29).
+      env: { ...process.env },
       stdout: "pipe",
       stderr: "pipe",
     });

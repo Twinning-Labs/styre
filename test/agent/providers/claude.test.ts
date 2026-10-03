@@ -350,7 +350,9 @@ const r = await claudeAgentRunner(${JSON.stringify(cli)}).run({ prompt: "x", mod
 console.log(JSON.stringify({ completed: r.completed, stdout: r.stdout }));`,
   );
   const start = Date.now();
-  const proc = Bun.spawn(["bun", "run", script], { stdout: "pipe" });
+  // Bun.spawn's default environment is the one Bun started with, which lacks the preload's test
+  // state folder: pass this process's, so no launch record reaches the operator's real one (R29).
+  const proc = Bun.spawn(["bun", "run", script], { env: { ...process.env }, stdout: "pipe" });
   const out = await new Response(proc.stdout).text();
   await proc.exited;
   // drain timeout (5s) plus startup, well under the escaped holder's 20s
