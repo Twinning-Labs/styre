@@ -10,6 +10,7 @@ import * as door from "../../src/util/process/door.ts";
 import { listProcesses } from "../../src/util/process/proc-table.ts";
 import {
   HANDLER_DEADLINE_MS,
+  type HandlerCtx,
   type HandlerDeps,
   __resetSignalsForTests,
   handleStopSignal,
@@ -67,8 +68,56 @@ const alive = (pid: number) => listProcesses().some((p) => p.pid === pid && p.st
 const childOf = (parent: number): number =>
   listProcesses().find((p) => p.ppid === parent && p.state !== "zombie")?.pid ?? 0;
 
+/** Reads `stream` until `re` matches (or the stream ends), then lets go of it. */
+async function readUntil(stream: ReadableStream<Uint8Array>, re: RegExp): Promise<string> {
+  const reader = stream.getReader();
+  const dec = new TextDecoder();
+  let text = "";
+  try {
+    while (!re.test(text)) {
+      const r = await reader.read();
+      if (r.done) break;
+      text += dec.decode(r.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return text;
+}
+const ticketRun = () => {
+  const t = makeTicketDb();
+  const db = new Database(t.path);
+  door.beginStep({ stepId: t.stepId, startedAt: t.startedAt, ident: "ENG-1", headAtStart: null });
+  return { t, db, run: { db, dbPath: t.path, ticketId: t.ticketId, ident: "ENG-1" } };
+};
+const notes = (path: string): number => {
+  const c = new Database(path, { readonly: true });
+  try {
+    return (
+      c
+        .query<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM event_log WHERE kind = 'note' AND reason = 'interrupted'",
+        )
+        .get()?.n ?? -1
+    );
+  } finally {
+    c.close();
+  }
+};
+
 afterEach(() => {
-  // Even on failure: nothing a test started may outlive it.
+  // Even on failure: nothing a test started may outlive it. A launch still live here (a stop that
+  // never settled, a survivor) would otherwise keep Bun's event loop, and so the test run, alive.
+  for (const h of door.liveLaunches()) {
+    try {
+      // A group may outlive its leader; an agent is killed only while Bun has not seen it end.
+      if (h.record.kind === "group") process.kill(-h.record.pid, "SIGKILL");
+      else if (h.proc.exitCode === null && h.proc.signalCode === null) h.proc.kill("SIGKILL");
+    } catch {
+      /* already gone */
+    }
+    h.proc.unref();
+  }
   Bun.spawnSync(["pkill", "-9", "-f", "sleep 30[7-9][0-9]"]);
   Bun.spawnSync(["pkill", "-9", "-f", "stubborn-cli.sh"]);
   Bun.spawnSync(["pkill", "-9", "-f", "signal-child.ts"]);
@@ -79,7 +128,8 @@ afterEach(() => {
 describe("order and messages", () => {
   test("Ctrl-C: signals go out before any write, the message order is exact, and the exit re-raises", async () => {
     const h = agent([join(FX, "standin-agent.sh")], {}, { ...process.env, STANDIN_SLEEP: "3071" });
-    await Bun.sleep(200);
+    // The stand-in says `tool <pid>` once its tool command runs: only then is there a command to stop.
+    expect(await readUntil(h.proc.stderr, /tool \d+\n/)).toMatch(/tool \d+\n/);
     const { out, d } = deps();
     let wroteBeforeSignal = false;
     const origKill = process.kill;
@@ -445,6 +495,192 @@ describe("the deadline and the exit", () => {
   }, 10_000);
 });
 
+describe("fix round 1", () => {
+  test("the run connection is already read only at the handler's first write (step 1 before step 3)", async () => {
+    const { db, run } = ticketRun();
+    const { out, d } = deps();
+    let atFirstWrite: unknown = "no write";
+    d.stderr = (s) => {
+      if (out.err.length === 0) {
+        try {
+          db.query("UPDATE ticket SET title = 'x'").run();
+          atFirstWrite = "written";
+        } catch (err) {
+          atFirstWrite = err;
+        }
+      }
+      out.err.push(s);
+    };
+    await handleStopSignal("SIGINT", { command: "run", run }, d);
+    expect(String(atFirstWrite)).toMatch(/readonly/);
+    db.close();
+  });
+
+  test("an already closed run database: the agent is still stopped, nothing is recorded or emitted, and the exit happens", async () => {
+    const { t, db, run } = ticketRun();
+    db.close();
+    const h = agent(["sleep", "3083"]);
+    const { out, d } = deps();
+    await handleStopSignal("SIGTERM", { command: "run", run }, d);
+    expect(alive(h.record.pid)).toBe(false);
+    expect(out.err).toContain(
+      `styre: stopped the agent (pid ${h.record.pid}) and 0 of its commands.\n`,
+    );
+    expect(out.emitted).toEqual([]);
+    expect(notes(t.path)).toBe(0);
+    expect(out.err.some((l) => l.includes("resume with"))).toBe(false);
+    expect(out.exited).toEqual([143]);
+  });
+
+  test("the run is read at the signal: setRun(null) during the stop does not lose the recording (R26)", async () => {
+    const { t, db, run } = ticketRun();
+    agent(["sleep", "3084"]);
+    const { out, d } = deps();
+    const emittedWith: unknown[] = [];
+    d.emit = (r, conn) => {
+      out.emitted.push(r);
+      emittedWith.push(conn);
+    };
+    const ctx: HandlerCtx = { command: "run", run };
+    const p = handleStopSignal("SIGINT", ctx, d);
+    ctx.run = null; // run code moving on while the handler waits
+    await p;
+    expect(notes(t.path)).toBe(1);
+    expect(out.emitted.length).toBe(1);
+    expect(emittedWith).toEqual([db]);
+    expect(out.err.at(-1)).toBe("styre: run interrupted; resume with: styre run --resume ENG-1\n");
+    db.close();
+  });
+
+  test("a stop that never settles: the deadline still holds, the stops are forced, and the line says so", async () => {
+    const h = agent(["sleep", "3081"]);
+    // The stop never settles and holds no timer, so it cannot keep Bun alive; the real process it
+    // would have stopped is killed below, so that cannot either.
+    h.stop = () => new Promise(() => {});
+    const { out, d } = deps();
+    const t0 = Date.now();
+    try {
+      await handleStopSignal("SIGTERM", { command: "run", run: null }, d);
+      expect(Date.now() - t0).toBeLessThan(HANDLER_DEADLINE_MS);
+      expect(door.stopAbort.forced).toBe(true);
+      expect(out.err).toContain(
+        `styre: could not confirm that sleep 3081 (pid ${h.record.pid}) stopped (it did not finish in time); if it is still running, stop it with: kill -9 ${h.record.pid}\n`,
+      );
+      expect(out.exited).toEqual([143]);
+    } finally {
+      h.proc.kill("SIGKILL");
+      await h.proc.exited;
+    }
+  }, 15_000);
+
+  test("a stop that fails is reported as unconfirmed with its reason", async () => {
+    const h = agent(["sleep", "3085"]);
+    h.stop = () => Promise.reject(new Error("boom"));
+    const { out, d } = deps();
+    await handleStopSignal("SIGTERM", { command: "run", run: null }, d);
+    expect(out.err).toContain(
+      `styre: could not confirm that sleep 3085 (pid ${h.record.pid}) stopped (boom); if it is still running, stop it with: kill -9 ${h.record.pid}\n`,
+    );
+  });
+
+  test("a leftover check that throws is said as skipped, and the interruption is still recorded", async () => {
+    const { t, db, run } = ticketRun();
+    agent(["sleep", "3086"], { stepId: t.stepId, worktree: scratch });
+    const { out, d } = deps();
+    d.leftovers = () => {
+      throw new Error("lsof exploded");
+    };
+    await handleStopSignal("SIGTERM", { command: "run", run }, d);
+    expect(out.err).toContain(
+      "styre: skipped the check for processes the agent left running in the worktree (lsof exploded)\n",
+    );
+    expect(notes(t.path)).toBe(1);
+    expect(out.emitted.length).toBe(1);
+    db.close();
+  });
+
+  test("a third signal does not repeat the forcing line", async () => {
+    const { out, d } = deps();
+    agent(["bash", join(FX, "stubborn-cli.sh")]);
+    const first = handleStopSignal("SIGINT", { command: "run", run: null }, d);
+    await handleStopSignal("SIGINT", { command: "run", run: null }, d);
+    await handleStopSignal("SIGTERM", { command: "run", run: null }, d);
+    await first;
+    expect(out.err.filter((l) => l === "styre: forcing stop…\n")).toHaveLength(1);
+    expect(out.reraised).toEqual(["SIGINT"]);
+  });
+
+  test("a re-raise that throws still reaches the fallback exit", async () => {
+    const { out, d } = deps();
+    d.reraise = () => {
+      throw new Error("kill failed");
+    };
+    await handleStopSignal("SIGHUP", { command: "run", run: null }, d);
+    expect(out.exited).toEqual([129]);
+  });
+
+  test("no agent line when the agent itself survived; its own survivor line is printed", async () => {
+    const h = agent(["sleep", "3082"]);
+    const pid = h.record.pid;
+    door.__setStopDepsForTests({
+      ...realStopDeps,
+      kill: (t, s) => {
+        if (t === pid) return;
+        realStopDeps.kill(t, s);
+      },
+    });
+    const { out, d } = deps();
+    const first = handleStopSignal("SIGINT", { command: "run", run: null }, d);
+    await Bun.sleep(200);
+    await handleStopSignal("SIGINT", { command: "run", run: null }, d); // force it
+    await first;
+    expect(out.err.some((l) => l.startsWith("styre: stopped the agent"))).toBe(false);
+    expect(out.err).toContain(
+      `styre: could not stop sleep 3082 (pid ${pid}); stop it with: kill -9 ${pid}\n`,
+    );
+  }, 10_000);
+
+  test("command (group) launches are left out of the leftover check", async () => {
+    const g = door.launch({
+      argv: ["sleep", "3087"],
+      cwd: process.cwd(),
+      env: process.env,
+      kind: "group",
+      context: { ident: "ENG-1", stepId: null, worktree: scratch },
+    });
+    const a = agent(["sleep", "3088"], { worktree: scratch });
+    const { out, d } = deps();
+    const seen: number[][] = [];
+    d.leftovers = (stopped) => {
+      seen.push(stopped.map((h) => h.record.pid));
+      return [];
+    };
+    await handleStopSignal("SIGTERM", { command: "run", run: null }, d);
+    expect(seen).toEqual([[a.record.pid]]);
+    expect(alive(g.record.pid)).toBe(false);
+    // With only a group launch, there is no check and no skip line.
+    door.__resetForTests();
+    __resetSignalsForTests();
+    door.launch({
+      argv: ["sleep", "3089"],
+      cwd: process.cwd(),
+      env: process.env,
+      kind: "group",
+      context: { ident: "ENG-1", stepId: null, worktree: scratch },
+    });
+    const second = deps();
+    let called = false;
+    second.d.leftovers = () => {
+      called = true;
+      return [];
+    };
+    await handleStopSignal("SIGTERM", { command: "run", run: null }, second.d);
+    expect(called).toBe(false);
+    expect(second.out.err.some((l) => l.includes("skipped the check"))).toBe(false);
+    void out;
+  });
+});
+
 describe("installing the handlers", () => {
   const SIGS = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
   const counts = () => SIGS.map((s) => process.listenerCount(s));
@@ -455,7 +691,8 @@ describe("installing the handlers", () => {
       process.stdout.listenerCount("error"),
       process.stderr.listenerCount("error"),
     ];
-    const h = installStopHandlers({ command: "run", run: null });
+    // Injected re-raise and exit: a stray signal during the test must not end the test run.
+    const h = installStopHandlers({ command: "run", run: null }, deps().d);
     try {
       expect(counts()).toEqual(before.map((n) => n + 1));
       expect(process.stdout.listenerCount("error")).toBeGreaterThanOrEqual((errBefore[0] ?? 0) + 1);
@@ -468,7 +705,7 @@ describe("installing the handlers", () => {
 
   test("suspendStopHandlers removes the listeners while it runs and restores them, even on a throw", async () => {
     const before = counts();
-    const h = installStopHandlers({ command: "setup", run: null });
+    const h = installStopHandlers({ command: "setup", run: null }, deps().d);
     try {
       const during = await suspendStopHandlers(() => counts());
       expect(during).toEqual(before);

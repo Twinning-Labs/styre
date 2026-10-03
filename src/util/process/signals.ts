@@ -44,7 +44,10 @@ const SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"];
 
 export interface HandlerCtx {
   command: "run" | "setup";
-  /** Set once the run database is open (`styre run` only). */
+  /** Set once the run database is open (`styre run` only). The handler reads it once, at the
+   *  signal (R26): a run that is null, or whose connection is already closed, at that moment is
+   *  not recorded. So the run code (Task 11) must neither close this connection nor call
+   *  `setRun(null)` while the door is stopping; it may only do so on a normal exit. */
   run?: { db: Database; dbPath: string; ticketId: number; ident: string } | null;
   releaseLock?: () => void;
   /** Shut analytics down within `ms`. */
@@ -52,7 +55,8 @@ export interface HandlerCtx {
 }
 export interface HandlerDeps {
   stderr: (s: string) => void;
-  emit: (row: EventLogRow) => void;
+  /** Writes the interruption's note as telemetry; `db` is the run's connection read at the signal. */
+  emit: (row: EventLogRow, db: Database) => void;
   reraise: (sig: NodeJS.Signals) => void;
   exit: (code: number) => void;
   now: () => number;
@@ -84,6 +88,8 @@ function snapshot(c: LaunchContext | undefined): LaunchContext | null {
 }
 
 let first: NodeJS.Signals | null = null;
+/** Set by the second signal, so a third one says nothing more. */
+let forcing = false;
 
 /** Section 7.3. Exported for tests; production reaches it through `installStopHandlers`. */
 export async function handleStopSignal(
@@ -102,7 +108,8 @@ export async function handleStopSignal(
     // A second signal: every stop still in progress skips the rest of its grace period. The exit
     // still uses the first signal.
     stopAbort.forced = true;
-    say("styre: forcing stop…\n");
+    if (!forcing) say("styre: forcing stop…\n");
+    forcing = true;
     return;
   }
   first = sig;
@@ -112,11 +119,19 @@ export async function handleStopSignal(
     // 1. Close the door, and make the run's connection read only. From here run code can neither
     //    start a process nor write the run database.
     beginStopping();
-    try {
-      ctx.run?.db.exec("PRAGMA query_only = ON;");
-    } catch {
-      /* already closed: nothing can write through it */
+    // The run is read once, here (R26). A connection that refuses the pragma is closed: the run
+    // has ended or is ending, so there is nothing to record (section 7.3 step 6).
+    const run = ctx.run ?? null;
+    let runOpen = false;
+    if (run) {
+      try {
+        run.db.exec("PRAGMA query_only = ON;");
+        runOpen = true;
+      } catch {
+        /* already closed: nothing can write through it, and nothing is recorded */
+      }
     }
+    const recordable = ctx.command === "run" && run !== null && runOpen ? run : null;
     // Read what the recording needs now, before any await lets run code move on (R18).
     const step = inFlightStep();
     const launches = liveLaunches();
@@ -171,10 +186,10 @@ export async function handleStopSignal(
 
     // 6. Record the interruption: `styre run` only, one transaction on the handler's own connection.
     let row: EventLogRow | null = null;
-    if (ctx.command === "run" && ctx.run) {
+    if (recordable) {
       try {
-        row = recordInterruption(ctx.run.dbPath, {
-          ticketId: ctx.run.ticketId,
+        row = recordInterruption(recordable.dbPath, {
+          ticketId: recordable.ticketId,
           signal: sig,
           step,
           agent: agentContext,
@@ -185,9 +200,9 @@ export async function handleStopSignal(
     }
 
     // 7. The telemetry event, then the outcome.
-    if (row) {
+    if (row && recordable) {
       try {
-        d.emit(row);
+        d.emit(row, recordable.db);
       } catch (err) {
         say(`styre: could not write the interruption's telemetry event: ${message(err)}\n`);
       }
@@ -223,8 +238,8 @@ export async function handleStopSignal(
       }
     });
     for (const l of [...lines, ...survivorLines, ...leftoverLines]) say(l);
-    if (ctx.command === "run" && ctx.run) {
-      say(`styre: run interrupted; resume with: styre run --resume ${ctx.run.ident}\n`);
+    if (recordable) {
+      say(`styre: run interrupted; resume with: styre run --resume ${recordable.ident}\n`);
     }
   } catch (err) {
     say(`styre: the stop handler failed: ${message(err)}\n`);
@@ -263,7 +278,7 @@ function removeInstalled(): void {
   for (const [s, h] of installed ?? []) process.removeListener(s, h);
 }
 
-function realDeps(ctx: HandlerCtx): HandlerDeps {
+function realDeps(): HandlerDeps {
   return {
     stderr: (s) => {
       try {
@@ -272,9 +287,7 @@ function realDeps(ctx: HandlerCtx): HandlerDeps {
         /* the terminal is gone */
       }
     },
-    emit: (row) => {
-      if (ctx.run) stdoutSink(toEvent(row, runCtx(ctx.run.db)));
-    },
+    emit: (row, db) => stdoutSink(toEvent(row, runCtx(db))),
     reraise: (sig) => {
       removeInstalled();
       process.kill(process.pid, sig);
@@ -298,7 +311,7 @@ export function installStopHandlers(
     process.stderr.on("error", () => {});
     streamsGuarded = true;
   }
-  const d: HandlerDeps = { ...realDeps(ctx), ...deps };
+  const d: HandlerDeps = { ...realDeps(), ...deps };
   const mine = new Map<NodeJS.Signals, () => void>(
     SIGNALS.map((s) => [
       s,
@@ -340,4 +353,5 @@ export function __resetSignalsForTests(): void {
   removeInstalled();
   installed = null;
   first = null;
+  forcing = false;
 }
