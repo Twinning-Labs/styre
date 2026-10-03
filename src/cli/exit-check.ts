@@ -31,8 +31,18 @@ export async function assertNoLeakedLaunches(): Promise<void> {
 }
 
 /** `guard`, plus the exit check. The check also runs when the command threw: a leaked launch is
- *  stopped and named either way, and the error boundary's exit code stands. */
-export async function guardWithExitCheck(cmd: string, body: () => Promise<void>): Promise<void> {
-  await guard(cmd, body);
-  await assertNoLeakedLaunches();
+ *  stopped and named either way, and the error boundary's exit code stands. `after` runs last, once
+ *  the check is done, whatever happened: `styre run` and `styre setup` remove their stop handlers
+ *  there, so a signal during the check's wait for leftover checks is still handled (R27). */
+export async function guardWithExitCheck(
+  cmd: string,
+  body: () => Promise<void>,
+  after?: () => void,
+): Promise<void> {
+  try {
+    await guard(cmd, body);
+    await assertNoLeakedLaunches();
+  } finally {
+    after?.();
+  }
 }

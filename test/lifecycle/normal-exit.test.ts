@@ -167,7 +167,10 @@ test("guardWithExitCheck: an internal error that leaked keeps its own exit code 
 test("styre run and styre setup both use the exit check", () => {
   for (const f of ["run.ts", "setup.ts"]) {
     const src = readFileSync(join(import.meta.dir, "../../src/cli", f), "utf8");
-    expect(src).toMatch(/guardWithExitCheck\("(run|setup)"/);
+    expect(src).toMatch(/guardWithExitCheck\(\s*"(run|setup)"/);
+    // The citty command goes through the body that runs the exit check (and removes the stop
+    // handlers after it, R27).
+    expect(src).toMatch(/run: \(ctx\) => (run|setup)CommandBody\(/);
     expect(src).not.toMatch(/\bguard\("(run|setup)"/);
   }
 });

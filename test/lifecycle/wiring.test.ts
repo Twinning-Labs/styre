@@ -12,11 +12,11 @@ import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import type { AgentRunResult } from "../../src/agent/runner.ts";
 import { StyreError, usageError } from "../../src/cli/errors.ts";
-import { assertNoLeakedLaunches, guardWithExitCheck } from "../../src/cli/exit-check.ts";
+import { assertNoLeakedLaunches } from "../../src/cli/exit-check.ts";
 import { guard } from "../../src/cli/output.ts";
 import { parkDir, resumeRun } from "../../src/cli/park.ts";
-import { runImpl } from "../../src/cli/run.ts";
-import { runSetup, setupImpl } from "../../src/cli/setup.ts";
+import { runCommandBody, runImpl } from "../../src/cli/run.ts";
+import { runSetup, setupCommandBody, setupImpl } from "../../src/cli/setup.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { slugForCwd } from "../../src/config/discover.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
@@ -34,7 +34,11 @@ import type { EnrichDeps } from "../../src/setup/enrich.ts";
 import type { AnalyticsClient } from "../../src/telemetry/analytics/client.ts";
 import { telemetryEnabled } from "../../src/telemetry/analytics/consent.ts";
 import * as door from "../../src/util/process/door.ts";
-import { __setCwdReadersForTests } from "../../src/util/process/leftovers.ts";
+import {
+  __setCwdReadersForTests,
+  checkLeftoversInBackground,
+} from "../../src/util/process/leftovers.ts";
+import { nowToken } from "../../src/util/process/proc-table.ts";
 import {
   type HandlerDeps,
   __resetSignalsForTests,
@@ -314,6 +318,19 @@ function recordBlockingCalls(): { argv: string; listening: number }[] {
 /** The run tests drive a whole run; the handler may wait in its own timers. */
 const SLOW = 30_000;
 
+/** Starts a leftover check that is still pending when the command's exit check waits for it, and
+ *  sends SIGINT to the listeners during that wait (R27). */
+function stopDuringExitCheckWait(): void {
+  __setCwdReadersForTests({
+    async: async () => {
+      await Bun.sleep(200);
+      process.emit("SIGINT", "SIGINT");
+      return new Map();
+    },
+  });
+  void checkLeftoversInBackground({ worktree: tmpdir(), since: nowToken(), report: () => {} });
+}
+
 const okPreflight = () => ({ ok: true as const, version: null });
 
 // ---- the error boundary while stopping (m1) -------------------------------------------------------
@@ -415,19 +432,17 @@ describe("styre run", () => {
         const a = analytics(false);
         process.chdir(repo);
         await captured(() =>
-          guardWithExitCheck("run", () =>
-            runImpl(
-              { args: { ticket: "ENG-1" } },
-              {
-                ports: { issueTracker: tracker(), forge: fakeForge() },
-                runner: agent(false),
-                preflight: () => {
-                  atPreflight = counts();
-                  return okPreflight();
-                },
-                analyticsClient: a.client,
+          runCommandBody(
+            { ticket: "ENG-1" },
+            {
+              ports: { issueTracker: tracker(), forge: fakeForge() },
+              runner: agent(false),
+              preflight: () => {
+                atPreflight = counts();
+                return okPreflight();
               },
-            ),
+              analyticsClient: a.client,
+            },
           ),
         );
         process.chdir(cwd);
@@ -443,6 +458,65 @@ describe("styre run", () => {
         process.chdir(cwd);
         env.restore();
         rmSync(repo, { recursive: true, force: true });
+      }
+    },
+    SLOW,
+  );
+
+  test(
+    "R27: a stop during the exit check's wait for leftover checks is handled by the handler",
+    async () => {
+      const env = isolate();
+      const profile = writeProfile(
+        join(env.configRoot, "p", "profile.json"),
+        "test-project",
+        tmpdir(),
+      );
+      const { out, d } = handlerDeps();
+      const base = counts();
+      try {
+        // The run ends early (the agent CLI preflight fails) while a leftover check is still
+        // pending; the exit check waits for it, and the signal lands during that wait.
+        await captured(() =>
+          runCommandBody(
+            { ticket: "ENG-1", profile },
+            {
+              preflight: () => {
+                stopDuringExitCheckWait();
+                throw new Error("the agent CLI is missing");
+              },
+              analyticsClient: analytics(false).client,
+              stopHandlerDeps: d,
+            },
+          ),
+        );
+        await waitFor(() => out.exited.length > 0, 3_000);
+        expect(out.lines[0]).toBe(STOP_LINE);
+        expect(out.exited).toEqual([130]);
+        expect(counts()).toEqual(plusOne(base)); // kept: the stop owns them now
+      } finally {
+        env.restore();
+      }
+    },
+    SLOW,
+  );
+
+  test(
+    "the command removes the handlers once its exit check is done",
+    async () => {
+      const env = isolate();
+      const base = counts();
+      try {
+        await captured(() =>
+          runCommandBody(
+            { ticket: "ENG-1", "review-action": "accept-risk" },
+            { analyticsClient: analytics(false).client, stopHandlerDeps: handlerDeps().d },
+          ),
+        );
+        expect(process.exitCode).toBe(64);
+        expect(counts()).toEqual(base);
+      } finally {
+        env.restore();
       }
     },
     SLOW,
@@ -479,17 +553,15 @@ describe("styre run", () => {
         const checkpoint = parkDir("test-project", "ENG-1");
         let text = "";
         const run = captured(() =>
-          guardWithExitCheck("run", () =>
-            runImpl(
-              { args: { ticket: "ENG-1", profile } },
-              {
-                ports: { issueTracker: tracker(), forge: fakeForge() },
-                runner: agent(true),
-                preflight: okPreflight,
-                analyticsClient: a.client,
-                stopHandlerDeps: d,
-              },
-            ),
+          runCommandBody(
+            { ticket: "ENG-1", profile },
+            {
+              ports: { issueTracker: tracker(), forge: fakeForge() },
+              runner: agent(true),
+              preflight: okPreflight,
+              analyticsClient: a.client,
+              stopHandlerDeps: d,
+            },
           ),
         ).then((t) => {
           text = t;
@@ -557,17 +629,15 @@ describe("styre run", () => {
         const checkpoint = parkDir("test-project", "ENG-1");
         let text = "";
         const run = captured(() =>
-          guardWithExitCheck("run", () =>
-            runImpl(
-              { args: { ticket: "ENG-1", profile } },
-              {
-                ports: { issueTracker: tracker(), forge: fakeForge() },
-                runner: agent(false),
-                preflight: okPreflight,
-                analyticsClient: a.client,
-                stopHandlerDeps: d,
-              },
-            ),
+          runCommandBody(
+            { ticket: "ENG-1", profile },
+            {
+              ports: { issueTracker: tracker(), forge: fakeForge() },
+              runner: agent(false),
+              preflight: okPreflight,
+              analyticsClient: a.client,
+              stopHandlerDeps: d,
+            },
           ),
         ).then((t) => {
           text = t;
@@ -612,17 +682,15 @@ describe("styre run", () => {
       const { out, d } = handlerDeps();
       try {
         await captured(() =>
-          guardWithExitCheck("run", () =>
-            runImpl(
-              { args: { ticket: "ENG-1", profile, db: dbPath } },
-              {
-                ports: { issueTracker: tracker(), forge: fakeForge() },
-                runner: agent(true),
-                preflight: okPreflight,
-                analyticsClient: analytics(false).client,
-                stopHandlerDeps: d,
-              },
-            ),
+          runCommandBody(
+            { ticket: "ENG-1", profile, db: dbPath },
+            {
+              ports: { issueTracker: tracker(), forge: fakeForge() },
+              runner: agent(true),
+              preflight: okPreflight,
+              analyticsClient: analytics(false).client,
+              stopHandlerDeps: d,
+            },
           ),
         );
         await waitFor(() => out.exited.length > 0);
@@ -655,17 +723,15 @@ describe("styre run", () => {
       };
       try {
         const text = await captured(() =>
-          guardWithExitCheck("run", () =>
-            runImpl(
-              { args: { ticket: "ENG-1", profile } },
-              {
-                ports: { issueTracker: it, forge: fakeForge() },
-                runner: agent(false),
-                preflight: okPreflight,
-                analyticsClient: analytics(false).client,
-                stopHandlerDeps: d,
-              },
-            ),
+          runCommandBody(
+            { ticket: "ENG-1", profile },
+            {
+              ports: { issueTracker: it, forge: fakeForge() },
+              runner: agent(false),
+              preflight: okPreflight,
+              analyticsClient: analytics(false).client,
+              stopHandlerDeps: d,
+            },
           ),
         );
         await waitFor(() => out.exited.length > 0);
@@ -711,17 +777,15 @@ describe("styre run --resume", () => {
       try {
         let text = "";
         const run = captured(() =>
-          guardWithExitCheck("run", () =>
-            runImpl(
-              { args: { resume: "ENG-1", profile } },
-              {
-                ports: { issueTracker: tracker(), forge: fakeForge() },
-                runner: agent(true),
-                preflight: okPreflight,
-                analyticsClient: a.client,
-                stopHandlerDeps: d,
-              },
-            ),
+          runCommandBody(
+            { resume: "ENG-1", profile },
+            {
+              ports: { issueTracker: tracker(), forge: fakeForge() },
+              runner: agent(true),
+              preflight: okPreflight,
+              analyticsClient: a.client,
+              stopHandlerDeps: d,
+            },
           ),
         ).then((t) => {
           text = t;
@@ -768,17 +832,15 @@ describe("styre run --resume", () => {
       try {
         let text = "";
         const run = captured(() =>
-          guardWithExitCheck("run", () =>
-            runImpl(
-              { args: { resume: "ENG-1", profile } },
-              {
-                ports: { issueTracker: tracker(), forge },
-                runner: agent(false),
-                preflight: okPreflight,
-                analyticsClient: a.client,
-                stopHandlerDeps: d,
-              },
-            ),
+          runCommandBody(
+            { resume: "ENG-1", profile },
+            {
+              ports: { issueTracker: tracker(), forge },
+              runner: agent(false),
+              preflight: okPreflight,
+              analyticsClient: a.client,
+              stopHandlerDeps: d,
+            },
           ),
         ).then((t) => {
           text = t;
@@ -808,6 +870,59 @@ describe("styre run --resume", () => {
   );
 
   test(
+    "a stop after the resumed step, while the resume waits for its leftover checks: nothing is finished",
+    async () => {
+      const k = await parked();
+      const env = isolate(k.state);
+      const profile = writeProfile(join(env.configRoot, "p", "profile.json"), k.p.slug, k.repo);
+      const { out, d } = handlerDeps();
+      const a = analytics(true);
+      __setCwdReadersForTests({
+        async: async () => {
+          await Bun.sleep(150);
+          process.emit("SIGINT", "SIGINT");
+          return new Map();
+        },
+      });
+      try {
+        let text = "";
+        const run = captured(() =>
+          runCommandBody(
+            { resume: "ENG-1", profile },
+            {
+              ports: { issueTracker: tracker(), forge: fakeForge() },
+              runner: agent(false),
+              preflight: okPreflight,
+              analyticsClient: a.client,
+              stopHandlerDeps: d,
+            },
+          ),
+        ).then((t) => {
+          text = t;
+        });
+        expect(await settles(run, 5_000)).toBe(true);
+        expect(out.emitted).toHaveLength(1);
+        expect(process.exitCode).toBe(0); // not 75: the resume did not finish the run
+        expect(text).not.toContain("Paused again");
+        const runDb = out.emitted[0]?.db as Database;
+        expect(() => runDb.query("SELECT 1").get()).not.toThrow(); // dumpPark did not close it
+        expect(existsSync(join(k.p.dumpDir, "run.lock"))).toBe(true);
+        expect(text).not.toContain("internal error");
+        a.open();
+        await waitFor(() => out.exited.length > 0);
+        expect(out.exited).toEqual([130]);
+        expect(existsSync(join(k.p.dumpDir, "run.lock"))).toBe(false);
+        runDb.close();
+      } finally {
+        a.open();
+        env.restore();
+        cleanupParkedRun(k.p);
+      }
+    },
+    SLOW,
+  );
+
+  test(
     "a resume that parks again ends with the handlers removed and the lock released",
     async () => {
       const k = await parked();
@@ -816,16 +931,14 @@ describe("styre run --resume", () => {
       const base = counts();
       try {
         await captured(() =>
-          guardWithExitCheck("run", () =>
-            runImpl(
-              { args: { resume: "ENG-1", profile } },
-              {
-                ports: { issueTracker: tracker(), forge: fakeForge() },
-                runner: agent(false),
-                preflight: okPreflight,
-                analyticsClient: analytics(false).client,
-              },
-            ),
+          runCommandBody(
+            { resume: "ENG-1", profile },
+            {
+              ports: { issueTracker: tracker(), forge: fakeForge() },
+              runner: agent(false),
+              preflight: okPreflight,
+              analyticsClient: analytics(false).client,
+            },
           ),
         );
         expect(process.exitCode).toBe(75);
@@ -969,27 +1082,81 @@ describe("styre setup", () => {
     const env = isolate();
     const repo = gitRepo();
     const { out, d } = handlerDeps();
+    const base = counts();
     try {
       const text = await captured(() =>
-        guardWithExitCheck("setup", () =>
-          setupImpl(
-            { args: { repo } },
-            {
-              preflight: () => {
-                process.emit("SIGINT", "SIGINT");
-                throw new StyreError({ code: 78, headline: "an error after the stop began" });
-              },
-              stopHandlerDeps: d,
+        setupCommandBody(
+          { repo },
+          {
+            preflight: () => {
+              process.emit("SIGINT", "SIGINT");
+              throw new StyreError({ code: 78, headline: "an error after the stop began" });
             },
-          ),
+            stopHandlerDeps: d,
+          },
         ),
       );
       expect(text).toBe("");
       expect(process.exitCode).toBe(0);
+      // Setup keeps its handlers during the stop: a second Ctrl-C forces the stop instead of
+      // taking the default action.
+      expect(counts()).toEqual(plusOne(base));
+      process.emit("SIGINT", "SIGINT");
+      expect(out.lines).toContain("styre: forcing stop…\n");
       await waitFor(() => out.exited.length > 0);
       expect(out.exited).toEqual([130]);
       expect(out.lines[0]).toBe(STOP_LINE);
       expect(out.lines.some((l) => l.includes("resume"))).toBe(false); // setup has no run
+    } finally {
+      env.restore();
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test("R27: a stop during setup's exit check wait for leftover checks is handled by the handler", async () => {
+    const env = isolate();
+    const repo = gitRepo();
+    const { out, d } = handlerDeps();
+    try {
+      await captured(() =>
+        setupCommandBody(
+          { repo },
+          {
+            preflight: () => {
+              stopDuringExitCheckWait();
+              throw new Error("the agent CLI is missing");
+            },
+            stopHandlerDeps: d,
+          },
+        ),
+      );
+      await waitFor(() => out.exited.length > 0, 3_000);
+      expect(out.lines[0]).toBe(STOP_LINE);
+      expect(out.exited).toEqual([130]);
+    } finally {
+      env.restore();
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test("setup removes the handlers once its exit check is done", async () => {
+    const env = isolate();
+    const repo = gitRepo();
+    const base = counts();
+    try {
+      await captured(() =>
+        setupCommandBody(
+          { repo },
+          {
+            preflight: () => {
+              throw new Error("the agent CLI is missing");
+            },
+            stopHandlerDeps: handlerDeps().d,
+          },
+        ),
+      );
+      expect(process.exitCode).toBe(70);
+      expect(counts()).toEqual(base);
     } finally {
       env.restore();
       rmSync(repo, { recursive: true, force: true });

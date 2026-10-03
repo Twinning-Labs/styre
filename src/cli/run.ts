@@ -135,20 +135,43 @@ export const runCommand = defineCommand({
       description: "Discard an existing checkpoint for this ticket and start over",
     },
   },
-  run: (ctx) => guardWithExitCheck("run", () => runImpl({ args: ctx.args as unknown as RunArgs })),
+  run: (ctx) => runCommandBody(ctx.args as unknown as RunArgs),
 });
 
-export async function runImpl(
-  { args }: { args: RunArgs },
-  deps?: {
-    analyticsClient?: AnalyticsClient;
-    ports?: ProjectorPorts;
-    runner?: AgentRunner;
-    preflight?: (config: AgentConfig) => AgentCliPreflight;
-    /** Replaces parts of the stop handler's real dependencies (tests: no real re-raise or exit). */
-    stopHandlerDeps?: Partial<HandlerDeps>;
-  },
-): Promise<void> {
+/** What `styre run` runs: the command behind its error boundary and exit check. */
+export async function runCommandBody(args: RunArgs, deps?: RunDeps): Promise<void> {
+  let removeHandlers = (): void => {};
+  await guardWithExitCheck(
+    "run",
+    () =>
+      runImpl(
+        { args },
+        {
+          ...deps,
+          keepStopHandlers: (remove) => {
+            removeHandlers = remove;
+          },
+        },
+      ),
+    () => removeHandlers(),
+  );
+}
+
+/** Test seams of `styre run`; production passes none. */
+export interface RunDeps {
+  analyticsClient?: AnalyticsClient;
+  ports?: ProjectorPorts;
+  runner?: AgentRunner;
+  preflight?: (config: AgentConfig) => AgentCliPreflight;
+  /** Replaces parts of the stop handler's real dependencies (tests: no real re-raise or exit). */
+  stopHandlerDeps?: Partial<HandlerDeps>;
+  /** Hands the removal of the stop handlers to the caller, which calls it after its exit check
+   *  (R27). Without it, `runImpl` removes them itself when it returns. The removal does nothing
+   *  while a stop is in progress. */
+  keepStopHandlers?: (remove: () => void) => void;
+}
+
+export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Promise<void> {
   // Hoisted so the single catch can emit `cliError` for throws that happen BEFORE analytics is
   // built (bad/absent profile, "not a git repo" usage error, config-discovery errors). When
   // config was never resolved, the catch builds a fallback client (env opt-outs still apply).
@@ -175,6 +198,9 @@ export async function runImpl(
     },
     deps?.stopHandlerDeps,
   );
+  deps?.keepStopHandlers?.(() => {
+    if (!isStopping()) stop.dispose();
+  });
   const wiring: StopWiring = {
     setRun: (r) => stop.setRun(r),
     holdLock: (lock) => {
@@ -500,9 +526,9 @@ export async function runImpl(
     throw err; // rethrow → guard renders + sets process.exitCode
   } finally {
     // During a stop the handler keeps its listeners (a second signal forces), and shuts analytics
-    // down within its deadline.
+    // down within its deadline. A caller that took the removal does it after its exit check (R27).
     if (!isStopping()) {
-      stop.dispose();
+      if (!deps?.keepStopHandlers) stop.dispose();
       await analytics?.shutdown();
     }
   }

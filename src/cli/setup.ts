@@ -359,9 +359,27 @@ export const setupCommand = defineCommand({
         "Headless only: accept agent-refined command strings. These run as code at verify — the metacharacter filter is hygiene, not a sandbox. Use only on trusted repos / isolated environments. Off by default.",
     },
   },
-  run: (ctx) =>
-    guardWithExitCheck("setup", () => setupImpl({ args: ctx.args as unknown as SetupArgs })),
+  run: (ctx) => setupCommandBody(ctx.args as unknown as SetupArgs),
 });
+
+/** What `styre setup` runs: the command behind its error boundary and exit check. */
+export async function setupCommandBody(args: SetupArgs, deps?: SetupDeps): Promise<void> {
+  let removeHandlers = (): void => {};
+  await guardWithExitCheck(
+    "setup",
+    () =>
+      setupImpl(
+        { args },
+        {
+          ...deps,
+          keepStopHandlers: (remove) => {
+            removeHandlers = remove;
+          },
+        },
+      ),
+    () => removeHandlers(),
+  );
+}
 
 export interface SetupArgs {
   repo?: string;
@@ -375,14 +393,18 @@ export interface SetupArgs {
   "test-environment"?: string;
 }
 
-export async function setupImpl(
-  { args }: { args: SetupArgs },
-  deps?: {
-    preflight?: typeof preflightAgentCli;
-    /** Replaces parts of the stop handler's real dependencies (tests: no real re-raise or exit). */
-    stopHandlerDeps?: Partial<HandlerDeps>;
-  },
-): Promise<void> {
+/** Test seams of `styre setup`; production passes none. */
+export interface SetupDeps {
+  preflight?: typeof preflightAgentCli;
+  /** Replaces parts of the stop handler's real dependencies (tests: no real re-raise or exit). */
+  stopHandlerDeps?: Partial<HandlerDeps>;
+  /** Hands the removal of the stop handlers to the caller, which calls it after its exit check
+   *  (R27). Without it, `setupImpl` removes them itself when it returns. The removal does nothing
+   *  while a stop is in progress. */
+  keepStopHandlers?: (remove: () => void) => void;
+}
+
+export async function setupImpl({ args }: { args: SetupArgs }, deps?: SetupDeps): Promise<void> {
   let analytics: Analytics | undefined;
   // ENG-485 section 7.1: installed before anything else, so before any launch (the slug's git call,
   // the agent CLI preflight, the enrichment agent). From a signal on, the handler owns the exit.
@@ -396,13 +418,17 @@ export async function setupImpl(
     },
     deps?.stopHandlerDeps,
   );
+  deps?.keepStopHandlers?.(() => {
+    if (!isStopping()) stop.dispose();
+  });
   try {
     await setupBody(args, deps, (a) => {
       analytics = a;
     });
   } finally {
-    // During a stop the handler keeps its listeners: a second signal forces.
-    if (!isStopping()) stop.dispose();
+    // During a stop the handler keeps its listeners: a second signal forces. A caller that took
+    // the removal does it after its exit check (R27).
+    if (!isStopping() && !deps?.keepStopHandlers) stop.dispose();
   }
 }
 
