@@ -339,6 +339,16 @@ export function findLeftovers(a: {
   return isSkip(r) ? "skipped" : r;
 }
 
+/** The same check, saying why when it could not finish (the sweep prints that reason). */
+export function findLeftoversOrReason(a: {
+  worktree: string;
+  since: string;
+  timeoutMs: number;
+  viaDiagnostic: boolean;
+}): Leftover[] | { skipped: string } {
+  return scanSync(a);
+}
+
 async function findLeftoversAsync(a: {
   worktree: string;
   since: string;

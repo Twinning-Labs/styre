@@ -35,6 +35,7 @@ import {
   installStopHandlers,
   suspendStopHandlers,
 } from "../util/process/signals.ts";
+import { sweepOrphans } from "../util/process/sweep.ts";
 import { agentCliError, usageError } from "./errors.ts";
 import { guardWithExitCheck } from "./exit-check.ts";
 
@@ -367,8 +368,10 @@ export async function setupCommandBody(args: SetupArgs, deps?: SetupDeps): Promi
   let removeHandlers = (): void => {};
   await guardWithExitCheck(
     "setup",
-    () =>
-      setupImpl(
+    async () => {
+      // The sweep runs first, inside the error boundary (section 8).
+      await sweepOrphans();
+      await setupImpl(
         { args },
         {
           ...deps,
@@ -376,7 +379,8 @@ export async function setupCommandBody(args: SetupArgs, deps?: SetupDeps): Promi
             removeHandlers = remove;
           },
         },
-      ),
+      );
+    },
     () => removeHandlers(),
   );
 }

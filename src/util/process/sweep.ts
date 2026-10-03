@@ -1,0 +1,292 @@
+import { join } from "node:path";
+import { GRACE_MS, describeProcess, selfIdentity } from "./door.ts";
+import {
+  LEFTOVER_TIMEOUT_MS,
+  findLeftoversOrReason,
+  formatLeftover,
+  skippedLine,
+} from "./leftovers.ts";
+import { type Probe, bootId, listProcesses, probe, tokenValue } from "./proc-table.ts";
+import {
+  type LaunchRecord,
+  type Listed,
+  type Unreadable,
+  claim,
+  processesDir,
+  recordFileName,
+  removeRecord,
+  scanRecords,
+  unclaim,
+} from "./records.ts";
+import { type StopReport, groupMembers, stopGroup, stopTree } from "./stop.ts";
+
+/**
+ * The sweep (ENG-485 section 8). Every Styre command runs it first, inside its error boundary. It
+ * stops what an earlier Styre left running when it was killed with `kill -9`, using only the launch
+ * records on disk: never a live run's launches, never a process whose identity does not match its
+ * record, never a file whose name is not an exact record name. Everything it says goes to stderr.
+ */
+export interface SweepResult {
+  /** Orphans this sweep stopped (it signalled at least one of their processes). */
+  stopped: LaunchRecord[];
+  /** Orphans whose stop failed or could not be tried; their records are kept for the next command. */
+  failed: LaunchRecord[];
+  /** Records removed without stopping anything: a reused pid, or a record from before a restart. */
+  stale: number;
+  /** The leftover check's lines (section 9.4), already printed. */
+  leftoverLines: string[];
+}
+
+/** Test seams; production passes at most `stderr`. */
+export interface SweepDeps {
+  stderr?: (s: string) => void;
+  /** The current boot ID (Linux); null on macOS. */
+  bootId?: () => string | null;
+  stopTree?: typeof stopTree;
+  stopGroup?: typeof stopGroup;
+}
+
+/** Alive means: the same process (pid and start time) and not a zombie. A process Styre may not
+ *  inspect counts as alive, so a run that belongs to another user is never taken for dead. */
+export function aliveFrom(p: Probe, who: { pid: number; startedAt: string }): boolean {
+  if (p.kind === "not-allowed") return true;
+  return (
+    p.kind === "alive" &&
+    p.info.pid === who.pid &&
+    p.info.startedAt === who.startedAt &&
+    p.info.state !== "zombie"
+  );
+}
+const isAlive = (who: { pid: number; startedAt: string }): boolean =>
+  aliveFrom(probe(who.pid), who);
+
+const who = (r: LaunchRecord): string => r.ident ?? "an unknown run";
+const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/** What the identity check (section 5.4) found for one orphan. */
+type Identity =
+  | { kind: "same" } // still the recorded process or group: stop it
+  | { kind: "exited" } // gone (or a zombie): nothing to stop
+  | { kind: "reused"; pid: number } // the pid now belongs to another program: leave it alone
+  | { kind: "unknown" }; // not allowed to look: keep the record
+
+function identify(r: LaunchRecord): Identity {
+  const p = probe(r.pid);
+  if (p.kind === "not-allowed") return { kind: "unknown" };
+  if (p.kind === "alive" && p.info.startedAt !== r.startedAt) return { kind: "reused", pid: r.pid };
+  if (r.kind === "agent") {
+    return p.kind === "alive" && p.info.state !== "zombie" ? { kind: "same" } : { kind: "exited" };
+  }
+  // A group: its leader, even a zombie, still holds the pid and so the group id. A group whose
+  // leader has exited stands for the launch while any member remains: POSIX does not hand out a pid
+  // still in use as a group id (section 5.4).
+  if (p.kind === "alive") return { kind: "same" };
+  return groupMembers(r.pid, listProcesses()).length > 0 ? { kind: "same" } : { kind: "exited" };
+}
+
+/**
+ * Stops one orphan. Throws when the target is unsafe (init, Styre itself, Styre's own group, or the
+ * group of the Styre that launched it, which a script that started Styre without job control
+ * shares): the caller prints that and keeps the record.
+ */
+async function stopOrphan(
+  r: LaunchRecord,
+  me: { pid: number; pgid: number },
+  deps: SweepDeps,
+): Promise<StopReport> {
+  if (r.kind === "group") {
+    if (r.pid === me.pgid || r.pid === r.owner.pgid) {
+      throw new Error(`refusing group ${r.pid}: it is Styre's own group or its launcher's`);
+    }
+    return (deps.stopGroup ?? stopGroup)(r.pid, "graceful", { graceMs: GRACE_MS });
+  }
+  if (r.pid === r.owner.pgid) {
+    throw new Error(`refusing pid ${r.pid}: it leads the group of the Styre that launched it`);
+  }
+  return (deps.stopTree ?? stopTree)({ pid: r.pid, startedAt: r.startedAt }, "graceful", {
+    graceMs: GRACE_MS,
+    // Never expand Styre's own group, nor the dead owner's: a script that started Styre without job
+    // control leads that group and must survive (N1, Review Focus 1).
+    excludePgids: [me.pgid, r.owner.pgid],
+  });
+}
+
+const sameBase = (l: Listed): string => recordFileName(l.record);
+
+function unreadableLine(dir: string, u: Unreadable): string {
+  return `styre: ignored the launch record ${join(dir, u.file)}: ${u.reason}; it was left in place\n`;
+}
+
+/** Section 8: run first by every command. */
+export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
+  const say =
+    deps.stderr ??
+    ((s: string) => {
+      try {
+        process.stderr.write(s);
+      } catch {
+        /* a closed stderr must not fail the command */
+      }
+    });
+  const res: SweepResult = { stopped: [], failed: [], stale: 0, leftoverLines: [] };
+  const dir = processesDir();
+
+  // Normally the folder is missing or empty: this one directory read is the whole cost.
+  let scan: ReturnType<typeof scanRecords>;
+  try {
+    scan = scanRecords();
+  } catch (e) {
+    say(
+      `styre: could not read the launch records in ${dir} (${errText(e)}), so no orphans were stopped\n`,
+    );
+    return res;
+  }
+  for (const u of scan.unreadable) say(unreadableLine(dir, u));
+  if (scan.listed.length === 0) return res;
+
+  let me: { pid: number; startedAt: string; pgid: number };
+  let currentBoot: string | null;
+  try {
+    me = selfIdentity();
+    currentBoot = (deps.bootId ?? bootId)();
+  } catch (e) {
+    say(
+      `styre: could not read this process's own identity (${errText(e)}), so no orphans were stopped\n`,
+    );
+    return res;
+  }
+  /** Orphans whose worktree the leftover check reads, after every stop (so an orphan not stopped
+   *  yet is never reported as a leftover of another). */
+  const checks: LaunchRecord[] = [];
+  const done = new Set<string>();
+
+  for (const l of scan.listed) {
+    const base = sameBase(l);
+    if (done.has(base)) continue; // a record and a claimed copy of it: one launch
+    done.add(base);
+    let mine: Listed | null = null;
+    try {
+      // 1. Claim it. A claim held by a live claimer (another command, or another sweep in this very
+      //    process) is theirs. A claim whose claimer is gone is retaken (finding 8).
+      if (l.claimedBy !== null && isAlive(l.claimedBy)) continue;
+      mine = claim(l, me);
+      if (mine === null) continue; // another command got there first, or the owner removed it
+      const r = mine.record;
+
+      // A record from before the last restart names nothing on this boot: its pid and start time
+      // (clock ticks since boot on Linux) may match an unrelated process. Remove it, stop nothing.
+      if (r.bootId !== currentBoot) {
+        say(
+          `styre: removed the launch record for pid ${r.pid} from ${who(r)}: it was written before this machine last started, so nothing was stopped\n`,
+        );
+        removeRecord(r);
+        res.stale++;
+        continue;
+      }
+
+      // 2. A live owner: the launch belongs to a live run (Review Focus 5). Put it back.
+      if (isAlive(r.owner)) {
+        unclaim(mine);
+        continue;
+      }
+
+      // 3. An orphan. The identity check first.
+      const id = identify(r);
+      if (id.kind === "unknown") {
+        say(
+          `styre: could not check pid ${r.pid} from ${who(r)} (not allowed to read it); its launch record was kept, so the next Styre command tries again\n`,
+        );
+        res.failed.push(r);
+        unclaim(mine);
+        continue;
+      }
+      if (id.kind === "reused") {
+        say(
+          `styre: pid ${r.pid} from ${who(r)} now belongs to another program, so it was left alone and its launch record removed\n`,
+        );
+        removeRecord(r);
+        res.stale++;
+        if (r.worktree) checks.push(r);
+        continue;
+      }
+      if (id.kind === "same") {
+        let rep: StopReport;
+        try {
+          rep = await stopOrphan(r, me, deps);
+        } catch (e) {
+          say(
+            `styre: could not stop the orphaned ${r.kind === "agent" ? "agent" : "command"} from ${who(r)} (pid ${r.pid}): ${errText(e)}; its launch record was kept, so the next Styre command tries again\n`,
+          );
+          res.failed.push(r);
+          unclaim(mine);
+          continue;
+        }
+        if (rep.survivors.length > 0) {
+          for (const s of rep.survivors) {
+            const command = describeProcess(s.pid, r.command);
+            say(
+              `styre: could not stop ${command} (pid ${s.pid}); stop it with: kill -9 ${s.pid}\n`,
+            );
+          }
+          res.failed.push(r);
+          unclaim(mine);
+          continue;
+        }
+        if (rep.signalled.length > 0) {
+          res.stopped.push(r);
+          say(
+            r.kind === "agent"
+              ? `styre: stopped an orphaned agent from ${who(r)} (pid ${r.pid}), left running when Styre was force quit\n`
+              : `styre: stopped an orphaned command "${r.command}" from ${who(r)} (pid ${r.pid}), left running when Styre was force quit\n`,
+          );
+        }
+      }
+      // 4. Stopped and confirmed, or it had already exited: the record goes.
+      removeRecord(r);
+      if (r.worktree) checks.push(r);
+    } catch (e) {
+      // Anything else (a removal that could not finish, an unreadable process table) is said and
+      // the command goes on. The record stays for the next command.
+      const r = l.record;
+      say(
+        `styre: could not finish with the launch record for pid ${r.pid} from ${who(r)}: ${errText(e)}\n`,
+      );
+      if (!res.failed.includes(r)) res.failed.push(r);
+      if (mine !== null) unclaim(mine);
+    }
+  }
+
+  // The leftover check (section 9), once per worktree, from the earliest start among its orphans.
+  const since = new Map<string, string>();
+  for (const r of checks) {
+    const wt = r.worktree as string;
+    const prev = since.get(wt);
+    if (prev === undefined || tokenValue(r.startedAt) < tokenValue(prev))
+      since.set(wt, r.startedAt);
+  }
+  const reported = new Set<number>();
+  for (const [worktree, from] of since) {
+    let found: ReturnType<typeof findLeftoversOrReason>;
+    try {
+      found = findLeftoversOrReason({
+        worktree,
+        since: from,
+        timeoutMs: LEFTOVER_TIMEOUT_MS,
+        viaDiagnostic: true,
+      });
+    } catch (e) {
+      found = { skipped: errText(e) };
+    }
+    if (!Array.isArray(found)) {
+      res.leftoverLines.push(skippedLine(found.skipped));
+      continue;
+    }
+    for (const f of found) {
+      if (reported.has(f.pid)) continue;
+      reported.add(f.pid);
+      res.leftoverLines.push(formatLeftover(f));
+    }
+  }
+  for (const line of res.leftoverLines) say(line);
+  return res;
+}

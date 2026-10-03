@@ -182,30 +182,67 @@ function isRecord(v: unknown, pid: number, startedAt: string): v is LaunchRecord
   );
 }
 
-/** Every well formed record, claimed or not. Files that are not regular files, do not match a name
- *  exactly, or whose content disagrees with their name are skipped and never touched. */
-export function listRecords(): Listed[] {
+/** A file whose name matches a record name exactly but that cannot be used as a record. It is never
+ *  touched: the sweep only says so, once per command, so a bad file is never silent. */
+export interface Unreadable {
+  file: string;
+  reason: string;
+}
+
+/** Every well formed record, claimed or not, and every file named like one that could not be used.
+ *  A file that vanished between the directory read and its own read (a peer claimed or removed it)
+ *  is in neither list. Throws when the folder itself cannot be read (anything but "no folder"). */
+export function scanRecords(): { listed: Listed[]; unreadable: Unreadable[] } {
   const dir = processesDir();
-  const out: Listed[] = [];
+  const listed: Listed[] = [];
+  const unreadable: Unreadable[] = [];
   for (const file of namesIn(dir)) {
     const rm = RECORD.exec(file);
     const cm = rm ? null : CLAIMED.exec(file);
     const m = rm ?? cm;
-    if (!m || !isRegularFile(join(dir, file))) continue;
-    let parsed: unknown;
+    if (!m) continue;
+    const path = join(dir, file);
+    let text: string;
     try {
-      parsed = JSON.parse(readFileSync(join(dir, file), "utf8"));
-    } catch {
+      if (!lstatSync(path).isFile()) {
+        unreadable.push({ file, reason: "it is not a regular file" });
+        continue;
+      }
+      text = readFileSync(path, "utf8");
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") continue; // renamed or removed by a peer meanwhile
+      unreadable.push({ file, reason: `it could not be read (${code ?? String(e)})` });
       continue;
     }
-    if (!isRecord(parsed, Number(m[1]), m[2])) continue;
-    out.push({
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      unreadable.push({ file, reason: "it is not valid JSON" });
+      continue;
+    }
+    if (!isRecord(parsed, Number(m[1]), m[2])) {
+      unreadable.push({
+        file,
+        reason:
+          "its content is not a version 1 launch record for the pid and start time in its name",
+      });
+      continue;
+    }
+    listed.push({
       file,
       record: parsed,
       claimedBy: cm ? { pid: Number(cm[3]), startedAt: cm[4] } : null,
     });
   }
-  return out;
+  return { listed, unreadable };
+}
+
+/** Every well formed record, claimed or not. Files that are not regular files, do not match a name
+ *  exactly, or whose content disagrees with their name are skipped and never touched. */
+export function listRecords(): Listed[] {
+  return scanRecords().listed;
 }
 
 /** Renames the record to its claimed name. Null when the rename fails: another command got there

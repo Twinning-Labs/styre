@@ -32,6 +32,7 @@ import type { TelemetryEvent } from "../telemetry/events.ts";
 import { RunInterrupted, isStopping } from "../util/process/door.ts";
 import { undoBeforeDiscard } from "../util/process/interruption.ts";
 import { type HandlerDeps, installStopHandlers } from "../util/process/signals.ts";
+import { sweepOrphans } from "../util/process/sweep.ts";
 import { nowUtc } from "../util/time.ts";
 import { formatNonPrimaryComponents, noPrimaryLeft } from "./component-roles.ts";
 import { noPrimaryComponentError } from "./errors.ts";
@@ -143,8 +144,11 @@ export async function runCommandBody(args: RunArgs, deps?: RunDeps): Promise<voi
   let removeHandlers = (): void => {};
   await guardWithExitCheck(
     "run",
-    () =>
-      runImpl(
+    async () => {
+      // The sweep runs first, inside the error boundary (section 8): before `--resume` recovers the
+      // interrupted step, and before `--fresh` discards a checkpoint.
+      await sweepOrphans();
+      await runImpl(
         { args },
         {
           ...deps,
@@ -152,7 +156,8 @@ export async function runCommandBody(args: RunArgs, deps?: RunDeps): Promise<voi
             removeHandlers = remove;
           },
         },
-      ),
+      );
+    },
     () => removeHandlers(),
   );
 }

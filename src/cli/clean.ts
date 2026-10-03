@@ -8,6 +8,7 @@ import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
 import { deleteLocalBranch, deleteRemoteBranch, reconcileWorktree } from "../dispatch/worktree.ts";
 import { undoBeforeDiscard } from "../util/process/interruption.ts";
+import { sweepOrphans } from "../util/process/sweep.ts";
 import { classifyCheckpointDb, listCheckpoints } from "./checkpoints.ts";
 import { EXIT, StyreError, usageError } from "./errors.ts";
 import { guard } from "./output.ts";
@@ -213,5 +214,10 @@ export const cleanCommand = defineCommand({
     },
     profile: { type: "string", description: "Path to the project-profile JSON" },
   },
-  run: (ctx) => guard("clean", () => cleanImpl(ctx.args as unknown as CleanArgs)),
+  // The sweep runs first, before the checkpoint is discarded (section 8).
+  run: (ctx) =>
+    guard("clean", async () => {
+      await sweepOrphans();
+      await cleanImpl(ctx.args as unknown as CleanArgs);
+    }),
 });
