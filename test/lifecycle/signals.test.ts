@@ -2,12 +2,12 @@
 // injected dependencies (stderr, telemetry, re-raise, exit, clock, leftover check) against real
 // processes; the last ones run a child process with the real handlers installed.
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as door from "../../src/util/process/door.ts";
-import { listProcesses } from "../../src/util/process/proc-table.ts";
+import { type ProcInfo, listProcesses, probe } from "../../src/util/process/proc-table.ts";
 import {
   HANDLER_DEADLINE_MS,
   type HandlerCtx,
@@ -19,6 +19,7 @@ import {
 } from "../../src/util/process/signals.ts";
 import { realStopDeps } from "../../src/util/process/stop.ts";
 import { makeTicketDb } from "../helpers/lifecycle.ts";
+import { allGone, killOwned, own, ownLaunch, ownTree, until } from "../helpers/own-processes.ts";
 
 const FX = join(import.meta.dir, "fixtures");
 const OPENING_INT =
@@ -64,9 +65,35 @@ function agent(argv: string[], context: Partial<door.LaunchContext> = {}, env = 
   });
 }
 const alive = (pid: number) => listProcesses().some((p) => p.pid === pid && p.state !== "zombie");
-/** The pid of the one live child of `parent` (not a zombie). */
-const childOf = (parent: number): number =>
-  listProcesses().find((p) => p.ppid === parent && p.state !== "zombie")?.pid ?? 0;
+/** The one live child of `parent` (not a zombie), remembered for cleanup; undefined if none yet. */
+const childOf = (parent: number): ProcInfo | undefined => {
+  const c = listProcesses().find((p) => p.ppid === parent && p.state !== "zombie");
+  if (c) own(c);
+  return c;
+};
+/** Real stop functions that note every signal sent, so a test can wait for the first one. */
+function noteSignals(over: Partial<typeof realStopDeps> = {}): { sent: number[] } {
+  const sent: number[] = [];
+  const base = { ...realStopDeps, ...over };
+  door.__setStopDepsForTests({
+    ...base,
+    kill: (t, sig) => {
+      sent.push(t);
+      base.kill(t, sig);
+    },
+  });
+  return { sent };
+}
+/** The tree of a launch once it has `n` processes (the launch's own counts), remembered. */
+async function treeOf(h: door.LaunchHandle, n: number): Promise<ProcInfo[]> {
+  let tree: ProcInfo[] = [];
+  const ok = await until(() => {
+    tree = ownTree(h.record);
+    return tree.length >= n;
+  });
+  expect(ok, `the launch never had ${n} processes`).toBe(true);
+  return tree;
+}
 
 /** Reads `stream` until `re` matches (or the stream ends), then lets go of it. */
 async function readUntil(stream: ReadableStream<Uint8Array>, re: RegExp): Promise<string> {
@@ -106,21 +133,15 @@ const notes = (path: string): number => {
 };
 
 afterEach(() => {
-  // Even on failure: nothing a test started may outlive it. A launch still live here (a stop that
-  // never settled, a survivor) would otherwise keep Bun's event loop, and so the test run, alive.
+  // Even on failure: nothing a test started may outlive it, and nothing else is touched. A launch
+  // still live here (a stop that never settled, a survivor) would otherwise keep Bun's event loop,
+  // and so the test run, alive. Its tree (and a group's members) is killed by pid and start time,
+  // with everything else the test remembered: the children it spawned and their trees.
   for (const h of door.liveLaunches()) {
-    try {
-      // A group may outlive its leader; an agent is killed only while Bun has not seen it end.
-      if (h.record.kind === "group") process.kill(-h.record.pid, "SIGKILL");
-      else if (h.proc.exitCode === null && h.proc.signalCode === null) h.proc.kill("SIGKILL");
-    } catch {
-      /* already gone */
-    }
+    ownLaunch(h);
     h.proc.unref();
   }
-  Bun.spawnSync(["pkill", "-9", "-f", "sleep 30[7-9][0-9]"]);
-  Bun.spawnSync(["pkill", "-9", "-f", "stubborn-cli.sh"]);
-  Bun.spawnSync(["pkill", "-9", "-f", "signal-child.ts"]);
+  killOwned();
   door.__resetForTests();
   __resetSignalsForTests();
 });
@@ -185,8 +206,11 @@ describe("order and messages", () => {
     // `sleep 0.1` ends at once and stays a zombie (the exec'd sleep never reaps it); `sleep 3072` is
     // the one live command. Only it was signalled besides the agent.
     const h = agent(["bash", "-c", "sleep 0.1 & sleep 3072 & exec sleep 3073"]);
-    await Bun.sleep(400);
-    const kids = listProcesses().filter((p) => p.ppid === h.record.pid);
+    let kids: ProcInfo[] = [];
+    await until(() => {
+      kids = listProcesses().filter((p) => p.ppid === h.record.pid);
+      return kids.some((p) => p.state === "zombie") && kids.some((p) => p.state !== "zombie");
+    });
     expect(kids.some((p) => p.state === "zombie")).toBe(true); // the case is really there
     const { out, d } = deps();
     await handleStopSignal("SIGINT", { command: "run", run: null }, d);
@@ -197,12 +221,16 @@ describe("order and messages", () => {
 
   test("a survivor is named by its own command, with the exact line", async () => {
     const h = agent(["bash", "-c", "sleep 3076 & wait"]);
-    await Bun.sleep(200);
-    const child = childOf(h.record.pid);
-    expect(child).toBeGreaterThan(0);
-    // The child cannot be signalled, so it outlives the stop.
-    door.__setStopDepsForTests({
-      ...realStopDeps,
+    let kid: ProcInfo | undefined;
+    expect(
+      await until(() => {
+        kid = childOf(h.record.pid);
+        return kid !== undefined;
+      }),
+    ).toBe(true);
+    const child = kid?.pid ?? 0;
+    // The child cannot be signalled, so it outlives the stop (afterEach kills it by its identity).
+    const { sent } = noteSignals({
       kill: (t, s) => {
         if (t === child) return;
         realStopDeps.kill(t, s);
@@ -210,24 +238,17 @@ describe("order and messages", () => {
     });
     const { out, d } = deps();
     const first = handleStopSignal("SIGINT", { command: "run", run: null }, d);
-    await Bun.sleep(300);
+    // The second signal lands once the first stop has sent its signals and is in its grace wait.
+    expect(await until(() => sent.includes(child))).toBe(true);
     await handleStopSignal("SIGINT", { command: "run", run: null }, d); // force it
     await first;
-    try {
-      expect(out.err).toContain(
-        `styre: could not stop sleep 3076 (pid ${child}); stop it with: kill -9 ${child}\n`,
-      );
-      // The survivor is not counted as stopped.
-      expect(out.err).toContain(
-        `styre: stopped the agent (pid ${h.record.pid}) and 0 of its commands.\n`,
-      );
-    } finally {
-      try {
-        process.kill(child, "SIGKILL");
-      } catch {
-        /* already gone */
-      }
-    }
+    expect(out.err).toContain(
+      `styre: could not stop sleep 3076 (pid ${child}); stop it with: kill -9 ${child}\n`,
+    );
+    // The survivor is not counted as stopped.
+    expect(out.err).toContain(
+      `styre: stopped the agent (pid ${h.record.pid}) and 0 of its commands.\n`,
+    );
   }, 10_000);
 
   test("styre setup speaks and exits, but records nothing and prints no resume line", async () => {
@@ -479,11 +500,14 @@ describe("the deadline and the exit", () => {
 
   test("a second signal forces every stop at once, and the exit uses the FIRST signal", async () => {
     const h = agent(["bash", join(FX, "stubborn-cli.sh")]);
-    await Bun.sleep(200);
+    // Its `sleep 1` child exists only once the line before, `trap '' TERM`, has run.
+    await treeOf(h, 2);
+    const { sent } = noteSignals();
     const { out, d } = deps();
     const t0 = Date.now();
     const first = handleStopSignal("SIGINT", { command: "run", run: null }, d);
-    await Bun.sleep(300);
+    // The second signal lands while the first stop is in its grace wait: after its SIGTERMs.
+    expect(await until(() => sent.length > 0)).toBe(true);
     await handleStopSignal("SIGTERM", { command: "run", run: null }, d);
     await first;
     expect(Date.now() - t0).toBeLessThan(2_500); // not the 5 s grace period
@@ -558,10 +582,33 @@ describe("fix round 1", () => {
     // would have stopped is killed below, so that cannot either.
     h.stop = () => new Promise(() => {});
     const { out, d } = deps();
-    const t0 = Date.now();
+    // The handler's waits run on fake timers, moved on 5 ms at a time, so the time they take is
+    // exact and a loaded machine's late timers cannot eat the margin (it was 0.7 s of 6.5 s in real
+    // time). The handler's own clock is the fake one (d.now reads Date.now). The real time the whole
+    // run took, the handler's synchronous work and this loop, is added on top, so the bound still
+    // covers everything the handler does.
+    const realStart = Date.now();
+    let waited = Number.POSITIVE_INFINITY;
+    let real = Number.POSITIVE_INFINITY;
+    jest.useFakeTimers();
     try {
-      await handleStopSignal("SIGTERM", { command: "run", run: null }, d);
-      expect(Date.now() - t0).toBeLessThan(HANDLER_DEADLINE_MS);
+      const t0 = Date.now();
+      let done = false;
+      const p = handleStopSignal("SIGTERM", { command: "run", run: null }, d).then(() => {
+        done = true;
+        waited = Date.now() - t0;
+      });
+      for (let i = 0; !done && i < 4_000; i++) {
+        jest.advanceTimersByTime(5);
+        for (let j = 0; j < 20 && !done; j++) await Promise.resolve();
+      }
+      if (done) await p;
+    } finally {
+      jest.useRealTimers();
+      real = Date.now() - realStart;
+    }
+    try {
+      expect(waited + real).toBeLessThan(HANDLER_DEADLINE_MS);
       expect(door.stopAbort.forced).toBe(true);
       expect(out.err).toContain(
         `styre: could not confirm that sleep 3081 (pid ${h.record.pid}) stopped (it did not finish in time); if it is still running, stop it with: kill -9 ${h.record.pid}\n`,
@@ -622,8 +669,7 @@ describe("fix round 1", () => {
   test("no agent line when the agent itself survived; its own survivor line is printed", async () => {
     const h = agent(["sleep", "3082"]);
     const pid = h.record.pid;
-    door.__setStopDepsForTests({
-      ...realStopDeps,
+    const { sent } = noteSignals({
       kill: (t, s) => {
         if (t === pid) return;
         realStopDeps.kill(t, s);
@@ -631,7 +677,7 @@ describe("fix round 1", () => {
     });
     const { out, d } = deps();
     const first = handleStopSignal("SIGINT", { command: "run", run: null }, d);
-    await Bun.sleep(200);
+    expect(await until(() => sent.includes(pid))).toBe(true); // the first stop is in its grace wait
     await handleStopSignal("SIGINT", { command: "run", run: null }, d); // force it
     await first;
     expect(out.err.some((l) => l.startsWith("styre: stopped the agent"))).toBe(false);
@@ -811,6 +857,9 @@ describe("deferred cleanups (m3)", () => {
       kind: "group",
       context: { ident: "ENG-1", stepId: null, worktree: scratch },
     });
+    // Its own group, remembered now: the stop below must end it, and afterEach kills it if not.
+    const members = ownLaunch(g);
+    expect(members.length).toBeGreaterThan(0);
     // A stop report the outcome step cannot read: that step throws, past every inner catch.
     const realStop = g.stop;
     g.stop = async (how) => {
@@ -829,6 +878,7 @@ describe("deferred cleanups (m3)", () => {
     expect(out.err.some((l) => l.startsWith("styre: the stop handler failed: "))).toBe(true);
     expect(ran).toBe(true);
     expect(out.reraised).toEqual(["SIGTERM"]);
+    expect(await allGone(members, 3_000)).toBe(true); // the real stop still ended the command
   });
 
   test("held cleanups run before the analytics shutdown, so a slow shutdown cannot use up their time (B7)", async () => {
@@ -935,6 +985,9 @@ describe("a real process with the handlers installed", () => {
       stdout: "pipe",
       stderr: "pipe",
     });
+    // Known by pid and start time from the start: afterEach kills it, and what it started, by that.
+    const me = probe(p.pid);
+    if (me.kind === "alive") own(me.info);
     const reader = p.stderr.getReader();
     let text = "";
     const dec = new TextDecoder();
@@ -943,6 +996,9 @@ describe("a real process with the handlers installed", () => {
       if (r.done) break;
       text += dec.decode(r.value);
     }
+    // Everything it started before saying ready (the stubborn agent), remembered too.
+    const self = me.kind === "alive" ? me.info : undefined;
+    if (self) ownTree(self);
     const rest = (async () => {
       for (;;) {
         const r = await reader.read();
@@ -950,7 +1006,7 @@ describe("a real process with the handlers installed", () => {
         text += dec.decode(r.value);
       }
     })();
-    return { p, reader, rest };
+    return { p, reader, rest, self, said: () => text };
   }
 
   test("each signal ends the process BY that signal, after the opening line", async () => {
@@ -968,9 +1024,9 @@ describe("a real process with the handlers installed", () => {
 
   test("after the terminal has closed, the writes are harmless and SIGHUP still ends it by SIGHUP", async () => {
     const { p, reader } = await child("slow");
+    // Both pipes are closed on this side once the cancels resolve: no wait is needed after them.
     await reader.cancel();
     await p.stdout.cancel();
-    await Bun.sleep(100);
     process.kill(p.pid, "SIGHUP");
     await p.exited;
     expect(p.exitCode).toBeNull();
@@ -978,11 +1034,14 @@ describe("a real process with the handlers installed", () => {
   }, 10_000);
 
   test("a second signal forces the stuck agent's stop, and the process ends by the first signal", async () => {
-    const { p, rest } = await child("stubborn");
-    await Bun.sleep(200);
+    const { p, rest, self, said } = await child("stubborn");
+    // The stubborn agent ignores SIGTERM once its `trap '' TERM` has run, which its `sleep 1` child
+    // shows: the child bun, the agent's bash and that sleep.
+    expect(await until(() => self !== undefined && ownTree(self).length >= 3)).toBe(true);
     const t0 = Date.now();
     process.kill(p.pid, "SIGINT");
-    await Bun.sleep(300);
+    // The second signal lands once the handler has begun: it has said its opening line.
+    expect(await until(() => said().includes(OPENING_INT))).toBe(true);
     process.kill(p.pid, "SIGTERM");
     await p.exited;
     const text = await rest;

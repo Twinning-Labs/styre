@@ -4,7 +4,8 @@
 set -m                      # job control: the background job gets its own process group (bash, with or without a terminal)
 sleep "${STANDIN_SLEEP:-300}" &   # the "tool command", leading its own group; tests set a unique value
 TOOL=$!
-echo "tool $TOOL" >&2
 trap 'kill -TERM -$TOOL 2>/dev/null; exit 0' TERM INT HUP
 trap 'kill -KILL $$' QUIT
+# Said only now, with the traps set: tests wait for this line before they signal the stand-in.
+echo "tool $TOOL" >&2
 wait

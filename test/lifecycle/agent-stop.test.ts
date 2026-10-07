@@ -1,5 +1,5 @@
 // The Claude adapter driven against stand-in agents (ENG-485 task 6).
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeAll, expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
@@ -14,8 +14,18 @@ import { launchAgent } from "../../src/agent/launch.ts";
 import { claudeAgentRunner } from "../../src/agent/providers/claude.ts";
 import { codexAgentRunner } from "../../src/agent/providers/codex.ts";
 import * as door from "../../src/util/process/door.ts";
-import { probe } from "../../src/util/process/proc-table.ts";
-import { realStopDeps } from "../../src/util/process/stop.ts";
+import { type ProcInfo, nowToken, probe } from "../../src/util/process/proc-table.ts";
+import { type StopDeps, realStopDeps } from "../../src/util/process/stop.ts";
+import {
+  allGone,
+  killOwned,
+  own,
+  ownLaunch,
+  ownPrinted,
+  ownTree,
+  toolPid,
+  until,
+} from "../helpers/own-processes.ts";
 
 const FX = join(import.meta.dir, "fixtures");
 const input = {
@@ -25,10 +35,52 @@ const input = {
   cwd: process.cwd(),
   timeoutMs: 300,
 };
-/** Count live processes whose command line contains `marker` (tests may spawn; the guard covers src/). */
-const running = (marker: string) =>
-  Bun.spawnSync(["pgrep", "-f", marker]).stdout.toString().trim().split("\n").filter(Boolean)
-    .length;
+const key = (p: { pid: number; startedAt: string }) => `${p.pid}:${p.startedAt}`;
+
+/**
+ * Stop functions that remember, at every listing a stop reads, the tree of each live launch: what
+ * the stop is about to act on, with start times, read while the agent is certainly the test's own.
+ * `tools()` is that tree without the agents themselves. Each remembered process is also killed in
+ * afterEach if it is somehow still there. `over` replaces parts of the real stop functions; every
+ * signal sent is recorded in `sent`.
+ */
+function watchStops(over: Partial<StopDeps> = {}): {
+  sent: NodeJS.Signals[];
+  tools: () => ProcInfo[];
+} {
+  const sent: NodeJS.Signals[] = [];
+  const seen = new Map<string, ProcInfo>();
+  const agents = new Set<string>();
+  const base = { ...realStopDeps, ...over };
+  door.__setStopDepsForTests({
+    ...base,
+    list: () => {
+      const table = base.list();
+      for (const h of door.liveLaunches()) {
+        agents.add(key(h.record));
+        for (const p of ownTree(h.record, table)) seen.set(key(p), p);
+      }
+      return table;
+    },
+    kill: (target, sig) => {
+      sent.push(sig);
+      base.kill(target, sig);
+    },
+  });
+  return { sent, tools: () => [...seen.values()].filter((p) => !agents.has(key(p))) };
+}
+
+/** The tree of the one live launch once it has a command running beside the agent. */
+async function toolsRunning(): Promise<ProcInfo[]> {
+  let tools: ProcInfo[] = [];
+  const ok = await until(() => {
+    const [h] = door.liveLaunches();
+    tools = h ? ownTree(h.record).filter((p) => p.pid !== h.record.pid) : [];
+    return tools.length > 0;
+  });
+  expect(ok, "the stand-in never started its tool command").toBe(true);
+  return tools;
+}
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "styre-agent-stop-")));
 /** An executable stand-in CLI; `body` runs under bash and sees the test's env. */
@@ -39,10 +91,24 @@ function script(name: string, body: string): string {
   return path;
 }
 
+beforeAll(async () => {
+  // Start the stand-ins once, directly as the adapters do, before any timed test. On macOS the
+  // first exec of a script that was just written (a fresh checkout) took 0.3 to 1.3 s here, longer
+  // than the 300 ms timeouts below, and a stop that lands before the stand-in starts its tool
+  // command leaves nothing to check. The wrapper starts the stand-in, so both are run. A zero second
+  // tool ends at once, and the stand-in with it.
+  const p = Bun.spawn([join(FX, "wrapped-standin.sh")], {
+    env: { ...process.env, STANDIN_SLEEP: "0" },
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  expect(await p.exited).toBe(0);
+});
+
 afterEach(() => {
-  // Even on failure: nothing a test started may outlive it.
-  Bun.spawnSync(["pkill", "-9", "-f", "sleep 30[0-9]"]);
-  Bun.spawnSync(["pkill", "-9", "-f", "standin-agent.sh"]);
+  // Even on failure: nothing a test started may outlive it, and nothing else is touched.
+  for (const h of door.liveLaunches()) ownLaunch(h);
+  killOwned();
   door.__resetForTests();
   Reflect.deleteProperty(process.env, "STANDIN_SLEEP");
   Reflect.deleteProperty(process.env, "TERM_MARKER");
@@ -50,36 +116,24 @@ afterEach(() => {
 
 test("a timeout stops the agent gracefully, so its command in its own group is gone too", async () => {
   process.env.STANDIN_SLEEP = "301";
+  const watch = watchStops();
   const r = await claudeAgentRunner(join(FX, "standin-agent.sh")).run(input);
   expect(r.timedOut).toBe(true);
-  await Bun.sleep(100);
-  expect(running("sleep 301")).toBe(0);
+  expect(watch.tools().length).toBeGreaterThan(0); // the stop saw the tool command
+  expect(await allGone(watch.tools())).toBe(true);
 });
-
-/** Wrap the real stop functions so a test can see every signal the door sends. */
-function recordSignals(): NodeJS.Signals[] {
-  const sent: NodeJS.Signals[] = [];
-  door.__setStopDepsForTests({
-    ...realStopDeps,
-    kill: (target, sig) => {
-      sent.push(sig);
-      realStopDeps.kill(target, sig);
-    },
-  });
-  return sent;
-}
 
 test("a timeout is graceful: only SIGTERM is sent when the agent exits within the grace period", async () => {
   // No timing dependence: the stand-in exits on SIGTERM (or dies of it), so a forced stop is the
   // only way a SIGKILL could be sent.
   process.env.STANDIN_SLEEP = "304";
-  const sent = recordSignals();
+  const { sent, tools } = watchStops();
   const r = await claudeAgentRunner(join(FX, "standin-agent.sh")).run(input);
   expect(r.timedOut).toBe(true);
   expect(sent.length).toBeGreaterThan(0);
   expect(sent.every((sig) => sig === "SIGTERM")).toBe(true);
-  await Bun.sleep(100);
-  expect(running("sleep 304")).toBe(0);
+  expect(tools().length).toBeGreaterThan(0);
+  expect(await allGone(tools())).toBe(true);
 });
 
 test("a startup refusal is forced: the agent gets no chance to run a shutdown", async () => {
@@ -99,24 +153,27 @@ test("a startup refusal is forced: the agent gets no chance to run a shutdown", 
     "refused-agent.sh",
     `trap 'touch "$TERM_MARKER"; exit 0' TERM\nsleep "$STANDIN_SLEEP" &\necho '${init}'\nwait`,
   );
-  const sent = recordSignals();
+  const { sent, tools } = watchStops();
   const r = await claudeAgentRunner(cli).run({ ...input, timeoutMs: 20_000 });
   expect(r.completed).toBe(false);
   expect(r.capabilities?.error).toContain("stopped at startup");
-  await Bun.sleep(200);
+  // A TERM trap would have written the marker before its shell left the table, and the stop waits
+  // for that: no wait is needed here.
   expect(existsSync(marker)).toBe(false);
   expect(sent.length).toBeGreaterThan(0);
   expect(sent.every((sig) => sig === "SIGKILL")).toBe(true); // forced: never a SIGTERM first
-  expect(running("sleep 305")).toBe(0);
+  expect(tools().length).toBeGreaterThan(0);
+  expect(await allGone(tools())).toBe(true);
 });
 
 test("an agent launched through a wrapper is stopped completely on timeout", async () => {
   process.env.STANDIN_SLEEP = "302";
+  const { tools } = watchStops();
   const r = await claudeAgentRunner(join(FX, "wrapped-standin.sh")).run(input);
   expect(r.timedOut).toBe(true);
-  await Bun.sleep(100);
-  expect(running("standin-agent.sh")).toBe(0);
-  expect(running("sleep 302")).toBe(0);
+  // Below the wrapper: the stand-in itself and its tool command.
+  expect(tools().length).toBeGreaterThanOrEqual(2);
+  expect(await allGone(tools())).toBe(true);
 });
 
 test("an agent stopped by the handler makes launchAgent throw RunInterrupted", async () => {
@@ -129,30 +186,31 @@ test("an agent stopped by the handler makes launchAgent throw RunInterrupted", a
     () => null,
     (e: unknown) => e,
   ); // attached at once: the rejection can land while the stop below is still being awaited
-  await Bun.sleep(200);
+  const tools = await toolsRunning();
   door.beginStopping();
   for (const h of door.liveLaunches()) {
     h.interrupted = true;
     await h.stop("graceful");
   }
   expect(await outcome).toBeInstanceOf(door.RunInterrupted);
-  expect(running("sleep 303")).toBe(0);
+  expect(await allGone(tools)).toBe(true);
 });
 
 test("an interrupted agent that is also past its timeout is still reported as interrupted", async () => {
   process.env.STANDIN_SLEEP = "307";
   const runner = claudeAgentRunner(join(FX, "standin-agent.sh"));
   const p = runner.run({ ...input, timeoutMs: 600 });
-  await Bun.sleep(200);
+  const tools = await toolsRunning();
   for (const h of door.liveLaunches()) h.interrupted = true; // flagged, not yet stopped
   const r = await p;
   expect(r.interrupted).toBe(true);
   expect(r.timedOut).toBe(false);
-  expect(running("sleep 307")).toBe(0);
+  expect(await allGone(tools)).toBe(true);
 });
 
 test("the agent stays in Styre's own group and carries the context it was given", async () => {
   process.env.STANDIN_SLEEP = "308";
+  watchStops();
   const context = {
     ident: "ENG-7",
     stepId: 41,
@@ -165,7 +223,7 @@ test("the agent stays in Styre's own group and carries the context it was given"
     timeoutMs: 800,
     context,
   });
-  await Bun.sleep(300);
+  expect(await until(() => door.liveLaunches().length === 1)).toBe(true);
   const [h] = door.liveLaunches();
   expect(h?.context).toEqual(context);
   expect(h?.record.kind).toBe("agent");
@@ -188,9 +246,8 @@ test("a stop that leaves survivors is reported on stderr and never hangs", async
   }) as typeof process.stderr.write;
   try {
     // A stop whose kill never lands: every process looks alive until the grace and confirm waits end.
-    const real = await import("../../src/util/process/stop.ts");
-    door.__setStopDepsForTests({
-      list: real.realStopDeps.list,
+    // The survivors are remembered by the watch, and killed after the test.
+    watchStops({
       kill: () => {},
       sleep: async () => {},
       now: (() => {
@@ -221,18 +278,18 @@ test("a stop that leaves survivors is reported on stderr and never hangs", async
 
 test("the codex adapter, though refused at startup, also goes through the door", async () => {
   process.env.STANDIN_SLEEP = "300";
+  const { tools } = watchStops();
   const r = await codexAgentRunner(join(FX, "standin-agent.sh")).run(input);
   expect(r.timedOut).toBe(true);
-  await Bun.sleep(100);
-  expect(running("sleep 300")).toBe(0);
+  expect(tools().length).toBeGreaterThan(0);
+  expect(await allGone(tools())).toBe(true);
 });
 
 test("a survivor of a timeout stop no longer keeps the subprocess referenced", async () => {
   process.env.STANDIN_SLEEP = "310";
-  const real = realStopDeps;
   let t = 0;
-  door.__setStopDepsForTests({
-    list: real.list,
+  // The survivors are remembered by the watch, and killed after the test.
+  watchStops({
     kill: () => {},
     sleep: async () => {},
     now: () => {
@@ -245,7 +302,7 @@ test("a survivor of a timeout stop no longer keeps the subprocess referenced", a
   process.stderr.write = (() => true) as typeof process.stderr.write; // the survivor lines
   try {
     const p = claudeAgentRunner(join(FX, "standin-agent.sh")).run({ ...input, timeoutMs: 400 });
-    await Bun.sleep(100);
+    expect(await until(() => door.liveLaunches().length === 1)).toBe(true);
     const [h] = door.liveLaunches();
     const unref = h?.proc.unref.bind(h.proc);
     if (h && unref) {
@@ -294,4 +351,32 @@ test("a closed door makes both adapters throw RunInterrupted, not report a trans
   door.beginStopping();
   await expect(claudeAgentRunner(okCli()).run(input)).rejects.toBeInstanceOf(door.RunInterrupted);
   await expect(codexAgentRunner(okCli()).run(input)).rejects.toBeInstanceOf(door.RunInterrupted);
+});
+
+test("the stand-in says `tool <pid>` only once its traps are set: a SIGTERM right then stops its tool", async () => {
+  // Tests wait for that line before they signal the stand-in, so the line must mean "ready".
+  const since = nowToken();
+  const p = Bun.spawn(["bash", join(FX, "standin-agent.sh")], {
+    env: { ...process.env, STANDIN_SLEEP: "311" },
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  const self = probe(p.pid);
+  if (self.kind === "alive") own(self.info);
+  const reader = p.stderr.getReader();
+  let text = "";
+  while (!/tool \d+\n/.test(text)) {
+    const r = await reader.read();
+    if (r.done) break;
+    text += new TextDecoder().decode(r.value);
+  }
+  reader.releaseLock();
+  const pid = toolPid(text);
+  // The tool leads its own group (the stand-in runs it with job control).
+  const tool = ownPrinted(pid, since, { pgid: pid });
+  p.kill("SIGTERM"); // at once: no time for a late trap to be installed
+  expect(tool).not.toBeNull();
+  expect(await p.exited).toBe(0); // the TERM trap ran: `exit 0`, not death by the signal
+  expect(p.signalCode).toBeNull();
+  expect(await allGone(tool ? [tool] : [])).toBe(true);
 });

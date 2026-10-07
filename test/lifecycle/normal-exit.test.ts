@@ -12,7 +12,14 @@ import {
   pendingLeftoverChecks,
 } from "../../src/util/process/leftovers.ts";
 import { listRecords } from "../../src/util/process/records.ts";
-import { cleanupFixtures, folder, isRunning, marker, until } from "../helpers/leftover-fixtures.ts";
+import {
+  claimLaunch,
+  cleanupFixtures,
+  folder,
+  isRunning,
+  marker,
+  until,
+} from "../helpers/leftover-fixtures.ts";
 
 const savedExit = process.exitCode;
 /** `process.exitCode` as read after an assignment of `undefined` (the type narrows otherwise). */
@@ -37,15 +44,18 @@ afterEach(async () => {
   (process.stderr.write as unknown as { mockRestore(): void }).mockRestore();
 });
 
-/** A launch nobody finished: what a leak looks like. */
+/** A launch nobody finished: what a leak looks like. Its `sleep <m>` is claimed for cleanup. */
 function leak(m: string) {
-  return door.launch({
-    argv: ["sleep", m],
-    cwd: folder("styre-wt-"),
-    env: process.env,
-    kind: "agent",
-    context: { ident: "ENG-1", stepId: 1, worktree: null },
-  });
+  return claimLaunch(
+    m,
+    door.launch({
+      argv: ["sleep", m],
+      cwd: folder("styre-wt-"),
+      env: process.env,
+      kind: "agent",
+      context: { ident: "ENG-1", stepId: 1, worktree: null },
+    }),
+  );
 }
 
 test("with no launch left, a normal exit keeps its exit code", async () => {

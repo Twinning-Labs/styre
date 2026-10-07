@@ -1,7 +1,7 @@
 // ENG-485 section 9: the detached leftover check finds processes still running in a step's
 // worktree that started during the step and are not part of anything Styre runs. It reports them and
-// never stops them. Fixtures here are real detached `sleep` processes with a unique marker, found
-// and removed by that marker, even when a test fails.
+// never stops them. Fixtures here are real detached `sleep` processes with a unique marker, known by
+// pid and start time and removed by that identity, even when a test fails (never by the marker).
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
@@ -29,12 +29,14 @@ import {
 } from "../../src/util/process/leftovers.ts";
 import { listProcesses, nowToken, probe } from "../../src/util/process/proc-table.ts";
 import {
+  claimPrinted,
   cleanupFixtures,
   folder,
   isRunning,
   leave,
   marker,
   pastToken,
+  runsIn,
   until,
 } from "../helpers/leftover-fixtures.ts";
 
@@ -177,7 +179,7 @@ describe("what counts as a leftover (section 9.2)", () => {
       kind: "group",
     });
     // Wait for each fixture's child to exist, so the exclusion is tested against real descendants.
-    const seen = await until(() => [mAgent, mGroup].every(isRunning));
+    const seen = await until(() => runsIn(agent, mAgent) && runsIn(group, mGroup));
     expect(seen).toBe(true);
     const found = scan(wt, since);
     expect(found).not.toBe("skipped");
@@ -211,12 +213,14 @@ describe("what counts as a leftover (section 9.2)", () => {
     const wt = folder("styre-wt-");
     const since = nowToken();
     const m = marker();
-    const sh = 'cd "$1" && nohup sh -c ": sleep $2 $3; sleep $2" >/dev/null 2>&1 &';
+    // The pid printed is the nohup'd shell's; its `sleep` child is removed with it.
+    const sh = 'cd "$1" || exit 1; nohup sh -c ": sleep $2 $3; sleep $2" >/dev/null 2>&1 & echo $!';
     const p = Bun.spawn(["sh", "-c", sh, "sh", wt, m, "x".repeat(300)], {
       stdin: "ignore",
-      stdout: "ignore",
+      stdout: "pipe",
       stderr: "ignore",
     });
+    await claimPrinted(m, p.stdout, since);
     await p.exited;
     let hit: Leftover | undefined;
     await until(() => {
@@ -406,13 +410,15 @@ describe("checkLeftovers: the signal handler's step 5", () => {
   test("it reports a leftover of each stopped agent launch, from that launch's own start", async () => {
     const wt = folder("styre wt ");
     const m = marker();
+    const since = nowToken();
     const agent = door.launch({
-      argv: ["sh", "-c", 'nohup sleep "$1" >/dev/null 2>&1 &', "sh", m],
+      argv: ["sh", "-c", 'nohup sleep "$1" >/dev/null 2>&1 & echo $!', "sh", m],
       cwd: wt,
       env: process.env,
       kind: "agent",
       context: { ident: "ENG-1", stepId: 1, worktree: wt },
     });
+    await claimPrinted(m, agent.proc.stdout, since);
     await agent.proc.exited;
     await agent.finish();
     let out: string[] = [];
@@ -572,13 +578,15 @@ describe("checkLeftovers is the handler's entry (review round 1, important 2)", 
   test("it works with the door closed: no throw, and the leftover is still found", async () => {
     const wt = folder("styre wt ");
     const m = marker();
+    const since = nowToken();
     const agent = door.launch({
-      argv: ["sh", "-c", 'nohup sleep "$1" >/dev/null 2>&1 &', "sh", m],
+      argv: ["sh", "-c", 'nohup sleep "$1" >/dev/null 2>&1 & echo $!', "sh", m],
       cwd: wt,
       env: process.env,
       kind: "agent",
       context: { ident: "ENG-1", stepId: 1, worktree: wt },
     });
+    await claimPrinted(m, agent.proc.stdout, since);
     await agent.proc.exited;
     expect(await until(() => isRunning(m))).toBe(true);
     await agent.finish();
@@ -596,13 +604,15 @@ describe("checkLeftovers is the handler's entry (review round 1, important 2)", 
     await leave(wt, before); // the developer's own, running before the step
     await pastToken(nowToken());
     const mine = marker();
+    const since = nowToken();
     const agent = door.launch({
-      argv: ["sh", "-c", 'nohup sleep "$1" >/dev/null 2>&1 &', "sh", mine],
+      argv: ["sh", "-c", 'nohup sleep "$1" >/dev/null 2>&1 & echo $!', "sh", mine],
       cwd: wt,
       env: process.env,
       kind: "agent",
       context: { ident: "ENG-1", stepId: 1, worktree: wt },
     });
+    await claimPrinted(mine, agent.proc.stdout, since);
     await agent.proc.exited;
     expect(await until(() => isRunning(mine))).toBe(true);
     await agent.finish();
@@ -624,7 +634,7 @@ describe("a reorphaned member of a live command group is not a leftover (R24 par
       kind: "group",
       context: { ident: null, stepId: null, worktree: wt },
     });
-    expect(await until(() => isRunning(m))).toBe(true);
+    expect(await until(() => runsIn(g, m))).toBe(true);
     expect(only(scan(wt, since), m)).toEqual([]);
     await g.stop("forced");
   });
@@ -641,7 +651,7 @@ describe("a reorphaned member of a live command group is not a leftover (R24 par
       context: { ident: null, stepId: null, worktree: wt },
     });
     await g.proc.exited;
-    expect(await until(() => isRunning(m))).toBe(true);
+    expect(await until(() => runsIn(g, m))).toBe(true);
     expect(door.liveLaunches()).toHaveLength(1);
     expect(only(scan(wt, since), m)).toEqual([]);
     await g.stop("forced");
