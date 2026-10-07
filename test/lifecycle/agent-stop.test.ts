@@ -4,6 +4,7 @@ import {
   chmodSync,
   existsSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   realpathSync,
   writeFileSync,
@@ -354,13 +355,27 @@ test("a closed door makes both adapters throw RunInterrupted, not report a trans
 });
 
 test("the stand-in says `tool <pid>` only once its traps are set: a SIGTERM right then stops its tool", async () => {
-  // Tests wait for that line before they signal the stand-in, so the line must mean "ready".
+  // Tests wait for that line before they signal the stand-in, so the line must mean "ready". Left
+  // alone, the gap between two lines of the script is microseconds, too narrow to show a wrong
+  // order. So the stand-in runs under a DEBUG trap that pauses 0.2 s before each `trap` line: a
+  // line said before the traps leaves 0.2 s with no TERM trap, and the SIGTERM below lands in it
+  // (the stand-in then dies by the signal). Said after them, nothing pauses between the line and
+  // the `wait` it ends in, and the trap stops the tool. `set -T` carries the DEBUG trap into the
+  // sourced script.
   const since = nowToken();
-  const p = Bun.spawn(["bash", join(FX, "standin-agent.sh")], {
-    env: { ...process.env, STANDIN_SLEEP: "311" },
-    stdout: "ignore",
-    stderr: "pipe",
-  });
+  const p = Bun.spawn(
+    [
+      "bash",
+      "-c",
+      `set -T; trap '[[ $BASH_COMMAND == trap* ]] && sleep 0.2' DEBUG; . "$0"`,
+      join(FX, "standin-agent.sh"),
+    ],
+    {
+      env: { ...process.env, STANDIN_SLEEP: "311" },
+      stdout: "ignore",
+      stderr: "pipe",
+    },
+  );
   const self = probe(p.pid);
   if (self.kind === "alive") own(self.info);
   const reader = p.stderr.getReader();
@@ -379,4 +394,14 @@ test("the stand-in says `tool <pid>` only once its traps are set: a SIGTERM righ
   expect(await p.exited).toBe(0); // the TERM trap ran: `exit 0`, not death by the signal
   expect(p.signalCode).toBeNull();
   expect(await allGone(tool ? [tool] : [])).toBe(true);
+});
+
+test("the stand-in's script says `tool <pid>` after both of its traps", () => {
+  // The order itself, read from the script: what the test above shows by behaviour.
+  const lines = readFileSync(join(FX, "standin-agent.sh"), "utf8").split("\n");
+  const echo = lines.findIndex((l) => l.trim().startsWith('echo "tool '));
+  const traps = lines.flatMap((l, i) => (l.trim().startsWith("trap ") ? [i] : []));
+  expect(echo).toBeGreaterThan(-1);
+  expect(traps).toHaveLength(2);
+  expect(traps.every((i) => i < echo)).toBe(true);
 });
