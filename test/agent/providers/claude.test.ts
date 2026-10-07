@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -342,7 +343,7 @@ test("a background process the CLI leaves behind cannot hang the run: the drain 
   const [pidFile, go, done] = ["straggler.pid", "go", "done"].map((n) => join(dir, n));
   const cli = fakeCli(
     "claude-straggler",
-    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\n( while [ ! -e '${done}' ]; do sleep 0.05; done ) &\necho $! > '${pidFile}'\nwhile [ ! -e '${go}' ]; do sleep 0.05; done\nexit 0`,
+    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\n( while [ ! -e '${done}' ] && [ -d '${dir}' ]; do sleep 0.05; done ) &\necho $! > '${pidFile}'\nwhile [ ! -e '${go}' ] && [ -d '${dir}' ]; do sleep 0.05; done\nexit 0`,
   );
   const since = nowToken();
   const start = Date.now();
@@ -350,12 +351,14 @@ test("a background process the CLI leaves behind cannot hang the run: the drain 
   try {
     const run = claudeAgentRunner(cli).run({ ...runInput });
     await until(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").endsWith("\n"));
-    ownPrinted(Number(readFileSync(pidFile, "utf8")), since); // claimed by descent, for cleanup
+    // Claimed by descent, for cleanup: it must succeed while the CLI waits for the go file.
+    expect(ownPrinted(Number(readFileSync(pidFile, "utf8")), since)).not.toBeNull();
     writeFileSync(go, "");
     r = await run;
   } finally {
     writeFileSync(go, ""); // even when the run threw: the CLI and the straggler end by themselves
     writeFileSync(done, "");
+    rmSync(dir, { recursive: true, force: true }); // every loop here also ends once it is gone
   }
   expect(Date.now() - start).toBeLessThan(9000); // the 5s drain bound; the straggler outlives it
   expect(r.completed).toBe(true);
@@ -373,7 +376,7 @@ test("a detached leftover process holding the output pipe does not keep the runn
     "claude-escaper",
     // The CLI exits only once the holder is established in its own session, outside the group.
     // The holder writes its own pid into the file the CLI waits for.
-    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\npython3 -c 'import os,time\nif os.fork()==0:\n    os.setsid(); f=open("${escaped}.tmp","w"); f.write(str(os.getpid())); f.close(); os.rename("${escaped}.tmp","${escaped}")\n    t=time.time()\n    while not os.path.exists("${done}") and time.time()-t < 20: time.sleep(0.05)\nelse:\n    while not os.path.exists("${go}"): time.sleep(0.05)' &\nwhile [ ! -f '${escaped}' ]; do sleep 0.05; done\nwhile [ ! -e '${go}' ]; do sleep 0.05; done\nexit 0`,
+    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\npython3 -c 'import os,time\nif os.fork()==0:\n    os.setsid(); f=open("${escaped}.tmp","w"); f.write(str(os.getpid())); f.close(); os.rename("${escaped}.tmp","${escaped}")\n    t=time.time()\n    while not os.path.exists("${done}") and os.path.isdir("${dir}") and time.time()-t < 20: time.sleep(0.05)\nelse:\n    while not os.path.exists("${go}") and os.path.isdir("${dir}"): time.sleep(0.05)' &\nwhile [ ! -f '${escaped}' ] && [ -d '${dir}' ]; do sleep 0.05; done\nwhile [ ! -e '${go}' ] && [ -d '${dir}' ]; do sleep 0.05; done\nexit 0`,
   );
   const since = nowToken();
   const script = join(dir, "escaper-runner.ts");
@@ -392,13 +395,15 @@ console.log(JSON.stringify({ completed: r.completed, stdout: r.stdout }));`,
     const text = new Response(proc.stdout).text();
     await until(() => existsSync(escaped), 10_000);
     const holder = Number(readFileSync(escaped, "utf8"));
-    ownPrinted(holder, since, { pgid: holder }); // claimed by descent, for cleanup
+    // Claimed by descent, for cleanup: it must succeed while the CLI and python wait for go.
+    expect(ownPrinted(holder, since, { pgid: holder })).not.toBeNull();
     writeFileSync(go, "");
     out = await text;
     await proc.exited;
   } finally {
     writeFileSync(go, ""); // even when something threw: everything here ends by itself
     writeFileSync(done, "");
+    rmSync(dir, { recursive: true, force: true }); // every loop here also ends once it is gone
   }
   // drain timeout (5s) plus startup, well under the escaped holder's 20s
   expect(Date.now() - start).toBeLessThan(12000);

@@ -7,7 +7,12 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as door from "../../src/util/process/door.ts";
-import { type ProcInfo, listProcesses, probe } from "../../src/util/process/proc-table.ts";
+import {
+  type ProcInfo,
+  listProcesses,
+  nowToken,
+  probe,
+} from "../../src/util/process/proc-table.ts";
 import {
   HANDLER_DEADLINE_MS,
   type HandlerCtx,
@@ -19,7 +24,16 @@ import {
 } from "../../src/util/process/signals.ts";
 import { realStopDeps } from "../../src/util/process/stop.ts";
 import { makeTicketDb } from "../helpers/lifecycle.ts";
-import { allGone, killOwned, own, ownLaunch, ownTree, until } from "../helpers/own-processes.ts";
+import {
+  allGone,
+  killOwned,
+  own,
+  ownLaunch,
+  ownPrinted,
+  ownTree,
+  toolPid,
+  until,
+} from "../helpers/own-processes.ts";
 
 const FX = join(import.meta.dir, "fixtures");
 const OPENING_INT =
@@ -148,9 +162,14 @@ afterEach(() => {
 
 describe("order and messages", () => {
   test("Ctrl-C: signals go out before any write, the message order is exact, and the exit re-raises", async () => {
+    const since = nowToken();
     const h = agent([join(FX, "standin-agent.sh")], {}, { ...process.env, STANDIN_SLEEP: "3071" });
     // The stand-in says `tool <pid>` once its tool command runs: only then is there a command to stop.
-    expect(await readUntil(h.proc.stderr, /tool \d+\n/)).toMatch(/tool \d+\n/);
+    const said = await readUntil(h.proc.stderr, /tool \d+\n/);
+    expect(said).toMatch(/tool \d+\n/);
+    // Claimed at once, while the stand-in is alive and the tool is this test's descendant: if the
+    // stand-in died first, the orphaned tool could never be claimed (and would outlive the test).
+    expect(ownPrinted(toolPid(said), since)).not.toBeNull();
     const { out, d } = deps();
     let wroteBeforeSignal = false;
     const origKill = process.kill;

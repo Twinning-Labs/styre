@@ -6,6 +6,9 @@ sleep "${STANDIN_SLEEP:-300}" &   # the "tool command", leading its own group; t
 TOOL=$!
 trap 'kill -TERM -$TOOL 2>/dev/null; exit 0' TERM INT HUP
 trap 'kill -KILL $$' QUIT
+# Whatever way it exits on its own (an error, a crash short of SIGKILL), it stops its tool group
+# first, so the tool is never left behind for a test that could not claim it in time.
+trap 'kill -TERM -$TOOL 2>/dev/null' EXIT
 # Said only now, with the traps set: tests wait for this line before they signal the stand-in.
 echo "tool $TOOL" >&2
 wait

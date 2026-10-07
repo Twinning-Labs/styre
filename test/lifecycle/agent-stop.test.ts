@@ -15,7 +15,12 @@ import { launchAgent } from "../../src/agent/launch.ts";
 import { claudeAgentRunner } from "../../src/agent/providers/claude.ts";
 import { codexAgentRunner } from "../../src/agent/providers/codex.ts";
 import * as door from "../../src/util/process/door.ts";
-import { type ProcInfo, nowToken, probe } from "../../src/util/process/proc-table.ts";
+import {
+  type ProcInfo,
+  listProcesses,
+  nowToken,
+  probe,
+} from "../../src/util/process/proc-table.ts";
 import { type StopDeps, realStopDeps } from "../../src/util/process/stop.ts";
 import {
   allGone,
@@ -38,12 +43,17 @@ const input = {
 };
 const key = (p: { pid: number; startedAt: string }) => `${p.pid}:${p.startedAt}`;
 
+/** The pollers `watchStops` started, stopped after each test. */
+const pollers: ReturnType<typeof setInterval>[] = [];
+
 /**
- * Stop functions that remember, at every listing a stop reads, the tree of each live launch: what
- * the stop is about to act on, with start times, read while the agent is certainly the test's own.
- * `tools()` is that tree without the agents themselves. Each remembered process is also killed in
- * afterEach if it is somehow still there. `over` replaces parts of the real stop functions; every
- * signal sent is recorded in `sent`.
+ * Stop functions that remember the tree of each live launch, with start times, claimed while the
+ * agent is certainly the test's own: at every listing a stop reads (what the stop is about to act
+ * on), and every 10 ms from the start (the adapter reads the stand-in's `tool <pid>` line itself,
+ * so polling the tree is the earliest the test can claim the tool; a tool whose stand-in died
+ * before any claim could never be claimed). `tools()` is what was seen without the agents
+ * themselves. Each claimed process is killed in afterEach if it is somehow still there. `over`
+ * replaces parts of the real stop functions; every signal sent is recorded in `sent`.
  */
 function watchStops(over: Partial<StopDeps> = {}): {
   sent: NodeJS.Signals[];
@@ -53,14 +63,18 @@ function watchStops(over: Partial<StopDeps> = {}): {
   const seen = new Map<string, ProcInfo>();
   const agents = new Set<string>();
   const base = { ...realStopDeps, ...over };
+  const look = (table: ProcInfo[]): void => {
+    for (const h of door.liveLaunches()) {
+      agents.add(key(h.record));
+      for (const p of ownTree(h.record, table)) seen.set(key(p), p);
+    }
+  };
+  pollers.push(setInterval(() => look(listProcesses()), 10));
   door.__setStopDepsForTests({
     ...base,
     list: () => {
       const table = base.list();
-      for (const h of door.liveLaunches()) {
-        agents.add(key(h.record));
-        for (const p of ownTree(h.record, table)) seen.set(key(p), p);
-      }
+      look(table);
       return table;
     },
     kill: (target, sig) => {
@@ -107,6 +121,7 @@ beforeAll(async () => {
 });
 
 afterEach(() => {
+  for (const t of pollers.splice(0)) clearInterval(t);
   // Even on failure: nothing a test started may outlive it, and nothing else is touched.
   for (const h of door.liveLaunches()) ownLaunch(h);
   killOwned();
@@ -120,7 +135,7 @@ test("a timeout stops the agent gracefully, so its command in its own group is g
   const watch = watchStops();
   const r = await claudeAgentRunner(join(FX, "standin-agent.sh")).run(input);
   expect(r.timedOut).toBe(true);
-  expect(watch.tools().length).toBeGreaterThan(0); // the stop saw the tool command
+  expect(watch.tools().length).toBeGreaterThan(0); // the tool command was seen and claimed
   expect(await allGone(watch.tools())).toBe(true);
 });
 
@@ -396,12 +411,12 @@ test("the stand-in says `tool <pid>` only once its traps are set: a SIGTERM righ
   expect(await allGone(tool ? [tool] : [])).toBe(true);
 });
 
-test("the stand-in's script says `tool <pid>` after both of its traps", () => {
+test("the stand-in's script says `tool <pid>` after all of its traps", () => {
   // The order itself, read from the script: what the test above shows by behaviour.
   const lines = readFileSync(join(FX, "standin-agent.sh"), "utf8").split("\n");
   const echo = lines.findIndex((l) => l.trim().startsWith('echo "tool '));
   const traps = lines.flatMap((l, i) => (l.trim().startsWith("trap ") ? [i] : []));
   expect(echo).toBeGreaterThan(-1);
-  expect(traps).toHaveLength(2);
+  expect(traps.length).toBeGreaterThanOrEqual(2); // TERM/INT/HUP and QUIT, at least
   expect(traps.every((i) => i < echo)).toBe(true);
 });

@@ -40,7 +40,7 @@ import {
   runsIn,
   until,
 } from "../helpers/leftover-fixtures.ts";
-import { ownTree } from "../helpers/own-processes.ts";
+import { own, ownTree } from "../helpers/own-processes.ts";
 
 const only = (r: Leftover[] | "skipped", m: string): Leftover[] => {
   expect(r).not.toBe("skipped");
@@ -215,22 +215,29 @@ describe("what counts as a leftover (section 9.2)", () => {
     const wt = folder("styre-wt-");
     const since = nowToken();
     const m = marker();
-    // The pid printed is the nohup'd shell's; its `sleep` child is removed with it. The outer shell
-    // waits for the go file, so the nohup'd shell is still its child (and this test's descendant)
-    // when it is claimed.
+    // The pid printed is the nohup'd shell's. Its command carries the marker in a `:` no-op, and it
+    // then only loops on short sleeps until the go folder is removed, so it never has a long lived
+    // child that could outlive it unclaimed. The outer shell waits for the go file, so the nohup'd
+    // shell is still its child (and this test's descendant) when it is claimed. The outer shell
+    // itself is claimed at once, and whatever happens the `finally` claims its whole tree while it
+    // is still connected, then opens the gate: a failed claim fails the test and leaves nothing
+    // running (every loop here also ends once its folder is gone).
     const gate = goFile();
     const sh =
-      'cd "$1" || exit 1; nohup sh -c ": sleep $2 $3; sleep $2" >/dev/null 2>&1 & echo $!; while [ ! -e "$4" ]; do sleep 0.02; done';
+      'cd "$1" || exit 1; nohup sh -c ": sleep $2 $3; while [ -d \'${4%/*}\' ]; do sleep 0.05; done" >/dev/null 2>&1 & echo $!; while [ ! -e "$4" ] && [ -d "${4%/*}" ]; do sleep 0.02; done';
     const p = Bun.spawn(["sh", "-c", sh, "sh", wt, m, "x".repeat(300), gate.path], {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "ignore",
     });
-    const nohupShell = await claimPrinted(m, p.stdout, since);
-    // Its `sleep` child too, claimed while the shell is still this test's descendant: once the
-    // outer shell has gone, neither is, and the sleep could no longer be claimed.
-    expect(await until(() => nohupShell !== null && ownTree(nohupShell).length >= 2)).toBe(true);
-    gate.go();
+    const outer = probe(p.pid);
+    expect(outer.kind === "alive" && own(outer.info).length === 1).toBe(true);
+    try {
+      await claimPrinted(m, p.stdout, since);
+    } finally {
+      if (outer.kind === "alive") ownTree(outer.info);
+      gate.go();
+    }
     await p.exited;
     let hit: Leftover | undefined;
     await until(() => {
@@ -428,7 +435,7 @@ describe("checkLeftovers: the signal handler's step 5", () => {
       argv: [
         "sh",
         "-c",
-        'nohup sleep "$1" >/dev/null 2>&1 & echo $!; while [ ! -e "$2" ]; do sleep 0.02; done',
+        'nohup sleep "$1" >/dev/null 2>&1 & echo $!; while [ ! -e "$2" ] && [ -d "${2%/*}" ]; do sleep 0.02; done',
         "sh",
         m,
         gate.path,
@@ -607,7 +614,7 @@ describe("checkLeftovers is the handler's entry (review round 1, important 2)", 
       argv: [
         "sh",
         "-c",
-        'nohup sleep "$1" >/dev/null 2>&1 & echo $!; while [ ! -e "$2" ]; do sleep 0.02; done',
+        'nohup sleep "$1" >/dev/null 2>&1 & echo $!; while [ ! -e "$2" ] && [ -d "${2%/*}" ]; do sleep 0.02; done',
         "sh",
         m,
         gate.path,
@@ -644,7 +651,7 @@ describe("checkLeftovers is the handler's entry (review round 1, important 2)", 
       argv: [
         "sh",
         "-c",
-        'nohup sleep "$1" >/dev/null 2>&1 & echo $!; while [ ! -e "$2" ]; do sleep 0.02; done',
+        'nohup sleep "$1" >/dev/null 2>&1 & echo $!; while [ ! -e "$2" ] && [ -d "${2%/*}" ]; do sleep 0.02; done',
         "sh",
         mine,
         gate.path,
