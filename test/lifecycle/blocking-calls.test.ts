@@ -255,10 +255,10 @@ test("runAtBaseline's worktree is removed by the handler's cleanups while its co
     expect(door.runDeferredCleanups()).toEqual([]);
     expect(worktreesOf(r.path)).toEqual(before); // removed before the run code unwound
   } finally {
-    // The command this test started ends with it, pass or fail.
+    // The command this test started ends with it, pass or fail, and the run code unwinds.
     for (const h of door.liveLaunches()) await h.stop("forced");
+    await running;
   }
-  await running;
   expect(worktreesOf(r.path)).toEqual(before);
 });
 
@@ -300,13 +300,21 @@ test("deliveredTestEvidenceAtBaseline's and replay's worktrees are removed by th
     timeoutMs: 1000,
     run,
   });
-  while (finish.length < 2) await Bun.sleep(10);
-  expect(worktreesOf(r.path)).toHaveLength(before.length + 2);
-  door.beginStopping();
-  expect(door.runDeferredCleanups()).toEqual([]);
-  expect(worktreesOf(r.path)).toEqual(before);
-  for (const f of finish) f();
-  await Promise.all([delivered, replay]);
+  try {
+    const end = Date.now() + 10_000;
+    while (finish.length < 2) {
+      if (Date.now() > end) throw new Error("the checks never started");
+      await Bun.sleep(10);
+    }
+    expect(worktreesOf(r.path)).toHaveLength(before.length + 2);
+    door.beginStopping();
+    expect(door.runDeferredCleanups()).toEqual([]);
+    expect(worktreesOf(r.path)).toEqual(before);
+  } finally {
+    // The checks end, pass or fail, so the run code unwinds and releases what it still holds.
+    for (const f of finish) f();
+    await Promise.all([delivered, replay]);
+  }
   expect(worktreesOf(r.path)).toEqual(before);
 });
 
