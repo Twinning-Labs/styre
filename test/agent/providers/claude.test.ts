@@ -1,5 +1,12 @@
-import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { afterEach, expect, test } from "bun:test";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -11,10 +18,15 @@ import {
   parseClaudeStream,
 } from "../../../src/agent/providers/claude.ts";
 import { extractSidecar } from "../../../src/dispatch/sidecar.ts";
+import { nowToken, probe } from "../../../src/util/process/proc-table.ts";
 
 import { installVirtualGrace, resetDoorAfterEach } from "../../helpers/graceful-stop.ts";
+import { killOwned, ownPrinted } from "../../helpers/own-processes.ts";
 
 resetDoorAfterEach();
+// The processes a fake CLI leaves behind on purpose, known by the pid it wrote: killed by that
+// identity after each test, never by searching for their command.
+afterEach(() => killOwned());
 
 const cwd = realpathSync(mkdtempSync(join(tmpdir(), "styre-claude-")));
 
@@ -323,12 +335,21 @@ test("a null JSON line is ignored rather than crashing the parser", () => {
 
 test("a background process the CLI leaves behind cannot hang the run: the drain is bounded", async () => {
   // The straggler holds the output pipes; stopping it is ENG-485, but the run must still return.
+  // Its parent has exited before the run's stop looks, so nothing stops it: the test does, by the
+  // pid the fake CLI wrote (it stays in this test's process group).
+  const pidFile = join(cwd, "straggler.pid");
   const cli = fakeCli(
     "claude-straggler",
-    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\n(sleep 30) &\nexit 0`,
+    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\n(sleep 30) &\necho $! > '${pidFile}'\nexit 0`,
   );
+  const since = nowToken();
   const start = Date.now();
   const r = await claudeAgentRunner(cli).run({ ...runInput });
+  const me = probe(process.pid);
+  const straggler = ownPrinted(Number(readFileSync(pidFile, "utf8")), since, {
+    pgid: me.kind === "alive" ? me.info.pgid : -1,
+  });
+  expect(straggler).not.toBeNull(); // still running: the test removes it
   expect(Date.now() - start).toBeLessThan(9000); // the 5s drain bound, well under the straggler's 30s
   expect(r.completed).toBe(true);
   expect(r.stdout).toBe("ok");
@@ -340,8 +361,10 @@ test("a detached leftover process holding the output pipe does not keep the runn
   const cli = fakeCli(
     "claude-escaper",
     // The CLI exits only once the holder is established in its own session, outside the group.
-    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\npython3 -c 'import os,time\nif os.fork()==0:\n    os.setsid(); open("${escaped}","w").close(); time.sleep(20)' &\nwhile [ ! -f '${escaped}' ]; do sleep 0.05; done\nexit 0`,
+    // The holder writes its own pid into the file, so the test can remove it afterwards.
+    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\npython3 -c 'import os,time\nif os.fork()==0:\n    os.setsid(); f=open("${escaped}.tmp","w"); f.write(str(os.getpid())); f.close(); os.rename("${escaped}.tmp","${escaped}"); time.sleep(20)' &\nwhile [ ! -f '${escaped}' ]; do sleep 0.05; done\nexit 0`,
   );
+  const since = nowToken();
   const script = join(cwd, "escaper-runner.ts");
   writeFileSync(
     script,
@@ -361,6 +384,9 @@ console.log(JSON.stringify({ completed: r.completed, stdout: r.stdout }));`,
     completed: true,
     stdout: "ok",
   });
+  // The holder leads a session (and group) of its own; it is still sleeping: the test removes it.
+  const holderPid = Number(readFileSync(escaped, "utf8"));
+  expect(ownPrinted(holderPid, since, { pgid: holderPid })).not.toBeNull();
 }, 20000);
 
 test("a transcript line cut off by a crash is never read as the CLI's own message", async () => {
