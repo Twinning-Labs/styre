@@ -3,7 +3,7 @@
 // processes; the last ones run a child process with the real handlers installed.
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, jest, test } from "bun:test";
-import { mkdtempSync, realpathSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as door from "../../src/util/process/door.ts";
@@ -977,11 +977,11 @@ describe("installing the handlers", () => {
 });
 
 describe("a real process with the handlers installed", () => {
-  async function child(mode = "plain") {
+  async function child(mode = "plain", extraEnv: Record<string, string> = {}) {
     const p = Bun.spawn(["bun", join(FX, "signal-child.ts"), mode], {
       // Bun.spawn's default environment is the one Bun started with, which lacks the preload's test
       // state folder: pass this process's, so no launch record reaches the operator's real one (R29).
-      env: { ...process.env },
+      env: { ...process.env, ...extraEnv },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -1022,15 +1022,21 @@ describe("a real process with the handlers installed", () => {
     }
   }, 20_000);
 
-  test("after the terminal has closed, the writes are harmless and SIGHUP still ends it by SIGHUP", async () => {
-    const { p, reader } = await child("slow");
-    // Both pipes are closed on this side once the cancels resolve: no wait is needed after them.
+  test("after its output pipes have closed, the writes are harmless and SIGHUP still ends it by SIGHUP", async () => {
+    // This closes the child's output PIPES, not a terminal: the closed terminal case needs a pty
+    // and is Task 15b's. In Bun 1.4.2 cancelling both readers closes the read ends: the handler's
+    // first line after the SIGHUP then fails with EPIPE in the child, which the child records, and
+    // the test asserts it, so the case is really exercised (if a Bun release kept the pipes open,
+    // this fails instead of passing without a failed write).
+    const errors = join(scratch, `stderr-errors-${Date.now()}-${Math.random()}`);
+    const { p, reader } = await child("slow", { STDERR_ERRORS: errors });
     await reader.cancel();
     await p.stdout.cancel();
     process.kill(p.pid, "SIGHUP");
     await p.exited;
     expect(p.exitCode).toBeNull();
     expect(p.signalCode).toBe("SIGHUP");
+    expect(existsSync(errors) ? readFileSync(errors, "utf8") : "").toContain("EPIPE");
   }, 10_000);
 
   test("a second signal forces the stuck agent's stop, and the process ends by the first signal", async () => {
