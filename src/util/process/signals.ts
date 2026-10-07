@@ -1,9 +1,9 @@
 // ENG-485 section 7: the stop signal handler. On SIGINT, SIGTERM, SIGHUP or SIGQUIT it owns the
 // whole interruption (D15): it closes the door, makes the run's connection read only, sends the stop
 // signals before writing anything, speaks, waits for the stops, reports leftovers, records the
-// interruption on its own connection, writes the telemetry event, reports the outcome, and exits as
-// Styre would have without a handler. Everything runs against one deadline (section 7.4); a second
-// signal forces every stop still in progress.
+// interruption on its own connection, writes the telemetry event, reports the outcome, makes the
+// cleanups the run code still holds, and exits as Styre would have without a handler. Everything
+// runs against one deadline (section 7.4); a second signal forces every stop still in progress.
 import type { Database } from "bun:sqlite";
 import { constants } from "node:os";
 import type { EventLogRow } from "../../db/repos/event-log.ts";
@@ -36,6 +36,10 @@ const AFTER_LEFTOVERS_MS = 1_000;
 const MIN_LEFTOVER_MS = 200;
 /** Kept back from the analytics shutdown for the lock release, the re-raise and the exit. */
 const EXIT_RESERVE_MS = 150;
+/** Kept back from a held cleanup's budget for what follows its blocking call (the folder removal). */
+const CLEANUP_MARGIN_MS = 100;
+/** Below this budget a held cleanup is skipped, and its manual finish said. */
+const MIN_CLEANUP_MS = 100;
 /** How long the re-raised signal gets to end the process before the fallback exit. */
 const RERAISE_WAIT_MS = 100;
 /** The longest one survivor's `ps` may take. */
@@ -167,13 +171,6 @@ export async function handleStopSignal(
       await within(all, FORCED_WAIT_MS);
     }
 
-    // The cleanups the run code would make in its own `finally`, such as removing a baseline
-    // worktree from the target repo (m3). The exit below does not wait for the run code to unwind,
-    // so they are made here, once the commands that used them are stopped.
-    for (const why of runDeferredCleanups()) {
-      say(`styre: could not clean up after the run: ${why}\n`);
-    }
-
     // 5. Leftovers, for each agent launch that was stopped, within what is left minus 1 s.
     const checked = launches.filter(
       (h) => h.record.kind === "agent" && h.context.worktree !== null,
@@ -252,6 +249,19 @@ export async function handleStopSignal(
   } catch (err) {
     say(`styre: the stop handler failed: ${message(err)}\n`);
   } finally {
+    // The cleanups the run code would make in its own `finally`, such as removing a baseline
+    // worktree from the target repo (m3). The exit below does not wait for the run code to unwind,
+    // so they are made here: after the stops, so nothing still uses what they remove, and after
+    // the record, so a slow one can never cost the interruption its record (I1). While stopping,
+    // the run code's own release leaves them held, so only this makes them. Each gets what is
+    // left of the deadline, short of the exit's reserve and a margin; with too little left one is
+    // skipped and its manual finish said.
+    for (const why of runDeferredCleanups(() => {
+      const ms = deadline - EXIT_RESERVE_MS - CLEANUP_MARGIN_MS - d.now();
+      return ms >= MIN_CLEANUP_MS ? ms : 0;
+    })) {
+      say(`styre: could not clean up after the run: ${why}\n`);
+    }
     // 8. Exit as Styre would have without a handler.
     const left = deadline - EXIT_RESERVE_MS - d.now();
     const shutdown = ctx.shutdownAnalytics;

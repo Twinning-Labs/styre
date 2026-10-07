@@ -684,18 +684,31 @@ describe("fix round 1", () => {
 describe("deferred cleanups (m3)", () => {
   // The handler re-raises without waiting for the run code to unwind, so a baseline worktree the
   // run code would remove in its own `finally` must be removed by the handler before it exits.
+  const ample = { manual: "remove it with: true" };
+
   test("the handler runs every pending cleanup once, after its stops and before it re-raises", async () => {
+    // A command that outlives its SIGTERM for a moment: a cleanup run before the handler waited for
+    // the stop would see it still alive.
     const g = door.launch({
-      argv: ["sleep", "3091"],
+      argv: [
+        "bash",
+        "-c",
+        "trap 'sleep 0.4; exit 0' TERM; echo ready >&2; while :; do sleep 1 & wait $!; done",
+      ],
       cwd: process.cwd(),
       env: process.env,
       kind: "group",
       context: { ident: "ENG-1", stepId: null, worktree: scratch },
     });
+    // Only once its trap is set does it outlive the SIGTERM.
+    expect(await readUntil(g.proc.stderr, /ready\n/)).toContain("ready");
     const { out, d } = deps();
     const events: string[] = [];
-    const release = door.deferCleanup(() => {
-      events.push(alive(g.record.pid) ? "cleanup while the command ran" : "cleanup");
+    const release = door.deferCleanup({
+      ...ample,
+      run: () => {
+        events.push(alive(g.record.pid) ? "cleanup while the command ran" : "cleanup");
+      },
     });
     d.reraise = (sig) => {
       events.push("reraise");
@@ -710,11 +723,17 @@ describe("deferred cleanups (m3)", () => {
   test("a cleanup that fails is said, the others still run, and the stop still exits", async () => {
     const { out, d } = deps();
     let ran = false;
-    door.deferCleanup(() => {
-      throw new Error("git worktree remove failed");
+    door.deferCleanup({
+      ...ample,
+      run: () => {
+        throw new Error("git worktree remove failed");
+      },
     });
-    door.deferCleanup(() => {
-      ran = true;
+    door.deferCleanup({
+      ...ample,
+      run: () => {
+        ran = true;
+      },
     });
     await handleStopSignal("SIGTERM", { command: "run", run: null }, d);
     expect(ran).toBe(true);
@@ -722,6 +741,65 @@ describe("deferred cleanups (m3)", () => {
       "styre: could not clean up after the run: git worktree remove failed\n",
     );
     expect(out.exited).toEqual([143]);
+  });
+
+  // I1: a held cleanup runs once the interruption is recorded, its telemetry written and the outcome
+  // said, and it cannot hold the handler past its deadline.
+  test("a slow cleanup runs after the interruption is recorded, and the re-raise still meets the deadline", async () => {
+    const { t, run } = ticketRun();
+    const { out, d } = deps();
+    // Real time, with the handler's clock moved on by 5 s after its first reading: the deadline
+    // falls 1.5 s after the signal, so the test need not wait the full 6.5 s.
+    const SHIFT = 5_000;
+    let readings = 0;
+    d.now = () => Date.now() + (readings++ === 0 ? 0 : SHIFT);
+    const seen = { recorded: -1, emitted: -1, said: false };
+    door.deferCleanup({
+      manual: "remove the slow thing with: true",
+      run: () => {
+        seen.recorded = notes(t.path);
+        seen.emitted = out.emitted.length;
+        seen.said = out.err.includes(
+          "styre: run interrupted; resume with: styre run --resume ENG-1\n",
+        );
+        // Its own bound is the normal 120 s; it would take 20 s.
+        const r = door.runBlocking(["sleep", "20"], { timeoutMs: 120_000, cleanup: true });
+        if (!r.success) throw new Error(`the slow thing ${r.timedOut ? "timed out" : "failed"}`);
+      },
+    });
+    let reraisedAfter = Number.POSITIVE_INFINITY;
+    const t0 = Date.now();
+    d.reraise = (sig) => {
+      reraisedAfter = Date.now() - t0;
+      out.reraised.push(sig);
+    };
+    await handleStopSignal("SIGTERM", { command: "run", run }, d);
+    expect(seen).toEqual({ recorded: 1, emitted: 1, said: true });
+    expect(reraisedAfter).toBeLessThanOrEqual(HANDLER_DEADLINE_MS - SHIFT);
+    expect(out.err).toContain(
+      "styre: could not clean up after the run: the slow thing timed out\n",
+    );
+    expect(out.reraised).toEqual(["SIGTERM"]);
+  }, 30_000);
+
+  test("with no time left before the deadline, a cleanup is skipped and its manual finish said", async () => {
+    const { out, d } = deps();
+    let readings = 0;
+    // Every reading after the first is past the deadline.
+    d.now = () => Date.now() + (readings++ === 0 ? 0 : HANDLER_DEADLINE_MS);
+    let ran = false;
+    door.deferCleanup({
+      manual: "remove the worktree /w with: git -C /r worktree remove --force /w",
+      run: () => {
+        ran = true;
+      },
+    });
+    await handleStopSignal("SIGTERM", { command: "run", run: null }, d);
+    expect(ran).toBe(false);
+    expect(out.err).toContain(
+      "styre: could not clean up after the run: no time was left before the stop deadline to remove the worktree /w with: git -C /r worktree remove --force /w\n",
+    );
+    expect(out.reraised).toEqual(["SIGTERM"]);
   });
 });
 

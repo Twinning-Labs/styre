@@ -344,36 +344,95 @@ test("the door is open before a stop begins, for blocking calls with or without 
 
 // --- deferred cleanups (m3: the handler may end Styre before the run code unwinds) ------------
 
+/** A held cleanup that records its runs; `manual` names how to finish it by hand. */
+const held = (ran: string[], name: string, run: () => void = () => ran.push(name)) => ({
+  run,
+  manual: `remove ${name} with: rm -r /tmp/${name}`,
+});
+/** The handler's budget for the held cleanups, when time is not what a test is about. */
+const ample = () => 60_000;
+
 test("a deferred cleanup runs exactly once: from runDeferredCleanups, or from its own release", () => {
   const ran: string[] = [];
-  const releaseA = door.deferCleanup(() => ran.push("a"));
-  const releaseB = door.deferCleanup(() => ran.push("b"));
+  const releaseA = door.deferCleanup(held(ran, "a"));
+  const releaseB = door.deferCleanup(held(ran, "b"));
   releaseA(); // the run code got there first
   expect(ran).toEqual(["a"]);
-  expect(door.runDeferredCleanups()).toEqual([]); // the handler runs what is still pending
+  expect(door.runDeferredCleanups(ample)).toEqual([]); // the handler runs what is still pending
   expect(ran).toEqual(["a", "b"]);
   releaseA();
   releaseB(); // the run code unwinds after the handler: nothing runs twice
-  expect(door.runDeferredCleanups()).toEqual([]);
+  expect(door.runDeferredCleanups(ample)).toEqual([]);
   expect(ran).toEqual(["a", "b"]);
 });
 
 test("runDeferredCleanups runs every pending cleanup even when one throws, and names the failures", () => {
   const ran: string[] = [];
-  door.deferCleanup(() => {
-    throw new Error("git worktree remove failed");
-  });
-  door.deferCleanup(() => ran.push("after"));
-  expect(door.runDeferredCleanups()).toEqual(["git worktree remove failed"]);
+  door.deferCleanup(
+    held(ran, "a", () => {
+      throw new Error("git worktree remove failed");
+    }),
+  );
+  door.deferCleanup(held(ran, "after"));
+  expect(door.runDeferredCleanups(ample)).toEqual(["git worktree remove failed"]);
   expect(ran).toEqual(["after"]);
 });
 
 test("a stop in progress lets a deferred cleanup's own cleanup calls through", () => {
-  door.deferCleanup(() => {
-    expect(door.runBlocking(["true"], { timeoutMs: 1000, cleanup: true }).success).toBe(true);
+  const ran: string[] = [];
+  door.deferCleanup(
+    held(ran, "a", () => {
+      expect(door.runBlocking(["true"], { timeoutMs: 1000, cleanup: true }).success).toBe(true);
+      ran.push("a");
+    }),
+  );
+  door.beginStopping();
+  expect(door.runDeferredCleanups(ample)).toEqual([]);
+  expect(ran).toEqual(["a"]);
+});
+
+// I1: once a stop has begun, the handler alone decides when a held cleanup runs, so the run code's
+// own `finally` cannot make it while the handler waits for its stops.
+test("while stopping, the run code's release leaves the cleanup held for the handler", () => {
+  const ran: string[] = [];
+  const release = door.deferCleanup(held(ran, "a"));
+  door.beginStopping();
+  release();
+  expect(ran).toEqual([]);
+  expect(door.runDeferredCleanups(ample)).toEqual([]);
+  expect(ran).toEqual(["a"]);
+  release();
+  expect(ran).toEqual(["a"]);
+});
+
+test("a held cleanup's cleanup calls are cut to the time the handler has left", () => {
+  let result: door.BlockingResult | null = null;
+  door.deferCleanup({
+    run: () => {
+      // Its own bound is the normal 120 s; the handler has 300 ms left.
+      result = door.runBlocking(["sleep", "20"], { timeoutMs: 120_000, cleanup: true });
+    },
+    manual: "remove it with: true",
   });
   door.beginStopping();
-  expect(door.runDeferredCleanups()).toEqual([]);
+  const t0 = Date.now();
+  door.runDeferredCleanups(() => 300);
+  const took = Date.now() - t0;
+  expect(result).toMatchObject({ success: false, timedOut: true });
+  expect(took).toBeLessThan(2_000);
+  // Outside a handler's run the normal bound applies again.
+  expect(door.runBlocking(["true"], { timeoutMs: 1000, cleanup: true }).success).toBe(true);
+});
+
+test("with no time left, a held cleanup is skipped and its manual finish is named", () => {
+  const ran: string[] = [];
+  door.deferCleanup(held(ran, "a"));
+  door.beginStopping();
+  expect(door.runDeferredCleanups(() => 0)).toEqual([
+    "no time was left before the stop deadline to remove a with: rm -r /tmp/a",
+  ]);
+  expect(ran).toEqual([]);
+  expect(door.runDeferredCleanups(ample)).toEqual([]); // skipped, not kept: the process is ending
 });
 
 test("a launch made before the stop can still be stopped while stopping", async () => {

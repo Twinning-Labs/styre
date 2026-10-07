@@ -221,8 +221,16 @@ export function runBlocking(
   },
 ): BlockingResult {
   if (stopping && !opts.cleanup) throw new RunInterrupted();
-  if (blockingOverride) return blockingOverride(argv, opts);
-  return spawnBlocking(argv, opts);
+  let bounded = opts;
+  if (opts.cleanup && cleanupEnd !== null) {
+    // Inside a held cleanup the handler is running: the call ends by the time the handler has left.
+    const left = cleanupEnd - Date.now();
+    if (left <= 0)
+      return { exitCode: null, success: false, stdout: "", stderr: "", timedOut: true };
+    bounded = { ...opts, timeoutMs: Math.min(opts.timeoutMs, left) };
+  }
+  if (blockingOverride) return blockingOverride(argv, bounded);
+  return spawnBlocking(argv, bounded);
 }
 
 /** Works while the door is closed and is never recorded. Only signals.ts, sweep.ts, leftovers.ts
@@ -249,33 +257,56 @@ export function describeProcess(pid: number, fallback: string, timeoutMs = 5_000
   return (text === "" ? fallback : text).slice(0, 120);
 }
 
-/** Cleanups the run must do even when a stop ends Styre before the run code unwinds, such as
- *  removing a baseline worktree it registered in the target repo (spec section 7.3 step 1, m3).
- *  The stop handler re-raises its signal without waiting for the run code, so it runs every pending
- *  cleanup itself, after its stops. */
-const deferred = new Set<() => void>();
-
-/** Holds `fn` until it is released. Returns the release: it runs `fn` and lets go of it. `fn` runs
- *  once at most, whether the release or `runDeferredCleanups` comes first. Its blocking calls must
- *  be marked `cleanup`, since it may run while a stop is in progress. */
-export function deferCleanup(fn: () => void): () => void {
-  const once = (): void => {
-    if (!deferred.delete(once)) return;
-    fn();
-  };
-  deferred.add(once);
-  return once;
+/** A cleanup the run must make even when a stop ends Styre before the run code unwinds, such as
+ *  removing a baseline worktree it registered in the target repo (spec section 7.3, m3). The stop
+ *  handler re-raises its signal without waiting for the run code, so it makes every held cleanup
+ *  itself, once the interruption is recorded and before it re-raises.
+ *  - `run` makes the cleanup. Its blocking calls must be marked `cleanup`, since it may run while a
+ *    stop is in progress, and it throws when the cleanup failed, saying how to finish it by hand.
+ *  - `manual` says how to finish it by hand ("remove the worktree <path> with: <command>"), for when
+ *    the handler has no time left to run it. */
+export interface HeldCleanup {
+  run: () => void;
+  manual: string;
 }
 
-/** Called only by signals.ts. Runs every pending cleanup, each even when another threw, and returns
- *  the failures' messages. */
-export function runDeferredCleanups(): string[] {
+const deferred = new Set<HeldCleanup>();
+/** While the handler runs a held cleanup: the time by which each of its cleanup calls must end. */
+let cleanupEnd: number | null = null;
+
+/** Holds `c` until it is released, and returns the release. The release runs `c` and lets go of
+ *  it, so `c` runs once at most. Once a stop has begun the release does nothing: the cleanup stays
+ *  held, and the handler alone decides when it runs, within its deadline (I1). A failure of `c`
+ *  is thrown to the release's caller. */
+export function deferCleanup(c: HeldCleanup): () => void {
+  const held: HeldCleanup = { run: c.run, manual: c.manual };
+  deferred.add(held);
+  return () => {
+    if (stopping) return;
+    if (!deferred.delete(held)) return;
+    held.run();
+  };
+}
+
+/** Called only by signals.ts. Runs every held cleanup, each even when another threw, and returns
+ *  the failures' messages. `timeLeftMs` is how long the next cleanup may take: each of its cleanup
+ *  calls is cut to it, and a cleanup with no time left is skipped and its manual finish named. */
+export function runDeferredCleanups(timeLeftMs: () => number): string[] {
   const failures: string[] = [];
-  for (const once of [...deferred]) {
+  for (const held of [...deferred]) {
+    if (!deferred.delete(held)) continue;
+    const ms = timeLeftMs();
+    if (!(ms > 0)) {
+      failures.push(`no time was left before the stop deadline to ${held.manual}`);
+      continue;
+    }
+    cleanupEnd = Date.now() + ms;
     try {
-      once();
+      held.run();
     } catch (err) {
       failures.push(err instanceof Error ? err.message : String(err));
+    } finally {
+      cleanupEnd = null;
     }
   }
   return failures;
@@ -313,4 +344,5 @@ export function __resetForTests(): void {
   stopDeps = undefined;
   blockingOverride = undefined;
   deferred.clear();
+  cleanupEnd = null;
 }

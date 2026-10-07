@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { listByTicket } from "../db/repos/ground-truth-signal.ts";
@@ -32,19 +32,12 @@ import { type SuiteObservation, observeSuiteCommand } from "./suite-observation.
  * a green advisory costs nothing.
  */
 
-/** `cleanup` marks a call that only releases what the run took (the worktree removal): the door
- *  lets it through while a stop is in progress, so a baseline worktree is never left behind. A
- *  checkout that writes the whole tree gets a longer bound than a probe (ENG-485 section 5.1). */
-function git(
-  args: string[],
-  cwd: string,
-  opts: { cleanup?: boolean; tree?: boolean } = {},
-): { ok: boolean } {
+/** A checkout that writes the whole tree gets a longer bound than a probe (ENG-485 section 5.1). */
+function git(args: string[], cwd: string, opts: { tree?: boolean } = {}): { ok: boolean } {
   return {
     ok: runBlocking(["git", ...args], {
       cwd,
       timeoutMs: opts.tree ? TREE_GIT_MS : 30_000,
-      cleanup: opts.cleanup,
     }).success,
   };
 }
@@ -53,18 +46,56 @@ function git(
  *  this can pass 30 seconds on a healthy disk. */
 const TREE_GIT_MS = 120_000;
 
-/** The removal of a temporary detached worktree, held with the door until it is released: the run
- *  code releases it in its `finally`, and a stop handler that ends Styre first makes it itself
- *  (m3), so the worktree is never left registered in the target repo. Returns the release. */
-function deferRemoval(repoPath: string, wt: string): () => void {
-  return deferCleanup(() => {
-    git(["worktree", "remove", "--force", wt], repoPath, { cleanup: true, tree: true });
-    try {
-      rmSync(wt, { recursive: true, force: true });
-    } catch {
-      /* worktree remove already cleaned it */
+/** A path as one shell word, so the manual command can be pasted as it is. */
+const shellWord = (s: string): string =>
+  /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replaceAll("'", "'\\''")}'`;
+
+/** Removes a temporary detached worktree: unregisters it from the target repo, then deletes its
+ *  folder. Throws when git cannot remove it, naming the worktree and the command that finishes it
+ *  by hand (I2); the folder is then kept, so that command still works. */
+function removeTempWorktree(repoPath: string, wt: string, manual: string): void {
+  // No `.git` file: `worktree add` never registered it (refused, or failed), so only the folder
+  // is left to delete.
+  if (existsSync(join(wt, ".git"))) {
+    // `cleanup`: it only releases what the run took, so the door lets it through while a stop is
+    // in progress, and the handler cuts its bound to the time it has left.
+    const r = runBlocking(["git", "worktree", "remove", "--force", wt], {
+      cwd: repoPath,
+      timeoutMs: TREE_GIT_MS,
+      cleanup: true,
+    });
+    if (!r.success) {
+      const why = r.timedOut
+        ? "timed out"
+        : r.stderr.trim().split("\n").join(" ") || `exit ${r.exitCode}`;
+      throw new Error(
+        `git worktree remove --force ${wt} failed (${why}); remove it with: ${manual}`,
+      );
     }
+  }
+  rmSync(wt, { recursive: true, force: true });
+}
+
+/** The removal of a temporary detached worktree (baseline, delivered test or replay), held with the
+ *  door until it is released: the run code releases it in its `finally`, and a stop handler that
+ *  ends Styre first makes it itself (m3), so the worktree is never left registered in the target
+ *  repo silently. Returns the release. A failure on the release is said on stderr and does not
+ *  replace the caller's result; during a stop the handler says it. */
+export function deferWorktreeRemoval(repoPath: string, wt: string): () => void {
+  const manual = `git -C ${shellWord(repoPath)} worktree remove --force ${shellWord(wt)}`;
+  const release = deferCleanup({
+    run: () => removeTempWorktree(repoPath, wt, manual),
+    manual: `remove the worktree ${wt} with: ${manual}`,
   });
+  return () => {
+    try {
+      release();
+    } catch (err) {
+      process.stderr.write(
+        `styre: could not remove a temporary worktree: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  };
 }
 
 /**
@@ -108,7 +139,7 @@ export async function runAtBaseline(p: {
   let removeWorktree: (() => void) | undefined;
   try {
     const wt = mkdtempSync(join(tmpdir(), "styre-baseline-adv-"));
-    removeWorktree = deferRemoval(p.repoPath, wt);
+    removeWorktree = deferWorktreeRemoval(p.repoPath, wt);
     if (
       !git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath, {
         tree: true,
@@ -181,7 +212,7 @@ export async function deliveredTestEvidenceAtBaseline(
   } catch (err) {
     return { verdict: "unknown", reason: `baseline execution failed: ${String(err)}` };
   }
-  const removeWorktree = deferRemoval(p.repoPath, wt);
+  const removeWorktree = deferWorktreeRemoval(p.repoPath, wt);
   try {
     if (
       !git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath, {

@@ -37,6 +37,7 @@ import {
 import { githubClient } from "../../src/integrations/adapters/github.ts";
 import { probeCommandExists } from "../../src/setup/discover-schema.ts";
 import * as door from "../../src/util/process/door.ts";
+import { __resetSignalsForTests, handleStopSignal } from "../../src/util/process/signals.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 const dirs: string[] = [];
@@ -79,8 +80,19 @@ beforeEach(() => {
   process.env.XDG_STATE_HOME = tmp("styre-blocking-state-");
   door.__resetForTests();
 });
+/** Worktrees a test locked: unlocked and removed after it, pass or fail. */
+const locked: { repo: string; wt: string }[] = [];
+/** The handler's budget for the held cleanups, when time is not what a test is about. */
+const ample = () => 60_000;
+
 afterEach(() => {
+  for (const { repo, wt } of locked.splice(0)) {
+    Bun.spawnSync(["git", "worktree", "unlock", wt], { cwd: repo });
+    Bun.spawnSync(["git", "worktree", "remove", "--force", wt], { cwd: repo });
+    rmSync(wt, { recursive: true, force: true });
+  }
   door.__resetForTests();
+  __resetSignalsForTests();
   if (savedState === undefined) Reflect.deleteProperty(process.env, "XDG_STATE_HOME");
   else process.env.XDG_STATE_HOME = savedState;
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -143,8 +155,10 @@ test("the forge's remote lookup still names a missing origin, not a stop", () =>
 });
 
 // --- the cleanup calls: a baseline or replay worktree is removed even when the stop lands during its run
+// Once a stop has begun the run code's own release leaves the removal held: the handler alone makes
+// it (I1), so these tests run the handler's cleanups after the run code returns.
 
-test("runAtBaseline removes its worktree when the stop lands during the run", async () => {
+test("runAtBaseline's worktree, when the stop lands during the run, is removed by the handler's cleanups", async () => {
   const r = repo();
   const before = worktreesOf(r.path);
   const tmpBefore = readdirSync(tmpdir()).filter((n) => n.startsWith("styre-baseline-adv-"));
@@ -157,13 +171,15 @@ test("runAtBaseline removes its worktree when the stop lands during the run", as
   });
   expect(door.isStopping()).toBe(true);
   expect(obs.execution?.outcome).toBe("completed-zero");
+  expect(worktreesOf(r.path)).toHaveLength(before.length + 1); // held for the handler
+  expect(door.runDeferredCleanups(ample)).toEqual([]);
   expect(worktreesOf(r.path)).toEqual(before);
   expect(readdirSync(tmpdir()).filter((n) => n.startsWith("styre-baseline-adv-"))).toEqual(
     tmpBefore,
   );
 });
 
-test("deliveredTestEvidenceAtBaseline removes its worktree when the stop lands during the run", async () => {
+test("deliveredTestEvidenceAtBaseline's worktree, when the stop lands during the run, is removed by the handler's cleanups", async () => {
   const r = repo();
   const source = join(r.path, "delivered.py");
   writeFileSync(source, "def test_bug(): assert False\n");
@@ -200,10 +216,12 @@ test("deliveredTestEvidenceAtBaseline removes its worktree when the stop lands d
   });
   expect(door.isStopping()).toBe(true);
   expect(out.verdict).toBe("binds");
+  expect(worktreesOf(r.path)).toHaveLength(before.length + 1); // held for the handler
+  expect(door.runDeferredCleanups(ample)).toEqual([]);
   expect(worktreesOf(r.path)).toEqual(before);
 });
 
-test("replayCheckAtBaseline removes its worktree when the stop lands during the run", async () => {
+test("replayCheckAtBaseline's worktree, when the stop lands during the run, is removed by the handler's cleanups", async () => {
   const r = repo();
   const before = worktreesOf(r.path);
   const coarse = await replayCheckAtBaseline({
@@ -223,6 +241,8 @@ test("replayCheckAtBaseline removes its worktree when the stop lands during the 
   });
   expect(door.isStopping()).toBe(true);
   expect(coarse).toBe("red");
+  expect(worktreesOf(r.path)).toHaveLength(before.length + 1); // held for the handler
+  expect(door.runDeferredCleanups(ample)).toEqual([]);
   expect(worktreesOf(r.path)).toEqual(before);
 });
 
@@ -252,7 +272,7 @@ test("runAtBaseline's worktree is removed by the handler's cleanups while its co
     await launches(1);
     expect(worktreesOf(r.path)).toHaveLength(before.length + 1); // the baseline worktree is there
     door.beginStopping();
-    expect(door.runDeferredCleanups()).toEqual([]);
+    expect(door.runDeferredCleanups(ample)).toEqual([]);
     expect(worktreesOf(r.path)).toEqual(before); // removed before the run code unwound
   } finally {
     // The command this test started ends with it, pass or fail, and the run code unwinds.
@@ -308,7 +328,7 @@ test("deliveredTestEvidenceAtBaseline's and replay's worktrees are removed by th
     }
     expect(worktreesOf(r.path)).toHaveLength(before.length + 2);
     door.beginStopping();
-    expect(door.runDeferredCleanups()).toEqual([]);
+    expect(door.runDeferredCleanups(ample)).toEqual([]);
     expect(worktreesOf(r.path)).toEqual(before);
   } finally {
     // The checks end, pass or fail, so the run code unwinds and releases what it still holds.
@@ -316,6 +336,127 @@ test("deliveredTestEvidenceAtBaseline's and replay's worktrees are removed by th
     await Promise.all([delivered, replay]);
   }
   expect(worktreesOf(r.path)).toEqual(before);
+});
+
+// I2: a held removal that fails throws, naming the worktree and the command that finishes it by
+// hand, so the failure is said: by the handler during a stop, by the run code otherwise.
+
+/** The path git registered for the one worktree in `after` that is not in `before`. */
+const added = (before: string[], after: string[]): string => {
+  const line = after.find((l) => !before.includes(l));
+  if (!line) throw new Error("no worktree was added");
+  return line.slice("worktree ".length);
+};
+const lock = (repoPath: string, wt: string): void => {
+  locked.push({ repo: repoPath, wt });
+  sh(["git", "worktree", "lock", wt], repoPath);
+};
+
+test("a held removal that fails during a stop is said by the handler, with the worktree and the command to remove it", async () => {
+  const r = repo();
+  const before = worktreesOf(r.path);
+  const running = runAtBaseline({
+    repoPath: r.path,
+    baselineSha: r.sha,
+    command: "sleep 30",
+    timeoutMs: 30_000,
+  });
+  const err: string[] = [];
+  let wt = "";
+  try {
+    await launches(1);
+    wt = added(before, worktreesOf(r.path));
+    lock(r.path, wt); // `worktree remove --force` refuses a locked worktree
+    await handleStopSignal(
+      "SIGTERM",
+      { command: "run", run: null },
+      {
+        stderr: (s) => {
+          err.push(s);
+        },
+        emit: () => {},
+        reraise: () => {},
+        exit: () => {},
+        now: () => Date.now(),
+        leftovers: () => [],
+      },
+    );
+  } finally {
+    for (const h of door.liveLaunches()) await h.stop("forced");
+    await running;
+  }
+  const lines = err.filter((l) => l.startsWith("styre: could not clean up after the run: "));
+  expect(lines).toHaveLength(1);
+  const line = lines[0] as string;
+  const name = wt.split("/").pop() as string;
+  expect(line).toMatch(/: git worktree remove --force \S+ failed \(.*locked.*\); remove it with: /);
+  expect(line).toContain(`; remove it with: git -C ${r.path} worktree remove --force `);
+  expect(line.endsWith(`${name}\n`)).toBe(true);
+  // Said, not hidden: the worktree is still registered, and its folder is still there to remove.
+  expect(worktreesOf(r.path)).toContain(`worktree ${wt}`);
+  expect(existsSync(wt)).toBe(true);
+});
+
+test("a held removal that fails on the normal path is said, and the result is still returned", async () => {
+  const r = repo();
+  const before = worktreesOf(r.path);
+  const source = join(r.path, "delivered.py");
+  writeFileSync(source, "def test_bug(): assert False\n");
+  const components = [
+    { name: "api", kind: "python" as const, paths: ["**"], commands: {}, extensions: [".py"] },
+  ];
+  const plan = resolveCheckExecution({ components, testFile: "tests/test_bug.py" });
+  // The check locks the worktree it runs in, so its removal fails once the check is done.
+  const run = async () => {
+    lock(r.path, added(before, worktreesOf(r.path)));
+    return { exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false };
+  };
+  const err: string[] = [];
+  const write = process.stderr.write.bind(process.stderr);
+  (process.stderr as { write: unknown }).write = (s: unknown) => {
+    err.push(String(s));
+    return true;
+  };
+  let coarse: string;
+  let verdict: string;
+  try {
+    coarse = await replayCheckAtBaseline({
+      repoPath: r.path,
+      baselineSha: r.sha,
+      components,
+      testFile: "checks/a_test.py",
+      testName: "test_ac",
+      content: "def test_ac():\n    assert False\n",
+      timeoutMs: 1000,
+      run,
+    });
+    const afterReplay = worktreesOf(r.path);
+    verdict = (
+      await deliveredTestEvidenceAtBaseline({
+        repoPath: r.path,
+        baselineSha: r.sha,
+        testFile: plan.testFile,
+        sourcePath: source,
+        plan,
+        timeoutMs: 1000,
+        run: async () => {
+          lock(r.path, added(afterReplay, worktreesOf(r.path)));
+          return { exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false };
+        },
+      })
+    ).verdict;
+  } finally {
+    (process.stderr as { write: unknown }).write = write;
+  }
+  expect(coarse).toBe("red");
+  expect(verdict).not.toBe("does-not-bind");
+  const lines = err.filter((l) => l.startsWith("styre: could not remove a temporary worktree: "));
+  expect(lines).toHaveLength(2);
+  for (const l of lines) {
+    expect(l).toMatch(/git worktree remove --force \S+ failed \(.*locked.*\); remove it with: /);
+    expect(l).toContain(`; remove it with: git -C ${r.path} worktree remove --force `);
+  }
+  expect(worktreesOf(r.path)).toHaveLength(before.length + 2);
 });
 
 test("the other worktree calls are not cleanup calls: a baseline checkout is refused during a stop", async () => {
@@ -328,6 +469,11 @@ test("the other worktree calls are not cleanup calls: a baseline checkout is ref
     mode: 0o755,
   });
   const savedPath = process.env.PATH;
+  const dirsBefore = new Set(
+    readdirSync(tmpdir()).filter((n) => n.startsWith("styre-baseline-adv-")),
+  );
+  const newBaselineDirs = () =>
+    readdirSync(tmpdir()).filter((n) => n.startsWith("styre-baseline-adv-") && !dirsBefore.has(n));
   process.env.PATH = `${shim}:${savedPath}`;
   try {
     door.beginStopping();
@@ -340,9 +486,14 @@ test("the other worktree calls are not cleanup calls: a baseline checkout is ref
     expect(obs.execution).toBeNull(); // the add was refused, nothing ran
     expect(obs.reason).toMatch(/RunInterrupted|interrupted/);
     expect(worktreesOf(r.path)).toHaveLength(1);
+    // Its empty folder is held for the handler, which removes it.
+    expect(newBaselineDirs()).toHaveLength(1);
+    expect(door.runDeferredCleanups(ample)).toEqual([]);
+    expect(newBaselineDirs()).toEqual([]);
     const calls = existsSync(log) ? readFileSync(log, "utf8").split("\n") : [];
-    expect(calls.filter((c) => c.startsWith("worktree add"))).toEqual([]); // never started
-    expect(calls.some((c) => c.startsWith("worktree remove"))).toBe(true); // the cleanup call ran
+    // Never registered, so nothing to tell git: the handler removes only the empty folder.
+    expect(calls.filter((c) => c.startsWith("worktree"))).toEqual([]);
+    expect(worktreesOf(r.path)).toHaveLength(1);
   } finally {
     process.env.PATH = savedPath;
   }
@@ -365,6 +516,10 @@ test("replay and delivered test checkouts are refused during a stop, and nothing
     ],
     testFile: "api/tests/test_bug.py",
   });
+  const isTemp = (n: string) =>
+    n.startsWith("styre-baseline-bind-") || n.startsWith("styre-baseline-wt-");
+  const dirsBefore = new Set(readdirSync(tmpdir()).filter(isTemp));
+  const newDirs = () => readdirSync(tmpdir()).filter((n) => isTemp(n) && !dirsBefore.has(n));
   let ran = 0;
   const run = async () => {
     ran++;
@@ -398,6 +553,9 @@ test("replay and delivered test checkouts are refused during a stop, and nothing
   ).rejects.toBeInstanceOf(door.RunInterrupted);
   expect(ran).toBe(0);
   expect(worktreesOf(r.path)).toHaveLength(1);
+  // Their empty folders are held for the handler, which removes them without asking git.
+  expect(door.runDeferredCleanups(ample)).toEqual([]);
+  expect(newDirs()).toEqual([]);
 });
 
 // --- git output arrives intact (no caller needs raw bytes: they all decoded UTF-8 before) -----------
