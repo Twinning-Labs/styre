@@ -52,7 +52,7 @@ function deps(runner: FakeAgentRunner, repo: string, wt: string) {
 test("a session-limit cause throws ParkSignal and records dispatch outcome 'parked'", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}`);
+  const wt = `${repo}-wt-${Date.now()}`;
   const runner = new FakeAgentRunner(() => ({
     completed: false,
     exitCode: 1,
@@ -86,7 +86,7 @@ test("a session-limit cause throws ParkSignal and records dispatch outcome 'park
 test("an out-of-credits cause throws ParkSignal and records dispatch outcome 'parked'", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = join(repo, "..", `wt-oc-${Date.now()}`);
+  const wt = `${repo}-wt-oc-${Date.now()}`;
   const runner = new FakeAgentRunner(() => ({
     completed: false,
     exitCode: 1,
@@ -119,7 +119,7 @@ test("an out-of-credits cause throws ParkSignal and records dispatch outcome 'pa
 test("a transient cause still throws a plain Error and records 'dispatch-failed'", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = join(repo, "..", `wt2-${Date.now()}`);
+  const wt = `${repo}-wt2-${Date.now()}`;
   const runner = new FakeAgentRunner(() => ({
     completed: false,
     exitCode: 1,

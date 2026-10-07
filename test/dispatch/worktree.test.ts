@@ -58,7 +58,7 @@ function makeRepo(): string {
 
 test("ensureWorktree creates a worktree on a branch; idempotent on reuse", () => {
   const repo = makeRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}`);
+  const wt = `${repo}-wt-${Date.now()}`;
   roots.push(wt);
   ensureWorktree(repo, "feat/eng-1", wt);
   expect(existsSync(join(wt, "README.md"))).toBe(true);
@@ -68,7 +68,7 @@ test("ensureWorktree creates a worktree on a branch; idempotent on reuse", () =>
 
 test("commitWorktree stages a named new file + tracked edits and reports changed=true", () => {
   const repo = makeRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}-c`);
+  const wt = `${repo}-wt-${Date.now()}-c`;
   roots.push(wt);
   ensureWorktree(repo, "feat/eng-2", wt);
   writeFileSync(join(wt, "README.md"), "# repo edited\n"); // tracked edit → staged by `git add -u`
@@ -82,7 +82,7 @@ test("commitWorktree stages a named new file + tracked edits and reports changed
 
 test("commitWorktree does NOT commit an undeclared new file (staged index stays empty → no-op)", () => {
   const repo = makeRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}-u`);
+  const wt = `${repo}-wt-${Date.now()}-u`;
   roots.push(wt);
   ensureWorktree(repo, "feat/eng-2u", wt);
   writeFileSync(join(wt, "scratch.txt"), "junk"); // brand-new, NOT passed in newPaths
@@ -94,7 +94,7 @@ test("commitWorktree does NOT commit an undeclared new file (staged index stays 
 
 test("commitWorktree on a clean tree reports changed=false (no-op)", () => {
   const repo = makeRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}-n`);
+  const wt = `${repo}-wt-${Date.now()}-n`;
   roots.push(wt);
   ensureWorktree(repo, "feat/eng-3", wt);
   const result = commitWorktree(wt, "feat: nothing", []);
@@ -104,7 +104,7 @@ test("commitWorktree on a clean tree reports changed=false (no-op)", () => {
 
 test("removeWorktree detaches the worktree", () => {
   const repo = makeRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}-r`);
+  const wt = `${repo}-wt-${Date.now()}-r`;
   roots.push(wt);
   ensureWorktree(repo, "feat/eng-4", wt);
   removeWorktree(repo, wt);
@@ -929,7 +929,7 @@ function inFlight(headAtStart: string | null): void {
 
 test("commitWorktree reports the new commit to the in-flight step", () => {
   const repo = makeRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}-note-c`);
+  const wt = `${repo}-wt-${Date.now()}-note-c`;
   roots.push(wt);
   ensureWorktree(repo, "feat/eng-note-c", wt);
   const start = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: wt }).stdout.toString().trim();
@@ -945,7 +945,7 @@ test("commitWorktree reports the new commit to the in-flight step", () => {
 
 test("commitWorktree with nothing to commit leaves the in-flight head alone", () => {
   const repo = makeRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}-note-n`);
+  const wt = `${repo}-wt-${Date.now()}-note-n`;
   roots.push(wt);
   ensureWorktree(repo, "feat/eng-note-n", wt);
   inFlight("aaa");
@@ -957,7 +957,7 @@ test("commitWorktree with nothing to commit leaves the in-flight head alone", ()
 
 test("resetWorktreeHard reports the head it reset to", () => {
   const repo = makeRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}-note-r`);
+  const wt = `${repo}-wt-${Date.now()}-note-r`;
   roots.push(wt);
   ensureWorktree(repo, "feat/eng-note-r", wt);
   const start = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: wt }).stdout.toString().trim();
@@ -975,7 +975,7 @@ test("resetWorktreeHard reports the head it reset to", () => {
 
 test("a failed reset does not report a head it never reached", () => {
   const repo = makeRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}-note-f`);
+  const wt = `${repo}-wt-${Date.now()}-note-f`;
   roots.push(wt);
   ensureWorktree(repo, "feat/eng-note-f", wt);
   inFlight("aaa");
@@ -987,7 +987,7 @@ test("a failed reset does not report a head it never reached", () => {
 test("with no step in flight the head reports do nothing and nothing throws", () => {
   door.__resetForTests();
   const repo = makeRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}-note-x`);
+  const wt = `${repo}-wt-${Date.now()}-note-x`;
   roots.push(wt);
   ensureWorktree(repo, "feat/eng-note-x", wt);
   writeFileSync(join(wt, "file.txt"), "hello");
@@ -997,7 +997,7 @@ test("with no step in flight the head reports do nothing and nothing throws", ()
 
 test("ensureWorktree deliberately reports nothing (section 7.5: safe in both orders)", () => {
   const repo = makeRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}-note-e`);
+  const wt = `${repo}-wt-${Date.now()}-note-e`;
   roots.push(wt);
   inFlight("aaa");
   ensureWorktree(repo, "feat/eng-note-e", wt); // moves the branch with `worktree add -B`
