@@ -7,8 +7,11 @@
 //   - the process matching tools: pkill, killall, pgrep, pidof;
 //   - a `kill` fed by a text search: `kill $(… grep|awk|ps …)`, `… grep|awk … | xargs kill`, and a
 //     `ps … | … kill` pipeline;
-//   - a signal to every process: `kill -1` or `kill 0` as the target (`kill -9 -1`, `kill 0`), and
-//     `process.kill(-1, …)` or `process.kill(0, …)`;
+//   - a signal to every process: `kill -1` or `kill 0` as the target (`kill -9 -1`, `kill 0`,
+//     `kill -s KILL -1`), `process.kill(-1, …)` or `process.kill(0, …)`, and an argv array that
+//     runs kill with -1 or 0 as its last word (`["kill", "-9", "-1"]`);
+//   - the cleanup helper's test seams (`__recordForTests`, `__registerGroupForTests`,
+//     `__snapshotForTests`, which bypass its claim rules) anywhere but their own test file;
 //   - a `ps` listing of many processes (no `-p`) in a file that also signals processes, on any line:
 //     the text filter between the two may be on lines of its own.
 // It is a tripwire for the plain forms a test would honestly be written with, not a parser: a
@@ -33,9 +36,16 @@ const RULES: { name: string; re: RegExp }[] = [
   { name: "kill fed by a text search", re: /\bps\b[^\n]*\|[^\n]*\bkill\b/ },
   {
     name: "a signal to every process",
-    re: /\bkill\s+(?:-\S+\s+)*(?:-1|0)\s*(?:$|[;|&)'"`])|\bkill\(\s*(?:-1|0)\s*[,)]/,
+    re: /\bkill\s+(?:-s\s+\S+\s+|-\S+\s+)*(?:-1|0)\s*(?:$|[;|&)'"`])|\bkill\(\s*(?:-1|0)\s*[,)]|\[\s*["'`]kill["'`](?:\s*,\s*["'`][^"'`]*["'`])*\s*,\s*["'`](?:-1|0)["'`]\s*,?\s*\]/,
   },
 ];
+
+/** The helper's seams that bypass its claim rules, and the one file allowed to use them. */
+const SEAMS = /\b__(?:recordForTests|registerGroupForTests|snapshotForTests)\b/;
+const SEAM_FILES = new Set([
+  "test/lifecycle/own-processes.test.ts",
+  "test/helpers/own-processes.ts",
+]);
 
 /** A `ps` that lists many processes: an argv or a command line starting with ps, without `-p`. */
 const PS_LISTING = /\[\s*["'`]ps["'`]|(?:^|[\s;|&(`"'$])ps\s+(?:-[A-Za-z]+|[auxe]+)(?=\s|$|["'`])/;
@@ -62,13 +72,16 @@ function offences(file: string, text: string): string[] {
       RULES.find((r) => r.re.test(line))?.name ??
       (signals && PS_LISTING.test(line) && !PS_ONE_PID.test(line)
         ? "a ps listing in a file that signals processes"
+        : undefined) ??
+      (SEAMS.test(line) && !SEAM_FILES.has(file)
+        ? "a cleanup helper seam outside its own test file"
         : undefined);
     if (rule) found.push(`${file}:${i + 1}: ${rule}: ${line.trim()}`);
   });
   return found;
 }
 
-test("no file under test/ uses a process matching tool, signals every process, or kills by a ps listing", () => {
+test("no file under test/ uses a process matching tool, signals every process, kills by a ps listing, or uses a helper seam outside its test", () => {
   const files = walk(join(ROOT, "test")).filter((f) => relative(ROOT, f) !== SELF);
   expect(files.length).toBeGreaterThan(100); // the walk really reached the test tree
   const hits = files.flatMap((f) => offences(relative(ROOT, f), readFileSync(f, "utf8")));
@@ -94,6 +107,13 @@ test.each([
   ],
   ['for p in $(echo x); do :; done\nids=$(ps -A -o pid=,command=)\necho "$ids" > f\nkill -9 "$p"'],
   ['ps aux > list\nkill -9 "$(head -1 list)"'],
+  ['Bun.spawnSync(["kill", "-9", "-1"]);'],
+  ["Bun.spawnSync(['kill', '0']);"],
+  ['Bun.spawn(["kill", "-s", "KILL", "-1"], { stdout: "ignore" });'],
+  ["kill -s KILL -1"],
+  ["__recordForTests({ pid: 1, startedAt: '1' });"],
+  ["const restore = __snapshotForTests();"],
+  ["import { __registerGroupForTests } from '../helpers/own-processes.ts';"],
 ])("refused: %s", (line) => {
   expect(offences("t.ts", line)).toHaveLength(1);
 });
@@ -106,6 +126,8 @@ test.each([
   ['Bun.spawnSync(["ps", "-o", "pgid=", "-p", String(pid)])'],
   ["const skill = killOwned();"],
   ["kill -1 1234"],
+  ['Bun.spawnSync(["kill", "-1", String(pid)]);'],
+  ["kill -s TERM 1234"],
   ['kill -0 "$pid"'],
   [
     'const r = Bun.spawnSync(["ps", "-o", "command=", "-p", String(p.pid)]);\nprocess.kill(p.pid, "SIGKILL");',
