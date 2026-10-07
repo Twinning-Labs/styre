@@ -1,11 +1,13 @@
 import type { Database } from "bun:sqlite";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -128,6 +130,42 @@ function removeTempWorktree(repoPath: string, wt: string): void {
   rmSync(wt, { recursive: true, force: true });
 }
 
+/** The identity of the folder the system reaches through `p`, following every link and `..` as it
+ *  does, or null when there is none. */
+function folderId(p: string): string | null {
+  try {
+    const st = statSync(p);
+    return st.isDirectory() ? `${st.dev}:${st.ino}` : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Why `wt` is not a temporary worktree folder this module may delete, or null when it is (N5,
+ *  R3-1). The check is made on the folders the system acts on, not on the path as written: a
+ *  `styre-baseline-*` symbolic link would hand the removal its target, and a `..` after a linked
+ *  part leads where the link points, not where the text says. Bun's realpath resolves `..` as text,
+ *  so the parent is compared by identity instead: `stat("<wt>/..")` is the folder the system
+ *  reaches. A temp folder that is itself reached through a link, or written with `//`, `./` or
+ *  `../`, is still matched (R2-1, R2-2). */
+function notATempWorktree(wt: string): string | null {
+  const path = wt.replace(/\/+$/, ""); // a trailing slash would make lstat follow a link
+  const name = basename(path);
+  if (!name.startsWith(TEMP_WORKTREE_PREFIX)) return "its name is not a temporary worktree's";
+  const tmp = folderId(tmpdir());
+  if (tmp === null) return "the temp folder cannot be read";
+  let link: boolean;
+  try {
+    link = lstatSync(path).isSymbolicLink();
+  } catch {
+    // Not there: nothing on disk to delete, only git's entry. Its parent, as the system resolves
+    // it, must still be the temp folder.
+    return folderId(dirname(path)) === tmp ? null : "it is not directly in the temp folder";
+  }
+  if (link) return "it is a symbolic link";
+  return folderId(`${path}/..`) === tmp ? null : "it is not directly in the temp folder";
+}
+
 /** The removal of a temporary detached worktree (baseline, delivered test or replay), held with the
  *  door until it is released: the run code releases it in its `finally`, and a stop handler that
  *  ends Styre first makes it itself (m3), so the worktree is never left registered in the target
@@ -136,11 +174,10 @@ function removeTempWorktree(repoPath: string, wt: string): void {
  *  `wt` must be a `styre-baseline-*` folder directly in the temp folder, as the call sites make it;
  *  any other path is refused before anything is held, since the removal deletes it (N5). */
 export function deferWorktreeRemoval(repoPath: string, wt: string): () => void {
-  // Compared resolved, so a temp folder written with `//`, `./` or `../` still matches (R2-2).
-  const at = resolve(wt);
-  if (dirname(at) !== resolve(tmpdir()) || !basename(at).startsWith(TEMP_WORKTREE_PREFIX)) {
+  const why = notATempWorktree(wt);
+  if (why !== null) {
     throw new Error(
-      `refusing to remove ${wt}: a temporary worktree must be a ${TEMP_WORKTREE_PREFIX}* folder directly in ${tmpdir()}`,
+      `refusing to remove ${wt}: ${why}; a temporary worktree must be a ${TEMP_WORKTREE_PREFIX}* folder directly in ${tmpdir()}`,
     );
   }
   const release = deferCleanup({

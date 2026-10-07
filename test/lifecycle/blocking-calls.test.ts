@@ -11,6 +11,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -771,6 +772,65 @@ test("a temp folder written with //, ./ or ../ still takes every real removal, a
   mkdirSync(rawInside);
   deferWorktreeRemoval(r.path, rawInside)();
   expect(existsSync(rawInside)).toBe(false);
+});
+
+/** A folder outside this test's temp folder, removed after the test. */
+function outsideFolder(): string {
+  const d = realpathSync(mkdtempSync(join(sharedTmp, "styre-blocking-outside-")));
+  dirs.push(d);
+  return d;
+}
+
+/** A registered worktree of `repoPath` at `path`, on a branch of its own, holding an uncommitted
+ *  file: work that `worktree remove --force` would destroy. */
+function victimWorktree(repoPath: string, path: string, branch: string): string {
+  sh(["git", "worktree", "add", "-q", "-b", branch, path], repoPath);
+  writeFileSync(join(path, "uncommitted.txt"), "work in progress");
+  return path;
+}
+
+/** Refused before anything is held: nothing runs, and the victim worktree and its file survive. */
+function expectRefusedAndKept(repoPath: string, wt: string, victim: string): void {
+  const before = worktreesOf(repoPath);
+  expect(() => deferWorktreeRemoval(repoPath, wt)).toThrow(/refusing to remove/);
+  expect(door.runDeferredCleanups(ample)).toEqual([]); // nothing was held
+  expect(readFileSync(join(victim, "uncommitted.txt"), "utf8")).toBe("work in progress");
+  expect(worktreesOf(repoPath)).toEqual(before);
+}
+
+test("a prefixed symlink in the temp folder is refused, whatever it points to (R3-1a)", () => {
+  const r = repo();
+  // To a worktree outside the temp folder.
+  const far = victimWorktree(r.path, join(outsideFolder(), "victim"), "victim-far");
+  const farLink = join(tmpdir(), "styre-baseline-link-far");
+  symlinkSync(far, farLink);
+  expectRefusedAndKept(r.path, farLink, far);
+  // To a worktree that is itself a styre-baseline folder in the temp folder: only the link check
+  // can tell the two apart, since both resolve to an accepted folder.
+  const near = victimWorktree(r.path, join(tmpdir(), "styre-baseline-victim"), "victim-near");
+  const nearLink = join(tmpdir(), "styre-baseline-link-near");
+  symlinkSync(near, nearLink);
+  expectRefusedAndKept(r.path, nearLink, near);
+  // A trailing slash would make the link check follow the link.
+  expectRefusedAndKept(r.path, `${nearLink}/`, near);
+});
+
+test("a .. that passes through a symlink is judged where the system resolves it, and refused (R3-1b)", () => {
+  const r = repo();
+  const outside = outsideFolder();
+  mkdirSync(join(outside, "victim"));
+  const target = victimWorktree(r.path, join(outside, "styre-baseline-z"), "victim-hop");
+  symlinkSync(join(outside, "victim"), join(tmpdir(), "styre-baseline-hop"));
+  // As text this is <tmp>/styre-baseline-z; the system follows hop, to <outside>/styre-baseline-z.
+  const wt = `${tmpdir()}/styre-baseline-hop/../styre-baseline-z`;
+  // Bun's realpath resolves `..` as text, so the same folder is shown by its identity.
+  const id = (p: string) => `${statSync(p).dev}:${statSync(p).ino}`;
+  expect(id(wt)).toBe(id(target));
+  expectRefusedAndKept(r.path, wt, target);
+  // The same hop to a path that does not exist (nothing on disk yet) is refused too.
+  expect(() =>
+    deferWorktreeRemoval(r.path, `${tmpdir()}/styre-baseline-hop/../styre-baseline-none`),
+  ).toThrow(/refusing to remove/);
 });
 
 test("deferWorktreeRemoval refuses a folder that is not a styre-baseline folder directly in the temp folder (N5)", () => {
