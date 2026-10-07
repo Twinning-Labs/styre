@@ -342,6 +342,40 @@ test("the door is open before a stop begins, for blocking calls with or without 
   expect(door.runBlocking(["true"], { timeoutMs: 1000, cleanup: true }).success).toBe(true);
 });
 
+// --- deferred cleanups (m3: the handler may end Styre before the run code unwinds) ------------
+
+test("a deferred cleanup runs exactly once: from runDeferredCleanups, or from its own release", () => {
+  const ran: string[] = [];
+  const releaseA = door.deferCleanup(() => ran.push("a"));
+  const releaseB = door.deferCleanup(() => ran.push("b"));
+  releaseA(); // the run code got there first
+  expect(ran).toEqual(["a"]);
+  expect(door.runDeferredCleanups()).toEqual([]); // the handler runs what is still pending
+  expect(ran).toEqual(["a", "b"]);
+  releaseA();
+  releaseB(); // the run code unwinds after the handler: nothing runs twice
+  expect(door.runDeferredCleanups()).toEqual([]);
+  expect(ran).toEqual(["a", "b"]);
+});
+
+test("runDeferredCleanups runs every pending cleanup even when one throws, and names the failures", () => {
+  const ran: string[] = [];
+  door.deferCleanup(() => {
+    throw new Error("git worktree remove failed");
+  });
+  door.deferCleanup(() => ran.push("after"));
+  expect(door.runDeferredCleanups()).toEqual(["git worktree remove failed"]);
+  expect(ran).toEqual(["after"]);
+});
+
+test("a stop in progress lets a deferred cleanup's own cleanup calls through", () => {
+  door.deferCleanup(() => {
+    expect(door.runBlocking(["true"], { timeoutMs: 1000, cleanup: true }).success).toBe(true);
+  });
+  door.beginStopping();
+  expect(door.runDeferredCleanups()).toEqual([]);
+});
+
 test("a launch made before the stop can still be stopped while stopping", async () => {
   const g = start(["sleep", "30"], "group");
   door.beginStopping();

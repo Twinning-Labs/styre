@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { listByAc } from "../db/repos/ac-check.ts";
 import { signalForAcCheck } from "../db/repos/ground-truth-signal.ts";
-import { runBlocking } from "../util/process/door.ts";
+import { deferCleanup, runBlocking } from "../util/process/door.ts";
 import type { CmdRunner } from "../util/run-command.ts";
 import { type CheckExecutionPlan, resolveCheckExecution } from "./check-execution.ts";
 import type { CoarseOrNone } from "./check-selector.ts";
@@ -82,6 +82,16 @@ export async function replayCheckEvidence(
   }
 
   const wt = mkdtempSync(join(tmpdir(), "styre-baseline-wt-"));
+  // Held with the door until released below: a stop handler that ends Styre before this function
+  // unwinds removes the worktree itself (m3).
+  const removeWorktree = deferCleanup(() => {
+    git(["worktree", "remove", "--force", wt], p.repoPath, { cleanup: true });
+    try {
+      rmSync(wt, { recursive: true, force: true });
+    } catch {
+      /* worktree remove already cleaned it */
+    }
+  });
   try {
     const added = git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath);
     if (!added.ok) return null;
@@ -99,12 +109,7 @@ export async function replayCheckEvidence(
     });
     return { ...result, plan };
   } finally {
-    git(["worktree", "remove", "--force", wt], p.repoPath, { cleanup: true });
-    try {
-      rmSync(wt, { recursive: true, force: true });
-    } catch {
-      /* worktree remove already cleaned it */
-    }
+    removeWorktree();
   }
 }
 

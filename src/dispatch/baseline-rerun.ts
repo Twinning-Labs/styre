@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { listByTicket } from "../db/repos/ground-truth-signal.ts";
-import { runBlocking } from "../util/process/door.ts";
+import { deferCleanup, runBlocking } from "../util/process/door.ts";
 import type { CmdRunner } from "../util/run-command.ts";
 import {
   type CheckExecutionPlan,
@@ -53,6 +53,20 @@ function git(
  *  this can pass 30 seconds on a healthy disk. */
 const TREE_GIT_MS = 120_000;
 
+/** The removal of a temporary detached worktree, held with the door until it is released: the run
+ *  code releases it in its `finally`, and a stop handler that ends Styre first makes it itself
+ *  (m3), so the worktree is never left registered in the target repo. Returns the release. */
+function deferRemoval(repoPath: string, wt: string): () => void {
+  return deferCleanup(() => {
+    git(["worktree", "remove", "--force", wt], repoPath, { cleanup: true, tree: true });
+    try {
+      rmSync(wt, { recursive: true, force: true });
+    } catch {
+      /* worktree remove already cleaned it */
+    }
+  });
+}
+
 /**
  * The ticket's pre-implement clean HEAD: the sha the FIRST `ac-check-red-first` ran at, which is
  * authored before any implement dispatch. Null when the ticket has no AC check to anchor on — the
@@ -91,9 +105,10 @@ export async function runAtBaseline(p: {
       "Baseline dependencies, source binding and test identities have not been qualified for comparison.",
     execution: null,
   };
-  let wt: string | undefined;
+  let removeWorktree: (() => void) | undefined;
   try {
-    wt = mkdtempSync(join(tmpdir(), "styre-baseline-adv-"));
+    const wt = mkdtempSync(join(tmpdir(), "styre-baseline-adv-"));
+    removeWorktree = deferRemoval(p.repoPath, wt);
     if (
       !git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath, {
         tree: true,
@@ -113,13 +128,7 @@ export async function runAtBaseline(p: {
   } catch (error) {
     return { ...result, reason: `Baseline execution unavailable: ${String(error).slice(0, 1000)}` };
   } finally {
-    if (wt) {
-      git(["worktree", "remove", "--force", wt], p.repoPath, {
-        cleanup: true,
-        tree: true,
-      });
-      rmSync(wt, { recursive: true, force: true });
-    }
+    removeWorktree?.();
   }
 }
 
@@ -172,6 +181,7 @@ export async function deliveredTestEvidenceAtBaseline(
   } catch (err) {
     return { verdict: "unknown", reason: `baseline execution failed: ${String(err)}` };
   }
+  const removeWorktree = deferRemoval(p.repoPath, wt);
   try {
     if (
       !git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath, {
@@ -198,15 +208,7 @@ export async function deliveredTestEvidenceAtBaseline(
   } catch (err) {
     return { verdict: "unknown", reason: `baseline execution failed: ${String(err)}` };
   } finally {
-    git(["worktree", "remove", "--force", wt], p.repoPath, {
-      cleanup: true,
-      tree: true,
-    });
-    try {
-      rmSync(wt, { recursive: true, force: true });
-    } catch {
-      /* worktree remove already cleaned it */
-    }
+    removeWorktree();
   }
 }
 

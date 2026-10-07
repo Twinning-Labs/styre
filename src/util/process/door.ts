@@ -249,6 +249,38 @@ export function describeProcess(pid: number, fallback: string, timeoutMs = 5_000
   return (text === "" ? fallback : text).slice(0, 120);
 }
 
+/** Cleanups the run must do even when a stop ends Styre before the run code unwinds, such as
+ *  removing a baseline worktree it registered in the target repo (spec section 7.3 step 1, m3).
+ *  The stop handler re-raises its signal without waiting for the run code, so it runs every pending
+ *  cleanup itself, after its stops. */
+const deferred = new Set<() => void>();
+
+/** Holds `fn` until it is released. Returns the release: it runs `fn` and lets go of it. `fn` runs
+ *  once at most, whether the release or `runDeferredCleanups` comes first. Its blocking calls must
+ *  be marked `cleanup`, since it may run while a stop is in progress. */
+export function deferCleanup(fn: () => void): () => void {
+  const once = (): void => {
+    if (!deferred.delete(once)) return;
+    fn();
+  };
+  deferred.add(once);
+  return once;
+}
+
+/** Called only by signals.ts. Runs every pending cleanup, each even when another threw, and returns
+ *  the failures' messages. */
+export function runDeferredCleanups(): string[] {
+  const failures: string[] = [];
+  for (const once of [...deferred]) {
+    try {
+      once();
+    } catch (err) {
+      failures.push(err instanceof Error ? err.message : String(err));
+    }
+  }
+  return failures;
+}
+
 export interface InFlightStep {
   stepId: number;
   startedAt: string;
@@ -280,4 +312,5 @@ export function __resetForTests(): void {
   self = null;
   stopDeps = undefined;
   blockingOverride = undefined;
+  deferred.clear();
 }

@@ -226,6 +226,90 @@ test("replayCheckAtBaseline removes its worktree when the stop lands during the 
   expect(worktreesOf(r.path)).toEqual(before);
 });
 
+// The stop handler re-raises without waiting for the run code to unwind, so each removal is also
+// held with the door while its worktree exists: the handler's runDeferredCleanups removes it even
+// when the run code is still waiting on its command (m3). A held removal then runs only once.
+
+/** Resolves once `n` launches are live. */
+async function launches(n: number): Promise<void> {
+  const end = Date.now() + 10_000;
+  while (door.liveLaunches().length < n) {
+    if (Date.now() > end) throw new Error("the command never started");
+    await Bun.sleep(10);
+  }
+}
+
+test("runAtBaseline's worktree is removed by the handler's cleanups while its command still runs", async () => {
+  const r = repo();
+  const before = worktreesOf(r.path);
+  const running = runAtBaseline({
+    repoPath: r.path,
+    baselineSha: r.sha,
+    command: "sleep 30",
+    timeoutMs: 30_000,
+  });
+  try {
+    await launches(1);
+    expect(worktreesOf(r.path)).toHaveLength(before.length + 1); // the baseline worktree is there
+    door.beginStopping();
+    expect(door.runDeferredCleanups()).toEqual([]);
+    expect(worktreesOf(r.path)).toEqual(before); // removed before the run code unwound
+  } finally {
+    // The command this test started ends with it, pass or fail.
+    for (const h of door.liveLaunches()) await h.stop("forced");
+  }
+  await running;
+  expect(worktreesOf(r.path)).toEqual(before);
+});
+
+test("deliveredTestEvidenceAtBaseline's and replay's worktrees are removed by the handler's cleanups while their check still runs", async () => {
+  const r = repo();
+  const before = worktreesOf(r.path);
+  const source = join(r.path, "delivered.py");
+  writeFileSync(source, "def test_bug(): assert False\n");
+  const components = [
+    { name: "api", kind: "python" as const, paths: ["**"], commands: {}, extensions: [".py"] },
+  ];
+  const plan = resolveCheckExecution({ components, testFile: "tests/test_bug.py" });
+  const finish: (() => void)[] = [];
+  // The check is still running: its promise has not settled when the cleanups run.
+  const run = () =>
+    new Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }>(
+      (resolve) => {
+        finish.push(() =>
+          resolve({ exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false }),
+        );
+      },
+    );
+  const delivered = deliveredTestEvidenceAtBaseline({
+    repoPath: r.path,
+    baselineSha: r.sha,
+    testFile: plan.testFile,
+    sourcePath: source,
+    plan,
+    timeoutMs: 1000,
+    run,
+  });
+  const replay = replayCheckAtBaseline({
+    repoPath: r.path,
+    baselineSha: r.sha,
+    components,
+    testFile: "checks/a_test.py",
+    testName: "test_ac",
+    content: "def test_ac():\n    assert False\n",
+    timeoutMs: 1000,
+    run,
+  });
+  while (finish.length < 2) await Bun.sleep(10);
+  expect(worktreesOf(r.path)).toHaveLength(before.length + 2);
+  door.beginStopping();
+  expect(door.runDeferredCleanups()).toEqual([]);
+  expect(worktreesOf(r.path)).toEqual(before);
+  for (const f of finish) f();
+  await Promise.all([delivered, replay]);
+  expect(worktreesOf(r.path)).toEqual(before);
+});
+
 test("the other worktree calls are not cleanup calls: a baseline checkout is refused during a stop", async () => {
   const r = repo();
   // A git on PATH that logs every call, so the test sees what was started, not only what failed.

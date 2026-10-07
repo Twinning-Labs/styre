@@ -16,6 +16,7 @@ import {
   describeProcess,
   inFlightStep,
   liveLaunches,
+  runDeferredCleanups,
   stopAbort,
 } from "./door.ts";
 import { recordInterruption } from "./interruption.ts";
@@ -164,6 +165,13 @@ export async function handleStopSignal(
     if (!(await within(all, deadline - AFTER_STOPS_MS - d.now()))) {
       stopAbort.forced = true;
       await within(all, FORCED_WAIT_MS);
+    }
+
+    // The cleanups the run code would make in its own `finally`, such as removing a baseline
+    // worktree from the target repo (m3). The exit below does not wait for the run code to unwind,
+    // so they are made here, once the commands that used them are stopped.
+    for (const why of runDeferredCleanups()) {
+      say(`styre: could not clean up after the run: ${why}\n`);
     }
 
     // 5. Leftovers, for each agent launch that was stopped, within what is left minus 1 s.

@@ -681,6 +681,50 @@ describe("fix round 1", () => {
   });
 });
 
+describe("deferred cleanups (m3)", () => {
+  // The handler re-raises without waiting for the run code to unwind, so a baseline worktree the
+  // run code would remove in its own `finally` must be removed by the handler before it exits.
+  test("the handler runs every pending cleanup once, after its stops and before it re-raises", async () => {
+    const g = door.launch({
+      argv: ["sleep", "3091"],
+      cwd: process.cwd(),
+      env: process.env,
+      kind: "group",
+      context: { ident: "ENG-1", stepId: null, worktree: scratch },
+    });
+    const { out, d } = deps();
+    const events: string[] = [];
+    const release = door.deferCleanup(() => {
+      events.push(alive(g.record.pid) ? "cleanup while the command ran" : "cleanup");
+    });
+    d.reraise = (sig) => {
+      events.push("reraise");
+      out.reraised.push(sig);
+    };
+    await handleStopSignal("SIGINT", { command: "run", run: null }, d);
+    expect(events).toEqual(["cleanup", "reraise"]);
+    release(); // the run code's own release, if it ever gets there, runs nothing again
+    expect(events).toEqual(["cleanup", "reraise"]);
+  });
+
+  test("a cleanup that fails is said, the others still run, and the stop still exits", async () => {
+    const { out, d } = deps();
+    let ran = false;
+    door.deferCleanup(() => {
+      throw new Error("git worktree remove failed");
+    });
+    door.deferCleanup(() => {
+      ran = true;
+    });
+    await handleStopSignal("SIGTERM", { command: "run", run: null }, d);
+    expect(ran).toBe(true);
+    expect(out.err).toContain(
+      "styre: could not clean up after the run: git worktree remove failed\n",
+    );
+    expect(out.exited).toEqual([143]);
+  });
+});
+
 describe("installing the handlers", () => {
   const SIGS = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
   const counts = () => SIGS.map((s) => process.listenerCount(s));
