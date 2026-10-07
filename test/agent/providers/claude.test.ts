@@ -18,24 +18,15 @@ import {
   parseClaudeStream,
 } from "../../../src/agent/providers/claude.ts";
 import { extractSidecar } from "../../../src/dispatch/sidecar.ts";
-import { nowToken, probe } from "../../../src/util/process/proc-table.ts";
+import { nowToken } from "../../../src/util/process/proc-table.ts";
 
 import { installVirtualGrace, resetDoorAfterEach } from "../../helpers/graceful-stop.ts";
-import { killOwned, ownPrinted } from "../../helpers/own-processes.ts";
+import { killOwned, ownPrinted, until } from "../../helpers/own-processes.ts";
 
 resetDoorAfterEach();
 // The processes a fake CLI leaves behind on purpose, known by the pid it wrote: killed by that
 // identity after each test, never by searching for their command.
 afterEach(() => killOwned());
-
-/** Claim, for the cleanup above, the process whose pid a fake CLI wrote to `file`, if it wrote one:
- *  started no earlier than `since` and in group `pgid` ("own": a group it leads). Called from a
- *  `finally`, so a run that throws still has its process removed. */
-function claimWritten(file: string, since: string, pgid: number | "own"): void {
-  if (!existsSync(file)) return;
-  const pid = Number(readFileSync(file, "utf8").trim());
-  ownPrinted(pid, since, { pgid: pgid === "own" ? pid : pgid });
-}
 
 const cwd = realpathSync(mkdtempSync(join(tmpdir(), "styre-claude-")));
 
@@ -344,38 +335,48 @@ test("a null JSON line is ignored rather than crashing the parser", () => {
 
 test("a background process the CLI leaves behind cannot hang the run: the drain is bounded", async () => {
   // The straggler holds the output pipes; stopping it is ENG-485, but the run must still return.
-  // Its parent has exited before the run's stop looks, so nothing stops it: the test does, by the
-  // pid the fake CLI wrote (it stays in this test's process group).
-  const pidFile = join(cwd, "straggler.pid");
+  // Its parent exits before the run's stop looks, so nothing stops it. It ends by itself once the
+  // test's `done` file exists. To be claimed for cleanup by descent, it must still be a descendant
+  // of this test when claimed: the fake CLI writes its pid, then waits for the `go` file.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "styre-straggler-")));
+  const [pidFile, go, done] = ["straggler.pid", "go", "done"].map((n) => join(dir, n));
   const cli = fakeCli(
     "claude-straggler",
-    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\n(sleep 30) &\necho $! > '${pidFile}'\nexit 0`,
+    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\n( while [ ! -e '${done}' ]; do sleep 0.05; done ) &\necho $! > '${pidFile}'\nwhile [ ! -e '${go}' ]; do sleep 0.05; done\nexit 0`,
   );
   const since = nowToken();
   const start = Date.now();
   let r: Awaited<ReturnType<ReturnType<typeof claudeAgentRunner>["run"]>>;
   try {
-    r = await claudeAgentRunner(cli).run({ ...runInput });
+    const run = claudeAgentRunner(cli).run({ ...runInput });
+    await until(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").endsWith("\n"));
+    ownPrinted(Number(readFileSync(pidFile, "utf8")), since); // claimed by descent, for cleanup
+    writeFileSync(go, "");
+    r = await run;
   } finally {
-    const me = probe(process.pid);
-    claimWritten(pidFile, since, me.kind === "alive" ? me.info.pgid : -1);
+    writeFileSync(go, ""); // even when the run threw: the CLI and the straggler end by themselves
+    writeFileSync(done, "");
   }
-  expect(Date.now() - start).toBeLessThan(9000); // the 5s drain bound, well under the straggler's 30s
+  expect(Date.now() - start).toBeLessThan(9000); // the 5s drain bound; the straggler outlives it
   expect(r.completed).toBe(true);
   expect(r.stdout).toBe("ok");
 }, 15000);
 
 test("a detached leftover process holding the output pipe does not keep the runner alive", async () => {
   // python's setsid detaches the holder into a new session, so killing the CLI does not reach it.
-  const escaped = join(cwd, "holder-escaped.txt");
+  // It ends by itself once the test's `done` file exists (or after 20 s). To be claimed for cleanup
+  // by descent, it must still be a descendant of this test when claimed: the CLI and the python
+  // parent wait for the `go` file.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "styre-holder-")));
+  const [escaped, go, done] = ["holder-escaped.txt", "go", "done"].map((n) => join(dir, n));
   const cli = fakeCli(
     "claude-escaper",
     // The CLI exits only once the holder is established in its own session, outside the group.
-    // The holder writes its own pid into the file, so the test can remove it afterwards.
-    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\npython3 -c 'import os,time\nif os.fork()==0:\n    os.setsid(); f=open("${escaped}.tmp","w"); f.write(str(os.getpid())); f.close(); os.rename("${escaped}.tmp","${escaped}"); time.sleep(20)' &\nwhile [ ! -f '${escaped}' ]; do sleep 0.05; done\nexit 0`,
+    // The holder writes its own pid into the file the CLI waits for.
+    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\npython3 -c 'import os,time\nif os.fork()==0:\n    os.setsid(); f=open("${escaped}.tmp","w"); f.write(str(os.getpid())); f.close(); os.rename("${escaped}.tmp","${escaped}")\n    t=time.time()\n    while not os.path.exists("${done}") and time.time()-t < 20: time.sleep(0.05)\nelse:\n    while not os.path.exists("${go}"): time.sleep(0.05)' &\nwhile [ ! -f '${escaped}' ]; do sleep 0.05; done\nwhile [ ! -e '${go}' ]; do sleep 0.05; done\nexit 0`,
   );
   const since = nowToken();
-  const script = join(cwd, "escaper-runner.ts");
+  const script = join(dir, "escaper-runner.ts");
   writeFileSync(
     script,
     `import { claudeAgentRunner } from ${JSON.stringify(join(import.meta.dir, "../../../src/agent/providers/claude.ts"))};
@@ -388,11 +389,16 @@ console.log(JSON.stringify({ completed: r.completed, stdout: r.stdout }));`,
     // Bun.spawn's default environment is the one Bun started with, which lacks the preload's test
     // state folder: pass this process's, so no launch record reaches the operator's real one (R29).
     const proc = Bun.spawn(["bun", "run", script], { env: { ...process.env }, stdout: "pipe" });
-    out = await new Response(proc.stdout).text();
+    const text = new Response(proc.stdout).text();
+    await until(() => existsSync(escaped), 10_000);
+    const holder = Number(readFileSync(escaped, "utf8"));
+    ownPrinted(holder, since, { pgid: holder }); // claimed by descent, for cleanup
+    writeFileSync(go, "");
+    out = await text;
     await proc.exited;
   } finally {
-    // The holder leads a session (and group) of its own, and outlives the run: remove it.
-    claimWritten(escaped, since, "own");
+    writeFileSync(go, ""); // even when something threw: everything here ends by itself
+    writeFileSync(done, "");
   }
   // drain timeout (5s) plus startup, well under the escaped holder's 20s
   expect(Date.now() - start).toBeLessThan(12000);

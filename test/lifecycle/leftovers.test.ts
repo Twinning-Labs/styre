@@ -32,6 +32,7 @@ import {
   claimPrinted,
   cleanupFixtures,
   folder,
+  goFile,
   isRunning,
   leave,
   marker,
@@ -39,6 +40,7 @@ import {
   runsIn,
   until,
 } from "../helpers/leftover-fixtures.ts";
+import { ownTree } from "../helpers/own-processes.ts";
 
 const only = (r: Leftover[] | "skipped", m: string): Leftover[] => {
   expect(r).not.toBe("skipped");
@@ -213,14 +215,22 @@ describe("what counts as a leftover (section 9.2)", () => {
     const wt = folder("styre-wt-");
     const since = nowToken();
     const m = marker();
-    // The pid printed is the nohup'd shell's; its `sleep` child is removed with it.
-    const sh = 'cd "$1" || exit 1; nohup sh -c ": sleep $2 $3; sleep $2" >/dev/null 2>&1 & echo $!';
-    const p = Bun.spawn(["sh", "-c", sh, "sh", wt, m, "x".repeat(300)], {
+    // The pid printed is the nohup'd shell's; its `sleep` child is removed with it. The outer shell
+    // waits for the go file, so the nohup'd shell is still its child (and this test's descendant)
+    // when it is claimed.
+    const gate = goFile();
+    const sh =
+      'cd "$1" || exit 1; nohup sh -c ": sleep $2 $3; sleep $2" >/dev/null 2>&1 & echo $!; while [ ! -e "$4" ]; do sleep 0.02; done';
+    const p = Bun.spawn(["sh", "-c", sh, "sh", wt, m, "x".repeat(300), gate.path], {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "ignore",
     });
-    await claimPrinted(m, p.stdout, since);
+    const nohupShell = await claimPrinted(m, p.stdout, since);
+    // Its `sleep` child too, claimed while the shell is still this test's descendant: once the
+    // outer shell has gone, neither is, and the sleep could no longer be claimed.
+    expect(await until(() => nohupShell !== null && ownTree(nohupShell).length >= 2)).toBe(true);
+    gate.go();
     await p.exited;
     let hit: Leftover | undefined;
     await until(() => {
@@ -411,14 +421,25 @@ describe("checkLeftovers: the signal handler's step 5", () => {
     const wt = folder("styre wt ");
     const m = marker();
     const since = nowToken();
+    // The agent waits for the go file, so its sleep is still its child (and this test's
+    // descendant) when the test claims it; then it exits and leaves the sleep behind.
+    const gate = goFile();
     const agent = door.launch({
-      argv: ["sh", "-c", 'nohup sleep "$1" >/dev/null 2>&1 & echo $!', "sh", m],
+      argv: [
+        "sh",
+        "-c",
+        'nohup sleep "$1" >/dev/null 2>&1 & echo $!; while [ ! -e "$2" ]; do sleep 0.02; done',
+        "sh",
+        m,
+        gate.path,
+      ],
       cwd: wt,
       env: process.env,
       kind: "agent",
       context: { ident: "ENG-1", stepId: 1, worktree: wt },
     });
     await claimPrinted(m, agent.proc.stdout, since);
+    gate.go();
     await agent.proc.exited;
     await agent.finish();
     let out: string[] = [];
@@ -579,14 +600,25 @@ describe("checkLeftovers is the handler's entry (review round 1, important 2)", 
     const wt = folder("styre wt ");
     const m = marker();
     const since = nowToken();
+    // The agent waits for the go file, so its sleep is still its child (and this test's
+    // descendant) when the test claims it; then it exits and leaves the sleep behind.
+    const gate = goFile();
     const agent = door.launch({
-      argv: ["sh", "-c", 'nohup sleep "$1" >/dev/null 2>&1 & echo $!', "sh", m],
+      argv: [
+        "sh",
+        "-c",
+        'nohup sleep "$1" >/dev/null 2>&1 & echo $!; while [ ! -e "$2" ]; do sleep 0.02; done',
+        "sh",
+        m,
+        gate.path,
+      ],
       cwd: wt,
       env: process.env,
       kind: "agent",
       context: { ident: "ENG-1", stepId: 1, worktree: wt },
     });
     await claimPrinted(m, agent.proc.stdout, since);
+    gate.go();
     await agent.proc.exited;
     expect(await until(() => isRunning(m))).toBe(true);
     await agent.finish();
@@ -605,14 +637,25 @@ describe("checkLeftovers is the handler's entry (review round 1, important 2)", 
     await pastToken(nowToken());
     const mine = marker();
     const since = nowToken();
+    // The agent waits for the go file, so its sleep is still its child (and this test's
+    // descendant) when the test claims it; then it exits and leaves the sleep behind.
+    const gate = goFile();
     const agent = door.launch({
-      argv: ["sh", "-c", 'nohup sleep "$1" >/dev/null 2>&1 & echo $!', "sh", mine],
+      argv: [
+        "sh",
+        "-c",
+        'nohup sleep "$1" >/dev/null 2>&1 & echo $!; while [ ! -e "$2" ]; do sleep 0.02; done',
+        "sh",
+        mine,
+        gate.path,
+      ],
       cwd: wt,
       env: process.env,
       kind: "agent",
       context: { ident: "ENG-1", stepId: 1, worktree: wt },
     });
     await claimPrinted(mine, agent.proc.stdout, since);
+    gate.go();
     await agent.proc.exited;
     expect(await until(() => isRunning(mine))).toBe(true);
     await agent.finish();

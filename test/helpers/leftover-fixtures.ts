@@ -1,20 +1,22 @@
 // Fixtures for the leftover check tests: real detached `sleep` processes carrying a unique marker
-// (the sleep's duration), so a check's report can be matched to the fixture. Each one is known by
-// pid and start time from the moment it starts (its pid is printed or it is a launch's own), and
-// it is removed by that identity, even when a test fails: never by searching for the marker (R28).
+// (the sleep's duration), so a check's report can be matched to the fixture. Each one is claimed by
+// structure while it is still this test's descendant (test/helpers/own-processes.ts), with its pid
+// and start time, and removed by that identity, even when a test fails: never by searching for the
+// marker (R28).
 import { expect } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { LaunchHandle } from "../../src/util/process/door.ts";
-import { nowToken, tokenValue } from "../../src/util/process/proc-table.ts";
+import { listProcesses, nowToken, probe, tokenValue } from "../../src/util/process/proc-table.ts";
+import { collectTree, groupMembers } from "../../src/util/process/stop.ts";
 import {
   type Ident,
   commandOf,
   killOwned,
   own,
-  ownLaunch,
   ownPrinted,
+  registerGroup,
   until,
 } from "./own-processes.ts";
 
@@ -36,10 +38,21 @@ export function folder(prefix: string): string {
   return d;
 }
 
-/** The process carrying marker `m` is the one with this pid and start time. */
+/** The process carrying marker `m` is the one with this pid and start time: claimed (by the
+ *  helper's rules) and remembered for `isRunning`. */
 export function claim(m: string, p: Ident): void {
-  own(p);
+  const [taken] = own(p);
+  expect(taken, `the process for marker ${m} (pid ${p.pid}) could not be claimed`).toBeDefined();
   carriers.set(m, { pid: p.pid, startedAt: p.startedAt });
+}
+
+/**
+ * A file that lets a fixture shell go on: the shell prints what the test must claim, then waits
+ * for this file, so what it started is still its descendant (and so the test's) when claimed.
+ */
+export function goFile(): { path: string; go: () => void } {
+  const path = join(folder("styre-go-"), "go");
+  return { path, go: () => writeFileSync(path, "") };
 }
 
 /** Claim a launch whose own process is `sleep <m>`. */
@@ -60,7 +73,7 @@ export async function claimPrinted(
   stream: ReadableStream<Uint8Array>,
   since: string,
   ms = 5_000,
-): Promise<void> {
+): Promise<Ident | null> {
   const reader = stream.getReader();
   const dec = new TextDecoder();
   let text = "";
@@ -85,25 +98,32 @@ export async function claimPrinted(
     `the fixture for marker ${m} printed "${line}", not the pid of a live process`,
   ).not.toBe(null);
   if (p) claim(m, p);
+  return p;
 }
 
-/** Starts `nohup sleep <m>` detached in `dir`, the way an agent's `nohup server &` would. */
+/**
+ * Starts `nohup sleep <m>` in `dir`, in a session and group of its own, the way an agent's
+ * `nohup server &` would look to the leftover check. It is this test's own child, so it is claimed
+ * by descent, and its group is registered as one the test made. (A shell that backgrounds it and
+ * exits would orphan it before it could be claimed.)
+ */
 export async function leave(dir: string, m: string): Promise<void> {
-  const since = nowToken();
   // Bun.spawn with ignored stdio, not spawnSync: under `bun test` a spawnSync that leaves a
-  // background process behind stalls the runner until the test times out. The shell prints the
-  // background process's pid; nohup and then sleep replace that process, so the pid stays. (With
-  // `cd && nohup … &` the whole list would run in a subshell that waits for nohup while holding the
-  // output pipe, and `$!` would be that subshell.)
-  const sh = 'cd "$1" || exit 1; nohup sleep "$2" >/dev/null 2>&1 & echo $!';
-  const p = Bun.spawn(["sh", "-c", sh, "sh", dir, m], {
+  // background process behind stalls the runner until the test times out.
+  const p = Bun.spawn(["nohup", "sleep", m], {
+    cwd: dir,
     stdin: "ignore",
-    stdout: "pipe",
+    stdout: "ignore",
     stderr: "ignore",
+    detached: true,
   });
-  await claimPrinted(m, p.stdout, since);
-  await p.exited;
-  // Until it has become `sleep`, the process is nohup (or the forked shell): wait for the real thing.
+  p.unref(); // it must not keep the test run alive
+  const now = probe(p.pid);
+  expect(now.kind, `the fixture for marker ${m} is not in the table`).toBe("alive");
+  if (now.kind !== "alive") return;
+  expect(registerGroup(now.info)).toBe(true);
+  claim(m, now.info);
+  // Until it has become `sleep`, the process is nohup: wait for the real thing.
   expect(await until(() => isRunning(m))).toBe(true);
 }
 
@@ -114,9 +134,16 @@ export function isRunning(m: string): boolean {
   return commandOf(p) === `sleep ${m}`;
 }
 
-/** True when a process of launch `h` (its tree, or a member of its group) is `sleep <m>`. */
+/** True when a process of launch `h` (its tree, or a member of its group) is `sleep <m>`. It only
+ *  looks: nothing is claimed (the launch's own stop ends what it started). */
 export function runsIn(h: LaunchHandle, m: string): boolean {
-  return ownLaunch(h).some((p) => commandOf(p) === `sleep ${m}`);
+  const table = listProcesses();
+  const root = { pid: h.record.pid, startedAt: h.record.startedAt };
+  const seen = [
+    ...collectTree(root, table, []),
+    ...(h.record.kind === "group" ? groupMembers(h.record.pid, table) : []),
+  ];
+  return seen.some((p) => commandOf(p) === `sleep ${m}`);
 }
 
 /** Remove every fixture process and folder made so far. Call from afterEach. */
