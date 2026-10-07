@@ -5,7 +5,7 @@
 //
 // The pseudo terminal test of Ctrl-C at a setup prompt lives in Task 15, with its pty helper (R4).
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,6 +34,7 @@ import type { EnrichDeps } from "../../src/setup/enrich.ts";
 import type { AnalyticsClient } from "../../src/telemetry/analytics/client.ts";
 import { telemetryEnabled } from "../../src/telemetry/analytics/consent.ts";
 import * as door from "../../src/util/process/door.ts";
+import * as leftovers from "../../src/util/process/leftovers.ts";
 import {
   __setCwdReadersForTests,
   checkLeftoversInBackground,
@@ -319,16 +320,31 @@ function recordBlockingCalls(): { argv: string; listening: number }[] {
 /** The run tests drive a whole run; the handler may wait in its own timers. */
 const SLOW = 30_000;
 
+/** Makes every leftover check pend until something waits for the pending checks, then sends
+ *  SIGINT to the listeners during that wait and lets the checks end. No fixed sleep: the signal
+ *  lands once `pendingLeftoverChecks` has been called (the run's own wait, or the exit check's). */
+function stopDuringLeftoverWait(): void {
+  const releases: ((v: Map<number, string>) => void)[] = [];
+  __setCwdReadersForTests({
+    async: () =>
+      new Promise((r) => {
+        releases.push(r);
+      }),
+  });
+  const waits = spyOn(leftovers, "pendingLeftoverChecks");
+  void (async () => {
+    const end = Date.now() + 10_000;
+    while (waits.mock.calls.length === 0 && Date.now() < end) await Bun.sleep(10);
+    waits.mockRestore();
+    if (releases.length > 0) process.emit("SIGINT", "SIGINT");
+    for (const r of releases.splice(0)) r(new Map());
+  })();
+}
+
 /** Starts a leftover check that is still pending when the command's exit check waits for it, and
  *  sends SIGINT to the listeners during that wait (R27). */
 function stopDuringExitCheckWait(): void {
-  __setCwdReadersForTests({
-    async: async () => {
-      await Bun.sleep(200);
-      process.emit("SIGINT", "SIGINT");
-      return new Map();
-    },
-  });
+  stopDuringLeftoverWait();
   void checkLeftoversInBackground({ worktree: tmpdir(), since: nowToken(), report: () => {} });
 }
 
@@ -619,13 +635,7 @@ describe("styre run", () => {
       // The parked step starts a leftover check in the background; the run waits for it before it
       // finishes. The stop lands during that wait, after every step has ended, so the run's own
       // code returns normally (the drain sends nothing and returns) instead of failing on a write.
-      __setCwdReadersForTests({
-        async: async () => {
-          await Bun.sleep(150);
-          process.emit("SIGINT", "SIGINT");
-          return new Map();
-        },
-      });
+      stopDuringLeftoverWait();
       try {
         const checkpoint = parkDir("test-project", "ENG-1");
         let text = "";
@@ -878,13 +888,7 @@ describe("styre run --resume", () => {
       const profile = writeProfile(join(env.configRoot, "p", "profile.json"), k.p.slug, k.repo);
       const { out, d } = handlerDeps();
       const a = analytics(true);
-      __setCwdReadersForTests({
-        async: async () => {
-          await Bun.sleep(150);
-          process.emit("SIGINT", "SIGINT");
-          return new Map();
-        },
-      });
+      stopDuringLeftoverWait();
       try {
         let text = "";
         const run = captured(() =>

@@ -210,7 +210,8 @@ test("a record that cannot be removed is a loud failure, not a silent one", asyn
 test("a stop signal in flight (stopAbort.forced) cuts a graceful stop's wait short", async () => {
   // The leader ignores SIGTERM, so a graceful stop would wait the whole grace period.
   const g = start(sh("trap '' TERM; while :; do sleep 1; done"), "group");
-  await Bun.sleep(300); // let the trap install
+  // Its `sleep 1` child exists only once the line before, the trap, has run.
+  expect(await waitFor(() => listProcesses().some((p) => p.ppid === g.proc.pid))).toBe(true);
   door.stopAbort.forced = true;
   const t0 = Date.now();
   const rep = await g.stop("graceful");
@@ -266,7 +267,8 @@ test("a finish that leaves a survivor keeps the record and the live entry", asyn
 test("a stop signal in flight (stopAbort.forced) also cuts a graceful AGENT stop short", async () => {
   // The agent's shell ignores SIGTERM and respawns its child, so only SIGKILL ends it.
   const a = start(sh("trap '' TERM; while :; do sleep 1; done"), "agent");
-  await Bun.sleep(300); // let the trap install
+  // Its `sleep 1` child exists only once the line before, the trap, has run.
+  expect(await waitFor(() => listProcesses().some((p) => p.ppid === a.proc.pid))).toBe(true);
   door.stopAbort.forced = true;
   const t0 = Date.now();
   const rep = await a.stop("graceful");

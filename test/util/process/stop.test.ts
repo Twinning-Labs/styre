@@ -829,8 +829,10 @@ describe("stopTree and stopGroup on real processes", () => {
   test("stopGroup escalates to SIGKILL for a group that ignores SIGTERM", async () => {
     const p = track(Bun.spawn([join(FX, "stubborn-cli.sh")], { detached: true }));
     liveGroups.push(p.pid);
-    await until("the stubborn script to be running", () => alive(p.pid));
-    await Bun.sleep(100); // let it install its trap
+    // Its `sleep 1` child exists only once the line before, the trap, has run.
+    await until("the stubborn script's trap to be installed", () =>
+      listProcesses().some((q) => q.ppid === p.pid && q.state !== "zombie"),
+    );
     const rep = await stopGroup(p.pid, "graceful", { graceMs: 500 });
     expect(rep.survivors).toEqual([]);
     expect(alive(p.pid)).toBe(false);
