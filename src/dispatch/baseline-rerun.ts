@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { listByTicket } from "../db/repos/ground-truth-signal.ts";
 import { type BlockingResult, deferCleanup, runBlocking } from "../util/process/door.ts";
 import type { CmdRunner } from "../util/run-command.ts";
@@ -81,11 +81,19 @@ function registered(repoPath: string, wt: string): boolean {
     cleanup: true,
   });
   if (!r.success) return true;
-  const names = new Set([wt]);
-  try {
-    names.add(realpathSync(wt));
-  } catch {
-    /* the folder is gone: git lists the path it was given */
+  // git lists the realpath (macOS: /private/var/… for /var/…). The folder may be gone, so its
+  // parent, which is the temp folder, is resolved; if that is gone too, the path as given is all
+  // there is to compare.
+  const names = new Set([wt, resolve(wt)]);
+  for (const real of [
+    () => realpathSync(wt),
+    () => join(realpathSync(dirname(wt)), basename(wt)),
+  ]) {
+    try {
+      names.add(real());
+    } catch {
+      /* not there to resolve */
+    }
   }
   return r.stdout.split("\n").some((l) => l.startsWith("worktree ") && names.has(l.slice(9)));
 }
@@ -128,7 +136,9 @@ function removeTempWorktree(repoPath: string, wt: string): void {
  *  `wt` must be a `styre-baseline-*` folder directly in the temp folder, as the call sites make it;
  *  any other path is refused before anything is held, since the removal deletes it (N5). */
 export function deferWorktreeRemoval(repoPath: string, wt: string): () => void {
-  if (dirname(wt) !== tmpdir() || !basename(wt).startsWith(TEMP_WORKTREE_PREFIX)) {
+  // Compared resolved, so a temp folder written with `//`, `./` or `../` still matches (R2-2).
+  const at = resolve(wt);
+  if (dirname(at) !== resolve(tmpdir()) || !basename(at).startsWith(TEMP_WORKTREE_PREFIX)) {
     throw new Error(
       `refusing to remove ${wt}: a temporary worktree must be a ${TEMP_WORKTREE_PREFIX}* folder directly in ${tmpdir()}`,
     );

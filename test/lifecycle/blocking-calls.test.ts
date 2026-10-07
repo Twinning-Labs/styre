@@ -11,10 +11,11 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { preflightAgentCli } from "../../src/agent/preflight.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { defaultGit, tryGit } from "../../src/config/slug.ts";
@@ -493,18 +494,28 @@ async function stderrOf(fn: () => Promise<unknown>): Promise<string[]> {
 
 /** Puts a `git` first on PATH that runs `onRemove` (shell) for `worktree remove` and the real git
  *  for everything else. Returns the restore. */
-function gitShim(onRemove: string): () => void {
+function gitShim(onRemove: string, onList = ":"): () => void {
+  return loggingGitShim(onRemove, onList).restore;
+}
+
+/** As gitShim, with `onList` (shell) run for `worktree list` too, and every call logged: `calls()`
+ *  returns the logged argument lists. */
+function loggingGitShim(onRemove: string, onList = ":") {
   const shim = tmp("styre-git-shim-");
+  const log = join(shim, "calls.log");
   const realGit = Bun.which("git");
   writeFileSync(
     join(shim, "git"),
-    `#!/bin/sh\nif [ "$1 $2" = "worktree remove" ]; then ${onRemove}; fi\nexec '${realGit}' "$@"\n`,
+    `#!/bin/sh\necho "$@" >> '${log}'\nif [ "$1 $2" = "worktree remove" ]; then ${onRemove}; fi\nif [ "$1 $2" = "worktree list" ]; then ${onList}; fi\nexec '${realGit}' "$@"\n`,
     { mode: 0o755 },
   );
   const savedPath = process.env.PATH;
   process.env.PATH = `${shim}:${savedPath}`;
-  return () => {
-    process.env.PATH = savedPath;
+  return {
+    restore: () => {
+      process.env.PATH = savedPath;
+    },
+    calls: (): string[] => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : []),
   };
 }
 
@@ -647,6 +658,119 @@ test("a held removal ended by a signal names the signal (N3)", async () => {
   expect(err).toEqual([
     `styre: could not remove a temporary worktree: git worktree remove --force ${wt} failed (killed by SIGINT); remove it with: git -C ${r.path} worktree remove --force ${wt}\n`,
   ]);
+});
+
+test("a worktree whose folder is entirely gone, under a temp folder reached through a symlink, is still unregistered (R2-1)", async () => {
+  const r = repo();
+  // git lists the realpath; the temp folder's own path goes through a symlink, as macOS's does.
+  const real = join(tmpdir(), "real");
+  mkdirSync(real);
+  const link = join(tmpdir(), "link");
+  symlinkSync(real, link);
+  process.env.TMPDIR = link;
+  const b = await blockedBaseline(r);
+  // git lists the realpath; Styre holds the same folder through the link.
+  const held = join(link, basename(b.wt));
+  expect(b.wt).toBe(join(real, basename(b.wt)));
+  expect(existsSync(held)).toBe(true);
+  const err: string[] = [];
+  try {
+    rmSync(held, { recursive: true, force: true }); // the whole folder is gone, git's entry is not
+    await handleStopSignal("SIGTERM", { command: "run", run: null }, handlerDeps(err));
+  } finally {
+    await b.end();
+  }
+  // Removed, not left silently: git accepts the removal of a worktree whose folder is missing.
+  expect(cleanupLines(err)).toEqual([]);
+  expect(worktreesOf(r.path)).toEqual(b.before);
+});
+
+test("when git cannot list the worktrees, the worktree counts as registered: the removal is tried and its failure said (R2-3)", async () => {
+  const r = repo();
+  const b = await blockedBaseline(r);
+  const shim = loggingGitShim(":", "exit 1"); // `git worktree list` fails
+  const err: string[] = [];
+  try {
+    rmSync(join(b.wt, ".git")); // so the code must ask git whether it is still registered
+    await handleStopSignal("SIGTERM", { command: "run", run: null }, handlerDeps(err));
+  } finally {
+    shim.restore();
+    await b.end();
+  }
+  expect(shim.calls()).toContain(`worktree remove --force ${b.wt}`);
+  const lines = cleanupLines(err);
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toEndWith(
+    `); remove it with: rm -rf ${b.wt} && git -C ${r.path} worktree prune\n`,
+  );
+  expect(worktreesOf(r.path)).toContain(`worktree ${b.wt}`); // said, and still there to remove
+});
+
+test("a temp folder written with //, ./ or ../ still takes every real removal, and an escape is still refused (R2-2)", async () => {
+  const r = repo();
+  const own = tmpdir();
+  mkdirSync(join(own, "x"));
+  mkdirSync(join(own, "sub"));
+  process.env.TMPDIR = `${own}//./x/../sub`;
+  const before = worktreesOf(r.path);
+  const source = join(r.path, "delivered.py");
+  writeFileSync(source, "def test_bug(): assert False\n");
+  const components = [
+    { name: "api", kind: "python" as const, paths: ["**"], commands: {}, extensions: [".py"] },
+  ];
+  const plan = resolveCheckExecution({ components, testFile: "tests/test_bug.py" });
+  const run = async () => ({ exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false });
+  const err = await stderrOf(async () => {
+    const obs = await runAtBaseline({
+      repoPath: r.path,
+      baselineSha: r.sha,
+      command: "true",
+      timeoutMs: 10_000,
+    });
+    expect(obs.execution?.outcome).toBe("completed-zero");
+    expect(
+      (
+        await deliveredTestEvidenceAtBaseline({
+          repoPath: r.path,
+          baselineSha: r.sha,
+          testFile: plan.testFile,
+          sourcePath: source,
+          plan,
+          timeoutMs: 1000,
+          run,
+        })
+      ).execution?.coarse,
+    ).toBe("red"); // the check ran in its worktree
+    expect(
+      await replayCheckAtBaseline({
+        repoPath: r.path,
+        baselineSha: r.sha,
+        components,
+        testFile: "checks/a_test.py",
+        testName: "test_ac",
+        content: "def test_ac():\n    assert False\n",
+        timeoutMs: 1000,
+        run,
+      }),
+    ).toBe("red");
+  });
+  expect(err).toEqual([]);
+  expect(worktreesOf(r.path)).toEqual(before);
+  expect(readdirSync(join(own, "sub"))).toEqual([]); // every folder removed
+  // A path that leaves the temp folder is refused however it is written.
+  const outside = join(own, "sub", "..", "styre-baseline-adv-escape");
+  mkdirSync(outside);
+  expect(() => deferWorktreeRemoval(r.path, outside)).toThrow(/refusing to remove/);
+  expect(existsSync(outside)).toBe(true);
+  // A path handed over as written, not through join(), is judged by where it resolves.
+  const rawEscape = `${tmpdir()}/../styre-baseline-adv-raw-escape`; // in `own`, not in `sub`
+  mkdirSync(rawEscape);
+  expect(() => deferWorktreeRemoval(r.path, rawEscape)).toThrow(/refusing to remove/);
+  expect(existsSync(rawEscape)).toBe(true);
+  const rawInside = `${tmpdir()}/./styre-baseline-adv-raw-inside`; // in `sub`
+  mkdirSync(rawInside);
+  deferWorktreeRemoval(r.path, rawInside)();
+  expect(existsSync(rawInside)).toBe(false);
 });
 
 test("deferWorktreeRemoval refuses a folder that is not a styre-baseline folder directly in the temp folder (N5)", () => {
