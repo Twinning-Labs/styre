@@ -1,8 +1,16 @@
-// Cleanup that touches only processes a test started itself (R28). A process is known by its pid AND
-// its start time, read while it was certainly the test's own, and it is signalled only while the
-// process table still shows that same process. Nothing here finds a process by its command text:
-// matching by text across the machine kills a developer's own processes and those of a parallel
-// test run (test/lifecycle/test-process-guard.test.ts refuses that in every test file).
+// Cleanup that touches only processes a test started itself (R28, and the operator's decision after
+// the 2026-10-07 incident, when a weakened check let a test claim pid 1 and kill launchd's tree).
+//
+// A process is CLAIMED only by structure, judged in one read of the process table:
+//   1. it descends from this test process: its ppid chain, walked in that same read, reaches
+//      process.pid; or
+//   2. it sits in a process group this test created: `registerGroup` takes a group only when its
+//      leader is this test process's own child (ppid === process.pid) and leads it (pgid === pid),
+//      and never this test's own group or the group of any of its ancestors.
+// pid 1, this process and its ancestors are refused whatever the rules say (an extra layer).
+// Each claim records pid AND start time. Only recorded processes are ever signalled, each one
+// checked again just before its signal (same pid, same start time, not an ancestor). Nothing here
+// finds a process by its command text (test/lifecycle/test-process-guard.test.ts refuses that).
 import type { LaunchHandle } from "../../src/util/process/door.ts";
 import {
   type ProcInfo,
@@ -19,64 +27,158 @@ export interface Ident {
 }
 
 const key = (p: Ident): string => `${p.pid}:${p.startedAt}`;
-/** Every process remembered and not yet cleaned up, across the test files of one run. */
+/** Every process claimed and not yet cleaned up, across the test files of one run. */
 const owned = new Map<string, Ident>();
-/** Every process ever remembered in this run, cleaned up or not: the end of run leak check reads it
- *  (`stillRunning`, called from test/preload.ts). */
+/** Every process ever claimed in this run, cleaned up or not: the end of run leak check reads it
+ *  (`stillRunning` and `stopStillRunning`, called from test/preload.ts). */
 const claimed = new Map<string, Ident>();
+/** The groups this test created, by group id, with their leader as it was when registered. */
+const groups = new Map<number, Ident>();
 
-/** Remember processes the test started, so `killOwned` stops them. Returns them unchanged. */
-export function own<T extends Ident>(...ps: T[]): T[] {
-  for (const p of ps) {
-    const id = { pid: p.pid, startedAt: p.startedAt };
-    owned.set(key(p), id);
-    claimed.set(key(p), id);
+/** This process's ancestors in one read: parent, its parent, and so on, up to pid 1. */
+function ancestorsOf(table: ProcInfo[]): Set<number> {
+  const byPid = new Map(table.map((p) => [p.pid, p]));
+  const out = new Set<number>([1]);
+  let p = byPid.get(process.pid);
+  while (p !== undefined && p.ppid > 0 && !out.has(p.ppid)) {
+    out.add(p.ppid);
+    p = byPid.get(p.ppid);
   }
-  return ps;
+  return out;
 }
 
-/** This test process's own group: never expanded, never signalled. */
+/** Rule 1: the ppid chain of `pid`, walked in `table`, reaches this test process. */
+function descends(pid: number, table: ProcInfo[]): boolean {
+  const byPid = new Map(table.map((p) => [p.pid, p]));
+  const seen = new Set<number>();
+  let p = byPid.get(pid);
+  while (p !== undefined && !seen.has(p.pid)) {
+    if (p.ppid === process.pid) return true;
+    if (p.ppid <= 1) return false;
+    seen.add(p.pid);
+    p = byPid.get(p.ppid);
+  }
+  return false;
+}
+
+/** Rule 2: `p` sits in a group this test registered, and started no earlier than its leader. */
+function inOwnGroup(p: ProcInfo, table: ProcInfo[]): boolean {
+  const leader = groups.get(p.pgid);
+  if (leader === undefined) return false;
+  const self = table.find((q) => q.pid === process.pid);
+  if (self === undefined || p.pgid === self.pgid) return false;
+  const ancestors = ancestorsOf(table);
+  if (table.some((q) => ancestors.has(q.pid) && q.pgid === p.pgid)) return false;
+  return tokenValue(p.startedAt) >= tokenValue(leader.startedAt);
+}
+
+/** Whether `p`, as `table` shows it, may be claimed: the same process, alive, never pid 1, this
+ *  process or an ancestor, and passing rule 1 or rule 2. */
+function claimable(p: Ident, table: ProcInfo[]): ProcInfo | null {
+  if (!Number.isInteger(p.pid) || p.pid <= 1 || p.pid === process.pid) return null;
+  if (ancestorsOf(table).has(p.pid)) return null;
+  const now = table.find((q) => q.pid === p.pid);
+  if (now === undefined || !sameProcess(p, now) || now.state === "zombie") return null;
+  return descends(now.pid, table) || inOwnGroup(now, table) ? now : null;
+}
+
+function record(p: ProcInfo): void {
+  const id = { pid: p.pid, startedAt: p.startedAt };
+  owned.set(key(p), id);
+  claimed.set(key(p), id);
+}
+
+/**
+ * Claim processes the test started, so `killOwned` stops them. Each is taken only if it passes
+ * rule 1 or rule 2 in one fresh read of the table (`table` when given); the rest are refused.
+ * Returns the ones taken.
+ */
+export function own<T extends Ident>(...ps: T[]): ProcInfo[] {
+  return claimAll(ps, listProcesses());
+}
+
+function claimAll(ps: Ident[], table: ProcInfo[]): ProcInfo[] {
+  const taken: ProcInfo[] = [];
+  for (const p of ps) {
+    const now = claimable(p, table);
+    if (now === null) continue;
+    record(now);
+    taken.push(now);
+  }
+  return taken;
+}
+
+/**
+ * Register a group this test created: `leader` must be, in a fresh read, this test process's own
+ * child (the same process) and lead its group, and the group must be neither this process's nor an
+ * ancestor's. Its members are then claimable by rule 2, even once their parent has died. Returns
+ * whether it was registered.
+ */
+export function registerGroup(leader: Ident): boolean {
+  const table = listProcesses();
+  const now = table.find((q) => q.pid === leader.pid);
+  if (now === undefined || !sameProcess(leader, now) || now.state === "zombie") return false;
+  if (now.pid <= 1 || now.ppid !== process.pid || now.pgid !== now.pid) return false;
+  const self = table.find((q) => q.pid === process.pid);
+  if (self === undefined || now.pgid === self.pgid) return false;
+  const ancestors = ancestorsOf(table);
+  if (ancestors.has(now.pgid) || table.some((q) => ancestors.has(q.pid) && q.pgid === now.pgid))
+    return false;
+  groups.set(now.pgid, { pid: now.pid, startedAt: now.startedAt });
+  return true;
+}
+
+/** Test seam for the kill time check alone: record an identity WITHOUT the claim rules, as a
+ *  recorded process whose pid has since been handed to another process would look. Only
+ *  test/lifecycle/own-processes.test.ts uses it. */
+export function __recordForTests(p: Ident): void {
+  const id = { pid: p.pid, startedAt: p.startedAt };
+  owned.set(key(id), id);
+  claimed.set(key(id), id);
+}
+
+/** Drop a process from every record: a test that handed the helper something it must refuse
+ *  forgets it in a `finally`, so a regression fails that test without a signal being sent. */
+export function forget(p: Ident): void {
+  owned.delete(key(p));
+  claimed.delete(key(p));
+}
+
+/** This test process's own group: never expanded by a tree collection. */
 function selfPgid(table: ProcInfo[]): number | undefined {
   return table.find((p) => p.pid === process.pid)?.pgid;
 }
 
 /**
- * The root and everything `collectTree` says belongs to it in one listing (its descendants, and the
- * members of groups they lead), remembered. A root that is no longer in the table gives nothing.
+ * The root and what `collectTree` says belongs to it in one read (its descendants, and the members
+ * of groups they lead), each claimed only if it passes rule 1 or rule 2 in that same read: a root
+ * that is not the same process, or not claimable, gives nothing. Returns what was claimed.
  */
 export function ownTree(root: Ident, table: ProcInfo[] = listProcesses()): ProcInfo[] {
+  if (claimable(root, table) === null) return [];
   const self = selfPgid(table);
-  const tree = collectTree(root, table, self === undefined ? [] : [self]).filter(
-    (p) => p.pid !== process.pid,
-  );
-  own(...tree);
-  return tree;
+  return claimAll(collectTree(root, table, self === undefined ? [] : [self]), table);
 }
 
 /**
  * What a launch the test made still has running: for an agent, its tree; for a command group, its
- * tree and every member of its group. The group's members count only while the leader is the
- * launch's own process or gone: a group id cannot be handed out again while any member is alive,
- * so members of a group whose leader has exited are still the launch's.
+ * group is registered (while its leader is still this test's child) and its tree and members are
+ * claimed by the rules. Members of a group whose leader died before it was registered are not
+ * claimable: the door's own stop is what ends those.
  */
 export function ownLaunch(h: LaunchHandle, table: ProcInfo[] = listProcesses()): ProcInfo[] {
   const root = { pid: h.record.pid, startedAt: h.record.startedAt };
+  if (h.record.kind === "group") registerGroup(root);
   const tree = ownTree(root, table);
-  if (h.record.kind !== "group") return tree;
-  const leader = table.find((p) => p.pid === root.pid);
-  if (leader !== undefined && !sameProcess(root, leader)) return tree;
-  if (root.pid <= 1 || root.pid === selfPgid(table)) return tree;
-  const members = groupMembers(root.pid, table);
-  own(...members);
+  if (h.record.kind !== "group" || !groups.has(root.pid)) return tree;
+  const members = claimAll(groupMembers(root.pid, table), table);
   return [...tree, ...members.filter((m) => !tree.some((t) => sameProcess(t, m)))];
 }
 
 /**
- * Remember a process whose pid a test only read from a fixture's output (`tool <pid>`, a pid file).
- * It is taken only if it is alive now, started no earlier than `since` (a `nowToken()` read before
- * the fixture was started), and, when given, sits in the group `pgid`: the checks that tell a pid
- * handed out again to someone else's process apart from the fixture's. Returns null when the
- * process is not (or no longer) there.
+ * Claim a process whose pid a test only read from a fixture's output (`tool <pid>`, a pid file).
+ * Rule 1 or rule 2 decides; it must also have started no earlier than `since` (a `nowToken()` read
+ * before the fixture started) and, when given, sit in group `pgid`. Returns null when refused.
  */
 export function ownPrinted(
   pid: number,
@@ -88,8 +190,7 @@ export function ownPrinted(
   if (p.kind !== "alive" || p.info.state === "zombie") return null;
   if (tokenValue(p.info.startedAt) < tokenValue(since)) return null;
   if (opts.pgid !== undefined && p.info.pgid !== opts.pgid) return null;
-  own(p.info);
-  return p.info;
+  return claimAll([p.info], listProcesses())[0] ?? null;
 }
 
 /** The pid in a fixture's `tool <pid>` line, or NaN. */
@@ -132,48 +233,61 @@ export function allGone(ps: Ident[], ms = 5_000): Promise<boolean> {
   return until(() => ps.every((p) => !isAlive(p)), ms);
 }
 
+/** SIGKILL one recorded process, checked again just before the signal: the same pid and start time,
+ *  alive, and never pid 1, this process or an ancestor of it. Returns whether it was signalled. */
+function killRecorded(p: Ident, ancestors: Set<number>): boolean {
+  if (!Number.isInteger(p.pid) || p.pid <= 1 || p.pid === process.pid || ancestors.has(p.pid))
+    return false;
+  if (!isAlive(p)) return false;
+  try {
+    process.kill(p.pid, "SIGKILL");
+    return true;
+  } catch {
+    return false; // it ended meanwhile
+  }
+}
+
 /**
- * SIGKILL every remembered process that the table still shows as the same process, and everything
- * `collectTree` finds under it in that same listing (what a process the test started has started
- * is the test's too), then forget them all. One listing is read before any kill, and every kill is
- * by pid: no pattern, no group id. Returns how many were signalled.
+ * Stop every claimed process. First, in one read, what `collectTree` finds under them that passes
+ * rule 1 or rule 2 is claimed too (what a process the test started has started); then each recorded
+ * process is signalled by pid after its own check (`killRecorded`), and all are forgotten. No
+ * pattern and no group id are ever signalled. Returns how many were signalled.
  */
 export function killOwned(): number {
   if (owned.size === 0) return 0;
   const table = listProcesses();
   const self = selfPgid(table);
-  const doomed = new Map<string, ProcInfo>();
-  for (const p of owned.values()) {
-    for (const q of collectTree(p, table, self === undefined ? [] : [self])) doomed.set(key(q), q);
+  for (const p of [...owned.values()]) {
+    if (!table.some((q) => sameProcess(p, q))) continue;
+    claimAll(collectTree(p, table, self === undefined ? [] : [self]), table);
   }
+  const ancestors = ancestorsOf(table);
+  const doomed = [...owned.values()];
   owned.clear();
-  for (const p of doomed.values()) claimed.set(key(p), { pid: p.pid, startedAt: p.startedAt });
   let n = 0;
-  for (const p of doomed.values()) {
-    if (p.pid <= 1 || p.pid === process.pid || p.state === "zombie") continue;
-    try {
-      process.kill(p.pid, "SIGKILL");
-      n++;
-    } catch {
-      /* it ended meanwhile */
-    }
-  }
+  for (const p of doomed) if (killRecorded(p, ancestors)) n++;
   return n;
 }
 
 /**
- * Every process remembered during the run (`own`, and so every helper that remembers) that is still
- * the same process and alive, after a bounded wait for any that are just ending, each named by pid
- * and command. A test that cleaned up leaves none: a cleanup removed or broken does.
+ * Every process claimed during the run that is still the same process and alive, after a bounded
+ * wait for any that are just ending, each named by pid and command. A test that cleaned up leaves
+ * none: a cleanup removed or broken does.
  */
 export async function stillRunning(ms = 3_000): Promise<(Ident & { command: string })[]> {
   let left: Ident[] = [];
   await until(() => {
-    const table = listProcesses();
-    left = [...claimed.values()].filter(
-      (p) => p.pid !== process.pid && table.some((q) => sameProcess(p, q) && q.state !== "zombie"),
-    );
+    left = [...claimed.values()].filter((p) => p.pid !== process.pid && isAlive(p));
     return left.length === 0;
   }, ms);
   return left.map((p) => ({ ...p, command: commandOf(p) ?? "(it ended meanwhile)" }));
+}
+
+/** Stop the claimed processes `stillRunning` named: recorded identities only, each checked again
+ *  just before its signal. */
+export function stopStillRunning(left: Ident[]): number {
+  const ancestors = ancestorsOf(listProcesses());
+  let n = 0;
+  for (const p of left) if (claimed.has(key(p)) && killRecorded(p, ancestors)) n++;
+  return n;
 }
