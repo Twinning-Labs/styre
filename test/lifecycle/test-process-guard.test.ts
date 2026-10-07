@@ -6,9 +6,15 @@
 // The scan reads every file under test/ (TypeScript, shell, any fixture) as text and refuses:
 //   - the process matching tools: pkill, killall, pgrep, pidof;
 //   - a `kill` fed by a text search: `kill $(… grep|awk|ps …)`, `… grep|awk … | xargs kill`, and a
-//     `ps … | … kill` pipeline.
-// Comments are scanned too: a test file has no reason to name these tools. This file is the one
-// exception, since it must spell them to look for them.
+//     `ps … | … kill` pipeline;
+//   - a signal to every process: `kill -1` or `kill 0` as the target (`kill -9 -1`, `kill 0`), and
+//     `process.kill(-1, …)` or `process.kill(0, …)`;
+//   - a `ps` listing of many processes (no `-p`) in a file that also signals processes, on any line:
+//     the text filter between the two may be on lines of its own.
+// It is a tripwire for the plain forms a test would honestly be written with, not a parser: a
+// spelling built to dodge it (a joined string, an escape) is not caught. Comments are scanned too:
+// a test file has no reason to name these tools. This file is the one exception, since it must
+// spell them to look for them.
 import { expect, test } from "bun:test";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -25,7 +31,17 @@ const RULES: { name: string; re: RegExp }[] = [
   },
   { name: "kill fed by a text search", re: /\b(?:grep|awk)\b[^\n]*\|\s*xargs\b[^\n]*\bkill\b/ },
   { name: "kill fed by a text search", re: /\bps\b[^\n]*\|[^\n]*\bkill\b/ },
+  {
+    name: "a signal to every process",
+    re: /\bkill\s+(?:-\S+\s+)*(?:-1|0)\s*(?:$|[;|&)'"`])|\bkill\(\s*(?:-1|0)\s*[,)]/,
+  },
 ];
+
+/** A `ps` that lists many processes: an argv or a command line starting with ps, without `-p`. */
+const PS_LISTING = /\[\s*["'`]ps["'`]|(?:^|[\s;|&(`"'$])ps\s+(?:-[A-Za-z]+|[auxe]+)(?=\s|$|["'`])/;
+const PS_ONE_PID = /["'`]-p["'`]|\s-p\b/;
+/** Any way a test file signals a process. */
+const SIGNALS = /\bprocess\.kill\(|\.kill\(|(?:^|[\s;|&(`"'])kill\s+[-$\d]/m;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -40,18 +56,19 @@ function walk(dir: string, out: string[] = []): string[] {
 /** Every offending line in `text`, as "file:line: rule: text". */
 function offences(file: string, text: string): string[] {
   const found: string[] = [];
+  const signals = SIGNALS.test(text);
   text.split("\n").forEach((line, i) => {
-    for (const r of RULES) {
-      if (r.re.test(line)) {
-        found.push(`${file}:${i + 1}: ${r.name}: ${line.trim()}`);
-        break;
-      }
-    }
+    const rule =
+      RULES.find((r) => r.re.test(line))?.name ??
+      (signals && PS_LISTING.test(line) && !PS_ONE_PID.test(line)
+        ? "a ps listing in a file that signals processes"
+        : undefined);
+    if (rule) found.push(`${file}:${i + 1}: ${rule}: ${line.trim()}`);
   });
   return found;
 }
 
-test("no file under test/ finds processes by matching text across the machine", () => {
+test("no file under test/ uses a process matching tool, signals every process, or kills by a ps listing", () => {
   const files = walk(join(ROOT, "test")).filter((f) => relative(ROOT, f) !== SELF);
   expect(files.length).toBeGreaterThan(100); // the walk really reached the test tree
   const hits = files.flatMap((f) => offences(relative(ROOT, f), readFileSync(f, "utf8")));
@@ -67,6 +84,16 @@ test.each([
   ["kill `ps -A | awk '/sleep 30/ {print $1}'`"],
   ["ps -A | grep standin | awk '{print $1}' | xargs kill -9"],
   ["pgrep -f marker | xargs -n1 kill"],
+  ["kill -9 -1"],
+  ["kill 0"],
+  ["sh -c 'kill -TERM -1; exit'"],
+  ['process.kill(-1, "SIGKILL");'],
+  ["process.kill(0);"],
+  [
+    'const ids = Bun.spawnSync(["ps", "-A", "-o", "pid=,command="]).stdout.toString();\nfor (const l of ids.split("\\n").filter((x) => x.includes("sleep 30"))) process.kill(Number(l.trim().split(" ")[0]), 9);',
+  ],
+  ['for p in $(echo x); do :; done\nids=$(ps -A -o pid=,command=)\necho "$ids" > f\nkill -9 "$p"'],
+  ['ps aux > list\nkill -9 "$(head -1 list)"'],
 ])("refused: %s", (line) => {
   expect(offences("t.ts", line)).toHaveLength(1);
 });
@@ -78,6 +105,13 @@ test.each([
   ['const r = door.runBlocking(sh("kill -TERM $$"), { timeoutMs: 10_000 });'],
   ['Bun.spawnSync(["ps", "-o", "pgid=", "-p", String(pid)])'],
   ["const skill = killOwned();"],
+  ["kill -1 1234"],
+  ['kill -0 "$pid"'],
+  [
+    'const r = Bun.spawnSync(["ps", "-o", "command=", "-p", String(p.pid)]);\nprocess.kill(p.pid, "SIGKILL");',
+  ],
+  ['LC_ALL=C ps -A -o pid=,ppid=,command= > "$1"'],
+  ['test("the ps fallback ignores locale", () => { process.kill(p.pid, 9); });'],
 ])("allowed: %s", (line) => {
   expect(offences("t.ts", line)).toEqual([]);
 });
