@@ -3,13 +3,14 @@
 // is claimed, or a member of a group this test created), records its pid and start time, and
 // signals only those recorded processes, each checked again just before its signal.
 //
-// Each test here signals only processes it starts itself. The refusal tests also forget what they
-// handed the helper in a `finally`, so a regression fails them without anything being signalled.
+// Each test here signals only processes it starts itself. The refusal tests also put the helper's
+// records back as they were before them (`__snapshotForTests`, in a `finally`): whatever a
+// regression let them claim, a candidate or the tree `ownTree` found under it, is never signalled.
 // Breaks that weaken who may be signalled are proved in a container, never on a developer machine.
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   type ProcInfo,
   listProcesses,
@@ -19,26 +20,33 @@ import {
 } from "../../src/util/process/proc-table.ts";
 import {
   __recordForTests,
+  __registerGroupForTests,
+  __snapshotForTests,
   allGone,
-  forget,
   isAlive,
   killOwned,
   own,
   ownPrinted,
   ownTree,
   registerGroup,
+  registeredGroups,
   stillRunning,
   until,
+  wouldClaim,
 } from "../helpers/own-processes.ts";
 
 /** Every child a test here spawned, killed through its own Bun handle after the test. */
 const children: Bun.Subprocess[] = [];
-/** Files whose creation ends a looping fixture by itself (no signal needed). */
+/** Files whose creation ends a looping fixture by itself (no signal needed), in folders of their
+ *  own, removed after each test (the loops also end once their folder is gone). */
 const doneFiles: string[] = [];
 afterEach(() => {
   killOwned();
   for (const c of children.splice(0)) if (c.exitCode === null && c.signalCode === null) c.kill(9);
-  for (const f of doneFiles.splice(0)) writeFileSync(f, "");
+  for (const f of doneFiles.splice(0)) {
+    writeFileSync(f, "");
+    rmSync(dirname(f), { recursive: true, force: true });
+  }
 });
 
 /**
@@ -58,7 +66,13 @@ async function orphan(detached: boolean): Promise<{
   doneFiles.push(done);
   const since = nowToken();
   const c = Bun.spawn(
-    ["sh", "-c", '(while [ ! -e "$1" ]; do sleep 0.05; done) & echo $!; wait', "sh", done],
+    [
+      "sh",
+      "-c",
+      '(while [ ! -e "$1" ] && [ -d "${1%/*}" ]; do sleep 0.05; done) & echo $!; wait',
+      "sh",
+      done,
+    ],
     { stdin: "ignore", stdout: "pipe", stderr: "ignore", detached },
   );
   children.push(c);
@@ -187,14 +201,16 @@ test("an orphan in a group the test never registered is refused, and is left run
   // looks like to the helper.
   const o = await orphan(true);
   await dropParent(o.shell, o.loop);
+  const restore = __snapshotForTests();
   try {
     expect(ownPrinted(o.loop.pid, o.since)).toBeNull();
     expect(own(o.loop)).toEqual([]);
-    expect(killOwned()).toBe(0);
     expect(isAlive(o.loop)).toBe(true);
   } finally {
-    forget(o.loop);
+    restore();
   }
+  expect(killOwned()).toBe(0);
+  expect(isAlive(o.loop)).toBe(true);
   o.end(); // it ends by itself: no signal from the test
   expect(await allGone([o.loop])).toBe(true);
 });
@@ -204,14 +220,16 @@ test("an orphan in the test's own group, not descended from the test, is refused
   await dropParent(o.shell, o.loop);
   const me = probe(process.pid);
   expect(me.kind === "alive" && o.loop.pgid === me.info.pgid).toBe(true);
+  const restore = __snapshotForTests();
   try {
     expect(ownPrinted(o.loop.pid, o.since)).toBeNull();
     expect(own(o.loop)).toEqual([]);
-    expect(killOwned()).toBe(0);
     expect(isAlive(o.loop)).toBe(true);
   } finally {
-    forget(o.loop);
+    restore();
   }
+  expect(killOwned()).toBe(0);
+  expect(isAlive(o.loop)).toBe(true);
   o.end();
   expect(await allGone([o.loop])).toBe(true);
 });
@@ -233,6 +251,7 @@ test("pid 1 and every ancestor of the test process are refused, and so are their
   expect(ancestors.some((a) => a.pid === process.ppid)).toBe(true);
   const init = byPid.get(1);
   const candidates = [...ancestors, ...(init ? [init] : [])];
+  const restore = __snapshotForTests();
   try {
     for (const a of candidates) {
       expect(ownPrinted(a.pid, "0")).toBeNull();
@@ -243,7 +262,7 @@ test("pid 1 and every ancestor of the test process are refused, and so are their
     const me = byPid.get(process.pid);
     if (me) expect(registerGroup(me)).toBe(false);
   } finally {
-    for (const a of candidates) forget(a);
+    restore(); // drops whatever was recorded above, the candidates' trees included
   }
   expect(killOwned()).toBe(0);
 });
@@ -297,14 +316,121 @@ test("at kill time a recorded pid whose start time no longer matches is not sign
   // What a recorded process looks like once it has ended and its pid went to another process: the
   // only check left between the record and the signal is the one made just before the signal.
   const child = spawn(["sleep", "30"]);
+  const restore = __snapshotForTests();
   __recordForTests(reused(child));
   try {
     expect(killOwned()).toBe(0);
     expect(isAlive(child)).toBe(true);
   } finally {
-    forget(reused(child));
+    restore();
   }
   own(child);
   expect(killOwned()).toBe(1);
   expect(await allGone([child])).toBe(true);
+});
+
+test("a group made by setpgid alone (inside this test's session) is never registered", async () => {
+  // A child that leads its group but not a session: any process of this session could join it.
+  const c = Bun.spawn(["perl", "-e", '$| = 1; setpgrp(0, 0); print "ready\\n"; sleep 30'], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  children.push(c);
+  const reader = c.stdout.getReader();
+  let text = "";
+  while (!text.includes("ready")) {
+    const r = await reader.read();
+    if (r.done) break;
+    text += new TextDecoder().decode(r.value);
+  }
+  void reader.cancel();
+  const now = probe(c.pid);
+  expect(now.kind === "alive" && now.info.pgid === c.pid).toBe(true); // it leads its group
+  if (now.kind === "alive") {
+    expect(registerGroup(now.info)).toBe(false);
+    expect(registeredGroups()).not.toContain(c.pid);
+  }
+  // The same child spawned `detached` leads its session too, and is registered.
+  const leader = spawn(["sleep", "30"], { detached: true });
+  expect(registerGroup(leader)).toBe(true);
+  expect(registeredGroups()).toContain(leader.pid);
+});
+
+test("a registered group is dropped once it has no member left", async () => {
+  const leader = spawn(["sleep", "30"], { detached: true });
+  expect(registerGroup(leader)).toBe(true);
+  own(); // a read with the member alive keeps the group
+  expect(registeredGroups()).toContain(leader.pid);
+  const c = children.find((x) => x.pid === leader.pid);
+  c?.kill(9);
+  await c?.exited;
+  own(); // the next read sees the group empty, so its id can no longer count
+  expect(registeredGroups()).not.toContain(leader.pid);
+});
+
+/** A table built by the test (no process is signalled): this process, its fake parent and init. */
+function builtTable(selfStart: string, extra: ProcInfo[]): ProcInfo[] {
+  const row = (pid: number, ppid: number, pgid: number, startedAt: string): ProcInfo => ({
+    pid,
+    ppid,
+    pgid,
+    startedAt,
+    state: "running",
+  });
+  return [
+    row(1, 0, 1, "1.000000"),
+    row(900001, 1, 900001, "50.000000"),
+    row(process.pid, 900001, 900001, selfStart),
+    ...extra,
+  ];
+}
+
+test("rule 1 needs every parent on the ppid chain to have started no later than its child", () => {
+  const row = (pid: number, ppid: number, startedAt: string): ProcInfo => ({
+    pid,
+    ppid,
+    pgid: 900020,
+    startedAt,
+    state: "running",
+  });
+  const x = row(900010, 900011, "300.000000");
+  // The parent is older than x, and this process older than the parent: x descends.
+  expect(wouldClaim(x, builtTable("100.000000", [x, row(900011, process.pid, "200.000000")]))).toBe(
+    true,
+  );
+  // The parent started after x: its pid was handed out again, so x is not this test's.
+  expect(wouldClaim(x, builtTable("100.000000", [x, row(900011, process.pid, "400.000000")]))).toBe(
+    false,
+  );
+  // This process started after the parent it seems to have: the same.
+  expect(wouldClaim(x, builtTable("250.000000", [x, row(900011, process.pid, "200.000000")]))).toBe(
+    false,
+  );
+});
+
+test("rule 2 refuses a member of a registered group that started before the group's leader", () => {
+  const leader: ProcInfo = {
+    pid: 900100,
+    ppid: 1,
+    pgid: 900100,
+    startedAt: "200.000000",
+    state: "running",
+  };
+  const member = (startedAt: string): ProcInfo => ({
+    pid: 900101,
+    ppid: 1,
+    pgid: 900100,
+    startedAt,
+    state: "running",
+  });
+  const unregister = __registerGroupForTests(900100, leader);
+  try {
+    const older = member("150.000000");
+    expect(wouldClaim(older, builtTable("100.000000", [leader, older]))).toBe(false);
+    const younger = member("250.000000");
+    expect(wouldClaim(younger, builtTable("100.000000", [leader, younger]))).toBe(true);
+  } finally {
+    unregister();
+  }
 });

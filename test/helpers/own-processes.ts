@@ -1,16 +1,24 @@
+import { FFIType, dlopen } from "bun:ffi";
 // Cleanup that touches only processes a test started itself (R28, and the operator's decision after
 // the 2026-10-07 incident, when a weakened check let a test claim pid 1 and kill launchd's tree).
 //
 // A process is CLAIMED only by structure, judged in one read of the process table:
 //   1. it descends from this test process: its ppid chain, walked in that same read, reaches
 //      process.pid; or
+//      Each parent on the way must have started no later than its child (a parent younger than
+//      its child is a pid handed out again while the table was being read).
 //   2. it sits in a process group this test created: `registerGroup` takes a group only when its
-//      leader is this test process's own child (ppid === process.pid) and leads it (pgid === pid),
-//      and never this test's own group or the group of any of its ancestors.
+//      leader is this test process's own child (ppid === process.pid) and leads both its group
+//      and its session (pgid === sid === pid: a `detached` spawn), and never this test's own group
+//      or the group of any of its ancestors. Nothing outside that new session can join the group,
+//      and the member must have started no earlier than the leader. A registered group is dropped
+//      once a read shows it has no member left, or its id held by a process other than its
+//      leader, so an id handed out again later is never taken for it.
 // pid 1, this process and its ancestors are refused whatever the rules say (an extra layer).
 // Each claim records pid AND start time. Only recorded processes are ever signalled, each one
 // checked again just before its signal (same pid, same start time, not an ancestor). Nothing here
 // finds a process by its command text (test/lifecycle/test-process-guard.test.ts refuses that).
+import { readFileSync } from "node:fs";
 import type { LaunchHandle } from "../../src/util/process/door.ts";
 import {
   type ProcInfo,
@@ -47,18 +55,53 @@ function ancestorsOf(table: ProcInfo[]): Set<number> {
   return out;
 }
 
-/** Rule 1: the ppid chain of `pid`, walked in `table`, reaches this test process. */
+/** Rule 1: the ppid chain of `pid`, walked in `table`, reaches this test process, and every parent
+ *  on it (this process included) started no later than its child. */
 function descends(pid: number, table: ProcInfo[]): boolean {
   const byPid = new Map(table.map((p) => [p.pid, p]));
   const seen = new Set<number>();
   let p = byPid.get(pid);
   while (p !== undefined && !seen.has(p.pid)) {
-    if (p.ppid === process.pid) return true;
     if (p.ppid <= 1) return false;
+    const parent = byPid.get(p.ppid);
+    if (parent === undefined || tokenValue(parent.startedAt) > tokenValue(p.startedAt))
+      return false;
+    if (parent.pid === process.pid) return true;
     seen.add(p.pid);
-    p = byPid.get(p.ppid);
+    p = parent;
   }
   return false;
+}
+
+/** Drop every registered group that `table` shows with no member left, or whose id is held by a
+ *  process other than its recorded leader: its id may be handed out again. */
+function pruneGroups(table: ProcInfo[]): void {
+  for (const [pgid, leader] of groups) {
+    const members = table.some((q) => q.pgid === pgid && q.state !== "zombie");
+    const holder = table.find((q) => q.pid === pgid);
+    if (!members || (holder !== undefined && !sameProcess(leader, holder))) groups.delete(pgid);
+  }
+}
+
+/** The session id of `pid` (Linux: /proc stat field 6; macOS: getsid), or null when unreadable. */
+let getsid: ((pid: number) => number) | null = null;
+function sessionOf(pid: number): number | null {
+  try {
+    if (process.platform === "linux") {
+      const raw = readFileSync(`/proc/${pid}/stat`, "utf8");
+      return Number(raw.slice(raw.lastIndexOf(")") + 2).split(" ")[3]);
+    }
+    if (getsid === null) {
+      const lib = dlopen("libSystem.B.dylib", {
+        getsid: { args: [FFIType.i32], returns: FFIType.i32 },
+      });
+      getsid = (p) => lib.symbols.getsid(p) as number;
+    }
+    const sid = getsid(pid);
+    return sid > 0 ? sid : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Rule 2: `p` sits in a group this test registered, and started no earlier than its leader. */
@@ -98,6 +141,7 @@ export function own<T extends Ident>(...ps: T[]): ProcInfo[] {
 }
 
 function claimAll(ps: Ident[], table: ProcInfo[]): ProcInfo[] {
+  pruneGroups(table);
   const taken: ProcInfo[] = [];
   for (const p of ps) {
     const now = claimable(p, table);
@@ -110,15 +154,17 @@ function claimAll(ps: Ident[], table: ProcInfo[]): ProcInfo[] {
 
 /**
  * Register a group this test created: `leader` must be, in a fresh read, this test process's own
- * child (the same process) and lead its group, and the group must be neither this process's nor an
- * ancestor's. Its members are then claimable by rule 2, even once their parent has died. Returns
- * whether it was registered.
+ * child (the same process) and lead its group and its session (a `detached` spawn), and the group
+ * must be neither this process's nor an ancestor's. Its members are then claimable by rule 2, even
+ * once their parent has died. Returns whether it was registered.
  */
 export function registerGroup(leader: Ident): boolean {
   const table = listProcesses();
+  pruneGroups(table);
   const now = table.find((q) => q.pid === leader.pid);
   if (now === undefined || !sameProcess(leader, now) || now.state === "zombie") return false;
   if (now.pid <= 1 || now.ppid !== process.pid || now.pgid !== now.pid) return false;
+  if (sessionOf(now.pid) !== now.pid) return false; // a group made by setpgid alone can be joined
   const self = table.find((q) => q.pid === process.pid);
   if (self === undefined || now.pgid === self.pgid) return false;
   const ancestors = ancestorsOf(table);
@@ -128,9 +174,42 @@ export function registerGroup(leader: Ident): boolean {
   return true;
 }
 
+/** Whether `p` would be claimed against `table` (the rules alone, nothing recorded or pruned): for
+ *  tests that check the rules on a table they build themselves. */
+export function wouldClaim(p: Ident, table: ProcInfo[]): boolean {
+  return claimable(p, table) !== null;
+}
+
+/** The group ids registered now (read only). */
+export function registeredGroups(): number[] {
+  return [...groups.keys()];
+}
+
+/** Test seam for the rule 2 start time check on a built table: register a group WITHOUT the
+ *  registration checks. Only test/lifecycle/own-processes.test.ts may use it (the guard checks). */
+export function __registerGroupForTests(pgid: number, leader: Ident): () => void {
+  groups.set(pgid, { pid: leader.pid, startedAt: leader.startedAt });
+  return () => groups.delete(pgid);
+}
+
+/** Test seam: snapshot what is recorded now; the returned function puts it back, dropping
+ *  everything recorded since. Refusal tests call it in a `finally`, so whatever a regression let
+ *  them claim (a candidate, or the tree `ownTree` found under it) is never signalled. Only
+ *  test/lifecycle/own-processes.test.ts may use it (the guard checks). */
+export function __snapshotForTests(): () => void {
+  const o = new Map(owned);
+  const c = new Map(claimed);
+  return () => {
+    owned.clear();
+    claimed.clear();
+    for (const [k, v] of o) owned.set(k, v);
+    for (const [k, v] of c) claimed.set(k, v);
+  };
+}
+
 /** Test seam for the kill time check alone: record an identity WITHOUT the claim rules, as a
  *  recorded process whose pid has since been handed to another process would look. Only
- *  test/lifecycle/own-processes.test.ts uses it. */
+ *  test/lifecycle/own-processes.test.ts may use it (the guard checks). */
 export function __recordForTests(p: Ident): void {
   const id = { pid: p.pid, startedAt: p.startedAt };
   owned.set(key(id), id);
