@@ -21,10 +21,17 @@ export interface Ident {
 const key = (p: Ident): string => `${p.pid}:${p.startedAt}`;
 /** Every process remembered and not yet cleaned up, across the test files of one run. */
 const owned = new Map<string, Ident>();
+/** Every process ever remembered in this run, cleaned up or not: the end of run leak check reads it
+ *  (`stillRunning`, called from test/preload.ts). */
+const claimed = new Map<string, Ident>();
 
 /** Remember processes the test started, so `killOwned` stops them. Returns them unchanged. */
 export function own<T extends Ident>(...ps: T[]): T[] {
-  for (const p of ps) owned.set(key(p), { pid: p.pid, startedAt: p.startedAt });
+  for (const p of ps) {
+    const id = { pid: p.pid, startedAt: p.startedAt };
+    owned.set(key(p), id);
+    claimed.set(key(p), id);
+  }
   return ps;
 }
 
@@ -140,6 +147,7 @@ export function killOwned(): number {
     for (const q of collectTree(p, table, self === undefined ? [] : [self])) doomed.set(key(q), q);
   }
   owned.clear();
+  for (const p of doomed.values()) claimed.set(key(p), { pid: p.pid, startedAt: p.startedAt });
   let n = 0;
   for (const p of doomed.values()) {
     if (p.pid <= 1 || p.pid === process.pid || p.state === "zombie") continue;
@@ -151,4 +159,21 @@ export function killOwned(): number {
     }
   }
   return n;
+}
+
+/**
+ * Every process remembered during the run (`own`, and so every helper that remembers) that is still
+ * the same process and alive, after a bounded wait for any that are just ending, each named by pid
+ * and command. A test that cleaned up leaves none: a cleanup removed or broken does.
+ */
+export async function stillRunning(ms = 3_000): Promise<(Ident & { command: string })[]> {
+  let left: Ident[] = [];
+  await until(() => {
+    const table = listProcesses();
+    left = [...claimed.values()].filter(
+      (p) => p.pid !== process.pid && table.some((q) => sameProcess(p, q) && q.state !== "zombie"),
+    );
+    return left.length === 0;
+  }, ms);
+  return left.map((p) => ({ ...p, command: commandOf(p) ?? "(it ended meanwhile)" }));
 }

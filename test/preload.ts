@@ -14,6 +14,7 @@ import { afterAll } from "bun:test";
 import { type FSWatcher, existsSync, mkdtempSync, readdirSync, rmSync, watch } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { killOwned, own, stillRunning } from "./helpers/own-processes.ts";
 
 if (!process.env.XDG_STATE_HOME) {
   const dir = mkdtempSync(join(tmpdir(), "styre-test-state-"));
@@ -65,3 +66,17 @@ if (realDir !== testDir) {
     }
   });
 }
+
+// The end of run leak check: every process a test remembered through test/helpers/own-processes.ts
+// (its launches' trees, printed pids, fixture sleeps) must be gone by now, because each test file
+// cleans up after itself. One still running means a cleanup was removed or broken: the run fails,
+// naming each by pid and command, and the processes are then stopped (by pid and start time).
+afterAll(async () => {
+  const left = await stillRunning();
+  if (left.length === 0) return;
+  own(...left);
+  killOwned();
+  throw new Error(
+    `test processes were still running at the end of the run (a test did not clean up after itself; they are stopped now): ${left.map((l) => `pid ${l.pid} "${l.command}"`).join(", ")}`,
+  );
+});
