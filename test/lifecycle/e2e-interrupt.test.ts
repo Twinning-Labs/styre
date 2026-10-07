@@ -156,13 +156,14 @@ function checkoutState(repo: string) {
 
 type Rows = Record<string, Record<string, Record<string, unknown>>>;
 /** Every row of every table of the run database, keyed by table and rowid, read through a
- *  connection of its own. */
+ *  connection of its own. SQLite's own tables are left out, except `sqlite_sequence`: a row run
+ *  code inserted and deleted again during the stop still shows there, as a bumped sequence. */
 function dbRows(dbPath: string): Rows {
   const c = new Database(dbPath, { readonly: true });
   try {
     const tables = c
       .query<{ name: string }, []>(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND (name NOT LIKE 'sqlite_%' OR name = 'sqlite_sequence')",
       )
       .all()
       .map((t) => t.name);
@@ -213,9 +214,16 @@ function stepRow(dbPath: string, key: string) {
   const c = new Database(dbPath, { readonly: true });
   try {
     return c
-      .query<{ id: number; status: string; attempt: number; started_at: string | null }, [string]>(
-        "SELECT id, status, attempt, started_at FROM workflow_step WHERE step_key = ?",
-      )
+      .query<
+        {
+          id: number;
+          status: string;
+          attempt: number;
+          started_at: string | null;
+          error_json: string | null;
+        },
+        [string]
+      >("SELECT id, status, attempt, started_at, error_json FROM workflow_step WHERE step_key = ?")
       .get(key);
   } finally {
     c.close();
@@ -526,7 +534,9 @@ function expectOnlyHandlerWrites(i: Interrupted, stepId: number, dispatchRowId: 
 /** What resume's recover() left, seen from inside resumeRun right after it: the registry is built
  *  after recover() and before the first step runs. */
 interface AfterRecover {
-  step: { status: string; attempt: number } | null;
+  /** `error_json` is null unless recover() marked the step failed on its way to pending, as it does
+   *  for a crash: an interruption must not be, or the redone dispatch gets it as a prior failure. */
+  step: { status: string; attempt: number; error_json: string | null } | null;
   checkout: ReturnType<typeof checkoutState>;
 }
 
@@ -565,7 +575,7 @@ async function resume(
         buildRegistry: () => {
           const s = stepRow(run.dbPath, stopKey);
           afterRecover = {
-            step: s ? { status: s.status, attempt: s.attempt } : null,
+            step: s ? { status: s.status, attempt: s.attempt, error_json: s.error_json } : null,
             checkout: checkoutState(run.repo),
           };
           return registryFor(run, runner);
@@ -672,7 +682,7 @@ test(
     const { runner, asked } = parkingRunner();
     const r = await resume(run, key, runner);
     expect(r.afterRecover).toEqual({
-      step: { status: "pending", attempt: 0 }, // its value before the interrupted attempt
+      step: { status: "pending", attempt: 0, error_json: null }, // its value before the interrupted attempt; not failed
       checkout: i.checkoutBefore,
     });
     expect(asked).toEqual([String(i.during.id)]); // the step was redone
@@ -779,7 +789,7 @@ async function expectCommandCaseResumes(
   const { runner } = parkingRunner();
   const r = await resume(run, key, runner);
   expect(r.afterRecover).toEqual({
-    step: { status: "pending", attempt: 0 }, // its value before the interrupted attempt
+    step: { status: "pending", attempt: 0, error_json: null }, // its value before the interrupted attempt; not failed
     checkout: i.checkoutBefore,
   });
   // Redone: the script ran again, and the step finished this time.
@@ -977,7 +987,7 @@ test(
     const { runner, asked } = parkingRunner();
     const r = await resume(run, key, runner);
     expect(r.afterRecover).toEqual({
-      step: { status: "pending", attempt: 0 }, // its value before the interrupted attempt
+      step: { status: "pending", attempt: 0, error_json: null }, // its value before the interrupted attempt; not failed
       checkout: i.checkoutBefore,
     });
     expect(asked).toEqual([String(i.during.id)]); // the step was redone
@@ -1062,7 +1072,7 @@ test(
     const { runner, asked } = parkingRunner();
     const r = await resume(run, key, runner);
     expect(r.afterRecover).toEqual({
-      step: { status: "pending", attempt: 0 }, // its value before the interrupted attempt
+      step: { status: "pending", attempt: 0, error_json: null }, // its value before the interrupted attempt; not failed
       checkout: i.checkoutBefore, // HEAD back at headAtStart, the authored test gone
     });
     expect(i.checkoutBefore.head).toBe(headAtStart);
@@ -1085,7 +1095,7 @@ test(
     const operator = git(run.repo, ["rev-parse", "HEAD"]);
     const { runner, asked } = parkingRunner();
     const r = await resume(run, key, runner, { acceptHead: true });
-    expect(r.afterRecover?.step).toEqual({ status: "pending", attempt: 0 });
+    expect(r.afterRecover?.step).toEqual({ status: "pending", attempt: 0, error_json: null });
     expect(r.afterRecover?.checkout.head).toBe(operator);
     expect(git(run.repo, ["rev-parse", `refs/heads/${BRANCH}`])).toBe(operator);
     expect(git(run.repo, ["rev-list", "--count", `${committed}..${operator}`])).toBe("1");

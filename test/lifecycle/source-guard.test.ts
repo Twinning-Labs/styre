@@ -59,6 +59,29 @@ const DIAG_ALLOWED = new Set([
   "src/util/process/proc-table.ts",
 ]);
 const CHILD = new Set(["child_process", "node:child_process"]);
+/** Where code may name the door's held cleanup functions (M5), outside the door itself: file, then
+ *  the functions within it. `deferCleanup` holds code that the stop handler runs while the door is
+ *  closed; `runDeferredCleanups` runs it. Widening this list is a visible change. */
+const HELD_SITES: Record<string, Record<string, string[]>> = {
+  deferCleanup: { "src/dispatch/baseline-rerun.ts": ["deferWorktreeRemoval"] },
+  runDeferredCleanups: { "src/util/process/signals.ts": ["handleStopSignal"] },
+};
+
+/** The names of the functions that enclose `n`, innermost first. */
+function enclosingFunctions(n: ts.Node): string[] {
+  const names: string[] = [];
+  for (let p: ts.Node | undefined = n.parent; p; p = p.parent) {
+    if ((ts.isFunctionDeclaration(p) || ts.isMethodDeclaration(p)) && p.name)
+      names.push(p.name.getText());
+    else if (
+      (ts.isArrowFunction(p) || ts.isFunctionExpression(p)) &&
+      ts.isVariableDeclaration(p.parent) &&
+      ts.isIdentifier(p.parent.name)
+    )
+      names.push(p.parent.name.text);
+  }
+  return names;
+}
 
 function files(dir: string): string[] {
   return readdirSync(dir).flatMap((n) => {
@@ -271,6 +294,19 @@ function offences(rel: string, text: string): string[] {
       n.expression.text === "module"
     )
       flag(n, "uses module.require");
+    // The held cleanup functions: named only in the door, or at a listed site (an import there,
+    // not renamed, or inside a listed function), as an identifier or as a string.
+    if (
+      rel !== "src/util/process/door.ts" &&
+      (ts.isIdentifier(n) || ts.isStringLiteralLike(n)) &&
+      Object.hasOwn(HELD_SITES, n.text)
+    ) {
+      const sites = (HELD_SITES[n.text] as Record<string, string[]>)[rel] ?? [];
+      const plainImport =
+        ts.isImportSpecifier(n.parent) && n.parent.propertyName === undefined && sites.length > 0;
+      const inSite = enclosingFunctions(n).some((f) => sites.includes(f));
+      if (!plainImport && !inSite) flag(n, `names ${n.text} off its listed sites`);
+    }
     // A string that is exactly the name, in any position: computed key, string keyed destructuring,
     // `export { x as "launchDiagnostic" }`, an import specifier written as a string.
     if (!diagOk && ts.isStringLiteralLike(n) && n.text === "launchDiagnostic")
@@ -491,6 +527,86 @@ test("the allowed files may spawn and may name launchDiagnostic", () => {
     "Bun.spawn(['x']); Bun.spawnSync(['x']); const B = Bun; require('node:child_process');";
   expect(offences("src/util/process/door.ts", src)).toEqual([]);
   expect(offences("src/util/process/proc-table.ts", src)).toEqual([]);
+});
+
+// --- held cleanups: only the door, the handler and the listed removal site (M5) ------------------
+// `deferCleanup` holds code that runs inside the stop handler while the door is closed, and
+// `runDeferredCleanups` runs it. Each may be named only at its listed sites.
+
+test("the held cleanup sites are pinned", () => {
+  expect(HELD_SITES).toEqual({
+    deferCleanup: { "src/dispatch/baseline-rerun.ts": ["deferWorktreeRemoval"] },
+    runDeferredCleanups: { "src/util/process/signals.ts": ["handleStopSignal"] },
+  });
+});
+
+test.each([
+  [
+    "deferCleanup in another module",
+    NEG,
+    "import { deferCleanup } from '../util/process/door.ts'; deferCleanup({ run() {}, manual: '' });",
+  ],
+  [
+    "deferCleanup in the replay harness",
+    "src/dispatch/replay-harness.ts",
+    "import { deferCleanup } from '../util/process/door.ts'; export function r() { deferCleanup({ run() {}, manual: '' }); }",
+  ],
+  [
+    "deferCleanup in the listed file, outside the listed function",
+    "src/dispatch/baseline-rerun.ts",
+    "import { deferCleanup } from '../util/process/door.ts'; export function runAtBaseline() { deferCleanup({ run() {}, manual: '' }); }",
+  ],
+  [
+    "deferCleanup at the top level of the listed file",
+    "src/dispatch/baseline-rerun.ts",
+    "import { deferCleanup } from '../util/process/door.ts'; deferCleanup({ run() {}, manual: '' });",
+  ],
+  [
+    "an aliased import of deferCleanup",
+    NEG,
+    "import { deferCleanup as d } from '../util/process/door.ts'; d({ run() {}, manual: '' });",
+  ],
+  [
+    "runDeferredCleanups in run code",
+    NEG,
+    "import { runDeferredCleanups } from '../util/process/door.ts'; runDeferredCleanups(() => 1);",
+  ],
+  [
+    "runDeferredCleanups in the removal site",
+    "src/dispatch/baseline-rerun.ts",
+    "import { runDeferredCleanups } from '../util/process/door.ts'; export function deferWorktreeRemoval() { runDeferredCleanups(() => 1); }",
+  ],
+  [
+    "runDeferredCleanups in signals.ts outside the handler",
+    "src/util/process/signals.ts",
+    "import { runDeferredCleanups } from './door.ts'; export function other() { runDeferredCleanups(() => 1); }",
+  ],
+  ["a string key", NEG, "declare const d: any; d['runDeferredCleanups'](() => 1);"],
+])("the guard rejects a held cleanup named off its listed sites: %s", (_name, file, source) => {
+  expect(
+    offences(file, source).some((o) => /names (deferCleanup|runDeferredCleanups)/.test(o)),
+  ).toBe(true);
+});
+
+test("the listed held cleanup sites are not hits", () => {
+  expect(
+    offences(
+      "src/dispatch/baseline-rerun.ts",
+      "import { deferCleanup, runBlocking } from '../util/process/door.ts';\nexport function deferWorktreeRemoval(r: string, w: string) { return deferCleanup({ run() {}, manual: w }); }",
+    ),
+  ).toEqual([]);
+  expect(
+    offences(
+      "src/util/process/signals.ts",
+      "import { runDeferredCleanups } from './door.ts';\nexport async function handleStopSignal() { for (const w of runDeferredCleanups(() => 1)) void w; }",
+    ),
+  ).toEqual([]);
+  expect(
+    offences(
+      "src/util/process/door.ts",
+      "export function deferCleanup() {} export function runDeferredCleanups() {} deferCleanup(); runDeferredCleanups();",
+    ),
+  ).toEqual([]);
 });
 
 // --- every blocking call states its timeout (spec section 5.1: "a required timeout") ---------------
