@@ -347,7 +347,7 @@ test("the door is open before a stop begins, for blocking calls with or without 
 /** A held cleanup that records its runs; `manual` names how to finish it by hand. */
 const held = (ran: string[], name: string, run: () => void = () => ran.push(name)) => ({
   run,
-  manual: `remove ${name} with: rm -r /tmp/${name}`,
+  manual: () => `remove ${name} with: rm -r /tmp/${name}`,
 });
 /** The handler's budget for the held cleanups, when time is not what a test is about. */
 const ample = () => 60_000;
@@ -412,7 +412,7 @@ test("a held cleanup's cleanup calls are cut to the time the handler has left", 
       // Its own bound is the normal 120 s; the handler has 300 ms left.
       result = door.runBlocking(["sleep", "20"], { timeoutMs: 120_000, cleanup: true });
     },
-    manual: "remove it with: true",
+    manual: () => "remove it with: true",
   });
   door.beginStopping();
   const t0 = Date.now();
@@ -433,6 +433,45 @@ test("with no time left, a held cleanup is skipped and its manual finish is name
   ]);
   expect(ran).toEqual([]);
   expect(door.runDeferredCleanups(ample)).toEqual([]); // skipped, not kept: the process is ending
+});
+
+test("the manual finish is read when the cleanup is skipped, so it matches what is left then (N2)", () => {
+  let state = "registered";
+  door.deferCleanup({ run: () => {}, manual: () => `finish it, ${state}` });
+  state = "half removed"; // what a cut short removal can leave
+  door.beginStopping();
+  expect(door.runDeferredCleanups(() => 0)).toEqual([
+    "no time was left before the stop deadline to finish it, half removed",
+  ]);
+});
+
+test("each held cleanup reads the time left when its turn comes: a slow first one leaves the second none (B6)", () => {
+  const ran: string[] = [];
+  door.deferCleanup({
+    run: () => {
+      ran.push("first");
+      door.runBlocking(["sleep", "20"], { timeoutMs: 120_000, cleanup: true });
+    },
+    manual: () => "finish the first by hand",
+  });
+  door.deferCleanup({ run: () => ran.push("second"), manual: () => "finish the second by hand" });
+  door.beginStopping();
+  const end = Date.now() + 300;
+  expect(door.runDeferredCleanups(() => end - Date.now())).toEqual([
+    "no time was left before the stop deadline to finish the second by hand",
+  ]);
+  expect(ran).toEqual(["first"]);
+});
+
+test("a blocking call ended by a signal says which signal (N3)", () => {
+  const r = door.runBlocking(["sh", "-c", "kill -INT $$"], { timeoutMs: 5_000 });
+  expect(r).toMatchObject({
+    success: false,
+    exitCode: null,
+    signalCode: "SIGINT",
+    timedOut: false,
+  });
+  expect(door.runBlocking(["true"], { timeoutMs: 5_000 }).signalCode).toBeNull();
 });
 
 test("a launch made before the stop can still be stopped while stopping", async () => {

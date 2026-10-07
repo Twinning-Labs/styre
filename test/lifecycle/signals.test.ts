@@ -684,7 +684,7 @@ describe("fix round 1", () => {
 describe("deferred cleanups (m3)", () => {
   // The handler re-raises without waiting for the run code to unwind, so a baseline worktree the
   // run code would remove in its own `finally` must be removed by the handler before it exits.
-  const ample = { manual: "remove it with: true" };
+  const ample = { manual: () => "remove it with: true" };
 
   test("the handler runs every pending cleanup once, after its stops and before it re-raises", async () => {
     // A command that outlives its SIGTERM for a moment: a cleanup run before the handler waited for
@@ -755,7 +755,7 @@ describe("deferred cleanups (m3)", () => {
     d.now = () => Date.now() + (readings++ === 0 ? 0 : SHIFT);
     const seen = { recorded: -1, emitted: -1, said: false };
     door.deferCleanup({
-      manual: "remove the slow thing with: true",
+      manual: () => "remove the slow thing with: true",
       run: () => {
         seen.recorded = notes(t.path);
         seen.emitted = out.emitted.length;
@@ -789,7 +789,7 @@ describe("deferred cleanups (m3)", () => {
     d.now = () => Date.now() + (readings++ === 0 ? 0 : HANDLER_DEADLINE_MS);
     let ran = false;
     door.deferCleanup({
-      manual: "remove the worktree /w with: git -C /r worktree remove --force /w",
+      manual: () => "remove the worktree /w with: git -C /r worktree remove --force /w",
       run: () => {
         ran = true;
       },
@@ -799,6 +799,54 @@ describe("deferred cleanups (m3)", () => {
     expect(out.err).toContain(
       "styre: could not clean up after the run: no time was left before the stop deadline to remove the worktree /w with: git -C /r worktree remove --force /w\n",
     );
+    expect(out.reraised).toEqual(["SIGTERM"]);
+  });
+
+  // N6: where the cleanups sit in the exit step.
+  test("held cleanups still run when an earlier handler step throws (B11)", async () => {
+    const g = door.launch({
+      argv: ["sleep", "3093"],
+      cwd: process.cwd(),
+      env: process.env,
+      kind: "group",
+      context: { ident: "ENG-1", stepId: null, worktree: scratch },
+    });
+    // A stop report the outcome step cannot read: that step throws, past every inner catch.
+    const realStop = g.stop;
+    g.stop = async (how) => {
+      await realStop(how);
+      return {} as Awaited<ReturnType<typeof g.stop>>;
+    };
+    const { out, d } = deps();
+    let ran = false;
+    door.deferCleanup({
+      ...ample,
+      run: () => {
+        ran = true;
+      },
+    });
+    await handleStopSignal("SIGTERM", { command: "run", run: null }, d);
+    expect(out.err.some((l) => l.startsWith("styre: the stop handler failed: "))).toBe(true);
+    expect(ran).toBe(true);
+    expect(out.reraised).toEqual(["SIGTERM"]);
+  });
+
+  test("held cleanups run before the analytics shutdown, so a slow shutdown cannot use up their time (B7)", async () => {
+    const { out, d } = deps();
+    const events: string[] = [];
+    door.deferCleanup({ ...ample, run: () => events.push("cleanup") });
+    await handleStopSignal(
+      "SIGTERM",
+      {
+        command: "run",
+        run: null,
+        shutdownAnalytics: async () => {
+          events.push("analytics");
+        },
+      },
+      d,
+    );
+    expect(events).toEqual(["cleanup", "analytics"]);
     expect(out.reraised).toEqual(["SIGTERM"]);
   });
 });

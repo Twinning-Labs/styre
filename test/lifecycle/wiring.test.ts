@@ -310,6 +310,7 @@ function recordBlockingCalls(): { argv: string; listening: number }[] {
       stdout: r.stdout.toString(),
       stderr: r.stderr.toString(),
       timedOut: r.exitedDueToTimeout === true,
+      signalCode: r.signalCode ?? null,
     };
   });
   return seen;

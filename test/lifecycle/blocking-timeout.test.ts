@@ -12,6 +12,7 @@ import * as door from "../../src/util/process/door.ts";
 
 const TIMED_OUT: door.BlockingResult = {
   timedOut: true,
+  signalCode: null,
   exitCode: null,
   success: false,
   stdout: "",
@@ -19,6 +20,7 @@ const TIMED_OUT: door.BlockingResult = {
 };
 const fail = (exitCode: number, stderr = "", stdout = ""): door.BlockingResult => ({
   timedOut: false,
+  signalCode: null,
   exitCode,
   success: false,
   stdout,
@@ -26,6 +28,7 @@ const fail = (exitCode: number, stderr = "", stdout = ""): door.BlockingResult =
 });
 const ok = (stdout = ""): door.BlockingResult => ({
   timedOut: false,
+  signalCode: null,
   exitCode: 0,
   success: true,
   stdout,

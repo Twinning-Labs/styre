@@ -170,6 +170,8 @@ export interface BlockingResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  /** The signal that ended the call ("SIGINT"), or null when it exited. */
+  signalCode: string | null;
 }
 
 function spawnBlocking(
@@ -198,6 +200,7 @@ function spawnBlocking(
     stdout: r.stdout.toString(),
     stderr: r.stderr.toString(),
     timedOut: r.exitedDueToTimeout === true,
+    signalCode: r.signalCode ?? null,
   };
 }
 
@@ -226,7 +229,14 @@ export function runBlocking(
     // Inside a held cleanup the handler is running: the call ends by the time the handler has left.
     const left = cleanupEnd - Date.now();
     if (left <= 0)
-      return { exitCode: null, success: false, stdout: "", stderr: "", timedOut: true };
+      return {
+        exitCode: null,
+        success: false,
+        stdout: "",
+        stderr: "",
+        timedOut: true,
+        signalCode: null,
+      };
     bounded = { ...opts, timeoutMs: Math.min(opts.timeoutMs, left) };
   }
   if (blockingOverride) return blockingOverride(argv, bounded);
@@ -264,10 +274,14 @@ export function describeProcess(pid: number, fallback: string, timeoutMs = 5_000
  *  - `run` makes the cleanup. Its blocking calls must be marked `cleanup`, since it may run while a
  *    stop is in progress, and it throws when the cleanup failed, saying how to finish it by hand.
  *  - `manual` says how to finish it by hand ("remove the worktree <path> with: <command>"), for when
- *    the handler has no time left to run it. */
+ *    the handler has no time left to run it. It is read at that moment, so it can match what is
+ *    left then.
+ *  The handler's time limit ends only the process a cleanup call starts (`runBlocking` kills its
+ *  direct child), so a held cleanup's calls must not start children of their own: one would outlive
+ *  the limit and the exit (N4). `git worktree remove` starts none. */
 export interface HeldCleanup {
   run: () => void;
-  manual: string;
+  manual: () => string;
 }
 
 const deferred = new Set<HeldCleanup>();
@@ -297,7 +311,7 @@ export function runDeferredCleanups(timeLeftMs: () => number): string[] {
     if (!deferred.delete(held)) continue;
     const ms = timeLeftMs();
     if (!(ms > 0)) {
-      failures.push(`no time was left before the stop deadline to ${held.manual}`);
+      failures.push(`no time was left before the stop deadline to ${held.manual()}`);
       continue;
     }
     cleanupEnd = Date.now() + ms;

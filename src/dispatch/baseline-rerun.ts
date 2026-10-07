@@ -1,9 +1,17 @@
 import type { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { listByTicket } from "../db/repos/ground-truth-signal.ts";
-import { deferCleanup, runBlocking } from "../util/process/door.ts";
+import { type BlockingResult, deferCleanup, runBlocking } from "../util/process/door.ts";
 import type { CmdRunner } from "../util/run-command.ts";
 import {
   type CheckExecutionPlan,
@@ -50,13 +58,52 @@ const TREE_GIT_MS = 120_000;
 const shellWord = (s: string): string =>
   /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replaceAll("'", "'\\''")}'`;
 
+/** Every temporary worktree folder starts with this, directly in the temp folder: the baseline
+ *  (`styre-baseline-adv-`), delivered test (`styre-baseline-bind-`) and replay (`styre-baseline-wt-`)
+ *  checkouts. */
+const TEMP_WORKTREE_PREFIX = "styre-baseline-";
+
+/** The command that finishes the removal by hand, for what is left now. A worktree whose `.git` is
+ *  gone (a removal cut short after deleting it) cannot be removed by `git worktree remove`: its
+ *  folder is deleted and git's stale entry pruned instead (N2). */
+function manualRemoval(repoPath: string, wt: string): string {
+  return existsSync(join(wt, ".git"))
+    ? `git -C ${shellWord(repoPath)} worktree remove --force ${shellWord(wt)}`
+    : `rm -rf ${shellWord(wt)} && git -C ${shellWord(repoPath)} worktree prune`;
+}
+
+/** Whether git still lists `wt` as a worktree of the repo. A list that cannot be read counts as
+ *  listed, so the removal is tried and its failure said. */
+function registered(repoPath: string, wt: string): boolean {
+  const r = runBlocking(["git", "worktree", "list", "--porcelain"], {
+    cwd: repoPath,
+    timeoutMs: 30_000,
+    cleanup: true,
+  });
+  if (!r.success) return true;
+  const names = new Set([wt]);
+  try {
+    names.add(realpathSync(wt));
+  } catch {
+    /* the folder is gone: git lists the path it was given */
+  }
+  return r.stdout.split("\n").some((l) => l.startsWith("worktree ") && names.has(l.slice(9)));
+}
+
+/** Why a removal failed: a timeout or a signal is named, since neither leaves stderr (N3). */
+function failure(r: BlockingResult): string {
+  if (r.timedOut) return "timed out";
+  if (r.signalCode) return `killed by ${r.signalCode}`;
+  return r.stderr.trim().split("\n").join(" ") || `exit ${r.exitCode}`;
+}
+
 /** Removes a temporary detached worktree: unregisters it from the target repo, then deletes its
  *  folder. Throws when git cannot remove it, naming the worktree and the command that finishes it
  *  by hand (I2); the folder is then kept, so that command still works. */
-function removeTempWorktree(repoPath: string, wt: string, manual: string): void {
-  // No `.git` file: `worktree add` never registered it (refused, or failed), so only the folder
-  // is left to delete.
-  if (existsSync(join(wt, ".git"))) {
+function removeTempWorktree(repoPath: string, wt: string): void {
+  // With no `.git` file, `worktree add` usually never registered it (refused, or failed), and only
+  // the folder is left to delete. git is asked, since a removal cut short can delete `.git` first.
+  if (existsSync(join(wt, ".git")) || registered(repoPath, wt)) {
     // `cleanup`: it only releases what the run took, so the door lets it through while a stop is
     // in progress, and the handler cuts its bound to the time it has left.
     const r = runBlocking(["git", "worktree", "remove", "--force", wt], {
@@ -65,11 +112,8 @@ function removeTempWorktree(repoPath: string, wt: string, manual: string): void 
       cleanup: true,
     });
     if (!r.success) {
-      const why = r.timedOut
-        ? "timed out"
-        : r.stderr.trim().split("\n").join(" ") || `exit ${r.exitCode}`;
       throw new Error(
-        `git worktree remove --force ${wt} failed (${why}); remove it with: ${manual}`,
+        `git worktree remove --force ${wt} failed (${failure(r)}); remove it with: ${manualRemoval(repoPath, wt)}`,
       );
     }
   }
@@ -80,12 +124,18 @@ function removeTempWorktree(repoPath: string, wt: string, manual: string): void 
  *  door until it is released: the run code releases it in its `finally`, and a stop handler that
  *  ends Styre first makes it itself (m3), so the worktree is never left registered in the target
  *  repo silently. Returns the release. A failure on the release is said on stderr and does not
- *  replace the caller's result; during a stop the handler says it. */
+ *  replace the caller's result; during a stop the handler says it.
+ *  `wt` must be a `styre-baseline-*` folder directly in the temp folder, as the call sites make it;
+ *  any other path is refused before anything is held, since the removal deletes it (N5). */
 export function deferWorktreeRemoval(repoPath: string, wt: string): () => void {
-  const manual = `git -C ${shellWord(repoPath)} worktree remove --force ${shellWord(wt)}`;
+  if (dirname(wt) !== tmpdir() || !basename(wt).startsWith(TEMP_WORKTREE_PREFIX)) {
+    throw new Error(
+      `refusing to remove ${wt}: a temporary worktree must be a ${TEMP_WORKTREE_PREFIX}* folder directly in ${tmpdir()}`,
+    );
+  }
   const release = deferCleanup({
-    run: () => removeTempWorktree(repoPath, wt, manual),
-    manual: `remove the worktree ${wt} with: ${manual}`,
+    run: () => removeTempWorktree(repoPath, wt),
+    manual: () => `remove the worktree ${wt} with: ${manualRemoval(repoPath, wt)}`,
   });
   return () => {
     try {

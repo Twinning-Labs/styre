@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -18,6 +19,7 @@ import { preflightAgentCli } from "../../src/agent/preflight.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { defaultGit, tryGit } from "../../src/config/slug.ts";
 import {
+  deferWorktreeRemoval,
   deliveredTestEvidenceAtBaseline,
   runAtBaseline,
 } from "../../src/dispatch/baseline-rerun.ts";
@@ -42,6 +44,11 @@ import { makeTestDb } from "../helpers/db.ts";
 
 const dirs: string[] = [];
 const savedState = process.env.XDG_STATE_HOME;
+/** The machine's temp folder. Each test gets a private one inside it (N1): the code under test makes
+ *  its `styre-baseline-*` folders in `os.tmpdir()`, which reads TMPDIR, so the counts below see only
+ *  this test's folders, even while other test processes run. */
+const sharedTmp = tmpdir();
+const savedTmpdir = process.env.TMPDIR;
 const tmp = (p: string): string => {
   const d = mkdtempSync(join(tmpdir(), p));
   dirs.push(d);
@@ -77,22 +84,34 @@ const worktreesOf = (path: string): string[] =>
     .filter((l) => l.startsWith("worktree "));
 
 beforeEach(() => {
+  const own = realpathSync(mkdtempSync(join(sharedTmp, "styre-blocking-tmp-")));
+  dirs.push(own);
+  process.env.TMPDIR = own;
   process.env.XDG_STATE_HOME = tmp("styre-blocking-state-");
   door.__resetForTests();
 });
+/** The `styre-baseline-*` folders in this test's own temp folder. */
+const baselineDirs = (): string[] =>
+  readdirSync(tmpdir()).filter((n) => n.startsWith("styre-baseline-"));
 /** Worktrees a test locked: unlocked and removed after it, pass or fail. */
 const locked: { repo: string; wt: string }[] = [];
 /** The handler's budget for the held cleanups, when time is not what a test is about. */
 const ample = () => 60_000;
 
 afterEach(() => {
-  for (const { repo, wt } of locked.splice(0)) {
+  const unlocked = locked.splice(0);
+  for (const { repo, wt } of unlocked)
     Bun.spawnSync(["git", "worktree", "unlock", wt], { cwd: repo });
+  // What a test still holds is removed, not just forgotten, so a failing test leaks nothing.
+  door.runDeferredCleanups(ample);
+  for (const { repo, wt } of unlocked) {
     Bun.spawnSync(["git", "worktree", "remove", "--force", wt], { cwd: repo });
     rmSync(wt, { recursive: true, force: true });
   }
   door.__resetForTests();
   __resetSignalsForTests();
+  if (savedTmpdir === undefined) Reflect.deleteProperty(process.env, "TMPDIR");
+  else process.env.TMPDIR = savedTmpdir;
   if (savedState === undefined) Reflect.deleteProperty(process.env, "XDG_STATE_HOME");
   else process.env.XDG_STATE_HOME = savedState;
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -161,7 +180,6 @@ test("the forge's remote lookup still names a missing origin, not a stop", () =>
 test("runAtBaseline's worktree, when the stop lands during the run, is removed by the handler's cleanups", async () => {
   const r = repo();
   const before = worktreesOf(r.path);
-  const tmpBefore = readdirSync(tmpdir()).filter((n) => n.startsWith("styre-baseline-adv-"));
   const obs = await runAtBaseline({
     repoPath: r.path,
     baselineSha: r.sha,
@@ -174,9 +192,7 @@ test("runAtBaseline's worktree, when the stop lands during the run, is removed b
   expect(worktreesOf(r.path)).toHaveLength(before.length + 1); // held for the handler
   expect(door.runDeferredCleanups(ample)).toEqual([]);
   expect(worktreesOf(r.path)).toEqual(before);
-  expect(readdirSync(tmpdir()).filter((n) => n.startsWith("styre-baseline-adv-"))).toEqual(
-    tmpBefore,
-  );
+  expect(baselineDirs()).toEqual([]);
 });
 
 test("deliveredTestEvidenceAtBaseline's worktree, when the stop lands during the run, is removed by the handler's cleanups", async () => {
@@ -459,6 +475,203 @@ test("a held removal that fails on the normal path is said, and the result is st
   expect(worktreesOf(r.path)).toHaveLength(before.length + 2);
 });
 
+/** Lines the code under test writes to stderr while `fn` runs. */
+async function stderrOf(fn: () => Promise<unknown>): Promise<string[]> {
+  const err: string[] = [];
+  const write = process.stderr.write.bind(process.stderr);
+  (process.stderr as { write: unknown }).write = (s: unknown) => {
+    err.push(String(s));
+    return true;
+  };
+  try {
+    await fn();
+  } finally {
+    (process.stderr as { write: unknown }).write = write;
+  }
+  return err;
+}
+
+/** Puts a `git` first on PATH that runs `onRemove` (shell) for `worktree remove` and the real git
+ *  for everything else. Returns the restore. */
+function gitShim(onRemove: string): () => void {
+  const shim = tmp("styre-git-shim-");
+  const realGit = Bun.which("git");
+  writeFileSync(
+    join(shim, "git"),
+    `#!/bin/sh\nif [ "$1 $2" = "worktree remove" ]; then ${onRemove}; fi\nexec '${realGit}' "$@"\n`,
+    { mode: 0o755 },
+  );
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${shim}:${savedPath}`;
+  return () => {
+    process.env.PATH = savedPath;
+  };
+}
+
+/** The handler's dependencies, with its clock moved on by `shift` ms after its first reading. */
+function handlerDeps(err: string[], shift = 0) {
+  let readings = 0;
+  return {
+    stderr: (s: string) => {
+      err.push(s);
+    },
+    emit: () => {},
+    reraise: () => {},
+    exit: () => {},
+    now: () => Date.now() + (readings++ === 0 ? 0 : shift),
+    leftovers: () => [],
+  };
+}
+
+/** Starts runAtBaseline with a command that blocks, and resolves once its worktree exists. Returns
+ *  the worktree, and `end`, which stops the command and lets the run code unwind. */
+async function blockedBaseline(r: { path: string; sha: string }) {
+  const before = worktreesOf(r.path);
+  const running = runAtBaseline({
+    repoPath: r.path,
+    baselineSha: r.sha,
+    command: "sleep 30",
+    timeoutMs: 30_000,
+  });
+  await launches(1);
+  const wt = added(before, worktreesOf(r.path));
+  return {
+    wt,
+    before,
+    end: async () => {
+      for (const h of door.liveLaunches()) await h.stop("forced");
+      await running;
+    },
+  };
+}
+const cleanupLines = (err: string[]) =>
+  err.filter((l) => l.startsWith("styre: could not clean up after the run: "));
+
+test("the handler's skip line names the worktree and the git command that removes it (B9)", async () => {
+  const r = repo();
+  const b = await blockedBaseline(r);
+  const err: string[] = [];
+  try {
+    // Every reading after the first is past the deadline: no time is left for the removal.
+    await handleStopSignal("SIGTERM", { command: "run", run: null }, handlerDeps(err, 10_000));
+  } finally {
+    await b.end();
+  }
+  expect(cleanupLines(err)).toEqual([
+    `styre: could not clean up after the run: no time was left before the stop deadline to remove the worktree ${b.wt} with: git -C ${r.path} worktree remove --force ${b.wt}\n`,
+  ]);
+  // The advice works as printed.
+  sh(["sh", "-c", `git -C ${r.path} worktree remove --force ${b.wt}`], r.path);
+  expect(worktreesOf(r.path)).toEqual(b.before);
+});
+
+test("when the worktree's .git is gone, the skip line gives the command that works then (N2)", async () => {
+  const r = repo();
+  const b = await blockedBaseline(r);
+  const err: string[] = [];
+  try {
+    rmSync(join(b.wt, ".git")); // what a removal cut short can leave
+    await handleStopSignal("SIGTERM", { command: "run", run: null }, handlerDeps(err, 10_000));
+  } finally {
+    await b.end();
+  }
+  const advice = `rm -rf ${b.wt} && git -C ${r.path} worktree prune`;
+  expect(cleanupLines(err)).toEqual([
+    `styre: could not clean up after the run: no time was left before the stop deadline to remove the worktree ${b.wt} with: ${advice}\n`,
+  ]);
+  sh(["sh", "-c", advice], r.path);
+  expect(worktreesOf(r.path)).toEqual(b.before);
+});
+
+test("when git fails because the worktree's .git is gone, the failure line gives the command that works then (N2)", async () => {
+  const r = repo();
+  const b = await blockedBaseline(r);
+  const err: string[] = [];
+  try {
+    rmSync(join(b.wt, ".git"));
+    await handleStopSignal("SIGTERM", { command: "run", run: null }, handlerDeps(err));
+  } finally {
+    await b.end();
+  }
+  const lines = cleanupLines(err);
+  expect(lines).toHaveLength(1);
+  const advice = `rm -rf ${b.wt} && git -C ${r.path} worktree prune`;
+  expect(lines[0]).toStartWith(
+    `styre: could not clean up after the run: git worktree remove --force ${b.wt} failed (`,
+  );
+  expect(lines[0]).toEndWith(`); remove it with: ${advice}\n`);
+  // git really refused it, and the advice works as printed.
+  expect(worktreesOf(r.path)).toContain(`worktree ${b.wt}`);
+  sh(["sh", "-c", advice], r.path);
+  expect(worktreesOf(r.path)).toEqual(b.before);
+});
+
+test("a held removal that times out says so, with the git command that removes it (B12)", async () => {
+  const r = repo();
+  const b = await blockedBaseline(r);
+  const err: string[] = [];
+  const restore = gitShim("exec sleep 20"); // a removal that would take 20 s
+  try {
+    // 5 s of the 6.5 s are gone after the first reading: about 1.25 s is left for the removal.
+    await handleStopSignal("SIGTERM", { command: "run", run: null }, handlerDeps(err, 5_000));
+  } finally {
+    restore();
+    await b.end();
+  }
+  expect(cleanupLines(err)).toEqual([
+    `styre: could not clean up after the run: git worktree remove --force ${b.wt} failed (timed out); remove it with: git -C ${r.path} worktree remove --force ${b.wt}\n`,
+  ]);
+});
+
+test("a held removal ended by a signal names the signal (N3)", async () => {
+  const r = repo();
+  const restore = gitShim("kill -INT $$"); // as a second Ctrl-C reaching git would
+  let wt = "";
+  let err: string[] = [];
+  try {
+    err = await stderrOf(async () => {
+      const obs = await runAtBaseline({
+        repoPath: r.path,
+        baselineSha: r.sha,
+        command: "true",
+        timeoutMs: 10_000,
+        onSettled: () => {
+          wt = added([], worktreesOf(r.path).slice(1));
+        },
+      });
+      expect(obs.execution?.outcome).toBe("completed-zero"); // the result is still returned
+    });
+  } finally {
+    restore();
+  }
+  expect(err).toEqual([
+    `styre: could not remove a temporary worktree: git worktree remove --force ${wt} failed (killed by SIGINT); remove it with: git -C ${r.path} worktree remove --force ${wt}\n`,
+  ]);
+});
+
+test("deferWorktreeRemoval refuses a folder that is not a styre-baseline folder directly in the temp folder (N5)", () => {
+  const r = repo();
+  const notOurs = [
+    join(r.path, "sub"), // inside the operator's repo: no .git of its own
+    join(tmpdir(), "someone-else"),
+    join(tmpdir(), "styre-baseline-adv-x", "nested"),
+    join(r.path, "styre-baseline-adv-y"),
+  ];
+  for (const d of notOurs) {
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, "keep.txt"), "not Styre's");
+    expect(() => deferWorktreeRemoval(r.path, d), d).toThrow(/refusing to remove/);
+  }
+  expect(door.runDeferredCleanups(ample)).toEqual([]); // nothing was held
+  for (const d of notOurs) expect(readFileSync(join(d, "keep.txt"), "utf8")).toBe("not Styre's");
+  // The folders the call sites make are accepted.
+  for (const prefix of ["styre-baseline-adv-", "styre-baseline-bind-", "styre-baseline-wt-"]) {
+    const ok = mkdtempSync(join(tmpdir(), prefix));
+    deferWorktreeRemoval(r.path, ok)();
+    expect(existsSync(ok)).toBe(false);
+  }
+});
+
 test("the other worktree calls are not cleanup calls: a baseline checkout is refused during a stop", async () => {
   const r = repo();
   // A git on PATH that logs every call, so the test sees what was started, not only what failed.
@@ -469,11 +682,6 @@ test("the other worktree calls are not cleanup calls: a baseline checkout is ref
     mode: 0o755,
   });
   const savedPath = process.env.PATH;
-  const dirsBefore = new Set(
-    readdirSync(tmpdir()).filter((n) => n.startsWith("styre-baseline-adv-")),
-  );
-  const newBaselineDirs = () =>
-    readdirSync(tmpdir()).filter((n) => n.startsWith("styre-baseline-adv-") && !dirsBefore.has(n));
   process.env.PATH = `${shim}:${savedPath}`;
   try {
     door.beginStopping();
@@ -487,12 +695,12 @@ test("the other worktree calls are not cleanup calls: a baseline checkout is ref
     expect(obs.reason).toMatch(/RunInterrupted|interrupted/);
     expect(worktreesOf(r.path)).toHaveLength(1);
     // Its empty folder is held for the handler, which removes it.
-    expect(newBaselineDirs()).toHaveLength(1);
+    expect(baselineDirs()).toHaveLength(1);
     expect(door.runDeferredCleanups(ample)).toEqual([]);
-    expect(newBaselineDirs()).toEqual([]);
+    expect(baselineDirs()).toEqual([]);
     const calls = existsSync(log) ? readFileSync(log, "utf8").split("\n") : [];
-    // Never registered, so nothing to tell git: the handler removes only the empty folder.
-    expect(calls.filter((c) => c.startsWith("worktree"))).toEqual([]);
+    // Never registered: git is only asked whether it lists it, and the empty folder is removed.
+    expect(calls.filter((c) => c.startsWith("worktree"))).toEqual(["worktree list --porcelain"]);
     expect(worktreesOf(r.path)).toHaveLength(1);
   } finally {
     process.env.PATH = savedPath;
@@ -516,10 +724,6 @@ test("replay and delivered test checkouts are refused during a stop, and nothing
     ],
     testFile: "api/tests/test_bug.py",
   });
-  const isTemp = (n: string) =>
-    n.startsWith("styre-baseline-bind-") || n.startsWith("styre-baseline-wt-");
-  const dirsBefore = new Set(readdirSync(tmpdir()).filter(isTemp));
-  const newDirs = () => readdirSync(tmpdir()).filter((n) => isTemp(n) && !dirsBefore.has(n));
   let ran = 0;
   const run = async () => {
     ran++;
@@ -555,7 +759,7 @@ test("replay and delivered test checkouts are refused during a stop, and nothing
   expect(worktreesOf(r.path)).toHaveLength(1);
   // Their empty folders are held for the handler, which removes them without asking git.
   expect(door.runDeferredCleanups(ample)).toEqual([]);
-  expect(newDirs()).toEqual([]);
+  expect(baselineDirs()).toEqual([]);
 });
 
 // --- git output arrives intact (no caller needs raw bytes: they all decoded UTF-8 before) -----------
