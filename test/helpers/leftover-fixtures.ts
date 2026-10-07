@@ -49,19 +49,40 @@ export function claimLaunch(m: string, h: LaunchHandle): LaunchHandle {
 }
 
 /**
- * Claim the process carrying marker `m` from a pid a fixture printed on `stream` (its whole text is
- * the pid), started no earlier than `since`.
+ * Claim the process carrying marker `m` from a pid a fixture printed on `stream`, alone on its first
+ * line, started no earlier than `since`. The pid is claimed as soon as that line is there (waiting
+ * at most `ms`), not at the end of the output: a fixture whose background child keeps the pipe open
+ * would otherwise be waited for until the test times out, and never claimed. The rest of the stream
+ * is let go.
  */
 export async function claimPrinted(
   m: string,
   stream: ReadableStream<Uint8Array>,
   since: string,
+  ms = 5_000,
 ): Promise<void> {
-  const text = (await new Response(stream).text()).trim();
-  const p = ownPrinted(Number(text), since);
+  const reader = stream.getReader();
+  const dec = new TextDecoder();
+  let text = "";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"timeout">((r) => {
+    timer = setTimeout(() => r("timeout"), ms);
+  });
+  try {
+    while (!text.includes("\n")) {
+      const r = await Promise.race([reader.read(), timeout]);
+      if (r === "timeout" || r.done) break;
+      text += dec.decode(r.value);
+    }
+  } finally {
+    clearTimeout(timer);
+    void reader.cancel().catch(() => {});
+  }
+  const line = text.split("\n")[0]?.trim() ?? "";
+  const p = ownPrinted(Number(line), since);
   expect(
     p,
-    `the fixture for marker ${m} printed "${text}", not the pid of a live process`,
+    `the fixture for marker ${m} printed "${line}", not the pid of a live process`,
   ).not.toBe(null);
   if (p) claim(m, p);
 }

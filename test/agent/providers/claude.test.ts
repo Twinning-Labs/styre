@@ -28,6 +28,15 @@ resetDoorAfterEach();
 // identity after each test, never by searching for their command.
 afterEach(() => killOwned());
 
+/** Claim, for the cleanup above, the process whose pid a fake CLI wrote to `file`, if it wrote one:
+ *  started no earlier than `since` and in group `pgid` ("own": a group it leads). Called from a
+ *  `finally`, so a run that throws still has its process removed. */
+function claimWritten(file: string, since: string, pgid: number | "own"): void {
+  if (!existsSync(file)) return;
+  const pid = Number(readFileSync(file, "utf8").trim());
+  ownPrinted(pid, since, { pgid: pgid === "own" ? pid : pgid });
+}
+
 const cwd = realpathSync(mkdtempSync(join(tmpdir(), "styre-claude-")));
 
 /** Write an executable stand-in for the `claude` CLI that ignores its argv and runs `body`. */
@@ -344,12 +353,13 @@ test("a background process the CLI leaves behind cannot hang the run: the drain 
   );
   const since = nowToken();
   const start = Date.now();
-  const r = await claudeAgentRunner(cli).run({ ...runInput });
-  const me = probe(process.pid);
-  const straggler = ownPrinted(Number(readFileSync(pidFile, "utf8")), since, {
-    pgid: me.kind === "alive" ? me.info.pgid : -1,
-  });
-  expect(straggler).not.toBeNull(); // still running: the test removes it
+  let r: Awaited<ReturnType<ReturnType<typeof claudeAgentRunner>["run"]>>;
+  try {
+    r = await claudeAgentRunner(cli).run({ ...runInput });
+  } finally {
+    const me = probe(process.pid);
+    claimWritten(pidFile, since, me.kind === "alive" ? me.info.pgid : -1);
+  }
   expect(Date.now() - start).toBeLessThan(9000); // the 5s drain bound, well under the straggler's 30s
   expect(r.completed).toBe(true);
   expect(r.stdout).toBe("ok");
@@ -373,20 +383,23 @@ const r = await claudeAgentRunner(${JSON.stringify(cli)}).run({ prompt: "x", mod
 console.log(JSON.stringify({ completed: r.completed, stdout: r.stdout }));`,
   );
   const start = Date.now();
-  // Bun.spawn's default environment is the one Bun started with, which lacks the preload's test
-  // state folder: pass this process's, so no launch record reaches the operator's real one (R29).
-  const proc = Bun.spawn(["bun", "run", script], { env: { ...process.env }, stdout: "pipe" });
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
+  let out = "";
+  try {
+    // Bun.spawn's default environment is the one Bun started with, which lacks the preload's test
+    // state folder: pass this process's, so no launch record reaches the operator's real one (R29).
+    const proc = Bun.spawn(["bun", "run", script], { env: { ...process.env }, stdout: "pipe" });
+    out = await new Response(proc.stdout).text();
+    await proc.exited;
+  } finally {
+    // The holder leads a session (and group) of its own, and outlives the run: remove it.
+    claimWritten(escaped, since, "own");
+  }
   // drain timeout (5s) plus startup, well under the escaped holder's 20s
   expect(Date.now() - start).toBeLessThan(12000);
   expect(JSON.parse(out.trim().split("\n").pop() ?? "{}")).toEqual({
     completed: true,
     stdout: "ok",
   });
-  // The holder leads a session (and group) of its own; it is still sleeping: the test removes it.
-  const holderPid = Number(readFileSync(escaped, "utf8"));
-  expect(ownPrinted(holderPid, since, { pgid: holderPid })).not.toBeNull();
 }, 20000);
 
 test("a transcript line cut off by a crash is never read as the CLI's own message", async () => {
