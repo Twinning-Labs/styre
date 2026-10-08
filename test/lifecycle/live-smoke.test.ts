@@ -9,10 +9,10 @@ import {
   agentAbove,
   cancelVerdict,
   controlVerdict,
-  groupLedByChild,
   judge,
   parseClaudeVersion,
   parseDriver,
+  r8Check,
   versionAtLeast,
 } from "../../scripts/lifecycle-live.ts";
 
@@ -48,35 +48,37 @@ describe("agentAbove: the driver's direct child on the sleep's parent chain", ()
   });
 });
 
-describe("groupLedByChild: R8, the agent's command group is led by its direct child", () => {
-  test("holds when the sleep's group leader is the agent's child", () => {
-    const r = groupLedByChild(TABLE[4] as Proc, TABLE[2] as Proc, TABLE);
-    expect(r).toEqual({
+describe("r8Check: Claude Code's command group is led by the agent's direct child (R8)", () => {
+  test("holds when the sleep sits in the group the agent's child leads", () => {
+    expect(r8Check(TABLE[4] as Proc, TABLE[2] as Proc, TABLE)).toEqual({
       ok: true,
-      why: "group 502 is led by pid 502, a direct child of the agent 501",
+      why: "the command group 502 is led by pid 502, the agent's direct child; the test runs in that group",
     });
   });
-  test("fails when the leader is a grandchild", () => {
-    const t = [
-      p(500, 1, 500),
-      p(501, 500, 500),
-      p(502, 501, 501),
-      p(504, 502, 504),
-      p(503, 504, 504),
-    ];
-    const r = groupLedByChild(t[4] as Proc, t[1] as Proc, t);
-    expect(r.ok).toBe(false);
-    expect(r.why).toContain("parent 502");
+  test("holds for a nested group led by a process on the chain (a shell with job control), and says so", () => {
+    // Seen on Linux with claude 2.1.294: the tool shell 502 leads 502, and the test 503 leads 503.
+    const t = [p(500, 1, 500), p(501, 500, 500), p(502, 501, 502), p(503, 502, 503)];
+    expect(r8Check(t[3] as Proc, t[1] as Proc, t)).toEqual({
+      ok: true,
+      why: "the command group 502 is led by pid 502, the agent's direct child; the test runs in group 503, led by pid 503 below it",
+    });
   });
-  test("fails when the sleep shares the agent's group", () => {
-    const t = [p(500, 1, 500), p(501, 500, 500), p(503, 501, 500)];
-    expect(groupLedByChild(t[2] as Proc, t[1] as Proc, t).ok).toBe(false);
-  });
-  test("fails when the group's leader has exited", () => {
-    const t = [p(500, 1, 500), p(501, 500, 500), p(503, 1, 502)];
-    const r = groupLedByChild(t[2] as Proc, t[1] as Proc, t);
+  test("fails when the agent's child does not lead a group of its own", () => {
+    const t = [p(500, 1, 500), p(501, 500, 500), p(502, 501, 500), p(503, 502, 500)];
+    const r = r8Check(t[3] as Proc, t[1] as Proc, t);
     expect(r.ok).toBe(false);
-    expect(r.why).toContain("no process leads group 502");
+    expect(r.why).toContain("pid 502, the agent's direct child, is in group 500");
+  });
+  test("fails when the sleep sits in a group whose leader is not on its chain", () => {
+    // The group's leader 504 exited, or is somewhere else: a stop would not take the group in.
+    const t = [p(500, 1, 500), p(501, 500, 500), p(502, 501, 502), p(503, 502, 504)];
+    const r = r8Check(t[3] as Proc, t[1] as Proc, t);
+    expect(r.ok).toBe(false);
+    expect(r.why).toContain("pid 503 is in group 504, which no process on its chain leads");
+  });
+  test("fails when the sleep is not below the agent", () => {
+    const t = [p(500, 1, 500), p(501, 500, 500), p(503, 1, 503)];
+    expect(r8Check(t[2] as Proc, t[1] as Proc, t).ok).toBe(false);
   });
 });
 

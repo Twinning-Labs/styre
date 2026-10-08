@@ -69,10 +69,10 @@ import {
   STOP_WINDOW_MS,
   agentAbove,
   controlVerdict,
-  groupLedByChild,
   judge,
   parseClaudeVersion,
   parseDriver,
+  r8Check,
   versionAtLeast,
 } from "./lifecycle-live.ts";
 
@@ -364,7 +364,7 @@ async function start(
     throw new Error(
       `${name}: no agent between the driver ${driver.pid} and the sleep ${sleep.pid}`,
     );
-  const r8 = groupLedByChild(sleep, agent, table);
+  const r8 = r8Check(sleep, agent, table);
   const chain: string[] = [];
   for (let p: ProcInfo | undefined = sleep; p !== undefined && p.pid !== driver.pid; ) {
     chain.push(`pid ${p.pid} parent ${p.ppid} group ${p.pgid}: ${commandOf(p) ?? "?"}`);

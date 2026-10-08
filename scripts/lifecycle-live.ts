@@ -37,27 +37,45 @@ export function agentAbove(leafPid: number, driverPid: number, table: Proc[]): P
 }
 
 /**
- * R8 (spec 6.1): the group that the agent's test command runs in is led by a direct child of the
- * agent. That is what lets a stop take the group in while the agent lives.
+ * R8 (spec 6.1): the group Claude Code makes for a tool command is led by the agent's direct child,
+ * so a stop takes it in while the agent lives. The check walks the sleep's parent chain up to the
+ * agent: the agent's direct child on it must lead a group of its own, and every process on the
+ * chain below the agent must sit in a group led by a process on that chain, which the stop
+ * collects as a descendant. A shell with job control can nest the test in a group of its own
+ * below the command group; that still holds, and the reason says so.
  */
-export function groupLedByChild(
-  leaf: Proc,
-  agent: Proc,
-  table: Proc[],
-): { ok: boolean; why: string } {
-  if (leaf.pgid === agent.pgid)
-    return { ok: false, why: `the command shares the agent's group ${agent.pgid}` };
-  const leader = table.find((q) => q.pid === leaf.pgid);
-  if (leader === undefined)
-    return { ok: false, why: `no process leads group ${leaf.pgid} (its leader has exited)` };
-  if (leader.ppid !== agent.pid)
+export function r8Check(leaf: Proc, agent: Proc, table: Proc[]): { ok: boolean; why: string } {
+  const byPid = new Map(table.map((q) => [q.pid, q]));
+  const chain: Proc[] = [];
+  const seen = new Set<number>();
+  for (let cur: Proc | undefined = leaf; cur !== undefined && !seen.has(cur.pid); ) {
+    chain.push(cur);
+    seen.add(cur.pid);
+    if (cur.ppid === agent.pid) break;
+    cur = byPid.get(cur.ppid);
+  }
+  const child = chain[chain.length - 1];
+  if (child === undefined || child.ppid !== agent.pid)
+    return { ok: false, why: `pid ${leaf.pid} is not below the agent ${agent.pid}` };
+  if (child.pgid !== child.pid)
     return {
       ok: false,
-      why: `group ${leaf.pgid} is led by pid ${leader.pid}, whose parent ${leader.ppid} is not the agent ${agent.pid}`,
+      why: `pid ${child.pid}, the agent's direct child, is in group ${child.pgid}, not a group of its own`,
     };
+  const onChain = new Set(chain.map((q) => q.pid));
+  for (const q of chain)
+    if (!onChain.has(q.pgid))
+      return {
+        ok: false,
+        why: `pid ${q.pid} is in group ${q.pgid}, which no process on its chain leads`,
+      };
+  const head = `the command group ${child.pgid} is led by pid ${child.pid}, the agent's direct child`;
   return {
     ok: true,
-    why: `group ${leaf.pgid} is led by pid ${leader.pid}, a direct child of the agent ${agent.pid}`,
+    why:
+      leaf.pgid === child.pgid
+        ? `${head}; the test runs in that group`
+        : `${head}; the test runs in group ${leaf.pgid}, led by pid ${leaf.pgid} below it`,
   };
 }
 
