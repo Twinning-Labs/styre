@@ -440,6 +440,23 @@ function rubyRepo(home: string): string {
   return repo;
 }
 
+/** Answer each of setup's missing command prompts with Enter (blank) until it asks for approval;
+ *  at least one such prompt must have run. */
+async function answerUntilApproval(pty: Pty): Promise<void> {
+  let answered = 0;
+  const reached = await until(() => {
+    if (pty.output().includes("Approve these components")) return true;
+    const asked = (pty.output().match(/leave blank for none: /g) ?? []).length;
+    if (asked > answered) {
+      pty.type("\n");
+      answered = asked;
+    }
+    return false;
+  }, 20_000);
+  expect(reached, `setup never asked for approval; it showed:\n${pty.output()}`).toBe(true);
+  expect(answered).toBeGreaterThan(0); // the prompts before it really ran
+}
+
 describe("styre in a terminal", () => {
   test(
     "styre setup: Ctrl-C at its approval prompt ends it at once by SIGINT (130), and no profile is written (finding 3)",
@@ -453,23 +470,46 @@ describe("styre in a terminal", () => {
       });
       ptys.push(pty);
       await pty.command();
-      // Setup first asks for each missing command: Enter leaves it blank. Then it asks for approval.
-      let answered = 0;
-      const reached = await until(() => {
-        if (pty.output().includes("Approve these components")) return true;
-        const asked = (pty.output().match(/leave blank for none: /g) ?? []).length;
-        if (asked > answered) {
-          pty.type("\n");
-          answered = asked;
-        }
-        return false;
-      }, 20_000);
-      expect(reached, `setup never asked for approval; it showed:\n${pty.output()}`).toBe(true);
-      expect(answered).toBeGreaterThan(0); // the prompts before it really ran
+      await answerUntilApproval(pty);
       const t0 = Date.now();
       pty.type(CTRL_C);
       await endedBy(pty, "SIGINT", 1_500);
       expect(Date.now() - t0).toBeLessThan(1_500);
+      expect(existsSync(out)).toBe(false);
+      expect(existsSync(`${out}.environment.json`)).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "styre setup: Ctrl-\\ at its approval prompt ends it by SIGQUIT (131) with no core, and no profile is written",
+    async () => {
+      const bin = binary();
+      const h = styreHome();
+      const repo = rubyRepo(h.home);
+      const out = join(h.home, "profile.json");
+      const waited = join(h.home, "wait-status.json");
+      // The handlers are suspended at the prompt, so Ctrl-\ takes SIGQUIT's default action: a core
+      // dump, unless setup turned core dumps off for the prompt. Core files are allowed wherever
+      // that is needed to see one (coreLimitShowsADump), and wait-status.pl reports WCOREDUMP.
+      const raise = coreLimitShowsADump();
+      const pty = underPty(
+        ["perl", WAIT_STATUS, waited, bin, "setup", repo, "--config", h.config, "--out", out],
+        { env: h.env, cwd: h.home, cores: raise },
+      );
+      ptys.push(pty);
+      const perl = await pty.command();
+      const hard = Bun.spawnSync(["sh", "-c", "ulimit -H -c"]).stdout.toString().trim();
+      if (raise && hard !== "0") expect(pty.coreLimit()).not.toBe("0");
+      await answerUntilApproval(pty);
+      const styre = ownTree(pty.script).find((p) => p.ppid === perl.pid);
+      expect(styre).toBeDefined();
+      const before = coreFiles(styre?.pid ?? -1, h.home);
+      pty.type(CTRL_BACKSLASH);
+      expect(await until(() => existsSync(waited), 5_000)).toBe(true);
+      expect(JSON.parse(readFileSync(waited, "utf8"))).toEqual({ signal: 3, core: false, code: 0 });
+      expect(coreFiles(styre?.pid ?? -1, h.home).filter((f) => !before.includes(f))).toEqual([]);
+      expect(pty.output()).not.toContain("could not turn off core dumps");
       expect(existsSync(out)).toBe(false);
       expect(existsSync(`${out}.environment.json`)).toBe(false);
     },
