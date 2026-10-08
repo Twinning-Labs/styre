@@ -11,4 +11,7 @@ trap 'kill -KILL $$' QUIT
 trap 'kill -TERM -$TOOL 2>/dev/null' EXIT
 # Said only now, with the traps set: tests wait for this line before they signal the stand-in.
 echo "tool $TOOL" >&2
+# With $STANDIN_PIDFILE (the GitHub cancel check), the same pids also go to that file: a CI step
+# whose stderr is Styre's cannot read the line above.
+if [ -n "$STANDIN_PIDFILE" ]; then echo "agent $$ tool $TOOL" >>"$STANDIN_PIDFILE"; fi
 wait
