@@ -333,7 +333,8 @@ async function start(
     ptys.push(pty);
     driver = await pty.command();
     const p = pty;
-    said = () => p.output();
+    // The terminal echoes the keystroke (`^C`, `^\`) in front of whatever is written next.
+    said = () => p.output().replace(/\^[C\\]/g, "");
     ended = (ms) => p.ended(ms);
   }
 
@@ -433,6 +434,8 @@ interface Outcome {
   sleepGoneMs: number | null;
   failures: string[];
   leakCheck: string[];
+  /** What Styre said (its `styre:` lines). */
+  styreSaid: string[];
 }
 const outcomes: Outcome[] = [];
 
@@ -455,6 +458,7 @@ async function scenario(
   };
   let exit: Ended | null = null;
   let r8ok = false;
+  let styreText = "";
   try {
     s = await start(name, root, how, timeoutMs);
     if (code === "new") {
@@ -477,6 +481,7 @@ async function scenario(
     failures.push(...(acted.extra ?? []), ...(acted.after?.() ?? []));
     if (want !== null)
       failures.push(...judge(want(s), { exit, ...watched, stderr: acted.stderr ?? s.said() }));
+    styreText = acted.stderr ?? s.said();
   } catch (err) {
     failures.push(err instanceof Error ? err.message : String(err));
   }
@@ -494,6 +499,7 @@ async function scenario(
     sleepGoneMs: watched.sleepGoneMs,
     failures,
     leakCheck: leak.ok ? ["nothing left running"] : leak.lines,
+    styreSaid: styreText.split("\n").filter((l) => l.startsWith("styre:")),
   };
   if (!leak.ok) failures.push(...leak.lines.map((l) => `LEAK: ${l}`));
   outcomes.push(o);

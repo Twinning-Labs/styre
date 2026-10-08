@@ -70,4 +70,6 @@ say(
     stdout: r.completed ? "" : r.stdout.slice(-600),
   })}`,
 );
-process.exit(0);
+// As the CLI's error boundary does (src/cli/output.ts guard): while a stop is in progress the stop
+// handler owns the exit, so an interrupted dispatch ends nothing here; the handler re-raises.
+if (r.interrupted !== true) process.exit(0);
