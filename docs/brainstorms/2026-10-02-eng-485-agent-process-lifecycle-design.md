@@ -1096,3 +1096,32 @@ and without it. This also settles bash 5's behaviour (§2.5).
 | N4 | minor | `git branch -f` refuses a branch checked out elsewhere | §7.5: report and skip |
 | N5 | minor | `handlers.ts:702` records the HEAD; it does not commit | §7.5 citation corrected (`:778` through `run-dispatch.ts:325`) |
 | m2 note | minor | One in-flight outbox request can still complete | §7.3 step 1: at most one duplicate Slack post, stated |
+
+## Amendment 2026-10-08: no core dump on Ctrl-\
+
+**Operator decision.** Before Styre's stop handler re-raises SIGQUIT (Ctrl-\, §7.3 step 8), it
+makes sure no core dump is written. Found in Task 15b: the re-raised SIGQUIT's default action
+dumps core, and a Bun core was about 6 GB. Ubuntu's apport stored it root-owned in
+/var/lib/apport/coredump.
+
+**Mechanism.** Both calls run just before the SIGQUIT re-raise, and for no other signal; the other
+stop signals dump nothing.
+- **The core limit is set to 0** (`setrlimit(RLIMIT_CORE, {0, 0})`). macOS writes a core to /cores
+  only within this limit (core(5) on macOS). Linux applies it when core_pattern names a file.
+- **On Linux, the process is also marked not dumpable** (`prctl(PR_SET_DUMPABLE, 0)`).
+  - When core_pattern pipes to a program (Ubuntu's apport, systemd-coredump), the kernel ignores the
+    core limit (core(5): "The RLIMIT_CORE limit is not enforced for core dumps that are piped to a
+    program"). It starts no dump for a process that is not dumpable: fs/coredump.c skips such a
+    process before any pipe handling.
+  - On the test laptop a tiny process proved both points. With the limit at 0 the kernel still piped
+    the core to apport (the wait status's WCOREDUMP bit was set). Not dumpable, nothing was dumped
+    at all.
+  - Its side effects (/proc entries owned by root, no ptrace attach) cannot matter at that moment:
+    nothing reads them before the exit.
+- **Calls:** through bun:ffi (libc.so.6, /usr/lib/libSystem.B.dylib).
+- **A failure is said** (`styre: could not turn off core dumps before exiting: <why>`) and the
+  re-raise still happens.
+
+**D13 is unchanged.** Ctrl-\ still ends Styre by SIGQUIT, exit status 131, and the orphaned
+command is still reported, not stopped. On macOS the system's crash report (a .ips file from
+ReportCrash) is not a core and is not affected.
