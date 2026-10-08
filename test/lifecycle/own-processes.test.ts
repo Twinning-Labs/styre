@@ -30,6 +30,7 @@ import {
   ownTree,
   registerGroup,
   registeredGroups,
+  signalOwned,
   stillRunning,
   until,
   wouldClaim,
@@ -433,4 +434,45 @@ test("rule 2 refuses a member of a registered group that started before the grou
   } finally {
     unregister();
   }
+});
+
+test("signalOwned signals a claimed process, and nothing that is not claimed", async () => {
+  const child = spawn(["sleep", "30"]);
+  expect(signalOwned(child, "SIGTERM")).toBe(false); // not claimed: nothing is sent
+  expect(isAlive(child)).toBe(true);
+  own(child);
+  expect(signalOwned(child, "SIGTERM")).toBe(true);
+  expect(await allGone([child])).toBe(true);
+});
+
+test("signalOwned checks the recorded process again just before its signal", async () => {
+  const child = spawn(["sleep", "30"]);
+  const restore = __snapshotForTests();
+  __recordForTests(reused(child)); // recorded, but the pid now belongs to another start time
+  try {
+    expect(signalOwned(reused(child), "SIGTERM")).toBe(false);
+    expect(isAlive(child)).toBe(true);
+  } finally {
+    restore();
+  }
+});
+
+test("signalOwned refuses pid 1, this process and its ancestors even when recorded", () => {
+  // SIGCONT: harmless to a running process, so a regression here could not hurt the machine; the
+  // return value says whether it was sent.
+  const table = listProcesses();
+  const self = table.find((p) => p.pid === process.pid);
+  const parent = table.find((p) => p.pid === process.ppid);
+  const init = table.find((p) => p.pid === 1);
+  const restore = __snapshotForTests();
+  try {
+    for (const p of [self, parent, init]) {
+      if (!p) continue;
+      __recordForTests(p);
+      expect(signalOwned(p, "SIGCONT")).toBe(false);
+    }
+  } finally {
+    restore();
+  }
+  expect(self && parent).toBeTruthy();
 });

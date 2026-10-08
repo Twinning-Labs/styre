@@ -312,18 +312,30 @@ export function allGone(ps: Ident[], ms = 5_000): Promise<boolean> {
   return until(() => ps.every((p) => !isAlive(p)), ms);
 }
 
-/** SIGKILL one recorded process, checked again just before the signal: the same pid and start time,
- *  alive, and never pid 1, this process or an ancestor of it. Returns whether it was signalled. */
-function killRecorded(p: Ident, ancestors: Set<number>): boolean {
+/** Signal one recorded process (SIGKILL unless told otherwise), checked again just before the
+ *  signal: the same pid and start time, alive, and never pid 1, this process or an ancestor of it.
+ *  Returns whether it was signalled. */
+function killRecorded(p: Ident, ancestors: Set<number>, sig: NodeJS.Signals = "SIGKILL"): boolean {
   if (!Number.isInteger(p.pid) || p.pid <= 1 || p.pid === process.pid || ancestors.has(p.pid))
     return false;
   if (!isAlive(p)) return false;
   try {
-    process.kill(p.pid, "SIGKILL");
+    process.kill(p.pid, sig);
     return true;
   } catch {
     return false; // it ended meanwhile
   }
+}
+
+/**
+ * Send `sig` to one process the test has claimed and not yet cleaned up (a test's own stop request,
+ * such as `kill -TERM` of a driver), checked again just before the signal as `killOwned` checks.
+ * Anything not claimed is refused. The process stays claimed, so `killOwned` still ends it if the
+ * signal did not. Returns whether it was signalled.
+ */
+export function signalOwned(p: Ident, sig: NodeJS.Signals): boolean {
+  if (!owned.has(key(p))) return false;
+  return killRecorded(p, ancestorsOf(listProcesses()), sig);
 }
 
 /**
