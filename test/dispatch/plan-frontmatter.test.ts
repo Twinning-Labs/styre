@@ -1,12 +1,12 @@
 // test/dispatch/plan-frontmatter.test.ts
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { hasTicketPlan, planFrontmatterLinear } from "../../src/dispatch/plan-frontmatter.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function tmp(): string {
-  return mkdtempSync(join(tmpdir(), "styre-pf-"));
+  return makeTempDir("styre-pf-");
 }
 
 test("planFrontmatterLinear reads linear: from leading frontmatter", () => {

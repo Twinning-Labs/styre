@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -25,10 +24,11 @@ import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { StepExecutionError } from "../../src/engine/step-journal.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function fixture(scope: "unit" | "integration", command: string) {
   const { db, ticketId, projectId } = makeTestDb();
-  const root = mkdtempSync(join(tmpdir(), "styre-execution-error-"));
+  const root = makeTempDir("styre-execution-error-");
   const repo = join(root, "repo");
   const git = (...args: string[]) => {
     const r = Bun.spawnSync(["git", "-C", repo, ...args]);

@@ -1,6 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getByKey } from "../../src/db/repos/workflow-step.ts";
 import type { Component } from "../../src/dispatch/profile.ts";
@@ -19,6 +18,7 @@ import { runStep } from "../../src/engine/step-journal.ts";
 import { isCommandSafe } from "../../src/setup/command-safety.ts";
 import { runCommand } from "../../src/util/run-command.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const roots: string[] = [];
 afterAll(() => {
@@ -28,7 +28,7 @@ afterAll(() => {
 });
 
 function tmpDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = makeTempDir(prefix);
   roots.push(dir);
   return dir;
 }

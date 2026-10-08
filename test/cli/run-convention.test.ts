@@ -1,11 +1,9 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { runImpl } from "../../src/cli/run.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function realRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-conv-repo-"));
+  const dir = makeTempDir("styre-conv-repo-");
   Bun.spawnSync(["git", "init", "-q"], { cwd: dir });
   return dir;
 }
@@ -34,12 +32,12 @@ async function invoke(args: Record<string, unknown>, cwd: string, xdg: string): 
 
 test("run with no --profile and no conventional profile → run-setup error", async () => {
   const repo = realRepo(); // slug = basename(repo)
-  const xdg = mkdtempSync(join(tmpdir(), "styre-xdg-"));
+  const xdg = makeTempDir("styre-xdg-");
   await expect(invoke({}, repo, xdg)).rejects.toThrow(/run `styre setup` first/);
 });
 
 test("run with no --profile outside a git repo → cd/pass-profile error", async () => {
-  const notRepo = mkdtempSync(join(tmpdir(), "styre-notrepo-"));
-  const xdg = mkdtempSync(join(tmpdir(), "styre-xdg-"));
+  const notRepo = makeTempDir("styre-notrepo-");
+  const xdg = makeTempDir("styre-xdg-");
   await expect(invoke({}, notRepo, xdg)).rejects.toThrow(/not a git repo/);
 });

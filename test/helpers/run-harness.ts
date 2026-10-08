@@ -1,5 +1,4 @@
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { finishRunResult, parkDir, resumeRun } from "../../src/cli/park.ts";
@@ -19,6 +18,7 @@ import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import type { ForgePort } from "../../src/integrations/forge.ts";
 import { gitRepoWithProject } from "./git-project.ts";
+import { makeTempDir, trackTempEntriesMadeBy } from "./temp.ts";
 
 const PARK_SLUG = "test-project";
 const PARK_IDENT = "ENG-1";
@@ -53,7 +53,7 @@ export function cleanupParkedRun(parked: ParkedRunResult): void {
 export async function runParkedTicket(): Promise<ParkedRunResult> {
   // Capture and override XDG_STATE_HOME so dumpPark / parkDir write to a temp dir, not ~/.local/state.
   const prevXdgStateHome = process.env.XDG_STATE_HOME;
-  const stateRoot = mkdtempSync(join(tmpdir(), "styre-park-state-"));
+  const stateRoot = makeTempDir("styre-park-state-");
   process.env.XDG_STATE_HOME = stateRoot;
 
   // A real git repo + on-disk SQLite DB seeded with ticket ENG-1 at stage='implement' + work_unit.
@@ -84,7 +84,7 @@ export async function runParkedTicket(): Promise<ParkedRunResult> {
   }));
 
   // worktreeRoot is only needed during driveToTerminal; cleaned up in the finally below.
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-wt-harness-"));
+  const worktreeRoot = makeTempDir("styre-wt-harness-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
@@ -175,7 +175,7 @@ export async function runParkedTicket(): Promise<ParkedRunResult> {
 export async function runNeedsYouTicket(): Promise<ParkedRunResult> {
   // Capture and override XDG_STATE_HOME so parkDir resolves to a temp dir, not ~/.local/state.
   const prevXdgStateHome = process.env.XDG_STATE_HOME;
-  const stateRoot = mkdtempSync(join(tmpdir(), "styre-needsyou-state-"));
+  const stateRoot = makeTempDir("styre-needsyou-state-");
   process.env.XDG_STATE_HOME = stateRoot;
 
   // A real git repo + on-disk SQLite DB seeded with ticket ENG-1 at stage='implement' + work_unit.
@@ -202,7 +202,7 @@ export async function runNeedsYouTicket(): Promise<ParkedRunResult> {
   }));
 
   // worktreeRoot is only needed during driveToTerminal; cleaned up in the finally below.
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-wt-needsyou-"));
+  const worktreeRoot = makeTempDir("styre-wt-needsyou-");
   const registry = buildDispatchRegistry({
     runner: failing,
     agentConfig: DEFAULT_AGENT_CONFIG,
@@ -381,70 +381,73 @@ export async function resumeParkedTicket(
   const previousExitCode = process.exitCode ?? 0;
   try {
     process.exitCode = 0;
-    await resumeRun(
-      { resume: parked.ident, acceptHead: opts?.acceptHead, inspect: opts?.inspect },
-      realProfile,
-      DEFAULT_RUNTIME_CONFIG,
-      {
-        buildRegistry: (resumeContext) => {
-          const runner = new FakeAgentRunner((input) => {
-            prompts.push(input.prompt);
-            callCount++;
-            if (opts?.parkAgain) {
-              // Simulate session-limit again to produce a second park (exit 75).
-              return {
-                completed: false,
-                exitCode: 1,
-                stdout: "partial work from second session-limit",
-                stderr: "You have reached your session limit · resets tomorrow",
-                timedOut: false,
-                costUsd: null,
-                tokensIn: null,
-                tokensOut: null,
-                cause: "session-limit" as const,
-                resetAt: "tomorrow",
-              };
-            }
-            if (callCount === 1) {
-              // implement:dispatch — write a file so the diff is non-empty (postcondition)
-              writeFileSync(join(input.cwd, "harness-impl.ts"), "// harness-written impl\n");
+    // resumeRun mints its own styre-wt-* root and keeps it, even when buildRegistry is injected.
+    await trackTempEntriesMadeBy("styre-wt-", () =>
+      resumeRun(
+        { resume: parked.ident, acceptHead: opts?.acceptHead, inspect: opts?.inspect },
+        realProfile,
+        DEFAULT_RUNTIME_CONFIG,
+        {
+          buildRegistry: (resumeContext) => {
+            const runner = new FakeAgentRunner((input) => {
+              prompts.push(input.prompt);
+              callCount++;
+              if (opts?.parkAgain) {
+                // Simulate session-limit again to produce a second park (exit 75).
+                return {
+                  completed: false,
+                  exitCode: 1,
+                  stdout: "partial work from second session-limit",
+                  stderr: "You have reached your session limit · resets tomorrow",
+                  timedOut: false,
+                  costUsd: null,
+                  tokensIn: null,
+                  tokensOut: null,
+                  cause: "session-limit" as const,
+                  resetAt: "tomorrow",
+                };
+              }
+              if (callCount === 1) {
+                // implement:dispatch — write a file so the diff is non-empty (postcondition)
+                writeFileSync(join(input.cwd, "harness-impl.ts"), "// harness-written impl\n");
+                return {
+                  completed: true,
+                  exitCode: 0,
+                  stdout: 'done\n```styre-sidecar\n{"new_files":["harness-impl.ts"]}\n```',
+                  stderr: "",
+                  timedOut: false,
+                  costUsd: null,
+                  tokensIn: null,
+                  tokensOut: null,
+                };
+              }
+              // review and any other dispatch: return a valid empty-findings sidecar
               return {
                 completed: true,
                 exitCode: 0,
-                stdout: 'done\n```styre-sidecar\n{"new_files":["harness-impl.ts"]}\n```',
+                stdout: 'Done.\n```styre-sidecar\n{"findings":[]}\n```',
                 stderr: "",
                 timedOut: false,
                 costUsd: null,
                 tokensIn: null,
                 tokensOut: null,
               };
-            }
-            // review and any other dispatch: return a valid empty-findings sidecar
-            return {
-              completed: true,
-              exitCode: 0,
-              stdout: 'Done.\n```styre-sidecar\n{"findings":[]}\n```',
-              stderr: "",
-              timedOut: false,
-              costUsd: null,
-              tokensIn: null,
-              tokensOut: null,
-            };
-          });
-          lastRunner = runner;
-          const wtRoot = mkdtempSync(join(tmpdir(), "styre-wt-resume-"));
-          resumeWorktreeDirs.push(wtRoot);
-          return buildDispatchRegistry({
-            runner,
-            agentConfig: DEFAULT_AGENT_CONFIG,
-            profile: realProfile,
-            worktreeRoot: wtRoot,
-            resumeContext,
-          });
+            });
+            lastRunner = runner;
+            const wtRoot = makeTempDir("styre-wt-resume-");
+            resumeWorktreeDirs.push(wtRoot);
+            return buildDispatchRegistry({
+              runner,
+              agentConfig: DEFAULT_AGENT_CONFIG,
+              profile: realProfile,
+              worktreeRoot: wtRoot,
+              resumeContext,
+            });
+          },
+          ports: fakePorts,
+          preflight: () => ({ ok: true, version: null }),
         },
-        ports: fakePorts,
-        preflight: () => ({ ok: true, version: null }),
-      },
+      ),
     );
 
     // resumeRun doesn't return RunResult directly; reconstruct a minimal result for backward
@@ -583,7 +586,7 @@ const FRESH_IDENT = "ENG-1";
  *  because `runFreshTicket` drives the real `provision` handler, which does `ensureWorktree` on
  *  `profile.targetRepo` before it can trivially no-op on an empty `components: []` profile. */
 function freshGitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-fresh-repo-"));
+  const root = makeTempDir("styre-fresh-repo-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -655,14 +658,13 @@ export async function runFreshTicket(opts?: {
     telemetry: process.env.STYRE_TELEMETRY,
   };
   const ownsStateRoot = opts?.reuseStateOf === undefined;
-  const stateRoot =
-    opts?.reuseStateOf?.stateRoot ?? mkdtempSync(join(tmpdir(), "styre-fresh-state-"));
+  const stateRoot = opts?.reuseStateOf?.stateRoot ?? makeTempDir("styre-fresh-state-");
   // Isolated + always-empty, so discoverRuntimeConfig's convention lookup never picks up a real
   // operator's ~/.config/styre/config.json (issueTracker/agent overrides that would be irrelevant
   // anyway since ports/runner are injected, but reading them would be non-hermetic).
-  const configRoot = mkdtempSync(join(tmpdir(), "styre-fresh-config-"));
+  const configRoot = makeTempDir("styre-fresh-config-");
   const repoDir = freshGitRepo();
-  const profileDir = mkdtempSync(join(tmpdir(), "styre-fresh-profile-"));
+  const profileDir = makeTempDir("styre-fresh-profile-");
   const profilePath = join(profileDir, "profile.json");
   writeFileSync(
     profilePath,
@@ -714,9 +716,12 @@ export async function runFreshTicket(opts?: {
       }),
       forge: opts?.forge ?? fakeForge(),
     };
-    await runImpl(
-      { args: { ticket: FRESH_IDENT, profile: profilePath, fresh: opts?.fresh } },
-      { ports, runner: sessionLimitRunner(), preflight: () => ({ ok: true, version: null }) },
+    // runImpl keeps the run's styre-wt-* worktree root after a pause (resume needs it).
+    await trackTempEntriesMadeBy("styre-wt-", () =>
+      runImpl(
+        { args: { ticket: FRESH_IDENT, profile: profilePath, fresh: opts?.fresh } },
+        { ports, runner: sessionLimitRunner(), preflight: () => ({ ok: true, version: null }) },
+      ),
     );
   } catch (err) {
     // The refuse-guard (and any other early throw) rejects before returning a `cleanup` handle to

@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   buildCodexArgs,
@@ -8,8 +7,9 @@ import {
   parseCodexUsage,
   sandboxForTools,
 } from "../../../src/agent/providers/codex.ts";
+import { makeTempDir } from "../../helpers/temp.ts";
 
-const cwd = realpathSync(mkdtempSync(join(tmpdir(), "styre-codex-")));
+const cwd = realpathSync(makeTempDir("styre-codex-"));
 
 function fakeCli(name: string, body: string): string {
   const path = join(cwd, name);

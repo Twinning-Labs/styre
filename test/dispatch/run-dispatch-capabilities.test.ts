@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import type { AgentRunInput, AgentRunResult, AgentRunner } from "../../src/agent/runner.ts";
@@ -15,13 +14,14 @@ import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runAgentDispatch } from "../../src/dispatch/run-dispatch.ts";
 import { StepPrerequisiteError } from "../../src/engine/step-journal.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir, trackTempPath } from "../helpers/temp.ts";
 
 // ENG-476: every completed dispatch must report the tool set the agent actually had, and it must
 // equal the step's allowlist. Anything else stops the run loudly (a prerequisite failure — no
 // retry burns cost against a provider that is not confining the agent).
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-cap-"));
+  const root = makeTempDir("styre-cap-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -72,7 +72,7 @@ function rawRunner(result: (input: AgentRunInput) => AgentRunResult): AgentRunne
 async function dispatchWith(runner: AgentRunner) {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = join(repo, "..", `wt-cap-${Date.now()}-${Math.random()}`);
+  const wt = trackTempPath(join(repo, "..", `wt-cap-${Date.now()}-${Math.random()}`));
   const call = runAgentDispatch(
     ctxFor(db, ticketId),
     {

@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   ComponentSchema,
@@ -10,6 +9,7 @@ import {
   loadProfile,
   parseProfile,
 } from "../../src/dispatch/profile.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 test("parses a v4 components profile", () => {
   const p = parseProfile({
@@ -84,7 +84,7 @@ test("parseProfile rejects a missing required field", () => {
 });
 
 test("loadProfile reads + validates a JSON file", () => {
-  const dir = mkdtempSync(join(tmpdir(), "styre-profile-"));
+  const dir = makeTempDir("styre-profile-");
   const path = join(dir, "profile.json");
   writeFileSync(path, JSON.stringify({ slug: "demo", targetRepo: "/tmp/demo" }));
   const p = loadProfile(path);

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { resolveAgentRunner } from "../../src/agent/resolve.ts";
 import { CODEX_PRESET, DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 test("resolveAgentRunner returns a runner for claude and for codex", () => {
   expect(typeof resolveAgentRunner(DEFAULT_AGENT_CONFIG).run).toBe("function");
@@ -15,10 +16,9 @@ test("resolveAgentRunner throws for an unregistered provider", () => {
 });
 
 test("the wired codex runner refuses before spawning anything, and says why (ENG-476)", async () => {
-  const { mkdtempSync, existsSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
+  const { existsSync } = await import("node:fs");
   const { join } = await import("node:path");
-  const dir = mkdtempSync(join(tmpdir(), "styre-codex-refuse-"));
+  const dir = makeTempDir("styre-codex-refuse-");
   const marker = join(dir, "codex-spawned.txt");
   // A command that WOULD leave a marker if it were ever executed.
   const cli = join(dir, "codex");

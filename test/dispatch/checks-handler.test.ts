@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -24,9 +23,10 @@ import { buildVerifyReport, renderVerifyReport } from "../../src/dispatch/verify
 import { runStep } from "../../src/engine/step-journal.ts";
 import { scriptedCheckRunner } from "../helpers/check-runner.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-ch-"));
+  const root = makeTempDir("styre-ch-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -100,7 +100,7 @@ async function runSingleCheckDispatch(fixture: {
         { name: "c", kind: fixture.kind, paths: ["**"], commands: { test: fixture.testCmd } },
       ],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
+    worktreeRoot: makeTempDir("styre-chwt-"),
     runCheckCommand: scriptedCheckRunner(async () => fixture.run(), {
       probeFails: fixture.probeSucceeds === false,
     }),
@@ -134,7 +134,7 @@ test.each(["TestRegression::test_x", "TestRegression::test_x[case::value]"])(
     await markDesignDone(db, ticketId);
     insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
     setTicketTrack(db, ticketId, "fast");
-    const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-qualified-check-"));
+    const worktreeRoot = makeTempDir("styre-qualified-check-");
     const testFile = "checks/ENG-1_ac1_test.py";
     let attempts = 0;
     const runner = new FakeAgentRunner((input) => {
@@ -270,7 +270,7 @@ test("checks:dispatch authors, verifies identity, runs RED-first, and persists a
       targetRepo: repo,
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
+    worktreeRoot: makeTempDir("styre-chwt-"),
     // Inject the RED-first runner: a failing (red) run for every check (decision 4).
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 1,
@@ -335,7 +335,7 @@ test("checks:dispatch rejects a MODIFIED file (identity: added-only) → postcon
       targetRepo: repo,
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt2-")),
+    worktreeRoot: makeTempDir("styre-chwt2-"),
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 1,
       stdout: "1 failed",
@@ -389,7 +389,7 @@ test("checks:dispatch reverts its author commit when coverage fails — no inval
       tokensOut: null,
     };
   });
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-chwt-revert-"));
+  const worktreeRoot = makeTempDir("styre-chwt-revert-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
@@ -440,7 +440,7 @@ test("checks:dispatch on a checks re-author loopback re-authors ONLY the flagged
   insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
   setTicketTrack(db, ticketId, "fast");
 
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-chwt-scoped-"));
+  const worktreeRoot = makeTempDir("styre-chwt-scoped-");
   const profile = parseProfile({
     slug: "demo",
     targetRepo: repo,
@@ -572,7 +572,7 @@ test("checks:dispatch scoped re-author is insert-only (deleteActiveByAc): a cras
   insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
   setTicketTrack(db, ticketId, "fast");
 
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-chwt-resume-"));
+  const worktreeRoot = makeTempDir("styre-chwt-resume-");
   const profile = parseProfile({
     slug: "demo",
     targetRepo: repo,
@@ -772,7 +772,7 @@ test("checks:dispatch reconciles a divergent path: written under styre_checks/, 
       targetRepo: repo,
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
+    worktreeRoot: makeTempDir("styre-chwt-"),
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 1,
       stdout: "1 failed",
@@ -838,7 +838,7 @@ test("checks:dispatch backward-compat: non-canonical name declared correctly sti
       targetRepo: repo,
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
+    worktreeRoot: makeTempDir("styre-chwt-"),
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 1,
       stdout: "1 failed",
@@ -897,7 +897,7 @@ test("checks:dispatch discards an undeclared loose file instead of rejecting", a
     };
   });
 
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-chwt-discard-"));
+  const worktreeRoot = makeTempDir("styre-chwt-discard-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
@@ -973,7 +973,7 @@ test("checks:dispatch names a discarded-but-needed helper in the uncovered-AC fa
     };
   });
 
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-chwt-discard-needed-"));
+  const worktreeRoot = makeTempDir("styre-chwt-discard-needed-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
@@ -1049,7 +1049,7 @@ test("checks:dispatch — a discarded __init__.py yields a legible, non-persiste
       targetRepo: repo,
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
+    worktreeRoot: makeTempDir("styre-chwt-"),
     // RED-first run: a collection error naming the package whose __init__.py was discarded.
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 2,
@@ -1112,7 +1112,7 @@ test("an unresolved framework pauses behavioral work before dispatching an autho
       targetRepo: repo,
       components: [{ name: "app", kind: "ruby", paths: ["**"], commands: { test: "bin/test" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
+    worktreeRoot: makeTempDir("styre-chwt-"),
     runCheckCommand: scriptedCheckRunner(async () => {
       throw new Error("runCheckCommand must not be called when no framework is detected");
     }),
@@ -1166,7 +1166,7 @@ test("a check that times out with empty output → error, empty → AC uncovered
       targetRepo: repo,
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
+    worktreeRoot: makeTempDir("styre-chwt-"),
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: null,
       stdout: "",
@@ -1415,7 +1415,7 @@ for (const requiredUnavailable of [false, true]) {
           },
         ],
       }),
-      worktreeRoot: mkdtempSync(join(tmpdir(), "styre-chwt-")),
+      worktreeRoot: makeTempDir("styre-chwt-"),
       // `legacy` has no pytest; `api` does. Keyed on cwd, which is how the probe distinguishes them.
       runCheckCommand: async (command, opts) => {
         const incapable = opts.cwd.includes("legacy");

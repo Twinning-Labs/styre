@@ -1,16 +1,16 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { insertAcCheck } from "../../src/db/repos/ac-check.ts";
 import { insertAc } from "../../src/db/repos/acceptance-criterion.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { checkIntegrityViolations } from "../../src/dispatch/check-integrity.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 /** Mirrors verify-e2e.test.ts's gitRepo(): a real git repo fixture. */
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-ci-"));
+  const root = makeTempDir("styre-ci-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);

@@ -1,12 +1,12 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { makeTestDb } from "./db.ts";
+import { makeTempDir } from "./temp.ts";
 
 /** Build a real temp git repo with an initial commit. Returns the repo root path. */
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-gp-"));
+  const root = makeTempDir("styre-gp-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);

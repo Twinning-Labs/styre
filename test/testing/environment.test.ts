@@ -1,6 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveCheckExecution } from "../../src/dispatch/check-execution.ts";
 import { runCheckExecution } from "../../src/dispatch/checks-run.ts";
@@ -17,13 +16,14 @@ import {
   requireTestEnvironment,
 } from "../../src/testing/environment.ts";
 import type { CmdRunner, CommandResult } from "../../src/util/run-command.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const roots: string[] = [];
 afterEach(() => {
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
 function fixture(files: Record<string, string> = {}) {
-  const r = mkdtempSync(join(tmpdir(), "styre-env-test-"));
+  const r = makeTempDir("styre-env-test-");
   roots.push(r);
   for (const [p, s] of Object.entries(files)) {
     mkdirSync(join(r, p, ".."), { recursive: true });

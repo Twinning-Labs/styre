@@ -1,19 +1,19 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { observeSuiteCommand, suiteResult } from "../../src/dispatch/suite-observation.ts";
 import { planTestEnvironment, qualifyTestEnvironment } from "../../src/testing/environment.ts";
 import { karmaReporterConfig } from "../../src/testing/karma.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 const deps = process.env.STYRE_KARMA_NATIVE_DEPS;
 test.skipIf(!deps)(
   "native Karma 4/Firefox: original context, passing/failing/empty/config-error/timeout",
   async () => {
     if (!deps) throw Error("missing native dependencies");
-    const root = mkdtempSync(join(tmpdir(), "styre-karma-native-"));
+    const root = makeTempDir("styre-karma-native-");
     try {
       symlinkSync(deps, join(root, "node_modules"), "dir");
       writeFileSync(
@@ -177,7 +177,7 @@ test.skipIf(!deps)(
   "native Karma config/reporter protocol preserves original paths and writes completion",
   () => {
     if (!deps) throw Error("missing native dependencies");
-    const root = realpathSync(mkdtempSync(join(tmpdir(), "styre-karma-config-")));
+    const root = realpathSync(makeTempDir("styre-karma-config-"));
     try {
       symlinkSync(deps, join(root, "node_modules"), "dir");
       writeFileSync(

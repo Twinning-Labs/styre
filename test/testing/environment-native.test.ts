@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   provesBehavioralFailure,
@@ -13,13 +12,14 @@ import {
   qualifyTestEnvironment,
   requireTestEnvironment,
 } from "../../src/testing/environment.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const deps = process.env.STYRE_ENV_NATIVE_NODE_DEPS;
 for (const fw of ["jest", "vitest", "mocha"] as const)
   test.skipIf(!deps)(
     `native ${fw}: collection and broken config stay distinct`,
     async () => {
-      const root = mkdtempSync(join(tmpdir(), `styre-native-${fw}-`));
+      const root = makeTempDir(`styre-native-${fw}-`);
       try {
         symlinkSync(deps as string, join(root, "node_modules"), "dir");
         const config =
@@ -82,7 +82,7 @@ for (const fw of ["jest", "vitest", "mocha"] as const)
 test.skipIf(!process.env.STYRE_ENV_NATIVE_PYTHON)(
   "native Python: ordinary managed environment distinguishes empty from import failure",
   async () => {
-    const root = mkdtempSync(join(tmpdir(), "styre-native-py-"));
+    const root = makeTempDir("styre-native-py-");
     try {
       writeFileSync(join(root, "pytest.ini"), "[pytest]\n");
       const c = parseProfile({
@@ -127,7 +127,7 @@ for (const launcher of [
       // -rA prints passing tests' captured output (a pytester-style inner failure here) where
       // `E assert` lines are counted as evidence; a -q launcher stacked on the collection probe's
       // own -q hides `N tests collected`. Neither may reach single-check or collection output.
-      const root = mkdtempSync(join(tmpdir(), "styre-native-py-report-"));
+      const root = makeTempDir("styre-native-py-report-");
       try {
         writeFileSync(join(root, "pytest.ini"), "[pytest]\n");
         writeFileSync(

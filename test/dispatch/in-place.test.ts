@@ -1,6 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   assertInPlaceIdentity,
@@ -10,6 +9,7 @@ import {
 } from "../../src/dispatch/in-place.ts";
 import type { Profile } from "../../src/dispatch/profile.ts";
 import type { runCommand } from "../../src/util/run-command.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const roots: string[] = [];
 afterAll(() => {
@@ -20,7 +20,7 @@ afterAll(() => {
 
 // A real git repo, detached HEAD (the disposable-container shape), clean tree.
 function tmpRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-inplace-test-"));
+  const dir = makeTempDir("styre-inplace-test-");
   roots.push(dir);
   const run = (args: string[]) => Bun.spawnSync(["git", ...args], { cwd: dir });
   run(["init", "-q"]);
@@ -31,7 +31,7 @@ function tmpRepo(): string {
 
 // Same, but stays on a named branch (the "may be owned" shape the gate must refuse by default).
 function tmpRepoOnBranch(): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-inplace-test-branch-"));
+  const dir = makeTempDir("styre-inplace-test-branch-");
   roots.push(dir);
   const run = (args: string[]) => Bun.spawnSync(["git", ...args], { cwd: dir });
   run(["init", "-q", "-b", "main"]);
@@ -79,7 +79,7 @@ test("discoverRepoRoot returns the git toplevel of cwd", () => {
 });
 
 test("discoverRepoRoot throws (fail-closed) when cwd is not a git repo", () => {
-  const dir = mkdtempSync(join(tmpdir(), "nonrepo-"));
+  const dir = makeTempDir("nonrepo-");
   roots.push(dir);
   expect(() => discoverRepoRoot(dir)).toThrow(/no git repo/);
 });
@@ -129,7 +129,7 @@ test("identity: skips (no throw) when profile has no python components", async (
 // import name, so the real (non-injected) `pythonImportName` derivation actually resolves an
 // importName and the injected `run` (the only DI seam per the brief) gets exercised.
 function tmpPyRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-inplace-py-"));
+  const dir = makeTempDir("styre-inplace-py-");
   roots.push(dir);
   writeFileSync(join(dir, "pyproject.toml"), '[project]\nname = "py"\n');
   return dir;
@@ -166,7 +166,7 @@ test("identity: resolves (no throw) when the source-check passes (injected)", as
 });
 
 test("identity: skips (no throw) when import name is underivable (no pyproject/src layout)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "styre-inplace-noderiv-"));
+  const dir = makeTempDir("styre-inplace-noderiv-");
   roots.push(dir);
   const profile = {
     targetRepo: dir,
@@ -181,7 +181,7 @@ test("identity: skips (no throw) when import name is underivable (no pyproject/s
 // Multi-python profile, one component per subdir — each must be checked on ITS OWN dir (mirrors
 // `provision`'s per-component `join(worktreePath, c.dir)`), not just the repo root.
 function tmpMultiPyRepo(): { repo: string; okDir: string; badDir: string } {
-  const repo = mkdtempSync(join(tmpdir(), "styre-inplace-multipy-"));
+  const repo = makeTempDir("styre-inplace-multipy-");
   roots.push(repo);
   const okDir = join(repo, "ok-comp");
   const badDir = join(repo, "bad-comp");

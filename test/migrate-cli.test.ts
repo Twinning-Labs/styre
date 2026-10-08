@@ -1,9 +1,9 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
+import { makeTempDir } from "./helpers/temp.ts";
 
-const workdir = mkdtempSync(join(tmpdir(), "styre-mig-cli-"));
+const workdir = makeTempDir("styre-mig-cli-");
 afterAll(() => rmSync(workdir, { recursive: true, force: true }));
 
 test("`styre migrate --db <path>` exits 0 and reports v8 on stderr (stdout stays empty)", async () => {

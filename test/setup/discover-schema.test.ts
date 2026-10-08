@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, rmdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Component } from "../../src/dispatch/profile.ts";
 import {
@@ -8,6 +7,7 @@ import {
   mergeComponents,
   probeCommandExists,
 } from "../../src/setup/discover-schema.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 test("mergeComponents keeps scan's kind + workspace paths but adopts agent's refined boundaries/commands", () => {
   const scan: Component[] = [
@@ -219,7 +219,7 @@ test("probeCommandExists is false for a missing binary", () => {
 
 test("probeCommandExists: command injection in bin name does not execute and returns false", () => {
   // Create a fresh temp directory as both the repoDir and the target for a potential PWNED file.
-  const dir = mkdtempSync(join(tmpdir(), "styre-injection-test-"));
+  const dir = makeTempDir("styre-injection-test-");
   try {
     const pwned = join(dir, "PWNED");
     // This is the injection payload: split(/\s+/)[0] yields "foo$(touch${IFS}<dir>/PWNED)"

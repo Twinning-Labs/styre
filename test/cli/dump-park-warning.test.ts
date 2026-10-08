@@ -1,13 +1,13 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { priorRunIdAt } from "../../src/cli/park.ts";
 import { ensureRunTable, insertRun } from "../../src/db/repos/run.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function dbWithRun(runId: string): string {
-  const path = join(mkdtempSync(join(tmpdir(), "dp-")), "run.db");
+  const path = join(makeTempDir("dp-"), "run.db");
   const db = new Database(path);
   ensureRunTable(db);
   insertRun(db, { runId, startedAt: "2026-07-21T00:00:00.000Z", provider: "claude" });
@@ -23,7 +23,7 @@ describe("priorRunIdAt", () => {
     expect(priorRunIdAt(join(tmpdir(), "does-not-exist.db"))).toBeNull();
   });
   test("returns null for a pre-upgrade dump with no run table", () => {
-    const path = join(mkdtempSync(join(tmpdir(), "dp-")), "run.db");
+    const path = join(makeTempDir("dp-"), "run.db");
     const db = new Database(path);
     db.exec("CREATE TABLE ticket (id INTEGER PRIMARY KEY);"); // no run table
     db.close();

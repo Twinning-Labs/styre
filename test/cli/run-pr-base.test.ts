@@ -7,6 +7,7 @@ import { parseProfile } from "../../src/dispatch/profile.ts";
 import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import { cleanupParkedRun, runFreshTicket, runParkedTicket } from "../helpers/run-harness.ts";
+import { trackTempEntriesMadeBy } from "../helpers/temp.ts";
 
 function recordedDefaultBranch(dbPath: string): string {
   const db = new Database(dbPath, { readonly: true });
@@ -59,17 +60,20 @@ test("a resumed run confirms the base on the forge before building its step regi
     });
     let baseAtRegistry: string | undefined;
     await expect(
-      resumeRun({ resume: parked.ident }, profile, DEFAULT_RUNTIME_CONFIG, {
-        ports: {
-          issueTracker: fakeIssueTracker(),
-          forge: fakeForge({ defaultBranch: "main", branches: ["main"] }),
-        },
-        preflight: () => ({ ok: true, version: null }),
-        buildRegistry: () => {
-          baseAtRegistry = profile.defaultBranch;
-          throw new Error("stop before dispatch");
-        },
-      }),
+      // resumeRun mints and keeps a styre-wt-* worktree root before buildRegistry throws.
+      trackTempEntriesMadeBy("styre-wt-", () =>
+        resumeRun({ resume: parked.ident }, profile, DEFAULT_RUNTIME_CONFIG, {
+          ports: {
+            issueTracker: fakeIssueTracker(),
+            forge: fakeForge({ defaultBranch: "main", branches: ["main"] }),
+          },
+          preflight: () => ({ ok: true, version: null }),
+          buildRegistry: () => {
+            baseAtRegistry = profile.defaultBranch;
+            throw new Error("stop before dispatch");
+          },
+        }),
+      ),
     ).rejects.toThrow("stop before dispatch");
     expect(baseAtRegistry).toBe("main");
   } finally {

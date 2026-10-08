@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -12,6 +11,7 @@ import { getByKey, insertPending } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 // This test proves the fix for Bug B (design-over-decomposition, the darkreader scenario)
 // generically: a design:extract attempt that over-decomposes (a vacuous zero-files work unit)
@@ -20,7 +20,7 @@ import { makeTestDb } from "../helpers/db.ts";
 // mistake until the attempt budget is exhausted.
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-erf-"));
+  const root = makeTempDir("styre-erf-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -52,7 +52,7 @@ function registryFor(repo: string, runner: FakeAgentRunner, rc: unknown = ABSENT
       components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
       runtimeContext: rc,
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wtroot-")),
+    worktreeRoot: makeTempDir("styre-wtroot-"),
   });
 }
 

@@ -1,15 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { lsImpl } from "../../src/cli/ls.ts";
 import { insertPending } from "../../src/db/repos/signal.ts";
 import { setTicketStage, setTicketStatus } from "../../src/db/repos/ticket.ts";
 import { seedCheckpoint } from "../helpers/checkpoint.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 describe("lsImpl", () => {
   test("lists a needs_you effort with its resume hint", async () => {
-    const root = mkdtempSync(join(tmpdir(), "styre-ls-"));
+    const root = makeTempDir("styre-ls-");
     const written: string[] = [];
     const orig = process.stdout.write.bind(process.stdout);
     process.stdout.write = ((s: string) => {
@@ -39,7 +38,7 @@ describe("lsImpl", () => {
   });
 
   test("qualifies finished leftovers with their project slug", async () => {
-    const root = mkdtempSync(join(tmpdir(), "styre-ls-"));
+    const root = makeTempDir("styre-ls-");
     const written: string[] = [];
     const orig = process.stdout.write.bind(process.stdout);
     process.stdout.write = ((s: string) => {

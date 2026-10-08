@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -9,9 +8,10 @@ import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { buildVerifyReport, renderVerifyReport } from "../../src/dispatch/verify-report.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-e2e-"));
+  const root = makeTempDir("styre-e2e-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -45,7 +45,7 @@ test("real design:dispatch handler (fake agent) commits a plan and the step succ
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
     profile: parseProfile({ slug: "demo", targetRepo: repo, promptVars: { stack: "bun" } }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-e2ewt-")),
+    worktreeRoot: makeTempDir("styre-e2ewt-"),
   });
 
   // provision is hoisted to the top of case "design" — it runs first (a no-op here: the profile
@@ -78,7 +78,7 @@ test("ENG-412: a component skipped for want of a toolchain reaches the PR adviso
         ],
       },
     ],
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-e2ewt-")),
+    worktreeRoot: makeTempDir("styre-e2ewt-"),
   });
 
   expect(await advanceOneStep(db, ticketId, registry)).toEqual({
@@ -109,7 +109,7 @@ test("ENG-412: a run that skipped nothing writes no toolchain advisory at all", 
     }),
     agentConfig: DEFAULT_AGENT_CONFIG,
     profile: parseProfile({ slug: "demo", targetRepo: repo }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-e2ewt-")),
+    worktreeRoot: makeTempDir("styre-e2ewt-"),
   });
 
   await advanceOneStep(db, ticketId, registry);
@@ -139,7 +139,7 @@ test("ENG-425: a non-primary component reaches the PR advisory through the real 
         label: "legacy stub package (py.test name reservation, sdist-only, no real tests)",
       },
     ],
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-e2ewt-")),
+    worktreeRoot: makeTempDir("styre-e2ewt-"),
   });
 
   expect(await advanceOneStep(db, ticketId, registry)).toEqual({
@@ -183,7 +183,7 @@ test("ENG-425 + ENG-412: both narrowings survive together; neither signal overwr
       },
     ],
     nonPrimaryComponents: [{ component: "demo", role: "example" }],
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-e2ewt-")),
+    worktreeRoot: makeTempDir("styre-e2ewt-"),
   });
 
   await advanceOneStep(db, ticketId, registry);

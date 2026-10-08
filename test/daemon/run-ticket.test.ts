@@ -1,7 +1,4 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
@@ -22,6 +19,7 @@ import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tra
 import type { TelemetryEvent } from "../../src/telemetry/events.ts";
 import { makeTestDb } from "../helpers/db.ts";
 import { skeletonRegistry } from "../helpers/skeleton-registry.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const profile = parseProfile({
   slug: "demo",
@@ -37,7 +35,7 @@ function reg() {
     }),
     agentConfig: DEFAULT_AGENT_CONFIG,
     profile,
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-rt-")),
+    worktreeRoot: makeTempDir("styre-rt-"),
   });
 }
 

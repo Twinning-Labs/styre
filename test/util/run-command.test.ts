@@ -1,11 +1,10 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { realpathSync } from "node:fs";
 import { runCommand } from "../../src/util/run-command.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 // realpathSync resolves macOS /var → /private/var so pwd output matches
-const cwd = realpathSync(mkdtempSync(join(tmpdir(), "styre-cmd-")));
+const cwd = realpathSync(makeTempDir("styre-cmd-"));
 
 test("captures stdout and a zero exit on success", async () => {
   const r = await runCommand("echo hello", { cwd, timeoutMs: 5000 });

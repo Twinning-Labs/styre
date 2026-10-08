@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Component } from "../../src/dispatch/profile.ts";
 import { resolveTestAction, withTestActions } from "../../src/setup/test-action.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 /** A repo whose test script hides its framework behind `npm run` — the darkreader shape. */
 function repoWithScripts(scripts: Record<string, string>): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-test-action-"));
+  const dir = makeTempDir("styre-test-action-");
   writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "x", scripts }));
   return dir;
 }
@@ -69,7 +69,7 @@ describe("resolveTestAction (ENG-399 blocker 2 — npm run indirection)", () => 
   });
 
   test("an absent or malformed package.json resolves nothing instead of throwing", () => {
-    const dir = mkdtempSync(join(tmpdir(), "styre-test-action-empty-"));
+    const dir = makeTempDir("styre-test-action-empty-");
     expect(resolveTestAction(dir, "npm run test")).toBeNull();
     writeFileSync(join(dir, "package.json"), "{not json");
     expect(resolveTestAction(dir, "npm run test")).toBeNull();
@@ -92,7 +92,7 @@ describe("withTestActions", () => {
   });
 
   test("resolves inside a non-root component `dir`", () => {
-    const root = mkdtempSync(join(tmpdir(), "styre-test-action-ws-"));
+    const root = makeTempDir("styre-test-action-ws-");
     mkdirSync(join(root, "packages", "ui"), { recursive: true });
     writeFileSync(
       join(root, "packages", "ui", "package.json"),
@@ -125,7 +125,7 @@ describe("withTestActions", () => {
  * ship no pytest at all.
  */
 function djangoRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-django-"));
+  const dir = makeTempDir("styre-django-");
   mkdirSync(join(dir, "tests"), { recursive: true });
   mkdirSync(join(dir, "django"), { recursive: true });
   writeFileSync(join(dir, "tests", "runtests.py"), "#!/usr/bin/env python\n");
@@ -155,7 +155,7 @@ test("ENG-427: a django repo resolves django-runtests, not pytest", () => {
 test("ENG-427: tests/runtests.py WITHOUT django is not django", () => {
   // Plenty of repos ship a `tests/runtests.py`. Requiring `django/__init__.py` beside it is what
   // makes this a detection rather than a guess.
-  const dir = mkdtempSync(join(tmpdir(), "styre-notdjango-"));
+  const dir = makeTempDir("styre-notdjango-");
   mkdirSync(join(dir, "tests"), { recursive: true });
   writeFileSync(join(dir, "tests", "runtests.py"), "#!/usr/bin/env python\n");
   const [c] = withTestActions(dir, [pyComponent()] as never);
@@ -163,13 +163,13 @@ test("ENG-427: tests/runtests.py WITHOUT django is not django", () => {
 });
 
 test("ENG-427: a plain python repo keeps the pytest inference (no testAction)", () => {
-  const dir = mkdtempSync(join(tmpdir(), "styre-py-"));
+  const dir = makeTempDir("styre-py-");
   const [c] = withTestActions(dir, [pyComponent({ commands: { test: "pytest" } })] as never);
   expect(c?.testAction).toBeUndefined();
 });
 
 test("ENG-427: a django component in a subdirectory resolves against ITS module root", () => {
-  const root = mkdtempSync(join(tmpdir(), "styre-mono-"));
+  const root = makeTempDir("styre-mono-");
   mkdirSync(join(root, "vendor", "django", "tests"), { recursive: true });
   mkdirSync(join(root, "vendor", "django", "django"), { recursive: true });
   writeFileSync(join(root, "vendor", "django", "tests", "runtests.py"), "");
@@ -180,7 +180,7 @@ test("ENG-427: a django component in a subdirectory resolves against ITS module 
 
 test("ENG-427: node resolution is untouched", () => {
   // The ENG-399 path must keep working — this change adds a branch, it does not reroute one.
-  const dir = mkdtempSync(join(tmpdir(), "styre-node-"));
+  const dir = makeTempDir("styre-node-");
   writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { "test:ci": "jest --ci" } }));
   const [c] = withTestActions(dir, [
     {
@@ -198,7 +198,7 @@ test("ENG-427: a `django/` package WITHOUT tests/runtests.py is not django's own
   // The mirror of the test above, and it has to exist on its own: without it, removing the
   // runtests.py guard entirely still passes every other case, because they all fail the second
   // guard instead. A mutation proved exactly that.
-  const dir = mkdtempSync(join(tmpdir(), "styre-djangoapp-"));
+  const dir = makeTempDir("styre-djangoapp-");
   mkdirSync(join(dir, "django"), { recursive: true });
   writeFileSync(join(dir, "django", "__init__.py"), "");
   const [c] = withTestActions(dir, [pyComponent()] as never);

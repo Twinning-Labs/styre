@@ -4,14 +4,14 @@ afterEach(() => {
   process.exitCode = 0;
 });
 
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setupImpl } from "../../src/cli/setup.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 // A hermetic runtime config whose agent.command points at a guaranteed-absent binary.
 function writeBadAgentConfig(): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-setup-agentpf-cfg-"));
+  const dir = makeTempDir("styre-setup-agentpf-cfg-");
   const path = join(dir, "config.json");
   writeFileSync(
     path,
@@ -30,7 +30,7 @@ test("setup: a missing agent CLI fails the gate (exit 69 error) before invoking 
   // Set the required env key so the EXISTING env-key gate passes and we reach the new CLI probe.
   const prevKey = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = "test-key";
-  const repo = mkdtempSync(join(tmpdir(), "styre-setup-agentpf-repo-"));
+  const repo = makeTempDir("styre-setup-agentpf-repo-");
   const config = writeBadAgentConfig();
   try {
     await expect(

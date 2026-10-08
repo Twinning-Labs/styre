@@ -1,8 +1,8 @@
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type SetupArgs, setupImpl } from "../../src/cli/setup.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 // This suite exercises the REAL `setup.ts` entrypoint (`setupImpl`, the unwrapped body behind
 // `setupCommand.run`'s `guard` wrapper) directly — not a reimplementation of its preflight block —
@@ -45,7 +45,7 @@ function git(args: string[], cwd: string): void {
 /** A real git repo on a named branch, clean tracked tree, optionally carrying the
  *  `.styre-disposable` marker (a regular file) that `assertInPlaceMarker` requires. */
 function makeRepo(withMarker: boolean): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-setup-inplace-disc-"));
+  const dir = makeTempDir("styre-setup-inplace-disc-");
   roots.push(dir);
   git(["init", "-q", "-b", "main"], dir);
   git(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-qm", "base"], dir);
@@ -65,7 +65,7 @@ async function invokeSetup(repo?: string, xdgConfigHome?: string): Promise<void>
   delete process.env.ANTHROPIC_API_KEY;
   let xdg = xdgConfigHome;
   if (xdg === undefined) {
-    xdg = mkdtempSync(join(tmpdir(), "styre-setup-xdg-empty-")); // no host config
+    xdg = makeTempDir("styre-setup-xdg-empty-"); // no host config
     roots.push(xdg);
   }
   process.env.XDG_CONFIG_HOME = xdg;
@@ -90,7 +90,7 @@ async function invokeSetup(repo?: string, xdgConfigHome?: string): Promise<void>
 
 test("setup with no repo arg: without a marker, throws the disposability gate BEFORE any enrichment call and writes nothing", async () => {
   const cwdRepo = makeRepo(false); // no marker
-  const cfg = mkdtempSync(join(tmpdir(), "styre-setup-inplace-disc-xdg-"));
+  const cfg = makeTempDir("styre-setup-inplace-disc-xdg-");
   roots.push(cfg);
 
   const prevCwd = process.cwd();
@@ -121,7 +121,7 @@ test("setup with no repo arg: with a marker, discovers the cwd root and passes t
 
 test("explicit `setup <repo>` is unchanged: no marker required, discovery/gate never runs even without one", async () => {
   const explicitRepo = makeRepo(false); // deliberately no marker
-  const elsewhere = mkdtempSync(join(tmpdir(), "styre-setup-inplace-disc-elsewhere-"));
+  const elsewhere = makeTempDir("styre-setup-inplace-disc-elsewhere-");
   roots.push(elsewhere);
   const prevCwd = process.cwd();
   process.chdir(elsewhere); // prove the explicit path doesn't even look at cwd

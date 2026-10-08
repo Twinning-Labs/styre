@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import type { AgentRunResult } from "../../src/agent/runner.ts";
@@ -8,6 +7,7 @@ import { StyreError } from "../../src/cli/errors.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { RuntimeContextSchema } from "../../src/dispatch/profile.ts";
 import { enrichRuntimeContext } from "../../src/setup/enrich.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const scan = (o: unknown) => RuntimeContextSchema.parse(o);
 const ok = (stdout: string): AgentRunResult => ({
@@ -112,7 +112,7 @@ test("enrich retries a non-completed result then succeeds on a later attempt", a
 });
 
 test("enrich injects manifest dependency names into the prompt", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "styre-enrich-deps-"));
+  const repo = makeTempDir("styre-enrich-deps-");
   writeFileSync(
     join(repo, "package.json"),
     JSON.stringify({ dependencies: { "drizzle-orm": "^0.30" } }),
@@ -127,7 +127,7 @@ test("enrich injects manifest dependency names into the prompt", async () => {
 });
 
 test("enrich still renders when the repo has no manifests", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "styre-enrich-empty-"));
+  const repo = makeTempDir("styre-enrich-empty-");
   const runner = new FakeAgentRunner(() => ok(sidecar(JSON.stringify(FULL))));
   const out = await enrichRuntimeContext(repo, scan({}), {
     runner,

@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import {
@@ -11,8 +10,9 @@ import {
   parseClaudeStream,
 } from "../../../src/agent/providers/claude.ts";
 import { extractSidecar } from "../../../src/dispatch/sidecar.ts";
+import { makeTempDir } from "../../helpers/temp.ts";
 
-const cwd = realpathSync(mkdtempSync(join(tmpdir(), "styre-claude-")));
+const cwd = realpathSync(makeTempDir("styre-claude-"));
 
 /** Write an executable stand-in for the `claude` CLI that ignores its argv and runs `body`. */
 function fakeCli(name: string, body: string): string {

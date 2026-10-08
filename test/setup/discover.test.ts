@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import type { AgentRunResult } from "../../src/agent/runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import type { Component } from "../../src/dispatch/profile.ts";
 import { discoverComponents } from "../../src/setup/discover.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const ok = (stdout: string): AgentRunResult => ({
   completed: true,
@@ -345,7 +345,7 @@ test("headless without trust drops agent repoCommands entirely", async () => {
 });
 
 test("AGENTS.md content is injected into the discovery prompt", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "styre-discover-agents-"));
+  const dir = makeTempDir("styre-discover-agents-");
   writeFileSync(join(dir, "AGENTS.md"), "Run `bun run test` for tests.");
   const runner = new FakeAgentRunner(() =>
     ok(sidecar(JSON.stringify({ components: [], repoCommands: {} }))),
@@ -361,7 +361,7 @@ test("AGENTS.md content is injected into the discovery prompt", async () => {
 // Security review item 5: AGENTS.md does NOT elevate trust — a headless-untrusted override is
 // still rejected and falls back to the deterministic scan command.
 test("headless without --trust-agent-commands: AGENTS.md-influenced override is rejected", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "styre-discover-headless-"));
+  const dir = makeTempDir("styre-discover-headless-");
   writeFileSync(join(dir, "AGENTS.md"), "Test with `true`.");
   const proposal = {
     components: [

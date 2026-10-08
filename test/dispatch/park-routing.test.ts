@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -13,9 +12,10 @@ import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runAgentDispatch } from "../../src/dispatch/run-dispatch.ts";
 import { ParkSignal } from "../../src/engine/park-signal.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir, trackTempPath } from "../helpers/temp.ts";
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-park-"));
+  const root = makeTempDir("styre-park-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -52,7 +52,7 @@ function deps(runner: FakeAgentRunner, repo: string, wt: string) {
 test("a session-limit cause throws ParkSignal and records dispatch outcome 'parked'", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}`);
+  const wt = trackTempPath(join(repo, "..", `wt-${Date.now()}`));
   const runner = new FakeAgentRunner(() => ({
     completed: false,
     exitCode: 1,
@@ -86,7 +86,7 @@ test("a session-limit cause throws ParkSignal and records dispatch outcome 'park
 test("an out-of-credits cause throws ParkSignal and records dispatch outcome 'parked'", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = join(repo, "..", `wt-oc-${Date.now()}`);
+  const wt = trackTempPath(join(repo, "..", `wt-oc-${Date.now()}`));
   const runner = new FakeAgentRunner(() => ({
     completed: false,
     exitCode: 1,
@@ -119,7 +119,7 @@ test("an out-of-credits cause throws ParkSignal and records dispatch outcome 'pa
 test("a transient cause still throws a plain Error and records 'dispatch-failed'", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = join(repo, "..", `wt2-${Date.now()}`);
+  const wt = trackTempPath(join(repo, "..", `wt2-${Date.now()}`));
   const runner = new FakeAgentRunner(() => ({
     completed: false,
     exitCode: 1,

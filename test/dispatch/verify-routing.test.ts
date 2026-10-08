@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -13,9 +12,10 @@ import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { buildDispatchRegistry, renderPrBody } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-vr-"));
+  const root = makeTempDir("styre-vr-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -28,7 +28,7 @@ function gitRepo(): string {
 
 function rig(repo: string, profileExtra: object) {
   const profile = parseProfile({ slug: "demo", targetRepo: repo, ...profileExtra });
-  return { profile, worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vrwt-")) };
+  return { profile, worktreeRoot: makeTempDir("styre-vrwt-") };
 }
 
 test("docs-only diff with no owned files passes for non-behavioral unit", async () => {

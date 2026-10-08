@@ -1,8 +1,7 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename } from "node:path";
 import { deriveSlug, discoverRepoRoot, parseGitHubRemote } from "../../src/config/slug.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 test("parseGitHubRemote handles SSH/HTTPS and rejects non-GitHub", () => {
   expect(parseGitHubRemote("git@github.com:owner/repo.git")).toEqual({
@@ -17,10 +16,10 @@ test("parseGitHubRemote handles SSH/HTTPS and rejects non-GitHub", () => {
 });
 
 test("deriveSlug uses the origin repo name, else the dir basename", () => {
-  const noRemote = mkdtempSync(join(tmpdir(), "styre-slug-"));
+  const noRemote = makeTempDir("styre-slug-");
   Bun.spawnSync(["git", "init", "-q"], { cwd: noRemote });
   expect(deriveSlug(noRemote)).toBe(basename(noRemote)); // no origin → basename
-  const withRemote = mkdtempSync(join(tmpdir(), "styre-slug-"));
+  const withRemote = makeTempDir("styre-slug-");
   Bun.spawnSync(["git", "init", "-q"], { cwd: withRemote });
   Bun.spawnSync(["git", "remote", "add", "origin", "git@github.com:acme/widget.git"], {
     cwd: withRemote,
@@ -29,9 +28,9 @@ test("deriveSlug uses the origin repo name, else the dir basename", () => {
 });
 
 test("discoverRepoRoot returns the toplevel and throws off-repo", () => {
-  const repo = mkdtempSync(join(tmpdir(), "styre-root-"));
+  const repo = makeTempDir("styre-root-");
   Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
   expect(discoverRepoRoot(repo).endsWith(basename(repo))).toBe(true);
-  const notRepo = mkdtempSync(join(tmpdir(), "styre-notrepo-"));
+  const notRepo = makeTempDir("styre-notrepo-");
   expect(() => discoverRepoRoot(notRepo)).toThrow(/no git repo/);
 });

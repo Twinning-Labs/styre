@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -20,9 +19,10 @@ import {
   worktreeHead,
 } from "../../src/dispatch/worktree.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function tmpRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-wt-"));
+  const dir = makeTempDir("styre-wt-");
   const g = (args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" });
   g(["init", "-q"]);
   g(["config", "user.email", "t@t"]);

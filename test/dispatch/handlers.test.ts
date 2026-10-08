@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -13,9 +12,10 @@ import { getByKey } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-h-"));
+  const root = makeTempDir("styre-h-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -35,7 +35,7 @@ function registryFor(repo: string, runner: FakeAgentRunner) {
       targetRepo: repo,
       components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wtroot-")),
+    worktreeRoot: makeTempDir("styre-wtroot-"),
   });
 }
 
@@ -148,7 +148,7 @@ test("implement:dispatch escalates to the deep tier after a bounce-back", async 
       targetRepo: repo,
       components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-lbwt-")),
+    worktreeRoot: makeTempDir("styre-lbwt-"),
   });
 
   await advanceOneStep(db, ticketId, registry);
@@ -241,7 +241,7 @@ test("implement:dispatch (default reject) rejects an undeclared loose file", asy
       tokensOut: null,
     };
   });
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-implreject-"));
+  const worktreeRoot = makeTempDir("styre-implreject-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
@@ -283,7 +283,7 @@ test("implement:dispatch honors implementDisposition=discard", async () => {
       tokensOut: null,
     };
   });
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-impldiscard-"));
+  const worktreeRoot = makeTempDir("styre-impldiscard-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
@@ -330,7 +330,7 @@ test("implement discard + malformed sidecar re-dispatches (transport failure), d
       tokensOut: null,
     };
   });
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-implmalformed-"));
+  const worktreeRoot = makeTempDir("styre-implmalformed-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
@@ -380,7 +380,7 @@ test("implement discard + absent sidecar WITH undeclared new files re-dispatches
       tokensOut: null,
     };
   });
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-implabsent-"));
+  const worktreeRoot = makeTempDir("styre-implabsent-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,

@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -16,9 +15,10 @@ import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { resolvePythonInterpreter } from "../../src/dispatch/provision.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-vfy-"));
+  const root = makeTempDir("styre-vfy-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -67,7 +67,7 @@ function registryFor(repo: string, commands: Record<string, string>) {
           ? [{ name: "app", kind: "node", paths: ["**"], commands }]
           : [],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfywt-")),
+    worktreeRoot: makeTempDir("styre-vfywt-"),
   });
 }
 
@@ -105,7 +105,7 @@ test("a passing check records a pass signal (with command) and the step succeeds
       targetRepo: repo,
       components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfywt-")),
+    worktreeRoot: makeTempDir("styre-vfywt-"),
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
@@ -164,7 +164,7 @@ test("a failing check records an advisory fail signal but the step SUCCEEDS (no 
         },
       ],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfywt-")),
+    worktreeRoot: makeTempDir("styre-vfywt-"),
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
@@ -222,7 +222,7 @@ test("an absent check (component has no command for the declared check-type) rec
       targetRepo: repo,
       components: [{ name: "app", kind: "node", paths: ["**"], commands: { build: "true" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-absent-")),
+    worktreeRoot: makeTempDir("styre-absent-"),
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
@@ -327,7 +327,7 @@ test("a timed-out check records an error signal (not fail)", async () => {
       targetRepo: repo,
       components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "sleep 5" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfywt2-")),
+    worktreeRoot: makeTempDir("styre-vfywt2-"),
     timeoutMs: 200,
   });
 
@@ -376,7 +376,7 @@ test("verify:check stamps the verified commit on the signal", async () => {
       targetRepo: repo,
       components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-stmp-")),
+    worktreeRoot: makeTempDir("styre-stmp-"),
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch → real commit sha recorded
@@ -426,7 +426,7 @@ test("behavioral unit: green test command but no test in the diff fails with beh
       targetRepo: repo,
       components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-a1-")),
+    worktreeRoot: makeTempDir("styre-a1-"),
   });
 
   // implement (writes feature.ts, commits) then verify:check test (true passes, but no test file).
@@ -475,7 +475,7 @@ test("behavioral unit: a test file in the diff passes the test check", async () 
       targetRepo: repo,
       components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-a1ok-")),
+    worktreeRoot: makeTempDir("styre-a1ok-"),
   });
   await advanceOneStep(db, ticketId, registry); // implement
   await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
@@ -532,7 +532,7 @@ test("scope_diff records an advisory fail for out-of-scope files but does NOT fa
       targetRepo: repo,
       components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-sd-")),
+    worktreeRoot: makeTempDir("styre-sd-"),
   });
   await advanceOneStep(db, ticketId, registry); // implement
   await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
@@ -592,7 +592,7 @@ test("hard-gate: verify:check runs a non-root component's command in its module 
         },
       ],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-dircwd-")),
+    worktreeRoot: makeTempDir("styre-dircwd-"),
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
@@ -645,7 +645,7 @@ test("hard-gate: a root component (no dir) still runs at the worktree root (no r
         },
       ],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-dircwd-root-")),
+    worktreeRoot: makeTempDir("styre-dircwd-root-"),
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
@@ -701,7 +701,7 @@ test("advisory sweep: the swept untouched component's command runs in its module
         },
       ],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-sweepdir-")),
+    worktreeRoot: makeTempDir("styre-sweepdir-"),
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch
@@ -758,7 +758,7 @@ test("verify:integration runs a component job in its module dir and a repoComman
       ],
       repoCommands: { lint: "test -f ROOT_MARKER" }, // repo-wide → must run at worktree root
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-intdir-")),
+    worktreeRoot: makeTempDir("styre-intdir-"),
   });
 
   await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
@@ -810,7 +810,7 @@ test("verify:check preserves a selected Python suite command", async () => {
         { name: "py", kind: "python", paths: ["**"], commands: { test: "tox -e unit" } },
       ],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfy-pynoready-")),
+    worktreeRoot: makeTempDir("styre-vfy-pynoready-"),
   });
 
   await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
@@ -831,7 +831,7 @@ const live = process.env.RUN_LIVE === "1" ? test : test.skip;
 live(
   "verify:check: a ready python env preserves the explicit suite command",
   async () => {
-    const root = mkdtempSync(join(tmpdir(), "styre-vfy-pyready-"));
+    const root = makeTempDir("styre-vfy-pyready-");
     const interp = resolvePythonInterpreter();
     const pytestCheck = Bun.spawnSync([interp, "-m", "pytest", "--version"]);
     const installedPytest = pytestCheck.exitCode !== 0;
@@ -891,7 +891,7 @@ live(
             },
           ],
         }),
-        worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vfywt-pyready-")),
+        worktreeRoot: makeTempDir("styre-vfywt-pyready-"),
       });
 
       await advanceOneStep(db, ticketId, registry); // implement:dispatch → commits, sets base_sha
@@ -928,7 +928,7 @@ for (const exitCode of [0, 1])
   test(`integration writes an independent non-browser requirement and a bound receipt for exit ${exitCode}`, async () => {
     const { db, ticketId, projectId } = makeTestDb();
     const repo = gitRepo();
-    const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-required-wt-"));
+    const worktreeRoot = makeTempDir("styre-required-wt-");
     try {
       seedAllVerified(db, ticketId, projectId, repo);
       const { insertDispatch, completeDispatch } = await import("../../src/db/repos/dispatch.ts");

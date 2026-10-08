@@ -7,6 +7,7 @@ import {
   runNeedsYouTicket,
   runParkedTicket,
 } from "../helpers/run-harness.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 test("park/resume helpers return CLI exits without overwriting their caller's exit status", async () => {
   const original = process.exitCode ?? 0;
@@ -45,7 +46,11 @@ test("a fresh process exits successfully after capturing a simulated CLI failure
       cleanupParkedRun(parked);
     }
   `;
+  // A bare `bun -e` has no test preload, so nothing removes what the harness makes there: point the
+  // child's TMPDIR at a folder this test owns. (Bun.spawn without `env` would pass the TMPDIR
+  // this process started with, not the preload's per-run root.)
   const child = Bun.spawnSync([process.execPath, "-e", script], {
+    env: { ...process.env, TMPDIR: makeTempDir("styre-child-tmp-") },
     stdout: "pipe",
     stderr: "pipe",
   });

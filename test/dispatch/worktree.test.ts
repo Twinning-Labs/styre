@@ -1,6 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { diffTouchesManifest } from "../../src/dispatch/provision.ts";
 import {
@@ -27,6 +26,7 @@ import {
   worktreeHasChanges,
   worktreeHoldingBranch,
 } from "../../src/dispatch/worktree.ts";
+import { makeTempDir, trackTempPath } from "../helpers/temp.ts";
 
 const roots: string[] = [];
 afterAll(() => {
@@ -37,7 +37,7 @@ afterAll(() => {
 
 // Make a real git repo with one commit on `main`; return its path.
 function makeRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-wt-"));
+  const root = makeTempDir("styre-wt-");
   roots.push(root);
   const run = (args: string[]) => {
     const res = Bun.spawnSync(["git", ...args], { cwd: root });
@@ -56,7 +56,7 @@ function makeRepo(): string {
 
 test("ensureWorktree creates a worktree on a branch; idempotent on reuse", () => {
   const repo = makeRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}`);
+  const wt = trackTempPath(join(repo, "..", `wt-${Date.now()}`));
   roots.push(wt);
   ensureWorktree(repo, "feat/eng-1", wt);
   expect(existsSync(join(wt, "README.md"))).toBe(true);
@@ -66,7 +66,7 @@ test("ensureWorktree creates a worktree on a branch; idempotent on reuse", () =>
 
 test("commitWorktree stages a named new file + tracked edits and reports changed=true", () => {
   const repo = makeRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}-c`);
+  const wt = trackTempPath(join(repo, "..", `wt-${Date.now()}-c`));
   roots.push(wt);
   ensureWorktree(repo, "feat/eng-2", wt);
   writeFileSync(join(wt, "README.md"), "# repo edited\n"); // tracked edit → staged by `git add -u`
@@ -80,7 +80,7 @@ test("commitWorktree stages a named new file + tracked edits and reports changed
 
 test("commitWorktree does NOT commit an undeclared new file (staged index stays empty → no-op)", () => {
   const repo = makeRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}-u`);
+  const wt = trackTempPath(join(repo, "..", `wt-${Date.now()}-u`));
   roots.push(wt);
   ensureWorktree(repo, "feat/eng-2u", wt);
   writeFileSync(join(wt, "scratch.txt"), "junk"); // brand-new, NOT passed in newPaths
@@ -92,7 +92,7 @@ test("commitWorktree does NOT commit an undeclared new file (staged index stays 
 
 test("commitWorktree on a clean tree reports changed=false (no-op)", () => {
   const repo = makeRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}-n`);
+  const wt = trackTempPath(join(repo, "..", `wt-${Date.now()}-n`));
   roots.push(wt);
   ensureWorktree(repo, "feat/eng-3", wt);
   const result = commitWorktree(wt, "feat: nothing", []);
@@ -102,7 +102,7 @@ test("commitWorktree on a clean tree reports changed=false (no-op)", () => {
 
 test("removeWorktree detaches the worktree", () => {
   const repo = makeRepo();
-  const wt = join(repo, "..", `wt-${Date.now()}-r`);
+  const wt = trackTempPath(join(repo, "..", `wt-${Date.now()}-r`));
   roots.push(wt);
   ensureWorktree(repo, "feat/eng-4", wt);
   removeWorktree(repo, wt);
@@ -110,7 +110,7 @@ test("removeWorktree detaches the worktree", () => {
 });
 
 test("changedFilesAt returns the files a commit touched", () => {
-  const root = mkdtempSync(join(tmpdir(), "styre-cf-"));
+  const root = makeTempDir("styre-cf-");
   roots.push(root);
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
@@ -129,7 +129,7 @@ test("changedFilesAt returns the files a commit touched", () => {
 });
 
 test("changedFilesBetween returns the cumulative diff across commits", () => {
-  const repo = mkdtempSync(join(tmpdir(), "styre-cfb-"));
+  const repo = makeTempDir("styre-cfb-");
   roots.push(repo);
   function git(a: string[], cwd: string) {
     const r = Bun.spawnSync(["git", ...a], { cwd });
@@ -157,7 +157,7 @@ test("changedFilesBetween returns the cumulative diff across commits", () => {
 // In-place mode (worktreePath === repoPath): the checkout is disposable (single-use container),
 // so styre works on a branch in the repo root instead of a separate git worktree.
 function tmpRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-wt-test-"));
+  const dir = makeTempDir("styre-wt-test-");
   roots.push(dir);
   const run = (args: string[]) => Bun.spawnSync(["git", ...args], { cwd: dir });
   run(["init", "-q"]);
@@ -189,7 +189,7 @@ test("removeWorktree in-place is a no-op (never removes the repo root)", () => {
 });
 test("worktree mode still creates a separate worktree (regression)", () => {
   const repo = tmpRepo();
-  const wt = join(mkdtempSync(join(tmpdir(), "styre-wt-out-")), "eng-1");
+  const wt = join(makeTempDir("styre-wt-out-"), "eng-1");
   roots.push(wt);
   ensureWorktree(repo, "styre/eng-1", wt);
   expect(
@@ -200,7 +200,7 @@ test("worktree mode still creates a separate worktree (regression)", () => {
 });
 
 function repoWithCommits(): { root: string; addSha: string; modSha: string } {
-  const root = mkdtempSync(join(tmpdir(), "styre-wt-"));
+  const root = makeTempDir("styre-wt-");
   roots.push(root);
   const git = (a: string[]) => {
     const r = Bun.spawnSync(["git", ...a], { cwd: root });
@@ -252,7 +252,7 @@ function repoWithNonAsciiPaths(): {
   cjkPath: string;
   weirdPath: string;
 } {
-  const root = mkdtempSync(join(tmpdir(), "styre-nonascii-"));
+  const root = makeTempDir("styre-nonascii-");
   roots.push(root);
   const git = (a: string[]) => {
     const r = Bun.spawnSync(["git", ...a], { cwd: root });
@@ -342,7 +342,7 @@ test("fileContentAt can read back a non-ASCII path reported by addedFilesAt", ()
 // --- pendingEntries / pendingChanges / stagedIndexEmpty / undoAttempt (Task 1) -----------------
 
 function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-wt-"));
+  const dir = makeTempDir("styre-wt-");
   roots.push(dir);
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: dir });
   run(["init", "-b", "main"]);
@@ -422,7 +422,7 @@ test("discardPaths is a no-op on empty input and never throws on a missing path"
 });
 
 test("readDiscardedSources reads sources, skips oversized and missing paths, never throws", () => {
-  const root = mkdtempSync(join(tmpdir(), "styre-rds-"));
+  const root = makeTempDir("styre-rds-");
   writeFileSync(join(root, "small.go"), "package a\n\nfunc Help() int { return 1 }\n");
   writeFileSync(join(root, "big.go"), "x".repeat(256 * 1024 + 1));
   const out = readDiscardedSources(root, ["small.go", "big.go", "absent.go"]);
@@ -433,7 +433,7 @@ test("readDiscardedSources reads sources, skips oversized and missing paths, nev
 });
 
 test("readDiscardedSources stops at the total budget", () => {
-  const root = mkdtempSync(join(tmpdir(), "styre-rds-budget-"));
+  const root = makeTempDir("styre-rds-budget-");
   const paths: string[] = [];
   for (let i = 0; i < 40; i++) {
     const p = `f${i}.go`;
@@ -447,7 +447,7 @@ test("readDiscardedSources stops at the total budget", () => {
 });
 
 test("readDiscardedSources skips symlinks rather than reading through them", () => {
-  const root = mkdtempSync(join(tmpdir(), "styre-rds-link-"));
+  const root = makeTempDir("styre-rds-link-");
   writeFileSync(join(root, "target.txt"), "secret contents\n");
   symlinkSync(join(root, "target.txt"), join(root, "link.go"));
   const out = readDiscardedSources(root, ["link.go"]);
@@ -458,7 +458,7 @@ test("readDiscardedSources skips symlinks rather than reading through them", () 
 // --- sweepScratch (Task 1) ----------------------------------------------------------------------
 
 test("sweepScratch removes every styre_scratch/ dir at any depth and returns their repo-relative paths", () => {
-  const root = mkdtempSync(join(tmpdir(), "sweep-"));
+  const root = makeTempDir("sweep-");
   mkdirSync(join(root, "a", "b", "styre_scratch"), { recursive: true });
   writeFileSync(join(root, "a", "b", "styre_scratch", "repro.py"), "x");
   mkdirSync(join(root, "pkg", "styre_scratch"), { recursive: true });
@@ -476,7 +476,7 @@ test("sweepScratch removes every styre_scratch/ dir at any depth and returns the
 });
 
 test("sweepScratch is a no-op (returns []) with no drawer, and skips .git and node_modules", () => {
-  const root = mkdtempSync(join(tmpdir(), "sweep-"));
+  const root = makeTempDir("sweep-");
   mkdirSync(join(root, "src"), { recursive: true });
   mkdirSync(join(root, ".git", "styre_scratch"), { recursive: true }); // inside .git → skipped
   mkdirSync(join(root, "node_modules", "dep", "styre_scratch"), { recursive: true }); // skipped
@@ -493,7 +493,7 @@ test("sweepScratch is a no-op (returns []) with no drawer, and skips .git and no
 
 /** Register a worktree on `branch` under a fresh tmp dir; return its path (dir tracked for cleanup). */
 function addWorktree(repo: string, branch: string, tag: string): string {
-  const dir = mkdtempSync(join(tmpdir(), `styre-wt-${tag}-`));
+  const dir = makeTempDir(`styre-wt-${tag}-`);
   roots.push(dir);
   const wt = join(dir, "held");
   const res = Bun.spawnSync(["git", "worktree", "add", "-b", branch, wt], { cwd: repo });
@@ -517,7 +517,7 @@ test("ensureWorktree frees a PRUNABLE leftover holding the branch and re-creates
   const repo = makeRepo();
   const gone = addWorktree(repo, "feat/STYRE-7", "gone");
   rmSync(dirname(gone), { recursive: true, force: true }); // reaped → prunable, branch still registered
-  const fresh = join(mkdtempSync(join(tmpdir(), "styre-wt-fresh-")), "STYRE-7");
+  const fresh = join(makeTempDir("styre-wt-fresh-"), "STYRE-7");
   roots.push(dirname(fresh));
   ensureWorktree(repo, "feat/STYRE-7", fresh); // today throws "already used by worktree"
   expect(existsSync(join(fresh, "README.md"))).toBe(true);
@@ -526,7 +526,7 @@ test("ensureWorktree frees a PRUNABLE leftover holding the branch and re-creates
 test("ensureWorktree REFUSES a live (non-prunable) holder and never force-removes it", () => {
   const repo = makeRepo();
   const live = addWorktree(repo, "feat/live", "live");
-  const fresh = join(mkdtempSync(join(tmpdir(), "styre-wt-fresh2-")), "held");
+  const fresh = join(makeTempDir("styre-wt-fresh2-"), "held");
   roots.push(dirname(fresh));
   expect(() => ensureWorktree(repo, "feat/live", fresh)).toThrow(/checked out at/);
   expect(existsSync(join(live, "README.md"))).toBe(true); // the live worktree is untouched
@@ -537,7 +537,7 @@ test("reconcileWorktree frees the recorded stale worktree (its own prior) so the
   const stale = addWorktree(repo, "feat/STYRE-9", "stale"); // dir still exists (not prunable)
   reconcileWorktree(repo, "feat/STYRE-9", stale, freshTarget());
   expect(worktreeHoldingBranch(repo, "feat/STYRE-9")).toBeNull();
-  const fresh = join(mkdtempSync(join(tmpdir(), "styre-wt-fresh3-")), "STYRE-9");
+  const fresh = join(makeTempDir("styre-wt-fresh3-"), "STYRE-9");
   roots.push(dirname(fresh));
   ensureWorktree(repo, "feat/STYRE-9", fresh);
   expect(existsSync(join(fresh, "README.md"))).toBe(true);
@@ -572,7 +572,7 @@ test("reconcileWorktree refuses a LOCKED (non-prunable) holder rather than force
 
 // A throwaway non-repo target path for the reconcileWorktree `newWorktreeRoot` arg.
 function freshTarget(): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-wt-target-"));
+  const dir = makeTempDir("styre-wt-target-");
   roots.push(dir);
   return join(dir, "target");
 }
@@ -700,7 +700,7 @@ test("worktreeHoldingBranch matches the MAIN worktree; reconcileWorktree refuses
 test("reconcile frees a styre-owned non-prunable holder when the owning run lock is DEAD", () => {
   const repo = makeRepo();
   addWorktree(repo, "feat/STYRE-50", "deadowner"); // path under styre-wt-*, dir exists → not prunable
-  const ckpt = mkdtempSync(join(tmpdir(), "styre-ckpt-"));
+  const ckpt = makeTempDir("styre-ckpt-");
   roots.push(ckpt);
   writeFileSync(join(ckpt, "run.lock"), "999999999"); // dead pid → stale
   const res = reconcileWorktree(repo, "feat/STYRE-50", undefined, freshTarget(), ckpt);
@@ -711,7 +711,7 @@ test("reconcile frees a styre-owned non-prunable holder when the owning run lock
 test("reconcile REFUSES a holder when a DIFFERENT live run owns the ticket lock", () => {
   const repo = makeRepo();
   const held = addWorktree(repo, "feat/STYRE-51", "liveowner");
-  const ckpt = mkdtempSync(join(tmpdir(), "styre-ckpt-"));
+  const ckpt = makeTempDir("styre-ckpt-");
   roots.push(ckpt);
   writeFileSync(join(ckpt, "run.lock"), String(process.ppid)); // alive, not us
   expect(() => reconcileWorktree(repo, "feat/STYRE-51", undefined, freshTarget(), ckpt)).toThrow(
@@ -722,11 +722,11 @@ test("reconcile REFUSES a holder when a DIFFERENT live run owns the ticket lock"
 
 test("reconcile REFUSES a FOREIGN (non-styre-wt) non-prunable holder even with a checkpointDir + no lock", () => {
   const repo = makeRepo();
-  const dir = mkdtempSync(join(tmpdir(), "human-wt-")); // NOT under styre-wt-*
+  const dir = makeTempDir("human-wt-"); // NOT under styre-wt-*
   roots.push(dir);
   const wt = join(dir, "held");
   Bun.spawnSync(["git", "worktree", "add", "-b", "feat/HUMAN-1", wt], { cwd: repo });
-  const ckpt = mkdtempSync(join(tmpdir(), "styre-ckpt-"));
+  const ckpt = makeTempDir("styre-ckpt-");
   roots.push(ckpt); // no run.lock → no owner
   expect(() => reconcileWorktree(repo, "feat/HUMAN-1", undefined, freshTarget(), ckpt)).toThrow(
     /checked out at/,
@@ -741,7 +741,7 @@ test("reconcile REFUSES a FOREIGN (non-styre-wt) non-prunable holder even with a
  *  `git ls-remote --heads origin` for real, rather than mocking git). */
 function makeRepoWithBareOrigin(): { repo: string; origin: string } {
   const repo = makeRepo();
-  const origin = mkdtempSync(join(tmpdir(), "styre-origin-"));
+  const origin = makeTempDir("styre-origin-");
   roots.push(origin);
   const run = (args: string[], cwd: string) => {
     const res = Bun.spawnSync(["git", ...args], { cwd });
@@ -874,7 +874,7 @@ test("pushBranch: a stale lease is rejected and the remote is left untouched", (
   const v1 = remoteHead(repo, "feat/eng-387-stale");
 
   // A SECOND actor advances origin behind our back (clone the bare origin, push v1b).
-  const other = mkdtempSync(join(tmpdir(), "styre-other-"));
+  const other = makeTempDir("styre-other-");
   roots.push(other);
   const orun = (args: string[]) => {
     const res = Bun.spawnSync(["git", ...args], { cwd: other });

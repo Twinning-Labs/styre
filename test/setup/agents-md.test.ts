@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readAgentsMd } from "../../src/setup/agents-md.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function tmp(files: Record<string, string> = {}): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-agents-"));
+  const dir = makeTempDir("styre-agents-");
   for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body);
   return dir;
 }

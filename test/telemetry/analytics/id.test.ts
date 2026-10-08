@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadOrCreateState, markNoticeShown } from "../../../src/telemetry/analytics/id.ts";
+import { makeTempDir } from "../../helpers/temp.ts";
 
 let prev: string | undefined;
 beforeEach(() => {
   prev = process.env.XDG_STATE_HOME;
-  process.env.XDG_STATE_HOME = mkdtempSync(join(tmpdir(), "styre-id-"));
+  process.env.XDG_STATE_HOME = makeTempDir("styre-id-");
 });
 afterEach(() => {
   if (prev === undefined) Reflect.deleteProperty(process.env, "XDG_STATE_HOME");

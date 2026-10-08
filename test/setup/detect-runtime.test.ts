@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { detectRuntimeContext } from "../../src/setup/detect-runtime.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function fixture(files: Record<string, string>): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-rt-"));
+  const dir = makeTempDir("styre-rt-");
   for (const [rel, content] of Object.entries(files)) {
     const full = join(dir, rel);
     mkdirSync(join(full, ".."), { recursive: true });

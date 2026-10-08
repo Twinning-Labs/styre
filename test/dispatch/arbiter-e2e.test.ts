@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -34,9 +33,10 @@ import { fakeChecks } from "../../src/integrations/adapters/fake-checks.ts";
 import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function gitRepo(): { root: string; initSha: string } {
-  const root = mkdtempSync(join(tmpdir(), "styre-arb-e2e-"));
+  const root = makeTempDir("styre-arb-e2e-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -73,7 +73,7 @@ function registryWith(
       targetRepo: repo,
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-arb-e2e-wt-")),
+    worktreeRoot: makeTempDir("styre-arb-e2e-wt-"),
     runCheckCommand,
   });
 }
@@ -647,7 +647,7 @@ test("Flow 1 — code-wrong loop: the arbiter blames from the REAL post-implemen
       targetRepo: repo,
       components: [CHECKS_COMPONENT, appComponent("true")],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-arb1-wt-")),
+    worktreeRoot: makeTempDir("styre-arb1-wt-"),
     // The post-implement rerun stays red, carrying a distinctive real assertion trace.
     runCheckCommand: async () => ({
       exitCode: 1,
@@ -764,7 +764,7 @@ test("Flow 2 — check-wrong re-author installs: RED-first-validates at baseline
       targetRepo: repo,
       components: [CHECKS_COMPONENT, appComponent("true")],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-arb2-wt-")),
+    worktreeRoot: makeTempDir("styre-arb2-wt-"),
     runCheckCommand,
   });
 
@@ -859,7 +859,7 @@ test("Flow 3 — a code-conforming re-author is REJECTED by the RED-first oracle
       targetRepo: repo,
       components: [CHECKS_COMPONENT, appComponent("true")],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-arb3-wt-")),
+    worktreeRoot: makeTempDir("styre-arb3-wt-"),
     runCheckCommand: async (_cmd, opts) =>
       opts.cwd.includes("styre-baseline-wt-")
         ? { exitCode: 0, stdout: "1 passed", stderr: "", timedOut: false } // GREENS at baseline → rejects
@@ -948,7 +948,7 @@ test("Flow 4 — AC-silent dispute: the arbiter correctly returns code-wrong whe
       targetRepo: repo,
       components: [CHECKS_COMPONENT, appComponent("true")],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-arb4-wt-")),
+    worktreeRoot: makeTempDir("styre-arb4-wt-"),
     runCheckCommand: async () => ({
       exitCode: 1,
       stdout: "KeyError: 'name'",
@@ -1042,7 +1042,7 @@ test("Flow 5 — environmental-classify rejection: a re-author that RED-first-va
       targetRepo: repo,
       components: [CHECKS_COMPONENT, appComponent("true")],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-arb5-wt-")),
+    worktreeRoot: makeTempDir("styre-arb5-wt-"),
     // RED both at the baseline replay (structurally installable) AND at the real gate rerun (stays
     // gated) — only the classify verdict (environmental) drives the rejection here.
     runCheckCommand: async () => ({ exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false }),
@@ -1146,7 +1146,7 @@ test("Flow 6 — counter no-false-escalate: repeated review loopbacks (nits) nev
       targetRepo: repo,
       components: [CHECKS_COMPONENT, appComponent("true")],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-arb6-wt-")),
+    worktreeRoot: makeTempDir("styre-arb6-wt-"),
     runCheckCommand: async () => ({ exitCode: 0, stdout: "1 passed", stderr: "", timedOut: false }), // always flips green
   });
 
@@ -1256,7 +1256,7 @@ test("Flow 7 — supersede + id-reuse healing: TWO consecutive check-wrong re-au
       targetRepo: repo,
       components: [CHECKS_COMPONENT, appComponent("true")],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-arb7-wt-")),
+    worktreeRoot: makeTempDir("styre-arb7-wt-"),
     runCheckCommand,
   });
 
@@ -1342,7 +1342,7 @@ test("Flow 8 — LIVENESS: a pure-code-wrong round where the re-implement commit
       checksSystem: "none",
       components: [CHECKS_COMPONENT, appComponent("true")],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-arb8-wt-")),
+    worktreeRoot: makeTempDir("styre-arb8-wt-"),
     // The real post-implement rerun stays red every round (HEAD never moves, so it must).
     runCheckCommand: async () => ({
       exitCode: 1,

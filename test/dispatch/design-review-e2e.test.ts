@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -14,9 +13,10 @@ import { getByKey, insertPending } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-dre-"));
+  const root = makeTempDir("styre-dre-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -47,7 +47,7 @@ function registryFor(repo: string, runner: FakeAgentRunner) {
       components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
       runtimeContext: ABSENT_RC,
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-drewt-")),
+    worktreeRoot: makeTempDir("styre-drewt-"),
   });
 }
 

@@ -1,7 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { toolchainError } from "../../src/cli/errors.ts";
 import { renderError } from "../../src/cli/output.ts";
 import {
@@ -16,6 +14,7 @@ import {
 } from "../../src/cli/preflight.ts";
 import type { Profile } from "../../src/dispatch/profile.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 // Fixtures may omit `extensions` (ComponentSchema defaults it to []); parseProfile fills it. The
 // inferred `Profile["components"]` type requires it, so accept the pre-default shape here.
@@ -164,7 +163,7 @@ test("formatMissingTools + toolchainError: framed message has exactly one headli
 });
 
 test("preflightToolchain (real probe): catches an absent binary, passes a present one", () => {
-  const repo = mkdtempSync(join(tmpdir(), "styre-preflight-repo-"));
+  const repo = makeTempDir("styre-preflight-repo-");
   const profile = makeProfile(
     [
       {

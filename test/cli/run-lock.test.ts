@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { acquireRunLock, releaseRunLock, runLockStatus } from "../../src/cli/run-lock.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
-const tmp = () => mkdtempSync(join(tmpdir(), "styre-lock-"));
+const tmp = () => makeTempDir("styre-lock-");
 
 test("acquire writes our pid; status reports self; release removes it", () => {
   const dir = tmp();

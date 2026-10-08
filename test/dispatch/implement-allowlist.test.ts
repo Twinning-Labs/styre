@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -9,6 +8,7 @@ import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 /** Shared rust+fe profile: rust paths src-tauri/**, fe paths src/** */
 const RUST_FE_PROFILE = parseProfile({
@@ -45,7 +45,7 @@ const ALL_UNAVAILABLE_PROFILE = parseProfile({
 });
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-ial-"));
+  const root = makeTempDir("styre-ial-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -61,7 +61,7 @@ function registryFor(repo: string, runner: FakeAgentRunner, profile = RUST_FE_PR
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
     profile: { ...profile, targetRepo: repo },
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-ialwt-")),
+    worktreeRoot: makeTempDir("styre-ialwt-"),
   });
 }
 

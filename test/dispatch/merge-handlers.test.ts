@@ -1,7 +1,4 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
@@ -14,6 +11,7 @@ import { getByKey, insertPending } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry, renderPrBody } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function registryFor() {
   return buildDispatchRegistry({
@@ -26,7 +24,7 @@ function registryFor() {
       targetRepo: "/tmp/x",
       defaultBranch: "main",
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-mh-")),
+    worktreeRoot: makeTempDir("styre-mh-"),
   });
 }
 

@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -10,9 +9,10 @@ import { getById as getUnit, insertWorkUnit } from "../../src/db/repos/work-unit
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-dg-"));
+  const root = makeTempDir("styre-dg-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -59,7 +59,7 @@ test("behavioral unit with no test file still verifies on the first attempt (A1 
       targetRepo: repo,
       components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-dgwt-")),
+    worktreeRoot: makeTempDir("styre-dgwt-"),
   });
 
   for (let i = 0; i < 12; i++) {
@@ -113,7 +113,7 @@ test("a failing integration suite is advisory and advances the ticket without sp
         { name: "app", kind: "node", paths: ["**"], commands: { test: "true", build: "false" } },
       ],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-dgint-")),
+    worktreeRoot: makeTempDir("styre-dgint-"),
   });
 
   // Drive until the integration signal is recorded — checked at the top BEFORE each tick, so we
