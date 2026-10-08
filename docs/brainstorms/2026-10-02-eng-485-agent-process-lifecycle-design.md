@@ -1125,3 +1125,20 @@ stop signals dump nothing.
 **D13 is unchanged.** Ctrl-\ still ends Styre by SIGQUIT, exit status 131, and the orphaned
 command is still reported, not stopped. On macOS the system's crash report (a .ips file from
 ReportCrash) is not a core and is not affected.
+
+**Addition, same day: setup's prompts.** Operator decision. While `styre setup` waits at a prompt
+with its stop handlers suspended (§7.1, finding 3), Ctrl-\ takes SIGQUIT's default action. Core
+dumps are therefore also off for each such prompt: its missing command prompts and its approval
+prompt, all through `suspendStopHandlers`.
+- **Off for the prompt.** The state is read first, then turned off.
+  - Only the soft core limit is lowered, to 0: a process that is not privileged can never raise its
+    hard limit again (getrlimit(2); macOS setrlimit(2)).
+  - On Linux the process is also marked not dumpable.
+- **Restored afterwards,** in a `finally`, whether the prompt answers, throws or meets the end of
+  input:
+  - the exact soft limit;
+  - on Linux, the dumpable flag. Setting it back to 1 returns the /proc/<pid> files to the user
+    (proc_pid(5)).
+- **Failures are said in one line,** for turning off or for restoring, and setup goes on.
+- **Exit statuses unchanged.** Ctrl-\ at the prompt still ends setup by SIGQUIT (131); Ctrl-C still
+  ends it by SIGINT (130).
