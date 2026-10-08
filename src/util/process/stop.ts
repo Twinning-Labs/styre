@@ -166,6 +166,11 @@ export async function stopTree(
       `stopTree: refusing root pid ${root.pid}: it is init, Styre, or Styre's own group leader`,
     );
   }
+  // The root is not in the table (an agent already reaped): nothing can be collected, since every
+  // link starts from the root. Skip building the collection over the whole table.
+  if (!first.some((p) => p.pid === root.pid && p.startedAt === root.startedAt)) {
+    return { stopped: [], survivors: [], signalled: [], failures: [] };
+  }
   const seen = new Map<string, ProcInfo>();
   const failed = new Map<string, string>();
   const signalled = new Map<string, ProcInfo>();

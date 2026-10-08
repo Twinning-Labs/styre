@@ -394,6 +394,21 @@ describe("stopTree (simulated)", () => {
     }
   });
 
+  test("a root gone from the table takes nothing in, even rows that still name its pid", async () => {
+    // Without the root nothing links to it: not a row whose parent is its pid, not a group whose id
+    // is its pid. Both stops leave them alone, after one read.
+    for (const how of ["graceful", "forced"] as const) {
+      const w = new World()
+        .add(proc(11, 10, 11), { onTerm: "ignore" })
+        .add(proc(12, 1, 10), { onTerm: "ignore" });
+      const c = counting(w);
+      const rep = await stopTree(ROOT, how, { ...OPTS, deps: c.deps });
+      expect(rep).toEqual({ stopped: [], survivors: [], signalled: [], failures: [] });
+      expect(w.calls).toEqual([]);
+      expect(c.reads()).toBe(1);
+    }
+  });
+
   test("a survivor found by that one read still gets the full stop: SIGTERM, then SIGKILL", async () => {
     // The agent has exited (a zombie not yet reaped); its child, still linked, ignores SIGTERM, and
     // a member of a group the child leads ignores it too.
