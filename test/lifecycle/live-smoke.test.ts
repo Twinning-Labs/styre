@@ -3,10 +3,13 @@
 // agent and its command group in a process table, the claude version, and the verdicts. Stand-in
 // tables and texts only: nothing here starts a process.
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   GITHUB_CANCEL,
   type Proc,
   agentAbove,
+  cancelStep,
   cancelVerdict,
   controlVerdict,
   judge,
@@ -267,5 +270,50 @@ describe("cancelVerdict: what a simulated GitHub cancel did", () => {
   });
   test("a step that ended on SIGINT alone with nothing left is not orphaned", () => {
     expect(cancelVerdict({ ...orphaned, sent: ["SIGINT"] }).kind).toBe("other");
+  });
+});
+
+describe("the workflow (.github/workflows/lifecycle-live.yml)", () => {
+  type Step = { name?: string; run?: string; uses?: string; env?: Record<string, string> };
+  const wf = Bun.YAML.parse(
+    readFileSync(join(import.meta.dir, "../../.github/workflows/lifecycle-live.yml"), "utf8"),
+  ) as { on: unknown; jobs: Record<string, { steps: Step[]; "timeout-minutes"?: number }> };
+  const longStep = (job: string): Step | undefined =>
+    wf.jobs[job]?.steps.find((s) => s.name?.startsWith("Long run"));
+
+  test("runs by hand only", () => {
+    expect(wf.on).toBe("workflow_dispatch");
+  });
+  test("each cancel job's long step is exactly the step the simulation runs", () => {
+    expect(longStep("cancel-with-exec")?.run).toBe(cancelStep(true));
+    expect(longStep("cancel-without-exec")?.run).toBe(cancelStep(false));
+    expect(wf.jobs["cancel-with-exec"]?.["timeout-minutes"]).toBe(3);
+    expect(wf.jobs["cancel-without-exec"]?.["timeout-minutes"]).toBe(3);
+  });
+  test("each cancel job checks the outcome its form predicts, even after the cancel", () => {
+    const last = (job: string) => wf.jobs[job]?.steps.at(-1) as Step & { if?: string };
+    expect(last("cancel-with-exec")).toEqual({
+      if: "always()",
+      run: "bash test/lifecycle/assert-cancel.sh cancel-exec graceful",
+    });
+    expect(last("cancel-without-exec")).toEqual({
+      if: "always()",
+      run: "bash test/lifecycle/assert-cancel.sh cancel-noexec orphaned",
+    });
+  });
+  test("the secret reaches the smoke step only, and every action is pinned by commit", () => {
+    const text = readFileSync(
+      join(import.meta.dir, "../../.github/workflows/lifecycle-live.yml"),
+      "utf8",
+    );
+    expect(text.match(/secrets\./g)).toHaveLength(1);
+    const withSecret = Object.entries(wf.jobs).flatMap(([job, j]) =>
+      j.steps
+        .filter((s) => JSON.stringify(s.env ?? {}).includes("secrets."))
+        .map((s) => `${job}: ${s.name}`),
+    );
+    expect(withSecret).toEqual(["smoke: Live smoke (real claude; seven dispatches)"]);
+    for (const j of Object.values(wf.jobs))
+      for (const s of j.steps) if (s.uses) expect(s.uses).toMatch(/@[0-9a-f]{40}$/);
   });
 });

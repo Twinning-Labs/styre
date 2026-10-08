@@ -264,3 +264,13 @@ export function cancelVerdict(o: CancelObservation): {
     why: [`not graceful: ${graceful.join("; ")}`, `not orphaned: ${orphaned.join("; ")}`],
   };
 }
+
+/**
+ * The long step of each cancel job in .github/workflows/lifecycle-live.yml, as its `run:` text
+ * (test/lifecycle/live-smoke.test.ts checks the workflow carries exactly this), which
+ * scripts/simulate-github-cancel.ts runs as GitHub does. It records its own pid first; with `exec`
+ * that pid becomes Styre's.
+ */
+export function cancelStep(exec: boolean): string {
+  return `echo "step $$" >"$CANCEL_PIDS"\n${exec ? "exec " : ""}"$STYRE" setup "$CANCEL_REPO" --config "$CANCEL_CONFIG" --out "$CANCEL_OUT" 2>"$CANCEL_LOG"\n`;
+}

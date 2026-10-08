@@ -1,0 +1,88 @@
+# ENG-485 Task 16 (spec 11.2, D14): the live lifecycle checks, run by hand only (workflow_dispatch).
+#
+# smoke: scripts/smoke-lifecycle.ts with the real `claude` CLI on a GitHub Ubuntu VM: a control run
+#   on main must leak the agent under kill and kill -9 (or the run says the probes are blind), and
+#   the new code must stop the agent and its command under Ctrl-C, kill, kill -9 followed by
+#   `styre ls`, a dispatch timeout, and Ctrl-\. Seven real agent dispatches on the cheap model. The
+#   ANTHROPIC_API_KEY secret is given to this job's smoke step only. claude is installed with npm at
+#   a pinned version: the npm package installs the same native binary as the recommended installer
+#   (code.claude.com/docs/en/setup, "Install with npm"), and a pinned version keeps runs comparable.
+#
+# cancel-with-exec / cancel-without-exec: what GitHub's cancel does to a `run:` step running the
+#   compiled styre, with and without `exec` (D14). The step runs `styre setup` with a stand-in agent
+#   (the fake claude CLI in hang mode: no real agent, no secret), until the job's 3 minute timeout
+#   cancels it, or someone cancels the run by hand. Then assert-cancel.sh reads what happened:
+#     with exec:    Styre is the step's process, handles GitHub's SIGINT and stops the agent;
+#     without exec: bash is the step's process; GitHub's SIGINT and then SIGTERM (7.5 s later) reach
+#                   bash only, bash dies on the SIGTERM, and Styre and the agent keep running until
+#                   the job's orphan cleanup kills them ("Terminate orphan process" under "Complete
+#                   job"). scripts/simulate-github-cancel.ts predicts both locally from the runner's
+#                   source (actions/runner src/Runner.Sdk/ProcessInvoker.cs).
+#   Run the workflow twice: once letting the timeout fire, once cancelling the run by hand while the
+#   long steps run (the runner treats both as the same cancel request; the run records whether
+#   GitHub agrees). The `CANCEL_*` names come from test/lifecycle/cancel-prepare.sh, and each long
+#   step's text is pinned by test/lifecycle/live-smoke.test.ts to what the simulation runs.
+name: lifecycle-live
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7 (node24)
+        with:
+          fetch-depth: 0 # the control run checks out main in a temporary worktree
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: npm install -g @anthropic-ai/claude-code@2.1.294
+      - run: claude --version && bun --version
+      - name: The control needs a local main
+        run: git rev-parse --verify --quiet refs/heads/main || git branch main origin/main
+      - name: Live smoke (real claude; seven dispatches)
+        run: ulimit -c 0 && timeout 900 bun run scripts/smoke-lifecycle.ts
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  cancel-with-exec:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7 (node24)
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile && bun run build
+      - run: bash test/lifecycle/cancel-prepare.sh cancel-exec
+      - name: Long run with exec, cancelled by the job timeout or by hand
+        env:
+          STYRE: ${{ github.workspace }}/dist/styre
+        run: |
+          echo "step $$" >"$CANCEL_PIDS"
+          exec "$STYRE" setup "$CANCEL_REPO" --config "$CANCEL_CONFIG" --out "$CANCEL_OUT" 2>"$CANCEL_LOG"
+      - if: always()
+        run: bash test/lifecycle/assert-cancel.sh cancel-exec graceful
+
+  cancel-without-exec:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7 (node24)
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile && bun run build
+      - run: bash test/lifecycle/cancel-prepare.sh cancel-noexec
+      - name: Long run without exec, cancelled by the job timeout or by hand
+        env:
+          STYRE: ${{ github.workspace }}/dist/styre
+        run: |
+          echo "step $$" >"$CANCEL_PIDS"
+          "$STYRE" setup "$CANCEL_REPO" --config "$CANCEL_CONFIG" --out "$CANCEL_OUT" 2>"$CANCEL_LOG"
+      - if: always()
+        run: bash test/lifecycle/assert-cancel.sh cancel-noexec orphaned
