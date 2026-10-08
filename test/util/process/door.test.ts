@@ -5,7 +5,7 @@ import { join } from "node:path";
 import * as door from "../../../src/util/process/door.ts";
 import { listProcesses, probe } from "../../../src/util/process/proc-table.ts";
 import { listRecords, processesDir } from "../../../src/util/process/records.ts";
-import type { StopDeps } from "../../../src/util/process/stop.ts";
+import { type StopDeps, realStopDeps } from "../../../src/util/process/stop.ts";
 
 const sh = (script: string): string[] => ["sh", "-c", script];
 const ctx = { ident: "ENG-1", stepId: 1, worktree: null };
@@ -107,6 +107,24 @@ test("a launch is recorded on disk and in memory, and released after it finishes
   const rep = await h.finish();
   expect(rep.survivors).toEqual([]);
   expect(door.liveLaunches()).not.toContain(h);
+  expect(listRecords()).toEqual([]);
+});
+
+test("finish() of an agent that already exited reads the process table once (spec 11.4)", async () => {
+  let reads = 0;
+  door.__setStopDepsForTests({
+    ...realStopDeps,
+    list: () => {
+      reads++;
+      return realStopDeps.list();
+    },
+  });
+  const a = start(["true"], "agent");
+  await a.proc.exited;
+  const rep = await a.finish();
+  expect(rep.survivors).toEqual([]);
+  expect(reads).toBe(1);
+  expect(door.liveLaunches()).toEqual([]);
   expect(listRecords()).toEqual([]);
 });
 

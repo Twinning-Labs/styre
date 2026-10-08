@@ -361,6 +361,65 @@ describe("stopTree (simulated)", () => {
     expect(rep.survivors).toEqual([]);
   });
 
+  // Latency (spec 11.4): finish() of an agent that already exited reads the table once.
+  const counting = (w: World) => {
+    let reads = 0;
+    const deps: StopDeps = {
+      ...w.deps,
+      list: () => {
+        reads++;
+        return w.deps.list();
+      },
+    };
+    return { deps, reads: () => reads };
+  };
+
+  test("an agent that already exited, with nothing left in its tree, costs one table read", async () => {
+    for (const how of ["graceful", "forced"] as const) {
+      // Gone from the table, and a zombie that leads nothing alive.
+      for (const w of [
+        new World().add(proc(99, 1, 99)),
+        new World()
+          .add(proc(10, 1, 5, undefined, "zombie"))
+          .add(proc(11, 10, 5, undefined, "zombie")),
+      ]) {
+        const c = counting(w);
+        const rep = await stopTree(ROOT, how, { ...OPTS, deps: c.deps });
+        expect(c.reads()).toBe(1);
+        expect(rep.survivors).toEqual([]);
+        expect(rep.signalled).toEqual([]);
+        expect(w.calls).toEqual([]);
+        expect(w.clock).toBe(0);
+      }
+    }
+  });
+
+  test("a survivor found by that one read still gets the full stop: SIGTERM, then SIGKILL", async () => {
+    // The agent has exited (a zombie not yet reaped); its child, still linked, ignores SIGTERM, and
+    // a member of a group the child leads ignores it too.
+    const w = new World()
+      .add(proc(10, 1, 5, undefined, "zombie"))
+      .add(proc(11, 10, 11), { onTerm: "ignore" })
+      .add(proc(12, 1, 11), { onTerm: "ignore" });
+    const c = counting(w);
+    const rep = await stopTree(ROOT, "graceful", { ...OPTS, deps: c.deps });
+    expect(w.signals("SIGTERM").sort()).toEqual([11, 12]);
+    expect(w.signals("SIGKILL").sort()).toEqual([11, 12]);
+    expect(rep.survivors).toEqual([]);
+    expect(w.procs.has(11) || w.procs.has(12)).toBe(false);
+    expect(c.reads()).toBeGreaterThan(1);
+  });
+
+  test("a forced stop of an exited agent whose child survives still kills the child", async () => {
+    const w = new World()
+      .add(proc(10, 1, 5, undefined, "zombie"))
+      .add(proc(11, 10, 5), { onTerm: "ignore" });
+    const rep = await stopTree(ROOT, "forced", { ...OPTS, deps: w.deps });
+    expect(w.signals("SIGTERM")).toEqual([]);
+    expect(w.signals("SIGKILL")).toEqual([11]);
+    expect(rep.survivors).toEqual([]);
+  });
+
   test("a root that is already gone, or was replaced under the same pid, signals nothing", async () => {
     const gone = new World();
     expect((await stopTree(ROOT, "graceful", { ...OPTS, deps: gone.deps })).survivors).toEqual([]);

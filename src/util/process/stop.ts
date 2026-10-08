@@ -154,7 +154,13 @@ export async function stopTree(
 ): Promise<StopReport> {
   const d = opts.deps ?? realStopDeps;
   const exclude = new Set(opts.excludePgids);
-  const own = ownPgid(d.list());
+  // One listing serves the refusal check, the first collection and the first liveness check. When
+  // it shows nothing collected alive (the usual finish of an agent that has already exited), the
+  // stop is done. No later listing could collect more: a new process joins only through a live
+  // collected process (its parent, or a member of a collected group that forked it), and there is
+  // none. A normal dispatch then pays one read (spec 11.4); anything alive gets the full stop.
+  const first = d.list();
+  const own = ownPgid(first);
   if (root.pid <= 1 || root.pid === process.pid || root.pid === own) {
     throw new Error(
       `stopTree: refusing root pid ${root.pid}: it is init, Styre, or Styre's own group leader`,
@@ -185,9 +191,11 @@ export async function stopTree(
     };
   };
 
-  grow(root, d.list(), seen, exclude);
+  grow(root, first, seen, exclude);
+  const aliveAtFirst = stillAlive(seen, first);
+  if (aliveAtFirst.length === 0) return finish(first);
   if (how === "graceful") {
-    for (const p of stillAlive(seen, d.list())) send(p, "SIGTERM");
+    for (const p of aliveAtFirst) send(p, "SIGTERM");
     const deadline = d.now() + opts.graceMs;
     while (d.now() < deadline && !opts.abort?.forced) {
       const table = d.list();
