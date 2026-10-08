@@ -119,6 +119,15 @@ Running:
   never appear as reapable, even if their classified kind would otherwise qualify. The section is
   omitted entirely when empty.
 
+When the sweep that `ls` runs first (see
+[Stopping, interruption and orphan cleanup](#stopping-interruption-and-orphan-cleanup-eng-485))
+stopped any orphan, a fourth section follows, one row per orphan:
+
+```
+Stopped orphans (left running when Styre was force quit):
+  <ident>  [<agent|group>, pid <pid>]  <command>
+```
+
 Age is rendered by `humanAge`: under 60 minutes as `"<m>m"`, under 24 hours as `"<h>h"`, otherwise
 `"<d>d"` (integer floors).
 
@@ -202,6 +211,194 @@ honored).
 
 ---
 
+## Stopping, interruption and orphan cleanup (ENG-485)
+
+How Styre stops the agent and its commands, what it prints while it does, and how it cleans up
+after a Styre that was killed. The security view, with every known limit, is in
+[`SECURITY.md`](../../SECURITY.md); the records folder is in [`conventions.md`](conventions.md).
+
+### Who does what
+
+- **`styre run` and `styre setup` handle stop signals:** SIGINT (Ctrl-C), SIGTERM (`kill`, CI,
+  `docker stop`), SIGHUP (the terminal closing) and SIGQUIT (`Ctrl-\`). `styre setup` removes its
+  handlers while it waits at a prompt, so Ctrl-C there ends setup at once (130) and `Ctrl-\` ends it
+  at once (131, with core dumps turned off for the prompt).
+- **Every command sweeps first.** `run`, `setup`, `ls`, `clean`, `migrate` and `notify` read the
+  launch records before doing anything else and stop what an earlier Styre left running when it
+  was killed with `kill -9` (an orphan). A live run's launches are never touched. `ls` also lists
+  what it stopped.
+- **On a signal, the handler owns the exit.** Within one deadline of 6.5 s from the first signal
+  it:
+  1. closes the door (no new process, no `git`, no write to the run database by run code);
+  2. sends SIGTERM to the agent's whole tree and to every command group at once;
+  3. says it is stopping;
+  4. waits up to 5 s for them to go, then sends SIGKILL to what is left;
+  5. looks for processes the agent left running in its worktree;
+  6. (`styre run` only) records the interruption in the run database: the step's attempt is given
+     back, its dispatch is closed as `interrupted`, and the data `--resume` needs to undo the
+     agent's edits is saved;
+  7. writes that record as a telemetry `event` line on stdout, then reports the outcome on stderr;
+  8. removes any temporary baseline worktree the run still holds;
+  9. shuts analytics down, releases the run lock, and ends itself by the same signal.
+- **A second signal** while stopping prints `styre: forcing stop…` and skips the rest of the 5 s
+  wait. The exit still uses the first signal.
+- **An interruption is free.** `styre run --resume <ident>` resets the interrupted step to pending
+  without counting the attempt, undoes the agent's partial edits in place, and returns the branch to
+  where the step started when the step had moved it and nobody else has since. A crash or `kill -9`
+  takes the normal crash path instead (control-loop §6.1).
+- **Normal exit.** Before `styre run` and `styre setup` exit, they wait for any leftover check still
+  running in the background (each bounded by 5 s), then check that no launch is still running. One
+  that is, is a bug: Styre stops it, names it, and turns a success exit into `70`. It never replaces
+  an exit status that already says something (`75`, `65`, `64`, `1`, or an error's own code). The
+  check also runs when the command failed.
+
+### Exit statuses on a signal
+
+The handler ends Styre by re-raising the first signal it received, so shells and CI see
+"terminated by signal":
+
+| Signal | Usual source | Exit status |
+|---|---|---|
+| SIGINT | Ctrl-C; GitHub's first cancel signal (with `exec`) | `130` |
+| SIGTERM | `kill`; GitHub's second signal; GitLab; `docker stop`; Kubernetes; systemd | `143` |
+| SIGHUP | the terminal closing | `129` |
+| SIGQUIT | `Ctrl-\` | `131` (no core dump is written) |
+
+As a container's first process, Styre ignores its own re-raised signal; it then exits with
+`128 + n`, the same numbers. An interruption is never exit `75`: `75` means Styre paused the run
+itself.
+
+### Messages
+
+Every line below goes to stderr, for every command: `styre run`'s stdout keeps only NDJSON, and the
+human output `ls` and `setup` print on stdout stays clean. Text in angle brackets is filled in;
+`<ident>` is `an unknown run` when a record names no ticket. A test
+(`test/lifecycle/messages-doc.test.ts`) checks that each line here is a message in `src/`, and that
+every message the stop handler, the sweep, the leftover check and recovery print is here.
+
+<!-- messages:begin -->
+**The stop handler** (`src/util/process/signals.ts`):
+
+```
+styre: stopping — cleaning up the agent and its commands before exiting (up to 5s; press Ctrl-C again to force)…
+styre: received a stop request (<SIGNAL>) — cleaning up…
+styre: forcing stop…
+styre: stopped the agent (pid <pid>) and <n> of its commands.
+styre: could not stop <command> (pid <pid>); stop it with: kill -9 <pid>
+styre: could not confirm that <command> (pid <pid>) stopped (<why>); if it is still running, stop it with: kill -9 <target>
+styre: run interrupted; resume with: styre run --resume <ident>
+styre: could not record the interruption: <why>
+styre: could not write the interruption's telemetry event: <why>
+styre: could not clean up after the run: <why>
+styre: could not release the run lock: <why>
+styre: could not turn off core dumps before exiting: <why>
+styre: the stop handler failed: <why>
+```
+
+- The first line is for SIGINT; the second, for any other signal, names it (`SIGTERM`, `SIGHUP`,
+  `SIGQUIT`).
+- `<n>` counts the agent's commands this stop signalled and that are gone.
+- `<command>` in `could not stop` is the survivor's own command line, read from the process table.
+- `<target>` in `could not confirm` is the pid, or `-- -<pid>` for a command's whole group.
+- `could not clean up after the run` covers a temporary worktree the handler could not remove. Its
+  `<why>` names the worktree and the command that finishes the removal by hand, and starts with
+  `no time was left before the stop deadline to` when the deadline was too close to try.
+- The resume line appears for `styre run` only, once the interruption is recorded.
+
+**Setup's prompts** (`src/util/process/signals.ts`, `suspendStopHandlers`):
+
+```
+styre: could not turn off core dumps for the prompt: <why>
+styre: could not restore core dumps after the prompt: <why>
+```
+
+**The leftover check** (`src/util/process/leftovers.ts`, `src/daemon/advance.ts`). It runs after
+every agent step in the background, on a stop, and in the sweep. It reports; it never stops anything:
+
+```
+styre: the agent left "<command>" (pid <pid>) running in the worktree; stop it with: kill <pid> (if it is not yours)
+styre: skipped the check for processes the agent left running in the worktree (<why>)
+styre: could not start the leftover check (<why>)
+```
+
+**The sweep** (`src/util/process/sweep.ts`):
+
+```
+styre: stopped an orphaned agent from <ident> (pid <pid>), left running when Styre was force quit
+styre: stopped an orphaned command "<command>" from <ident> (pid <pid>), left running when Styre was force quit
+styre: could not stop <command> (pid <pid>); stop it with: kill -9 <pid>
+styre: could not stop the orphaned <agent or command> from <ident> (pid <pid>): <why>; its launch record was kept, so the next Styre command tries again
+styre: pid <pid> from <ident> now belongs to another program, so it was left alone and its launch record removed
+styre: removed the launch record for pid <pid> from <ident>: it was written before this machine last started, so nothing was stopped
+styre: could not check pid <pid> from <ident> (not allowed to read it); its launch record was kept, so the next Styre command tries again
+styre: could not finish with the launch record for pid <pid> from <ident>: <why>
+styre: ignored the launch record <file>: <why>; it was left in place
+styre: could not read the launch records in <folder> (<why>), so no orphans were stopped
+styre: could not read this process's own identity (<why>), so no orphans were stopped
+```
+
+The sweep stops orphans one at a time, each with its own grace period of up to 5 s. A record whose
+stop failed is kept, so the next Styre command tries again.
+
+**Resume, `--fresh` and `clean`** (`src/util/process/interruption.ts`):
+
+```
+styre: skipped undoing the interrupted step's edits: <why>
+styre: could not undo the interrupted step's edits in <folder> (<why>); they remain
+styre: the interrupted step's commits remain under the current HEAD of <branch> (<why>); nothing was reset
+styre: could not return <branch> to <sha> (<why>); the interrupted step's commits remain
+styre: step '<step key>' was left running by an older Styre; pid <pid> is alive but its identity cannot be confirmed, so nothing was stopped
+styre: could not read <path> to undo an interrupted step's edits: <why>
+```
+
+The last but one appears only for a checkpoint written by a Styre from before ENG-485, which
+journaled pids; Styre stops nothing for it.
+
+**During a run** (a command's or the agent's stop, a temporary worktree, the exit check):
+
+```
+styre: could not stop <command> (pid <pid>); stop it with: kill -9 <pid>
+styre: stopping the agent failed: <why>
+styre: could not remove a temporary worktree: <why>
+styre: internal error: a launch was still running at exit; stopped "<command>" (pid <pid>).
+```
+<!-- messages:end -->
+
+### Blocking calls
+
+Short calls (`git`, `command -v`, version probes) run to completion and stay in Styre's terminal
+group. Every one has a bound of at most 120 s, which the source guard checks. For example: 5 s for
+`command -v` and `--version` probes, 10 s for `--help`, 30 s for local git reads, and 120 s for git
+calls that rewrite the tree (checkout, reset, clean, add, commit, worktree add and remove) and for
+network git calls (`push`, `ls-remote`). A call that reaches its bound is killed with SIGKILL (that
+one process only) and reported as a timeout. A stop signal that lands during a blocking call is
+handled when the call returns, at most after its bound.
+
+### GitHub Actions: use `exec`
+
+GitHub cancels a step (a manual cancel, or a step or job timeout) by signalling the step's own
+process by pid: SIGINT, then SIGTERM 7.5 s later, then SIGKILL 2.5 s after that (actions/runner,
+`src/Runner.Sdk/ProcessInvoker.cs`). A `run:` step's process is bash running the step as a script
+file. Make Styre that process with `exec`:
+
+```yaml
+- name: Run the ticket
+  run: exec styre run ENG-123 --profile profile.json
+```
+
+- **With `exec`,** Styre receives GitHub's SIGINT, stops the agent and its commands within the 7.5 s,
+  records the interruption, and ends by SIGINT (130). The run resumes with `--resume`.
+- **Without `exec`,** bash receives the signals and Styre does not: bash ignores the SIGINT while it
+  waits, dies on the SIGTERM, and the runner ends the step. Styre, the agent and its commands keep
+  working until the job's final cleanup kills every process carrying the job's
+  `RUNNER_TRACKING_ID` ("Terminate orphan process" under "Complete job"). That is a kill, not a
+  stop: the run is not recorded as interrupted, and the agent may bill for those last seconds. On a
+  macOS runner, where process environments cannot be read, they may outlive the job.
+- `exec` must be the step's last command, since nothing after it runs. Put any setup in an earlier
+  step.
+
+---
+
 ## Exit codes (error codes) and their meaning
 
 The process exit code is the machine-readable error code. The space is enumerated in `src/cli/run.ts`
@@ -216,8 +413,9 @@ convention, which is what lets a CI/fleet caller branch on them.
 | `64` | usage (`EX_USAGE`) | CLI misuse — e.g. `styre notify` without `--test`, `styre clean --all --purge`, or a fresh `styre run <ticket>` when a checkpoint already exists for that ident (`usageError` → `EXIT.USAGE`). A misuse error, not a run failure. | No — correct the invocation. |
 | `65` | resume refused (`EX_DATAERR`) | `run --resume`, refused because either the branch HEAD moved since the run paused and `--accept-head` was not passed, *or* concurrent-resume lock contention — another `styre run --resume` already holds this checkpoint. | Yes, deliberately — re-run with `--accept-head` (HEAD moved) or retry once the other resume releases the lock (contention), or `--inspect` (diagnose, exits `0`). |
 | `69` | toolchain missing (`EX_UNAVAILABLE`) | A required repo toolchain program (a build/test/check tool the profile depends on) is not installed on this machine. Detected by the fresh-run preflight *before any spend*; never raised on `--resume`/`--inspect`. Also raised when component-role classification (ENG-425) leaves the run no primary component to work on — same fresh-run-only rule: a resumed or inspected run is never refused for it. Also raised, on any run, resume or setup, when the agent CLI is missing, below its minimum version, or lacks a flag Styre needs to confine agents (ENG-476), and when an agent run in `setup` could not be confirmed as confined (including one stopped at startup). | Yes, after you install or upgrade the tool — the stderr report names it. |
-| `70` | internal (`EX_SOFTWARE`) | An unexpected crash or a violated internal invariant — anything that is not a `StyreError` reaching the error boundary. | No — this is a bug; please report it. |
-| `75` | paused (`EX_TEMPFAIL`) | **Any** paused run (`exitCodeForOutcome`) — reason `budget`, `needs_you` (including a PR the forge did not deliver — a resume retries the request; one made for an older commit is replaced when the PR step runs again at the new head — and an agent dispatch whose confinement could not be confirmed, ENG-476, whose cause the run summary's timeline shows), or `interrupted`. The checkpoint (SoT + transcript) is already on disk and **no retry attempt is consumed**. Also returned by `styre clean <ident>` when that ident is currently a live run — `clean` refuses rather than reaping. | Paused: yes — `styre run --resume <ident> --profile <p>`. `clean` on a live run: not as-is — wait for the run to finish or pause, then clean. |
+| `70` | internal (`EX_SOFTWARE`) | An unexpected crash or a violated internal invariant — anything that is not a `StyreError` reaching the error boundary. Also set by `styre run` and `styre setup` when a launch is still running at a normal exit (ENG-485: Styre stops and names it), but only when the exit status was otherwise `0`. | No — this is a bug; please report it. |
+| `75` | paused (`EX_TEMPFAIL`) | **Any** paused run (`exitCodeForOutcome`) — reason `budget`, `needs_you` (including a PR the forge did not deliver — a resume retries the request; one made for an older commit is replaced when the PR step runs again at the new head — and an agent dispatch whose confinement could not be confirmed, ENG-476, whose cause the run summary's timeline shows), or `interrupted` (reserved: a stop signal does not pause a run, it ends it with the signal's own status, `129` to `143`). The checkpoint (SoT + transcript) is already on disk and **no retry attempt is consumed**. Also returned by `styre clean <ident>` when that ident is currently a live run — `clean` refuses rather than reaping. | Paused: yes — `styre run --resume <ident> --profile <p>`. `clean` on a live run: not as-is — wait for the run to finish or pause, then clean. |
+| `129`, `130`, `131`, `143` | ended by a stop signal | `styre run` or `styre setup` stopped the agent and its commands on SIGHUP, SIGINT, SIGQUIT or SIGTERM and ended itself by the same signal ([Exit statuses on a signal](#exit-statuses-on-a-signal)). For `run`, the interruption is recorded and costs no attempt. Never `75`. | Yes — `styre run --resume <ident>`. |
 | `78` | config (`EX_CONFIG`) | A bad config/profile value, an unknown adapter, an unresolved profile (`configError` → `EXIT.CONFIG`), or — at `run` start — a forge with neither the profile's `defaultBranch` nor its own default branch to open a PR against. Also raised when `agent.provider` is `codex`, which Styre cannot yet confine (ENG-476; lifted by ENG-484). | No — fix the value, or re-run `styre setup`. |
 
 **How to read them as a caller:**
@@ -229,6 +427,7 @@ convention, which is what lets a CI/fleet caller branch on them.
 - **`1`** — reserved for `abandoned`. Not currently emitted by any run — cleaning a run's disk state (`styre clean`) is not the same as abandoning the ticket.
 - **`64` / `78`** — a misuse or a bad config value: the invocation or the config needs fixing, not a retry.
 - **`70`** — an internal error: a bug in Styre, not in the ticket or the host. Worth reporting.
+- **`129` / `130` / `131` / `143`** — a stop signal ended the run (terminal, operator or CI); resume it with `--resume`.
 
 Stream reminder: for `run`, the human-readable explanation for any nonzero code is on **stderr**;
 stdout carries only the NDJSON telemetry stream.

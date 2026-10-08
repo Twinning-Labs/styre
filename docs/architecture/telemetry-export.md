@@ -95,6 +95,15 @@ that outcome.
 | `payload_json` | string \| null | yes, and optional (key may be absent) | `event_log.payload_json` — opaque JSON blob, kind-specific shape |
 | `created_at` | string | no | `event_log.created_at` (UTC timestamp string) |
 
+**Two `note` reasons from ENG-485** (no new kind, no schema change):
+- **`interrupted`** — written by the stop handler when a stop signal ends `styre run`, and emitted at
+  once as an ordinary `event` line. No `summary` follows: the process ends by the signal. `payload_json` holds `event: "interrupted"` and the `signal`, and,
+  when a step was in flight, its `stepId`, `attempt` (after the attempt was given back), `startedAt`,
+  `worktree`, `untrackedBefore`, `dispatchRowId`, `headAtStart` and `headAtStop`. On `--resume` the
+  stream carries this row again: each process's emitter starts its watermark at the first row.
+- **`leftover-check`** — the agent left processes running in its worktree, or the check could not
+  finish; `payload_json` holds the `worktree` and the stderr `lines` reported.
+
 ### 3.2 `dispatch` — one completed agent invocation (`dispatch` row)
 
 One row per completed dispatch (an agent call that started and ended within this run). A dispatch

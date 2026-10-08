@@ -227,8 +227,9 @@ The dispatch leaves were **ported into native TypeScript** — there is no shell
 `src/dispatch/run-dispatch.ts` + `src/agent/runner.ts`). For an agent step the runner resolves the
 model (via the step's tier), the step's tool allowlist (§4 catalog), and the timeout (§4), renders
 the prompt from the compiled template + project profile (`render-prompt.ts`), spawns the agent CLI
-with a scrubbed environment, **journals the spawned pid** (`recover()` orphan-kill), awaits, and
-writes the result into SQLite (the worker never writes the DB).
+with a scrubbed environment through the process door (`src/util/process/door.ts`, which records the
+launch on disk so a later Styre command can stop it if Styre is killed; no pid is journaled, ENG-485),
+awaits, and writes the result into SQLite (the worker never writes the DB).
 
 **Two dispatch modes:**
 - **Worktree agent (CLI leaf).** Steps that read/write the worktree — `design:dispatch` (plan doc),

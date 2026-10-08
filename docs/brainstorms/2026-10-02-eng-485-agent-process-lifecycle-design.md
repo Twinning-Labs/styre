@@ -1175,3 +1175,20 @@ It reports whether the test ran in the tool shell's group or in a nested group b
 handler still found and stopped the agent and two commands, so nothing was orphaned and D13's report
 was not needed there. On macOS (the same version, zsh) the agent died at once, and the leftover line
 of D13 appeared as specified.
+
+## Correction 2026-10-08: the claimed record name, and the latency criterion
+
+**The claimed record name keeps `.json`.** §8 and the plan's constraints write a claimed record as
+`<pid>-<startedAt>.claimed-<claimerPid>-<claimerStartedAt>`. The code
+(`src/util/process/records.ts`, `CLAIMED` and `claim()`) renames `<pid>-<startedAt>.json` to
+`<pid>-<startedAt>.json.claimed-<claimerPid>-<claimerStartedAt>`, and the code is what holds. The
+maintained reference (`docs/architecture/conventions.md`) gives the names as the code writes them.
+Nothing else changes: the sweep still acts only on regular files whose names match one of the two
+patterns exactly.
+
+**Latency (§11.4, §14).** Measured with `scripts/measure-lifecycle-latency.ts` on macOS arm64: a
+normal dispatch with a stand-in agent costs about 0.8 to 1.1 ms more than before ENG-485 (about
+42.6 ms against 41.7 ms), after `stopTree` was changed to read the process table once when nothing
+is left. What remains is the launch record (written and removed), the one table read that confirms
+nothing the agent started is still running, and git calls going through the door. The operator
+accepted this cost on 2026-10-08, and ENG-485's latency acceptance criterion was amended to match.

@@ -14,7 +14,7 @@ treated as unset.
 | Function | Variable | Fallback | Holds |
 |---|---|---|---|
 | `configDir()` | `XDG_CONFIG_HOME` | `~/.config` | `<config>/styre/` — profiles + `config.json` |
-| `stateDir()` | `XDG_STATE_HOME` | `~/.local/state` | `<state>/styre/` — DB, checkpoints, telemetry id |
+| `stateDir()` | `XDG_STATE_HOME` | `~/.local/state` | `<state>/styre/` — DB, checkpoints, telemetry id; and its sibling `<state>/styre-processes/` — launch records |
 
 `XDG_DATA_HOME` and `XDG_CACHE_HOME` are **not** read anywhere. Nothing Styre persists is classified
 as data or cache; ephemeral work goes to the OS temp dir instead (below).
@@ -43,6 +43,39 @@ as data or cache; ephemeral work goes to the OS temp dir instead (below).
 The default DB lives here only for `styre migrate`. A `styre run` journals directly to its
 checkpoint (`<slug>/<ticket-ident>/run.db` above) unless you pass `--db` — the checkpoint IS the
 run's live location, not a temp file written only on pause.
+
+### Launch records — `$XDG_STATE_HOME/styre-processes/`
+
+One small JSON file per live long running launch (an agent, or a command: suites, probes,
+acceptance checks, provisioning, the macOS `lsof` of the leftover check), for the whole machine
+(`src/util/process/records.ts`, ENG-485). It is how a later Styre command finds and stops what a
+Styre killed with `kill -9` left running (the sweep, see
+[`runtime-parameters.md`](runtime-parameters.md#stopping-interruption-and-orphan-cleanup-eng-485)).
+
+```
+<state>/styre-processes/                                   # created (mode 0700) by the first record
+  <pid>-<startedAt>.json                                   # a record (0600)
+  <pid>-<startedAt>.json.claimed-<claimerPid>-<claimerStartedAt>   # a record a sweep has claimed
+```
+
+- **A sibling of `styre/`, never inside it.** Any folder name inside `styre/` could collide with a
+  project slug, and `ls` and `clean --all` treat every child folder of `styre/` as one.
+- **`<startedAt>`** is the process's start time as the kernel reports it: clock ticks since boot on
+  Linux (digits only), `<seconds>.<microseconds>` (six digits) on macOS. With the pid it identifies
+  the process, so a pid reused by another program is never mistaken for it.
+- **A record holds** the pid, the start time, the boot ID (Linux), whether it is an `agent` or a
+  `group`, the ticket ident, step ID and worktree when known, the first 200 characters of the
+  command line, and the owner: the launching Styre's pid, start time and process group.
+- **Written** right after the spawn, to a temporary name that starts with a dot, then renamed, so a
+  reader never sees half a file. **Removed** only once the process, or for a group every member, is
+  confirmed gone.
+- **A claimed record** is one a sweep has renamed while it checks the owner (the name keeps
+  `.json`). A claim whose claimer is gone is taken again, so a sweep stopped midway strands nothing.
+- **Nothing else in the folder is touched.** Styre reads, renames and deletes only regular files
+  whose names match one of the two patterns exactly. A file with a record's name that cannot be used
+  is reported once per command and left in place.
+- Tests point `XDG_STATE_HOME` at a temporary folder (`test/preload.ts`) and fail the run if a record
+  appears in the real folder.
 
 ---
 
