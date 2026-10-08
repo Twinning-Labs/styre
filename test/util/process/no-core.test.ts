@@ -67,9 +67,13 @@ function child(limits: string, body: string): Record<string, unknown> {
   return JSON.parse(r.stdout.toString());
 }
 
-/** A soft core limit above 0 and below an unlimited hard one, where the hard limit allows it, so the
- *  restore must bring back an exact value, not just "unlimited". */
-const SOME_LIMIT = 'ulimit -c 4096 2>/dev/null || ulimit -c "$(ulimit -H -c)"';
+/** The soft core limit alone set to a value above 0 and below the hard limit, so the restore must
+ *  bring back an exact soft value, distinct from the hard one. */
+const SOME_LIMIT = "ulimit -S -c 4096";
+/** Said when the hard core limit is 0: these tests cannot run, and they fail rather than pass
+ *  without checking anything. */
+const NO_HARD =
+  "the hard core limit is 0: either this machine sets it so, or something earlier in this test run lowered the test process's hard limit (the bug these tests guard against)";
 
 test("for a prompt only the soft limit is lowered, and the restore brings back the exact soft limit and, on Linux, the dumpable flag", () => {
   const out = child(
@@ -84,6 +88,10 @@ test("for a prompt only the soft limit is lowered, and the restore brings back t
   `,
   ) as Record<string, { soft: string; hard: string; dumpable: number | null }>;
   const { before, during, after } = out as Required<typeof out>;
+  expect(before?.hard, NO_HARD).not.toBe("0");
+  // The child really started with a soft limit of its own, above 0 and below its hard limit.
+  expect(before?.soft).not.toBe("0");
+  expect(before?.soft).not.toBe(before?.hard);
   expect(during?.soft).toBe("0");
   expect(during?.hard).toBe(before?.hard); // never lowered
   expect(during?.dumpable).toBe(process.platform === "linux" ? 0 : null);
@@ -106,7 +114,7 @@ test("a restore after the hard limit was lowered fails loudly: the old limits ca
     }
   `,
   );
-  if (out.hard === "0") return; // nothing was lowered: there is nothing to fail
+  expect(out.hard, NO_HARD).not.toBe("0");
   expect(out.restored).toBeUndefined();
   expect(String(out.error)).toContain("setrlimit");
 });

@@ -994,13 +994,15 @@ describe("installing the handlers", () => {
     const before = counts();
     const h = installStopHandlers({ command: "setup", run: null }, deps().d);
     try {
-      const during = await suspendStopHandlers(() => counts());
+      // Stand-in core calls: the real ones would change this test process's own core limits.
+      const cores = promptCores([]);
+      const during = await suspendStopHandlers(() => counts(), cores);
       expect(during).toEqual(before);
       expect(counts()).toEqual(before.map((n) => n + 1));
       await expect(
         suspendStopHandlers(() => {
           throw new Error("boom");
-        }),
+        }, cores),
       ).rejects.toThrow("boom");
       expect(counts()).toEqual(before.map((n) => n + 1));
     } finally {
