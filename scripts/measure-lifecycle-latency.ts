@@ -25,9 +25,12 @@
 // than the noise, where the noise is the larger of the two sides' spreads (highest round median
 // minus lowest) across the repeated rounds. The script prints the numbers it judged by.
 //
-// Safety: every process it starts gets XDG_STATE_HOME under the script's temporary folder, so the
-// real ~/.local/state/styre-processes is never touched; the folder is removed at the end. It fails
-// loudly if the baseline branch is missing or already has the stop handlers.
+// Safety: every process it starts gets XDG_STATE_HOME and TMPDIR under the script's temporary
+// folder, so the real ~/.local/state/styre-processes is never touched and every temporary file lands
+// in that folder, which is removed at the end: after a failure too, and on SIGINT, SIGTERM or SIGHUP
+// (a SIGKILL leaves it in $TMPDIR as styre-latency-*). It fails loudly (exit 1) if the baseline
+// branch is missing or already has the stop handlers. LATENCY_FAIL_AFTER_EXPORT=1 forces a failure
+// after the export, to check that cleanup.
 import {
   existsSync,
   mkdirSync,
@@ -279,9 +282,10 @@ async function workerMicro(root: string, work: string, standin: string) {
 
 // ---- main ----------------------------------------------------------------------------------------
 
+/** A failure of the measurement. It is thrown, never an exit, so `main`'s cleanup always runs. */
+class Failed extends Error {}
 function die(msg: string): never {
-  process.stderr.write(`measure-lifecycle-latency: ${msg}\n`);
-  process.exit(1);
+  throw new Failed(msg);
 }
 
 function parseArgs(argv: string[]): { rounds: number; dispatches: number } {
@@ -356,20 +360,40 @@ function runWorker(args: string[], env: Record<string, string>, timeoutMs: numbe
 async function main(): Promise<void> {
   const { rounds, dispatches } = parseArgs(process.argv.slice(2));
   const work = realpathSync(mkdtempSync(join(tmpdir(), "styre-latency-")));
+  // Ctrl-C, `kill` or a closed terminal: remove the temporary folder, then end by the signal's
+  // status. A running worker gets the terminal's Ctrl-C too; the handler runs once it has ended.
+  const onStop = (sig: NodeJS.Signals, n: number) => () => {
+    process.stderr.write(`measure-lifecycle-latency: stopped by ${sig}\n`);
+    rmSync(work, { recursive: true, force: true });
+    process.exit(128 + n);
+  };
+  const handlers: [NodeJS.Signals, () => void][] = [
+    ["SIGINT", onStop("SIGINT", 2)],
+    ["SIGTERM", onStop("SIGTERM", 15)],
+    ["SIGHUP", onStop("SIGHUP", 1)],
+  ];
+  for (const [sig, h] of handlers) process.on(sig, h);
   try {
     const state = join(work, "state");
     mkdirSync(state);
     const standin = join(work, "standin-claude.sh");
     writeFileSync(standin, STANDIN, { mode: 0o755 });
     const base = exportBaseline(join(work, "baseline"));
+    if (process.env.LATENCY_FAIL_AFTER_EXPORT === "1")
+      die("forced failure (LATENCY_FAIL_AFTER_EXPORT)");
     const head = Bun.spawnSync(["git", "-C", ROOT, "rev-parse", "--short", "HEAD"])
       .stdout.toString()
       .trim();
     const dirty =
       Bun.spawnSync(["git", "-C", ROOT, "status", "--porcelain"]).stdout.toString().trim() !== "";
+    // TMPDIR: every temporary file a worker makes (makeTestDb's database folder, its repositories)
+    // lands inside `work`, which is removed at the end whatever happens.
+    const tmp = join(work, "tmp");
+    mkdirSync(tmp);
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
       XDG_STATE_HOME: state,
+      TMPDIR: tmp,
     };
     const log = (s: string) => process.stdout.write(`${s}\n`);
 
@@ -432,6 +456,7 @@ async function main(): Promise<void> {
     }
     if (!within) process.exitCode = 2;
   } finally {
+    for (const [sig, h] of handlers) process.removeListener(sig, h);
     rmSync(work, { recursive: true, force: true });
   }
 }
@@ -440,8 +465,15 @@ if (process.argv[2] === "--worker") {
   const [, , , kind, root, work, standin, count] = process.argv;
   if (kind === "dispatch") await workerDispatch(root, work, standin, Number(count));
   else if (kind === "micro") await workerMicro(root, work, standin);
-  else die(`unknown worker ${kind}`);
+  else throw new Error(`unknown worker ${kind}`);
   process.exit(0);
 } else {
-  await main();
+  try {
+    await main(); // its `finally` has removed the temporary folder before anything below runs
+  } catch (err) {
+    process.stderr.write(
+      `measure-lifecycle-latency: ${err instanceof Failed ? err.message : String(err)}\n`,
+    );
+    process.exitCode = 1;
+  }
 }
