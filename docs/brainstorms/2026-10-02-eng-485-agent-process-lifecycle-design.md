@@ -1142,3 +1142,36 @@ prompt, all through `suspendStopHandlers`.
 - **Failures are said in one line,** for turning off or for restoring, and setup goes on.
 - **Exit statuses unchanged.** Ctrl-\ at the prompt still ends setup by SIGQUIT (131); Ctrl-C still
   ends it by SIGINT (130).
+
+## Amendment 2026-10-08: Claude Code's nested command group on Linux (R8)
+
+**Found by the live smoke (Task 16) and its review.** On Linux with bash, claude 2.1.294 runs each
+Bash tool command through a shell snapshot that it writes itself, and that snapshot turns job
+control on (`set -o monitor`; it also carries `set -o onecmd`, which no rc file on the test laptop
+sets). So the command is nested one group deeper than §6.1 and §2.2 describe:
+- the tool shell (`bash -c 'source <snapshot> … eval <command>'`) is the agent's direct child and
+  leads a group of its own, as §6.1 says, so R8 still holds;
+- with job control on, that shell starts the command itself (here `sh test.sh`) in a further group,
+  led by the command.
+
+The Mac's zsh snapshot has no such line; there the command stays in the tool shell's group.
+
+**It widens §6.1's known limit (R8).** While the agent lives, a stop still collects the command:
+it is a descendant, and its group is led by a collected descendant. But a background child that the
+command leaves behind after the command itself has exited now sits in the command's own group, whose
+leader is gone, and no collected process leads that group. Without the nesting it would have sat in
+the tool shell's group. Only §9's check reports such a process. The window is small, but the limit
+now covers this group as well.
+
+**What the smoke's R8 check verifies now** (`r8Check` in `scripts/lifecycle-live.ts`). It walks the
+parent chain from the test's process up to the agent and requires that:
+- the agent's direct child on the chain leads a group of its own (R8 itself);
+- every process on the chain sits in a group led by a process on that chain, which is what a stop
+  collects.
+
+It reports whether the test ran in the tool shell's group or in a nested group below it.
+
+**Also seen (Linux, claude 2.1.294):** on Ctrl-\ the agent did not die at once as §2.2 says. Styre's
+handler still found and stopped the agent and two commands, so nothing was orphaned and D13's report
+was not needed there. On macOS (the same version, zsh) the agent died at once, and the leftover line
+of D13 appeared as specified.
