@@ -27,8 +27,9 @@
 # Stopping it: Ctrl-C (or SIGTERM, SIGHUP) stops the container with `docker stop` (the smoke inside
 # gets SIGTERM and stops what it started; docker kills what is left after 10 s), then removes it and
 # the image, and exits non-zero. docker runs in the background and the script waits for it, so the
-# signal is handled at once (a foreground command would hold the trap until it ended, and GNU
-# timeout puts docker in a group of its own, which a terminal's Ctrl-C never reaches). A SIGKILL of
+# signal is handled at once (a foreground command would hold the trap until it ended, and timeout,
+# GNU or the uutils one Ubuntu 26.04 ships, puts docker in a group of its own, which a terminal's
+# Ctrl-C never reaches). A SIGKILL of
 # this script leaves the image (`docker images styre-smoke-lifecycle`) and its build folder in $TMPDIR
 # (or /tmp).
 set -euo pipefail
@@ -57,7 +58,7 @@ fail() {
   exit 1
 }
 command -v docker >/dev/null || fail "docker is not installed"
-command -v timeout >/dev/null || fail "GNU timeout is not installed"
+command -v timeout >/dev/null || fail "timeout (coreutils) is not installed"
 if [ "$mode" = live ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   fail "ANTHROPIC_API_KEY is not set: the live run passes it to the container by name"
 fi
