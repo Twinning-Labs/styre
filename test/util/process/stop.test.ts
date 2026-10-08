@@ -434,6 +434,18 @@ describe("stopTree (simulated)", () => {
     }
   });
 
+  test("a root its probe may not read falls through to the full read, and gets the full stop", async () => {
+    // "Not allowed to look" is never "gone": the table decides, and here it shows the agent alive.
+    const w = new World().add(proc(10, 1, 5), { onTerm: "ignore" }).add(proc(11, 10, 11));
+    const c = counting(w);
+    const deps: StopDeps = { ...c.deps, probe: () => ({ kind: "not-allowed" }) };
+    const rep = await stopTree(ROOT, "graceful", { ...OPTS, deps });
+    expect(c.reads()).toBeGreaterThan(0);
+    expect(w.signals("SIGTERM").sort()).toEqual([10, 11]);
+    expect(w.signals("SIGKILL")).toEqual([10]);
+    expect(rep.survivors).toEqual([]);
+  });
+
   test("an agent still alive is probed, then gets the full stop", async () => {
     const w = new World().add(proc(10, 1, 5), { onTerm: "ignore" }).add(proc(11, 10, 11));
     const c = counting(w);
