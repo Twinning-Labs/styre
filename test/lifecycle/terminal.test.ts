@@ -13,12 +13,13 @@ import {
   existsSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ProcInfo } from "../../src/util/process/proc-table.ts";
 import { makeTicketDb } from "../helpers/lifecycle.ts";
 import {
@@ -35,6 +36,7 @@ import { CTRL_BACKSLASH, CTRL_C, type Pty, shellStatus, underPty } from "./pty.t
 const ROOT = join(import.meta.dir, "../..");
 const FX = join(import.meta.dir, "fixtures");
 const DRIVER = join(FX, "drive-run.ts");
+const WAIT_STATUS = join(FX, "wait-status.pl");
 const OPENING_INT =
   "styre: stopping — cleaning up the agent and its commands before exiting (up to 5s; press Ctrl-C again to force)…\n";
 const opening = (sig: string): string => `styre: received a stop request (${sig}) — cleaning up…\n`;
@@ -77,17 +79,36 @@ interface Driven {
   find: (pid: number) => ProcInfo;
   sleep: string;
   worktree: string;
+  /** The driver's working folder. */
+  home: string;
+  /** With `cores`: the file wait-status.pl writes. */
+  waited: string;
 }
 
 /** The driver in a new terminal, once it has said "ready": everything it started is claimed. */
-async function driven(mode: string, env: Record<string, string> = {}): Promise<Driven> {
+/**
+ * The driver in a new terminal, once it has said "ready": everything it started is claimed. With
+ * `cores`, the terminal allows core files (the soft limit raised to the hard one), the driver works
+ * in a folder of its own (where a plain core_pattern would put a core), and it runs under
+ * fixtures/wait-status.pl, which writes how it ended, WCOREDUMP included, to `waited`.
+ */
+async function driven(
+  mode: string,
+  env: Record<string, string> = {},
+  opts: { cores?: boolean } = {},
+): Promise<Driven> {
   const worktree = realpathSync(mkdtempSync(join(scratch, "wt-")));
+  const home = realpathSync(mkdtempSync(join(scratch, "driver-")));
+  const waited = join(home, "wait-status.json");
   const sleep = sleepLength();
-  const pty = underPty([process.execPath, DRIVER, mode], {
+  const argv = [process.execPath, DRIVER, mode];
+  const pty = underPty(opts.cores ? ["perl", WAIT_STATUS, waited, ...argv] : argv, {
     env: { ...process.env, DRIVE_WORKTREE: worktree, STANDIN_SLEEP: sleep, ...env },
+    cwd: home,
+    cores: opts.cores === true,
   });
   ptys.push(pty);
-  const driver = await pty.command();
+  const command = await pty.command();
   await expectShown(pty, "ready\n", 10_000);
   const tree = ownTree(pty.script);
   const find = (pid: number): ProcInfo => {
@@ -95,7 +116,8 @@ async function driven(mode: string, env: Record<string, string> = {}): Promise<D
     if (p === undefined) throw new Error(`pid ${pid} is not in the terminal's tree`);
     return p;
   };
-  return { pty, driver, tree, find, sleep, worktree };
+  const driver = opts.cores ? find(find(said(pty, "agent")).ppid) : command;
+  return { pty, driver, tree, find, sleep, worktree, home, waited };
 }
 
 /** The status a shell shows for each stop signal (global constraints: by re-raising the signal). */
@@ -136,19 +158,32 @@ describe("the driver in a terminal", () => {
   );
 
   test(
-    "Ctrl-\\: the agent dies at once and its orphaned tool is reported with the exact line, not stopped (D13); the exit is SIGQUIT (131)",
+    "Ctrl-\\: the agent dies at once and its orphaned tool is reported with the exact line, not stopped (D13); the exit is SIGQUIT (131), and no core is dumped even where core files are allowed",
     async () => {
-      const d = await driven("agent");
+      const d = await driven("agent", {}, { cores: true });
       const agent = d.find(said(d.pty, "agent"));
       // Claimed above, while still a descendant: once the agent dies it is no one's child.
       const tool = d.find(said(d.pty, "tool"));
+      // Core files really were allowed, wherever the hard limit allows them at all.
+      const hard = Bun.spawnSync(["sh", "-c", "ulimit -H -c"]).stdout.toString().trim();
+      if (hard !== "0") expect(d.pty.coreLimit()).not.toBe("0");
+      const before = coreFiles(d.driver.pid, d.home);
       d.pty.type(CTRL_BACKSLASH);
-      await endedBy(d.pty, "SIGQUIT");
+      expect(await until(() => existsSync(d.waited), 10_000)).toBe(true);
+      // Ended BY SIGQUIT (131), and the kernel dumped no core: neither to a file nor to a program
+      // core_pattern pipes to (WCOREDUMP covers both).
+      expect(JSON.parse(readFileSync(d.waited, "utf8"))).toEqual({
+        signal: 3,
+        core: false,
+        code: 0,
+      });
+      expect(coreFiles(d.driver.pid, d.home).filter((f) => !before.includes(f))).toEqual([]);
       await expectShown(d.pty, opening("SIGQUIT"));
       await expectShown(
         d.pty,
         `styre: the agent left "sleep ${d.sleep}" (pid ${tool.pid}) running in the worktree; stop it with: kill ${tool.pid} (if it is not yours)\n`,
       );
+      expect(d.pty.output()).not.toContain("could not turn off core dumps");
       expect(isAlive(agent)).toBe(false);
       expect(isAlive(tool)).toBe(true); // reported, not stopped
       expect(killOwned()).toBeGreaterThan(0);
@@ -264,6 +299,39 @@ describe("the driver in a terminal", () => {
     SLOW,
   );
 });
+
+/**
+ * Core files that could belong to process `pid`, where this machine puts cores: on macOS the
+ * kern.corefile path; on Linux, for a core_pattern that pipes to a program, the folders Ubuntu's
+ * apport and systemd-coredump write to (names holding the pid, or "bun"), and for a plain pattern,
+ * its folder (the working folder `cwd` for a relative one). The wait status's WCOREDUMP is the main
+ * check; this one names a file if one was written.
+ */
+function coreFiles(pid: number, cwd: string): string[] {
+  const list = (dir: string, keep: (n: string) => boolean): string[] => {
+    try {
+      return readdirSync(dir)
+        .filter(keep)
+        .map((n) => join(dir, n));
+    } catch {
+      return [];
+    }
+  };
+  const mine = (n: string) => n.includes(String(pid)) || n.includes("bun");
+  if (process.platform === "darwin") {
+    const pattern = Bun.spawnSync(["sysctl", "-n", "kern.corefile"]).stdout.toString().trim();
+    const path = pattern.replace(/%P/g, String(pid));
+    return path.includes("%") ? list(dirname(path), mine) : existsSync(path) ? [path] : [];
+  }
+  const pattern = readFileSync("/proc/sys/kernel/core_pattern", "utf8").trim();
+  if (pattern.startsWith("|")) {
+    return ["/var/lib/apport/coredump", "/var/crash", "/var/lib/systemd/coredump"].flatMap((d) =>
+      list(d, mine),
+    );
+  }
+  const dir = pattern.includes("/") ? dirname(pattern) : cwd;
+  return list(dir, (n) => n.startsWith("core") || mine(n));
+}
 
 /** How many interruption notes the run database holds. */
 function interruptions(path: string): number {

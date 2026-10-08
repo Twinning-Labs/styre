@@ -11,7 +11,7 @@
 // Inside the terminal, fixtures/pty-shell.ts plays the shell: it runs the command as its job,
 // reports the job's pid and how the job ended (a signal, or an exit code), passes SIGHUP on when
 // the terminal closes, as a shell does, and stays until the test ends it. The command runs with
-// core files turned off (`ulimit -c 0`). `close()` closes the terminal for real: it kills
+// core files turned off (`ulimit -c 0`) unless the test asks for them (`cores: true`). `close()` closes the terminal for real: it kills
 // script, which holds the terminal's other side.
 //
 // Every process here is the test's own: script is claimed the moment it starts, the shell and the
@@ -52,6 +52,8 @@ export interface Pty {
   close(): Promise<void>;
   /** How the command ended, once its shell has said so; null if that takes longer than `ms`. */
   ended(ms?: number): Promise<Ended | null>;
+  /** With `cores: true`, the soft core limit the command started with (`ulimit -c`); else null. */
+  coreLimit(): string | null;
   /** Close the keyboard side and remove the status folder. The processes are the caller's to clean
    *  up, through `killOwned`. */
   dispose(): void;
@@ -88,7 +90,7 @@ export function scriptArgv(argv: string[], platform: NodeJS.Platform = process.p
  */
 export function underPty(
   argv: string[],
-  opts: { env: Record<string, string | undefined>; cwd?: string },
+  opts: { env: Record<string, string | undefined>; cwd?: string; cores?: boolean },
 ): Pty {
   const dir = mkdtempSync(join(tmpdir(), "styre-pty-"));
   const status = join(dir, "status");
@@ -97,18 +99,21 @@ export function underPty(
   let keyboard: number | null = writeEnd;
   let proc: Bun.Subprocess<number, "pipe", "pipe">;
   try {
-    // No core files: a re-raised SIGQUIT (Ctrl-\) dumps core where the limit allows it, which in a
-    // container meant gigabytes per run and a timed out test (review M1).
-    proc = Bun.spawn(
-      scriptArgv(["sh", "-c", 'ulimit -c 0; exec "$@"', "sh", process.execPath, SHELL, ...argv]),
-      {
-        cwd: opts.cwd,
-        env: { ...opts.env, PTY_STATUS: status, SHELL: "/bin/sh" },
-        stdin: readEnd,
-        stdout: "pipe",
-        stderr: "pipe",
-      },
-    );
+    // Core files are off by default. Styre itself turns them off before its SIGQUIT re-raise (the
+    // 2026-10-08 amendment), but anything else that crashes under a test (Bun, a fixture) would
+    // still dump: in a container a Bun core was gigabytes, written to the host's apport folder, and
+    // timed the test out (review M1). `cores: true` raises the soft limit to the hard one instead
+    // (the Ctrl-\ test proves Styre writes none even then) and records the limit it set.
+    const limit = opts.cores
+      ? 'ulimit -c "$(ulimit -H -c)"; ulimit -c > "$PTY_STATUS.corelimit"; exec "$@"'
+      : 'ulimit -c 0; exec "$@"';
+    proc = Bun.spawn(scriptArgv(["sh", "-c", limit, "sh", process.execPath, SHELL, ...argv]), {
+      cwd: opts.cwd,
+      env: { ...opts.env, PTY_STATUS: status, SHELL: "/bin/sh" },
+      stdin: readEnd,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
   } catch (err) {
     closeSync(writeEnd);
     throw err;
@@ -169,6 +174,10 @@ export function underPty(
     async close() {
       if (!signalOwned(claimed, "SIGKILL")) throw new Error("pty: script could not be signalled");
       await proc.exited;
+    },
+    coreLimit() {
+      const f = `${status}.corelimit`;
+      return existsSync(f) ? readFileSync(f, "utf8").trim() : null;
     },
     async ended(ms = 10_000) {
       const ok = await until(() => existsSync(status), ms);
