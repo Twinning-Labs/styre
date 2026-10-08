@@ -387,6 +387,7 @@ function handlerDeps(onReraise: () => void = () => {}) {
     },
     now: () => Date.now(),
     leftovers: () => [],
+    noCore: () => {},
   };
   return { out, notes, d };
 }

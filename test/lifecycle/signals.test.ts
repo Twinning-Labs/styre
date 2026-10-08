@@ -64,6 +64,7 @@ function deps(): { out: Out; d: HandlerDeps } {
       },
       now: () => Date.now(),
       leftovers: () => [],
+      noCore: () => {},
     },
   };
 }
@@ -495,6 +496,42 @@ describe("the deadline and the exit", () => {
       "reraise SIGQUIT",
       "exit 131",
     ]);
+  });
+
+  test("Ctrl-\\: core dumps are turned off just before the SIGQUIT re-raise, and for no other signal", async () => {
+    const codes: Record<string, number> = { SIGTERM: 143, SIGHUP: 129, SIGQUIT: 131, SIGINT: 130 };
+    for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
+      door.__resetForTests();
+      __resetSignalsForTests();
+      const order: string[] = [];
+      const { d } = deps();
+      d.noCore = () => order.push("no core");
+      d.reraise = (s) => order.push(`reraise ${s}`);
+      d.exit = (c) => order.push(`exit ${c}`);
+      await handleStopSignal(
+        sig,
+        { command: "run", run: null, releaseLock: () => order.push("lock") },
+        d,
+      );
+      expect(order).toEqual(
+        sig === "SIGQUIT"
+          ? ["lock", "no core", "reraise SIGQUIT", "exit 131"]
+          : ["lock", `reraise ${sig}`, `exit ${codes[sig]}`],
+      );
+    }
+  });
+
+  test("core dumps that cannot be turned off are said in one line, and SIGQUIT is still re-raised", async () => {
+    const { out, d } = deps();
+    d.noCore = () => {
+      throw new Error("setrlimit failed");
+    };
+    await handleStopSignal("SIGQUIT", { command: "run", run: null }, d);
+    expect(out.err.filter((l) => l.includes("core"))).toEqual([
+      "styre: could not turn off core dumps before exiting: setrlimit failed\n",
+    ]);
+    expect(out.reraised).toEqual(["SIGQUIT"]);
+    expect(out.exited).toEqual([131]);
   });
 
   test("a failing analytics shutdown or lock release does not stop the exit", async () => {

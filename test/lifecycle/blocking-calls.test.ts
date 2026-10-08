@@ -397,6 +397,7 @@ test("a held removal that fails during a stop is said by the handler, with the w
         exit: () => {},
         now: () => Date.now(),
         leftovers: () => [],
+        noCore: () => {},
       },
     );
   } finally {
@@ -532,6 +533,7 @@ function handlerDeps(err: string[], shift = 0) {
     exit: () => {},
     now: () => Date.now() + (readings++ === 0 ? 0 : shift),
     leftovers: () => [],
+    noCore: () => {},
   };
 }
 
