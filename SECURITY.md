@@ -163,12 +163,19 @@ messages and exit statuses are in [`runtime-parameters.md`](docs/architecture/ru
 ### Cost
 
 Measured on macOS arm64 with a stand-in agent that answers at once
-(`scripts/measure-lifecycle-latency.ts`, 5 rounds of 50 dispatches per side, against the code before
-ENG-485). Per dispatch: within noise in five runs on 2026-10-08 (median differences +1.00, +0.03,
-+0.23, +0.68 and +0.37 ms, on a dispatch of about 48 to 49 ms). What the door adds to a dispatch is
-the launch record, written and removed (about 0.1 ms each), and one probe of the agent's own entry
-when it has exited; the whole process table is read only when the agent is still there. Per
-effectful step, outside the dispatch: recording the branch head where the step started is one
+(`scripts/measure-lifecycle-latency.ts`, rounds of 50 dispatches per side, against the code before
+ENG-485). **A normal dispatch costs about 0.5 ms more**, on a dispatch of about 48 ms. Paired by
+round over five runs on 2026-10-08, the new code was slower in 22 of 25 rounds, by +0.48 ms on
+average (standard error 0.12 ms); an independent rerun at the same load found +0.56 and +0.55 ms in
+two of three runs. The operator accepted this cost on 2026-10-08. Where it goes:
+
+- the launch record, written right after the agent starts and removed after it ends: about 0.23 ms;
+- the git calls around the dispatch, which now go through the door: about 0.25 ms, measured with no
+  agent at all, not traced call by call;
+- one probe of the agent's own entry once it has exited, and `launch()`'s other steps: well under
+  0.1 ms. The whole process table is read only when the agent is still there.
+
+Per effectful step, outside the dispatch: recording the branch head where the step started is one
 `git rev-parse` (about 5 to 6 ms), and starting the background leftover check delays the next step's
 start by about 0.7 to 0.9 ms (the check itself, about 80 to 90 ms with macOS `lsof`, runs beside the
 next step). The sweep over an empty records folder takes about 10 µs.

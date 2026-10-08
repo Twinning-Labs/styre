@@ -245,8 +245,9 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
         const proc = h.proc;
         spawned = h;
         const kill = () => {
-          // Startup refusal: no tool has run yet, so nothing is lost by a forced stop. A failure
-          // here is not swallowed: finish() below stops what is left and reports it.
+          // Startup refusal: no tool has run yet, so nothing is lost by a forced stop. This stop,
+          // made while the agent is alive, is what reaches its tree. Its result is not awaited here;
+          // finish() below runs once the agent has exited, and by then it can only release the record.
           void h.stop("forced").catch(() => {});
         };
         // ENG-476: confinement is checked the moment the CLI reports it, not after the agent has
@@ -268,9 +269,11 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
           return transportFailure("dispatch timed out", true);
         }
         const exitCode = await proc.exited;
-        // Stop whatever the agent left running before reading its output: a leftover holding the
-        // pipes would otherwise cost the whole drain bound, and one that outlives the run is the
-        // orphan this ticket exists to remove.
+        // The agent has exited and Bun has reaped it, so finish() stops only what is still linked
+        // to it (nothing, after a normal exit: what it left running was reparented when it exited)
+        // and releases the launch record. Such leftovers are not stopped here; the leftover check
+        // after the step reports them if they run in the worktree (ENG-485 sections 6.3 and 9). A
+        // leftover holding the output pipes costs at most the drain bound below.
         reportStop(h, await h.finish());
         if (h.interrupted) {
           stdoutRead.cancel();

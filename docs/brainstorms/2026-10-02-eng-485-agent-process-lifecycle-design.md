@@ -1215,3 +1215,17 @@ original criterion is met as written.
 pays one `git rev-parse` to record the branch head where it started (about 5 to 6 ms), and starting
 the background leftover check delays the next step's start by about 0.7 to 0.9 ms (the check, about
 80 to 90 ms with macOS `lsof`, runs beside the next step).
+
+**Third latency correction, 2026-10-08 (Task 17 re-review, B1).** The note above says the dispatch
+difference is "within noise in every run", "so the original criterion is met as written". That does
+not hold. The script's noise rule (the spread of five round medians) widens with the machine's load,
+and those runs were made at a load average of about 4. Paired by round, the same five runs show the
+new code slower in 22 of 25 rounds, by +0.48 ms on average (standard error 0.12 ms, about four
+standard errors from zero). An independent rerun at the same load found +0.56 and +0.55 ms, outside
+the script's own noise band, in two of three runs. So about **0.5 ms per dispatch remains, measured**:
+the launch record written and removed (about 0.23 ms), the git calls around the dispatch, which now go
+through the door (about 0.25 ms, measured with no agent at all, not traced call by call), and the
+probe and `launch()`'s other steps (well under 0.1 ms). The operator accepted about 0.5 ms per
+dispatch on 2026-10-08, and the ENG-485 criterion was amended to say so. The per step costs above are
+unchanged: about 5 to 6 ms per effectful step for one `git rev-parse`, and about 0.7 to 0.9 ms before
+the next step starts while the leftover check is launched.

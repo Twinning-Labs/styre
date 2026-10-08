@@ -23,7 +23,10 @@
 //
 // The verdict on dispatches: "within noise" when the difference of the pooled medians is no larger
 // than the noise, where the noise is the larger of the two sides' spreads (highest round median
-// minus lowest) across the repeated rounds. The script prints the numbers it judged by.
+// minus lowest) across the repeated rounds. The script prints the numbers it judged by. Caution
+// (ENG-485 Task 17): this band widens with the machine's load and then hides a fixed cost of about
+// 0.5 ms. Also compare the rounds in pairs (each round runs both sides back to back) across several
+// runs: the per round differences, how many are positive, and their mean and standard error.
 //
 // Safety: every process it starts gets XDG_STATE_HOME and TMPDIR under the script's temporary
 // folder, so the real ~/.local/state/styre-processes is never touched and every temporary file lands

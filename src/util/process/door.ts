@@ -63,7 +63,10 @@ export interface LaunchHandle {
   interrupted: boolean;
   /** Stop the launch. The record is removed only when nothing is left alive (section 5.3). */
   stop(how: "graceful" | "forced"): Promise<StopReport>;
-  /** Stop whatever is left of the launch (graceful), then release the record if nothing survives. */
+  /** Stop what is left of the launch (graceful), then release the record if nothing survives. For a
+   *  group: whatever is still in it. For an agent: whatever is still linked to it, which is nothing
+   *  once it has exited and been reaped (its children were reparented); leftovers are then only
+   *  reported, by the leftover check. */
   finish(): Promise<StopReport>;
 }
 
@@ -156,8 +159,9 @@ export function launch(spec: LaunchSpec): LaunchHandle {
     context,
     interrupted: false,
     stop: async (how) => release(await doStop(how)),
-    // Both kinds stop what is left, so a record is never released while anything it covers is alive
-    // (section 5.3). An agent or a group that already exited returns at once.
+    // Both kinds stop what is left, so a record is never released while anything the stop can still
+    // reach is alive (section 5.3): for an agent, only what is still linked to it. An agent already
+    // reaped, or a group already empty, returns at once.
     finish: async () => release(await doStop("graceful")),
   };
   live.add(handle);

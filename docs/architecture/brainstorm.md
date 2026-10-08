@@ -459,6 +459,8 @@ Status legend: **DECIDED** (confirmed by operator) · **RATIFIED** (proposed, no
 
 - **2026-10-08 — ENG-485 cost, corrected.** The entry above gives "about 0.9 ms per dispatch" as the accepted cost, and its basis included a false claim: that the one table read in `finish()` finds what an agent left running after a successful exit. It cannot (the agent is already reaped; only the leftover check reports such processes, in the worktree). `stopTree` now probes the agent's own entry first and reads the table only while the agent is still there; measured again, the per dispatch difference is within noise. Per effectful step, outside the dispatch: one `git rev-parse` for the step's starting branch head (about 5 to 6 ms), and about 0.7 to 0.9 ms before the next step starts while the leftover check is launched. Details: the design's correction notes of 2026-10-08.
 
+- **2026-10-08 — ENG-485 cost, corrected again.** The entry above says the per dispatch difference is "within noise". It is not: paired by round, the new code was slower in 22 of 25 rounds by +0.48 ms (standard error 0.12 ms), and an independent rerun found +0.56 and +0.55 ms. About 0.5 ms per dispatch is measured and accepted by the operator: the launch record written and removed (about 0.23 ms) and the git calls around the dispatch, which now go through the door (about 0.25 ms, not traced call by call). Per effectful step, unchanged: about 5 to 6 ms for one `git rev-parse`, and about 0.7 to 0.9 ms before the next step starts while the leftover check is launched. Details: the design's third latency correction.
+
 ---
 
 ## 12. The SQLite schema `[SHIPPED 2026-06-19 → docs/architecture/schema.sql]`

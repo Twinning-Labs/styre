@@ -257,6 +257,14 @@ after a Styre that was killed. The security view, with every known limit, is in
   an exit status that already says something (`75`, `65`, `64`, `1`, or an error's own code). The
   check also runs when the command failed.
 
+### Cost
+
+A normal dispatch costs about 0.5 ms more than before ENG-485 (the launch record, and the git calls
+going through the door), and each effectful step about 5 to 6 ms for one `git rev-parse` plus about
+0.7 to 0.9 ms before the next step starts while the leftover check is launched. Measured on macOS
+arm64 with `scripts/measure-lifecycle-latency.ts`; the evidence and the breakdown are in
+[`SECURITY.md`](../../SECURITY.md#cost).
+
 ### Exit statuses on a signal
 
 The handler ends Styre by re-raising the first signal it received, so shells and CI see
