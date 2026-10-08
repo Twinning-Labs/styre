@@ -209,31 +209,8 @@ describe("an orphan whose owner is dead", () => {
     expect(files()).toEqual([]);
   });
 
-  test("a group whose leader has exited still stands for the launch while a member remains (section 5.4)", async () => {
-    const owner = await deadOwner();
-    // The leader starts a member in its group and exits; the member stays in the group.
-    const leader = spawn(["sh", "-c", `sleep ${NAP} & echo started; sleep 0.3`], {
-      detached: true,
-    });
-    const l = startOf(leader.pid);
-    let member: number | undefined;
-    expect(
-      await until(() => {
-        member = listProcesses().find(
-          (p) => p.pgid === leader.pid && p.pid !== leader.pid && p.state !== "zombie",
-        )?.pid;
-        return member !== undefined;
-      }),
-    ).toBe(true);
-    mine.push(member as number);
-    await leader.exited;
-    expect(await until(() => probe(leader.pid).kind === "gone")).toBe(true);
-    writeRecord(rec(l, owner, { kind: "group", command: "make" }));
-    const r = await sweepOrphans({ stderr: () => {} });
-    expect(r.stopped.map((x) => x.pid)).toEqual([l.pid]);
-    expect(await until(() => isGone(member as number))).toBe(true);
-    expect(files()).toEqual([]);
-  });
+  // A group whose leader has exited is reported, never stopped (amendment 2026-10-09):
+  // test/lifecycle/sweep-leaderless.test.ts.
 
   test("an orphan that had already exited: nothing is stopped or said, the record is removed", async () => {
     const owner = await deadOwner();
@@ -383,7 +360,7 @@ describe("what the sweep leaves alone", () => {
     const before = files();
     const out = collect();
     const r = await sweepOrphans({ stderr: out.stderr });
-    expect(r).toEqual({ stopped: [], failed: [], stale: 0, leftoverLines: [] });
+    expect(r).toEqual({ stopped: [], failed: [], stale: 0, reported: [], leftoverLines: [] });
     expect(files()).toEqual(before);
     expect(out.lines.sort()).toEqual(
       [
@@ -399,7 +376,7 @@ describe("what the sweep leaves alone", () => {
     writeFileSync(join(state, "styre-processes"), "");
     const out = collect();
     const r = await sweepOrphans({ stderr: out.stderr });
-    expect(r).toEqual({ stopped: [], failed: [], stale: 0, leftoverLines: [] });
+    expect(r).toEqual({ stopped: [], failed: [], stale: 0, reported: [], leftoverLines: [] });
     expect(out.lines.length).toBe(1);
     expect(out.lines[0]).toStartWith(
       `styre: could not read the launch records in ${processesDir()} (`,
@@ -608,7 +585,7 @@ describe("claims", () => {
     try {
       const out = collect();
       const r = await sweepOrphans({ stderr: out.stderr });
-      expect(r).toEqual({ stopped: [], failed: [], stale: 0, leftoverLines: [] });
+      expect(r).toEqual({ stopped: [], failed: [], stale: 0, reported: [], leftoverLines: [] });
       expect(out.lines).toEqual([]);
     } finally {
       scan.mockRestore();

@@ -76,9 +76,10 @@ messages and exit statuses are in [`runtime-parameters.md`](docs/architecture/ru
   identity, and stops the orphan.
 - **Never someone else's process.** A stop never expands Styre's own process group, the group of the
   script that started Styre, or any group not led by one of the agent's own processes. A pid that now
-  belongs to another program (a different start time) is left alone and reported. On Linux, a
-  record from before the last restart stops nothing (the boot ID differs). Processes Styre may not
-  inspect are reported, never treated as gone.
+  belongs to another program (a different start time) is left alone and reported. An orphaned
+  command group whose leader has exited is reported, never stopped: without its leader nothing
+  confirms the group is still that command's. On Linux, a record from before the last restart stops
+  nothing (the boot ID differs). Processes Styre may not inspect are reported, never treated as gone.
 - **Launch records hold the command text.** Each record stores the first 200 characters of the
   launch's command line, in a file only your user can read. Styre passes the agent's prompt on stdin,
   never on the command line; keep secrets out of declared commands too.
@@ -93,6 +94,11 @@ messages and exit statuses are in [`runtime-parameters.md`](docs/architecture/ru
   to stop it, and never stops it. Something left running outside the worktree is not found.
 - **`kill -9` is cleaned up later, not at once.** The orphaned agent keeps running, and may keep
   billing, until the next Styre command on the machine runs its sweep.
+- **An orphaned command group whose leader has exited needs you to act.** After a `kill -9`, a
+  command's group is normally still led by the command's own shell, and the next Styre command stops
+  it. If that leader has exited too, the group's id could by then belong to an unrelated program that
+  daemonized, so the sweep stops nothing: it names each process still in the group with `kill <pid>`
+  to stop it, and removes the launch record. Stopping them is your call.
 - **The unrecorded window.** Between the spawn and the record write there are a few milliseconds. A
   `kill -9` landing there leaves an orphan with no record, which nothing will stop.
 - **Detached leftovers are reported, not stopped.** A process the agent left running in its worktree

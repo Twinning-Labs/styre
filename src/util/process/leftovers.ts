@@ -233,7 +233,7 @@ async function asyncCwds(a: ReadArgs): Promise<Cwds> {
 export function commandFromCmdline(raw: string): string {
   return raw.replace(/\0+$/, "").split("\0").join(" ").slice(0, 120);
 }
-function commandOf(pid: number): string {
+export function commandOf(pid: number): string {
   if (process.platform === "linux") {
     try {
       const text = commandFromCmdline(readFileSync(`/proc/${pid}/cmdline`, "utf8"));

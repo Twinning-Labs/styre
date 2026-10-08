@@ -2,11 +2,19 @@ import { join } from "node:path";
 import { GRACE_MS, describeProcess, selfIdentity } from "./door.ts";
 import {
   LEFTOVER_TIMEOUT_MS,
+  commandOf,
   findLeftoversOrReason,
   formatLeftover,
   skippedLine,
 } from "./leftovers.ts";
-import { type Probe, bootId, listProcesses, probe, tokenValue } from "./proc-table.ts";
+import {
+  type Probe,
+  type ProcInfo,
+  bootId,
+  listProcesses,
+  probe,
+  tokenValue,
+} from "./proc-table.ts";
 import {
   type LaunchRecord,
   type Listed,
@@ -24,7 +32,9 @@ import { type StopReport, groupMembers, stopGroup, stopTree } from "./stop.ts";
  * The sweep (ENG-485 section 8). Every Styre command runs it first, inside its error boundary. It
  * stops what an earlier Styre left running when it was killed with `kill -9`, using only the launch
  * records on disk: never a live run's launches, never a process whose identity does not match its
- * record, never a file whose name is not an exact record name. Everything it says goes to stderr.
+ * record, never a file whose name is not an exact record name. A command group whose leader has
+ * exited cannot be confirmed (amendment 2026-10-09): its remaining members are reported, with the
+ * command that stops each, and never signalled. Everything it says goes to stderr.
  */
 export interface SweepResult {
   /** Orphans this sweep stopped (it signalled at least one of their processes). */
@@ -33,6 +43,9 @@ export interface SweepResult {
   failed: LaunchRecord[];
   /** Records removed without stopping anything: a reused pid, or a record from before a restart. */
   stale: number;
+  /** Orphaned command groups whose leader had exited: their remaining members were named, never
+   *  signalled, and the records removed (amendment 2026-10-09). */
+  reported: LaunchRecord[];
   /** The leftover check's lines (section 9.4), already printed. */
   leftoverLines: string[];
 }
@@ -68,6 +81,7 @@ type Identity =
   | { kind: "same" } // still the recorded process or group: stop it
   | { kind: "exited" } // gone (or a zombie): nothing to stop
   | { kind: "reused"; pid: number } // the pid now belongs to another program: leave it alone
+  | { kind: "leaderless"; members: ProcInfo[] } // a group with no leader: report, never stop
   | { kind: "unknown" }; // not allowed to look: keep the record
 
 function identify(r: LaunchRecord): Identity {
@@ -77,11 +91,14 @@ function identify(r: LaunchRecord): Identity {
   if (r.kind === "agent") {
     return p.kind === "alive" && p.info.state !== "zombie" ? { kind: "same" } : { kind: "exited" };
   }
-  // A group: its leader, even a zombie, still holds the pid and so the group id. A group whose
-  // leader has exited stands for the launch while any member remains: POSIX does not hand out a pid
-  // still in use as a group id (section 5.4).
+  // A group: its leader, even a zombie, still holds the pid and so the group id, and its start time
+  // matched above. A group whose leader has exited has nothing left to check: once the leader's
+  // pid is free again it can be handed to a process that daemonizes (setsid in an intermediate
+  // child that then exits), whose group then has that id and no leader. So such a group is never
+  // stopped; its members are reported (amendment 2026-10-09, which changes section 5.4).
   if (p.kind === "alive") return { kind: "same" };
-  return groupMembers(r.pid, listProcesses()).length > 0 ? { kind: "same" } : { kind: "exited" };
+  const members = groupMembers(r.pid, listProcesses());
+  return members.length > 0 ? { kind: "leaderless", members } : { kind: "exited" };
 }
 
 /**
@@ -128,7 +145,7 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
         /* a closed stderr must not fail the command */
       }
     });
-  const res: SweepResult = { stopped: [], failed: [], stale: 0, leftoverLines: [] };
+  const res: SweepResult = { stopped: [], failed: [], stale: 0, reported: [], leftoverLines: [] };
   const dir = processesDir();
 
   // Normally the folder is missing or empty: this one directory read is the whole cost.
@@ -159,6 +176,8 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
    *  yet is never reported as a leftover of another). */
   const checks: LaunchRecord[] = [];
   const done = new Set<string>();
+  /** Processes already named by this sweep, so the leftover check does not name them again. */
+  const reported = new Set<number>();
 
   for (const l of scan.listed) {
     const base = sameBase(l);
@@ -206,6 +225,20 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
         );
         removeRecord(r);
         res.stale++;
+        if (r.worktree) checks.push(r);
+        continue;
+      }
+      if (id.kind === "leaderless") {
+        // Never signalled: nothing can confirm the group is still this launch's. Each member is
+        // named with the command that stops it, and the record goes (operator decision 2026-10-09).
+        for (const m of id.members) {
+          reported.add(m.pid);
+          say(
+            `styre: an orphaned command "${r.command}" from ${who(r)} (pid ${r.pid}) left "${commandOf(m.pid)}" (pid ${m.pid}) running in its process group; its leader has exited, so Styre cannot confirm the group is still that command's and stopped nothing; if the process is a leftover of that command, stop it with: kill ${m.pid}\n`,
+          );
+        }
+        removeRecord(r);
+        res.reported.push(r);
         if (r.worktree) checks.push(r);
         continue;
       }
@@ -264,7 +297,6 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
     if (prev === undefined || tokenValue(r.startedAt) < tokenValue(prev))
       since.set(wt, r.startedAt);
   }
-  const reported = new Set<number>();
   for (const [worktree, from] of since) {
     let found: ReturnType<typeof findLeftoversOrReason>;
     try {

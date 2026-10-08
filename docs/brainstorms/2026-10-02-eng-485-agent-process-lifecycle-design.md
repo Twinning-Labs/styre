@@ -1229,3 +1229,36 @@ probe and `launch()`'s other steps (well under 0.1 ms). The operator accepted ab
 dispatch on 2026-10-08, and the ENG-485 criterion was amended to say so. The per step costs above are
 unchanged: about 5 to 6 ms per effectful step for one `git rev-parse`, and about 0.7 to 0.9 ms before
 the next step starts while the leftover check is launched.
+
+## Amendment 2026-10-09: an orphaned group whose leader has exited is reported, never stopped
+
+**Operator decision, after the final review (reviewer C, I2).** When the sweep (§8) finds a
+`group` record whose leader is gone while members of a group with that id remain, it reports each
+remaining member, with the exact command to stop it, removes the record, and signals nothing. This
+changes §5.4's rule "a group whose leader has exited stands for the launch while any member remains"
+and §8 step 3 for that case. §5.4's identity check, and §8, are otherwise unchanged: a record whose
+leader is still there with the recorded start time (alive or a zombie) is stopped as before, and a
+reused pid is still left alone and reported.
+
+**Why.** §5.4's argument covers only the time while the original group still exists: POSIX does not
+hand out a pid that is still in use as a group id. It says nothing about the time after the group has
+emptied. The record stays on disk until the next Styre command, and in that time the pid can be
+handed out again, to a process that daemonizes the usual way (setsid in an intermediate child, which
+forks the daemon and exits: gpg-agent, ssh-agent, `pg_ctl`, a development server with a daemon
+option). That daemon then sits in a group whose id is the record's pid and whose leader is gone,
+which is exactly what a real leaderless orphan looks like. With the leader gone there is no start
+time left to check, so nothing tells the two apart. Reviewer C reproduced it on macOS with correct
+code: the sweep stopped an unrelated `sleep` that sat in such a group. Stopping it broke the promise
+that Styre never stops someone else's process. Reporting keeps that promise; the cost is that a
+real orphaned group whose leader has exited needs the operator to act on the lines.
+
+**What is said,** one line for each remaining member, on stderr
+(`docs/architecture/runtime-parameters.md` holds it exactly):
+`styre: an orphaned command "<command>" from <ident> (pid <pid>) left "<command>" (pid <pid>) running in its process group; its leader has exited, so Styre cannot confirm the group is still that command's and stopped nothing; if the process is a leftover of that command, stop it with: kill <pid>`.
+A member named this way is not named again by the leftover check of the same sweep.
+
+**Not affected.** A stop of a live run's own command group (a timeout, a stop signal, a command that
+exits with members still in its group) still stops the whole group: that Styre launched the group and
+has held it since, so its id cannot have been handed to another program. The usual `kill -9` case is
+also unaffected: a command's leader (`sh -c …`) normally outlives Styre, so the sweep still finds it
+with its start time and stops the group.

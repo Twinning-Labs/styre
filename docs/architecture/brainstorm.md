@@ -461,6 +461,8 @@ Status legend: **DECIDED** (confirmed by operator) · **RATIFIED** (proposed, no
 
 - **2026-10-08 — ENG-485 cost, corrected again.** The entry above says the per dispatch difference is "within noise". It is not: paired by round, the new code was slower in 22 of 25 rounds by +0.48 ms (standard error 0.12 ms), and an independent rerun found +0.56 and +0.55 ms. About 0.5 ms per dispatch is measured and accepted by the operator: the launch record written and removed (about 0.23 ms) and the git calls around the dispatch, which now go through the door (about 0.25 ms, not traced call by call). Per effectful step, unchanged: about 5 to 6 ms for one `git rev-parse`, and about 0.7 to 0.9 ms before the next step starts while the leftover check is launched. Details: the design's third latency correction.
 
+- **2026-10-09 — ENG-485: an orphaned command group whose leader has exited is reported, never stopped.** Operator decision after the final review. The 2026-10-08 entry says the sweep stops the orphan after `kill -9`; for a command group whose leader has exited too, it no longer does. With the leader gone nothing confirms the group is still that command's: its pid may have been handed to a program that daemonized and left a group with that id (reproduced by the review). The sweep names each remaining process with `kill <pid>`, removes the record, and signals nothing, so Styre still never stops someone else's process. Details: the design's amendment of 2026-10-09.
+
 ---
 
 ## 12. The SQLite schema `[SHIPPED 2026-06-19 → docs/architecture/schema.sql]`

@@ -341,6 +341,7 @@ styre: could not start the leftover check (<why>)
 ```
 styre: stopped an orphaned agent from <ident> (pid <pid>), left running when Styre was force quit
 styre: stopped an orphaned command "<command>" from <ident> (pid <pid>), left running when Styre was force quit
+styre: an orphaned command "<command>" from <ident> (pid <pid>) left "<command>" (pid <pid>) running in its process group; its leader has exited, so Styre cannot confirm the group is still that command's and stopped nothing; if the process is a leftover of that command, stop it with: kill <pid>
 styre: could not stop <command> (pid <pid>); stop it with: kill -9 <pid>
 styre: could not stop the orphaned <agent or command> from <ident> (pid <pid>): <why>; its launch record was kept, so the next Styre command tries again
 styre: pid <pid> from <ident> now belongs to another program, so it was left alone and its launch record removed
@@ -354,6 +355,12 @@ styre: could not read this process's own identity (<why>), so no orphans were st
 
 The sweep stops orphans one at a time, each with its own grace period of up to 5 s. A record whose
 stop failed is kept, so the next Styre command tries again.
+
+An orphaned command group whose leader has exited is never stopped: once the leader is gone,
+nothing confirms the group is still that command's (its pid may have been handed to another program
+that left a group with the same id). The sweep names each process still in the group, one line each,
+with `kill <pid>` to stop it, removes the record, and signals nothing. The first `<command>` is the
+launch's command from its record; the second is the remaining process's own command line.
 
 **Resume, `--fresh` and `clean`** (`src/util/process/interruption.ts`):
 
