@@ -11,7 +11,8 @@
 # process list (`docker top`), it runs `docker stop` and checks:
 #   - `docker inspect` reports ExitCode 143, and the stop took well under docker's 10 s timeout (so
 #     the exit was Styre's, not docker's SIGKILL);
-#   - the log holds Styre's stop request line and its line saying it stopped the agent, and no line
+#   - the log holds Styre's stop request line and its line saying it stopped the agent and at least
+#     one of its commands (the tool, which the wait above saw), and no line
 #     saying something could not be stopped. When pid 1 exits, the kernel ends every process left in
 #     the container, so "no stand-in remains" is shown by Styre having stopped it itself first.
 # The image and the container are removed whatever happens.
@@ -102,7 +103,9 @@ echo "$log" | sed 's/^/  log: /'
 [ "$took_ms" -lt 8000 ] || fail "docker stop took ${took_ms} ms: Styre did not end the container itself"
 grep -qF "styre: received a stop request (SIGTERM) — cleaning up…" <<<"$log" ||
   fail "no stop request line in the log"
-grep -qE "^styre: stopped the agent \(pid [0-9]+\) and [0-9]+ of its commands\.$" <<<"$log" ||
-  fail "no line saying the agent was stopped"
+# At least one command: the stand-in's tool, which exists, was stopped by Styre, not by the kernel
+# when pid 1 exited.
+grep -qE "^styre: stopped the agent \(pid [0-9]+\) and [1-9][0-9]* of its commands\.$" <<<"$log" ||
+  fail "no line saying the agent and at least one of its commands were stopped"
 if grep -qE "could not (stop|confirm)" <<<"$log"; then fail "something was left running"; fi
 echo "container-first-process: PASS"
