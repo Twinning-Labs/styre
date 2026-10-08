@@ -3,7 +3,7 @@
 // here is installed with an injected re-raise and exit, so no test sends a real signal to the test
 // process or ends it: `process.emit` calls the listeners only.
 //
-// The pseudo terminal test of Ctrl-C at a setup prompt lives in Task 15, with its pty helper (R4).
+// The pseudo terminal test of Ctrl-C at a setup prompt is in terminal.test.ts, with its pty helper (R4).
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";

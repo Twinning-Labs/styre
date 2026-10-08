@@ -1042,8 +1042,9 @@ describe("a real process with the handlers installed", () => {
   }, 20_000);
 
   test("after its output pipes have closed, the writes are harmless and SIGHUP still ends it by SIGHUP", async () => {
-    // This closes the child's output PIPES, not a terminal: the closed terminal case needs a pty
-    // and is Task 15b's. In Bun 1.4.2 cancelling both readers closes the read ends: the handler's
+    // This closes the child's output PIPES, not a terminal. The case where a real terminal closes
+    // (pty closed, SIGHUP, writes failing with EIO) is in terminal.test.ts ("the terminal really
+    // closes"). In Bun 1.4.2 cancelling both readers closes the read ends: the handler's
     // first line after the SIGHUP then fails with EPIPE in the child, which the child records, and
     // the test asserts it, so the case is really exercised (if a Bun release kept the pipes open,
     // this fails instead of passing without a failed write).
