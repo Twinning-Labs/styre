@@ -68,23 +68,34 @@ describe("folders that code under test makes in the temp root and keeps", () => 
   });
 });
 
-test("folders made before a failing call are still tracked", async () => {
+describe("folders made before a failing call", () => {
   let made = "";
-  await expect(
-    trackTempEntriesMadeBy("styre-kept-", async () => {
-      made = mkdtempSync(join(tmpdir(), "styre-kept-"));
-      throw new Error("boom");
-    }),
-  ).rejects.toThrow("boom");
-  expect(existsSync(made)).toBe(true);
+  test("are tracked", async () => {
+    await expect(
+      trackTempEntriesMadeBy("styre-kept-", async () => {
+        made = mkdtempSync(join(tmpdir(), "styre-kept-"));
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+    expect(existsSync(made)).toBe(true);
+  });
+  test("are gone by the next test", () => {
+    expect(made).not.toBe("");
+    expect(existsSync(made)).toBe(false);
+  });
 });
 
-/** Run one fixture file as its own `bun test` (which loads the preload from bunfig.toml) with
- *  TMPDIR pointed at an empty folder, so the folder shows what the nested run left behind. */
-function runFixture(name: string): { exitCode: number; output: string; leftBehind: string[] } {
+/** Run one fixture file as its own `bun test` with TMPDIR pointed at an empty folder, so the
+ *  folder shows what the nested run left behind. From the repo root (the default) the nested run
+ *  loads the preload through bunfig.toml; from anywhere else it does not. */
+function runFixture(
+  name: string,
+  cwd = repoRoot,
+): { exitCode: number; output: string; leftBehind: string[]; parent: string } {
   const parent = makeTempDir("styre-guard-");
-  const result = Bun.spawnSync(["bun", "test", `./test/helpers/fixtures/${name}`], {
-    cwd: repoRoot,
+  const fixture = join(import.meta.dir, "fixtures", name);
+  const result = Bun.spawnSync([process.execPath, "test", fixture], {
+    cwd,
     env: { ...process.env, TMPDIR: parent },
     stdout: "pipe",
     stderr: "pipe",
@@ -93,6 +104,7 @@ function runFixture(name: string): { exitCode: number; output: string; leftBehin
     exitCode: result.exitCode,
     output: result.stdout.toString() + result.stderr.toString(),
     leftBehind: readdirSync(parent),
+    parent,
   };
 }
 
@@ -114,6 +126,28 @@ describe("the leak guard", () => {
     expect(run.exitCode).not.toBe(0);
     expect(run.leftBehind).toEqual([]);
   }, 60_000);
+
+  test("refuses to make a folder when the preload is not loaded, instead of leaking it", () => {
+    // From test/ there is no bunfig.toml, so no preload: nothing would ever remove the folder.
+    const run = runFixture("cleans-up.fixture.ts", join(repoRoot, "test"));
+    expect(run.output).toContain("test/preload.ts");
+    expect(run.exitCode).not.toBe(0);
+    expect(run.leftBehind).toEqual([]);
+  }, 60_000);
+
+  test.skipIf(process.getuid?.() === 0)(
+    "still names a tracked folder that cannot be removed, with the reason",
+    () => {
+      const run = runFixture("cannot-remove-a-folder.fixture.ts");
+      // Let this test's own cleanup remove what the nested run could not.
+      Bun.spawnSync(["chmod", "-R", "u+w", run.parent]);
+      expect(run.output).toContain("left behind");
+      expect(run.output).toContain("styre-stuck-");
+      expect(run.output).toContain("could not remove");
+      expect(run.exitCode).not.toBe(0);
+    },
+    60_000,
+  );
 
   test("passes a run whose folders all go through the tracked helper", () => {
     const run = runFixture("cleans-up.fixture.ts");

@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeEach } from "bun:test";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { enterTest, leaveTest, removeRunScoped } from "./helpers/temp.ts";
+import { armForBunTest, enterTest, leaveTest, removeRunScoped } from "./helpers/temp.ts";
 
 /**
  * Loaded once per `bun test` run (bunfig.toml). Every run gets its own temp root. At the end of
@@ -15,25 +15,32 @@ import { enterTest, leaveTest, removeRunScoped } from "./helpers/temp.ts";
  * original TMPDIR and this guard cannot see what it leaves; give that child an explicit TMPDIR.
  *
  * The root itself is made with a bare mkdtempSync on purpose: tracking it would remove it before
- * the guard looks inside.
+ * the guard looks inside. A run that never reaches afterAll (`--bail`, Ctrl-C, a crash) leaves
+ * this one root behind, unreported.
  */
 const runRoot = mkdtempSync(join(tmpdir(), "styre-test-run-"));
 process.env.TMPDIR = runRoot;
+armForBunTest();
 
 beforeEach(enterTest);
 afterEach(leaveTest);
 
 afterAll(() => {
-  removeRunScoped();
+  const couldNotRemove = removeRunScoped();
   const leftBehind = readdirSync(runRoot).sort();
   // Remove the root even when the guard trips, so a leaking run does not pile up on disk.
-  rmSync(runRoot, { recursive: true, force: true });
-  if (leftBehind.length > 0) {
-    const names = leftBehind.map((name) => `  ${name}`).join("\n");
-    const fix =
-      "Make them with makeTempDir/trackTempPath (test/helpers/temp.ts) or remove them in the test.";
-    throw new Error(
-      `bun test left behind ${leftBehind.length} temp folder(s) in ${runRoot}:\n${names}\n${fix}`,
-    );
+  try {
+    rmSync(runRoot, { recursive: true, force: true });
+  } catch (error) {
+    couldNotRemove.push(`${runRoot}: ${(error as Error).message}`);
   }
+  if (leftBehind.length === 0 && couldNotRemove.length === 0) return;
+  const lines = [`bun test left behind ${leftBehind.length} temp folder(s) in ${runRoot}:`];
+  for (const name of leftBehind) lines.push(`  ${name}`);
+  if (couldNotRemove.length > 0) lines.push("It could not remove:");
+  for (const failure of couldNotRemove) lines.push(`  ${failure}`);
+  lines.push(
+    "Make them with makeTempDir/trackTempPath (test/helpers/temp.ts) or remove them in the test.",
+  );
+  throw new Error(lines.join("\n"));
 });
