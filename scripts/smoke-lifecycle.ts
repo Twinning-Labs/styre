@@ -4,12 +4,18 @@
 // and authenticated. Each scenario is one real agent dispatch, which costs money: seven per full
 // run on the cheap model.
 //
-// Usage: bun run scripts/smoke-lifecycle.ts [--standin] [model]   (default: claude-haiku-4-5-20251001)
+// Usage: bun run scripts/smoke-lifecycle.ts --live|--standin [--model <claude model>]
+//   (model default: claude-haiku-4-5-20251001). The mode is required: with none, or with any argument
+//   the script does not know, it prints the usage and exits 64 before anything runs.
 //
-// --standin is the free mode: test/lifecycle/fixtures/standin-claude.sh is put first on PATH as
-// `claude` (no network, no model), so the whole run, the control, every scenario, the leak checks and
-// D13's leftover report (the stand-in dies at once on SIGQUIT) cost nothing. Run it before every live
-// run. SMOKE_STANDIN_QUIT=clean and SMOKE_STANDIN_PARENT=follow change the stand-in (see its header).
+// --standin is the free mode: every driver runs test/lifecycle/fixtures/standin-claude.sh (no network,
+// no model) by its absolute path, and a refusing `claude` sits first on PATH for every process the
+// script starts, so a lookup by name can never reach the real CLI: the run fails if the refusing one
+// was called, or if an agent's command line is not the stand-in's. The whole run, the control, every
+// scenario, the leak checks and D13's leftover report (the stand-in dies at once on SIGQUIT) cost
+// nothing. Run it before every live run. SMOKE_STANDIN_QUIT, SMOKE_STANDIN_PARENT and
+// SMOKE_STANDIN_TEST change the stand-in (see its header); SMOKE_START_MS shortens the wait for the
+// test to start.
 //
 // Each scenario makes a throwaway git repository whose test suite is slow (`test.sh` writes its
 // pid, then becomes `sleep 97.3<n>`), and runs scripts/smoke-lifecycle-driver.ts: Styre's stop
@@ -81,6 +87,7 @@ import {
   type Expectation,
   type Observation,
   SIGNALS_FILE,
+  SMOKE_USAGE,
   STOP_WINDOW_MS,
   agentAbove,
   baselineProblem,
@@ -89,13 +96,19 @@ import {
   judge,
   parseClaudeVersion,
   parseDriver,
+  parseSmokeArgs,
   r8Check,
   versionAtLeast,
 } from "./lifecycle-live.ts";
 
-const args = process.argv.slice(2);
-const standin = args.includes("--standin");
-const model = args.find((a) => !a.startsWith("--")) ?? "claude-haiku-4-5-20251001";
+// The arguments first, before anything is created or run (N1): no mode, or anything unknown, ends here.
+const parsed = parseSmokeArgs(process.argv.slice(2));
+if ("error" in parsed) {
+  process.stderr.write(`smoke-lifecycle: ${parsed.error}\n${SMOKE_USAGE}\n`);
+  process.exit(64);
+}
+const standin = parsed.mode === "standin";
+const model = parsed.model;
 const ROOT = realpathSync(join(import.meta.dir, ".."));
 const DRIVER = join(ROOT, "scripts", "smoke-lifecycle-driver.ts");
 /** How long the agent may take to start its test (CLI start, one model call, one tool call). */
@@ -124,6 +137,18 @@ const recordsDir = join(stateHome, "styre-processes");
 /** The agent CLI every driver runs: the stand-in, by absolute path, in the free mode. */
 const STANDIN = join(ROOT, "test", "lifecycle", "fixtures", "standin-claude.sh");
 const CLAUDE = standin ? STANDIN : "claude";
+/** Free mode: every call of a `claude` found by name lands here, is recorded, and is refused. */
+const refusedLog = join(work, "refused-claude.log");
+if (standin) {
+  const shim = join(work, "refusing-bin");
+  mkdirSync(shim);
+  writeFileSync(
+    join(shim, "claude"),
+    `#!/bin/sh\nprintf '%s\\n' "$*" >>'${refusedLog}'\necho "refused: the free mode never runs the real claude" >&2\nexit 1\n`,
+    { mode: 0o755 },
+  );
+  process.env.PATH = `${shim}:${process.env.PATH ?? "/usr/bin:/bin"}`;
+}
 
 // The guard on the operator's real records folder (as test/preload.ts does for the test suite).
 const RECORD_NAME = /^\.?\d+-\d+(?:\.\d{6})?\.json/;
@@ -221,6 +246,13 @@ async function finish(wanted: number): Promise<never> {
     const leak = await cleanUp(null, null, []);
     if (!leak.ok) {
       log(`LEAK after the run:\n- ${leak.lines.join("\n- ")}`);
+      code = 1;
+    }
+    if (standin && existsSync(refusedLog)) {
+      const calls = readFileSync(refusedLog, "utf8").split("\n").filter(Boolean).length;
+      log(
+        `FAIL: the free mode looked up \`claude\` by name ${calls} time(s); the refusing one answered, so the real CLI was not run`,
+      );
       code = 1;
     }
     const written = realRecordsWritten();
@@ -405,6 +437,13 @@ async function start(
     throw new Error(
       `${name}: no agent between the driver ${driver.pid} and the sleep ${sleep.pid}`,
     );
+  if (standin) {
+    const cmd = commandOf(agent) ?? "";
+    if (!cmd.includes(STANDIN))
+      throw new Error(
+        `${name}: free mode, but the agent (pid ${agent.pid}) is "${cmd}", not the stand-in`,
+      );
+  }
   const r8 = r8Check(sleep, agent, table);
   const chain: string[] = [];
   for (let p: ProcInfo | undefined = sleep; p !== undefined && p.pid !== driver.pid; ) {

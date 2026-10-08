@@ -305,3 +305,36 @@ export function cancelVerdict(o: CancelObservation): {
 export function cancelStep(exec: boolean): string {
   return `echo "step $$" >"$CANCEL_PIDS"\n${exec ? "exec " : ""}"$STYRE" setup "$CANCEL_REPO" --config "$CANCEL_CONFIG" --out "$CANCEL_OUT" 2>"$CANCEL_LOG"\n`;
 }
+
+/** The smoke's usage line (N1: an explicit mode, so no mistake can start a live run). */
+export const SMOKE_USAGE =
+  "usage: bun run scripts/smoke-lifecycle.ts --live|--standin [--model <claude model>]";
+export const DEFAULT_SMOKE_MODEL = "claude-haiku-4-5-20251001";
+
+/**
+ * The smoke's arguments: exactly one of `--live` (real dispatches, which cost money) and
+ * `--standin` (the free mode), and optionally `--model <claude-…>`. Anything else, a misspelled
+ * mode included, is an error: the script then prints the usage and runs nothing.
+ */
+export function parseSmokeArgs(
+  argv: string[],
+): { mode: "live" | "standin"; model: string } | { error: string } {
+  let mode: "live" | "standin" | null = null;
+  let model: string | null = null;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i] as string;
+    if (a === "--live" || a === "--standin") {
+      if (mode !== null) return { error: `more than one mode (${a})` };
+      mode = a === "--live" ? "live" : "standin";
+    } else if (a === "--model") {
+      const m = argv[i + 1];
+      if (model !== null) return { error: "--model given twice" };
+      if (m === undefined || !/^claude-[a-z0-9.-]+$/.test(m))
+        return { error: `--model needs a claude model name, not ${m ?? "nothing"}` };
+      model = m;
+      i++;
+    } else return { error: `unknown argument ${a}` };
+  }
+  if (mode === null) return { error: "no mode: give --live or --standin" };
+  return { mode, model: model ?? DEFAULT_SMOKE_MODEL };
+}

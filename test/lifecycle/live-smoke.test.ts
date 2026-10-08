@@ -20,6 +20,7 @@ import {
   judge,
   parseClaudeVersion,
   parseDriver,
+  parseSmokeArgs,
   r8Check,
   versionAtLeast,
 } from "../../scripts/lifecycle-live.ts";
@@ -132,6 +133,49 @@ describe("handlersProblem: the control runs without stop handlers, the new code 
   test("the new code must say `handlers installed`", () => {
     expect(handlersProblem("new", "installed")).toBeNull();
     expect(handlersProblem("new", "none")).toContain("the new code installed no stop handlers");
+  });
+});
+
+describe("parseSmokeArgs: an explicit mode, and nothing it does not know (N1)", () => {
+  test("--live and --standin, with an optional --model", () => {
+    expect(parseSmokeArgs(["--live"])).toEqual({
+      mode: "live",
+      model: "claude-haiku-4-5-20251001",
+    });
+    expect(parseSmokeArgs(["--standin"])).toEqual({
+      mode: "standin",
+      model: "claude-haiku-4-5-20251001",
+    });
+    expect(parseSmokeArgs(["--live", "--model", "claude-sonnet-4-6"])).toEqual({
+      mode: "live",
+      model: "claude-sonnet-4-6",
+    });
+    expect(parseSmokeArgs(["--model", "claude-sonnet-4-6", "--standin"])).toEqual({
+      mode: "standin",
+      model: "claude-sonnet-4-6",
+    });
+  });
+  test("no mode, a misspelled mode, or both modes is refused", () => {
+    for (const argv of [
+      [],
+      ["--stand-in"],
+      ["--free"],
+      ["--live", "--standin"],
+      ["--live", "--live"],
+      ["--STANDIN"],
+    ])
+      expect("error" in parseSmokeArgs(argv), JSON.stringify(argv)).toBe(true);
+  });
+  test("anything else is refused: a bare word, an unknown flag, a model that is not a claude model", () => {
+    for (const argv of [
+      ["--live", "claude-haiku-4-5-20251001"],
+      ["--standin", "--verbose"],
+      ["--live", "--model"],
+      ["--live", "--model", "--standin"],
+      ["--live", "--model", "gpt-5"],
+      ["--live", "--model", "claude-x", "--model", "claude-y"],
+    ])
+      expect("error" in parseSmokeArgs(argv), JSON.stringify(argv)).toBe(true);
   });
 });
 
@@ -409,7 +453,7 @@ describe("the workflow (.github/workflows/lifecycle-live.yml)", () => {
       "ulimit -c 0 && exec timeout 600 bun run scripts/smoke-lifecycle.ts --standin",
     );
     expect(run("Live smoke (real claude; seven dispatches)")).toBe(
-      "ulimit -c 0 && exec timeout 900 bun run scripts/smoke-lifecycle.ts",
+      "ulimit -c 0 && exec timeout 900 bun run scripts/smoke-lifecycle.ts --live",
     );
     const names = wf.jobs.smoke?.steps.map((s) => s.name) ?? [];
     expect(names.indexOf("Free run with the stand-in claude (no model calls)")).toBeLessThan(
