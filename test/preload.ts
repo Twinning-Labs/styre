@@ -27,20 +27,31 @@ afterEach(leaveTest);
 
 afterAll(() => {
   const couldNotRemove = removeRunScoped();
-  const leftBehind = readdirSync(runRoot).sort();
+  // A tracked folder whose removal failed is reported with its reason, not as untracked.
+  const failed = (name: string) =>
+    couldNotRemove.some(
+      ({ path }) => path === join(runRoot, name) || path.startsWith(join(runRoot, name, "/")),
+    );
+  const untracked = readdirSync(runRoot)
+    .sort()
+    .filter((name) => !failed(name));
   // Remove the root even when the guard trips, so a leaking run does not pile up on disk.
   try {
     rmSync(runRoot, { recursive: true, force: true });
   } catch (error) {
-    couldNotRemove.push(`${runRoot}: ${(error as Error).message}`);
+    couldNotRemove.push({ path: runRoot, reason: (error as Error).message });
   }
-  if (leftBehind.length === 0 && couldNotRemove.length === 0) return;
-  const lines = [`bun test left behind ${leftBehind.length} temp folder(s) in ${runRoot}:`];
-  for (const name of leftBehind) lines.push(`  ${name}`);
-  if (couldNotRemove.length > 0) lines.push("It could not remove:");
-  for (const failure of couldNotRemove) lines.push(`  ${failure}`);
-  lines.push(
-    "Make them with makeTempDir/trackTempPath (test/helpers/temp.ts) or remove them in the test.",
-  );
+  if (untracked.length === 0 && couldNotRemove.length === 0) return;
+  const lines = [`bun test left temp folders behind in ${runRoot}.`];
+  if (untracked.length > 0) {
+    const fix =
+      "make them with makeTempDir/trackTempPath from test/helpers/temp.ts, or remove them";
+    lines.push(`${untracked.length} that nothing removed (${fix} in the test):`);
+    for (const name of untracked) lines.push(`  ${name}`);
+  }
+  if (couldNotRemove.length > 0) {
+    lines.push("Tracked paths that could not be removed (fix what blocks the removal):");
+    for (const { path, reason } of couldNotRemove) lines.push(`  ${path}: ${reason}`);
+  }
   throw new Error(lines.join("\n"));
 });

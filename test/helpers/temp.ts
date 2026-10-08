@@ -17,7 +17,12 @@ import { join } from "node:path";
  */
 const testScoped: string[] = [];
 const runScoped: string[] = [];
-const couldNotRemove: string[] = [];
+const couldNotRemove: RemovalFailure[] = [];
+
+export interface RemovalFailure {
+  path: string;
+  reason: string;
+}
 let inTest = false;
 let armed = false;
 
@@ -78,7 +83,7 @@ function removeAll(paths: string[]): void {
     try {
       rmSync(path, { recursive: true, force: true });
     } catch (error) {
-      couldNotRemove.push(`${path}: ${(error as Error).message}`);
+      couldNotRemove.push({ path, reason: (error as Error).message });
     }
   }
 }
@@ -96,7 +101,7 @@ export function leaveTest(): void {
 
 /** Global afterAll (test/preload.ts only), before the leak guard looks at the temp root. Returns
  *  every tracked path that could not be removed during the run, with the reason. */
-export function removeRunScoped(): string[] {
+export function removeRunScoped(): RemovalFailure[] {
   removeAll(testScoped);
   removeAll(runScoped);
   return couldNotRemove.splice(0);

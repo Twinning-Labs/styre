@@ -112,6 +112,7 @@ describe("the leak guard", () => {
   test("fails a run that leaves a folder in its temp root, and names the folder", () => {
     const run = runFixture("leaks-a-folder.fixture.ts");
     expect(run.exitCode).not.toBe(0);
+    expect(run.output).toContain("nothing removed");
     expect(run.output).toContain("styre-leak-");
     // The guard still removes the run's temp root, so a leaking run does not pile up folders.
     expect(run.leftBehind).toEqual([]);
@@ -122,7 +123,7 @@ describe("the leak guard", () => {
     expect(run.output).toContain("failing on purpose");
     expect(run.output).toContain("1 pass");
     expect(run.output).toContain("1 fail");
-    expect(run.output).not.toContain("left behind");
+    expect(run.output).not.toContain("left temp folders behind");
     expect(run.exitCode).not.toBe(0);
     expect(run.leftBehind).toEqual([]);
   }, 60_000);
@@ -141,9 +142,12 @@ describe("the leak guard", () => {
       const run = runFixture("cannot-remove-a-folder.fixture.ts");
       // Let this test's own cleanup remove what the nested run could not.
       Bun.spawnSync(["chmod", "-R", "u+w", run.parent]);
-      expect(run.output).toContain("left behind");
-      expect(run.output).toContain("styre-stuck-");
-      expect(run.output).toContain("could not remove");
+      // The folder's own removal failure, with the reason (not just the run root's).
+      expect(run.output).toMatch(/^ {2}\S*\/styre-stuck-[A-Za-z0-9]{6}: \S/m);
+      // It was tracked, so it is not reported as a folder nothing removed...
+      expect(run.output).not.toContain("nothing removed");
+      // ...and the failure did not abort the rest of the cleanup or fail the test that made it.
+      expect(run.output).toContain("1 pass");
       expect(run.exitCode).not.toBe(0);
     },
     60_000,
@@ -151,7 +155,7 @@ describe("the leak guard", () => {
 
   test("passes a run whose folders all go through the tracked helper", () => {
     const run = runFixture("cleans-up.fixture.ts");
-    expect(run.output).not.toContain("left behind");
+    expect(run.output).not.toContain("left temp folders behind");
     expect(run.exitCode).toBe(0);
     expect(run.leftBehind).toEqual([]);
   }, 60_000);
