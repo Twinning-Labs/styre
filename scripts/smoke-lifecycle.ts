@@ -307,24 +307,36 @@ function driverEnv(
   };
 }
 
+/** What a scenario knows about its driver so far. */
+interface Known {
+  dir: string | null;
+  since: string | null;
+  groups: number[];
+}
+
 /** Start the driver, wait for the agent's sleep, and claim everything. */
 async function start(
   name: string,
   root: string,
   how: "background" | "terminal",
-  timeoutMs = 600_000,
+  timeoutMs: number,
+  /** Filled in as each is known, so the scenario's cleanup and leak check see them even when
+   *  this throws (a driver that died before anything under it was claimed). */
+  known: Known,
 ): Promise<Started> {
   const dir = realpathSync(mkdtempSync(join(work, `${name.replace(/[^a-z0-9]+/gi, "-")}-`)));
+  known.dir = dir;
   const sleepTag = `97.3${nextSleep++}`;
   const repo = makeRepo(dir, sleepTag);
   const ident = `SMOKE-${nextSleep - 1}`;
   const env = driverEnv(root, repo, ident, timeoutMs);
   const since = nowToken();
+  known.since = since;
   dispatches++;
   let driver: ProcInfo;
   let said: () => string;
   let ended: (ms: number) => Promise<Ended | null>;
-  const groups: number[] = [];
+  const groups = known.groups;
   let pty: Pty | null = null;
   if (how === "background") {
     const proc = Bun.spawn([process.execPath, DRIVER], {
@@ -478,6 +490,7 @@ async function scenario(
   timeoutMs?: number,
 ): Promise<Outcome> {
   let s: Started | null = null;
+  const known: Known = { dir: null, since: null, groups: [] };
   const failures: string[] = [];
   let watched: Pick<Observation, "agentGoneMs" | "sleepGoneMs"> = {
     agentGoneMs: null,
@@ -487,7 +500,7 @@ async function scenario(
   let r8ok = false;
   let styreText = "";
   try {
-    s = await start(name, root, how, timeoutMs);
+    s = await start(name, root, how, timeoutMs ?? 600_000, known);
     const handlers = handlersProblem(code, parseDriver(s.said()).handlers);
     if (handlers !== null) failures.push(handlers);
     if (!s.said().split("\n").includes(`smoke-driver: claude ${CLAUDE}`))
@@ -516,7 +529,7 @@ async function scenario(
   } catch (err) {
     failures.push(err instanceof Error ? err.message : String(err));
   }
-  const leak = await cleanUp(s?.dir ?? null, s?.since ?? null, s?.groups ?? []);
+  const leak = await cleanUp(known.dir, known.since, known.groups);
   const o: Outcome = {
     name,
     code,
