@@ -95,6 +95,44 @@ jobs:
             -e STYRE_KARMA_SPHINX=/suite \
             styre-karma-native xvfb-run -a bun test /code/test/testing/karma-native.test.ts
 
+  lifecycle:
+    # ENG-485: the stop handling with real signals and in real terminals (test/lifecycle/terminal.test.ts
+    # drives Ctrl-C, Ctrl-\, kill and a closed terminal through `script`) on Linux x64 and arm64 and
+    # macOS arm64 and Intel. The Intel run also checks the macOS process table reader on x86_64 (R6).
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7 (node24)
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+        with:
+          bun-version: latest
+      - name: The tests run as an ordinary user
+        # A few permission tests (a folder Styre may not read or write) cannot fail for root.
+        run: |
+          id
+          test "$(id -u)" != 0
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - run: bun test test/lifecycle test/util/process
+
+  lifecycle-container:
+    # ENG-485 spec 7.6: the compiled styre as a container's first process (no init) handles
+    # `docker stop`'s SIGTERM, stops its agent, and exits 143.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7 (node24)
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - run: bash test/lifecycle/container-first-process.sh
+
   pr-title:
     # Conventional-Commits lint on the PR title. Squash-merge makes the PR title
     # the commit + changelog line git-cliff parses, so a malformed title would
