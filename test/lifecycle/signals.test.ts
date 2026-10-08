@@ -12,11 +12,13 @@ import {
   listProcesses,
   nowToken,
   probe,
+  turnOffCoreDumps,
 } from "../../src/util/process/proc-table.ts";
 import {
   HANDLER_DEADLINE_MS,
   type HandlerCtx,
   type HandlerDeps,
+  __realDepsForTests,
   __resetSignalsForTests,
   handleStopSignal,
   installStopHandlers,
@@ -519,6 +521,10 @@ describe("the deadline and the exit", () => {
           : ["lock", `reraise ${sig}`, `exit ${codes[sig]}`],
       );
     }
+  });
+
+  test("the real handler turns core dumps off with turnOffCoreDumps", () => {
+    expect(__realDepsForTests().noCore).toBe(turnOffCoreDumps);
   });
 
   test("core dumps that cannot be turned off are said in one line, and SIGQUIT is still re-raised", async () => {

@@ -85,27 +85,27 @@ interface Driven {
   waited: string;
 }
 
-/** The driver in a new terminal, once it has said "ready": everything it started is claimed. */
 /**
- * The driver in a new terminal, once it has said "ready": everything it started is claimed. With
- * `cores`, the terminal allows core files (the soft limit raised to the hard one), the driver works
- * in a folder of its own (where a plain core_pattern would put a core), and it runs under
- * fixtures/wait-status.pl, which writes how it ended, WCOREDUMP included, to `waited`.
+ * The driver in a new terminal, once it has said "ready": everything it started is claimed. The
+ * driver works in a folder of its own (where a plain core_pattern would put a core). With
+ * `waitStatus` it runs under fixtures/wait-status.pl, which writes how it ended, WCOREDUMP included,
+ * to `waited`; with `raiseCoreLimit` the terminal allows core files (the soft limit raised to the
+ * hard one) instead of `ulimit -c 0`.
  */
 async function driven(
   mode: string,
   env: Record<string, string> = {},
-  opts: { cores?: boolean } = {},
+  opts: { waitStatus?: boolean; raiseCoreLimit?: boolean } = {},
 ): Promise<Driven> {
   const worktree = realpathSync(mkdtempSync(join(scratch, "wt-")));
   const home = realpathSync(mkdtempSync(join(scratch, "driver-")));
   const waited = join(home, "wait-status.json");
   const sleep = sleepLength();
   const argv = [process.execPath, DRIVER, mode];
-  const pty = underPty(opts.cores ? ["perl", WAIT_STATUS, waited, ...argv] : argv, {
+  const pty = underPty(opts.waitStatus ? ["perl", WAIT_STATUS, waited, ...argv] : argv, {
     env: { ...process.env, DRIVE_WORKTREE: worktree, STANDIN_SLEEP: sleep, ...env },
     cwd: home,
-    cores: opts.cores === true,
+    cores: opts.raiseCoreLimit === true,
   });
   ptys.push(pty);
   const command = await pty.command();
@@ -116,7 +116,7 @@ async function driven(
     if (p === undefined) throw new Error(`pid ${pid} is not in the terminal's tree`);
     return p;
   };
-  const driver = opts.cores ? find(find(said(pty, "agent")).ppid) : command;
+  const driver = opts.waitStatus ? find(find(said(pty, "agent")).ppid) : command;
   return { pty, driver, tree, find, sleep, worktree, home, waited };
 }
 
@@ -158,15 +158,17 @@ describe("the driver in a terminal", () => {
   );
 
   test(
-    "Ctrl-\\: the agent dies at once and its orphaned tool is reported with the exact line, not stopped (D13); the exit is SIGQUIT (131), and no core is dumped even where core files are allowed",
+    "Ctrl-\\: the agent dies at once and its orphaned tool is reported with the exact line, not stopped (D13); the exit is SIGQUIT (131), and no core is dumped (with core files allowed wherever that is needed to see one)",
     async () => {
-      const d = await driven("agent", {}, { cores: true });
+      const raise = coreLimitShowsADump();
+      const d = await driven("agent", {}, { waitStatus: true, raiseCoreLimit: raise });
       const agent = d.find(said(d.pty, "agent"));
       // Claimed above, while still a descendant: once the agent dies it is no one's child.
       const tool = d.find(said(d.pty, "tool"));
-      // Core files really were allowed, wherever the hard limit allows them at all.
+      // Where the limit was raised, core files really were allowed (wherever the hard limit allows
+      // them at all).
       const hard = Bun.spawnSync(["sh", "-c", "ulimit -H -c"]).stdout.toString().trim();
-      if (hard !== "0") expect(d.pty.coreLimit()).not.toBe("0");
+      if (raise && hard !== "0") expect(d.pty.coreLimit()).not.toBe("0");
       const before = coreFiles(d.driver.pid, d.home);
       d.pty.type(CTRL_BACKSLASH);
       expect(await until(() => existsSync(d.waited), 10_000)).toBe(true);
@@ -299,6 +301,21 @@ describe("the driver in a terminal", () => {
     SLOW,
   );
 });
+
+/**
+ * Whether the Ctrl-\ test must raise the core limit to see a dump at all.
+ * - macOS, and Linux with a core_pattern naming a file: yes. There the limit decides whether a core
+ *   is written, so at limit 0 a regression would go unseen.
+ * - Linux with a core_pattern that pipes to a program (Ubuntu's apport, systemd-coredump): no. The
+ *   kernel pipes the core whatever the limit (fs/coredump.c sets it to infinity for a pipe), so the
+ *   wait status's WCOREDUMP still shows a dump at limit 0 (probed through wait-status.pl: core true
+ *   for a QUIT at limit 0, false once the process is not dumpable). And apport, told %c = 0, writes
+ *   nothing, so a regression fails the test without storing a root-owned Bun core of about 6 GB.
+ */
+function coreLimitShowsADump(): boolean {
+  if (process.platform !== "linux") return true;
+  return !readFileSync("/proc/sys/kernel/core_pattern", "utf8").trim().startsWith("|");
+}
 
 /**
  * Core files that could belong to process `pid`, where this machine puts cores: on macOS the

@@ -379,6 +379,11 @@ export async function suspendStopHandlers<T>(fn: () => T | Promise<T>): Promise<
   }
 }
 
+/** Test seam only: the real dependencies, so a test can check what they are wired to. */
+export function __realDepsForTests(): HandlerDeps {
+  return realDeps();
+}
+
 /** Test seam only. */
 export function __resetSignalsForTests(): void {
   removeInstalled();
