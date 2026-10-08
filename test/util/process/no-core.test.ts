@@ -4,13 +4,13 @@
 import { expect, test } from "bun:test";
 import { join } from "node:path";
 
-const SIGNALS = join(import.meta.dir, "../../../src/util/process/signals.ts");
+const PROC_TABLE = join(import.meta.dir, "../../../src/util/process/proc-table.ts");
 
 /** Runs the real `turnOffCoreDumps` in a child whose soft core limit was first raised to its hard
  *  limit, and returns the child's core state before and after. */
 function inChild(): { hard: string; before: State; after: State } {
   const script = `
-    import { coreDumpState, turnOffCoreDumps } from ${JSON.stringify(SIGNALS)};
+    import { coreDumpState, turnOffCoreDumps } from ${JSON.stringify(PROC_TABLE)};
     const before = coreDumpState();
     turnOffCoreDumps();
     console.log(JSON.stringify({ before, after: coreDumpState() }));

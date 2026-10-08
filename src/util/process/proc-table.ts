@@ -187,3 +187,80 @@ function psList(): ProcInfo[] {
       } satisfies ProcInfo;
     });
 }
+
+// ---- no core dump on Ctrl-\ (amendment 2026-10-08) -------------------------------------------------
+// Called by the stop handler (signals.ts) just before it re-raises SIGQUIT. It lives here because
+// this is the one module the source guard lets call libc through bun:ffi (beside the door).
+
+/** RLIMIT_CORE: 4 on Linux (asm-generic/resource.h, no override) and on macOS (sys/resource.h). */
+const RLIMIT_CORE = 4;
+/** PR_SET_DUMPABLE and PR_GET_DUMPABLE (linux/prctl.h). */
+const PR_SET_DUMPABLE = 4;
+const PR_GET_DUMPABLE = 3;
+
+interface CoreCalls {
+  setrlimit(resource: number, rlim: BigUint64Array): number;
+  getrlimit(resource: number, rlim: BigUint64Array): number;
+  prctl: ((option: number, arg: bigint) => number) | null;
+}
+let coreCalls: CoreCalls | null = null;
+function calls(): CoreCalls {
+  if (coreCalls !== null) return coreCalls;
+  const { dlopen, FFIType, ptr } = require("bun:ffi") as typeof import("bun:ffi");
+  const linux = process.platform === "linux";
+  const rl = { args: [FFIType.i32, FFIType.ptr], returns: FFIType.i32 } as const;
+  const lib = dlopen(linux ? "libc.so.6" : "/usr/lib/libSystem.B.dylib", {
+    setrlimit: rl,
+    getrlimit: rl,
+    // int prctl(int option, unsigned long arg2, ...): the dumpable calls read arg2 only.
+    ...(linux
+      ? {
+          prctl: {
+            args: [FFIType.i32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64],
+            returns: FFIType.i32,
+          },
+        }
+      : {}),
+  });
+  const s = lib.symbols as Record<string, (...a: unknown[]) => unknown>;
+  coreCalls = {
+    // struct rlimit is two rlim_t, each 64 bits on every target Styre builds for (macOS
+    // __uint64_t; Linux unsigned long on x86_64 and arm64).
+    setrlimit: (r, rlim) => s.setrlimit?.(r, ptr(rlim)) as number,
+    getrlimit: (r, rlim) => s.getrlimit?.(r, ptr(rlim)) as number,
+    prctl: linux ? (o, a) => s.prctl?.(o, a, 0n, 0n, 0n) as number : null,
+  };
+  return coreCalls;
+}
+
+/**
+ * Turn core dumps off for this process, just before the SIGQUIT re-raise. Two calls, because one
+ * is not enough everywhere:
+ * - the core limit to 0 (setrlimit): macOS writes a core to /cores only within this limit, and so
+ *   does Linux when core_pattern names a file;
+ * - on Linux, the process marked not dumpable (prctl PR_SET_DUMPABLE 0): when core_pattern pipes to
+ *   a program (Ubuntu's apport, systemd-coredump) the kernel ignores the core limit and runs the
+ *   program anyway, but it starts no dump at all for a process that is not dumpable. Its side
+ *   effects (the /proc entries owned by root, no ptrace attach) cannot matter this late: nothing
+ *   reads them before the exit.
+ * Throws when a call fails; the handler says so and still re-raises.
+ */
+export function turnOffCoreDumps(): void {
+  const c = calls();
+  if (c.setrlimit(RLIMIT_CORE, new BigUint64Array([0n, 0n])) !== 0)
+    throw new Error("setrlimit(RLIMIT_CORE) failed");
+  if (c.prctl !== null && c.prctl(PR_SET_DUMPABLE, 0n) !== 0)
+    throw new Error("prctl(PR_SET_DUMPABLE) failed");
+}
+
+/** This process's soft core limit (a decimal string) and, on Linux, its dumpable flag. Read only;
+ *  for the tests of `turnOffCoreDumps`. */
+export function coreDumpState(): { limit: string; dumpable: number | null } {
+  const c = calls();
+  const rlim = new BigUint64Array(2);
+  if (c.getrlimit(RLIMIT_CORE, rlim) !== 0) throw new Error("getrlimit(RLIMIT_CORE) failed");
+  return {
+    limit: String(rlim[0]),
+    dumpable: c.prctl === null ? null : c.prctl(PR_GET_DUMPABLE, 0n),
+  };
+}
