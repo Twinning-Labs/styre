@@ -17,6 +17,41 @@ export interface Ended {
   signal: string | null;
 }
 
+/**
+ * The control's code (operator decision, 2026-10-08): the branch `baseline/pre-eng-485`, main at
+ * 9f51460 before ENG-485. Not `main`: once ENG-485 is merged, main has the stop handlers and the
+ * control would stop its agent. Found locally, or as the remote's branch after a fetch.
+ */
+export const BASELINE_BRANCH = "baseline/pre-eng-485";
+export const BASELINE_REFS = [
+  `refs/heads/${BASELINE_BRANCH}`,
+  `refs/remotes/origin/${BASELINE_BRANCH}`,
+];
+/** The file that holds ENG-485's stop handlers: the control's code must not have it. */
+export const SIGNALS_FILE = "src/util/process/signals.ts";
+
+/** Why the baseline cannot be the control (`resolved`: the first of BASELINE_REFS that exists),
+ *  or null when it can. */
+export function baselineProblem(resolved: string | null, hasSignals: boolean): string | null {
+  if (resolved === null)
+    return `no branch ${BASELINE_BRANCH} (looked for ${BASELINE_REFS.join(" and ")}); fetch it: git fetch origin ${BASELINE_BRANCH}:${BASELINE_REFS[1]}`;
+  if (hasSignals)
+    return `${resolved} has ${SIGNALS_FILE}: it is not code from before ENG-485, so it cannot be the control`;
+  return null;
+}
+
+/** The control's driver must run without stop handlers, the new code's with them. */
+export function handlersProblem(
+  code: "control" | "new",
+  said: "installed" | "none" | null,
+): string | null {
+  if (said === null) return "the driver never said whether it installed the stop handlers";
+  if (code === "control" && said !== "none")
+    return "the control installed stop handlers: it is not code from before ENG-485";
+  if (code === "new" && said !== "installed") return "the new code installed no stop handlers";
+  return null;
+}
+
 /** The longest a stop may take: the grace period, 5 s (D8). */
 export const STOP_WINDOW_MS = 5_000;
 
@@ -139,8 +174,9 @@ export interface Expectation {
   lines: (string | RegExp)[];
   /** Lines that must not appear. */
   absent?: RegExp[];
-  /** Ctrl-\ (D13): the test's sleep may outlive the stop, but then this pid must be reported. */
-  reportSleep?: number;
+  /** Ctrl-\ (D13): the test's sleep may outlive the stop, but then Styre must have reported it
+   *  with the exact leftover line for this pid and command. */
+  reportSleep?: { pid: number; command: string };
 }
 
 /** What one scenario showed. Times are counted from the scenario's trigger. */
@@ -149,8 +185,6 @@ export interface Observation {
   /** When the agent was first seen gone, or null if it was still running when the watch ended. */
   agentGoneMs: number | null;
   sleepGoneMs: number | null;
-  /** Whether the sleep was still running at the end of the watch. */
-  sleepAliveAtEnd: boolean;
   /** Everything Styre said on stderr. */
   stderr: string;
 }
@@ -170,13 +204,10 @@ export function judge(want: Expectation, seen: Observation): string[] {
   if (want.reportSleep === undefined) {
     if (late(seen.sleepGoneMs))
       out.push(`the test's sleep was still running ${STOP_WINDOW_MS} ms after the trigger`);
-  } else if (seen.sleepAliveAtEnd) {
-    const pid = want.reportSleep;
-    const named = new RegExp(
-      `^styre: the agent left ".*" \\(pid ${pid}\\) running in the worktree; stop it with: kill ${pid} \\(if it is not yours\\)$`,
-      "m",
-    );
-    if (!named.test(seen.stderr))
+  } else if (late(seen.sleepGoneMs)) {
+    const { pid, command } = want.reportSleep;
+    const line = `styre: the agent left "${command}" (pid ${pid}) running in the worktree; stop it with: kill ${pid} (if it is not yours)`;
+    if (!hasLine(seen.stderr, line))
       out.push(`the sleep (pid ${pid}) outlived the stop and was not reported`);
   }
   for (const l of want.lines) if (!hasLine(seen.stderr, l)) out.push(`missing line: ${String(l)}`);

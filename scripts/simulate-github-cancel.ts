@@ -20,6 +20,9 @@
 //   `bash -c 'styre …'`             graceful too: bash runs a lone simple command given with -c by
 //                                   exec, so Styre is the process signalled. That is why the
 //                                   script file form, not -c, is what models GitHub.
+// Both of the step's output streams are pipes the simulation reads, so a Styre that outlives bash
+// holds them and the 5 s pipe wait happens as on GitHub. A stop of the simulation itself (Ctrl-C)
+// cleans up before it exits.
 // Every process is the script's own (test/helpers/own-processes.ts): bash leads a new session the
 // script registers; the stand-in's pids are claimed as soon as it writes them. After each form,
 // everything claimed is stopped and the form fails if anything is still running.
@@ -133,7 +136,9 @@ async function simulate(bin: string, form: Form, marker: string) {
     detached: true, // a new session, registered: what Styre starts stays claimable after bash dies
     env,
     stdin: "ignore",
-    stdout: "ignore",
+    // Both output streams are pipes the runner reads, as on GitHub: whoever still holds one after
+    // the step's process exits makes the runner wait (ProcessExitedHandler, 5 s).
+    stdout: "pipe",
     stderr: "pipe",
   });
   const me = probe(proc.pid);
@@ -143,12 +148,14 @@ async function simulate(bin: string, form: Form, marker: string) {
     throw new Error(`${form.name}: the step's bash could not be claimed`);
   }
   let piped = "";
-  let eof = false;
-  void (async () => {
+  let open = 2;
+  const drain = async (stream: ReadableStream<Uint8Array>, keep: boolean) => {
     const dec = new TextDecoder();
-    for await (const c of proc.stderr) piped += dec.decode(c, { stream: true });
-    eof = true;
-  })();
+    for await (const c of stream) if (keep) piped += dec.decode(c, { stream: true });
+    open--;
+  };
+  void drain(proc.stderr, true);
+  void drain(proc.stdout, false);
   const said = (): string =>
     form.file
       ? existsSync(jobEnv.CANCEL_LOG as string)
@@ -192,7 +199,9 @@ async function simulate(bin: string, form: Form, marker: string) {
   }
   const endedMs = Date.now() - t0;
   // The process has exited; the runner waits up to 5 s more for its output pipes.
-  await until(() => eof, GITHUB_CANCEL.pipeWaitMs);
+  const pipesHeld = open > 0;
+  await until(() => open === 0, GITHUB_CANCEL.pipeWaitMs);
+  const completedMs = Date.now() - t0;
   const o: CancelObservation = {
     sent,
     stepEnded: { code: proc.exitCode, signal: proc.signalCode },
@@ -231,6 +240,10 @@ async function simulate(bin: string, form: Form, marker: string) {
     sent,
     stepEnded: o.stepEnded,
     stepEndedAfterMs: endedMs,
+    /** Whether something still held the step's output when its process exited, and when the
+     *  runner would have ended the step (the exit, or up to 5 s later). */
+    pipesHeldAtExit: pipesHeld,
+    stepCompletedAfterMs: completedMs,
     afterTheStep: { styre: o.styreAlive, agent: o.agentAlive, tool: o.toolAlive },
     stderr: o.stderr.trim().split("\n"),
     assertCancel: form.file ? { ok: assertOk, output: assertOut } : null,
@@ -239,6 +252,23 @@ async function simulate(bin: string, form: Form, marker: string) {
 }
 
 let code = 0;
+/** Stop everything this script claimed and remove its folder; false if something had to be stopped. */
+async function cleanUp(): Promise<boolean> {
+  killOwned();
+  const left = await stillRunning(3_000);
+  if (left.length > 0) {
+    stopStillRunning(left);
+    log(`LEAK: ${left.map((l) => `pid ${l.pid} "${l.command}"`).join(", ")}`);
+  }
+  rmSync(work, { recursive: true, force: true });
+  return left.length === 0;
+}
+// A stop of the simulation itself still cleans up what it started (Styre and its stand-in agent).
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const)
+  process.on(sig, () => {
+    log(`simulate-github-cancel: ${sig} received, cleaning up`);
+    void cleanUp().finally(() => process.exit(1));
+  });
 try {
   const bin = binary();
   const shell = Bun.spawnSync(["bash", "--version"]).stdout.toString().split("\n")[0];
@@ -248,7 +278,7 @@ try {
     const r = await simulate(bin, f, `cancel-sim-${results.length + 1}`);
     results.push(r);
     log(
-      `${r.form}: ${r.got} (expected ${r.expected}); signals ${r.sent.join(" → ")}; step ended ${JSON.stringify(r.stepEnded)} after ${r.stepEndedAfterMs} ms; assert-cancel.sh: ${r.assertCancel === null ? "not run (-c form)" : r.assertCancel.ok ? "PASS" : "FAIL"}; leak check: ${r.leftRunning.length === 0 ? "nothing left running" : r.leftRunning.join(", ")}`,
+      `${r.form}: ${r.got} (expected ${r.expected}); signals ${r.sent.join(" → ")}; step ended ${JSON.stringify(r.stepEnded)} after ${r.stepEndedAfterMs} ms (step complete after ${r.stepCompletedAfterMs} ms${r.pipesHeldAtExit ? ", its pipes still held" : ""}); assert-cancel.sh: ${r.assertCancel === null ? "not run (-c form)" : r.assertCancel.ok ? "PASS" : "FAIL"}; leak check: ${r.leftRunning.length === 0 ? "nothing left running" : r.leftRunning.join(", ")}`,
     );
   }
   log(JSON.stringify(results, null, 2));
@@ -265,13 +295,6 @@ try {
   log(`FAIL: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
   code = 1;
 } finally {
-  killOwned();
-  const left = await stillRunning(3_000);
-  if (left.length > 0) {
-    stopStillRunning(left);
-    log(`LEAK: ${left.map((l) => `pid ${l.pid} "${l.command}"`).join(", ")}`);
-    code = 1;
-  }
-  rmSync(work, { recursive: true, force: true });
+  if (!(await cleanUp())) code = 1;
 }
 process.exit(code);

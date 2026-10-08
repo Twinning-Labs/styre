@@ -6,12 +6,17 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  BASELINE_BRANCH,
+  BASELINE_REFS,
   GITHUB_CANCEL,
   type Proc,
+  SIGNALS_FILE,
   agentAbove,
+  baselineProblem,
   cancelStep,
   cancelVerdict,
   controlVerdict,
+  handlersProblem,
   judge,
   parseClaudeVersion,
   parseDriver,
@@ -85,6 +90,51 @@ describe("r8Check: Claude Code's command group is led by the agent's direct chil
   });
 });
 
+describe("the control's baseline: branch baseline/pre-eng-485, before ENG-485", () => {
+  test("named by the operator's decision, found locally or as the remote's branch", () => {
+    expect(BASELINE_BRANCH).toBe("baseline/pre-eng-485");
+    expect(BASELINE_REFS).toEqual([
+      "refs/heads/baseline/pre-eng-485",
+      "refs/remotes/origin/baseline/pre-eng-485",
+    ]);
+  });
+  test("a missing branch, or one that has the stop handlers, is refused loudly", () => {
+    expect(baselineProblem(null, false)).toContain("no branch baseline/pre-eng-485");
+    expect(baselineProblem("refs/heads/baseline/pre-eng-485", true)).toContain(
+      "has src/util/process/signals.ts",
+    );
+    expect(baselineProblem("refs/heads/baseline/pre-eng-485", false)).toBeNull();
+  });
+  // Runs wherever the branch is in the clone (the Mac, the laptop, the workflow after its fetch);
+  // a shallow CI checkout without it skips, and the smoke itself refuses to run without it.
+  const git = (args: string[]) =>
+    Bun.spawnSync(["git", ...args], { cwd: join(import.meta.dir, "../.."), timeout: 10_000 });
+  const ref = BASELINE_REFS.find(
+    (r) => git(["rev-parse", "--verify", "--quiet", r]).exitCode === 0,
+  );
+  test.skipIf(ref === undefined)(
+    "the baseline branch has the Claude adapter and no stop handlers",
+    () => {
+      expect(git(["cat-file", "-e", `${ref}:${SIGNALS_FILE}`]).exitCode).not.toBe(0);
+      expect(git(["cat-file", "-e", `${ref}:src/agent/providers/claude.ts`]).exitCode).toBe(0);
+    },
+  );
+});
+
+describe("handlersProblem: the control runs without stop handlers, the new code with them", () => {
+  test("the control must say `handlers none`", () => {
+    expect(handlersProblem("control", "none")).toBeNull();
+    expect(handlersProblem("control", "installed")).toContain(
+      "the control installed stop handlers",
+    );
+    expect(handlersProblem("control", null)).toContain("never said");
+  });
+  test("the new code must say `handlers installed`", () => {
+    expect(handlersProblem("new", "installed")).toBeNull();
+    expect(handlersProblem("new", "none")).toContain("the new code installed no stop handlers");
+  });
+});
+
 describe("the claude version", () => {
   test("parsed from `claude --version`", () => {
     expect(parseClaudeVersion("2.1.292 (Claude Code)\n")).toBe("2.1.292");
@@ -124,7 +174,6 @@ describe("judge: one scenario against what it must show", () => {
     exit: { code: null, signal: "SIGTERM" },
     agentGoneMs: 900,
     sleepGoneMs: 1_100,
-    sleepAliveAtEnd: false,
     stderr: "styre: received a stop request (SIGTERM) — cleaning up…\n",
   };
   const want = {
@@ -139,6 +188,11 @@ describe("judge: one scenario against what it must show", () => {
       'exit {"code":0,"signal":null}, expected {"code":null,"signal":"SIGTERM"}',
     ]);
   });
+  test("the same code with another signal is a wrong exit (130, 143 and 131 differ only there)", () => {
+    expect(judge(want, { ...ok, exit: { code: null, signal: "SIGINT" } })).toEqual([
+      'exit {"code":null,"signal":"SIGINT"}, expected {"code":null,"signal":"SIGTERM"}',
+    ]);
+  });
   test("no exit at all is named", () => {
     expect(judge(want, { ...ok, exit: null })[0]).toContain("did not exit");
   });
@@ -147,7 +201,10 @@ describe("judge: one scenario against what it must show", () => {
     expect(judge(want, { ...ok, agentGoneMs: 5_001 })[0]).toContain("the agent was still running");
   });
   test("a sleep still running fails, unless the scenario expects it reported", () => {
-    expect(judge(want, { ...ok, sleepGoneMs: null, sleepAliveAtEnd: true })[0]).toContain(
+    expect(judge(want, { ...ok, sleepGoneMs: null })[0]).toContain(
+      "the test's sleep was still running",
+    );
+    expect(judge(want, { ...ok, sleepGoneMs: 5_400 })[0]).toContain(
       "the test's sleep was still running",
     );
   });
@@ -160,6 +217,15 @@ describe("judge: one scenario against what it must show", () => {
       )[0],
     ).toContain("unexpected line");
   });
+  test("a line matches only whole: the same text inside a longer line does not count", () => {
+    expect(judge(want, { ...ok, stderr: `x ${ok.stderr}` })[0]).toContain("missing line");
+    expect(
+      judge(want, {
+        ...ok,
+        stderr: "styre: received a stop request (SIGTERM) — cleaning up… and more\n",
+      })[0],
+    ).toContain("missing line");
+  });
   test("a regular expression line matches", () => {
     expect(
       judge(
@@ -171,34 +237,29 @@ describe("judge: one scenario against what it must show", () => {
       ),
     ).toEqual([]);
   });
-  test("Ctrl-\\: a sleep that survives must be named in a leftover report with its pid", () => {
-    const want2 = { exit: { code: null, signal: "SIGQUIT" }, lines: [], reportSleep: 503 };
-    const seen = {
-      ...ok,
-      exit: { code: null, signal: "SIGQUIT" },
-      sleepGoneMs: null,
-      sleepAliveAtEnd: true,
-    };
-    expect(judge(want2, seen)[0]).toContain("(pid 503) outlived the stop and was not reported");
-    expect(
-      judge(want2, {
-        ...seen,
-        stderr:
-          'styre: the agent left "sleep 97.35" (pid 503) running in the worktree; stop it with: kill 503 (if it is not yours)\n',
-      }),
-    ).toEqual([]);
-    // The report for some other pid does not count.
-    expect(
-      judge(want2, {
-        ...seen,
-        stderr:
-          'styre: the agent left "sh" (pid 502) running in the worktree; stop it with: kill 502 (if it is not yours)\n',
-      }),
-    ).toHaveLength(1);
+  const quit = {
+    exit: { code: null, signal: "SIGQUIT" },
+    lines: [],
+    reportSleep: { pid: 503, command: "sleep 97.35" },
+  };
+  const D13 =
+    'styre: the agent left "sleep 97.35" (pid 503) running in the worktree; stop it with: kill 503 (if it is not yours)';
+  test("Ctrl-\\: a sleep still running 5 s after the trigger must be reported with the exact D13 line", () => {
+    const seen = { ...ok, exit: { code: null, signal: "SIGQUIT" }, sleepGoneMs: null };
+    expect(judge(quit, seen)[0]).toContain("(pid 503) outlived the stop and was not reported");
+    expect(judge(quit, { ...seen, stderr: `${D13}\n` })).toEqual([]);
+    // Another pid, another command, or the line inside a longer one does not count.
+    expect(judge(quit, { ...seen, stderr: `${D13.replaceAll("503", "502")}\n` })).toHaveLength(1);
+    expect(judge(quit, { ...seen, stderr: `${D13.replace("97.35", "97.36")}\n` })).toHaveLength(1);
+    expect(judge(quit, { ...seen, stderr: `x${D13}\n` })).toHaveLength(1);
   });
-  test("Ctrl-\\: a sleep that is gone needs no report", () => {
-    const want2 = { exit: { code: null, signal: "SIGQUIT" }, lines: [], reportSleep: 503 };
-    expect(judge(want2, { ...ok, exit: { code: null, signal: "SIGQUIT" } })).toEqual([]);
+  test("Ctrl-\\: a sleep gone only after 5 s also needs the report", () => {
+    const seen = { ...ok, exit: { code: null, signal: "SIGQUIT" }, sleepGoneMs: 5_500 };
+    expect(judge(quit, seen)).toHaveLength(1);
+    expect(judge(quit, { ...seen, stderr: `${D13}\n` })).toEqual([]);
+  });
+  test("Ctrl-\\: a sleep gone within 5 s needs no report", () => {
+    expect(judge(quit, { ...ok, exit: { code: null, signal: "SIGQUIT" } })).toEqual([]);
   });
 });
 
@@ -218,6 +279,18 @@ describe("controlVerdict: the control must leak, or the probes are blind", () =>
     ]);
     expect(v.blind).toBe(true);
     expect(v.why).toContain("kill: the agent was gone");
+  });
+  test("blind when a control stopped only its agent and left the sleep", () => {
+    const v = controlVerdict([
+      { name: "kill", agentAlive: false, sleepAlive: true },
+      { name: "kill -9", agentAlive: true, sleepAlive: true },
+    ]);
+    expect(v).toEqual({ blind: true, why: "kill: the agent was gone and its sleep running" });
+  });
+  test("blind when a control left the agent but its sleep was gone", () => {
+    expect(controlVerdict([{ name: "kill", agentAlive: true, sleepAlive: false }]).blind).toBe(
+      true,
+    );
   });
   test("blind with no control scenario at all", () => {
     expect(controlVerdict([]).blind).toBe(true);
@@ -245,6 +318,17 @@ describe("cancelVerdict: what a simulated GitHub cancel did", () => {
     const v = cancelVerdict({ ...graceful, agentPid: 43 });
     expect(v.kind).toBe("other");
     expect(v.why.join()).toContain("stopped the agent (pid 43)");
+  });
+  test("not graceful when the step ended any other way than by SIGINT", () => {
+    for (const stepEnded of [
+      { code: 0, signal: null },
+      { code: 130, signal: null },
+      { code: null, signal: "SIGTERM" },
+    ]) {
+      const v = cancelVerdict({ ...graceful, stepEnded });
+      expect(v.kind).toBe("other");
+      expect(v.why.join()).toContain("step ended");
+    }
   });
   test("not graceful when the tool survived", () => {
     expect(cancelVerdict({ ...graceful, toolAlive: true }).kind).toBe("other");
@@ -301,19 +385,57 @@ describe("the workflow (.github/workflows/lifecycle-live.yml)", () => {
       run: "bash test/lifecycle/assert-cancel.sh cancel-noexec orphaned",
     });
   });
-  test("the secret reaches the smoke step only, and every action is pinned by commit", () => {
-    const text = readFileSync(
-      join(import.meta.dir, "../../.github/workflows/lifecycle-live.yml"),
-      "utf8",
-    );
-    expect(text.match(/secrets\./g)).toHaveLength(1);
+  const text = readFileSync(
+    join(import.meta.dir, "../../.github/workflows/lifecycle-live.yml"),
+    "utf8",
+  );
+  test("the secret reaches the live smoke step only, in any spelling", () => {
+    expect(text.match(/secrets\s*(?:\.|\[)/g)).toHaveLength(1);
     const withSecret = Object.entries(wf.jobs).flatMap(([job, j]) =>
-      j.steps
-        .filter((s) => JSON.stringify(s.env ?? {}).includes("secrets."))
-        .map((s) => `${job}: ${s.name}`),
+      j.steps.filter((s) => /secrets/.test(JSON.stringify(s))).map((s) => `${job}: ${s.name}`),
     );
     expect(withSecret).toEqual(["smoke: Live smoke (real claude; seven dispatches)"]);
+  });
+  test("every action is pinned by commit", () => {
     for (const j of Object.values(wf.jobs))
       for (const s of j.steps) if (s.uses) expect(s.uses).toMatch(/@[0-9a-f]{40}$/);
+  });
+  test("the smoke fetches the baseline, runs the free stand-in first, and execs each run under a time limit with no cores", () => {
+    const run = (name: string) => wf.jobs.smoke?.steps.find((s) => s.name === name)?.run;
+    expect(run("Fetch the control's baseline branch")).toBe(
+      "git fetch --depth 1 --no-tags origin +refs/heads/baseline/pre-eng-485:refs/remotes/origin/baseline/pre-eng-485",
+    );
+    expect(run("Free run with the stand-in claude (no model calls)")).toBe(
+      "ulimit -c 0 && exec timeout 600 bun run scripts/smoke-lifecycle.ts --standin",
+    );
+    expect(run("Live smoke (real claude; seven dispatches)")).toBe(
+      "ulimit -c 0 && exec timeout 900 bun run scripts/smoke-lifecycle.ts",
+    );
+    const names = wf.jobs.smoke?.steps.map((s) => s.name) ?? [];
+    expect(names.indexOf("Free run with the stand-in claude (no model calls)")).toBeLessThan(
+      names.indexOf("Live smoke (real claude; seven dispatches)"),
+    );
+  });
+  test("claude is pinned to the version smoke-lifecycle-container.sh uses", () => {
+    const pin = /@anthropic-ai\/claude-code@(\d+\.\d+\.\d+)/;
+    const container = readFileSync(
+      join(import.meta.dir, "../../scripts/smoke-lifecycle-container.sh"),
+      "utf8",
+    );
+    expect(pin.exec(text)?.[1]).toBeDefined();
+    expect(pin.exec(text)?.[1]).toBe(pin.exec(container)?.[1]);
+  });
+  test("each cancel job prepares and asserts the same marker", () => {
+    for (const job of ["cancel-with-exec", "cancel-without-exec"]) {
+      const steps = wf.jobs[job]?.steps ?? [];
+      const prepared = steps
+        .map((s) => /^bash test\/lifecycle\/cancel-prepare\.sh (\S+)$/.exec(s.run ?? "")?.[1])
+        .filter(Boolean);
+      const asserted = steps
+        .map((s) => /^bash test\/lifecycle\/assert-cancel\.sh (\S+) \S+$/.exec(s.run ?? "")?.[1])
+        .filter(Boolean);
+      expect(prepared).toHaveLength(1);
+      expect(asserted).toEqual(prepared);
+    }
   });
 });

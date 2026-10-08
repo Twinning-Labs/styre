@@ -4,36 +4,49 @@
 // and authenticated. Each scenario is one real agent dispatch, which costs money: seven per full
 // run on the cheap model.
 //
-// Usage: bun run scripts/smoke-lifecycle.ts [model]     (default: claude-haiku-4-5-20251001)
+// Usage: bun run scripts/smoke-lifecycle.ts [--standin] [model]   (default: claude-haiku-4-5-20251001)
+//
+// --standin is the free mode: test/lifecycle/fixtures/standin-claude.sh is put first on PATH as
+// `claude` (no network, no model), so the whole run, the control, every scenario, the leak checks and
+// D13's leftover report (the stand-in dies at once on SIGQUIT) cost nothing. Run it before every live
+// run. SMOKE_STANDIN_QUIT=clean and SMOKE_STANDIN_PARENT=follow change the stand-in (see its header).
 //
 // Each scenario makes a throwaway git repository whose test suite is slow (`test.sh` writes its
 // pid, then becomes `sleep 97.3<n>`), and runs scripts/smoke-lifecycle-driver.ts: Styre's stop
 // handling around one dispatch through the real Claude adapter, with the design's prompt and the
 // tools ["Read", "Bash(sh:*)"]. Once the agent's sleep is running, the scenario stops Styre.
 //
-//   1. It records `claude --version` (at least 2.1.280), and in every scenario that the group the
-//      agent's command runs in is led by the agent's direct child (R8, spec 6.1).
-//   2. CONTROL: main, checked out in a temporary git worktree outside this checkout, under
-//      `kill` and `kill -9`. Each must leave the agent and its sleep running (spec 2.1). If one
-//      does not, the probes cannot see a failure: it prints "probes are blind" and exits 1.
-//      ($SMOKE_CONTROL_ROOT names other code to use as the control: the proof that this check bites.)
+//   1. It records `claude --version` (at least 2.1.280), and in every scenario the sleep's parent
+//      chain and R8 (spec 6.1, amended 2026-10-08): the agent's direct child leads the command
+//      group, and every process on the chain sits in a group led by a process on the chain.
+//   2. CONTROL: the branch baseline/pre-eng-485 (main before ENG-485, operator decision), exported
+//      with `git archive` into the script's temporary folder (no worktree is registered, so a crash
+//      leaves nothing in the repository), under `kill` and `kill -9`. The run refuses loudly if the
+//      branch is missing or has src/util/process/signals.ts, and the control's driver must say it
+//      installed no stop handlers (the new code's, that it did). Each control scenario must leave
+//      the agent and its sleep running (spec 2.1); if one does not, the probes cannot see a failure:
+//      it prints "probes are blind" and exits 1. ($SMOKE_CONTROL_ROOT names other code to use as the
+//      control.)
 //   3. NEW CODE: Ctrl-C (typed into a real terminal), `kill`, `kill -9` followed by `styre ls`, a
-//      dispatch timeout, and Ctrl-\. Each must end with the expected exit, and the agent and its
-//      sleep must be gone within 5 s, except Ctrl-\, where the sleep may outlive the stop but must
-//      then be reported (D13).
+//      dispatch timeout, and Ctrl-\. Each must end with the expected exit and lines, and the agent
+//      and its sleep must be gone within 5 s, except Ctrl-\, where the sleep may outlive the stop
+//      but must then be reported with D13's exact leftover line.
 //
 // Safety. Every process here is the script's own (test/helpers/own-processes.ts): a driver started
 // in the background leads a new session that the script registers, so the agent, which stays in
 // the driver's group, remains claimable after the driver dies; the agent's command and its sleep
 // are claimed by descent before any stop. Nothing is found by its command text, and nothing is
-// signalled that was not claimed. After every scenario everything claimed is stopped, and the
-// scenario fails loudly if any claimed process, any member of the driver's group, or any process
-// working in the scenario's folder is still running. Every Styre process gets a state folder of the
-// script's own (XDG_STATE_HOME), and the run fails if a launch record appears in the real
-// ~/.local/state/styre-processes.
+// signalled that was not claimed. After every scenario the members of the driver's group are
+// claimed and asked to stop (so a driver that died before its tree was claimed leaves no agent
+// running), everything claimed is stopped, and the scenario fails loudly if any claimed process,
+// any member of the driver's group, or any process working in the scenario's folder is still
+// running. Every Styre process gets a state folder of the script's own (XDG_STATE_HOME), and the
+// run fails if a launch record appears in the real ~/.local/state/styre-processes. A SIGKILL of the
+// smoke itself skips all of this: background drivers then keep running in their own sessions.
 import {
   type FSWatcher,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -62,13 +75,17 @@ import {
 } from "../test/helpers/own-processes.ts";
 import { CTRL_BACKSLASH, CTRL_C, type Pty, underPty } from "../test/lifecycle/pty.ts";
 import {
+  BASELINE_REFS,
   type ControlResult,
   type Ended,
   type Expectation,
   type Observation,
+  SIGNALS_FILE,
   STOP_WINDOW_MS,
   agentAbove,
+  baselineProblem,
   controlVerdict,
+  handlersProblem,
   judge,
   parseClaudeVersion,
   parseDriver,
@@ -76,11 +93,13 @@ import {
   versionAtLeast,
 } from "./lifecycle-live.ts";
 
-const model = process.argv[2] ?? "claude-haiku-4-5-20251001";
+const args = process.argv.slice(2);
+const standin = args.includes("--standin");
+const model = args.find((a) => !a.startsWith("--")) ?? "claude-haiku-4-5-20251001";
 const ROOT = realpathSync(join(import.meta.dir, ".."));
 const DRIVER = join(ROOT, "scripts", "smoke-lifecycle-driver.ts");
 /** How long the agent may take to start its test (CLI start, one model call, one tool call). */
-const START_MS = 120_000;
+const START_MS = Number(process.env.SMOKE_START_MS ?? 120_000);
 /** The dispatch timeout of the timeout scenario: long enough for the sleep to start first. */
 const TIMEOUT_SCENARIO_MS = 60_000;
 /** How long a stopped driver may take to exit: the handler's 6.5 s deadline, and some room. */
@@ -102,6 +121,9 @@ const work = realpathSync(mkdtempSync(join(tmpdir(), "styre-smoke-lifecycle-")))
 const stateHome = join(work, "state");
 process.env.XDG_STATE_HOME = stateHome;
 const recordsDir = join(stateHome, "styre-processes");
+/** The agent CLI every driver runs: the stand-in, by absolute path, in the free mode. */
+const STANDIN = join(ROOT, "test", "lifecycle", "fixtures", "standin-claude.sh");
+const CLAUDE = standin ? STANDIN : "claude";
 
 // The guard on the operator's real records folder (as test/preload.ts does for the test suite).
 const RECORD_NAME = /^\.?\d+-\d+(?:\.\d{6})?\.json/;
@@ -137,7 +159,6 @@ function realRecordsWritten(): string[] {
 /** Every dispatch this run started: each is one real `claude` agent run. */
 let dispatches = 0;
 const ptys: Pty[] = [];
-let mainWorktree: string | null = null;
 
 // ---- cleanup: only what the script claimed ------------------------------------------------------
 interface LeakCheck {
@@ -150,6 +171,14 @@ async function cleanUp(
   since: string | null,
   groups: number[],
 ): Promise<LeakCheck> {
+  // A driver that died before its tree was claimed leaves its agent in the driver's group (the
+  // agent is never spawned detached, D4): claim the group's members (rule 2) and ask them to stop,
+  // so the agent stops its own commands, before everything claimed is killed.
+  const members = own(
+    ...listProcesses().filter((p) => groups.includes(p.pgid) && p.state !== "zombie"),
+  );
+  for (const p of members) signalOwned(p, "SIGTERM");
+  if (members.length > 0) await until(() => members.every((p) => !isAlive(p)), STOP_WINDOW_MS);
   killOwned();
   const lines: string[] = [];
   const left = await stillRunning(3_000);
@@ -194,19 +223,17 @@ async function finish(wanted: number): Promise<never> {
       log(`LEAK after the run:\n- ${leak.lines.join("\n- ")}`);
       code = 1;
     }
-    if (mainWorktree !== null) {
-      Bun.spawnSync(["git", "-C", ROOT, "worktree", "remove", "--force", mainWorktree], {
-        timeout: 60_000,
-      });
-      Bun.spawnSync(["git", "-C", ROOT, "worktree", "prune"], { timeout: 60_000 });
-    }
     const written = realRecordsWritten();
     if (written.length > 0) {
       log(`FAIL: launch records were written into the real ${realDir}: ${written.join(", ")}`);
       code = 1;
     }
     rmSync(work, { recursive: true, force: true });
-    log(`claude dispatches started: ${dispatches}`);
+    log(
+      standin
+        ? `claude dispatches started: 0 (free mode: ${dispatches} runs of the stand-in)`
+        : `claude dispatches started: ${dispatches}`,
+    );
   }
   process.exit(code);
 }
@@ -276,6 +303,7 @@ function driverEnv(
     SMOKE_MODEL: model,
     SMOKE_TIMEOUT_MS: String(timeoutMs),
     SMOKE_IDENT: ident,
+    SMOKE_CLAUDE: CLAUDE,
   };
 }
 
@@ -395,7 +423,7 @@ async function start(
 async function watchStop(
   s: Started,
   t0: number,
-): Promise<Pick<Observation, "agentGoneMs" | "sleepGoneMs" | "sleepAliveAtEnd">> {
+): Promise<Pick<Observation, "agentGoneMs" | "sleepGoneMs">> {
   let agentGoneMs: number | null = null;
   let sleepGoneMs: number | null = null;
   const end = t0 + STOP_WINDOW_MS + 1_000;
@@ -406,7 +434,7 @@ async function watchStop(
     if ((agentGoneMs !== null && sleepGoneMs !== null) || now >= end) break;
     await Bun.sleep(20);
   }
-  return { agentGoneMs, sleepGoneMs, sleepAliveAtEnd: isAlive(s.sleep) };
+  return { agentGoneMs, sleepGoneMs };
 }
 
 /** What a scenario's action did: the trigger's instant, and anything it read itself. */
@@ -451,16 +479,19 @@ async function scenario(
 ): Promise<Outcome> {
   let s: Started | null = null;
   const failures: string[] = [];
-  let watched: Pick<Observation, "agentGoneMs" | "sleepGoneMs" | "sleepAliveAtEnd"> = {
+  let watched: Pick<Observation, "agentGoneMs" | "sleepGoneMs"> = {
     agentGoneMs: null,
     sleepGoneMs: null,
-    sleepAliveAtEnd: true,
   };
   let exit: Ended | null = null;
   let r8ok = false;
   let styreText = "";
   try {
     s = await start(name, root, how, timeoutMs);
+    const handlers = handlersProblem(code, parseDriver(s.said()).handlers);
+    if (handlers !== null) failures.push(handlers);
+    if (!s.said().split("\n").includes(`smoke-driver: claude ${CLAUDE}`))
+      failures.push(`the driver did not run ${CLAUDE}`);
     if (code === "new") {
       const recorded =
         existsSync(recordsDir) &&
@@ -512,7 +543,7 @@ async function scenario(
 // ---- the run -------------------------------------------------------------------------------------
 try {
   // 1. The CLI's version.
-  const v = Bun.spawnSync(["claude", "--version"], {
+  const v = Bun.spawnSync([CLAUDE, "--version"], {
     timeout: 30_000,
     env: { ...process.env, XDG_STATE_HOME: stateHome },
   });
@@ -520,6 +551,10 @@ try {
   log(
     `claude --version: ${v.stdout.toString().trim() || v.stderr.toString().trim()}; model ${model}`,
   );
+  if (standin && !v.stdout.toString().includes("stand-in")) {
+    log(`FAIL: the free mode is not running the stand-in (${CLAUDE}); no dispatch was started`);
+    await finish(1);
+  }
   if (version === null || !versionAtLeast(version, CLAUDE_MIN_CLI_VERSION)) {
     log(
       `FAIL: claude ${version ?? "(not found)"} is older than ${CLAUDE_MIN_CLI_VERSION}, or missing`,
@@ -530,21 +565,45 @@ try {
   // 2. The control.
   let controlRoot = process.env.SMOKE_CONTROL_ROOT ?? "";
   if (controlRoot === "") {
-    mainWorktree = join(work, "main");
-    const add = Bun.spawnSync(
-      ["git", "-C", ROOT, "worktree", "add", "--quiet", "--detach", mainWorktree, "main"],
-      { timeout: 60_000 },
+    const git = (a: string[]) => Bun.spawnSync(["git", "-C", ROOT, ...a], { timeout: 60_000 });
+    const ref =
+      BASELINE_REFS.find((r) => git(["rev-parse", "--verify", "--quiet", r]).exitCode === 0) ??
+      null;
+    const hasSignals =
+      ref !== null && git(["cat-file", "-e", `${ref}:${SIGNALS_FILE}`]).exitCode === 0;
+    const problem = baselineProblem(ref, hasSignals);
+    if (problem !== null) {
+      log(`FAIL: the control's code: ${problem}`);
+      await finish(1);
+    }
+    // Exported, not checked out: no worktree is registered in the repository.
+    controlRoot = join(work, "baseline");
+    mkdirSync(controlRoot);
+    const sha = git(["rev-parse", `${ref}^{commit}`])
+      .stdout.toString()
+      .trim();
+    const out = Bun.spawnSync(
+      [
+        "sh",
+        "-c",
+        'git -C "$1" archive --format=tar "$2" | tar -x -C "$3"',
+        "sh",
+        ROOT,
+        sha,
+        controlRoot,
+      ],
+      { timeout: 120_000, stderr: "pipe" },
     );
-    if (add.exitCode !== 0) throw new Error(`could not check out main: ${add.stderr.toString()}`);
+    if (out.exitCode !== 0) throw new Error(`could not export ${ref}: ${out.stderr.toString()}`);
     const inst = Bun.spawnSync([process.execPath, "install", "--frozen-lockfile"], {
-      cwd: mainWorktree,
+      cwd: controlRoot,
       timeout: 180_000,
       stdout: "pipe",
       stderr: "pipe",
     });
     if (inst.exitCode !== 0)
-      throw new Error(`bun install in main's worktree failed: ${inst.stderr.toString()}`);
-    controlRoot = mainWorktree;
+      throw new Error(`bun install in the baseline failed: ${inst.stderr.toString()}`);
+    log(`control: ${ref} at ${sha}`);
   }
   log(`control: ${controlRoot}`);
   const control: ControlResult[] = [];
@@ -704,7 +763,12 @@ try {
       s.pty?.type(CTRL_BACKSLASH);
       return { t0 };
     },
-    (s) => ({ exit: { code: null, signal: "SIGQUIT" }, lines: [], reportSleep: s.sleep.pid }),
+    (s) => ({
+      exit: { code: null, signal: "SIGQUIT" },
+      lines: [opening("SIGQUIT"), stopped(s)],
+      absent: [COULD_NOT],
+      reportSleep: { pid: s.sleep.pid, command: `sleep ${s.sleepTag}` },
+    }),
   );
 
   log(JSON.stringify({ claude: version, model, outcomes }, null, 2));

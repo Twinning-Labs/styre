@@ -11,7 +11,8 @@
 // Everything Styre itself says goes to the same stderr.
 //
 // Environment: SMOKE_ROOT, SMOKE_REPO (the agent's working folder), SMOKE_MODEL, SMOKE_TIMEOUT_MS,
-// SMOKE_IDENT. The caller points XDG_STATE_HOME at a folder of its own.
+// SMOKE_IDENT, and SMOKE_CLAUDE, the agent CLI to run (an absolute path in the free mode, so no PATH
+// lookup can pick the real CLI). The caller points XDG_STATE_HOME at a folder of its own.
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type * as Claude from "../src/agent/providers/claude.ts";
@@ -27,6 +28,7 @@ const repo = need("SMOKE_REPO");
 const model = need("SMOKE_MODEL");
 const timeoutMs = Number(need("SMOKE_TIMEOUT_MS"));
 const ident = need("SMOKE_IDENT");
+const command = need("SMOKE_CLAUDE");
 
 const say = (line: string): void => {
   process.stderr.write(`smoke-driver: ${line}\n`);
@@ -49,8 +51,9 @@ const { claudeAgentRunner } = (await import(
 const PROMPT =
   "Run this project's test suite with the Bash tool: `sh test.sh` (in the foreground, with a 300000 ms timeout), then report whether it passed.";
 
+say(`claude ${command}`);
 say(`dispatch ${Date.now()}`);
-const r = await claudeAgentRunner().run({
+const r = await claudeAgentRunner(command).run({
   prompt: PROMPT,
   model,
   allowedTools: ["Read", "Bash(sh:*)"],
