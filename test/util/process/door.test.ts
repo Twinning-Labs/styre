@@ -110,7 +110,7 @@ test("a launch is recorded on disk and in memory, and released after it finishes
   expect(listRecords()).toEqual([]);
 });
 
-test("finish() of an agent that already exited reads the process table once (spec 11.4)", async () => {
+test("finish() of an agent that already exited reads no process table, only its own entry (spec 11.4)", async () => {
   let reads = 0;
   door.__setStopDepsForTests({
     ...realStopDeps,
@@ -123,7 +123,7 @@ test("finish() of an agent that already exited reads the process table once (spe
   await a.proc.exited;
   const rep = await a.finish();
   expect(rep.survivors).toEqual([]);
-  expect(reads).toBe(1);
+  expect(reads).toBe(0);
   expect(door.liveLaunches()).toEqual([]);
   expect(listRecords()).toEqual([]);
 });

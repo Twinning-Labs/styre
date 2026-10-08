@@ -1,4 +1,4 @@
-import { type ProcInfo, listProcesses } from "./proc-table.ts";
+import { type Probe, type ProcInfo, listProcesses, probe } from "./proc-table.ts";
 
 /**
  * Stop functions (ENG-485 section 6). "Gone" is always read from the process table, including its
@@ -25,6 +25,9 @@ export interface StopDeps {
   kill: (target: number, sig: NodeJS.Signals) => void;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
+  /** One process's own entry, without reading the whole table. Absent: `stopTree` reads the table
+   *  to learn whether its root is still there (the same answer, at a higher cost). */
+  probe?: (pid: number) => Probe;
 }
 
 /**
@@ -43,6 +46,7 @@ export const realStopDeps: StopDeps = {
   },
   sleep: (ms) => Bun.sleep(ms),
   now: () => Date.now(),
+  probe,
 };
 
 const POLL_MS = 50;
@@ -142,6 +146,9 @@ function stillAlive(seen: Map<string, ProcInfo>, table: ProcInfo[]): ProcInfo[] 
  * collected process at once, waits up to `graceMs` (polling with `await`), then escalates; `forced`
  * goes straight to SIGKILL. `abort.forced`, set by a second signal, ends the wait early.
  */
+const refusal = (pid: number): Error =>
+  new Error(`stopTree: refusing root pid ${pid}: it is init, Styre, or Styre's own group leader`);
+
 export async function stopTree(
   root: { pid: number; startedAt: string },
   how: "graceful" | "forced",
@@ -154,23 +161,31 @@ export async function stopTree(
 ): Promise<StopReport> {
   const d = opts.deps ?? realStopDeps;
   const exclude = new Set(opts.excludePgids);
-  // One listing serves the refusal check, the first collection and the first liveness check. When
-  // it shows nothing collected alive (the usual finish of an agent that has already exited), the
-  // stop is done. No later listing could collect more: a new process joins only through a live
-  // collected process (its parent, or a member of a collected group that forked it), and there is
-  // none. A normal dispatch then pays one read (spec 11.4); anything alive gets the full stop.
+  if (root.pid <= 1 || root.pid === process.pid) throw refusal(root.pid);
+  const nothing = (): StopReport => ({ stopped: [], survivors: [], signalled: [], failures: [] });
+  // Every link of the collection starts from the root (pid and start time). A root no longer on the
+  // system (an agent Bun has already reaped, the usual case after a normal exit) or whose pid now
+  // belongs to another program collects nothing: its own entry says so without reading the whole
+  // table (spec 11.4), and a full read would give the same answer. What such an agent left running
+  // is no longer linked to it; only the leftover check (section 9) reports it.
+  if (d.probe) {
+    const p = d.probe(root.pid);
+    if (p.kind === "gone" || (p.kind === "alive" && p.info.startedAt !== root.startedAt)) {
+      // The refusal of Styre's own group leader still holds without the table.
+      const me = d.probe(process.pid);
+      if (me.kind === "alive" && me.info.pgid === root.pid) throw refusal(root.pid);
+      return nothing();
+    }
+  }
+  // The root is still there (alive or a zombie), or could not be probed. One listing serves the
+  // refusal check, the first collection and the first liveness check. When it shows nothing
+  // collected alive, the stop is done: no later listing could collect more, since a new process
+  // joins only through a live collected process (its parent, or a member of a collected group that
+  // forked it). Anything alive gets the full stop.
   const first = d.list();
   const own = ownPgid(first);
-  if (root.pid <= 1 || root.pid === process.pid || root.pid === own) {
-    throw new Error(
-      `stopTree: refusing root pid ${root.pid}: it is init, Styre, or Styre's own group leader`,
-    );
-  }
-  // The root is not in the table (an agent already reaped): nothing can be collected, since every
-  // link starts from the root. Skip building the collection over the whole table.
-  if (!first.some((p) => p.pid === root.pid && p.startedAt === root.startedAt)) {
-    return { stopped: [], survivors: [], signalled: [], failures: [] };
-  }
+  if (root.pid === own) throw refusal(root.pid);
+  if (!first.some((p) => p.pid === root.pid && p.startedAt === root.startedAt)) return nothing();
   const seen = new Map<string, ProcInfo>();
   const failed = new Map<string, string>();
   const signalled = new Map<string, ProcInfo>();
