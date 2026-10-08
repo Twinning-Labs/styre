@@ -253,6 +253,63 @@ export function turnOffCoreDumps(): void {
     throw new Error("prctl(PR_SET_DUMPABLE) failed");
 }
 
+/** The core dump state a prompt changes and gives back: the soft and hard core limits, and on
+ *  Linux the dumpable flag (null elsewhere). */
+export interface CoreDumpState {
+  soft: bigint;
+  hard: bigint;
+  dumpable: number | null;
+}
+
+/** Read this process's core dump state, to give it back after a prompt. Read only. */
+export function saveCoreDumps(): CoreDumpState {
+  const c = calls();
+  const rlim = new BigUint64Array(2);
+  if (c.getrlimit(RLIMIT_CORE, rlim) !== 0) throw new Error("getrlimit(RLIMIT_CORE) failed");
+  let dumpable: number | null = null;
+  if (c.prctl !== null) {
+    dumpable = c.prctl(PR_GET_DUMPABLE, 0n);
+    if (dumpable < 0) throw new Error("prctl(PR_GET_DUMPABLE) failed");
+  }
+  return { soft: rlim[0] as bigint, hard: rlim[1] as bigint, dumpable };
+}
+
+/**
+ * Turn core dumps off while setup waits at a prompt with the stop handlers suspended, so a Ctrl-\
+ * there (SIGQUIT's default action) writes no core. Unlike `turnOffCoreDumps` it lowers only the
+ * soft limit: a process that is not privileged can never raise its hard limit again (getrlimit(2);
+ * macOS setrlimit(2)), and `restoreCoreDumps` must be able to give the soft limit back. On Linux the
+ * process is also marked not dumpable (a pipe core_pattern ignores the limit). Throws when a call
+ * fails.
+ */
+export function turnOffCoreDumpsForPrompt(): void {
+  const c = calls();
+  const rlim = new BigUint64Array(2);
+  if (c.getrlimit(RLIMIT_CORE, rlim) !== 0) throw new Error("getrlimit(RLIMIT_CORE) failed");
+  if (c.setrlimit(RLIMIT_CORE, new BigUint64Array([0n, rlim[1] as bigint])) !== 0)
+    throw new Error("setrlimit(RLIMIT_CORE) failed");
+  if (c.prctl !== null && c.prctl(PR_SET_DUMPABLE, 0n) !== 0)
+    throw new Error("prctl(PR_SET_DUMPABLE) failed");
+}
+
+/**
+ * Give back the state `saveCoreDumps` read: the soft and hard limits as they were, and on Linux the
+ * dumpable flag (setting 1 again gives the /proc/<pid> files back to the process's own user,
+ * proc_pid(5)). Fails, and throws, if the hard limit was lowered meanwhile: it cannot be raised
+ * again.
+ */
+export function restoreCoreDumps(saved: CoreDumpState): void {
+  const c = calls();
+  if (c.setrlimit(RLIMIT_CORE, new BigUint64Array([saved.soft, saved.hard])) !== 0)
+    throw new Error("setrlimit(RLIMIT_CORE) failed");
+  if (
+    c.prctl !== null &&
+    saved.dumpable !== null &&
+    c.prctl(PR_SET_DUMPABLE, BigInt(saved.dumpable)) !== 0
+  )
+    throw new Error("prctl(PR_SET_DUMPABLE) failed");
+}
+
 /** This process's soft core limit (a decimal string) and, on Linux, its dumpable flag. Read only;
  *  for the tests of `turnOffCoreDumps`. */
 export function coreDumpState(): { limit: string; dumpable: number | null } {

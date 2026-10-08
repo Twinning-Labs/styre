@@ -21,7 +21,13 @@ import {
 } from "./door.ts";
 import { recordInterruption } from "./interruption.ts";
 import { checkLeftovers, skippedLine } from "./leftovers.ts";
-import { turnOffCoreDumps } from "./proc-table.ts";
+import {
+  type CoreDumpState,
+  restoreCoreDumps,
+  saveCoreDumps,
+  turnOffCoreDumps,
+  turnOffCoreDumpsForPrompt,
+} from "./proc-table.ts";
 import type { StopReport } from "./stop.ts";
 
 /** One deadline for the whole handler, from the first signal (section 7.4). */
@@ -367,16 +373,67 @@ export function installStopHandlers(
   };
 }
 
-/** Section 7.1: setup's blocking prompt() would otherwise hold Ctrl-C until Enter (review round 1,
- *  finding 3). While `fn` runs a signal has its default effect; the handlers come back after. */
-export async function suspendStopHandlers<T>(fn: () => T | Promise<T>): Promise<T> {
+/** The core dump calls around a prompt (proc-table.ts), and where their failures are said. */
+export interface PromptCores {
+  save: () => CoreDumpState;
+  off: () => void;
+  restore: (saved: CoreDumpState) => void;
+  say: (line: string) => void;
+}
+const PROMPT_CORES: PromptCores = {
+  save: saveCoreDumps,
+  off: turnOffCoreDumpsForPrompt,
+  restore: restoreCoreDumps,
+  say: (line) => {
+    try {
+      process.stderr.write(line);
+    } catch {
+      /* nowhere to say it */
+    }
+  },
+};
+
+/**
+ * Section 7.1: setup's blocking prompt() would otherwise hold Ctrl-C until Enter (review round 1,
+ * finding 3). While `fn` runs a signal has its default effect; the handlers come back after. Every
+ * prompt that runs with the handlers suspended goes through here: setup's missing command prompts
+ * (resolveCommands) and its approval prompt.
+ *
+ * A signal's default effect for Ctrl-\ is a core dump, so core dumps are off while `fn` runs
+ * (amendment 2026-10-08): the state is saved, turned off (the soft limit only), and given back in
+ * the `finally`, whether `fn` answers, throws or meets the end of input. A failure on either side is
+ * said in one line, and the prompt and setup go on.
+ */
+export async function suspendStopHandlers<T>(
+  fn: () => T | Promise<T>,
+  cores: PromptCores = PROMPT_CORES,
+): Promise<T> {
   const saved = installed;
   for (const [s, h] of saved ?? []) process.removeListener(s, h);
+  let kept: CoreDumpState | null = null;
+  try {
+    kept = cores.save();
+    cores.off();
+  } catch (err) {
+    cores.say(`styre: could not turn off core dumps for the prompt: ${message(err)}\n`);
+  }
   try {
     return await fn();
   } finally {
+    if (kept !== null) {
+      try {
+        cores.restore(kept);
+      } catch (err) {
+        cores.say(`styre: could not restore core dumps after the prompt: ${message(err)}\n`);
+      }
+    }
     if (saved && installed === saved) for (const [s, h] of saved) process.on(s, h);
   }
+}
+
+/** Test seam only: the core dump calls setup's prompts use. */
+export function __promptCoresForTests(): PromptCores {
+  return PROMPT_CORES;
 }
 
 /** Test seam only: the real dependencies, so a test can check what they are wired to. */

@@ -8,16 +8,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as door from "../../src/util/process/door.ts";
 import {
+  type CoreDumpState,
   type ProcInfo,
   listProcesses,
   nowToken,
   probe,
+  restoreCoreDumps,
+  saveCoreDumps,
   turnOffCoreDumps,
+  turnOffCoreDumpsForPrompt,
 } from "../../src/util/process/proc-table.ts";
 import {
   HANDLER_DEADLINE_MS,
   type HandlerCtx,
   type HandlerDeps,
+  type PromptCores,
+  __promptCoresForTests,
   __realDepsForTests,
   __resetSignalsForTests,
   handleStopSignal,
@@ -1000,6 +1006,99 @@ describe("installing the handlers", () => {
     } finally {
       h.dispose();
     }
+  });
+
+  /** A stand-in for the core dump calls around a prompt, noting each call in `order`. */
+  function promptCores(order: string[], over: Partial<PromptCores> = {}): PromptCores {
+    const saved: CoreDumpState = { soft: 7n, hard: 9n, dumpable: 1 };
+    return {
+      save: () => {
+        order.push("save");
+        return saved;
+      },
+      off: () => {
+        order.push("off");
+      },
+      restore: (s) => {
+        order.push(s === saved ? "restore saved" : "restore other");
+      },
+      say: (line) => {
+        order.push(`say ${line}`);
+      },
+      ...over,
+    };
+  }
+
+  test("while a prompt runs core dumps are off: saved and turned off before it reads, the saved state restored after", async () => {
+    const order: string[] = [];
+    const answer = await suspendStopHandlers(() => {
+      order.push("prompt");
+      return "y";
+    }, promptCores(order));
+    expect(answer).toBe("y");
+    expect(order).toEqual(["save", "off", "prompt", "restore saved"]);
+  });
+
+  test("the saved core state is restored when the prompt throws", async () => {
+    const order: string[] = [];
+    await expect(
+      suspendStopHandlers(() => {
+        order.push("prompt");
+        throw new Error("EOF");
+      }, promptCores(order)),
+    ).rejects.toThrow("EOF");
+    expect(order).toEqual(["save", "off", "prompt", "restore saved"]);
+  });
+
+  test("core dumps that cannot be turned off for a prompt are said in one line; the prompt still runs and what was changed is restored", async () => {
+    const order: string[] = [];
+    const cores = promptCores(order, {
+      off: () => {
+        order.push("off");
+        throw new Error("prctl failed");
+      },
+    });
+    expect(await suspendStopHandlers(() => order.push("prompt"), cores)).toBe(4);
+    expect(order).toEqual([
+      "save",
+      "off",
+      "say styre: could not turn off core dumps for the prompt: prctl failed\n",
+      "prompt",
+      "restore saved",
+    ]);
+    const unread: string[] = [];
+    const noSave = promptCores(unread, {
+      save: () => {
+        throw new Error("getrlimit failed");
+      },
+    });
+    await suspendStopHandlers(() => unread.push("prompt"), noSave);
+    expect(unread).toEqual([
+      "say styre: could not turn off core dumps for the prompt: getrlimit failed\n",
+      "prompt",
+    ]);
+  });
+
+  test("a restore that fails after the prompt is said in one line and does not end setup", async () => {
+    const order: string[] = [];
+    const cores = promptCores(order, {
+      restore: () => {
+        throw new Error("setrlimit failed");
+      },
+    });
+    expect(await suspendStopHandlers(() => "y", cores)).toBe("y");
+    expect(order).toEqual([
+      "save",
+      "off",
+      "say styre: could not restore core dumps after the prompt: setrlimit failed\n",
+    ]);
+  });
+
+  test("setup's prompts use the real core dump calls", () => {
+    const real = __promptCoresForTests();
+    expect(real.save).toBe(saveCoreDumps);
+    expect(real.off).toBe(turnOffCoreDumpsForPrompt);
+    expect(real.restore).toBe(restoreCoreDumps);
   });
 
   test("the real telemetry path writes the note as one NDJSON event line on stdout", async () => {
