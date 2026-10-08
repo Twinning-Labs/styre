@@ -15,7 +15,7 @@
 // database and a step in flight, so the interruption is recorded there. With $DRIVE_SLOW the
 // analytics shutdown takes 300 ms, as a real one can, so a write's failure after the terminal has
 // closed has time to surface. With $DRIVE_ERRORS it appends the code of every failed stderr write to
-// that file.
+// that file; with $DRIVE_LOG, everything it writes to stderr.
 import { Database } from "bun:sqlite";
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
@@ -28,6 +28,17 @@ if (errorsFile) {
   process.stderr.on("error", (err) => {
     appendFileSync(errorsFile, `${(err as NodeJS.ErrnoException).code ?? err.message}\n`);
   });
+}
+
+// With $DRIVE_LOG every stderr write is also appended to that file, before it goes to the terminal:
+// the test can read what Styre said after the terminal itself is gone.
+const logFile = process.env.DRIVE_LOG;
+if (logFile) {
+  const write = process.stderr.write.bind(process.stderr) as (...a: unknown[]) => boolean;
+  process.stderr.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+    appendFileSync(logFile, chunk);
+    return write(chunk, ...rest);
+  }) as typeof process.stderr.write;
 }
 
 const dbPath = process.env.DRIVE_DB;

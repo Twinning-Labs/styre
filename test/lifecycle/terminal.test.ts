@@ -121,7 +121,16 @@ describe("the driver in a terminal", () => {
       expect(await allGone([agent, tool], Math.max(0, 5_000 - (Date.now() - t0)))).toBe(true);
       expect(Date.now() - t0).toBeLessThan(5_000);
       await expectShown(d.pty, OPENING_INT);
-      await expectShown(d.pty, `styre: stopped the agent (pid ${agent.pid}) and `);
+      // The terminal's Ctrl-C reaches the agent too, which may stop its tool before Styre does.
+      expect(
+        await d.pty.waitFor(
+          new RegExp(
+            `styre: stopped the agent \\(pid ${agent.pid}\\) and [01] of its commands\\.\n`,
+          ),
+          3_000,
+        ),
+        `no line saying the agent was stopped; the terminal showed:\n${d.pty.output()}`,
+      ).toBe(true);
     },
     SLOW,
   );
@@ -157,6 +166,11 @@ describe("the driver in a terminal", () => {
       expect(signalOwned(d.driver, "SIGTERM")).toBe(true);
       await endedBy(d.pty, "SIGTERM");
       await expectShown(d.pty, opening("SIGTERM"));
+      // Only the driver got the signal: the agent and its tool were stopped by Styre.
+      await expectShown(
+        d.pty,
+        `styre: stopped the agent (pid ${agent.pid}) and 1 of its commands.\n`,
+      );
       expect(await allGone([agent, tool])).toBe(true);
     },
     SLOW,
@@ -201,6 +215,10 @@ describe("the driver in a terminal", () => {
       expect(Date.now() - t0).toBeLessThan(3_000);
       await expectShown(d.pty, FORCING);
       expect(d.pty.output().split(FORCING).length - 1).toBe(1);
+      await expectShown(
+        d.pty,
+        `styre: stopped the agent (pid ${agent.pid}) and 1 of its commands.\n`,
+      );
       expect(await allGone([agent, tool], 1_000)).toBe(true);
     },
     SLOW,
@@ -209,25 +227,39 @@ describe("the driver in a terminal", () => {
   test(
     "the terminal really closes: the handler's writes to it fail, and still the exit is SIGHUP, the processes are stopped and the run is recorded",
     async () => {
-      const t = makeTicketDb();
-      const errors = join(scratch, `stderr-errors-${Date.now()}`);
-      const d = await driven("agent", {
-        DRIVE_DB: t.path,
-        DRIVE_TICKET: String(t.ticketId),
-        DRIVE_STEP: String(t.stepId),
-        DRIVE_STARTED: t.startedAt,
-        DRIVE_SLOW: "1",
-        DRIVE_ERRORS: errors,
-      });
-      const agent = d.find(said(d.pty, "agent"));
-      const tool = d.find(said(d.pty, "tool"));
-      await d.pty.close();
-      await endedBy(d.pty, "SIGHUP");
-      // The stop line went to a terminal that no longer exists: the write failed (EIO), and the
-      // stream's error listener kept that from ending the stop.
-      expect(existsSync(errors) ? readFileSync(errors, "utf8") : "").toContain("EIO");
-      expect(await allGone([agent, tool])).toBe(true);
-      expect(interruptions(t.path)).toBe(1);
+      const runDir = mkdtempSync(join(scratch, "run-"));
+      try {
+        const t = makeTicketDb({ path: join(runDir, "run.db") });
+        const errors = join(runDir, "stderr-errors");
+        const log = join(runDir, "stderr-log");
+        const d = await driven("agent", {
+          DRIVE_DB: t.path,
+          DRIVE_TICKET: String(t.ticketId),
+          DRIVE_STEP: String(t.stepId),
+          DRIVE_STARTED: t.startedAt,
+          DRIVE_SLOW: "1",
+          DRIVE_ERRORS: errors,
+          DRIVE_LOG: log,
+        });
+        const agent = d.find(said(d.pty, "agent"));
+        const tool = d.find(said(d.pty, "tool"));
+        await d.pty.close();
+        await endedBy(d.pty, "SIGHUP");
+        // The stop line went to a terminal that no longer exists: the write failed (EIO), and the
+        // stream's error listener kept that from ending the stop.
+        expect(existsSync(errors) ? readFileSync(errors, "utf8") : "").toContain("EIO");
+        // What Styre said, read from the driver's own copy: only the driver got the SIGHUP (its
+        // shell passes it to the job's pid), so the agent and its tool were stopped by Styre.
+        const said_ = existsSync(log) ? readFileSync(log, "utf8") : "";
+        expect(said_).toContain(opening("SIGHUP"));
+        expect(said_).toContain(
+          `styre: stopped the agent (pid ${agent.pid}) and 1 of its commands.\n`,
+        );
+        expect(await allGone([agent, tool])).toBe(true);
+        expect(interruptions(t.path)).toBe(1);
+      } finally {
+        rmSync(runDir, { recursive: true, force: true });
+      }
     },
     SLOW,
   );
@@ -252,18 +284,32 @@ function interruptions(path: string): number {
 // ---- the compiled styre --------------------------------------------------------------------------
 
 let built: string | null = null;
-/** A fresh build of styre for this run (never a dist/styre left from an older checkout). */
+/**
+ * A fresh build of styre for this run (never a dist/styre left from an older checkout), made as
+ * scripts/build.sh makes it, by the Bun running this test (review M5). It runs in the test's own
+ * temporary folder with an absolute entry: on macOS `bun build --compile` leaves a copy of Bun
+ * (`.<hash>-00000000.bun-build`, 61 MB) in its working folder, which then goes with the folder
+ * (review I2).
+ */
 function binary(): string {
   if (built !== null) return built;
   const out = join(scratch, "styre");
-  const r = Bun.spawnSync(["sh", join(ROOT, "scripts", "build.sh")], {
-    cwd: ROOT,
-    env: { ...process.env, OUTFILE: out },
-    stdout: "pipe",
-    stderr: "pipe",
-    timeout: 120_000,
-  });
+  const run = (argv: string[]) =>
+    Bun.spawnSync(argv, { cwd: scratch, stdout: "pipe", stderr: "pipe", timeout: 120_000 });
+  const r = run([
+    process.execPath,
+    "build",
+    "--compile",
+    join(ROOT, "src", "index.ts"),
+    "--outfile",
+    out,
+  ]);
   if (r.exitCode !== 0) throw new Error(`the build failed: ${r.stderr.toString()}`);
+  if (process.platform === "darwin") {
+    // As build.sh: Apple Silicon kills a binary with Bun's own linker signature (exit 137).
+    const sign = run(["codesign", "--sign", "-", "--force", out]);
+    if (sign.exitCode !== 0) throw new Error(`codesign failed: ${sign.stderr.toString()}`);
+  }
   built = out;
   return out;
 }
@@ -345,12 +391,13 @@ describe("styre in a terminal", () => {
     SLOW,
   );
 
-  // The Bun #30189 guard (spec 7.6): handlers never run while stdin has a flowing data listener. Each
-  // command that installs handlers is signalled for real while it waits, in a terminal, so a future
-  // reader of stdin (or a handler not installed) shows here as a command that does not say its stop
-  // line or does not end by the signal.
+  // The compiled styre's own handlers, signalled for real while each command waits in a terminal: a
+  // handler not installed, or not run, shows here as a command that does not say its stop line or
+  // does not end by the signal. These are also the Bun #30189 guard of spec 7.6 (handlers never run
+  // while stdin has a flowing data listener), but only should that bug come back: Bun 1.4.2 does not
+  // show it (a stdin data listener under a pty or a pipe still lets SIGTERM and SIGINT handlers run).
   test(
-    "Bun #30189 guard: styre setup's handler fires on SIGTERM while its agent runs, and stops the agent",
+    "the compiled styre setup handles SIGTERM while its agent runs and stops the agent (handlers installed; Bun #30189 guard)",
     async () => {
       const bin = binary();
       const sleep = sleepLength();
@@ -373,9 +420,17 @@ describe("styre in a terminal", () => {
         return tool !== undefined;
       }, 15_000);
       expect(running, `the agent's tool never started; setup showed:\n${pty.output()}`).toBe(true);
+      // The agent: the fake CLI that became the stand-in, the tool's parent.
+      const agent = tree.find((p) => p.pid === tool?.ppid);
+      expect(agent?.ppid).toBe(styre.pid);
       expect(signalOwned(styre, "SIGTERM")).toBe(true);
       await endedBy(pty, "SIGTERM");
       await expectShown(pty, opening("SIGTERM"));
+      // Only styre got the signal: the agent and its tool were stopped by Styre.
+      await expectShown(
+        pty,
+        `styre: stopped the agent (pid ${agent?.pid}) and 1 of its commands.\n`,
+      );
       expect(await allGone(tree.filter((p) => p.pid !== styre.pid))).toBe(true);
       expect(existsSync(out)).toBe(false);
     },
@@ -383,7 +438,7 @@ describe("styre in a terminal", () => {
   );
 
   test(
-    "Bun #30189 guard: styre run's handler fires on SIGTERM while it waits on the forge",
+    "the compiled styre run handles SIGTERM while it waits on the forge (handlers installed; Bun #30189 guard)",
     async () => {
       const bin = binary();
       // A proxy that takes the forge's connection and never answers: the run waits there, and

@@ -9,8 +9,9 @@
 // the pipe comes from pipe(2) through bun:ffi.
 //
 // Inside the terminal, fixtures/pty-shell.ts plays the shell: it runs the command as its job,
-// reports the job's pid and how the job ended (a signal, or an exit code), and passes SIGHUP on
-// when the terminal closes, as a shell does. `close()` closes the terminal for real: it kills
+// reports the job's pid and how the job ended (a signal, or an exit code), passes SIGHUP on when
+// the terminal closes, as a shell does, and stays until the test ends it. The command runs with
+// core files turned off (`ulimit -c 0`). `close()` closes the terminal for real: it kills
 // script, which holds the terminal's other side.
 //
 // Every process here is the test's own: script is claimed the moment it starts, the shell and the
@@ -21,7 +22,7 @@ import { closeSync, existsSync, mkdtempSync, readFileSync, rmSync, writeSync } f
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ProcInfo, nowToken, probe } from "../../src/util/process/proc-table.ts";
-import { own, ownPrinted, signalOwned, until } from "../helpers/own-processes.ts";
+import { own, ownPrinted, ownTree, signalOwned, until } from "../helpers/own-processes.ts";
 
 const SHELL = join(import.meta.dir, "fixtures", "pty-shell.ts");
 
@@ -96,13 +97,21 @@ export function underPty(
   let keyboard: number | null = writeEnd;
   let proc: Bun.Subprocess<number, "pipe", "pipe">;
   try {
-    proc = Bun.spawn(scriptArgv([process.execPath, SHELL, ...argv]), {
-      cwd: opts.cwd,
-      env: { ...opts.env, PTY_STATUS: status, SHELL: "/bin/sh" },
-      stdin: readEnd,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    // No core files: a re-raised SIGQUIT (Ctrl-\) dumps core where the limit allows it, which in a
+    // container meant gigabytes per run and a timed out test (review M1).
+    proc = Bun.spawn(
+      scriptArgv(["sh", "-c", 'ulimit -c 0; exec "$@"', "sh", process.execPath, SHELL, ...argv]),
+      {
+        cwd: opts.cwd,
+        env: { ...opts.env, PTY_STATUS: status, SHELL: "/bin/sh" },
+        stdin: readEnd,
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+  } catch (err) {
+    closeSync(writeEnd);
+    throw err;
   } finally {
     closeSync(readEnd);
   }
@@ -143,14 +152,18 @@ export function underPty(
       writeSync(keyboard, keys);
     },
     async command(ms = 10_000) {
+      // The shell writes the file whole (a rename), but a read is still checked: a complete pid.
       let pid = Number.NaN;
       await until(() => {
         if (!existsSync(`${status}.pid`)) return false;
-        pid = Number(readFileSync(`${status}.pid`, "utf8").trim());
-        return Number.isInteger(pid);
+        const text = readFileSync(`${status}.pid`, "utf8");
+        pid = /^\d+\n$/.test(text) ? Number(text) : Number.NaN;
+        return pid > 1;
       }, ms);
-      const p = Number.isInteger(pid) ? ownPrinted(pid, since) : null;
+      const p = pid > 1 ? ownPrinted(pid, since) : null;
       if (p === null) throw new Error(`pty: the command (pid ${pid}) could not be claimed`);
+      // The shell too (it stays until the test ends it), and anything else under script by now.
+      ownTree(claimed);
       return p;
     },
     async close() {

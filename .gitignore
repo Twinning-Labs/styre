@@ -162,3 +162,6 @@ AGENTS.md
 # Independent-review records keyed by commit SHA (see .claude/hooks/require-independent-review.sh).
 # Local process artifacts, not project history.
 .claude/reviews/
+
+# bun build --compile on macOS leaves a copy of Bun in its working folder
+*.bun-build
