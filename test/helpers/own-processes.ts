@@ -216,6 +216,13 @@ export function __recordForTests(p: Ident): void {
   claimed.set(key(id), id);
 }
 
+/** Test seam: drop a claimed process from the set still to clean up, keeping it in the run's record,
+ *  as `killOwned` leaves each process it signals. Only test/lifecycle/own-processes.test.ts may use
+ *  it (the guard checks). */
+export function __releaseForTests(p: Ident): void {
+  owned.delete(key(p));
+}
+
 /** Drop a process from every record: a test that handed the helper something it must refuse
  *  forgets it in a `finally`, so a regression fails that test without a signal being sent. */
 export function forget(p: Ident): void {

@@ -21,6 +21,7 @@ import {
 import {
   __recordForTests,
   __registerGroupForTests,
+  __releaseForTests,
   __snapshotForTests,
   allGone,
   isAlive,
@@ -475,4 +476,19 @@ test("signalOwned refuses pid 1, this process and its ancestors even when record
     restore();
   }
   expect(self && parent).toBeTruthy();
+});
+
+test("signalOwned refuses a process already released by killOwned, even while it is still alive", () => {
+  // killOwned forgets each process from the set still to clean up as it signals it; the run's
+  // record keeps it for the end of run leak check. A released process that has not died yet is
+  // what a signalOwned right after killOwned would meet: it must be refused.
+  const child = spawn(["sleep", "30"]);
+  own(child);
+  __releaseForTests(child);
+  try {
+    expect(signalOwned(child, "SIGTERM")).toBe(false);
+    expect(isAlive(child)).toBe(true);
+  } finally {
+    own(child); // claimed again, so afterEach stops it
+  }
 });

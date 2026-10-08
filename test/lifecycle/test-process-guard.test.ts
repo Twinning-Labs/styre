@@ -11,7 +11,8 @@
 //     `kill -s KILL -1`), `process.kill(-1, …)` or `process.kill(0, …)`, and an argv array that
 //     runs kill with -1 or 0 as its last word (`["kill", "-9", "-1"]`);
 //   - the cleanup helper's test seams (`__recordForTests`, `__registerGroupForTests`,
-//     `__snapshotForTests`, which bypass its claim rules) anywhere but their own test file;
+//     `__snapshotForTests`, `__releaseForTests`, which bypass its claim rules) anywhere but their
+//     own test file;
 //   - a `ps` listing of many processes (no `-p`) in a file that also signals processes, on any line:
 //     the text filter between the two may be on lines of its own.
 // It is a tripwire for the plain forms a test would honestly be written with, not a parser: a
@@ -41,7 +42,7 @@ const RULES: { name: string; re: RegExp }[] = [
 ];
 
 /** The helper's seams that bypass its claim rules, and the one file allowed to use them. */
-const SEAMS = /\b__(?:recordForTests|registerGroupForTests|snapshotForTests)\b/;
+const SEAMS = /\b__(?:recordForTests|registerGroupForTests|snapshotForTests|releaseForTests)\b/;
 const SEAM_FILES = new Set([
   "test/lifecycle/own-processes.test.ts",
   "test/helpers/own-processes.ts",
@@ -113,6 +114,7 @@ test.each([
   ["kill -s KILL -1"],
   ["__recordForTests({ pid: 1, startedAt: '1' });"],
   ["const restore = __snapshotForTests();"],
+  ["__releaseForTests(child);"],
   ["import { __registerGroupForTests } from '../helpers/own-processes.ts';"],
 ])("refused: %s", (line) => {
   expect(offences("t.ts", line)).toHaveLength(1);
