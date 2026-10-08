@@ -1192,3 +1192,26 @@ normal dispatch with a stand-in agent costs about 0.8 to 1.1 ms more than before
 is left. What remains is the launch record (written and removed), the one table read that confirms
 nothing the agent started is still running, and git calls going through the door. The operator
 accepted this cost on 2026-10-08, and ENG-485's latency acceptance criterion was amended to match.
+
+**Correction to the correction above, 2026-10-08 (Task 17 review, I1).** The latency paragraph
+above says the remaining cost includes "the one table read that confirms nothing the agent started
+is still running". That is false. `finish()` runs after the agent has exited and Bun has reaped it,
+so the agent is no longer in the table, and every link of a stop's collection starts from the agent:
+the read can find nothing the agent left running. The same was true before ENG-485; a probe through
+the real `door.launch` and `finish()` gave identical results at cc3614e and at the fixed code, for a
+reaped agent that left a tool group with a grandchild running and for one that left a child leading
+its own group: nothing collected, nothing signalled, the processes still running. As §6.3 says, a
+normal exit adds nothing; only the leftover check (§9) reports such processes, and only inside the
+worktree.
+
+Operator decision, same day: `stopTree` first probes the agent's own entry (pid and start time).
+When the agent is gone, or its pid belongs to another program, it returns at once without reading
+the table; the full read happens only while the agent is still there, alive or a zombie. Measured
+again on macOS arm64 (5 runs of 5 rounds × 50 dispatches per side), the median dispatch difference
+is within noise in every run (+1.00, +0.03, +0.23, +0.68 and +0.37 ms, on about 48 to 49 ms), so the
+original criterion is met as written.
+
+**The per step costs, which the paragraph above left out.** Outside the dispatch, each effectful step
+pays one `git rev-parse` to record the branch head where it started (about 5 to 6 ms), and starting
+the background leftover check delays the next step's start by about 0.7 to 0.9 ms (the check, about
+80 to 90 ms with macOS `lsof`, runs beside the next step).

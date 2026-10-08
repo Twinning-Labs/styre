@@ -240,6 +240,11 @@ after a Styre that was killed. The security view, with every known limit, is in
   7. writes that record as a telemetry `event` line on stdout, then reports the outcome on stderr;
   8. removes any temporary baseline worktree the run still holds;
   9. shuts analytics down, releases the run lock, and ends itself by the same signal.
+- **An agent that exits on its own** is not stopped further: what it left running is no longer
+  linked to it. The leftover check that runs in the background after every agent step reports any
+  such process whose working folder is inside the worktree (the leftover lines below), and stops
+  nothing. A command launch is different: when the process it started exits, anything still in
+  its group is stopped before its output is read.
 - **A second signal** while stopping prints `styre: forcing stop…` and skips the rest of the 5 s
   wait. The exit still uses the first signal.
 - **An interruption is free.** `styre run --resume <ident>` resets the interrupted step to pending
@@ -273,8 +278,10 @@ itself.
 Every line below goes to stderr, for every command: `styre run`'s stdout keeps only NDJSON, and the
 human output `ls` and `setup` print on stdout stays clean. Text in angle brackets is filled in;
 `<ident>` is `an unknown run` when a record names no ticket. A test
-(`test/lifecycle/messages-doc.test.ts`) checks that each line here is a message in `src/`, and that
-every message the stop handler, the sweep, the leftover check and recovery print is here.
+(`test/lifecycle/messages-doc.test.ts`) checks that each line here is a message in `src/`, that every
+`styre: …` message in `src/` is here (apart from a short, tested list of messages unrelated to
+stopping), that `<pid>` stands exactly where the code puts a pid, and that no message is built from
+parts (a `+`, a prefix constant, or a helper) that would hide it from the check.
 
 <!-- messages:begin -->
 **The stop handler** (`src/util/process/signals.ts`):

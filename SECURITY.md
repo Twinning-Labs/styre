@@ -48,8 +48,11 @@ The practical consequence: a compromised or misbehaving agent cannot reach your 
 
 ## Agent processes: stopping, interruption and cleanup (ENG-485)
 
-Whenever an agent run ends, Styre stops everything the agent started, and reports what it cannot
-stop. The design is `docs/brainstorms/2026-10-02-eng-485-agent-process-lifecycle-design.md`; the
+When Styre stops an agent (a timeout, the startup refusal, a stop signal such as Ctrl-C, or the
+next Styre command after a `kill -9`), it stops the agent and everything still linked to it, and
+reports what it cannot stop. When an agent exits on its own, Styre stops nothing more: what the
+agent left running is no longer linked to it, and is reported if it runs in the worktree (see the
+limits below). The design is `docs/brainstorms/2026-10-02-eng-485-agent-process-lifecycle-design.md`; the
 messages and exit statuses are in [`runtime-parameters.md`](docs/architecture/runtime-parameters.md#stopping-interruption-and-orphan-cleanup-eng-485).
 
 - **One door.** Every process Styre starts goes through `src/util/process/door.ts` (a source guard
@@ -57,12 +60,13 @@ messages and exit statuses are in [`runtime-parameters.md`](docs/architecture/ru
   checks, provisioning) is recorded in memory and in a small file on disk
   (`$XDG_STATE_HOME/styre-processes/`, see [`conventions.md`](docs/architecture/conventions.md)), with
   its start time, so Styre can later confirm it is the same process before stopping it.
-- **Whole trees, including wrappers.** A stop collects the agent's descendants and the members of
-  every process group one of them leads (Claude Code runs each tool command in a group of its own),
-  sends SIGTERM to all of them at once, waits up to 5 s, then sends SIGKILL to whatever is still
-  alive, including a real CLI that dropped out of the tree when the wrapper script around it died.
-  The gap ENG-476 stated, that a wrapper's child survived Styre's kills, is closed. Every command
-  launch leads a group of its own and is stopped as a group, also on its timeout.
+- **Whole trees, including wrappers.** A stop of a running agent collects its descendants and the
+  members of every process group one of them leads (Claude Code runs each tool command in a group of
+  its own), sends SIGTERM to all of them at once, waits up to 5 s, then sends SIGKILL to whatever is
+  still alive, including a real CLI that dropped out of the tree when the wrapper script around it
+  died. The gap ENG-476 stated, that a wrapper's child survived Styre's kills, is closed. Every
+  command launch leads a group of its own and is stopped as a group, also on its timeout and when it
+  exits normally with members still running.
 - **Stop signals.** `styre run` and `styre setup` handle Ctrl-C, `Ctrl-\`, `kill` (SIGTERM) and a
   closed terminal (SIGHUP): they stop the agent and its commands, record the interruption so it is
   free on `--resume` (the attempt is not counted and the agent's partial edits are undone), and exit
@@ -73,14 +77,20 @@ messages and exit statuses are in [`runtime-parameters.md`](docs/architecture/ru
 - **Never someone else's process.** A stop never expands Styre's own process group, the group of the
   script that started Styre, or any group not led by one of the agent's own processes. A pid that now
   belongs to another program (a different start time) is left alone and reported. On Linux, a
-  record from before the last restart stops nothing (the boot ID differs). Processes Styre may not inspect are reported, never treated
-  as gone.
+  record from before the last restart stops nothing (the boot ID differs). Processes Styre may not
+  inspect are reported, never treated as gone.
 - **Launch records hold the command text.** Each record stores the first 200 characters of the
   launch's command line, in a file only your user can read. Styre passes the agent's prompt on stdin,
   never on the command line; keep secrets out of declared commands too.
 
 ### Limits, stated plainly
 
+- **What an agent leaves running after it exits on its own is reported, not stopped.** Once the agent
+  has exited, the commands it started are no longer linked to it (they are adopted by the system), so
+  nothing ties them to the agent any more. Claude Code normally stops its own background commands
+  when it exits. Anything still running is found only by the leftover check that runs after every
+  agent step, and only if its working folder is inside the worktree; the check reports it with how
+  to stop it, and never stops it. Something left running outside the worktree is not found.
 - **`kill -9` is cleaned up later, not at once.** The orphaned agent keeps running, and may keep
   billing, until the next Styre command on the machine runs its sweep.
 - **The unrecorded window.** Between the spawn and the record write there are a few milliseconds. A
@@ -90,7 +100,9 @@ messages and exit statuses are in [`runtime-parameters.md`](docs/architecture/ru
   reported after the step, on a stop, and by the sweep, with the command to stop it. Styre never stops
   it: matching by folder alone could hit your own processes, especially in in-place mode, where
   something you started in the checkout during the step is reported too. A leftover that moved out of
-  the worktree, or runs as another user, is not found.
+  the worktree, or runs as another user, is not found. On macOS, if Styre has to fall back from the
+  kernel's process table to `ps`, start times have whole second resolution, so a leftover that started
+  within about a second of the step's start or end can be missed, or reported for the wrong step.
 - **`Ctrl-\` (SIGQUIT).** The terminal delivers it to Claude Code too, which can die at once without
   stopping its running command. That command is then no longer linked to the agent, so Styre reports
   it (with how to stop it) instead of stopping it. Seen on macOS; on Linux, Claude Code 2.1.294 did
@@ -150,13 +162,16 @@ messages and exit statuses are in [`runtime-parameters.md`](docs/architecture/ru
 
 ### Cost
 
-Measured on macOS arm64 with a stand-in agent (`scripts/measure-lifecycle-latency.ts`): a normal
-dispatch costs about 0.8 to 1.1 ms more than before ENG-485 (about 42.6 ms against 41.7 ms), for the
-launch record, one read of the process table, and git calls going through the door. Per step, outside
-the dispatch: recording the branch head where the step started is one `git rev-parse`, about 5.3 ms;
-starting the background leftover check delays the next step's start by about 0.7 ms (the check itself,
-about 77 ms with macOS `lsof`, runs beside it). The sweep over an empty records folder takes about
-10 µs.
+Measured on macOS arm64 with a stand-in agent that answers at once
+(`scripts/measure-lifecycle-latency.ts`, 5 rounds of 50 dispatches per side, against the code before
+ENG-485). Per dispatch: within noise in five runs on 2026-10-08 (median differences +1.00, +0.03,
++0.23, +0.68 and +0.37 ms, on a dispatch of about 48 to 49 ms). What the door adds to a dispatch is
+the launch record, written and removed (about 0.1 ms each), and one probe of the agent's own entry
+when it has exited; the whole process table is read only when the agent is still there. Per
+effectful step, outside the dispatch: recording the branch head where the step started is one
+`git rev-parse` (about 5 to 6 ms), and starting the background leftover check delays the next step's
+start by about 0.7 to 0.9 ms (the check itself, about 80 to 90 ms with macOS `lsof`, runs beside the
+next step). The sweep over an empty records folder takes about 10 µs.
 
 ## Human gate
 

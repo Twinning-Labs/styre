@@ -22,10 +22,12 @@
   the zod schema before writing; a validation failure is logged to **stderr** (never stdout) and
   the event is written anyway. A schema-drift bug must never flip an otherwise-successful run into
   a crash.
-- **Idempotent under resume.** `event`/`dispatch`/`signal` rows are derived from the durable SQLite
-  SoT and streamed by watermark (`src/telemetry/emitter.ts`), so a re-spawned/resumed worker never
-  re-emits rows already flushed in a prior attempt of the same run. `summary` and `ci_handoff` are
-  each emitted once, at their respective terminal points.
+- **Not idempotent under resume.** `event`/`dispatch`/`signal` rows are derived from the durable
+  SQLite SoT and streamed by watermark (`src/telemetry/emitter.ts`), but each process starts its
+  watermarks at the first row, so a resumed run (`--resume`) streams every row of the checkpoint
+  again, including those an earlier process already emitted. Consumers dedupe by `run_id` plus
+  `ticket_id` and `seq` (`event`), `dispatch_id` (`dispatch`) or `id` (`signal`). `summary` and `ci_handoff` are each emitted
+  once per process, at their respective terminal points.
 - **Five event types:** `event`, `dispatch`, `signal`, `summary`, `ci_handoff` — one zod object
   each, joined into `TelemetryEventSchema` as a `discriminatedUnion` on `type`.
 

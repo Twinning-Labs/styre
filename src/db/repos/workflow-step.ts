@@ -108,8 +108,8 @@ export function markRunning(
 
 export function markSucceeded(db: Database, id: number, result: unknown): void {
   const now = nowUtc();
-  // pid is meaningful only while a step is 'running' (recover()'s orphan-kill target); null it on
-  // terminal states so a finished step never carries a now-defunct (and possibly recycled) pid.
+  // New code never sets pid (ENG-485: launch records hold pids); a checkpoint from an older Styre may.
+  // Null it on terminal states so a finished step never carries a defunct (possibly recycled) pid.
   db.query(
     `UPDATE workflow_step
        SET status = 'succeeded', result_json = $r, error_json = NULL, pid = NULL, ended_at = $now, updated_at = $now

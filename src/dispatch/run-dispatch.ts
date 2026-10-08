@@ -100,8 +100,8 @@ function dispatchId(ident: string, seq: number): string {
 }
 
 /** The shared real-dispatch flow (control-loop §4), provider-agnostic: render (CL-PROFILE) →
- *  worktree → run the agent via the injected AgentRunner (model from the tier+config; pid
- *  journaled for orphan-kill) → daemon-commit (CL-COMMIT) → record the dispatch → enforce the
+ *  worktree → run the agent via the injected AgentRunner (model from the tier+config; the launch is
+ *  recorded on disk by the process door, ENG-485, not journaled) → daemon-commit (CL-COMMIT) → record the dispatch → enforce the
  *  postcondition (CL-POSTCOND). Throws on CL-PROFILE miss, transport failure, or postcondition
  *  failure (→ failure-policy). */
 export async function runAgentDispatch(
