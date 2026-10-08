@@ -22,7 +22,7 @@
 set -euo pipefail
 
 # The version on npm's `latest` dist tag when this was written (`npm view @anthropic-ai/claude-code
-# dist-tags`): @anthropic-ai/claude-code@2.1.293, the same pin as the workflow.
+# dist-tags`), the same pin as the workflow (test/lifecycle/live-smoke.test.ts checks it).
 CLAUDE_PIN="@anthropic-ai/claude-code@2.1.293"
 BASE="${STYRE_SMOKE_BASE:-oven/bun:1.4.2}"
 BASELINE="baseline/pre-eng-485"

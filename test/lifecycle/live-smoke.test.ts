@@ -423,7 +423,12 @@ describe("the workflow (.github/workflows/lifecycle-live.yml)", () => {
       "utf8",
     );
     expect(pin.exec(text)?.[1]).toBeDefined();
-    expect(pin.exec(text)?.[1]).toBe(pin.exec(container)?.[1]);
+    const pinned = /^CLAUDE_PIN="@anthropic-ai\/claude-code@(\d+\.\d+\.\d+)"$/m.exec(
+      container,
+    )?.[1];
+    expect(pinned).toBeDefined();
+    expect(pin.exec(text)?.[1]).toBe(pinned);
+    expect(container.match(/claude-code@\d/g)).toHaveLength(1);
   });
   test("each cancel job prepares and asserts the same marker", () => {
     for (const job of ["cancel-with-exec", "cancel-without-exec"]) {
