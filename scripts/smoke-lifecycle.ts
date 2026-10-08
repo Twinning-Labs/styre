@@ -230,6 +230,8 @@ interface Started {
   sleep: ProcInfo;
   sleepTag: string;
   r8: { ok: boolean; why: string };
+  /** The sleep's parent chain up to the driver, one line per process, as listed at the start. */
+  chain: string[];
   /** Everything the driver said (its stderr, or the terminal's text). */
   said: () => string;
   /** How the driver ended, or null if not within `ms`. */
@@ -363,6 +365,12 @@ async function start(
       `${name}: no agent between the driver ${driver.pid} and the sleep ${sleep.pid}`,
     );
   const r8 = groupLedByChild(sleep, agent, table);
+  const chain: string[] = [];
+  for (let p: ProcInfo | undefined = sleep; p !== undefined && p.pid !== driver.pid; ) {
+    chain.push(`pid ${p.pid} parent ${p.ppid} group ${p.pgid}: ${commandOf(p) ?? "?"}`);
+    const parent: number = p.ppid;
+    p = table.find((q) => q.pid === parent);
+  }
   return {
     name,
     ident,
@@ -374,6 +382,7 @@ async function start(
     sleep,
     sleepTag,
     r8,
+    chain,
     said,
     ended,
     groups,
@@ -417,6 +426,8 @@ interface Outcome {
   agent: number;
   sleep: number;
   r8: string;
+  r8ok: boolean;
+  chain: string[];
   exit: Ended | null;
   agentGoneMs: number | null;
   sleepGoneMs: number | null;
@@ -443,9 +454,9 @@ async function scenario(
     sleepAliveAtEnd: true,
   };
   let exit: Ended | null = null;
+  let r8ok = false;
   try {
     s = await start(name, root, how, timeoutMs);
-    if (!s.r8.ok) failures.push(`R8: ${s.r8.why}`);
     if (code === "new") {
       const recorded =
         existsSync(recordsDir) &&
@@ -455,7 +466,11 @@ async function scenario(
           `no launch record for the agent in ${recordsDir} (XDG_STATE_HOME not honoured)`,
         );
     }
-    log(`${name}: agent ${s.agent.pid}, sleep ${s.sleep.pid} ("sleep ${s.sleepTag}"); ${s.r8.why}`);
+    log(
+      `${name}: agent ${s.agent.pid}, sleep ${s.sleep.pid} ("sleep ${s.sleepTag}"); R8: ${s.r8.why}`,
+    );
+    log(`${name}: the sleep's parent chain up to the driver:\n  ${s.chain.join("\n  ")}`);
+    r8ok = s.r8.ok;
     const acted = await act(s);
     watched = await watchStop(s, acted.t0);
     exit = acted.exit !== undefined ? acted.exit : await s.ended(EXIT_MS);
@@ -472,6 +487,8 @@ async function scenario(
     agent: s?.agent.pid ?? -1,
     sleep: s?.sleep.pid ?? -1,
     r8: s?.r8.why ?? "",
+    r8ok,
+    chain: s?.chain ?? [],
     exit,
     agentGoneMs: watched.agentGoneMs,
     sleepGoneMs: watched.sleepGoneMs,
@@ -480,6 +497,7 @@ async function scenario(
   };
   if (!leak.ok) failures.push(...leak.lines.map((l) => `LEAK: ${l}`));
   outcomes.push(o);
+  log(`${name}: leak check: ${o.leakCheck.join("; ")}`);
   log(`${name}: ${failures.length === 0 ? "held" : `FAILED\n  - ${failures.join("\n  - ")}`}`);
   if (s !== null && failures.length > 0) log(`${name}: the driver said:\n${s.said()}`);
   return o;
@@ -685,8 +703,14 @@ try {
 
   log(JSON.stringify({ claude: version, model, outcomes }, null, 2));
   const failed = outcomes.filter((o) => o.failures.length > 0);
-  if (failed.length > 0) {
-    log(`FAIL: ${failed.map((o) => `${o.name}: ${o.failures.join("; ")}`).join("\n      ")}`);
+  const r8 = outcomes.filter((o) => !o.r8ok);
+  if (r8.length > 0)
+    log(
+      `FAIL: R8 (the agent's command group is led by its direct child) did not hold in: ${r8.map((o) => `${o.name} (${o.r8})`).join("; ")}`,
+    );
+  if (failed.length > 0 || r8.length > 0) {
+    if (failed.length > 0)
+      log(`FAIL: ${failed.map((o) => `${o.name}: ${o.failures.join("; ")}`).join("\n      ")}`);
     await finish(1);
   }
   log("PASS: control leaked (probes can see failure); every scenario held");
