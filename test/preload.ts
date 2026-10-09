@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeEach } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { armForBunTest, enterTest, leaveTest, removeRunScoped } from "./helpers/temp.ts";
@@ -18,8 +18,11 @@ import { armForBunTest, enterTest, leaveTest, removeRunScoped } from "./helpers/
  * the guard looks inside. A run that never reaches afterAll (`--bail`, Ctrl-C, a crash) leaves
  * this one root behind, unreported.
  */
-const runRoot = mkdtempSync(join(tmpdir(), "styre-test-run-"));
+const runRoot = realpathSync(mkdtempSync(join(tmpdir(), "styre-test-run-")));
 process.env.TMPDIR = runRoot;
+// npm on Node 22+ keeps a compile cache in tmpdir() for good; children of tests (suite commands
+// that run npm) inherit this and skip it. It only affects start-up speed.
+process.env.NODE_DISABLE_COMPILE_CACHE = "1";
 armForBunTest();
 
 beforeEach(enterTest);

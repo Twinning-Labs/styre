@@ -97,16 +97,25 @@ test.skipIf(!deps)(
         "describe('example',()=>{it('hangs',()=>{while(true){}});});",
       );
       let group: number | undefined;
-      const timeout = await observeSuiteCommand({
-        sha: "fixture-sha",
-        command: "npm test",
-        cwd: root,
-        environment: c.testEnvironment,
-        timeoutMs: 1000,
-        onSpawn: (pid) => {
-          group = pid;
-        },
-      });
+      // Killed on timeout, karma never removes its browser profile (os.tmpdir()/karma-*), so this
+      // one run gets a temp root the test owns. Every other run here stays under the leak guard.
+      const previousTmp = process.env.TMPDIR;
+      process.env.TMPDIR = makeTempDir("styre-karma-timeout-tmp-");
+      let timeout: Awaited<ReturnType<typeof observeSuiteCommand>>;
+      try {
+        timeout = await observeSuiteCommand({
+          sha: "fixture-sha",
+          command: "npm test",
+          cwd: root,
+          environment: c.testEnvironment,
+          timeoutMs: 1000,
+          onSpawn: (pid) => {
+            group = pid;
+          },
+        });
+      } finally {
+        process.env.TMPDIR = previousTmp;
+      }
       expect(timeout.timedOut).toBe(true);
       expect(suiteResult(timeout)).toBe("error");
       if (!group) throw Error("missing process group receipt");
