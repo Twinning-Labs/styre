@@ -59,6 +59,13 @@ afterEach(() => {
 
 const echoTemp = `printf '%s\\n%s\\n%s\\n' "$TMPDIR" "$TMP" "$TEMP"`;
 const lines = (s: string) => s.trim().split("\n");
+/** Gives every folder below `dir` back its owner's write permission, if it still exists. */
+function writable(dir: string): void {
+  if (!existsSync(dir)) return;
+  chmodSync(dir, 0o700);
+  for (const e of readdirSync(dir, { withFileTypes: true }))
+    if (e.isDirectory() && !e.isSymbolicLink()) writable(join(dir, e.name));
+}
 const collect = () => {
   const out: string[] = [];
   return { out, say: (s: string) => out.push(s) };
@@ -72,10 +79,10 @@ test("a command's TMPDIR, TMP and TEMP all name one folder this Styre owns, for 
   expect(lines(plain.stdout)).toEqual([tmpdir, tmpdir, tmpdir]);
   const dir = tmpdir as string;
   expect(dirname(dir)).toBe(root);
-  const me = door.selfIdentity();
-  expect(basename(dir)).toMatch(
-    new RegExp(`^styre-cmd-${me.pid}-${me.startedAt.replace(".", "\\.")}-[A-Za-z0-9]{6}$`),
-  );
+  expect(basename(dir)).toMatch(/^styre-cmd-[A-Za-z0-9]{6}$/);
+  // Short on purpose: a Unix socket path holds at most 104 bytes on macOS, and Python's
+  // multiprocessing puts its listener 32 characters below TMPDIR.
+  expect(dir.length - root.length).toBeLessThanOrEqual(17);
   expect(statSync(dir).isDirectory()).toBe(true);
   // Only this user may read or write what commands put there.
   expect(statSync(dir).mode & 0o777).toBe(0o700);
@@ -167,7 +174,7 @@ test("the removal keeps the folder while a command Styre started is still runnin
   }
 });
 
-test("a removal that fails is said, never thrown", async () => {
+test("a removal that fails is said once, with how to remove it, and its note goes so it is not said again", async () => {
   await runCommand("true", { cwd, timeoutMs: 5000 });
   const dir = commandTempDir();
   // A temp root this user may not write: the folder's entries go, the folder itself cannot.
@@ -180,6 +187,102 @@ test("a removal that fails is said, never thrown", async () => {
   }
   expect(out.length).toBe(1);
   expect(out[0]).toStartWith(`styre: could not remove the temp folder ${dir}: `);
+  expect(out[0]).toEndWith(`; remove it with: chmod -R u+w ${dir} && rm -rf ${dir}\n`);
+  expect(existsSync(dir)).toBe(true);
+  expect(readdirSync(processesDir())).toEqual([]);
+});
+
+test("a read-only tree inside the folder is removed too (a Go module cache)", async () => {
+  await runCommand(
+    `mkdir -p "$TMPDIR/mod/pkg@v1" && echo x > "$TMPDIR/mod/pkg@v1/a.go" && chmod -R a-w "$TMPDIR/mod"`,
+    { cwd, timeoutMs: 5000 },
+  );
+  const dir = commandTempDir();
+  const { out, say } = collect();
+  try {
+    removeCommandTempDir(say);
+  } finally {
+    writable(dir); // so a failing run can still clean up
+  }
+  expect(out).toEqual([]);
+  expect(existsSync(dir)).toBe(false);
+});
+
+test("with a time budget, a removal that runs out of time stops, says so, and keeps the note for the sweep", async () => {
+  await runCommand(
+    `mkdir "$TMPDIR/many" && i=0; while [ $i -lt 300 ]; do : > "$TMPDIR/many/f$i"; i=$((i+1)); done`,
+    { cwd, timeoutMs: 10_000 },
+  );
+  const dir = commandTempDir();
+  // A clock that moves 1 ms per look: 50 ms of budget ends long before 300 entries are gone.
+  let t = 0;
+  const { out, say } = collect();
+  removeCommandTempDir(say, { budgetMs: 50, now: () => t++ });
+  expect(out).toEqual([
+    `styre: left the temp folder ${dir} for the next Styre command to remove: no time was left before the stop deadline\n`,
+  ]);
+  expect(existsSync(dir)).toBe(true);
+  expect(readdirSync(join(dir, "many")).length).toBeLessThan(300);
+  expect(readdirSync(processesDir()).length).toBe(1);
+});
+
+test("a running agent does not hold the folder back: agents keep their own temp folder", async () => {
+  await runCommand("true", { cwd, timeoutMs: 5000 });
+  const dir = commandTempDir();
+  const agent = door.launch({
+    argv: ["sleep", "5"],
+    cwd,
+    env: { ...process.env },
+    kind: "agent",
+    context: { ident: null, stepId: null, worktree: null },
+  });
+  try {
+    const { out, say } = collect();
+    removeCommandTempDir(say);
+    expect(out).toEqual([]);
+    expect(existsSync(dir)).toBe(false);
+  } finally {
+    await agent.stop("forced");
+  }
+});
+
+test("no folder is made once a stop has begun: the refused command leaves nothing behind", async () => {
+  door.beginStopping();
+  try {
+    await expect(runCommand("true", { cwd, timeoutMs: 5000 })).rejects.toBeInstanceOf(
+      door.RunInterrupted,
+    );
+    await expect(runBoundedCommand("true", { cwd, timeoutMs: 5000 })).rejects.toBeInstanceOf(
+      door.RunInterrupted,
+    );
+  } finally {
+    door.__resetForTests();
+  }
+  expect(readdirSync(root)).toEqual([]);
+  expect(existsSync(processesDir()) ? readdirSync(processesDir()) : []).toEqual([]);
+});
+
+test("the exit check leaves the folder to the stop handler while a stop is in progress", async () => {
+  const running = runCommand("sleep 2", { cwd, timeoutMs: 5000 }).catch((e: unknown) => e);
+  for (let i = 0; i < 100 && door.liveLaunches().length === 0; i++) await Bun.sleep(10);
+  const dir = commandTempDir();
+  const err: string[] = [];
+  const write = process.stderr.write.bind(process.stderr);
+  (process.stderr as { write: unknown }).write = (s: unknown) => {
+    err.push(String(s));
+    return true;
+  };
+  door.beginStopping();
+  const savedCode = process.exitCode;
+  try {
+    await guardWithExitCheck("test", async () => {});
+  } finally {
+    (process.stderr as { write: unknown }).write = write;
+    process.exitCode = savedCode;
+    door.__resetForTests();
+    await running;
+  }
+  expect(err.filter((l) => l.includes("temp folder"))).toEqual([]);
   expect(existsSync(dir)).toBe(true);
 });
 
@@ -289,4 +392,51 @@ test("a folder replaced by a link while Styre runs is left alone and never writt
   } finally {
     rmSync(dir, { force: true });
   }
+});
+
+test("the stop handler leaves the folder to the sweep when its deadline leaves no time to remove it", async () => {
+  await runCommand("true", { cwd, timeoutMs: 5000 });
+  const dir = commandTempDir();
+  const err: string[] = [];
+  // The first look sets the handler's deadline; every later look is a minute past it.
+  let first = true;
+  const now = () => {
+    const t = Date.now() + (first ? 0 : 60_000);
+    first = false;
+    return t;
+  };
+  try {
+    await handleStopSignal(
+      "SIGTERM",
+      { command: "run", run: null },
+      {
+        stderr: (s) => err.push(s),
+        emit: () => {},
+        reraise: () => {},
+        exit: () => {},
+        now,
+        leftovers: () => [],
+        noCore: () => {},
+      },
+    );
+  } finally {
+    door.__resetForTests();
+    __resetSignalsForTests();
+  }
+  expect(err.filter((l) => l.includes("temp folder"))).toEqual([
+    `styre: left the temp folder ${dir} for the next Styre command to remove: no time was left before the stop deadline\n`,
+  ]);
+  expect(existsSync(dir)).toBe(true);
+  expect(readdirSync(processesDir()).length).toBe(1);
+});
+
+test("an abandoned folder's note goes from the folder it was written to, so no sweep acts on what is at its name", async () => {
+  await runCommand("true", { cwd, timeoutMs: 5000 });
+  const first = join(state, "styre-processes");
+  expect(readdirSync(first).length).toBe(1);
+  rmSync(commandTempDir(), { recursive: true, force: true });
+  process.env.XDG_STATE_HOME = join(state, "later");
+  await runCommand("true", { cwd, timeoutMs: 5000 });
+  expect(readdirSync(first)).toEqual([]);
+  expect(readdirSync(join(state, "later", "styre-processes")).length).toBe(1);
 });

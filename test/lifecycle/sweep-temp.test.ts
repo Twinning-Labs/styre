@@ -20,6 +20,7 @@ import * as door from "../../src/util/process/door.ts";
 import * as procTable from "../../src/util/process/proc-table.ts";
 import { bootId, probe } from "../../src/util/process/proc-table.ts";
 import { type LaunchRecord, processesDir, writeRecord } from "../../src/util/process/records.ts";
+import * as records from "../../src/util/process/records.ts";
 import { sweepOrphans } from "../../src/util/process/sweep.ts";
 import { killOwned, ownChild, until } from "../helpers/own-processes.ts";
 import { makeTempDir } from "../helpers/temp.ts";
@@ -63,8 +64,8 @@ async function deadOwner(): Promise<Who> {
   return { pid: info.pid, startedAt: info.startedAt };
 }
 /** The folder a Styre with this identity would have made, holding what a stopped command left. */
-function folderOf(owner: Who, suffix = "Ab3xY9"): string {
-  const dir = join(root, `styre-cmd-${owner.pid}-${owner.startedAt}-${suffix}`);
+function folderOf(_owner: Who, suffix = "Ab3xY9"): string {
+  const dir = join(root, `styre-cmd-${suffix}`);
   mkdirSync(join(dir, "karma-12345678"), { recursive: true, mode: 0o700 });
   writeFileSync(join(dir, "karma-12345678", "prefs.js"), "");
   return dir;
@@ -97,7 +98,7 @@ test("a force quit Styre's temp folder is removed with what it held, and its not
 
 test("a note whose folder is already gone is removed", async () => {
   const owner = await deadOwner();
-  const note = writeNote(owner, join(root, `styre-cmd-${owner.pid}-${owner.startedAt}-Zz0000`));
+  const note = writeNote(owner, join(root, "styre-cmd-Zz0000"));
   const out = collect();
   const r = await sweepOrphans({ stderr: out.stderr });
   expect(r.tempFolders).toEqual([]);
@@ -116,7 +117,7 @@ test("a live Styre's folder is kept: this process, and another live process", as
   });
   ownChild(other);
   const peer = startOf(other.pid);
-  const theirs = folderOf(peer);
+  const theirs = folderOf(peer, "Peer00");
   writeNote(peer, theirs);
   const r = await sweepOrphans({ stderr: () => {} });
   expect(r.tempFolders).toEqual([]);
@@ -172,15 +173,19 @@ test("a dead owner's folder is kept while one of its launch records is still on 
 test("only a folder that is exactly what the note says is removed; anything else is said and left", async () => {
   const cases: { label: string; path: (o: Who) => string; why: string }[] = [
     {
-      label: "another owner's name",
-      path: (o) => folderOf({ pid: o.pid + 1, startedAt: o.startedAt }),
-      why: "its name is not the temp folder of the Styre the note names",
+      label: "a name that is not a command temp folder's",
+      path: () => {
+        const d = join(root, "styre-wt-Ab3xY9");
+        mkdirSync(d);
+        return d;
+      },
+      why: "its name is not a command temp folder's",
     },
     {
       label: "a symbolic link",
       path: (o) => {
         const target = folderOf(o, "Target");
-        const link = join(root, `styre-cmd-${o.pid}-${o.startedAt}-Link00`);
+        const link = join(root, "styre-cmd-Link00");
         symlinkSync(target, link);
         return link;
       },
@@ -188,8 +193,8 @@ test("only a folder that is exactly what the note says is removed; anything else
     },
     {
       label: "a file",
-      path: (o) => {
-        const f = join(root, `styre-cmd-${o.pid}-${o.startedAt}-File00`);
+      path: () => {
+        const f = join(root, "styre-cmd-File00");
         writeFileSync(f, "keep me");
         return f;
       },
@@ -197,13 +202,13 @@ test("only a folder that is exactly what the note says is removed; anything else
     },
     {
       label: "a relative path",
-      path: (o) => `styre-cmd-${o.pid}-${o.startedAt}-Rel000`,
+      path: () => "styre-cmd-Rel000",
       why: "its path is not absolute",
     },
     {
       label: "a suffix of the wrong length",
       path: (o) => folderOf(o, "Short"),
-      why: "its name is not the temp folder of the Styre the note names",
+      why: "its name is not a command temp folder's",
     },
   ];
   for (const c of cases) {
@@ -290,3 +295,103 @@ test.skipIf(bootId() === null)(
     expect(existsSync(note)).toBe(false);
   },
 );
+
+test("one sweep stops a force quit Styre's orphan and then removes its folder", async () => {
+  const owner = { ...(await deadOwner()), pgid: 0 };
+  const dir = folderOf(owner);
+  writeNote(owner, dir);
+  const orphan = Bun.spawn(["sleep", "4213"], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  ownChild(orphan);
+  const o = startOf(orphan.pid);
+  writeRecord({
+    version: 1,
+    pid: o.pid,
+    startedAt: o.startedAt,
+    bootId: bootId(),
+    kind: "agent",
+    ident: "ENG-32",
+    stepId: 1,
+    worktree: null,
+    command: "standin",
+    owner,
+  });
+  const r = await sweepOrphans({ stderr: () => {} });
+  expect(r.stopped.map((x) => x.pid)).toEqual([o.pid]);
+  expect(r.tempFolders).toEqual([dir]);
+  expect(existsSync(dir)).toBe(false);
+});
+
+test("when the records cannot be read again after the stops, no folder is removed", async () => {
+  const owner = await deadOwner();
+  const dir = folderOf(owner);
+  const note = writeNote(owner, dir);
+  const real = records.scanRecords;
+  let calls = 0;
+  const spy = spyOn(records, "scanRecords").mockImplementation(() => {
+    calls++;
+    if (calls > 1) throw new Error("the disk said no");
+    return real();
+  });
+  const out = collect();
+  try {
+    const r = await sweepOrphans({ stderr: out.stderr });
+    expect(r.tempFolders).toEqual([]);
+  } finally {
+    spy.mockRestore();
+  }
+  expect(out.lines).toEqual([
+    "styre: could not read the launch records again (the disk said no), so no temp folders were removed\n",
+  ]);
+  expect(existsSync(dir)).toBe(true);
+  expect(existsSync(note)).toBe(true);
+});
+
+test("a read-only tree in a force quit Styre's folder is removed too", async () => {
+  const owner = await deadOwner();
+  const dir = folderOf(owner);
+  writeNote(owner, dir);
+  const ro = join(dir, "mod", "pkg@v1");
+  mkdirSync(ro, { recursive: true });
+  writeFileSync(join(ro, "a.go"), "x");
+  chmodSync(ro, 0o555);
+  chmodSync(join(dir, "mod"), 0o555);
+  const out = collect();
+  try {
+    const r = await sweepOrphans({ stderr: out.stderr });
+    expect(r.tempFolders).toEqual([dir]);
+  } finally {
+    if (existsSync(ro)) {
+      chmodSync(join(dir, "mod"), 0o700);
+      chmodSync(ro, 0o700);
+    }
+  }
+  expect(out.lines).toEqual([]);
+  expect(existsSync(dir)).toBe(false);
+});
+
+test("a folder the sweep cannot remove is said once, with how to remove it, and its note goes", async () => {
+  const owner = await deadOwner();
+  const dir = folderOf(owner);
+  const note = writeNote(owner, dir);
+  chmodSync(root, 0o500); // the folder's entries go, the folder itself cannot
+  const out = collect();
+  try {
+    await sweepOrphans({ stderr: out.stderr });
+  } finally {
+    chmodSync(root, 0o700);
+  }
+  expect(out.lines.length).toBe(1);
+  expect(out.lines[0]).toStartWith(
+    `styre: could not remove the temp folder ${dir} left by an earlier Styre: `,
+  );
+  expect(out.lines[0]).toEndWith(`; remove it with: chmod -R u+w ${dir} && rm -rf ${dir}\n`);
+  expect(existsSync(dir)).toBe(true);
+  expect(existsSync(note)).toBe(false);
+  const again = collect();
+  await sweepOrphans({ stderr: again.stderr });
+  expect(again.lines).toEqual([]);
+});

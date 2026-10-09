@@ -124,7 +124,7 @@ after use:
 | `styre-baseline-wt-*` | Replay-harness baseline worktree. |
 | `styre-provcheck-*` | Provision-check script dir. |
 | `styre-codex-msg-*` | Codex adapter message dir. |
-| `styre-cmd-<pid>-<startedAt>-*` | The **command temp folder**: `TMPDIR`, `TMP` and `TEMP` of every project command one Styre process starts. Removed when that Styre exits, or by the sweep after a `kill -9` ([`runtime-parameters.md`](runtime-parameters.md#command-temp-folder)). |
+| `styre-cmd-*` | The **command temp folder**: `TMPDIR`, `TMP` and `TEMP` of every project command one Styre process starts. Removed when that Styre exits, or by the sweep after a `kill -9` ([`runtime-parameters.md`](runtime-parameters.md#command-temp-folder)). |
 
 In `--in-place` mode the "worktree" **is** the repo root (a `checkout -B`, never removed) rather than
 a temp dir.

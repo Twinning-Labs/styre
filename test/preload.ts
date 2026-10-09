@@ -19,6 +19,7 @@ import { type FSWatcher, existsSync, mkdtempSync, readdirSync, rmSync, watch } f
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { commandTempDir, removeCommandTempDir } from "../src/util/process/command-temp.ts";
+import { isStopping } from "../src/util/process/door.ts";
 import { ownGroupMembers, stillRunning, stopStillRunning } from "./helpers/own-processes.ts";
 import { armForBunTest, enterTest, leaveTest, removeRunScoped } from "./helpers/temp.ts";
 
@@ -57,6 +58,8 @@ commandTempDir();
 // out, and the next command would then make one in whatever TMPDIR and state folder that test set.
 // So each test starts with a folder in this run's temp root again, noted in this run's state folder.
 beforeEach(() => {
+  // A test file that left the door closed (a simulated stop) opens it again itself.
+  if (isStopping()) return;
   const tmp = process.env.TMPDIR;
   const stateHome = process.env.XDG_STATE_HOME;
   process.env.TMPDIR = runRoot;

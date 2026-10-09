@@ -2,14 +2,15 @@ import { lstatSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { verifyEnv } from "../../agent/agent-env.ts";
-import { liveLaunches, selfIdentity } from "./door.ts";
+import { RunInterrupted, isStopping, liveLaunches, selfIdentity } from "./door.ts";
 import { bootId } from "./proc-table.ts";
 import { removeTempNote, writeTempNote } from "./records.ts";
+import { removeTree } from "./remove-tree.ts";
 
 /**
  * The temp folder of the project commands a Styre process starts. Every command `runCommand` and
  * `runBoundedCommand` start gets TMPDIR, TMP and TEMP pointed at one folder this process owns,
- * `os.tmpdir()/styre-cmd-<pid>-<start>-XXXXXX` (mode 700), made when the first command starts.
+ * `os.tmpdir()/styre-cmd-XXXXXX` (mode 700), made when the first command starts.
  * What a command leaves there (a browser profile karma never removed because a stop cut it short, a
  * Python TemporaryDirectory that SIGTERM ended before its cleanup ran) stays out of the system temp
  * folder, and Styre removes the folder on its way out: the exit check of `run` and `setup`, or the
@@ -37,8 +38,12 @@ export function commandTempDir(): string {
     removeTempNote(made.note);
     made = null;
   }
+  // Once a stop has begun the door refuses every launch; a folder made for one would outlive Styre.
+  if (isStopping()) throw new RunInterrupted();
   const me = selfIdentity();
-  const dir = mkdtempSync(join(tmpdir(), `styre-cmd-${me.pid}-${me.startedAt}-`));
+  // Short on purpose: a Unix socket path holds at most 104 bytes on macOS, and tools put sockets
+  // below TMPDIR (Python's multiprocessing listener adds 32 characters). The note names the owner.
+  const dir = mkdtempSync(join(tmpdir(), "styre-cmd-"));
   try {
     const note = writeTempNote({
       version: 1,
@@ -76,23 +81,40 @@ export function commandEnv(): Record<string, string> {
 
 /** Removes the folder and then its note, on Styre's way out. Kept, and said, while a command Styre
  *  started is still running: it may still be using it, and the sweep removes it once that command
- *  has been stopped. A removal that fails is said, never thrown; the note stays for the sweep. */
-export function removeCommandTempDir(say: (s: string) => void): void {
+ *  has been stopped. With a time budget (the stop handler's), a removal that runs out of time stops
+ *  and is said (a budget of 0 skips it), and the note stays so the sweep finishes it. A removal that fails is said once, with
+ *  how to finish it by hand, and its note goes so no later command says it again. Never throws. */
+export function removeCommandTempDir(
+  say: (s: string) => void,
+  opts: { budgetMs?: number; now?: () => number } = {},
+): void {
   if (!made) return;
+  const { dir, note } = made;
   if (liveLaunches().some((h) => h.record.kind === "group")) {
     say(
-      `styre: kept the temp folder ${made.dir}: a command Styre started is still running; the next Styre command removes it once that command has stopped\n`,
+      `styre: kept the temp folder ${dir}: a command Styre started is still running; the next Styre command removes it once that command has stopped\n`,
     );
     return;
   }
+  const now = opts.now ?? Date.now;
   try {
-    rmSync(made.dir, { recursive: true, force: true });
-    removeTempNote(made.note);
+    const deadline = opts.budgetMs === undefined ? undefined : now() + opts.budgetMs;
+    if (opts.budgetMs === 0 || !removeTree(dir, { deadline, now })) {
+      say(
+        `styre: left the temp folder ${dir} for the next Styre command to remove: no time was left before the stop deadline\n`,
+      );
+      return;
+    }
+    removeTempNote(note);
   } catch (e) {
     say(
-      `styre: could not remove the temp folder ${made.dir}: ${e instanceof Error ? e.message : String(e)}\n`,
+      `styre: could not remove the temp folder ${dir}: ${e instanceof Error ? e.message : String(e)}; remove it with: chmod -R u+w ${dir} && rm -rf ${dir}\n`,
     );
-    return;
+    try {
+      removeTempNote(note);
+    } catch {
+      /* said above; the sweep will say it again, once */
+    }
   }
   made = null;
 }

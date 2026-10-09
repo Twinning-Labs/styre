@@ -1,4 +1,4 @@
-import { lstatSync, rmSync } from "node:fs";
+import { lstatSync } from "node:fs";
 import { basename, isAbsolute, join } from "node:path";
 import { GRACE_MS, describeProcess, selfIdentity } from "./door.ts";
 import {
@@ -31,6 +31,7 @@ import {
   scanRecords,
   unclaim,
 } from "./records.ts";
+import { removeTree } from "./remove-tree.ts";
 import { type StopReport, groupMembers, stopGroup, stopTree } from "./stop.ts";
 
 /**
@@ -388,7 +389,8 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
  * folder goes once the Styre that wrote the note is gone (or it was written before this machine
  * last started) and none of that Styre's launch records is still on disk: a command the stops
  * above could not end may still be using it. Only a folder that is exactly what the note says is
- * removed: an absolute path, named for that Styre, a real folder (not a link) of this user's.
+ * removed: an absolute path, named like a command temp folder, a real folder (not a link) of this
+ * user's.
  * Anything else is said, and the note and the path are left in place. Silent when it removes one.
  */
 function removeTempFolders(
@@ -422,10 +424,8 @@ function removeTempFolders(
       leave("its path is not absolute");
       continue;
     }
-    const prefix = `styre-cmd-${owner.pid}-${owner.startedAt}-`;
-    const name = basename(note.path);
-    if (!name.startsWith(prefix) || !/^[A-Za-z0-9]{6}$/.test(name.slice(prefix.length))) {
-      leave("its name is not the temp folder of the Styre the note names");
+    if (!/^styre-cmd-[A-Za-z0-9]{6}$/.test(basename(note.path))) {
+      leave("its name is not a command temp folder's");
       continue;
     }
     try {
@@ -445,14 +445,21 @@ function removeTempFolders(
           leave(`it is owned by uid ${st.uid}, not by you (uid ${me})`);
           continue;
         }
-        rmSync(note.path, { recursive: true, force: true });
+        removeTree(note.path);
         res.tempFolders.push(note.path);
       }
       removeTempNote(notePath);
     } catch (e) {
+      // Said once, with how to finish it by hand: the note goes, so no later command says it again.
+      const path = printable(note.path);
       say(
-        `styre: could not remove the temp folder ${printable(note.path)} of a Styre that was force quit: ${errText(e)}; the next Styre command tries again\n`,
+        `styre: could not remove the temp folder ${path} left by an earlier Styre: ${errText(e)}; remove it with: chmod -R u+w ${path} && rm -rf ${path}\n`,
       );
+      try {
+        removeTempNote(notePath);
+      } catch {
+        /* said above */
+      }
     }
   }
 }

@@ -84,8 +84,8 @@ messages and exit statuses are in [`runtime-parameters.md`](docs/architecture/ru
   `TMPDIR`, `TMP` and `TEMP` pointed at one folder its Styre process owns (mode 0700), removed when
   that Styre exits, or by the next Styre command's sweep after a `kill -9`. The sweep removes only a
   folder a note in the records folder names, once its Styre is gone and none of that Styre's
-  records is left, and only when it is a real folder of yours with that Styre's exact name; it
-  never follows a symbolic link. If the folder disappears while Styre runs, the next command gets a
+  records is left, and only when it is a real folder of yours named like a command temp folder;
+  it never follows a symbolic link at or below that folder. If the folder disappears while Styre runs, the next command gets a
   new one under a new name: a name in a shared `/tmp` that someone else took meanwhile is never
   written through, and its note is dropped so no sweep acts on it.
 - **The records folder must be yours alone.** The sweep acts on launch records only when their
@@ -122,8 +122,13 @@ messages and exit statuses are in [`runtime-parameters.md`](docs/architecture/ru
   `TMP` and `TEMP` (a JVM on Linux uses `/tmp` unless told otherwise) still writes where it likes.
   After a `kill -9`, a command left running in a group whose leader has exited may lose its temp
   folder: the sweep removes the record (see above), and with it the last sign that the folder is
-  still in use. A `kill -9` between making the folder and noting it (a few milliseconds) leaves the
-  folder, which nothing will remove.
+  still in use. A process that left a command's group (a daemon started with `setsid`) loses its
+  temp folder when Styre exits. A `kill -9` between making the folder and noting it (a few
+  milliseconds) leaves the folder, which nothing will remove.
+- **A state folder shared between machines or pid namespaces** (an NFS home, containers sharing
+  `XDG_STATE_HOME` and `/tmp`) can make one Styre's sweep take another's live note for a dead one:
+  the boot ID differs, or the pid is not visible. Then it can remove a live run's temp folder. The
+  launch records have the same limit; give each machine or container its own state folder.
 - **The unrecorded window.** Between the spawn and the record write there are a few milliseconds. A
   `kill -9` landing there leaves an orphan with no record, which nothing will stop.
 - **Detached leftovers are reported, not stopped.** A process the agent left running in its worktree
