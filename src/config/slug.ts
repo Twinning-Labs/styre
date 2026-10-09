@@ -1,5 +1,5 @@
 import { basename } from "node:path";
-import { RunInterrupted, runBlocking } from "../util/process/door.ts";
+import { type BlockingResult, RunInterrupted, runBlocking } from "../util/process/door.ts";
 
 /** Local git: a healthy call never takes this long (ENG-485 section 5.1). */
 const LOCAL_GIT_MS = 30_000;
@@ -13,7 +13,7 @@ const LOCAL_GIT_MS = 30_000;
  *  folder name in silence: a different state folder, where `--resume` cannot find its checkpoint
  *  (ENG-485 final review A F10). */
 export function tryGit(args: string[], cwd: string): string | null {
-  let res: ReturnType<typeof runBlocking>;
+  let res: BlockingResult;
   try {
     res = runBlocking(["git", ...args], { cwd, timeoutMs: LOCAL_GIT_MS });
   } catch (err) {
