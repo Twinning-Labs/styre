@@ -355,7 +355,11 @@ jobs:
           brew install twinning-labs/styre/styre
           styre --version
       - name: brew audit (strict)
-        run: brew audit --strict --online twinning-labs/styre/styre
+        # `--except=version`: Homebrew 6.0.14+ reads the version from the
+        # release tag in the URL and flags our explicit `version` as redundant.
+        # Older Homebrew scans the asset filename instead and gets `64` (from
+        # arm64/x64), so the formula keeps `version` (scripts/render-formula.ts).
+        run: brew audit --strict --online --except=version twinning-labs/styre/styre
 
   smoke-linux:
     # No Homebrew on GitHub's Linux runners — validate the published Linux
