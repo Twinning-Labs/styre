@@ -61,6 +61,10 @@ export interface LaunchHandle {
   context: LaunchContext;
   /** Set by the signal handler when it stopped this launch. */
   interrupted: boolean;
+  /** Set once a stop of this launch left processes alive. The launch then stays in the live set and
+   *  keeps its record, and the caller of that stop has named each survivor, so the exit check does
+   *  not stop or report it again (section 7.7). */
+  leftSurvivors: boolean;
   /** Stop the launch. The record is removed only when nothing is left alive (section 5.3). */
   stop(how: "graceful" | "forced"): Promise<StopReport>;
   /** Stop what is left of the launch (graceful), then release the record if nothing survives. For a
@@ -146,7 +150,10 @@ export function launch(spec: LaunchSpec): LaunchHandle {
   const release = (rep: StopReport): StopReport => {
     // A survivor still holds this subprocess; it must not keep Bun's event loop alive and stop
     // Styre from exiting (the operator was told how to stop it).
-    if (rep.survivors.length > 0) proc.unref();
+    if (rep.survivors.length > 0) {
+      proc.unref();
+      handle.leftSurvivors = true;
+    }
     if (rep.survivors.length === 0) {
       removeRecord(record); // may throw after its own deadline: a loud failure, never swallowed
       live.delete(handle);
@@ -158,6 +165,7 @@ export function launch(spec: LaunchSpec): LaunchHandle {
     record,
     context,
     interrupted: false,
+    leftSurvivors: false,
     stop: async (how) => release(await doStop(how)),
     // Both kinds stop what is left, so a record is never released while anything the stop can still
     // reach is alive (section 5.3): for an agent, only what is still linked to it. An agent already

@@ -8,7 +8,9 @@ import { guard } from "./output.ts";
  * The check at the end of `styre run` and `styre setup` (ENG-485 section 7.7). It first waits for
  * the leftover checks still running in the background, each bounded by its own timeout (a check
  * that timed out has said so and is not a leak). It then asserts that the set of launches held in
- * memory is empty. A launch still there is a bug: Styre stops it, says what it stopped, and makes
+ * memory is empty, apart from launches an earlier stop could not end: those keep their records, and
+ * their survivors were named by that stop's caller, so they are neither stopped nor reported again.
+ * Any other launch still there is a bug: Styre stops it, says what it stopped, and makes
  * the exit status EXIT.INTERNAL, so a leak is never silent. It never replaces a status that already
  * says something (75 paused, 65, 64, 1, or any error's own code): it only turns success into 70.
  * While a stop is in progress it does nothing: the launches still live are the stop handler's, which
@@ -17,7 +19,7 @@ import { guard } from "./output.ts";
 export async function assertNoLeakedLaunches(): Promise<void> {
   if (isStopping()) return;
   await pendingLeftoverChecks();
-  const leaked = liveLaunches();
+  const leaked = liveLaunches().filter((h) => !h.leftSurvivors);
   if (leaked.length === 0) return;
   for (const h of leaked) {
     const command = describeProcess(h.record.pid, h.record.command);

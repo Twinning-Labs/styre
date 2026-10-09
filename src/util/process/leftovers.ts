@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { sep } from "node:path";
+import { reportSurvivors } from "../run-command.ts";
 import {
   type LaunchHandle,
   RunInterrupted,
@@ -205,7 +206,7 @@ async function lsofThroughDoor(timeoutMs: number): Promise<Cwds> {
     });
     const r = await Promise.race([h.proc.exited, limit]);
     if (r === "timeout") {
-      await h.stop("forced");
+      reportSurvivors(h, (await h.stop("forced")).survivors);
       return { skipped: `lsof did not finish within ${timeoutMs} ms` };
     }
     if (!(await out.finish(1_000))) return { skipped: "the lsof output was cut off" };
@@ -218,7 +219,12 @@ async function lsofThroughDoor(timeoutMs: number): Promise<Cwds> {
     clearTimeout(timer);
     out.cancel();
     err.cancel();
-    await h.finish().catch(() => {}); // releases the record; an exited group returns at once
+    // Releases the record; an exited group returns at once. What it cannot stop is named here,
+    // since the exit check does not report a launch whose stop left survivors (section 7.7).
+    await h.finish().then(
+      (rep) => reportSurvivors(h, rep.survivors),
+      () => {},
+    );
   }
 }
 
