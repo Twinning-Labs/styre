@@ -4,21 +4,34 @@
 // I2). The sweep names each remaining member with the exact command to stop it, removes the record,
 // and signals nothing.
 //
-// Every process here is this test's own, claimed by structure (test/helpers/own-processes.ts) and
-// stopped by killOwned in a `finally`. No test signals anything it did not start.
+// Every process here is this test's own. Each is claimed by structure (test/helpers/own-processes.ts)
+// the moment it is started, before any assertion, so afterEach's killOwned stops it whether the test
+// passed, failed or timed out, and the preload's end of run leak check sees any that survive. The
+// sleeps also end by themselves after NAP seconds, so even a test run killed outright leaves nothing
+// for long. No test signals anything it did not start, and none waits on a subprocess's `exited`
+// promise (Bun resolved it two minutes late here for a process whose child had called setsid): every
+// wait reads the process table, bounded.
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as door from "../../src/util/process/door.ts";
 import { __setCwdReadersForTests } from "../../src/util/process/leftovers.ts";
-import { bootId, nowToken, probe } from "../../src/util/process/proc-table.ts";
+import { bootId, nowToken, probe, tokenValue } from "../../src/util/process/proc-table.ts";
 import { type LaunchRecord, processesDir, writeRecord } from "../../src/util/process/records.ts";
 import { sweepOrphans } from "../../src/util/process/sweep.ts";
 import { isAlive, killOwned, own, registerGroup, until } from "../helpers/own-processes.ts";
 
-/** A sleep length no other test uses. */
-const NAP = "4719";
+/** A sleep length no other test uses, in seconds: it also bounds how long a process this file
+ *  starts can outlive the run if the run is killed before its cleanup. */
+const NAP = "29.4719";
 
 let state: string;
 const saved = process.env.XDG_STATE_HOME;
@@ -51,7 +64,7 @@ const startOf = (pid: number) => {
 async function deadOwner() {
   const p = Bun.spawn(["sleep", "0.2"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
   const info = startOf(p.pid);
-  await p.exited;
+  own(info);
   expect(await until(() => probe(info.pid).kind === "gone")).toBe(true);
   return info;
 }
@@ -101,6 +114,8 @@ async function leaderlessGroup() {
     },
   );
   const l = startOf(leader.pid);
+  // Claimed first: from here killOwned reaches the leader and, while it lives, its member.
+  own(l);
   expect(registerGroup(l)).toBe(true);
   const reader = leader.stdout.getReader();
   let text = "";
@@ -115,7 +130,6 @@ async function leaderlessGroup() {
   const m = claimed[0];
   expect(m.pgid).toBe(l.pid);
   leader.stdin.end();
-  await leader.exited;
   expect(await until(() => probe(l.pid).kind === "gone")).toBe(true);
   expect(isAlive(m)).toBe(true);
   return { leader: l, member: m };
@@ -153,6 +167,7 @@ test("reviewer C's reproduction: a stale group record whose pid is now an unrela
   // command whose pid was handed out again.
   const owner = await deadOwner();
   const pidFile = join(state, "daemon");
+  const go = join(state, "go");
   const since = nowToken();
   const top = Bun.spawn(
     [
@@ -163,10 +178,13 @@ test("reviewer C's reproduction: a stale group record whose pid is now an unrela
        setsid(); defined(my $g = fork) or die;
        if ($g == 0) { open(STDIN, '<', '/dev/null'); open(STDOUT, '>', '/dev/null'); open(STDERR, '>', '/dev/null'); exec('sleep', '${NAP}') }
        open(my $f, '>', '${pidFile}.tmp'); print $f "$$ $g\\n"; close $f; rename('${pidFile}.tmp', '${pidFile}');
-       select(undef, undef, undef, 1.0); exit 0`,
+       for (1 .. 200) { last if -e '${go}'; select(undef, undef, undef, 0.05) } exit 0`,
     ],
     { stdin: "ignore", stdout: "ignore", stderr: "ignore", env: { ...process.env } },
   );
+  // Claimed first. The intermediate waits (up to 10 s) for the go file, so until the daemon is
+  // claimed below, killOwned still reaches it through the intermediate.
+  own(startOf(top.pid));
   let text = "";
   expect(
     await until(() => {
@@ -184,9 +202,9 @@ test("reviewer C's reproduction: a stale group record whose pid is now an unrela
   expect(claimed.length).toBe(1);
   const victim = claimed[0];
   expect(victim.pgid).toBe(x);
-  expect(probe(victim.pid).kind === "alive" && startOf(victim.pid).startedAt >= since).toBe(true);
-  await top.exited;
-  expect(await until(() => probe(x).kind === "gone")).toBe(true);
+  expect(tokenValue(victim.startedAt) >= tokenValue(since)).toBe(true);
+  writeFileSync(go, "");
+  expect(await until(() => probe(x).kind === "gone" && probe(top.pid).kind === "gone")).toBe(true);
 
   writeRecord(
     groupRecord(x, "1000000000.000001", owner, {
