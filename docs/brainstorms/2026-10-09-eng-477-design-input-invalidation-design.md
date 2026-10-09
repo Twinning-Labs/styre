@@ -569,16 +569,25 @@ removing the folder by hand.
 (Operator ruling, 2026-10-10, later the same day) ENG-477 adds no new way to delete anything. A
 checkpoint that cannot be read (damaged, or no ticket recorded) is listed by `ls` with the reason, and
 `styre clean <ident>` refuses it exactly as it refuses a schema it cannot use: exit 65, nothing
-removed, with the reason, the checkpoint folder and the worktrees that look like the run's, then
-the commands that remove the run by hand, each on a line of its own. `git worktree remove` refuses a
-worktree that holds uncommitted or untracked work; the forced command, which deletes that work, is
-printed only after a warning, for the operator to choose. `--purge` refuses the same way and
-`clean --all` skips both kinds. A checkpoint folder without its `run.db` stays "no styre effort"
-(exit 64), as before. `clean` and `styre run` (fresh and `--resume`) refuse an ident or slug that is
-empty, `.`, `..`, or contains `/`, `\` or NUL (exit 64) before building any path from it: one check,
-applied to the `--slug` flag, a slug derived from the repository, the profile's own slug, and the
-ticket's ident wherever a checkpoint path is built. Safe removal of such checkpoints is a follow up
-ticket.
+removed. After the headline it prints a block that is safe to paste whole or in any part: every line
+is a shell comment (the reason, the checkpoint folder, the worktrees that look like the run's, and,
+for a schema it cannot use, first that the Styre that wrote it keeps the paused work) except the
+commands that remove the run by hand or start it over, whose arguments are shell quoted.
+`git worktree remove` refuses a worktree that holds uncommitted or untracked work; Styre never prints
+`--force`, and what to do with that work is the operator's decision. `--purge` refuses the same way
+and `clean --all` skips both kinds. A checkpoint folder without its `run.db` stays "no styre effort"
+(exit 64), as before. Safe removal of such checkpoints is a follow up ticket.
+
+(Operator ruling, 2026-10-10, on names) An ident is one folder name: not empty, not `.` or `..`, and
+with no `/`, `\` or NUL. A slug may contain `/` and then nests, as `conventions.md` documents; each
+part between slashes must be a folder name by the same rule, so `team/app` is accepted and `team/..`,
+`/abs`, `a//b` and `a/./b` are refused. One check applies wherever a checkpoint path is built, before
+it is built: `styre run` (fresh and `--resume`: the `--slug` flag, a slug derived from the
+repository, the profile's own slug, and the ticket's ident), `styre clean`, and `styre setup`, which
+therefore never writes a profile whose slug `run` would refuse. A name given on the command line or
+derived from the repository exits 64; a slug read from a profile file exits 78. As a second line of
+defence the resolved checkpoint path must stay inside the state folder. `ls` lists checkpoints under
+nested slugs.
 
 ## 8. Testing
 
