@@ -551,11 +551,15 @@ with `complexityGrading` on; recorded v8 fixtures of each must resume after the 
   which select only columns present since v7, and a test runs `ls`, `clean` and `--fresh` against every
   fixture.
 
-(Operator ruling, 2026-10-09) Every read of a database that must not change it (`--inspect`, the
-narrow readers of `ls`, `clean` and `--fresh`, and the tests' reads of fixtures and checkpoints) goes
-through a private copy: the file, and its `-wal` and `-shm` files when present, copied into a temporary
-folder, the copy opened, the folder removed afterwards. The original is never opened, in any journal
-mode. The committed fixtures are kept in rollback journal (DELETE) mode.
+(Operator rulings, 2026-10-09) Every read of a database that must not change it, in production and
+in tests (`--inspect`, the narrow readers of `ls`, `clean` and `--fresh`, the pause's read of the copy
+it overwrites, and every test's read of a fixture or a run database) goes through one private copy
+helper: the file, and its `-wal` and `-shm` files when present, copied into a temporary folder, the
+copy opened, the folder removed afterwards. The original is never opened, in any journal mode. A copy
+during which a source file's size, modification time or WAL header moved is taken again, up to 3
+attempts, then refused with a clear error; `ls` lists such an effort as unreadable, with the reason. A
+source guard refuses read only opens anywhere else, with stated exceptions. The committed fixtures are
+kept in rollback journal (DELETE) mode.
 
 ## 8. Testing
 
