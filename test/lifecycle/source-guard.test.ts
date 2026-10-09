@@ -29,7 +29,11 @@
 //     without a spread, whose `timeoutMs` is a numeric literal, a top level `const` numeric literal
 //     in the same file, or an exported numeric `const` of an allow listed module, in (0, 120 000],
 //     alone or in the branches of a conditional. A constant whose name is declared more than once in
-//     the file (shadowed by a parameter, a local, a destructured name) is not trusted.
+//     the file (shadowed by a parameter, a local, a destructured name) is not trusted. A call whose
+//     options carry a `cleanup` key (any spelling of the key) runs while the door is closed, so it is
+//     allowed only inside the functions CLEANUP_SITES lists (spec section 7.3 step 1);
+//   - `deferCleanup`, `runDeferredCleanups` and `beginStopping` may be named (as an identifier or a
+//     string) only at the sites HELD_SITES lists: the door may be closed only by the stop handler.
 //
 // STATED LIMITS. These forms are NOT refused, and nothing here claims they are:
 //   - indirect eval: `const e = eval; e(...)`, `(0, eval)(...)`;
@@ -59,12 +63,20 @@ const DIAG_ALLOWED = new Set([
   "src/util/process/proc-table.ts",
 ]);
 const CHILD = new Set(["child_process", "node:child_process"]);
-/** Where code may name the door's held cleanup functions (M5), outside the door itself: file, then
- *  the functions within it. `deferCleanup` holds code that the stop handler runs while the door is
- *  closed; `runDeferredCleanups` runs it. Widening this list is a visible change. */
+/** Where code may name the door's held cleanup functions (M5), and the door's stop switch (A M2),
+ *  outside the door itself: file, then the functions within it. `deferCleanup` holds code that the
+ *  stop handler runs while the door is closed; `runDeferredCleanups` runs it; `beginStopping`
+ *  closes the door. Widening this list is a visible change. */
 const HELD_SITES: Record<string, Record<string, string[]>> = {
   deferCleanup: { "src/dispatch/baseline-rerun.ts": ["deferWorktreeRemoval"] },
   runDeferredCleanups: { "src/util/process/signals.ts": ["handleStopSignal"] },
+  beginStopping: { "src/util/process/signals.ts": ["handleStopSignal"] },
+};
+/** The functions that may make a blocking call marked `cleanup` (spec section 7.3 step 1: "The
+ *  source guard lists the permitted cleanup calls"; final review A M1): such a call runs while the
+ *  door is closed. File, then the functions within it. Widening this list is a visible change. */
+const CLEANUP_SITES: Record<string, string[]> = {
+  "src/dispatch/baseline-rerun.ts": ["registered", "removeTempWorktree"],
 };
 
 /** The names of the functions that enclose `n`, innermost first. */
@@ -537,6 +549,7 @@ test("the held cleanup sites are pinned", () => {
   expect(HELD_SITES).toEqual({
     deferCleanup: { "src/dispatch/baseline-rerun.ts": ["deferWorktreeRemoval"] },
     runDeferredCleanups: { "src/util/process/signals.ts": ["handleStopSignal"] },
+    beginStopping: { "src/util/process/signals.ts": ["handleStopSignal"] },
   });
 });
 
@@ -711,6 +724,19 @@ function timeoutProblems(rel: string, text: string): string[] {
       } else {
         if (opts.properties.some((p) => ts.isSpreadAssignment(p)))
           out.push(`${at}: runBlocking options with a spread`);
+        // A call marked `cleanup` runs while the door is closed: only at the listed sites.
+        const keyOf = (p: ts.ObjectLiteralElementLike): string | undefined => {
+          const k = p.name;
+          if (k === undefined) return undefined;
+          if (ts.isIdentifier(k) || ts.isStringLiteralLike(k)) return k.text;
+          if (ts.isComputedPropertyName(k)) return lit(k.expression);
+          return undefined;
+        };
+        if (opts.properties.some((p) => keyOf(p) === "cleanup")) {
+          const sites = CLEANUP_SITES[rel] ?? [];
+          if (!enclosingFunctions(n).some((f) => sites.includes(f)))
+            out.push(`${at}: runBlocking marked cleanup off its listed sites`);
+        }
         const prop = opts.properties.find(
           (p) => p.name !== undefined && p.name.getText(sf) === "timeoutMs",
         );
@@ -881,4 +907,100 @@ test.each([
   ],
 ])("the timeout check accepts %s", (_name, source) => {
   expect(timeoutProblems("src/dispatch/x.ts", source)).toEqual([]);
+});
+
+// --- blocking calls marked `cleanup` run while the door is closed (spec section 7.3 step 1) ------
+// "The source guard lists the permitted cleanup calls" (final review A M1). A call marked cleanup
+// runs during a stop, so a stray one (a `git reset` marked that way) could move HEAD mid stop.
+
+test("the permitted cleanup calls are pinned", () => {
+  expect(CLEANUP_SITES).toEqual({
+    "src/dispatch/baseline-rerun.ts": ["registered", "removeTempWorktree"],
+  });
+});
+
+test("the cleanup calls in src are all at their listed sites", () => {
+  const problems = files(join(ROOT, "src")).flatMap((p) => {
+    const rel = relative(ROOT, p);
+    return rel === "src/util/process/door.ts"
+      ? []
+      : timeoutProblems(rel, readFileSync(p, "utf8")).filter((x) => x.includes("cleanup"));
+  });
+  expect(problems).toEqual([]);
+});
+
+test.each([
+  ["in another module", NEG, "runBlocking(['true'], { timeoutMs: 1, cleanup: true });"],
+  [
+    "in the listed file, outside the listed functions",
+    "src/dispatch/baseline-rerun.ts",
+    "export function runAtBaseline() { runBlocking(['git', 'reset'], { timeoutMs: 1, cleanup: true }); }",
+  ],
+  [
+    "at the top level of the listed file",
+    "src/dispatch/baseline-rerun.ts",
+    "runBlocking(['git'], { timeoutMs: 1, cleanup: true });",
+  ],
+  ["as a string key", NEG, "runBlocking(['true'], { timeoutMs: 1, 'cleanup': true });"],
+  ["as a computed key", NEG, "runBlocking(['true'], { timeoutMs: 1, ['cleanup']: true });"],
+  [
+    "as a shorthand",
+    NEG,
+    "const cleanup = true; runBlocking(['true'], { timeoutMs: 1, cleanup });",
+  ],
+  [
+    "through an aliased import",
+    NEG,
+    "import { runBlocking as rb } from '../util/process/door.ts'; rb(['true'], { timeoutMs: 1, cleanup: true });",
+  ],
+])("the guard rejects a blocking call marked cleanup %s", (_name, file, source) => {
+  expect(
+    timeoutProblems(file, source).some((p) => /marked cleanup off its listed sites/.test(p)),
+  ).toBe(true);
+});
+
+test("a cleanup call at a listed site is not a hit", () => {
+  expect(
+    timeoutProblems(
+      "src/dispatch/baseline-rerun.ts",
+      "function removeTempWorktree(r: string, wt: string) { runBlocking(['git', 'worktree', 'remove', wt], { cwd: r, timeoutMs: 120_000, cleanup: true }); }\nfunction registered(r: string) { runBlocking(['git', 'worktree', 'list'], { cwd: r, timeoutMs: 30_000, cleanup: true }); }",
+    ),
+  ).toEqual([]);
+});
+
+// --- beginStopping closes the door: only the stop handler may call it (final review A M2) --------
+
+test("beginStopping is pinned to the stop handler", () => {
+  expect(HELD_SITES.beginStopping).toEqual({ "src/util/process/signals.ts": ["handleStopSignal"] });
+});
+
+test.each([
+  ["in run code", NEG, "import { beginStopping } from '../util/process/door.ts'; beginStopping();"],
+  [
+    "in signals.ts outside the handler",
+    "src/util/process/signals.ts",
+    "import { beginStopping } from './door.ts'; export function other() { beginStopping(); }",
+  ],
+  [
+    "through a namespace",
+    NEG,
+    "import * as door from '../util/process/door.ts'; door.beginStopping();",
+  ],
+  ["as a string key", NEG, "declare const d: any; d['beginStopping']();"],
+  [
+    "through an aliased import",
+    NEG,
+    "import { beginStopping as b } from '../util/process/door.ts'; b();",
+  ],
+])("the guard rejects beginStopping %s", (_name, file, source) => {
+  expect(offences(file, source).some((o) => /names beginStopping/.test(o))).toBe(true);
+});
+
+test("the stop handler's own beginStopping is not a hit", () => {
+  expect(
+    offences(
+      "src/util/process/signals.ts",
+      "import { beginStopping } from './door.ts';\nexport async function handleStopSignal() { beginStopping(); }",
+    ),
+  ).toEqual([]);
 });

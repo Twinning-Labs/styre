@@ -25,7 +25,7 @@ export const stopAbort = { forced: false };
 export function isStopping(): boolean {
   return stopping;
 }
-/** Called only by signals.ts. */
+/** Called only by the stop handler (signals.ts `handleStopSignal`); the source guard enforces it. */
 export function beginStopping(): void {
   stopping = true;
 }
