@@ -1,3 +1,4 @@
+import { printable } from "./printable.ts";
 import { bootId, probe } from "./proc-table.ts";
 import { type LaunchRecord, removeRecord, writeRecord } from "./records.ts";
 import { type StopDeps, type StopReport, stopGroup, stopTree } from "./stop.ts";
@@ -122,7 +123,7 @@ export function launch(spec: LaunchSpec): LaunchHandle {
       ident: context.ident,
       stepId: context.stepId,
       worktree: context.worktree,
-      command: spec.argv.join(" ").slice(0, 200),
+      command: printable(spec.argv.join(" ")).slice(0, 200),
       owner: me,
     };
     if (p.kind === "alive") writeRecord(record);
@@ -282,7 +283,7 @@ export function describeProcess(pid: number, fallback: string, timeoutMs = 5_000
   } catch {
     /* unreadable: use the fallback */
   }
-  return (text === "" ? fallback : text).slice(0, 120);
+  return printable(text === "" ? fallback : text).slice(0, 120);
 }
 
 /** A cleanup the run must make even when a stop ends Styre before the run code unwinds, such as

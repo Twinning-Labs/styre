@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { printable } from "./printable.ts";
 
 /** Launch records on disk (ENG-485 §5.3). One file per live long running launch, for the whole
  *  machine, in a sibling of `styre/` so no repository slug can collide with it. */
@@ -318,7 +319,8 @@ export function scanRecords(): { listed: Listed[]; unreadable: Unreadable[] } {
     }
     listed.push({
       file,
-      record: parsed,
+      // A record file is data from disk: its command is shown, so it is made printable here.
+      record: { ...parsed, command: printable(parsed.command) },
       claimedBy: cm ? { pid: Number(cm[3]), startedAt: cm[4] } : null,
     });
   }

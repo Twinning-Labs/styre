@@ -11,6 +11,7 @@ import {
   liveLaunches,
   runBlocking,
 } from "./door.ts";
+import { printable } from "./printable.ts";
 import { type ProcInfo, listProcesses, nowToken, tokenValue } from "./proc-table.ts";
 import { readPipe } from "./read-pipe.ts";
 import { collectTree, groupMembers } from "./stop.ts";
@@ -34,13 +35,13 @@ export interface Leftover {
 
 /** The exact operator line of section 9.4, with its newline. */
 export function formatLeftover(l: Leftover): string {
-  return `styre: the agent left "${l.command}" (pid ${l.pid}) running in the worktree; stop it with: kill ${l.pid} (if it is not yours)\n`;
+  return `styre: the agent left "${printable(l.command)}" (pid ${l.pid}) running in the worktree; stop it with: kill ${l.pid} (if it is not yours)\n`;
 }
 
 /** Said when a check could not finish, so a missing report is never read as a clean worktree. The
  *  signal handler uses it too, when no time is left for the check. */
 export function skippedLine(why: string): string {
-  return `styre: skipped the check for processes the agent left running in the worktree (${why})\n`;
+  return `styre: skipped the check for processes the agent left running in the worktree (${printable(why)})\n`;
 }
 
 /** A check that could not finish, with the reason the operator is told. */
@@ -237,7 +238,7 @@ async function asyncCwds(a: ReadArgs): Promise<Cwds> {
 /** The command line of a process, for the report: from /proc on Linux (no process launched), from
  *  `ps` elsewhere. At most 120 characters. */
 export function commandFromCmdline(raw: string): string {
-  return raw.replace(/\0+$/, "").split("\0").join(" ").slice(0, 120);
+  return printable(raw.replace(/\0+$/, "").split("\0").join(" ")).slice(0, 120);
 }
 export function commandOf(pid: number): string {
   if (process.platform === "linux") {
