@@ -25,16 +25,42 @@ test("fakeIssueTracker records calls", async () => {
   expect(id).not.toBeUndefined();
 });
 
-test("makeProjectorPorts selects the jira adapter when configured", () => {
-  const prev = {
-    u: process.env.JIRA_BASE_URL,
-    e: process.env.JIRA_EMAIL,
-    t: process.env.JIRA_API_TOKEN,
-  };
-  process.env.JIRA_BASE_URL = "https://x.atlassian.net";
-  process.env.JIRA_EMAIL = "a@b.com";
-  process.env.JIRA_API_TOKEN = "tok";
+const JIRA_ENV = {
+  JIRA_BASE_URL: "https://x.atlassian.net",
+  JIRA_EMAIL: "a@b.com",
+  JIRA_API_TOKEN: "tok",
+} as const;
+
+/** Run `fn` with the Jira env vars set, then put each one back exactly as it was. */
+function withJiraEnv(fn: () => void): void {
+  const prev = Object.fromEntries(Object.keys(JIRA_ENV).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, JIRA_ENV);
   try {
+    fn();
+  } finally {
+    for (const [k, v] of Object.entries(prev)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+test('withJiraEnv leaves previously unset Jira env vars unset, not the string "undefined"', () => {
+  const saved = Object.fromEntries(Object.keys(JIRA_ENV).map((k) => [k, process.env[k]]));
+  for (const k of Object.keys(JIRA_ENV)) Reflect.deleteProperty(process.env, k);
+  try {
+    withJiraEnv(() => {});
+    for (const k of Object.keys(JIRA_ENV)) expect(k in process.env).toBe(false);
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) Reflect.deleteProperty(process.env, k);
+      else process.env[k] = v;
+    }
+  }
+});
+
+test("makeProjectorPorts selects the jira adapter when configured", () => {
+  withJiraEnv(() => {
     const ports = makeProjectorPorts(
       { issueTracker: "jira", forge: "github" },
       { checksSystem: "none", targetRepo: "/tmp/x" },
@@ -43,9 +69,5 @@ test("makeProjectorPorts selects the jira adapter when configured", () => {
       { forge: { github: () => fakeForge() } },
     );
     expect(typeof ports.issueTracker.fetchTicket).toBe("function");
-  } finally {
-    process.env.JIRA_BASE_URL = prev.u;
-    process.env.JIRA_EMAIL = prev.e;
-    process.env.JIRA_API_TOKEN = prev.t;
-  }
+  });
 });
