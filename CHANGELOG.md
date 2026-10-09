@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.14.1] - 2026-10-09
+
+### Bug Fixes
+
+- **Homebrew installs on macOS are no longer blocked by a release audit failure**: the release pipeline's `brew audit --strict` step no longer flags the formula's explicit version as redundant, so Homebrew-based installs and upgrades of styre proceed cleanly.
+
 ## [0.14.0] - 2026-10-09
 
 ### Features
