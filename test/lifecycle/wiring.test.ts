@@ -5,7 +5,7 @@
 //
 // The pseudo terminal test of Ctrl-C at a setup prompt is in terminal.test.ts, with its pty helper (R4).
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,8 +45,26 @@ import {
   __resetSignalsForTests,
   installStopHandlers,
 } from "../../src/util/process/signals.ts";
-import { makeOutboxDb } from "../helpers/lifecycle.ts";
+import { makeOutboxDb, removeLifecycleFolders } from "../helpers/lifecycle.ts";
+import { killOwned, ownGroupMembers, ownLaunch } from "../helpers/own-processes.ts";
 import { cleanupParkedRun, runParkedTicket } from "../helpers/run-harness.ts";
+
+// The temporary folders the lifecycle helpers made for this file.
+afterAll(removeLifecycleFolders);
+
+// Everything else this file's runs put in the temporary folder (the worktree root each `styre run`
+// and `--resume` makes, the profile and database folders below) goes into one folder of its own,
+// removed after the file.
+const savedTmpdir = process.env.TMPDIR;
+const tmpRoot = mkdtempSync(join(tmpdir(), "styre-wiring-"));
+beforeAll(() => {
+  process.env.TMPDIR = tmpRoot;
+});
+afterAll(() => {
+  if (savedTmpdir === undefined) Reflect.deleteProperty(process.env, "TMPDIR");
+  else process.env.TMPDIR = savedTmpdir;
+  rmSync(tmpRoot, { recursive: true, force: true });
+});
 
 const SIGS = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
 const counts = (): number[] => SIGS.map((s) => process.listenerCount(s));
@@ -57,14 +75,14 @@ const RESUME_LINE = "styre: run interrupted; resume with: styre run --resume ENG
 
 afterEach(() => {
   __setCwdReadersForTests(undefined);
+  // Launches still live: claimed by structure and killed by recorded identity
+  // (test/helpers/own-processes.ts), never a bare pid or group.
   for (const h of door.liveLaunches()) {
-    try {
-      process.kill(h.record.kind === "group" ? -h.record.pid : h.record.pid, "SIGKILL");
-    } catch {
-      /* already gone */
-    }
+    ownLaunch(h);
     h.proc.unref();
   }
+  ownGroupMembers();
+  killOwned();
   door.__resetForTests();
   __resetSignalsForTests();
 });
@@ -389,6 +407,7 @@ describe("the error boundary while stopping (m1)", () => {
       kind: "group",
       context: { ident: null, stepId: null, worktree: null },
     });
+    ownLaunch(h);
     door.beginStopping();
     process.exitCode = 0;
     const text = await captured(() => assertNoLeakedLaunches());

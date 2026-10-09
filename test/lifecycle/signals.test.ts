@@ -2,8 +2,8 @@
 // injected dependencies (stderr, telemetry, re-raise, exit, clock, leftover check) against real
 // processes; the last ones run a child process with the real handlers installed.
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, jest, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, realpathSync } from "node:fs";
+import { afterAll, afterEach, describe, expect, jest, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as door from "../../src/util/process/door.ts";
@@ -31,7 +31,7 @@ import {
   suspendStopHandlers,
 } from "../../src/util/process/signals.ts";
 import { realStopDeps } from "../../src/util/process/stop.ts";
-import { makeTicketDb } from "../helpers/lifecycle.ts";
+import { makeTicketDb, removeLifecycleFolders } from "../helpers/lifecycle.ts";
 import {
   allGone,
   killOwned,
@@ -42,6 +42,9 @@ import {
   toolPid,
   until,
 } from "../helpers/own-processes.ts";
+
+// The temporary folders the lifecycle helpers made for this file.
+afterAll(removeLifecycleFolders);
 
 const FX = join(import.meta.dir, "fixtures");
 const OPENING_INT =
@@ -78,14 +81,19 @@ function deps(): { out: Out; d: HandlerDeps } {
 }
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "styre-signals-")));
+afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+/** An agent launch, claimed at once while it is certainly this test's child; what it starts later
+ *  is claimed by the tests that wait for it, and by afterEach's tree walk. */
 function agent(argv: string[], context: Partial<door.LaunchContext> = {}, env = process.env) {
-  return door.launch({
+  const h = door.launch({
     argv,
     cwd: process.cwd(),
     env,
     kind: "agent",
     context: { ident: "ENG-1", stepId: null, worktree: null, ...context },
   });
+  ownLaunch(h);
+  return h;
 }
 const alive = (pid: number) => listProcesses().some((p) => p.pid === pid && p.state !== "zombie");
 /** The one live child of `parent` (not a zombie), remembered for cleanup; undefined if none yet. */
@@ -239,6 +247,9 @@ describe("order and messages", () => {
       kids = listProcesses().filter((p) => p.ppid === h.record.pid);
       return kids.some((p) => p.state === "zombie") && kids.some((p) => p.state !== "zombie");
     });
+    // `sleep 3072` claimed while the agent is alive and it is this test's descendant: a stop that
+    // left it running would otherwise orphan it out of every cleanup's reach.
+    expect(ownTree(h.record).some((p) => p.ppid === h.record.pid)).toBe(true);
     expect(kids.some((p) => p.state === "zombie")).toBe(true); // the case is really there
     const { out, d } = deps();
     await handleStopSignal("SIGINT", { command: "run", run: null }, d);
@@ -1175,7 +1186,7 @@ describe("a real process with the handlers installed", () => {
   test("each signal ends the process BY that signal, after the opening line", async () => {
     for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
       const { p, rest } = await child();
-      process.kill(p.pid, sig);
+      p.kill(sig);
       await p.exited;
       const text = await rest;
       expect(p.signalCode).toBe(sig);
@@ -1196,7 +1207,7 @@ describe("a real process with the handlers installed", () => {
     const { p, reader } = await child("slow", { STDERR_ERRORS: errors });
     await reader.cancel();
     await p.stdout.cancel();
-    process.kill(p.pid, "SIGHUP");
+    p.kill("SIGHUP");
     await p.exited;
     expect(p.exitCode).toBeNull();
     expect(p.signalCode).toBe("SIGHUP");
@@ -1209,10 +1220,10 @@ describe("a real process with the handlers installed", () => {
     // shows: the child bun, the agent's bash and that sleep.
     expect(await until(() => self !== undefined && ownTree(self).length >= 3)).toBe(true);
     const t0 = Date.now();
-    process.kill(p.pid, "SIGINT");
+    p.kill("SIGINT");
     // The second signal lands once the handler has begun: it has said its opening line.
     expect(await until(() => said().includes(OPENING_INT))).toBe(true);
-    process.kill(p.pid, "SIGTERM");
+    p.kill("SIGTERM");
     await p.exited;
     const text = await rest;
     expect(Date.now() - t0).toBeLessThan(3_000);

@@ -6,6 +6,8 @@ import * as door from "../../../src/util/process/door.ts";
 import { listProcesses, probe } from "../../../src/util/process/proc-table.ts";
 import { listRecords, processesDir } from "../../../src/util/process/records.ts";
 import { type StopDeps, realStopDeps } from "../../../src/util/process/stop.ts";
+import { claimLaunchesAtStops } from "../../helpers/claim-launches.ts";
+import { killOwned, ownChild, ownGroupMembers, ownLaunch } from "../../helpers/own-processes.ts";
 
 const sh = (script: string): string[] => ["sh", "-c", script];
 const ctx = { ident: "ENG-1", stepId: 1, worktree: null };
@@ -29,18 +31,28 @@ async function waitFor(pred: () => boolean, ms = 5_000): Promise<boolean> {
   return pred();
 }
 
+/** A launch, claimed at once (test/helpers/own-processes.ts): its process while it is certainly this
+ *  test's child, and for a command group, the group itself, so what it leaves there stays claimable
+ *  after it exits. afterEach kills what is still alive by recorded identity. */
 function start(argv: string[], kind: "agent" | "group", env = process.env) {
-  return door.launch({ argv, cwd: process.cwd(), env, kind, context: ctx });
+  const h = door.launch({ argv, cwd: process.cwd(), env, kind, context: ctx });
+  ownLaunch(h);
+  return h;
 }
 
 beforeEach(() => {
   state = mkdtempSync(join(tmpdir(), "styre-door-"));
   process.env.XDG_STATE_HOME = state;
   door.__resetForTests();
+  // Every stop claims what a launch is running before it signals (a test's own stop functions
+  // replace these).
+  claimLaunchesAtStops();
   childrenBefore = new Set(liveChildren());
 });
 afterEach(async () => {
-  // Cleanup runs even when a test failed: stop every live launch, then kill any child it missed.
+  // Cleanup runs even when a test failed: everything the test started is claimed by structure (its
+  // launches' trees, the groups it created, any other child it spawned) and killed by recorded
+  // identity (test/helpers/own-processes.ts). No bare pid or group is signalled.
   for (const dir of [state, processesDir()]) {
     try {
       chmodSync(dir, 0o700);
@@ -49,26 +61,10 @@ afterEach(async () => {
     }
   }
   door.__setStopDepsForTests(undefined);
-  for (const h of door.liveLaunches()) {
-    try {
-      await h.stop("forced");
-    } catch {
-      /* the test may have broken it on purpose */
-    }
-  }
-  for (const pid of liveChildren()) {
-    if (childrenBefore.has(pid)) continue;
-    try {
-      process.kill(-pid, "SIGKILL");
-    } catch {
-      /* not a group leader */
-    }
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {
-      /* gone */
-    }
-  }
+  for (const h of door.liveLaunches()) ownLaunch(h);
+  for (const pid of liveChildren()) if (!childrenBefore.has(pid)) ownChild({ pid });
+  ownGroupMembers();
+  killOwned();
   await waitFor(() => liveChildren().every((p) => childrenBefore.has(p)), 2_000);
   rmSync(state, { recursive: true, force: true });
   if (saved === undefined) Reflect.deleteProperty(process.env, "XDG_STATE_HOME");
@@ -102,7 +98,7 @@ test("a launch is recorded on disk and in memory, and released after it finishes
   expect(rec?.owner).toEqual(door.selfIdentity());
   expect(h.interrupted).toBe(false);
   // Make the leader exit, then finish releases the record.
-  process.kill(h.proc.pid, "SIGKILL");
+  h.proc.kill("SIGKILL");
   await h.proc.exited;
   const rep = await h.finish();
   expect(rep.survivors).toEqual([]);
@@ -214,16 +210,19 @@ test("the record stays, and the launch stays live, while anything survives a sto
   expect(door.liveLaunches()).toEqual([]);
 });
 
-test("a record that cannot be removed is a loud failure, not a silent one", async () => {
-  if (isRoot) return; // root ignores folder permissions
-  const g = start(["sleep", "30"], "group");
-  chmodSync(processesDir(), 0o500);
-  await expect(g.stop("forced")).rejects.toThrow();
-  expect(door.liveLaunches()).toContain(g); // still held: the record is still on disk
-  chmodSync(processesDir(), 0o700);
-  expect((await g.stop("forced")).survivors).toEqual([]);
-  expect(listRecords()).toEqual([]);
-});
+// Root ignores folder permissions: skipped there, never passed silently.
+test.skipIf(isRoot)(
+  "a record that cannot be removed is a loud failure, not a silent one",
+  async () => {
+    const g = start(["sleep", "30"], "group");
+    chmodSync(processesDir(), 0o500);
+    await expect(g.stop("forced")).rejects.toThrow();
+    expect(door.liveLaunches()).toContain(g); // still held: the record is still on disk
+    chmodSync(processesDir(), 0o700);
+    expect((await g.stop("forced")).survivors).toEqual([]);
+    expect(listRecords()).toEqual([]);
+  },
+);
 
 test("a stop signal in flight (stopAbort.forced) cuts a graceful stop's wait short", async () => {
   // The leader ignores SIGTERM, so a graceful stop would wait the whole grace period.
@@ -243,6 +242,7 @@ test("a launch starts in the cwd it was given, for both kinds", async () => {
   try {
     for (const kind of ["group", "agent"] as const) {
       const h = door.launch({ argv: ["pwd"], cwd: dir, env: process.env, kind, context: ctx });
+      ownLaunch(h);
       const out = await new Response(h.proc.stdout).text();
       await h.proc.exited;
       await h.finish();
@@ -314,6 +314,7 @@ test("a launch passes its stdin and env through, an undefined env value is left 
     kind: "agent",
     context: ctx,
   });
+  ownLaunch(s);
   expect(await new Response(s.proc.stdout).text()).toBe("from stdin");
   await s.proc.exited;
   await s.finish();
@@ -321,23 +322,26 @@ test("a launch passes its stdin and env through, an undefined env value is left 
 });
 
 for (const kind of ["group", "agent"] as const) {
-  test(`an unwritable state folder stops what it just started and throws (${kind})`, async () => {
-    if (isRoot) return;
-    chmodSync(state, 0o500);
-    let message = "";
-    try {
-      start(["sleep", "30"], kind);
-    } catch (e) {
-      message = e instanceof Error ? e.message : String(e);
-    } finally {
-      chmodSync(state, 0o700);
-    }
-    expect(message).toMatch(/launch record/);
-    expect(door.liveLaunches()).toEqual([]);
-    expect(listRecords()).toEqual([]);
-    // No child is left running: the one just started was stopped.
-    expect(await waitFor(() => liveChildren().every((p) => childrenBefore.has(p)))).toBe(true);
-  });
+  // Root can write to any folder, so the refusal cannot happen: skipped, never passed silently.
+  test.skipIf(isRoot)(
+    `an unwritable state folder stops what it just started and throws (${kind})`,
+    async () => {
+      chmodSync(state, 0o500);
+      let message = "";
+      try {
+        start(["sleep", "30"], kind);
+      } catch (e) {
+        message = e instanceof Error ? e.message : String(e);
+      } finally {
+        chmodSync(state, 0o700);
+      }
+      expect(message).toMatch(/launch record/);
+      expect(door.liveLaunches()).toEqual([]);
+      expect(listRecords()).toEqual([]);
+      // No child is left running: the one just started was stopped.
+      expect(await waitFor(() => liveChildren().every((p) => childrenBefore.has(p)))).toBe(true);
+    },
+  );
 }
 
 // --- stopping --------------------------------------------------------------------------------
@@ -610,7 +614,8 @@ test("describeProcess names a live process's own command, truncated, and falls b
   expect(
     await waitFor(() => door.describeProcess(g.proc.pid, "the launch argv") === "the launch argv"),
   ).toBe(true);
-  const long = start(["sh", "-c", `sleep 48 # ${"y".repeat(300)}`], "group");
+  // Two commands, so the shell stays (a lone `sleep` would replace it, and its long line with it).
+  const long = start(["sh", "-c", `sleep 48; exit 0 # ${"y".repeat(300)}`], "group");
   expect(await waitFor(() => door.describeProcess(long.proc.pid, "z").length === 120)).toBe(true);
   await long.stop("forced");
 });

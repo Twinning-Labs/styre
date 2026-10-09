@@ -1,6 +1,7 @@
 import { afterEach } from "bun:test";
 import * as door from "../../src/util/process/door.ts";
 import { realStopDeps } from "../../src/util/process/stop.ts";
+import { claimingStopDeps } from "./claim-launches.ts";
 
 /**
  * A stop that really signals and really inspects the process table, but whose clock is virtual: each
@@ -17,8 +18,9 @@ export interface GracefulStopRecorder {
 export function installVirtualGrace(stepMs = 250): GracefulStopRecorder {
   let virtual = 0;
   const sent: GracefulStopRecorder["sent"] = [];
+  // Each listing first claims what the live launches are running (test/helpers/claim-launches.ts).
   door.__setStopDepsForTests({
-    ...realStopDeps,
+    ...claimingStopDeps(),
     kill: (target, sig) => {
       sent.push({ sig, at: virtual });
       realStopDeps.kill(target, sig);

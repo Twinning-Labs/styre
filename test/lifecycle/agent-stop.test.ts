@@ -1,5 +1,5 @@
 // The Claude adapter driven against stand-in agents (ENG-485 task 6).
-import { afterEach, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
@@ -7,6 +7,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -98,6 +99,17 @@ async function toolsRunning(): Promise<ProcInfo[]> {
 }
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "styre-agent-stop-")));
+/** Each test gets a state folder of its own, inside `scratch` (removed after the file): the
+ *  records a stop that left survivors keeps never reach the run's shared test state folder. */
+const savedState = process.env.XDG_STATE_HOME;
+beforeEach(() => {
+  process.env.XDG_STATE_HOME = mkdtempSync(join(scratch, "state-"));
+});
+afterAll(() => {
+  if (savedState === undefined) Reflect.deleteProperty(process.env, "XDG_STATE_HOME");
+  else process.env.XDG_STATE_HOME = savedState;
+  rmSync(scratch, { recursive: true, force: true });
+});
 /** An executable stand-in CLI; `body` runs under bash and sees the test's env. */
 function script(name: string, body: string): string {
   const path = join(scratch, name);
@@ -348,7 +360,7 @@ const okCli = () => {
 
 test("after a completed run the launch is released: nothing live, no record left on disk", async () => {
   const prev = process.env.XDG_STATE_HOME;
-  const state = realpathSync(mkdtempSync(join(tmpdir(), "styre-agent-state-")));
+  const state = realpathSync(mkdtempSync(join(scratch, "agent-state-")));
   process.env.XDG_STATE_HOME = state;
   try {
     const r = await claudeAgentRunner(okCli()).run({ ...input, timeoutMs: 20_000 });

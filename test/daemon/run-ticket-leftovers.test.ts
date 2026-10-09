@@ -1,7 +1,7 @@
 // ENG-485 section 7.7: the drive loop lets the leftover checks started after agent steps end
 // before it returns, so they never write to a database a caller has already closed.
-import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
@@ -31,6 +31,17 @@ const profile = parseProfile({
   checksSystem: "none",
 });
 
+/** The worktree roots this file made, removed after its tests. */
+const roots: string[] = [];
+const worktreeRoot = (): string => {
+  const dir = mkdtempSync(join(tmpdir(), "styre-rt-"));
+  roots.push(dir);
+  return dir;
+};
+afterAll(() => {
+  for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
+});
+
 beforeEach(() => door.__resetForTests());
 afterEach(async () => {
   __setCwdReadersForTests(undefined);
@@ -57,7 +68,7 @@ test("driveToTerminal does not return while a leftover check is still running", 
     }),
     agentConfig: DEFAULT_AGENT_CONFIG,
     profile,
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-rt-")),
+    worktreeRoot: worktreeRoot(),
   });
 
   let release: (v: Map<number, string>) => void = () => {};

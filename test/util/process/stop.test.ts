@@ -1,7 +1,14 @@
 // test/util/process/stop.test.ts
 import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type ProcInfo, listProcesses, probe } from "../../../src/util/process/proc-table.ts";
+import {
+  type ProcInfo,
+  listProcesses,
+  nowToken,
+  probe,
+} from "../../../src/util/process/proc-table.ts";
 import {
   type StopDeps,
   collectTree,
@@ -10,6 +17,14 @@ import {
   stopGroup,
   stopTree,
 } from "../../../src/util/process/stop.ts";
+import {
+  killOwned,
+  own,
+  ownChild,
+  ownGroupMembers,
+  ownPrinted,
+  ownTree,
+} from "../../helpers/own-processes.ts";
 
 // ---------------------------------------------------------------------------------------------
 // A small simulated process world. It lets the stop logic be driven through exact sequences
@@ -828,34 +843,17 @@ describe("realStopDeps.kill", () => {
 // Real processes
 // ---------------------------------------------------------------------------------------------
 const FX = join(import.meta.dir, "../../lifecycle/fixtures");
-const livePids: number[] = [];
-const liveGroups: number[] = [];
-/** Roots of process trees a test started. Cleanup kills each whole tree (children and the groups
- *  they lead), so a test that fails before it registers the tool command's group leaks nothing. */
-const liveRoots: number[] = [];
+/** Every process a test starts is claimed at once by structure (test/helpers/own-processes.ts): a
+ *  child by descent, a detached child's group by registration, a tool command while it is still a
+ *  descendant. afterEach kills what is still alive by recorded identity, never a bare pid or group,
+ *  so a test that fails midway (or a stop that regressed) leaks nothing, and the end of run leak
+ *  check sees whatever a broken cleanup left. */
 afterEach(() => {
-  // Collect everything first, then kill: killing a parent first would orphan its children out of reach.
-  const table = listProcesses();
-  const own = table.find((q) => q.pid === process.pid)?.pgid;
-  const doomed = new Set<number>();
-  for (const pid of [...liveRoots.splice(0), ...livePids]) {
-    const r = table.find((q) => q.pid === pid);
-    if (!r) continue;
-    for (const q of collectTree(r, table, own === undefined ? [] : [own])) doomed.add(q.pid);
-  }
-  for (const g of liveGroups.splice(0))
-    try {
-      process.kill(-g, "SIGKILL");
-    } catch {}
-  for (const pid of [...doomed, ...livePids.splice(0)])
-    if (pid !== process.pid)
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {}
+  ownGroupMembers();
+  killOwned();
 });
-const track = <T extends { pid: number }>(p: T): T => {
-  livePids.push(p.pid);
-  liveRoots.push(p.pid);
+const track = <T extends { pid: number }>(p: T, opts: { group?: boolean } = {}): T => {
+  ownChild(p, opts);
   return p;
 };
 const alive = (pid: number) => {
@@ -888,7 +886,7 @@ async function toolOf(agentPid: number): Promise<ProcInfo> {
     () => listProcesses().find((p) => p.pid === child.pid && p.pgid === p.pid),
     3_000,
   );
-  liveGroups.push(leads.pid);
+  own(leads); // still a descendant: the agent is alive
   return leads;
 }
 let sleepSeed = 400_000 + (process.pid % 1000) * 7;
@@ -931,7 +929,7 @@ describe("stopTree and stopGroup on real processes", () => {
     const cli = await until("the stubborn CLI", () =>
       listProcesses().find((p) => p.ppid === w.pid),
     );
-    livePids.push(cli.pid);
+    own(cli);
     const rep = await stopTree({ pid: w.pid, startedAt: startOf(w.pid) }, "graceful", {
       graceMs: 500,
       excludePgids: [myPgid()],
@@ -939,6 +937,61 @@ describe("stopTree and stopGroup on real processes", () => {
     expect(alive(cli.pid)).toBe(false);
     expect(alive(w.pid)).toBe(false);
     expect(rep.survivors).toEqual([]);
+  });
+
+  test("a member of a collected group that is NOT a descendant is stopped too (spec 6.1)", async () => {
+    // The tool command leads a group of its own; a subshell of it started a sleep and exited, so the
+    // sleep's parent is gone (it is no descendant of the agent) but it is still in the tool's group.
+    // Only the group link reaches it: a collection that took in descendants alone would leave it.
+    const dir = mkdtempSync(join(tmpdir(), "styre-stop-orphan-"));
+    try {
+      const pidFile = join(dir, "pid");
+      const go = join(dir, "go");
+      const since = nowToken();
+      const agent = track(
+        Bun.spawn([join(FX, "group-orphan.sh")], {
+          stdin: "ignore",
+          stderr: "ignore",
+          env: {
+            ...process.env,
+            ORPHAN_SLEEP: uniqueSleep(),
+            TOOL_SLEEP: uniqueSleep(),
+            ORPHAN_PID: pidFile,
+            ORPHAN_GO: go,
+          },
+        }),
+      );
+      const orphanPid = await until("the subshell to start the sleep", () => {
+        const text = existsSync(pidFile) ? readFileSync(pidFile, "utf8") : "";
+        return text.endsWith("\n") ? Number(text.trim()) : undefined;
+      });
+      // Claimed while the subshell still holds it: then it is this test's descendant.
+      const orphan = ownPrinted(orphanPid, since);
+      if (orphan === null) throw new Error(`the sleep (pid ${orphanPid}) could not be claimed`);
+      ownTree({ pid: agent.pid, startedAt: startOf(agent.pid) });
+      writeFileSync(go, "");
+      const root = { pid: agent.pid, startedAt: startOf(agent.pid) };
+      // The case is really there: no descendant of the agent, in a group led by its tool.
+      const now = await until("the sleep to lose its parent", () => {
+        const table = listProcesses();
+        const byPid = new Map(table.map((p) => [p.pid, p]));
+        const me = byPid.get(orphan.pid);
+        if (me === undefined || me.startedAt !== orphan.startedAt) return undefined;
+        for (let p = byPid.get(me.ppid); p !== undefined && p.pid > 1; p = byPid.get(p.ppid))
+          if (p.pid === root.pid) return undefined; // still a descendant
+        return me;
+      });
+      const tool = listProcesses().find((p) => p.pid === now.pgid);
+      expect(tool?.ppid).toBe(agent.pid); // its group's leader is the agent's own child
+      expect(now.pgid).not.toBe(myPgid());
+      const rep = await stopTree(root, "graceful", { graceMs: 5000, excludePgids: [myPgid()] });
+      expect(rep.survivors).toEqual([]);
+      expect(rep.stopped.map((p) => p.pid)).toContain(orphan.pid);
+      expect(alive(orphan.pid)).toBe(false);
+      expect(alive(agent.pid)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("Styre's own group is never signalled, even though the agent is in it (N1)", async () => {
@@ -996,8 +1049,16 @@ describe("stopTree and stopGroup on real processes", () => {
 
   test("stopGroup stops a background child a command left in its group", async () => {
     const tag = uniqueSleep();
-    const p = Bun.spawn(["sh", "-c", `sleep ${tag} & exit 0`], { detached: true });
-    liveGroups.push(p.pid);
+    // The leader waits for its stdin to close before it exits, so its group is registered (and the
+    // child stays claimable by it) while the leader is surely alive.
+    const p = track(
+      Bun.spawn(["sh", "-c", `sleep ${tag} & read _`], { detached: true, stdin: "pipe" }),
+      { group: true },
+    );
+    await until("the background child", () =>
+      listProcesses().find((q) => q.ppid === p.pid && q.state !== "zombie"),
+    );
+    p.stdin.end();
     await p.exited;
     const rep = await stopGroup(p.pid, "graceful", { graceMs: 5000 });
     expect(rep.stopped.length).toBeGreaterThan(0);
@@ -1006,8 +1067,7 @@ describe("stopTree and stopGroup on real processes", () => {
   });
 
   test("stopGroup escalates to SIGKILL for a group that ignores SIGTERM", async () => {
-    const p = track(Bun.spawn([join(FX, "stubborn-cli.sh")], { detached: true }));
-    liveGroups.push(p.pid);
+    const p = track(Bun.spawn([join(FX, "stubborn-cli.sh")], { detached: true }), { group: true });
     // Its `sleep 1` child exists only once the line before, the trap, has run.
     await until("the stubborn script's trap to be installed", () =>
       listProcesses().some((q) => q.ppid === p.pid && q.state !== "zombie"),

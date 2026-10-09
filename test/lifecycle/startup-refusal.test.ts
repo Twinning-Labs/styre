@@ -7,7 +7,7 @@
 // macOS (pids end at 99999) and is far above Linux's usual limit. The stop's kill function refuses
 // it with EPERM before any real signal, so a fake only makes a stop do less. Every real process is
 // this test's own, claimed through test/helpers/own-processes.ts and stopped in afterEach.
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +16,7 @@ import * as door from "../../src/util/process/door.ts";
 import { type ProcInfo, listProcesses, probe } from "../../src/util/process/proc-table.ts";
 import { processesDir } from "../../src/util/process/records.ts";
 import { realStopDeps } from "../../src/util/process/stop.ts";
+import { claimLaunchesAtStops, claimingStopDeps } from "../helpers/claim-launches.ts";
 import { killOwned, ownLaunch, until } from "../helpers/own-processes.ts";
 
 const FAKE = 999999;
@@ -86,28 +87,30 @@ test("a process the refusal's forced stop cannot end is named with the exact lin
   const cwd = realpathSync(mkdtempSync(join(scratch, "wt-")));
   const cli = wideCli("wide-with-child.sh", "sleep 6.2519 </dev/null >/dev/null 2>&1");
   let agentPid: number | null = null;
-  door.__setStopDepsForTests({
-    ...realStopDeps,
-    list: () => {
-      const table = listProcesses();
-      agentPid ??= door.liveLaunches().find((h) => h.record.kind === "agent")?.record.pid ?? null;
-      if (agentPid === null) return table;
-      const fake: ProcInfo = {
-        pid: FAKE,
-        ppid: agentPid,
-        pgid: FAKE,
-        startedAt: "1.000000",
-        state: "running",
-      };
-      return [...table, fake];
-    },
-    kill: (target, sig) => {
-      if (target === FAKE || target === -FAKE) {
-        throw Object.assign(new Error("EPERM"), { code: "EPERM" });
-      }
-      realStopDeps.kill(target, sig);
-    },
-  });
+  door.__setStopDepsForTests(
+    claimingStopDeps({
+      ...realStopDeps,
+      list: () => {
+        const table = listProcesses();
+        agentPid ??= door.liveLaunches().find((h) => h.record.kind === "agent")?.record.pid ?? null;
+        if (agentPid === null) return table;
+        const fake: ProcInfo = {
+          pid: FAKE,
+          ppid: agentPid,
+          pgid: FAKE,
+          startedAt: "1.000000",
+          state: "running",
+        };
+        return [...table, fake];
+      },
+      kill: (target, sig) => {
+        if (target === FAKE || target === -FAKE) {
+          throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+        }
+        realStopDeps.kill(target, sig);
+      },
+    }),
+  );
   claimWhileRunning();
   const { value: r, lines } = await stderrOf(() => claudeAgentRunner(cli).run(input(cwd)));
   expect(r.capabilities?.error).toContain("stopped at startup");
@@ -123,17 +126,19 @@ test("a forced stop that fails at startup kills the agent's own process and says
   // The agent is the sleep itself (exec), so killing its own process ends everything it is.
   const cli = wideCli("wide-exec.sh", "exec sleep 7.3119 </dev/null >/dev/null 2>&1");
   let armed = false;
-  door.__setStopDepsForTests({
-    ...realStopDeps,
-    list: () => {
-      // Every read of the whole table fails once an agent is running: the stop cannot start.
-      if (armed || door.liveLaunches().some((h) => h.record.kind === "agent")) {
-        armed = true;
-        throw new Error("the process table could not be read");
-      }
-      return listProcesses();
-    },
-  });
+  door.__setStopDepsForTests(
+    claimingStopDeps({
+      ...realStopDeps,
+      list: () => {
+        // Every read of the whole table fails once an agent is running: the stop cannot start.
+        if (armed || door.liveLaunches().some((h) => h.record.kind === "agent")) {
+          armed = true;
+          throw new Error("the process table could not be read");
+        }
+        return listProcesses();
+      },
+    }),
+  );
   claimWhileRunning();
   const t0 = Date.now();
   const { value: r, lines } = await stderrOf(() => claudeAgentRunner(cli).run(input(cwd)));
@@ -156,6 +161,7 @@ test("a forced stop that fails at startup kills the agent's own process and says
 test("no launch record is left on disk by a refused agent whose tree was stopped", async () => {
   const cwd = realpathSync(mkdtempSync(join(scratch, "wt-")));
   const cli = wideCli("wide-plain.sh", "sleep 6.4119 </dev/null >/dev/null 2>&1");
+  claimLaunchesAtStops(); // the real stop functions, claiming at each listing
   claimWhileRunning();
   const { value: r } = await stderrOf(() => claudeAgentRunner(cli).run(input(cwd)));
   expect(r.capabilities?.error).toContain("stopped at startup");
@@ -169,4 +175,5 @@ test("no launch record is left on disk by a refused agent whose tree was stopped
   expect(names).toEqual([]);
 });
 
-process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
+// bun test emits no process exit event: the end of the file is its afterAll.
+afterAll(() => rmSync(scratch, { recursive: true, force: true }));

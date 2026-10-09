@@ -3,8 +3,8 @@
 // replaced first, so a leftover cannot write terminal escapes (OSC 52 can set the clipboard) or a
 // newline that forges a `styre:` line of its own.
 //
-// The one real process here is this test's own, claimed at start and stopped in afterEach; it ends
-// by itself after 22.8 s whatever happens.
+// The real processes here are this test's own (a shell and its sleep), claimed at start and stopped
+// in afterEach; the sleep ends by itself after 22.8 s whatever happens.
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,7 +19,7 @@ import {
 import { printable } from "../../../src/util/process/printable.ts";
 import { probe } from "../../../src/util/process/proc-table.ts";
 import { processesDir, recordFileName, scanRecords } from "../../../src/util/process/records.ts";
-import { killOwned, own, until } from "../../helpers/own-processes.ts";
+import { killOwned, own, ownTree, until } from "../../helpers/own-processes.ts";
 
 afterEach(() => {
   killOwned();
@@ -68,6 +68,9 @@ test.skipIf(!Bun.which("ps"))(
     });
     const info = probe(p.pid);
     if (info.kind === "alive") own(info.info);
+    // Its `sleep`, claimed too while it is this test's descendant: a cleanup that killed the shell
+    // alone, just as it forked, would orphan the sleep out of every cleanup's reach.
+    expect(await until(() => info.kind === "alive" && ownTree(info.info).length >= 2)).toBe(true);
     expect(await until(() => describeProcess(p.pid, "?").includes("52;c;"))).toBe(true);
     const text = describeProcess(p.pid, "?");
     expect(CONTROL.test(text)).toBe(false);
@@ -83,6 +86,9 @@ test("the leftover check's command of a real process whose argv holds escapes ha
   });
   const info = probe(p.pid);
   if (info.kind === "alive") own(info.info);
+  // Its `sleep`, claimed too while it is this test's descendant: a cleanup that killed the shell
+  // alone, just as it forked, would orphan the sleep out of every cleanup's reach.
+  expect(await until(() => info.kind === "alive" && ownTree(info.info).length >= 2)).toBe(true);
   expect(await until(() => commandOf(p.pid).includes("52;c;"))).toBe(true);
   expect(CONTROL.test(commandOf(p.pid))).toBe(false);
 });

@@ -1,7 +1,8 @@
 // ENG-485 section 8: the sweep. Every Styre command first stops what an earlier Styre left running
 // when it was killed with `kill -9`, from the launch records on disk. Each test gets its own state
-// folder (never the operator's ~/.local/state), starts only its own processes, and removes them by
-// pid (or by the group it created) in afterEach. No test signals a process it did not start.
+// folder (never the operator's ~/.local/state), starts only its own processes, claims each one at
+// once by structure (test/helpers/own-processes.ts), and kills what is left in afterEach by recorded
+// identity. No test signals a process it did not start, and no cleanup signals a bare pid or group.
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -32,6 +33,14 @@ import {
 import * as records from "../../src/util/process/records.ts";
 import type { StopReport } from "../../src/util/process/stop.ts";
 import { aliveFrom, sweepOrphans } from "../../src/util/process/sweep.ts";
+import {
+  killOwned,
+  own,
+  ownChild,
+  ownGroupMembers,
+  ownPrinted,
+  ownTree,
+} from "../helpers/own-processes.ts";
 
 const FX = join(import.meta.dir, "fixtures");
 /** A sleep length no other test uses, so nothing else ever matches these processes. */
@@ -39,10 +48,6 @@ const NAP = "4173";
 
 let state: string;
 const saved = process.env.XDG_STATE_HOME;
-/** Processes this file started: killed by pid in afterEach. */
-const mine: number[] = [];
-/** Process groups this file created (detached spawns): killed by group in afterEach. */
-const myGroups: number[] = [];
 
 beforeEach(() => {
   state = mkdtempSync(join(tmpdir(), "styre-sweep-"));
@@ -51,20 +56,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   __setCwdReadersForTests(undefined);
-  for (const g of myGroups.splice(0)) {
-    try {
-      process.kill(-g, "SIGKILL");
-    } catch {
-      /* already gone */
-    }
-  }
-  for (const p of mine.splice(0)) {
-    try {
-      process.kill(p, "SIGKILL");
-    } catch {
-      /* already gone */
-    }
-  }
+  ownGroupMembers();
+  killOwned();
   process.env.XDG_STATE_HOME = saved;
   rmSync(state, { recursive: true, force: true });
 });
@@ -95,9 +88,39 @@ function spawn(argv: string[], opts: { detached?: boolean; env?: Record<string, 
     detached: opts.detached ?? false,
     env: { ...process.env, ...opts.env },
   });
-  mine.push(p.pid);
-  if (opts.detached) myGroups.push(p.pid);
+  // Claimed at once, while it is certainly this test's child; a detached one's group too.
+  ownChild(p, { group: opts.detached ?? false });
   return p;
+}
+
+/** Start `nohup sleep NAP` in `worktree` from a shell, as an agent leaves a detached leftover, and
+ *  return its pid once it is claimed: the shell waits for its stdin to close, so the sleep is still
+ *  its child (this test's descendant) when the printed pid is claimed. */
+async function nohupLeftover(worktree: string): Promise<number> {
+  const since = nowToken();
+  const sh = Bun.spawn(
+    [
+      "sh",
+      "-c",
+      `cd "$1" || exit 1; nohup sleep ${NAP} </dev/null >/dev/null 2>&1 & echo $!; read _`,
+      "sh",
+      worktree,
+    ],
+    { stdin: "pipe", stdout: "pipe", stderr: "ignore" },
+  );
+  ownChild(sh);
+  const reader = sh.stdout.getReader();
+  let text = "";
+  while (!text.includes("\n")) {
+    const r = await reader.read();
+    if (r.done) break;
+    text += new TextDecoder().decode(r.value);
+  }
+  const left = Number(text.trim());
+  expect(ownPrinted(left, since)).not.toBeNull();
+  sh.stdin.end();
+  await sh.exited;
+  return left;
 }
 
 /** A fake "dead Styre": a short lived process whose identity we record as the owner. */
@@ -113,6 +136,9 @@ async function deadOwner() {
 async function termIgnoring() {
   const p = spawn(["sh", "-c", `trap '' TERM; sleep ${NAP}`]);
   expect(await until(() => listProcesses().some((x) => x.ppid === p.pid))).toBe(true);
+  // Its `sleep`, claimed while it is this test's descendant: a stop that ended the shell alone
+  // would orphan it out of every cleanup's reach.
+  expect(ownTree(startOf(p.pid)).length).toBeGreaterThanOrEqual(2);
   return p;
 }
 
@@ -159,7 +185,9 @@ describe("an orphan whose owner is dead", () => {
     let tool: number | undefined;
     expect(
       await until(() => {
-        tool = listProcesses().find((p) => p.ppid === agent.pid && p.state !== "zombie")?.pid;
+        const t = listProcesses().find((p) => p.ppid === agent.pid && p.state !== "zombie");
+        // Claimed while the agent is alive and the tool is this test's descendant.
+        if (t !== undefined && own(t).length > 0) tool = t.pid;
         return tool !== undefined;
       }),
     ).toBe(true);
@@ -415,6 +443,8 @@ describe("groups that are never expanded", () => {
         return agentPid !== undefined && listProcesses().some((p) => p.ppid === agentPid);
       }),
     ).toBe(true);
+    // The agent and its tool, claimed while they are this test's descendants.
+    expect(ownTree(startOf(agentPid as number)).length).toBeGreaterThanOrEqual(2);
     const sh = startOf(script.pid);
     expect(startOf(agentPid as number).pgid).toBe(script.pid); // one group: no job control
     const a = startOf(agentPid as number);
@@ -666,10 +696,10 @@ describe("claims", () => {
         stderr: "pipe",
       });
     const p = run();
-    mine.push(p.pid);
+    ownChild(p);
     expect(await until(() => files().some((f) => f.includes(".claimed-")))).toBe(true);
     const q = run();
-    mine.push(q.pid);
+    ownChild(q);
     const [po, qo, pe, qe] = await Promise.all([
       new Response(p.stdout).text(),
       new Response(q.stdout).text(),
@@ -708,19 +738,7 @@ describe("the leftover check", () => {
       const gone = await deadOwner(); // an orphan that had already exited, in this worktree
       await until(() => tokenValue(nowToken()) > tokenValue(gone.startedAt));
       // A real leftover in the worktree, as a control: it must still be reported.
-      const sh = Bun.spawn(
-        [
-          "sh",
-          "-c",
-          `cd "$1" || exit 1; nohup sleep ${NAP} </dev/null >/dev/null 2>&1 & echo $!`,
-          "sh",
-          worktree,
-        ],
-        { stdout: "pipe", stderr: "ignore" },
-      );
-      const left = Number((await new Response(sh.stdout).text()).trim());
-      mine.push(left);
-      await sh.exited;
+      const left = await nohupLeftover(worktree);
       writeRecord(rec(gone, owner, { worktree }));
       // The sweeping command runs from a shell in the worktree; `; true` keeps the shell from
       // replacing itself with the command, so it stays the command's parent.
@@ -746,7 +764,7 @@ describe("the leftover check", () => {
         ],
         { env: { ...process.env, XDG_STATE_HOME: state }, stdout: "pipe", stderr: "pipe" },
       );
-      mine.push(runner.pid);
+      ownChild(runner);
       const [out, err] = await Promise.all([
         new Response(runner.stdout).text(),
         new Response(runner.stderr).text(),
@@ -770,19 +788,7 @@ describe("the leftover check", () => {
       const a = startOf(agent.pid);
       // Something the agent left: a detached process running in the worktree, started after it.
       await until(() => tokenValue(nowToken()) > tokenValue(a.startedAt));
-      const sh = Bun.spawn(
-        [
-          "sh",
-          "-c",
-          `cd "$1" || exit 1; nohup sleep ${NAP} </dev/null >/dev/null 2>&1 & echo $!`,
-          "sh",
-          worktree,
-        ],
-        { stdout: "pipe", stderr: "ignore" },
-      );
-      const left = Number((await new Response(sh.stdout).text()).trim());
-      mine.push(left);
-      await sh.exited;
+      const left = await nohupLeftover(worktree);
       writeRecord(rec(a, owner, { worktree }));
       const out = collect();
       const r = await sweepOrphans({ stderr: out.stderr });

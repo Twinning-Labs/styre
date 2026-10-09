@@ -67,6 +67,7 @@ import {
   handleStopSignal,
 } from "../../src/util/process/signals.ts";
 import { nowUtc } from "../../src/util/time.ts";
+import { killOwned, ownGroupMembers, ownLaunch } from "../helpers/own-processes.ts";
 
 const FX = join(import.meta.dir, "fixtures");
 const SLUG = "test-project";
@@ -82,16 +83,23 @@ const BLOCK_LIFE = 45;
 // ---- cleanup: only what this file started ---------------------------------------------------------
 
 const cleanups: (() => void)[] = [];
+/** Claim every live launch's processes (test/helpers/own-processes.ts) while they are this test's
+ *  descendants: an agent's tree, a command's group. A case does it just before its stop begins, so
+ *  what a broken stop leaves behind is still killed by afterEach, and seen by the end of run leak
+ *  check, even after its parent has died. */
+function claimLaunches(): void {
+  for (const h of door.liveLaunches()) ownLaunch(h);
+}
+
 afterEach(() => {
-  // Launches still live (a case that failed before its stop): this file started them.
+  // Launches still live (a case that failed before its stop): this file started them. They, and
+  // everything claimed before the stops, are killed by recorded identity, never a bare pid or group.
   for (const h of door.liveLaunches()) {
-    try {
-      process.kill(h.record.kind === "group" ? -h.record.pid : h.record.pid, "SIGKILL");
-    } catch {
-      /* already gone */
-    }
+    ownLaunch(h);
     h.proc.unref();
   }
+  ownGroupMembers();
+  killOwned();
   door.__resetForTests();
   __resetSignalsForTests();
   for (const c of cleanups.splice(0).reverse()) {
@@ -429,6 +437,7 @@ async function interrupt(
   let before: Rows | null = null;
   let handler: Promise<void> | null = null;
   const startStop = () => {
+    claimLaunches();
     before = dbRows(run.dbPath);
     handler = handleStopSignal("SIGINT", ctx, d);
   };
@@ -438,6 +447,7 @@ async function interrupt(
     readHead = () => {
       const head = real();
       if (stepRow(run.dbPath, stopKey)?.status === "running" && before === null) {
+        claimLaunches();
         before = dbRows(run.dbPath);
         door.beginStopping();
         // A signal that arrives during a blocking call is handled once the call has returned and

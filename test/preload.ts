@@ -1,36 +1,40 @@
 // Loaded once before the whole test run (bunfig.toml). Launch records are written under
 // $XDG_STATE_HOME/styre-processes, so a test that starts a command must never reach the operator's
-// real ~/.local/state. When the environment does not already name a state folder, use a fresh one
-// for this run and remove it when the run ends. Tests that set their own folder still do, and
-// restore this one.
+// real records folder. The run always gets a fresh state folder of its own, whatever the
+// environment already says (an XDG_STATE_HOME the operator set names their REAL state folder), and
+// it is removed when the run ends. Tests that set their own folder still do, and restore this one.
 //
-// A guard then watches the operator's REAL records folder ($HOME/.local/state/styre-processes,
-// whatever XDG_STATE_HOME says) for the whole run, and fails the run, naming the files, if a launch
-// record was written there. A child started with Bun.spawn and no `env` gets the environment Bun
-// started with, not this preload's XDG_STATE_HOME, so that is how a test leaks (R29). The watch sees
-// a record even when it was removed again before the run ended. A real Styre the operator runs
-// during the test run would trip it too; that failure says so.
+// A guard then watches the operator's REAL records folders for the whole run: the one the
+// environment named before this preload ran ($XDG_STATE_HOME/styre-processes, or
+// $HOME/.local/state/styre-processes when it was not set), and the default one too when they differ.
+// It fails the run, naming the files, if a launch record was written there. A child started with
+// Bun.spawn and no `env` gets the environment Bun started with, not this preload's XDG_STATE_HOME,
+// so that is how a test leaks (R29). The watch sees a record even when it was removed again before
+// the run ended. A real Styre the operator runs during the test run would trip it too; that failure
+// says so.
 import { afterAll } from "bun:test";
 import { type FSWatcher, existsSync, mkdtempSync, readdirSync, rmSync, watch } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { stillRunning, stopStillRunning } from "./helpers/own-processes.ts";
+import { ownGroupMembers, stillRunning, stopStillRunning } from "./helpers/own-processes.ts";
 
-if (!process.env.XDG_STATE_HOME) {
-  const dir = mkdtempSync(join(tmpdir(), "styre-test-state-"));
-  process.env.XDG_STATE_HOME = dir;
-  // bun test does not emit the process exit event, so the end of the run is the last afterAll.
-  afterAll(() => {
-    rmSync(dir, { recursive: true, force: true });
-  });
-}
+const home = process.env.HOME || homedir();
+const defaultState = join(home, ".local", "state");
+/** The operator's state folder as the environment named it before this preload. */
+const originalState = process.env.XDG_STATE_HOME || defaultState;
+const testState = mkdtempSync(join(tmpdir(), "styre-test-state-"));
+process.env.XDG_STATE_HOME = testState;
+// bun test does not emit the process exit event, so the end of the run is the last afterAll.
+afterAll(() => {
+  rmSync(testState, { recursive: true, force: true });
+});
 
 /** A launch record, a claimed copy, or the temporary file a record is written through. */
 const RECORD_NAME = /^\.?\d+-\d+(?:\.\d{6})?\.json/;
-const realDir = join(process.env.HOME || homedir(), ".local", "state", "styre-processes");
-const testDir = join(process.env.XDG_STATE_HOME ?? "", "styre-processes");
+const realDirs = [...new Set([originalState, defaultState])].map((d) => join(d, "styre-processes"));
+const testDir = join(testState, "styre-processes");
 
-if (realDir !== testDir) {
+for (const realDir of realDirs.filter((d) => d !== testDir)) {
   const records = (): string[] => {
     try {
       return readdirSync(realDir).filter((n) => RECORD_NAME.test(n));
@@ -68,11 +72,14 @@ if (realDir !== testDir) {
 }
 
 // The end of run leak check: every process a test remembered through test/helpers/own-processes.ts
-// (its launches' trees, printed pids, fixture sleeps) must be gone by now, because each test file
-// cleans up after itself. One still running means a cleanup was removed or broken: the run fails,
-// naming each by pid and command, and the processes are then stopped (recorded identities only, each
-// checked again just before its signal).
+// (its launches' trees, printed pids, fixture sleeps, members of the groups it created) must be gone
+// by now, because each test file cleans up after itself. One still running means a cleanup was
+// removed or broken: the run fails, naming each by pid and command, and the processes are then
+// stopped (recorded identities only, each checked again just before its signal).
 afterAll(async () => {
+  // What a command left in a group a test created is claimed now too (rule 2), even when no
+  // cleanup reached it: its leader has exited, so no tree walk finds it.
+  ownGroupMembers();
   const left = await stillRunning();
   if (left.length === 0) return;
   stopStillRunning(left);

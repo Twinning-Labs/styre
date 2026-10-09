@@ -28,6 +28,7 @@ import {
   pendingLeftoverChecks,
 } from "../../src/util/process/leftovers.ts";
 import { listProcesses, nowToken, probe } from "../../src/util/process/proc-table.ts";
+import { claimLaunchesAtStops } from "../helpers/claim-launches.ts";
 import {
   claimPrinted,
   cleanupFixtures,
@@ -40,7 +41,7 @@ import {
   runsIn,
   until,
 } from "../helpers/leftover-fixtures.ts";
-import { own, ownTree } from "../helpers/own-processes.ts";
+import { own, ownLaunch, ownTree } from "../helpers/own-processes.ts";
 
 const only = (r: Leftover[] | "skipped", m: string): Leftover[] => {
   expect(r).not.toBe("skipped");
@@ -59,12 +60,18 @@ async function find(wt: string, since: string, m: string): Promise<Leftover | un
 }
 beforeEach(() => {
   door.__resetForTests();
+  // Every stop claims what a launch is running before it signals (test/helpers/claim-launches.ts):
+  // a stop that failed to end a launch's child still leaves it to cleanupFixtures.
+  claimLaunchesAtStops();
 });
 afterEach(async () => {
   __setCwdReadersForTests(undefined);
   __setLsofPathForTests(undefined);
   await pendingLeftoverChecks();
-  for (const h of door.liveLaunches()) await h.stop("forced").catch(() => {});
+  for (const h of door.liveLaunches()) {
+    ownLaunch(h);
+    await h.stop("forced").catch(() => {});
+  }
   cleanupFixtures();
   door.__resetForTests();
 });

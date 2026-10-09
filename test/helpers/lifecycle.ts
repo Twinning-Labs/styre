@@ -1,6 +1,6 @@
 // Fixtures for the interruption tests (ENG-485 section 7.5): a run database holding one ticket whose
 // step is `running`, and the same database pointed at a real git repository.
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ProjectorPorts } from "../../src/daemon/projector.ts";
@@ -14,6 +14,22 @@ import { insertTicket } from "../../src/db/repos/ticket.ts";
 import * as steps from "../../src/db/repos/workflow-step.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import { nowUtc } from "../../src/util/time.ts";
+
+/** Every temporary folder these helpers made (and the `-wt` folder beside a repository, which a
+ *  worktree mode run may create). A test file that uses the helpers removes them all after its
+ *  tests: `afterAll(removeLifecycleFolders)`. */
+const made: string[] = [];
+function tempFolder(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  made.push(dir);
+  return dir;
+}
+export function removeLifecycleFolders(): void {
+  for (const dir of made.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(`${dir}-wt`, { recursive: true, force: true });
+  }
+}
 
 export interface TicketDb {
   path: string;
@@ -38,7 +54,7 @@ export function makeTicketDb(opts?: {
   /** Where to create the database (default: a new temporary folder). */
   path?: string;
 }): TicketDb {
-  const path = opts?.path ?? join(mkdtempSync(join(tmpdir(), "styre-lifecycle-")), "run.db");
+  const path = opts?.path ?? join(tempFolder("styre-lifecycle-"), "run.db");
   mkdirSync(dirname(path), { recursive: true });
   migrate(path);
   const db = openDb(path);
@@ -118,7 +134,7 @@ export interface GitProject extends TicketDb {
  *  commit). In place (the default) the checkout stays on `b` and every dispatch row names the
  *  repository as its worktree; in worktree mode the checkout goes back to `main`. */
 export function makeGitProject(opts?: { mode?: "in-place" | "worktree" }): GitProject {
-  const repo = realpathSync(mkdtempSync(join(tmpdir(), "styre-lifecycle-repo-")));
+  const repo = realpathSync(tempFolder("styre-lifecycle-repo-"));
   const branch = "b";
   git(repo, ["init", "-b", "main"]);
   git(repo, ["config", "user.email", "t@s.dev"]);
@@ -193,7 +209,7 @@ export function makeOutboxDb(opts?: { onCall?: (n: number) => void }): {
   calls(): number;
   pending(): number;
 } {
-  const path = join(mkdtempSync(join(tmpdir(), "styre-outbox-")), "run.db");
+  const path = join(tempFolder("styre-outbox-"), "run.db");
   migrate(path);
   const db = openDb(path);
   const projectId = insertProject(db, { slug: "test-project", targetRepo: "/tmp/repo" });

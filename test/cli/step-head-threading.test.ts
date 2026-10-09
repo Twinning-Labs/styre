@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../../src/db/client.ts";
 import * as door from "../../src/util/process/door.ts";
@@ -13,6 +15,19 @@ import {
 // ENG-485 section 7.5: `styre run` and `--resume` must hand the step journal a way to read the
 // HEAD of the TICKET branch (not the default branch, not whatever the checkout has), so the step in
 // flight records where that branch stood when the step started.
+
+// The worktree root each run makes in the temporary folder goes into one folder of this file's own,
+// removed after the file.
+const savedTmpdir = process.env.TMPDIR;
+const tmpRoot = mkdtempSync(join(tmpdir(), "styre-head-threading-"));
+beforeAll(() => {
+  process.env.TMPDIR = tmpRoot;
+});
+afterAll(() => {
+  if (savedTmpdir === undefined) Reflect.deleteProperty(process.env, "TMPDIR");
+  else process.env.TMPDIR = savedTmpdir;
+  rmSync(tmpRoot, { recursive: true, force: true });
+});
 
 beforeEach(() => door.__resetForTests());
 afterEach(() => {

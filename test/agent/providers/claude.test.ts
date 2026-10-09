@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
@@ -21,10 +21,14 @@ import {
 import { extractSidecar } from "../../../src/dispatch/sidecar.ts";
 import { nowToken } from "../../../src/util/process/proc-table.ts";
 
+import { claimLaunchesAtStops } from "../../helpers/claim-launches.ts";
 import { installVirtualGrace, resetDoorAfterEach } from "../../helpers/graceful-stop.ts";
 import { killOwned, ownPrinted, until } from "../../helpers/own-processes.ts";
 
 resetDoorAfterEach();
+// Every stop a test causes claims what the launch is running first (test/helpers/claim-launches.ts),
+// so a stop that fails to end a fake CLI's child still leaves it to afterEach's cleanup.
+beforeEach(() => claimLaunchesAtStops());
 // The processes a fake CLI leaves behind on purpose, known by the pid it wrote: killed by that
 // identity after each test, never by searching for their command.
 afterEach(() => killOwned());

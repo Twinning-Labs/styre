@@ -279,6 +279,34 @@ export function ownPrinted(
   return claimAll([p.info], listProcesses())[0] ?? null;
 }
 
+/**
+ * Claim a process the test has just spawned itself (`Bun.spawn`), at once, while it is certainly
+ * this test's child: rule 1 decides, in one fresh read. With `group` (a `detached` spawn), its group
+ * is registered first, so what it leaves in that group stays claimable by rule 2 after it exits
+ * (`ownGroupMembers`). Returns null when refused, or when it is already gone.
+ */
+export function ownChild(p: { pid: number }, opts: { group?: boolean } = {}): ProcInfo | null {
+  if (!Number.isInteger(p.pid) || p.pid <= 1 || p.pid === process.pid) return null;
+  const now = probe(p.pid);
+  if (now.kind !== "alive" || now.info.state === "zombie") return null;
+  if (opts.group) registerGroup(now.info);
+  return claimAll([now.info], listProcesses())[0] ?? null;
+}
+
+/**
+ * Claim every live member of every group this test registered (rule 2 decides each, in one read):
+ * what a command left in its group after its leader exited, which no tree walk reaches any more.
+ * Cleanups call it before `killOwned`, and the end of run leak check before it looks. Returns
+ * what was claimed.
+ */
+export function ownGroupMembers(table: ProcInfo[] = listProcesses()): ProcInfo[] {
+  pruneGroups(table);
+  return claimAll(
+    [...groups.keys()].flatMap((g) => groupMembers(g, table)),
+    table,
+  );
+}
+
 /** The pid in a fixture's `tool <pid>` line, or NaN. */
 export function toolPid(text: string): number {
   const m = /tool (\d+)/.exec(text);

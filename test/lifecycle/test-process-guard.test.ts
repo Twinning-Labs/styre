@@ -14,7 +14,12 @@
 //     `__snapshotForTests`, `__releaseForTests`, which bypass its claim rules) anywhere but their
 //     own test file;
 //   - a `ps` listing of many processes (no `-p`) in a file that also signals processes, on any line:
-//     the text filter between the two may be on lines of its own.
+//     the text filter between the two may be on lines of its own;
+//   - `process.kill(…)` anywhere but the cleanup helper itself (BARE_PID_FILES): a test signals a
+//     process it started through the helper (`killOwned`, `signalOwned`, both by recorded pid and
+//     start time) or through its own Bun.spawn handle (`proc.kill()`, which Bun refuses once the
+//     child has exited and been reaped), never by a bare pid or group id that may have been handed
+//     to another process (the operator's structural rule after the 2026-10-07 incident).
 // It is a tripwire for the plain forms a test would honestly be written with, not a parser: a
 // spelling built to dodge it (a joined string, an escape) is not caught. Comments are scanned too:
 // a test file has no reason to name these tools. This file is the one exception, since it must
@@ -48,6 +53,11 @@ const SEAM_FILES = new Set([
   "test/helpers/own-processes.ts",
 ]);
 
+/** A signal by bare pid or group id. */
+const BARE_PID = /\bprocess\.kill\s*\(/;
+/** The only files allowed to call process.kill: the helper that signals recorded identities only. */
+const BARE_PID_FILES = new Set(["test/helpers/own-processes.ts"]);
+
 /** A `ps` that lists many processes: an argv or a command line starting with ps, without `-p`. */
 const PS_LISTING = /\[\s*["'`]ps["'`]|(?:^|[\s;|&(`"'$])ps\s+(?:-[A-Za-z]+|[auxe]+)(?=\s|$|["'`])/;
 const PS_ONE_PID = /["'`]-p["'`]|\s-p\b/;
@@ -76,6 +86,9 @@ function offences(file: string, text: string): string[] {
         : undefined) ??
       (SEAMS.test(line) && !SEAM_FILES.has(file)
         ? "a cleanup helper seam outside its own test file"
+        : undefined) ??
+      (BARE_PID.test(line) && !BARE_PID_FILES.has(file)
+        ? "a signal by bare pid outside the cleanup helper"
         : undefined);
     if (rule) found.push(`${file}:${i + 1}: ${rule}: ${line.trim()}`);
   });
@@ -116,12 +129,17 @@ test.each([
   ["const restore = __snapshotForTests();"],
   ["__releaseForTests(child);"],
   ["import { __registerGroupForTests } from '../helpers/own-processes.ts';"],
+  ['process.kill(pid, "SIGKILL");'],
+  ['process.kill(-h.record.pid, "SIGKILL");'],
+  ["process.kill (Number(readFileSync(pidFile, 'utf8')), 9);"],
+  ['      process.kill(h.record.kind === "group" ? -h.record.pid : h.record.pid, "SIGKILL");'],
 ])("refused: %s", (line) => {
-  expect(offences("t.ts", line)).toHaveLength(1);
+  // At least one rule: a ps listing that feeds process.kill breaks two.
+  expect(offences("t.ts", line).length).toBeGreaterThanOrEqual(1);
 });
 
 test.each([
-  ['process.kill(p.pid, "SIGKILL");'],
+  ['proc.kill("SIGKILL");'],
   ["trap 'kill -TERM -$TOOL 2>/dev/null; exit 0' TERM INT HUP"],
   ['"styre: could not stop sleep 309 (pid 1); stop it with: kill -9 1"'],
   ['const r = door.runBlocking(sh("kill -TERM $$"), { timeoutMs: 10_000 });'],
@@ -132,10 +150,23 @@ test.each([
   ["kill -s TERM 1234"],
   ['kill -0 "$pid"'],
   [
-    'const r = Bun.spawnSync(["ps", "-o", "command=", "-p", String(p.pid)]);\nprocess.kill(p.pid, "SIGKILL");',
+    'const r = Bun.spawnSync(["ps", "-o", "command=", "-p", String(p.pid)]);\nproc.kill("SIGKILL");',
   ],
   ['LC_ALL=C ps -A -o pid=,ppid=,command= > "$1"'],
-  ['test("the ps fallback ignores locale", () => { process.kill(p.pid, 9); });'],
+  ['test("the ps fallback ignores locale", () => { proc.kill(9); });'],
+  ["const origKill = process.kill;"],
+  ["(process as { kill: unknown }).kill = origKill;"],
 ])("allowed: %s", (line) => {
   expect(offences("t.ts", line)).toEqual([]);
+});
+
+test("process.kill is allowed only in the cleanup helper, and each listed exception really uses it", () => {
+  const line = 'process.kill(p.pid, "SIGKILL");';
+  for (const file of BARE_PID_FILES) {
+    expect(offences(file, line)).toEqual([]);
+    expect(readFileSync(join(ROOT, file), "utf8")).toMatch(BARE_PID); // the list cannot rot
+  }
+  expect([...BARE_PID_FILES]).toEqual(["test/helpers/own-processes.ts"]);
+  expect(offences("test/lifecycle/sweep.test.ts", line)).toHaveLength(1);
+  expect(offences("test/helpers/command-lifecycle.ts", line)).toHaveLength(1);
 });

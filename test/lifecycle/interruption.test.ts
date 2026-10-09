@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 // transaction through its own connection, and on --resume recover() matches it, so the interruption
 // is free: the attempt is given back, edits are undone in place, the branch goes back to where the
 // step started when that is safe. Anything unmatched takes the crash path. recover() kills nothing.
-import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -34,8 +34,24 @@ import {
   undoBeforeDiscard,
 } from "../../src/util/process/interruption.ts";
 import { nowUtc } from "../../src/util/time.ts";
-import { git, makeGitProject, makeTicketDb } from "../helpers/lifecycle.ts";
+import { git, makeGitProject, makeTicketDb, removeLifecycleFolders } from "../helpers/lifecycle.ts";
 import { cleanupParkedRun, resumeParkedTicket, runParkedTicket } from "../helpers/run-harness.ts";
+
+// The temporary folders the lifecycle helpers made for this file.
+afterAll(removeLifecycleFolders);
+
+// The worktree root each `styre run --resume` makes in the temporary folder goes into one folder of
+// this file's own, removed after the file.
+const savedTmpdir = process.env.TMPDIR;
+const tmpRoot = mkdtempSync(join(tmpdir(), "styre-interruption-tmp-"));
+beforeAll(() => {
+  process.env.TMPDIR = tmpRoot;
+});
+afterAll(() => {
+  if (savedTmpdir === undefined) Reflect.deleteProperty(process.env, "TMPDIR");
+  else process.env.TMPDIR = savedTmpdir;
+  rmSync(tmpRoot, { recursive: true, force: true });
+});
 
 let state: string;
 const savedState = process.env.XDG_STATE_HOME;

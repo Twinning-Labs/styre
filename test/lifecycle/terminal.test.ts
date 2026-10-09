@@ -21,7 +21,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ProcInfo } from "../../src/util/process/proc-table.ts";
-import { makeTicketDb } from "../helpers/lifecycle.ts";
+import { makeTicketDb, removeLifecycleFolders } from "../helpers/lifecycle.ts";
 import {
   allGone,
   commandOf,
@@ -32,6 +32,9 @@ import {
   until,
 } from "../helpers/own-processes.ts";
 import { CTRL_BACKSLASH, CTRL_C, type Pty, shellStatus, underPty } from "./pty.ts";
+
+// The temporary folders the lifecycle helpers made for this file.
+afterAll(removeLifecycleFolders);
 
 const ROOT = join(import.meta.dir, "../..");
 const FX = join(import.meta.dir, "fixtures");

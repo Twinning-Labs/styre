@@ -78,31 +78,34 @@ for (const forcePs of [false, true]) {
   });
 }
 
-test("the ps fallback ignores ambient locale and timezone", () => {
-  if (process.platform === "linux") return; // Linux reads /proc and never launches ps
-  const sysctl = probe(process.pid);
-  const saved = { lc: process.env.LC_ALL, tz: process.env.TZ };
-  process.env.LC_ALL = "fr_FR.UTF-8";
-  process.env.TZ = "Asia/Kolkata";
-  let viaPs: ReturnType<typeof probe>;
-  try {
-    _forcePsFallbackForTest(true);
-    viaPs = probe(process.pid);
-  } finally {
-    _forcePsFallbackForTest(false);
-    if (saved.lc === undefined) Reflect.deleteProperty(process.env, "LC_ALL");
-    else process.env.LC_ALL = saved.lc;
-    if (saved.tz === undefined) Reflect.deleteProperty(process.env, "TZ");
-    else process.env.TZ = saved.tz;
-  }
-  expect(sysctl.kind).toBe("alive");
-  expect(viaPs.kind).toBe("alive");
-  if (sysctl.kind === "alive" && viaPs.kind === "alive") {
-    expect(Math.floor(tokenValue(viaPs.info.startedAt))).toBe(
-      Math.floor(tokenValue(sysctl.info.startedAt)),
-    );
-  }
-});
+// Linux reads /proc and never launches ps: skipped there, never passed silently.
+test.skipIf(process.platform === "linux")(
+  "the ps fallback ignores ambient locale and timezone",
+  () => {
+    const sysctl = probe(process.pid);
+    const saved = { lc: process.env.LC_ALL, tz: process.env.TZ };
+    process.env.LC_ALL = "fr_FR.UTF-8";
+    process.env.TZ = "Asia/Kolkata";
+    let viaPs: ReturnType<typeof probe>;
+    try {
+      _forcePsFallbackForTest(true);
+      viaPs = probe(process.pid);
+    } finally {
+      _forcePsFallbackForTest(false);
+      if (saved.lc === undefined) Reflect.deleteProperty(process.env, "LC_ALL");
+      else process.env.LC_ALL = saved.lc;
+      if (saved.tz === undefined) Reflect.deleteProperty(process.env, "TZ");
+      else process.env.TZ = saved.tz;
+    }
+    expect(sysctl.kind).toBe("alive");
+    expect(viaPs.kind).toBe("alive");
+    if (sysctl.kind === "alive" && viaPs.kind === "alive") {
+      expect(Math.floor(tokenValue(viaPs.info.startedAt))).toBe(
+        Math.floor(tokenValue(sysctl.info.startedAt)),
+      );
+    }
+  },
+);
 
 test("sameProcess is false when the start time or the pid differs (pid reuse defence)", () => {
   const p = probe(process.pid);

@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -21,6 +22,8 @@ beforeEach(() => {
 afterEach(() => {
   if (saved === undefined) Reflect.deleteProperty(process.env, "XDG_STATE_HOME");
   else process.env.XDG_STATE_HOME = saved;
+  chmodSync(state, 0o700); // a test may have taken the write bit away
+  rmSync(state, { recursive: true, force: true });
 });
 
 const r = (pid = 4242): rec.LaunchRecord => ({

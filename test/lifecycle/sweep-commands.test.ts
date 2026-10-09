@@ -16,13 +16,13 @@ import { setupCommand } from "../../src/cli/setup.ts";
 import * as door from "../../src/util/process/door.ts";
 import { bootId, probe } from "../../src/util/process/proc-table.ts";
 import { processesDir, writeRecord } from "../../src/util/process/records.ts";
+import { killOwned, ownChild } from "../helpers/own-processes.ts";
 
 /** A sleep length no other test uses. */
 const NAP = "4179";
 let state: string;
 let scratch: string;
 const saved = { state: process.env.XDG_STATE_HOME, dnt: process.env.DO_NOT_TRACK };
-const mine: number[] = [];
 /** Every write to stdout and stderr, in order. */
 let log: { stream: "out" | "err"; text: string }[] = [];
 let spies: { mockRestore(): void }[] = [];
@@ -47,13 +47,9 @@ beforeEach(() => {
 });
 afterEach(() => {
   for (const s of spies.splice(0)) s.mockRestore();
-  for (const p of mine.splice(0)) {
-    try {
-      process.kill(p, "SIGKILL");
-    } catch {
-      /* already gone */
-    }
-  }
+  // What a test started was claimed at once (test/helpers/own-processes.ts); what is left is killed
+  // by recorded identity, never by a bare pid.
+  killOwned();
   process.exitCode = 0;
   process.env.XDG_STATE_HOME = saved.state;
   if (saved.dnt === undefined) Reflect.deleteProperty(process.env, "DO_NOT_TRACK");
@@ -81,7 +77,7 @@ async function orphan(ident: string): Promise<number> {
   const o = probe(owner.pid);
   await owner.exited;
   const agent = Bun.spawn(["sleep", NAP], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-  mine.push(agent.pid);
+  ownChild(agent);
   const a = probe(agent.pid);
   if (o.kind !== "alive" || a.kind !== "alive") throw new Error("fixture did not start");
   expect(await until(() => isGone(o.info.pid))).toBe(true);
@@ -212,7 +208,7 @@ test("the real entry point: `styre ls` sweeps, with sweep lines on stderr and no
     stdout: "pipe",
     stderr: "pipe",
   });
-  mine.push(proc.pid);
+  ownChild(proc);
   const [out, err, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),

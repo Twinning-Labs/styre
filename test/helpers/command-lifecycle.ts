@@ -1,12 +1,20 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as door from "../../src/util/process/door.ts";
-import { listProcesses } from "../../src/util/process/proc-table.ts";
+import { type ProcInfo, listProcesses, nowToken } from "../../src/util/process/proc-table.ts";
 import { listRecords } from "../../src/util/process/records.ts";
 import type { StopDeps } from "../../src/util/process/stop.ts";
 import type { CommandResult } from "../../src/util/run-command.ts";
+import {
+  isAlive,
+  killOwned,
+  ownGroupMembers,
+  ownLaunch,
+  ownPrinted,
+  registeredGroups,
+} from "./own-processes.ts";
 
 type Run = (command: string, opts: { cwd: string; timeoutMs: number }) => Promise<CommandResult>;
 
@@ -30,7 +38,7 @@ async function waitFor(pred: () => boolean, ms = 3_000): Promise<boolean> {
  */
 export function commandLifecycleTests(
   name: string,
-  run: Run,
+  runRaw: Run,
   spawnFailure: "throws" | "result",
 ): void {
   describe(`${name} process handling`, () => {
@@ -38,12 +46,31 @@ export function commandLifecycleTests(
     let state: string;
     const saved = process.env.XDG_STATE_HOME;
     const pidFile = (): string => join(dir, "pid");
-    const readPid = (): number => Number(readFileSync(pidFile(), "utf8").trim());
-    const spawned = new Set<number>();
-    const remember = (): number => {
-      const pid = readPid();
-      spawned.add(pid);
-      return pid;
+    const remember = (): number => Number(readFileSync(pidFile(), "utf8").trim());
+    let gates = 0;
+    /**
+     * Every command runs behind a gate: the shell first waits for a go file, so the test registers
+     * the command's group (test/helpers/own-processes.ts) while the shell is surely alive and this
+     * test's own child. What the command leaves in its group then stays claimable after the shell
+     * exits, and afterEach kills it by recorded identity: no pid read from a file is ever killed.
+     * The wait uses shell builtins only (a few ms of spinning), and the shell then execs the
+     * command in its own place (same pid, so `$$` and the record agree): no fork can race a stop
+     * that lands at once, as a `sleep` in the wait loop could (macOS: a child forked while the
+     * group is signalled can miss the signal, and the stop then waits out its grace period).
+     */
+    const quote = (text: string): string => `'${text.replaceAll("'", `'\\''`)}'`;
+    const run: Run = (command, opts) => {
+      const go = join(dir, `go-${++gates}`);
+      const p = runRaw(
+        `while [ ! -e ${quote(go)} ]; do :; done; exec sh -c ${quote(command)}`,
+        opts,
+      );
+      const live = door.liveLaunches();
+      for (const h of live) ownLaunch(h);
+      const registered = live.every((h) => registeredGroups().includes(h.record.pid));
+      writeFileSync(go, "");
+      if (!registered) throw new Error("the command's group could not be registered for cleanup");
+      return p;
     };
 
     beforeEach(() => {
@@ -52,23 +79,13 @@ export function commandLifecycleTests(
       process.env.XDG_STATE_HOME = state;
       door.__resetForTests();
     });
-    afterEach(async () => {
+    afterEach(() => {
       door.__setStopDepsForTests(undefined);
-      for (const h of door.liveLaunches()) {
-        try {
-          await h.stop("forced");
-        } catch {
-          /* best effort */
-        }
-      }
-      for (const pid of spawned) {
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch {
-          /* gone */
-        }
-      }
-      spawned.clear();
+      // Even on failure: the launches' trees, the groups the commands led, and the daemon the perl
+      // test claimed are killed by recorded identity, never a bare pid or group.
+      for (const h of door.liveLaunches()) ownLaunch(h);
+      ownGroupMembers();
+      killOwned();
       door.__resetForTests();
       rmSync(dir, { recursive: true, force: true });
       rmSync(state, { recursive: true, force: true });
@@ -147,9 +164,10 @@ export function commandLifecycleTests(
       expect(rec?.kind).toBe("group");
       expect(rec?.worktree).toBe(dir);
       expect(rec?.ident).toBeNull();
+      // Both lines: the shell's pid, then its group id from ps.
       await waitFor(() => {
         try {
-          return readFileSync(pidFile(), "utf8").includes("\n");
+          return readFileSync(pidFile(), "utf8").trim().split("\n").length === 2;
         } catch {
           return false;
         }
@@ -161,23 +179,40 @@ export function commandLifecycleTests(
       expect(listRecords()).toEqual([]); // released once nothing survives
     });
 
-    test("a daemonized holder of the pipe cannot hang the caller: output is read for at most 5 s", async () => {
-      if (!Bun.which("perl")) return;
-      // perl leaves the group (setsid), so no stop reaches it; it keeps the pipe open for 12 s.
-      const t0 = performance.now();
-      const r = await run(
-        // The shell waits until perl has left the group, or the stop would still reach it.
-        `perl -MPOSIX -e 'POSIX::setsid(); open(F, ">ready"); close(F); sleep 12' & echo $! > "${pidFile()}"; until [ -e ready ]; do sleep 0.05; done; echo hi`,
-        { cwd: dir, timeoutMs: 3000 },
-      );
-      const elapsed = performance.now() - t0;
-      remember();
-      expect(elapsed).toBeLessThan(8_000);
-      expect(elapsed).toBeGreaterThan(4_000); // it did wait for the limit
-      expect(r.exitCode).toBe(0);
-      expect(r.stdout).toContain("hi");
-      expect(r.stderr).toContain("output read limit reached");
-    }, 20_000);
+    test.skipIf(!Bun.which("perl"))(
+      "a daemonized holder of the pipe cannot hang the caller: output is read for at most 5 s, and the daemon survives (R2)",
+      async () => {
+        // perl leaves the group (setsid), so no stop reaches it; it keeps the pipe open for 12 s.
+        const since = nowToken();
+        const claimed = join(dir, "claimed");
+        const t0 = performance.now();
+        const p = run(
+          // The shell waits until perl has left the group (or the stop would still reach it), then
+          // until the test has claimed perl: while the shell lives, perl is this test's descendant.
+          `perl -MPOSIX -e 'POSIX::setsid(); open(F, ">ready"); close(F); sleep 12' & echo $! > "${pidFile()}"; until [ -e ready ]; do sleep 0.05; done; until [ -e '${claimed}' ]; do sleep 0.01; done; echo hi`,
+          { cwd: dir, timeoutMs: 3000 },
+        );
+        const held: { daemon: ProcInfo | null } = { daemon: null };
+        await waitFor(() => {
+          if (!existsSync(join(dir, "ready"))) return false;
+          held.daemon = ownPrinted(remember(), since);
+          return held.daemon !== null;
+        });
+        writeFileSync(claimed, "");
+        const r = await p;
+        const elapsed = performance.now() - t0;
+        const daemon = held.daemon;
+        if (daemon === null) throw new Error("the daemon was never claimed");
+        expect(elapsed).toBeLessThan(8_000);
+        expect(elapsed).toBeGreaterThan(4_000); // it did wait for the limit
+        expect(r.exitCode).toBe(0);
+        expect(r.stdout).toContain("hi");
+        expect(r.stderr).toContain("output read limit reached");
+        // Spec 11.3: a process that daemonized itself is left alone by the command's stop.
+        expect(isAlive(daemon)).toBe(true);
+      },
+      20_000,
+    );
 
     const deaf = (): StopDeps => {
       let t = 0;

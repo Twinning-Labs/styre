@@ -2,7 +2,7 @@
 // `--resume`, so it appears only when the interruption was recorded. When recording failed, the
 // handler says what resume will do instead and how to start over. No process is started here.
 import { Database } from "bun:sqlite";
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +12,10 @@ import {
   __resetSignalsForTests,
   handleStopSignal,
 } from "../../src/util/process/signals.ts";
-import { makeTicketDb } from "../helpers/lifecycle.ts";
+import { makeTicketDb, removeLifecycleFolders } from "../helpers/lifecycle.ts";
+
+// The temporary folders the lifecycle helpers made for this file.
+afterAll(removeLifecycleFolders);
 
 const dirs: string[] = [];
 afterEach(() => {
