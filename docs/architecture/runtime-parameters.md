@@ -452,7 +452,7 @@ styre: stopping the agent failed: <why>
 styre: could not stop the agent's process tree at startup (<why>), so only the agent itself was killed (pid <pid>); anything it started may still be running
 styre: could not remove a temporary worktree: <why>
 styre: internal error: a launch was still running at exit; stopped "<command>" (pid <pid>).
-styre: cleaning up the temp folder this run's commands used: <path>
+styre: cleaning up the temp folder of the commands Styre ran: <path>
 styre: kept the temp folder <path>: a command Styre started is still running; the next Styre command removes it once that command has stopped
 styre: could not remove the temp folder <path>: <why>; remove it with: chmod -R u+w <path> && rm -rf <path>
 styre: left the temp folder <path> for the next Styre command to remove: no time was left before the stop deadline

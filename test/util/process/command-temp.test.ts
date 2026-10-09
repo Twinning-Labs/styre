@@ -168,7 +168,8 @@ test("the removal keeps the folder while a command Styre started is still runnin
     expect(door.liveLaunches().length).toBe(1);
     const dir = commandTempDir();
     const { out, say } = collect();
-    removeCommandTempDir(say);
+    // Announcing (as the exit check does) says nothing about a removal that does not happen.
+    removeCommandTempDir(say, { announce: true });
     expect(existsSync(dir)).toBe(true);
     expect(out).toEqual([
       `styre: kept the temp folder ${dir}: a command Styre started is still running; the next Styre command removes it once that command has stopped\n`,
@@ -621,7 +622,7 @@ test("the exit check says one line before it removes the run's temp folder, so a
   }
   expect(said).toEqual([
     {
-      line: `styre: cleaning up the temp folder this run's commands used: ${dir}\n`,
+      line: `styre: cleaning up the temp folder of the commands Styre ran: ${dir}\n`,
       folderThere: true,
     },
   ]);

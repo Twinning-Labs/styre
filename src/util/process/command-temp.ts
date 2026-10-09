@@ -129,7 +129,7 @@ export function removeCommandTempDir(
   try {
     // A folder a tool cache filled can take seconds to remove: said first, so the pause is not silent.
     if (opts.announce && opts.budgetMs !== 0) {
-      say(`styre: cleaning up the temp folder this run's commands used: ${shown}\n`);
+      say(`styre: cleaning up the temp folder of the commands Styre ran: ${shown}\n`);
     }
     const deadline = opts.budgetMs === undefined ? undefined : now() + opts.budgetMs;
     if (opts.budgetMs === 0 || !removeTree(dir, { deadline, now })) {
