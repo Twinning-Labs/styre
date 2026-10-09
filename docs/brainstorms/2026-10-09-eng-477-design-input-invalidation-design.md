@@ -236,6 +236,15 @@ therefore see a different profile on resume than on the fresh run: a defect toda
 - A scheme version, starting at 1. A step recorded under another scheme is treated as unfingerprinted
   and adopted (§7.6), never compared byte for byte.
 
+(Operator ruling, 2026-10-09) This replaces the last sentence above. A step whose manifest was recorded
+under an older scheme counts as changed, so it reruns the next time the run is in design; a run past
+design is unaffected until it returns to design. The adopt pass (§7.6) adopts only steps with no manifest
+at all (finished under a Styre older than this change) and never adopts an older scheme's manifest again.
+The scheme covers everything a recorded digest depends on: the encoding, how the profile and config are
+parsed (defaults included), what each table step declares, and how each output is digested. A test pins
+the digests of a fixed set of inputs (snapshot rows, units, track, plan) per scheme, so any such change
+fails until the scheme number is bumped deliberately.
+
 ### 5.2 What a step records
 
 When a table step succeeds, in any stage (provision also reruns during implement, and a missing
@@ -353,10 +362,12 @@ checks steps, E9.)
   until the review reruns, so "stage `design`, `design:review` succeeded, blocking plan findings" no
   longer means the run stopped at the gate: a budget pause in the regenerated `design:dispatch` looks
   the same, and `retry-plan` would apply the verdict again on every resume. `planReviewResume` returns
-  `retry-plan` only when the latest `escalated` event since the last `resumed` event is the gate's (signature
-  `review:unresolved-plan`) or the plan review verdict's (its dispatch is the latest `design:review`
-  dispatch), and no design loopback or `invalidated` note came after it. v8 wrote the same events, so
-  an upgraded checkpoint answers the same.
+  `retry-plan` only when some escalation since the last `resumed` event is plan review's, and no design
+  loopback event or `invalidated` note came after it. Plan review's escalations are the gate's
+  (signature `review:unresolved-plan`) and the verdict's own (its `review:` findings signature, never
+  its dispatch id alone). Unrelated escalations (the projector, the invalidate loop guard, the step
+  replay guard, the resume's toolchain pause) are ignored, and that pause is not added to a ticket the
+  resume already left waiting. v8 wrote the same events, so an upgraded checkpoint answers the same.
 - **The checks loop** (`applyChecksVerdict`) is unchanged (E9).
 
 ### 6.5 Feedback belongs to a generation
@@ -395,6 +406,10 @@ Findings are never fingerprinted, so "findings to no findings" cannot loop.
 **Guard, fail fast.** If the same step is invalidated with cause `inputs` more than three times since
 the last `resumed` event, the resolver escalates with signature `invalidate-loop:<step>`. This catches
 a defect such as an unstable digest.
+
+(Ruling, 2026-10-09) The count also starts again at a `reused-database` note, which a `styre run` on a
+reused `--db` writes when its ticket already exists: that path rewrites the inputs as a resume does (§4)
+but appends no `resumed` event.
 
 ### 6.7 The general rule for feedback loops (for every stage)
 
@@ -641,6 +656,12 @@ Each key test is shown to fail when the code it guards is broken on purpose.
   profile or config edit, keeps the acceptance tests written before it, as today. ENG-475 owns it.
 - **The `signal` rebuild for v0.8–v0.9 checkpoints** is the first real rebuild. The backup, the
   per-migration transaction, the foreign key check and the structural proof bound the damage.
+- **Profile fields with defaults change paused runs' digests.** The snapshot holds the parsed profile, so
+  a release that adds a field with a default to a component, `runtimeContext` or `promptVars` (or
+  changes a config default or how a field is parsed) changes the digests of every paused run, and the
+  steps that read them rerun at the next design visit although nobody edited anything. Mitigated by the
+  test that pins the digests of a fixed set of inputs per scheme, which fails until the release bumps
+  the scheme deliberately (§5.1 ruling), so the rerun is a decision, not an accident.
 
 ## 13. Review record
 
