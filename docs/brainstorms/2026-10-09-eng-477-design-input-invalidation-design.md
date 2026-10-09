@@ -348,6 +348,15 @@ checks steps, E9.)
 - **Both** keep their later-stage resets (`review`, verify, merge) until ENG-475. Everything else in
   design follows from fingerprints: a redesign that changes the units now also reruns `design:size` and
   the track. The checks steps keep today's behaviour after a redesign (E9).
+- **`retry-plan` only at the plan review gate.** (Ruling, 2026-10-09: required by the redesign
+  change.) A plan review redesign now leaves `design:review` succeeded, with its blocking findings,
+  until the review reruns, so "stage `design`, `design:review` succeeded, blocking plan findings" no
+  longer means the run stopped at the gate: a budget pause in the regenerated `design:dispatch` looks
+  the same, and `retry-plan` would apply the verdict again on every resume. `planReviewResume` returns
+  `retry-plan` only when the latest `escalated` event since the last `resumed` event is the gate's (signature
+  `review:unresolved-plan`) or the plan review verdict's (its dispatch is the latest `design:review`
+  dispatch), and no design loopback or `invalidated` note came after it. v8 wrote the same events, so
+  an upgraded checkpoint answers the same.
 - **The checks loop** (`applyChecksVerdict`) is unchanged (E9).
 
 ### 6.5 Feedback belongs to a generation
@@ -507,6 +516,14 @@ shapes like the bridge.
   `design:size` is pending (a crash between the two writes); it reruns, which spends one agent call if
   grading is on.
 - A fresh run never needs the pass. A reused `--db` gets it if manifests are missing.
+
+(Operator ruling, 2026-10-09) The pass adopts in table order and stops at the first applicable step
+that is not succeeded, exactly as the walk does. A succeeded step after that point cannot be adopted
+against inputs that do not exist yet: it is recorded with an empty manifest `{}` and the current
+scheme, so the walk invalidates it with cause `inputs` through the ordinary comparison once its
+upstream reruns, and the `adopted` note lists it as "will rerun". This covers a v8 run stopped at the
+plan review gate and resumed (with HEAD moved, or unchanged) and a v8 run paused during a redesign
+with `complexityGrading` on; recorded v8 fixtures of each must resume after the upgrade and finish.
 
 ### 7.7 Who migrates, and who only reads
 
