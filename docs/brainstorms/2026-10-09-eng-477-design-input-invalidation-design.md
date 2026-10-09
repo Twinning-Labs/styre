@@ -1,7 +1,7 @@
 # ENG-477: design-stage steps rerun when their recorded inputs change, with a real database upgrade path
 
 **Date:** 2026-10-09
-**Status:** rev 2, for independent review
+**Status:** rev 3, for independent review
 **Ticket:** ENG-477 (deliverable 2 of the grounded-requirements split, parent ENG-483)
 **Umbrella design:** `docs/brainstorms/2026-09-24-grounded-requirements-design.md` §9, §14, §15 (branch
 `feat/grounded-requirements`), with the rev 2 review findings C3, M3 and M4
@@ -29,6 +29,17 @@
   - the schema proof compares structure, not text; the backup uses `VACUUM INTO`; one fixture per
     real released shape;
   - invalidations are a `note` event, so `event_log` is not rebuilt.
+- **rev 3**: a second review found 2 critical and 6 major problems (§13). Two operator decisions
+  (E7, E8) replace rev 2's test file restore and its `ctx.inputs` refactor:
+  - no files are restored on the branch; a re-authored check may modify its canonical file, judged
+    against the commit its step generation started from (§6.3);
+  - handler reads are pinned by tests, a recording proxy and named accessors (§3);
+  - reconcile units are deleted with the extract units, and `origin` is backfilled;
+  - a step reset by feedback keeps its manifest, so an edit made meanwhile is still caught;
+  - every loopback names the step that consumes its feedback and that step's generation;
+  - the toolchain narrowing on resume never exits 69;
+  - a crash rerun of `checks:dispatch` is judged against its generation's starting commit;
+  - proof rules for column order and `AUTOINCREMENT`; a timestamped backup.
 
 ---
 
@@ -76,6 +87,8 @@ paused runs are upgraded and continue under the new rules) stand.
 | E4 | The scope is the whole design stage: `provision`, `design:dispatch`, `design:extract`, `design:size`, `design:review`, `checks:dispatch`, `checks:classify`. |
 | E5 | Approach A: each step records a fingerprint of its inputs, and a digest of its output where that output is not in the database. Dependants are judged afresh after an upstream rerun (early cutoff, as in Bazel and Salsa). |
 | E6 | An edit made while a run is paused after design (implement, verify, review, merge) is recorded on resume and takes effect the next time the run is in design. The run carries on from where it paused. (2026-10-09) |
+| E7 | No test files are restored on the branch when checks rerun. Check identity changes so a re-authored check may modify its canonical file (`<ident>_ac<N>_test.*`), not only add it. Stale helper files from an earlier generation can remain; the PR lists that as a limit. (2026-10-09) |
+| E8 | The declared table is enforced by tests, not by restructuring handlers: a recording proxy over the profile, config and ticket, named accessor functions for upstream rows, and a source guard limiting which step may call which accessor. (2026-10-09) |
 
 ## 3. The declared table (`src/daemon/design-graph.ts`)
 
@@ -86,21 +99,23 @@ this table**, so a step the resolver chooses is by construction a step the table
 | Step | Applies when | Snapshot inputs | Upstream outputs it reads | Feedback (not fingerprinted) | Produces |
 |---|---|---|---|---|---|
 | `provision` | always | profile components (as narrowed, §4.1); the unusable and non-primary component lists | — | — | nothing the table tracks (§3.2) |
-| `design:dispatch` | always | ticket title and description; profile slug, prompt variables, runtime variables, detected stacks | — | design loopback findings | the plan |
+| `design:dispatch` | always | ticket title and description; profile slug, prompt variables, runtime variables, detected stacks, and components (read by `environmentGate`) | — | design loopback findings | the plan |
 | `design:extract` | always | ticket ident and title; profile slug, prompt and runtime variables, detected stacks, components | plan | — | work units (origin `extract`); `ticket.needs_docs` |
 | `design:size` | always | config `complexityGrading`; when grading is on: ticket title, profile slug and prompt variables | work units; when grading is on: plan | — | `ticket.track` |
-| `design:review` | `ticket.track = 'full'` | ticket title and description; profile fields its prompt reads | plan; work units | — | plan findings (rows of this step's latest dispatch) |
-| gate | after `design:review` | — | plan findings | — | escalates `review:unresolved-plan` if blocking findings remain (today's resolver rule, `resolver.ts:120-127`) |
-| `checks:dispatch` | always | ticket description (the checklist); profile components | the check owners: the sorted set of components owning behavioural units' files, and whether any behavioural unit exists (`handlers.ts:731-744`) | checks loopback ACs and findings | acceptance criteria (first run only, §3.2); acceptance checks; capability and red-first signals; test files on the branch |
+| `design:review` | `ticket.track = 'full'` (ENG-478's D11 widens this) | ticket title and description; profile fields its prompt reads | plan; work units | — | plan findings (rows of this step's latest dispatch), read directly by the gate |
+| gate | when `design:review` applies | — | plan findings | — | escalates `review:unresolved-plan` if blocking findings remain (today's resolver rule, `resolver.ts:120-127`) |
+| `checks:dispatch` | always | ticket ident, title and description (the checklist); profile slug, prompt variables and components | the check owners: the sorted set of components owning behavioural units' files, and whether any behavioural unit exists (`handlers.ts:731-744`) | checks loopback ACs and findings | acceptance criteria (first run only, §3.2); acceptance checks; capability and red-first signals; test files on the branch |
 | `checks:classify` | always | ticket title and description; profile slug and prompt variables; acceptance criterion text | acceptance checks; their red-first signals | — | the active checks' classifications |
 
 - **Exact fields come from the code.** The plan pins every field by reading each handler and its
   prompt variables function in `prompt-vars.ts`.
-- **Enforced by construction.** Each handler receives `ctx.inputs`, a projection built from the table:
-  the snapshot fields and the upstream outputs it declares. A test fails if a handler reads the
-  profile, the config or another step's rows other than through `ctx.inputs`. Agents still read files
-  with their own tools; that cannot be declared. The table claims only what Styre hands over, plus the
-  plan, whose content Styre hashes.
+- **Enforced by tests (E8).**
+  - In tests, the profile, config and ticket handed to each handler are wrapped in a recording proxy;
+    a test runs every design step and fails if it reads a field the table does not declare for it.
+  - Upstream rows are read through named accessor functions (`readWorkUnitsForDesign`,
+    `readActiveChecks`, and so on); a source guard limits which step's handler may call which.
+  - Agents still read files with their own tools; that cannot be declared. The table claims only what
+    Styre hands over, plus the plan, whose content Styre hashes.
 
 ### 3.1 Rules, checked by a unit test and asserted when the table is first used
 
@@ -129,7 +144,7 @@ A failed assertion exits 70 with the rule and the steps named.
   moves the derivation to run start (umbrella §4.1).
 - **Reconcile units.** The integration failure path adds a unit during implement
   (`failure-policy.ts:205-216`). A new `work_unit.origin` column (`extract` or `reconcile`) keeps it
-  out of extract's output digest.
+  out of extract's output digest. The v8 → v9 migration backfills it from `kind = 'reconcile'`.
 
 ## 4. The snapshot (`ticket_input`)
 
@@ -145,7 +160,8 @@ A new table holds the inputs that are not already rows.
 - **At run start**, after the toolchain and role narrowing (§4.1), Styre writes every declared
   snapshot input, the starting commit (§4.2), and the ticket text.
 - **On a reused `--db`** (run.ts:369, :428-440), rows that already exist for the ticket text and the
-  starting commit are never rewritten.
+  starting commit are never rewritten; the profile and config rows are rewritten as on a resume, with
+  the same `inputs-changed` note.
 - **On each resume**, after `recover()` and the provision reset and before the first resolver pass,
   Styre rewrites the profile and config rows from what the handlers will receive now. The ticket text
   and the starting commit are never rewritten (E2).
@@ -158,8 +174,14 @@ A new table holds the inputs that are not already rows.
 A fresh run applies `applyToolchainGate` and drops components whose toolchain is missing
 (`run.ts:338-339`); the resume path returns before that line (`run.ts:298-312`). The handlers
 therefore see a different profile on resume than on the fresh run: a defect today, and a false
-"inputs changed" on every resume once the profile is fingerprinted. Resume applies the same narrowing
-as a fresh run, and the snapshot records the profile exactly as the handlers receive it.
+"inputs changed" on every resume once the profile is fingerprinted.
+
+- Resume applies the same narrowing, after the `--inspect` return, but never its refusal: a missing
+  toolchain only drops the component, it never exits 69. `runtime-parameters.md:450` ("never on
+  `--resume` or `--inspect`") stays true.
+- The snapshot records the profile exactly as the handlers receive it.
+- Resuming on another host with different toolchains narrows differently. That is a real input
+  change, so the affected steps rerun (E1), and the note names the components.
 
 ### 4.2 The starting commit
 
@@ -167,8 +189,7 @@ as a fresh run, and the snapshot records the profile exactly as the handlers rec
 - **Worktree mode:** the commit the ticket branch is created from. It is read right after the branch
   is first created, and recorded once.
 - It is never rewritten: not on resume, not after `--accept-head` (umbrella §4.1).
-- It is not a fingerprinted input of any step in this ticket. It is used to restore files (§6.3), and
-  it is the input ENG-478 needs. The umbrella's design-rules version is not needed: under the revised
+- It is not a fingerprinted input of any step in this ticket. It is the input ENG-478 needs. The umbrella's design-rules version is not needed: under the revised
   D9, an old run is adopted (§7.6) rather than finished under old rules.
 - ENG-488 (`worktree add -B` resetting the branch on resume) is a separate defect. This design
   depends on the ticket branch surviving a resume; the PR names ENG-488 as a known limit for worktree
@@ -206,10 +227,9 @@ Anything slow (a `git` call) is computed before the transaction and passed in.
     `test_plan`, `files_to_touch`, `verify_check_types`, `depends_on`; plus `ticket.needs_docs`.
   - Check owners: derived from the same rows (§3).
   - Track: `ticket.track`.
-  - Plan findings: the rows of `design:review`'s latest dispatch, by `category`, `severity`, `location`,
-    `rationale`, unit `seq`.
-  - Acceptance checks: the active rows' `ac_id`, `selector`, `test_path`, `red_first_result`, with
-    their red-first signals by content.
+  - Acceptance checks: the active rows' `ac_id`, `selector`, `test_path`, `red_first_result`, and
+    from each check's red-first signal only its check id, outcome and exit class (never its
+    environment observation).
 - **The plan.** When `design:dispatch` succeeds, the runner lists `docs/plans/*.md` at the branch head
   through git, keeps the files whose frontmatter `linear:` equals the ticket ident
   (`plan-frontmatter.ts:8-28`), and hashes path and content, sorted by path. A renamed or extra plan
@@ -219,7 +239,10 @@ Anything slow (a `git` call) is computed before the transaction and passed in.
 
 Before choosing the next design-stage step, the resolver walks the table in order:
 1. Skip a step whose "applies when" is false.
-2. A step that is not succeeded is the next step to run. The walk stops there.
+2. A step that is not succeeded is the next step to run, and the walk stops there. One exception: a
+   step reset by feedback (§6.5) still holds its last manifest. The walk compares it first, and on a
+   mismatch invalidates the step with cause `inputs`, so an edit made while it waited is not absorbed
+   by a scoped rerun.
 3. A succeeded step's manifest is recomputed and compared with the recorded one.
    - A match: the step is done; continue.
    - A mismatch: return `{ kind: "invalidate", stepKeys: [step], reason: { cause: "inputs",
@@ -251,8 +274,10 @@ A rerun caused by an invalidate is a fresh round, so the attempt limit keeps its
 has an idempotency key today (`advance.ts:195-226`); dispatch ids are monotonic, so a rerun's effects
 cannot collide with the previous generation's.
 
-`resetProvision` (`provision.ts:263-284`), used on resume and on a manifest change, goes through the
-same function with cause `worktree-recreated`, so it too leaves history and bumps the generation.
+`resetProvision` (`provision.ts:263-284`), used on resume, goes through the same function with cause
+`worktree-recreated`, so it too leaves history and bumps the generation. `resetProvisionIfManifestTouched`
+runs inside `implement:dispatch` (`handlers.ts:1333`); it calls the same function from there, so
+`advance.ts` is not its only caller.
 
 ### 6.1 Clearing rules
 
@@ -260,7 +285,7 @@ same function with cause `worktree-recreated`, so it too leaves history and bump
 |---|---|
 | `provision` | nothing in the database; it reruns |
 | `design:dispatch` | nothing; the rerun revises the plan file in place, as a redesign does today |
-| `design:extract` | work units with origin `extract` are deleted, as `redesignLoopback` does today, after detaching code findings **and plan findings** from them (today only code findings are detached, `review-verdict.ts:184-186`, so unit-tied plan findings are cascade-deleted); `ticket.needs_docs` set to 0 |
+| `design:extract` | all work units are deleted, reconcile units included, as `redesignLoopback` does today (a reconcile unit left behind would collide on `UNIQUE (ticket_id, seq)` or depend on units that no longer exist); code findings **and plan findings** are detached first (today only code findings are, `review-verdict.ts:184-186`, so unit-tied plan findings are cascade-deleted); `ticket.needs_docs` set to 0 |
 | `design:size` | `ticket.track` set to NULL (a new setter) |
 | `design:review` | nothing; `requiredPlanFindings` already reads only the latest `design:review` dispatch (`review-round.ts:35-40`) |
 | `checks:dispatch` | active acceptance checks superseded (`superseded_at`); never deleted |
@@ -279,30 +304,41 @@ inside the success transaction. Today extract inserts units one by one before `m
 (`handlers.ts:570-585`), so a crash between the two leaves partial units, and the rerun hits
 `UNIQUE (ticket_id, seq)`.
 
-### 6.3 Files on the branch
+- In `onSucceed`, a step's own rows are written before any verdict reads them: `design:review`'s
+  findings before `applyReviewVerdict`, `checks:classify`'s classifications before
+  `applyChecksVerdict`.
+- `checks:dispatch` gains an `onSucceed` for its `ac_check` persist. Its git commit and its
+  append-only capability signals stay in `execute`.
 
-When `checks:dispatch` reruns after its checks were superseded by an invalidate, it first restores the
-files the superseded generation changed:
-- **Which files.** The full diff of that generation's `checks:dispatch` commits, from its `dispatch`
-  rows (parent commit to `branch_head_sha`): new test files, helpers declared in `new_files`, and edits
-  to tracked files such as `conftest.py`.
-- **To what.** Each file's content at the starting commit, or removed if it did not exist then.
-- **Why it is needed.** A re-author writes to the same canonical path, and check identity uses added
-  files only (`worktree.ts:301-305`, `check-path.ts:52-62`). Without the restore, every re-authored
-  check would be rejected.
-- **How.** One runner commit through `commitWorktree`, so in-place mode's `noteHead` and the ENG-485
-  interrupt and undo machinery see it. It is idempotent, so a crash between the invalidate transaction
-  and the commit means the next attempt finishes it.
-- **Scope.** Only generations superseded by an invalidate. The checks loop's scoped reauthor
-  (`supersedeByAc`) and the arbiter's re-author keep today's behaviour.
+### 6.3 Files on the branch (E7)
+
+No files are restored. Instead, check identity changes.
+
+- **Today** identity accepts only files the check commit *added* (`addedFilesAt`, `--diff-filter=A`,
+  `worktree.ts:301-305`; `check-path.ts:52-62`). A re-author writes to the same canonical path
+  (`<ident>_ac<N>_test.*`), which is a modification, so it is rejected. That appears to break today's
+  checks loop re-author too. The plan starts with a failing test that confirms or refutes it.
+- **New rule.** A check's test file is accepted when it is the canonical path for its AC, its content
+  contains the declared test name, and it differs between the step generation's starting commit and
+  the dispatch's commit (added or modified).
+- **The generation's starting commit** is recorded on `workflow_step` (`generation_start_head`) the first
+  time a generation starts running, and never moves within the generation. A crash rerun therefore
+  still sees the crashed attempt's files as changed, and the agent need not rewrite identical content.
+  Today the rerun's `preHead` is the crashed commit (`handlers.ts:700`), so every AC would be uncovered.
+- **The superseded generation's test file** at the canonical path is overwritten by the re-author.
+- **Limit:** a helper file or a tracked-file edit (for example `conftest.py`) made by an earlier
+  generation remains on the branch. The PR and `SECURITY.md` say so.
 
 ### 6.4 Loopbacks
 
 - **A plan-review redesign** (`design:review` blocking) keeps its event, which carries the feedback,
   and applies `invalidate([design:dispatch])` with cause `feedback`. The plan is an input of
   `design:review`, so a revised plan is always reviewed again.
-- **A code-review redesign** (`onPlanDefect = redesign`) and `review-resume`'s retry-plan apply
-  `invalidate([design:dispatch, design:extract])`. The units are always re-created and re-implemented,
+- **A code-review redesign** (`onPlanDefect = redesign`), and `review-resume`'s retry-plan when HEAD
+  moved (it calls `redesignLoopback` directly), apply `invalidate([design:dispatch, design:extract])`.
+  Retry-plan without a moved HEAD calls `applyReviewVerdict('design:review')`, the plan-review path,
+  and invalidates `design:dispatch` only (`review-resume.ts:139-149`). `redesignLoopback` takes the set
+  as a parameter. The units are always re-created and re-implemented,
   with the code findings detached to the first unit, exactly as today. Without that, an unchanged plan
   would leave the units `verified` and the code findings would never reach an implementer.
 - **Both** keep their later-stage resets (`review`, verify, merge) until ENG-475. Everything else in
@@ -317,9 +353,22 @@ Feedback lookups today take the latest loopback of the whole run and never expir
 `latestChecksReauthorAcs` (`checks-verdict.ts:60-68`), `checksFeedback` (`checks-feedback.ts:12-21`)
 and `designFeedback` (`design-feedback.ts:18-30`). After an invalidate caused by inputs,
 `checks:dispatch` would rerun scoped to ACs flagged in some earlier round and leave every other AC with
-no active check. A loopback event therefore records the generation of the step it targets, and each
-lookup returns only loopbacks for the step's current generation. An invalidate caused by inputs starts
-a new generation with no feedback; one caused by feedback carries its loopback.
+no active check.
+
+- **Each loopback event records its consumer**: the step key that reads its feedback, and that step's
+  generation. `routeTo` is not that step (it is `checks:classify` for the checks loop and `review` for
+  a redesign), so the consumer is recorded separately.
+  - A redesign applies its invalidate first, then appends its event with
+    `{ consumer: "design:dispatch", generation: <after the bump> }`.
+  - The checks loop resets without an invalidate, so its event records
+    `{ consumer: "checks:dispatch", generation: <current> }`.
+  - Loopbacks whose consumers are outside the design stage (the arbiter's re-author, the implement
+    loops) record their consumer too, but their lookups are unchanged until ENG-475.
+- **Each design-stage lookup** returns only events for its step key and current generation.
+- **A step reset by feedback keeps its manifest** (§5.4), so an input edit made meanwhile is caught by
+  the walk instead of being absorbed by a scoped rerun.
+- An invalidate caused by inputs starts a new generation with no feedback; one caused by feedback
+  carries its own loopback.
 
 ### 6.6 Livelock and the guard
 
@@ -351,9 +400,11 @@ a defect such as an unstable digest.
 | older, known | run each pending migration in order |
 
 How migrations run:
-- **Backup.** Before the first migration, `VACUUM INTO '<name>.v<old>.bak'`, then print the path. A
-  file copy is not used: with a reader holding a snapshot, a WAL checkpoint returns busy and the copy
-  misses rows (probe, review §14 M9). If the backup fails, the upgrade does not start.
+- **Backup.** Before the first migration, `VACUUM INTO '<name>.v<old>.<utc-timestamp>.bak'`, then print
+  the path. A file copy is not used: with a reader holding a snapshot, a WAL checkpoint returns busy and
+  the copy misses rows (probe, review M9). The timestamp keeps a retried upgrade from failing on an
+  earlier backup (`VACUUM INTO` refuses an existing file). If the backup fails, the upgrade does not
+  start.
 - **Foreign keys** are turned off before the first `BEGIN` (inside a transaction the pragma is a silent
   no-op) and turned back on after the last commit.
 - **Each migration** runs in `db.transaction.immediate`, inserts its `schema_meta` row, and ends with
@@ -376,11 +427,19 @@ After migrating, Styre builds a fresh in-memory database from `schema.sql` and c
 - `foreign_key_list`;
 - view and trigger SQL with comments and whitespace removed.
 
+Two rules keep the proof sound:
+- **New columns go last** in `schema.sql`, in migration order, because `ALTER TABLE ADD COLUMN`
+  appends; a column placed mid-table fails the proof (probe 4). The schema change checklist says so.
+- **`AUTOINCREMENT`** is invisible to the pragmas (probe 6), and `ac_check` relies on it for supersede
+  semantics. The proof also compares, per table, whether its comment-stripped SQL carries the token.
+
 Text is never compared directly. `sqlite_master` keeps comments, comment-only edits landed inside v8
 without a version change, `ALTER TABLE ADD COLUMN` produces different text from a fresh `CREATE`, and a
 rebuild's rename quotes the table name (probes, review §14 C3). Pragmas do not expose CHECK
 constraints, so tests probe each CHECK behaviourally on the migrated and the fresh database: the same
-forbidden value must be rejected by both. Any difference fails loudly, at runtime and in tests.
+forbidden value must be rejected by both. At runtime the proof covers columns, indexes, foreign keys,
+views, triggers and `AUTOINCREMENT`; CHECK constraints are covered in tests only, which is enough
+because migrations are static code. Any difference fails loudly.
 
 ### 7.4 Known shapes and versions
 
@@ -388,19 +447,21 @@ forbidden value must be rejected by both. Any difference fails loudly, at runtim
 |---|---|---|
 | v7 with the four `signal` budget columns | v0.8.0 to v0.9.0 | v7 → v8 rebuilds `signal` without them (`workflow_step.await_signal_id` references it), then creates `run` |
 | v7 | v0.10.0 | v7 → v8 creates `run` |
-| v7 bridged by `ensureRunTable` | resumed on v0.11+ | v7 → v8 sees `run` already present and only records the version |
+| v7 bridged by `ensureRunTable`, on either v7 shape | resumed on v0.11+ | v7 → v8 handles each condition independently: rebuild `signal` if the budget columns are present; create `run` if absent |
 | v8, three comment variants | b3be1be/v0.11 to v0.13.2; 6414689; 2b05680 | none; the structure is the same |
 
-- **v8 → v9 (this ticket):** the new `workflow_step` columns; `work_unit.origin`; `ticket_input`;
-  `workflow_step_history`. All are added columns or new tables; `event_log` is not rebuilt.
+- **v8 → v9 (this ticket):** the new `workflow_step` columns (including `generation_start_head`);
+  `work_unit.origin`, backfilled from `kind = 'reconcile'`; `ticket_input`; `workflow_step_history`. All
+  are added columns or new tables; `event_log` is not rebuilt.
+- Shapes are detected structurally against this list, never by version number alone.
 - **v6 and older are refused.** v6 → v7 renamed columns (`linear_*` to `external_*`), so v6 checkpoints
   already cannot resume today. D9's "runs paused by an older Styre are upgraded" means v7 and later.
 - `ensureRunTable` is removed; its job is the v7 → v8 migration.
 
 ### 7.5 Fixtures
 
-One fixture per shape in §7.4: v0.9.0, v0.10.0, v0.10.0 plus the bridge, v0.13.2, and main before this
-change. Each is produced by that release's own binary or `schema.sql`, seeded through that era's real
+One fixture per shape in §7.4: v0.9.0, v0.9.0 plus the bridge, v0.10.0, v0.10.0 plus the bridge,
+v0.13.2, and main before this change. Each is produced by that release's own binary or `schema.sql`, seeded through that era's real
 handlers where they can run, or from a recorded database of a real paused run. Hand-written rows miss
 shapes like the bridge.
 
@@ -459,21 +520,27 @@ Every test that involves design steps drives the real handlers through `advanceO
    Resume must leave no duplicate or partial outputs, manifests that match the inputs, and no step run
    twice for the same inputs.
 8. **Every output kind is cleared**, and history survives:
-   - units, `needs_docs`, track;
+   - units (reconcile units included), `needs_docs`, track;
    - unit-tied plan findings are kept (detached);
    - superseded checks are kept, not deleted, and the re-author counter survives;
-   - classifications are reset;
-   - files: a new test, a helper, and an edited tracked file each go back to their starting-commit
-     state.
-9. **The rules** of §3.1 each refuse their kind of bad table, and the `ctx.inputs` test catches a handler
-   reading outside its projection.
-10. **Migrations.** Every fixture in §7.5 to v9, with the structural proof and the CHECK probes; a newer
+   - classifications are reset.
+9. **Check identity (E7).**
+   - A failing test first shows whether today's checks loop rejects a scoped re-author of an existing
+     canonical file.
+   - A re-author that modifies its canonical file is accepted; one that leaves it identical to the
+     generation's starting commit is not.
+   - A crash rerun of `checks:dispatch` accepts the crashed attempt's files without rewriting them.
+   - A step reset by the checks loop, followed by a profile edit and a resume, is invalidated with cause
+     `inputs`, and every AC is re-authored.
+10. **The rules** of §3.1 each refuse their kind of bad table; the recording proxy test catches a
+    handler reading an undeclared field; the source guard catches an accessor called from the wrong step.
+11. **Migrations.** Every fixture in §7.5 to v9, with the structural proof and the CHECK probes; a newer
     database, an unknown shape and v6 refused; the backup written while another reader holds a snapshot;
     a failing `foreign_key_check` aborts; a failing migration leaves the previous version.
-11. **D9.** A v8 paused run in worktree mode resumes on the new binary; the adopt pass records manifests;
+12. **D9.** A v8 paused run in worktree mode resumes on the new binary; the adopt pass records manifests;
     no finished design step reruns; the run completes.
-12. **The guard.** A digest made deliberately unstable escalates with `invalidate-loop:<step>`.
-13. **Canonical encoding.** Key order, NFC, ids and timestamps excluded.
+13. **The guard.** A digest made deliberately unstable escalates with `invalidate-loop:<step>`.
+14. **Canonical encoding.** Key order, NFC, ids and timestamps excluded.
 
 Each key test is shown to fail when the code it guards is broken on purpose.
 
@@ -505,9 +572,9 @@ Each key test is shown to fail when the code it guards is broken on purpose.
 | Changing a design input invalidates exactly its dependants, shown per input through real steps | §5.4, §8.1, §8.3, §8.4 |
 | No livelock | §6.6, §8.5 |
 | Crash after each design step | §6.2, §8.7 |
-| Every output kind cleared on invalidate | §6.1, §6.3, §8.8 |
-| A v8 paused run resumes after an automatic migration and continues without rerunning finished design steps, on a real v8 database | §7.4 to §7.6, §8.10, §8.11 |
-| The startup check refuses an inconsistent table | §3.1, §8.9 |
+| Every output kind cleared on invalidate | §6.1, §6.3, §8.8, §8.9 |
+| A v8 paused run resumes after an automatic migration and continues without rerunning finished design steps, on a real v8 database | §7.4 to §7.6, §8.11, §8.12 |
+| The startup check refuses an inconsistent table | §3.1, §8.10 |
 | Docs, both `schema.sql` copies, independent review before the PR | §9 |
 
 ## 11. Out of scope
@@ -524,9 +591,9 @@ Each key test is shown to fail when the code it guards is broken on purpose.
   "no false changes" tests (§8.3) and the `invalidate-loop` guard.
 - **The plan is outside the database.** If a later stage edits it, the recorded digest is stale. That
   only matters when the ticket is back in design, and a redesign names `design:dispatch` explicitly.
-- **Restoring files to the starting commit** could undo an implement-stage edit to the same file after
-  a redesign. Implement does not own acceptance test files (declare or discard rules). The restore
-  commit lists every path it touches.
+- **Stale helpers.** Under E7 an earlier generation's helper files and tracked-file edits stay on the
+  branch after a checks rerun. They are listed as a limit; a later ticket can add a cleanup if they cause
+  trouble in practice.
 - **The `signal` rebuild for v0.8–v0.9 checkpoints** is the first real rebuild. The backup, the
   per-migration transaction, the foreign key check and the structural proof bound the damage.
 
@@ -566,3 +633,26 @@ Each key test is shown to fail when the code it guards is broken on purpose.
 | Minor 10 plan digest definition | §5.3 |
 | Minor 11 rename quoting | structural proof (§7.3) |
 | Minor 12 fixture realism | §7.5 |
+
+- **rev 2 → rev 3**, independent review (2026-10-09), verdict revise: 2 critical, 6 major, 10 minor.
+
+| Finding | Answer |
+|---|---|
+| C1 reconcile units collide on `seq` | all units deleted on an extract invalidate; `origin` backfilled (§3.2, §6.1) |
+| C2 the restore can revert the plan | restore removed (E7, §6.3) |
+| M1 a feedback reset absorbs a profile edit | a step reset by feedback keeps its manifest and the walk compares it (§5.4, §6.5) |
+| M2 the feedback generation is undefined | loopbacks record their consumer and its generation, after the bump (§6.5) |
+| M3 table gaps; enforcement mechanism | table corrected; tests, proxy, accessors, source guard (E8, §3) |
+| M4 resume narrowing can exit 69 | narrowing without the refusal, after `--inspect` (§4.1) |
+| M5 a crash rerun of checks fails identity | identity judged against the generation's starting commit (§6.3) |
+| M6 the restore misses files and reverts implement work | restore removed (E7) |
+| Minor 1 gate applicability | "when `design:review` applies" (§3) |
+| Minor 2 retry-plan paths | per caller, `redesignLoopback` parameter (§6.4) |
+| Minor 3 write order in `onSucceed` | §6.2 |
+| Minor 4 proof gaps | column order and `AUTOINCREMENT` rules; CHECKs in tests (§7.3) |
+| Minor 5 `VACUUM INTO` refuses an existing file | timestamped backup (§7.1) |
+| Minor 6 fixtures | both v7 shapes with and without the bridge; structural detection (§7.4, §7.5) |
+| Minor 7 unused plan findings digest | dropped (§5.3) |
+| Minor 8 `resetProvisionIfManifestTouched` | stated (§6) |
+| Minor 9 reused `--db` | rewritten as on resume (§4) |
+| Minor 10 red-first signal fields | explicit fields (§5.3) |
