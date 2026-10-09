@@ -257,10 +257,14 @@ export function commandLifecycleTests(
     test("a stop that arrives while leftovers are being stopped still throws RunInterrupted", async () => {
       // The leftover ignores TERM, so finish() waits out its grace period. The handler stops the
       // launch during that wait: the runner must not report a result after that.
-      const p = run(`(trap '' TERM; sleep 30) & echo $! > "${pidFile()}"; exit 0`, {
-        cwd: dir,
-        timeoutMs: 60_000,
-      });
+      // The leftover writes its own pid only once its trap is set, and the shell exits only after
+      // that file appears. Otherwise finish()'s TERM can land before the trap: the leftover dies at
+      // once, the launch is released, and the stop finds nothing to mark interrupted (seen on
+      // macOS CI). `exec` keeps the ignored TERM and the pid.
+      const p = run(
+        `sh -c 'trap "" TERM; echo $$ > "${pidFile()}"; exec sleep 30' & until [ -s "${pidFile()}" ]; do :; done; exit 0`,
+        { cwd: dir, timeoutMs: 60_000 },
+      );
       const settled = p.then(
         () => "resolved",
         (e) => e,
