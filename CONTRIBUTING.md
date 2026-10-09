@@ -36,8 +36,8 @@ For the security and isolation model, see [`SECURITY.md`](SECURITY.md).
 
 | Script | What it does | Cost |
 |---|---|---|
-| `bun run scripts/smoke-lifecycle.ts --standin` | The live smoke's free mode: every scenario (Ctrl-C, `kill`, `kill -9` then `styre ls`, a timeout, `Ctrl-\`) against a stand-in `claude`, plus the control run that must leak. Run it before every live run. | free |
-| `bun run scripts/smoke-lifecycle.ts --live [--model <claude model>]` | The same with the real `claude` CLI, installed and signed in. | seven real dispatches on the cheap model (`claude-haiku-4-5-20251001` by default) |
+| `bun run scripts/smoke-lifecycle.ts --standin` | The live smoke's free mode: every scenario against a stand-in `claude`: Ctrl-C, `kill`, a timeout, `Ctrl-\`, a wrapper that runs the CLI as a child (Ctrl-C and a timeout), a closed terminal, a second Ctrl-C, the startup refusal, a stop during a verify suite, and `kill -9` followed by `styre ls`, `styre run --resume`, `styre run --fresh` or `styre clean`; plus the control runs on the old code, which must leak. Run it before every live run (about 4 minutes). | free |
+| `bun run scripts/smoke-lifecycle.ts --live [--model <claude model>]` | The same with the real `claude` CLI, installed and signed in. | seventeen real dispatches on the cheap model (`claude-haiku-4-5-20251001` by default) |
 | `bash scripts/smoke-lifecycle-container.sh --standin` or `--live` | The smoke inside a Linux container (needs docker). `--live` needs `ANTHROPIC_API_KEY` in the environment; the script passes it by name only. | as above |
 | `bun run scripts/simulate-github-cancel.ts` | Replays GitHub's cancel (SIGINT, 7.5 s, SIGTERM, 2.5 s, SIGKILL) against a compiled `styre setup`, with and without `exec`. Set `$STYRE_BIN` to use a built binary. | free |
 | `bun run scripts/measure-lifecycle-latency.ts [--rounds <n>] [--dispatches <n>]` | Dispatch latency before and after ENG-485 (median and p90), and the cost of the sweep, an empty group stop, the per step `git rev-parse` and the leftover check. At least 2 rounds: the noise is the spread between them. | free |

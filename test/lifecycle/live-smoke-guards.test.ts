@@ -232,11 +232,11 @@ describe("N4: the container script never shows the key", () => {
     const calls = readFileSync(rig.log, "utf8");
     expect(calls).not.toContain(SENTINEL);
     expect(calls).toMatch(
-      /^run --rm --init --name \S+ --user 1000:1000 --ulimit core=0 -e ANTHROPIC_API_KEY \S+ timeout 900 bun run scripts\/smoke-lifecycle\.ts --live$/m,
+      /^run --rm --init --name \S+ --user 1000:1000 --ulimit core=0 -e ANTHROPIC_API_KEY \S+ timeout 1500 bun run scripts\/smoke-lifecycle\.ts --live$/m,
     );
     expect(calls).toContain("build folder files holding the key: 0");
     // docker ran under the time bound (the rig's stand-in, so the test needs no coreutils).
-    expect(calls).toMatch(/^timeout 960 docker run --rm /m);
+    expect(calls).toMatch(/^timeout 1560 docker run --rm /m);
     // Nothing it wrote is left, and nothing left holds the key.
     expect(filesHolding(rig.tmp, SENTINEL)).toEqual([]);
     expect(readdirSync(rig.tmp)).toEqual([]);

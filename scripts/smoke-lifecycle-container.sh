@@ -5,7 +5,7 @@
 #
 # Usage, on a host with docker (the image is Linux either way), from a clone that holds the branch to test and the control's
 # branch baseline/pre-eng-485 (locally, or as origin's after a fetch):
-#   bash scripts/smoke-lifecycle-container.sh --live     seven real dispatches; needs
+#   bash scripts/smoke-lifecycle-container.sh --live     seventeen real dispatches; needs
 #                                                         ANTHROPIC_API_KEY in this environment
 #   bash scripts/smoke-lifecycle-container.sh --standin  the free mode: the stand-in claude
 # The mode is required; with none, or anything else, it prints the usage and exits 64.
@@ -112,13 +112,13 @@ echo "smoke-lifecycle-container: building $tag from $BASE ($(git -C "$ROOT" rev-
 docker build -q -t "$tag" "$ctx" >/dev/null
 
 args=(run --rm --init --name "$name" --user 1000:1000 --ulimit core=0)
-smoke=(timeout 900 bun run scripts/smoke-lifecycle.ts "--$mode")
+smoke=(timeout 1500 bun run scripts/smoke-lifecycle.ts "--$mode")
 if [ "$mode" = live ]; then
   args+=(-e ANTHROPIC_API_KEY)
 fi
 echo "smoke-lifecycle-container: running the $mode smoke"
 # In the background, so a stop request runs its trap at once instead of after docker ends.
-timeout 960 docker "${args[@]}" "$tag" "${smoke[@]}" &
+timeout 1560 docker "${args[@]}" "$tag" "${smoke[@]}" &
 status=0
 wait "$!" || status=$?
 if [ "$status" -ne 0 ]; then fail "the smoke exited $status"; fi

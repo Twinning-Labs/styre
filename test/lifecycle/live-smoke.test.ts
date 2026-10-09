@@ -500,7 +500,7 @@ describe("the workflow (.github/workflows/lifecycle-live.yml)", () => {
     const withSecret = Object.entries(wf.jobs).flatMap(([job, j]) =>
       j.steps.filter((s) => /secrets/.test(JSON.stringify(s))).map((s) => `${job}: ${s.name}`),
     );
-    expect(withSecret).toEqual(["smoke: Live smoke (real claude; seven dispatches)"]);
+    expect(withSecret).toEqual(["smoke: Live smoke (real claude; seventeen dispatches)"]);
   });
   test("every action is pinned by commit", () => {
     for (const j of Object.values(wf.jobs))
@@ -512,14 +512,14 @@ describe("the workflow (.github/workflows/lifecycle-live.yml)", () => {
       "git fetch --depth 1 --no-tags origin +refs/heads/baseline/pre-eng-485:refs/remotes/origin/baseline/pre-eng-485",
     );
     expect(run("Free run with the stand-in claude (no model calls)")).toBe(
-      "ulimit -c 0 && exec timeout 600 bun run scripts/smoke-lifecycle.ts --standin",
+      "ulimit -c 0 && exec timeout 900 bun run scripts/smoke-lifecycle.ts --standin",
     );
-    expect(run("Live smoke (real claude; seven dispatches)")).toBe(
-      "ulimit -c 0 && exec timeout 900 bun run scripts/smoke-lifecycle.ts --live",
+    expect(run("Live smoke (real claude; seventeen dispatches)")).toBe(
+      "ulimit -c 0 && exec timeout 1500 bun run scripts/smoke-lifecycle.ts --live",
     );
     const names = wf.jobs.smoke?.steps.map((s) => s.name) ?? [];
     expect(names.indexOf("Free run with the stand-in claude (no model calls)")).toBeLessThan(
-      names.indexOf("Live smoke (real claude; seven dispatches)"),
+      names.indexOf("Live smoke (real claude; seventeen dispatches)"),
     );
   });
   test("claude is pinned to the version smoke-lifecycle-container.sh uses", () => {

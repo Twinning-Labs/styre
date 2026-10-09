@@ -138,6 +138,8 @@ export interface DriverResult {
   timedOut: boolean;
   exitCode: number | null;
   interrupted: boolean;
+  /** Why the ENG-476 startup refusal stopped the agent, when it did (agent mode only). */
+  fault?: string | null;
 }
 
 /** What scripts/smoke-lifecycle-driver.ts said on stderr: its `smoke-driver: …` lines. */

@@ -5,7 +5,7 @@
 #   stop handlers), and must leak the agent under kill and kill -9 (or the run says the probes are
 #   blind); the new code must stop the agent and its command under Ctrl-C, kill, kill -9 followed by
 #   `styre ls`, a dispatch timeout, and Ctrl-\. First the free mode (`--standin`: the stand-in claude, no
-#   model calls), then the live run (`--live`: seven real agent dispatches on the cheap model). The
+#   model calls), then the live run (`--live`: seventeen real agent dispatches on the cheap model). The
 #   smoke refuses to run without one of the two, or with any argument it does not know. The ANTHROPIC_API_KEY
 #   secret is given to the live step only. Each run is exec'd under `timeout`, so a cancel of this
 #   job reaches the smoke itself, which then stops what it started. claude is installed with npm at
@@ -36,7 +36,7 @@ permissions:
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7 (node24)
       - name: Fetch the control's baseline branch
@@ -48,9 +48,9 @@ jobs:
       - run: npm install -g @anthropic-ai/claude-code@2.1.293
       - run: claude --version && bun --version
       - name: Free run with the stand-in claude (no model calls)
-        run: ulimit -c 0 && exec timeout 600 bun run scripts/smoke-lifecycle.ts --standin
-      - name: Live smoke (real claude; seven dispatches)
-        run: ulimit -c 0 && exec timeout 900 bun run scripts/smoke-lifecycle.ts --live
+        run: ulimit -c 0 && exec timeout 900 bun run scripts/smoke-lifecycle.ts --standin
+      - name: Live smoke (real claude; seventeen dispatches)
+        run: ulimit -c 0 && exec timeout 1500 bun run scripts/smoke-lifecycle.ts --live
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 

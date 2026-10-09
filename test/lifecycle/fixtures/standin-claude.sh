@@ -32,6 +32,9 @@ done
 cat >/dev/null # the prompt
 list="[\"$(printf '%s' "$tools" | sed 's/,/","/g')\"]"
 printf '{"type":"system","subtype":"init","tools":%s,"permissionMode":"dontAsk","mcp_servers":[]}\n' "$list"
+# A real CLI asks the model before its first tool call. This short wait keeps that order, so a
+# startup refusal of the report above lands before any tool has run, as it does with the real CLI.
+sleep 0.5
 
 set -m # job control: the tool shell leads a group of its own, as Claude Code's does
 if [ "${SMOKE_STANDIN_TEST:-run}" != run ]; then
