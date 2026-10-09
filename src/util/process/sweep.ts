@@ -7,6 +7,7 @@ import {
   formatLeftover,
   skippedLine,
 } from "./leftovers.ts";
+import { printable } from "./printable.ts";
 import {
   type Probe,
   type ProcInfo,
@@ -76,7 +77,9 @@ export function aliveFrom(p: Probe, who: { pid: number; startedAt: string }): bo
 const isAlive = (who: { pid: number; startedAt: string }): boolean =>
   aliveFrom(probe(who.pid), who);
 
-const who = (r: LaunchRecord): string => r.ident ?? "an unknown run";
+/** The run a record names, with its control characters replaced (the ident is read from a file
+ *  that a record-shaped write could have put anything in). */
+const who = (r: LaunchRecord): string => (r.ident === null ? "an unknown run" : printable(r.ident));
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /** What the identity check (section 5.4) found for one orphan. */

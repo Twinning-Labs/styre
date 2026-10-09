@@ -1,4 +1,5 @@
 import { defineCommand } from "citty";
+import { printable } from "../util/process/printable.ts";
 import type { LaunchRecord } from "../util/process/records.ts";
 import { sweepOrphans } from "../util/process/sweep.ts";
 import { type Checkpoint, listCheckpoints } from "./checkpoints.ts";
@@ -24,7 +25,9 @@ function leftoverRow(c: Checkpoint): string {
 
 /** One orphan the sweep stopped, for `ls`'s human output (section 8). */
 function sweptRow(r: LaunchRecord): string {
-  return `  ${r.ident ?? "an unknown run"}  [${r.kind}, pid ${r.pid}]  ${r.command}`.trimEnd();
+  // The ident comes from the record file: its control characters are replaced, as the command's are.
+  const ident = r.ident === null ? "an unknown run" : printable(r.ident);
+  return `  ${ident}  [${r.kind}, pid ${r.pid}]  ${r.command}`.trimEnd();
 }
 
 export async function lsImpl(opts?: { root?: string; swept?: LaunchRecord[] }): Promise<void> {

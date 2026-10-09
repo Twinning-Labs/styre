@@ -5,10 +5,11 @@
 //
 // The real processes here are this test's own (a shell and its sleep), claimed at start and stopped
 // in afterEach; the sleep ends by itself after 22.8 s whatever happens.
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { lsImpl } from "../../../src/cli/ls.ts";
 import { describeProcess } from "../../../src/util/process/door.ts";
 import {
   commandFromCmdline,
@@ -19,6 +20,7 @@ import {
 import { printable } from "../../../src/util/process/printable.ts";
 import { probe } from "../../../src/util/process/proc-table.ts";
 import { processesDir, recordFileName, scanRecords } from "../../../src/util/process/records.ts";
+import { sweepOrphans } from "../../../src/util/process/sweep.ts";
 import { killOwned, own, ownTree, until } from "../../helpers/own-processes.ts";
 
 afterEach(() => {
@@ -118,4 +120,74 @@ test("a record read from disk has a printable command", () => {
     process.env.XDG_STATE_HOME = saved;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+/** An ident with a terminal escape (OSC 52 sets the clipboard) and a newline that forges a line. */
+const EVIL_IDENT = "ENG-1\u001b]52;c;eA==\u0007\nstyre: forged";
+const SAFE_IDENT = "ENG-1?]52;c;eA==??styre: forged";
+
+test("the sweep's lines carry a record's ident with no control character (final re-review A N2, C D3)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "styre-printable-"));
+  const saved = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = dir;
+  try {
+    // A record from another boot: the sweep removes it and says so, naming its run, and never
+    // looks at (or signals) the pid it names.
+    const r = {
+      version: 1 as const,
+      pid: 4321,
+      startedAt: "1.000000",
+      bootId: "not-this-boot",
+      kind: "agent" as const,
+      ident: EVIL_IDENT,
+      stepId: null,
+      worktree: null,
+      command: "claude",
+      owner: { pid: 999999, startedAt: "1.000000", pgid: 999999 },
+    };
+    mkdirSync(processesDir(), { recursive: true, mode: 0o700 });
+    writeFileSync(join(processesDir(), recordFileName(r)), JSON.stringify(r), { mode: 0o600 });
+    const lines: string[] = [];
+    await sweepOrphans({ stderr: (s) => lines.push(s) });
+    expect(lines).toEqual([
+      `styre: removed the launch record for pid 4321 from ${SAFE_IDENT}: it was written before this machine last started, so nothing was stopped\n`,
+    ]);
+  } finally {
+    process.env.XDG_STATE_HOME = saved;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("styre ls lists a stopped orphan's ident with no control character", async () => {
+  const root = mkdtempSync(join(tmpdir(), "styre-printable-"));
+  const out: string[] = [];
+  const write = spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+    out.push(String(chunk));
+    return true;
+  });
+  try {
+    await lsImpl({
+      root,
+      swept: [
+        {
+          version: 1,
+          pid: 4321,
+          startedAt: "1.000000",
+          bootId: null,
+          kind: "agent",
+          ident: EVIL_IDENT,
+          stepId: null,
+          worktree: null,
+          command: "claude",
+          owner: { pid: 999999, startedAt: "1.000000", pgid: 999999 },
+        },
+      ],
+    });
+  } finally {
+    write.mockRestore();
+    rmSync(root, { recursive: true, force: true });
+  }
+  const text = out.join("");
+  expect(text).toContain(`  ${SAFE_IDENT}  [agent, pid 4321]  claude\n`);
+  for (const line of text.split("\n")) expect(CONTROL.test(line)).toBe(false);
 });

@@ -87,9 +87,10 @@ messages and exit statuses are in [`runtime-parameters.md`](docs/architecture/ru
 - **Leftover reports carry command lines into telemetry.** Each leftover line names a process by its
   command line (up to 120 characters), and it is stored in the run database and emitted on the
   telemetry stream (`note` reason `leftover-check`). In in place mode that can include processes you
-  started yourself in the checkout during the step. Control characters in command lines are replaced
-  with `?` before they are shown, stored or emitted, so a process cannot write terminal escapes or
-  forge a `styre:` line.
+  started yourself in the checkout during the step. Control characters in command lines, and in the
+  ticket ident a launch record names (in the sweep's lines and `styre ls`), are replaced with `?`
+  before they are shown, stored or emitted, so a process cannot write terminal escapes or forge a
+  `styre:` line.
 - **Launch records hold the command text.** Each record stores the first 200 characters of the
   launch's command line, in a file only your user can read. Styre passes the agent's prompt on stdin,
   never on the command line; keep secrets out of declared commands too.
