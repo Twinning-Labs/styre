@@ -27,6 +27,8 @@ import {
   isAlive,
   killOwned,
   own,
+  ownChild,
+  ownGroupMembers,
   ownPrinted,
   ownTree,
   registerGroup,
@@ -491,4 +493,127 @@ test("signalOwned refuses a process already released by killOwned, even while it
   } finally {
     own(child); // claimed again, so afterEach stops it
   }
+});
+
+/** This test process's ancestors in one read (its parent, its parent's parent, …), and pid 1. */
+function ancestorsAndInit(): ProcInfo[] {
+  const byPid = new Map(listProcesses().map((p) => [p.pid, p]));
+  const out: ProcInfo[] = [];
+  for (let p = byPid.get(process.pid); p && p.ppid > 0 && !out.some((a) => a.pid === p?.ppid); ) {
+    const parent = byPid.get(p.ppid);
+    if (!parent) break;
+    out.push(parent);
+    p = parent;
+  }
+  const init = byPid.get(1);
+  if (init && !out.some((a) => a.pid === 1)) out.push(init);
+  return out;
+}
+
+test("ownChild refuses pid 1, this process, its ancestors and an orphan outside the test's tree, and records none of them", async () => {
+  const o = await orphan(true); // a session of its own, never registered
+  await dropParent(o.shell, o.loop);
+  const refused = [1, process.pid, ...ancestorsAndInit().map((a) => a.pid), o.loop.pid];
+  expect(refused.length).toBeGreaterThan(3);
+  const restore = __snapshotForTests();
+  try {
+    for (const pid of refused) {
+      expect(ownChild({ pid }), `ownChild(${pid})`).toBeNull();
+      expect(ownChild({ pid }, { group: true }), `ownChild(${pid}, group)`).toBeNull();
+    }
+    // Nothing was recorded: the end of run leak check (which lists every recorded process still
+    // alive) names none of them.
+    const recorded = (await stillRunning(0)).map((l) => l.pid);
+    for (const pid of refused) expect(recorded).not.toContain(pid);
+  } finally {
+    restore(); // drops whatever a regression recorded or registered above, before any signal
+  }
+  expect(killOwned()).toBe(0);
+  expect(isAlive(o.loop)).toBe(true);
+  o.end(); // it ends by itself: no signal from the test
+  expect(await allGone([o.loop])).toBe(true);
+  // This test's own child is taken.
+  const child = spawn(["sleep", "30"]);
+  expect(ownChild(child)).toMatchObject({ pid: child.pid, startedAt: child.startedAt });
+  expect(killOwned()).toBe(1);
+  expect(await allGone([child])).toBe(true);
+});
+
+test("ownChild with a group registers only a detached child of this test: never a child in this test's group, a group made by setpgid alone, or an ancestor's", async () => {
+  const inMyGroup = spawn(["sleep", "30"]); // this test's child, in this test's own group
+  const setpgidOnly = Bun.spawn(
+    ["perl", "-e", '$| = 1; setpgrp(0, 0); print "ready\\n"; sleep 30'],
+    { stdin: "ignore", stdout: "pipe", stderr: "ignore" },
+  );
+  children.push(setpgidOnly);
+  const reader = setpgidOnly.stdout.getReader();
+  let text = "";
+  while (!text.includes("ready")) {
+    const r = await reader.read();
+    if (r.done) break;
+    text += new TextDecoder().decode(r.value);
+  }
+  void reader.cancel();
+  const leadsGroupOnly = probe(setpgidOnly.pid);
+  expect(leadsGroupOnly.kind === "alive" && leadsGroupOnly.info.pgid === setpgidOnly.pid).toBe(
+    true,
+  );
+  const before = [...registeredGroups()].sort((a, b) => a - b);
+  const restore = __snapshotForTests();
+  try {
+    // Both are this test's children, so each is claimed by rule 1; neither group may be registered.
+    expect(ownChild(inMyGroup, { group: true })).toMatchObject({ pid: inMyGroup.pid });
+    expect(ownChild(setpgidOnly, { group: true })).toMatchObject({ pid: setpgidOnly.pid });
+    for (const a of ancestorsAndInit()) expect(ownChild(a, { group: true })).toBeNull();
+    expect([...registeredGroups()].sort((a, b) => a - b)).toEqual(before);
+  } finally {
+    restore(); // drops the claims and any group a regression registered, before any signal
+  }
+  expect(killOwned()).toBe(0); // the children end through their own handles in afterEach
+  // A detached child (it leads its group and its session) is registered.
+  const leader = spawn(["sleep", "30"], { detached: true });
+  expect(ownChild(leader, { group: true })).toMatchObject({ pid: leader.pid });
+  expect(registeredGroups()).toContain(leader.pid);
+  expect(killOwned()).toBe(1);
+});
+
+test("ownGroupMembers claims only what rule 2 allows: nothing of a group never registered, of a pruned group, or of this test's own group", () => {
+  // Tables built by the test: nothing is signalled, and the records are put back afterwards.
+  const row = (pid: number, pgid: number, startedAt: string): ProcInfo => ({
+    pid,
+    ppid: 1,
+    pgid,
+    startedAt,
+    state: "running",
+  });
+  const self = "100.000000";
+  const restore = __snapshotForTests();
+  try {
+    // A group the test never registered.
+    const stray = row(900301, 900300, "250.000000");
+    expect(ownGroupMembers(builtTable(self, [row(900300, 900300, "200.000000"), stray]))).toEqual(
+      [],
+    );
+    // A registered group: a member older than the leader is refused; the leader itself and a
+    // younger member are taken.
+    const leader = row(900400, 900400, "200.000000");
+    __registerGroupForTests(900400, leader);
+    const pids = (t: ProcInfo[]): number[] => ownGroupMembers(t).map((p) => p.pid);
+    const older = row(900401, 900400, "150.000000");
+    expect(pids(builtTable(self, [leader, older]))).toEqual([900400]);
+    const younger = row(900402, 900400, "350.000000");
+    expect(pids(builtTable(self, [leader, younger]))).toEqual([900400, 900402]);
+    // The leader's pid now held by another process: the group is pruned, and gives nothing.
+    const impostor = row(900400, 900400, "300.000000");
+    const later = row(900403, 900400, "360.000000");
+    expect(ownGroupMembers(builtTable(self, [impostor, later]))).toEqual([]);
+    expect(registeredGroups()).not.toContain(900400);
+    // This test's own group (900001 in the built table), even if registered, gives nothing.
+    __registerGroupForTests(900001, { pid: 900001, startedAt: "50.000000" });
+    const mine = row(900501, 900001, "60.000000");
+    expect(ownGroupMembers(builtTable(self, [mine]))).toEqual([]);
+  } finally {
+    restore(); // drops the made-up records and groups
+  }
+  expect(registeredGroups()).not.toContain(900001);
 });

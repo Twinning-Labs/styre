@@ -192,18 +192,22 @@ export function __registerGroupForTests(pgid: number, leader: Ident): () => void
   return () => groups.delete(pgid);
 }
 
-/** Test seam: snapshot what is recorded now; the returned function puts it back, dropping
- *  everything recorded since. Refusal tests call it in a `finally`, so whatever a regression let
- *  them claim (a candidate, or the tree `ownTree` found under it) is never signalled. Only
- *  test/lifecycle/own-processes.test.ts may use it (the guard checks). */
+/** Test seam: snapshot what is recorded now, the registered groups included; the returned function
+ *  puts it back, dropping everything recorded or registered since. Refusal tests call it in a
+ *  `finally`, so whatever a regression let them claim (a candidate, or the tree `ownTree` found
+ *  under it) or register (a group whose members a later cleanup would claim) is never signalled.
+ *  Only test/lifecycle/own-processes.test.ts may use it (the guard checks). */
 export function __snapshotForTests(): () => void {
   const o = new Map(owned);
   const c = new Map(claimed);
+  const g = new Map(groups);
   return () => {
     owned.clear();
     claimed.clear();
+    groups.clear();
     for (const [k, v] of o) owned.set(k, v);
     for (const [k, v] of c) claimed.set(k, v);
+    for (const [k, v] of g) groups.set(k, v);
   };
 }
 
