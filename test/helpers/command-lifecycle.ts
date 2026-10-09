@@ -25,8 +25,14 @@ async function waitFor(pred: () => boolean, ms = 3_000): Promise<boolean> {
 /**
  * The process handling contract shared by runCommand and runBoundedCommand (ENG-485 section 6.2).
  * Every test uses its own temp folder for pid files and records, and kills what it started.
+ * `spawnFailure` is each runner's own contract for a command that cannot be launched at all, kept
+ * from before ENG-485: runCommand throws (final review A F10), runBoundedCommand returns a result.
  */
-export function commandLifecycleTests(name: string, run: Run): void {
+export function commandLifecycleTests(
+  name: string,
+  run: Run,
+  spawnFailure: "throws" | "result",
+): void {
   describe(`${name} process handling`, () => {
     let dir: string;
     let state: string;
@@ -300,11 +306,20 @@ export function commandLifecycleTests(name: string, run: Run): void {
       expect(r.exitCode === null || r.exitCode === 143).toBe(true);
     });
 
-    test("a spawn failure is a result, not a throw", async () => {
+    test.if(spawnFailure === "result")("a spawn failure is a result, not a throw", async () => {
       const r = await run("echo hi", { cwd: join(dir, "does-not-exist"), timeoutMs: 1000 });
       expect(r.exitCode).toBeNull();
       expect(r.timedOut).toBe(false);
       expect(r.stderr.length).toBeGreaterThan(0);
     });
+
+    test.if(spawnFailure === "throws")(
+      "a spawn failure throws, never returns as a command that ran",
+      async () => {
+        await expect(
+          run("echo hi", { cwd: join(dir, "does-not-exist"), timeoutMs: 1000 }),
+        ).rejects.toThrow();
+      },
+    );
   });
 }

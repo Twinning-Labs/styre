@@ -95,7 +95,9 @@ The slug names a project's config/profile subdirectory and its checkpoint direct
    `https|ssh|git://github.com/owner/repo(.git)`), the slug is the **repo name only** (not
    `owner/repo`).
 3. On any failure — no remote, a non-GitHub host (GitLab/Bitbucket/self-hosted), an unparseable URL
-   — fall back to `basename(repoDir)`.
+   — fall back to `basename(repoDir)`. The one exception: a `git` call that times out (30 s) is not
+   an answer, so the command fails with an error naming it instead of silently using the folder
+   name, which would be a different state folder (`--resume` would not find its checkpoint).
 
 Consequences worth knowing: the GitHub match is case-sensitive on `github.com`; a nested path like
 `org/group/repo` yields a slug containing a slash, which becomes a nested directory under the config

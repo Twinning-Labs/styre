@@ -29,7 +29,8 @@ export interface CommandResult {
  *  anything the command left running is stopped BEFORE the output is read, and the rest of the output
  *  is read for at most DRAIN_LIMIT_MS, so a background child holding the pipe can never hang the
  *  caller. Output is read while the command runs, so a large output cannot stall it. Throws
- *  RunInterrupted when the stop handler stopped the command or the door was already closed.
+ *  RunInterrupted when the stop handler stopped the command or the door was already closed, and
+ *  throws when the command could not be launched at all.
  *
  *  A known limit (spec 6.2, R11): a command in a group of its own has no controlling terminal, so
  *  one that opens /dev/tty (sudo, an ssh passphrase or host key prompt, a git username prompt)
@@ -39,19 +40,16 @@ export async function runCommand(
   command: string,
   opts: { cwd: string; timeoutMs: number; context?: LaunchContext },
 ): Promise<CommandResult> {
-  let h: LaunchHandle;
-  try {
-    h = launch({
-      argv: ["sh", "-c", command],
-      cwd: opts.cwd,
-      env: verifyEnv(process.env),
-      kind: "group",
-      context: opts.context ?? { ident: null, stepId: null, worktree: opts.cwd },
-    });
-  } catch (err) {
-    if (err instanceof RunInterrupted) throw err;
-    return { exitCode: null, stdout: "", stderr: String(err), timedOut: false };
-  }
+  // A command that could not be launched (no such folder, a launch record that could not be
+  // written) throws, as the spawn did before ENG-485: it is not a command that ran and failed, and a
+  // verify step must never read it as red ground truth (final review A F10).
+  const h: LaunchHandle = launch({
+    argv: ["sh", "-c", command],
+    cwd: opts.cwd,
+    env: verifyEnv(process.env),
+    kind: "group",
+    context: opts.context ?? { ident: null, stepId: null, worktree: opts.cwd },
+  });
   let stdout = "";
   let stderr = "";
   const out = readPipe(h.proc.stdout, (t) => {

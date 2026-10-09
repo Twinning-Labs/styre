@@ -72,7 +72,7 @@ test("scrubs the daemon-held creds from the spawned command's env", async () => 
   }
 });
 
-commandLifecycleTests("runCommand", runCommand);
+commandLifecycleTests("runCommand", runCommand, "throws");
 
 describe("runCommand context", () => {
   const saved = process.env.XDG_STATE_HOME;

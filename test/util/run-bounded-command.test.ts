@@ -93,4 +93,4 @@ test("caps both output streams while draining them to completion", async () => {
   });
 });
 
-commandLifecycleTests("runBoundedCommand", runBoundedCommand);
+commandLifecycleTests("runBoundedCommand", runBoundedCommand, "result");
