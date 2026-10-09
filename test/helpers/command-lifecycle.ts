@@ -257,10 +257,12 @@ export function commandLifecycleTests(
     test("a stop that arrives while leftovers are being stopped still throws RunInterrupted", async () => {
       // The leftover ignores TERM, so finish() waits out its grace period. The handler stops the
       // launch during that wait: the runner must not report a result after that.
-      const p = run(`(trap '' TERM; sleep 30) & echo $! > "${pidFile()}"; exit 0`, {
-        cwd: dir,
-        timeoutMs: 60_000,
-      });
+      // The shell exits only once the trap is in place: finish() sends TERM as soon as the shell
+      // exits, and a TERM that beats the trap ends the leftover, so the run would just resolve.
+      const p = run(
+        `(trap '' TERM; : > ready; exec sleep 30) & until [ -e ready ]; do :; done; echo $! > "${pidFile()}"; exit 0`,
+        { cwd: dir, timeoutMs: 60_000 },
+      );
       const settled = p.then(
         () => "resolved",
         (e) => e,
