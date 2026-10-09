@@ -199,6 +199,10 @@ therefore see a different profile on resume than on the fresh run: a defect toda
   (`run.ts:446`; resume does not today, `park.ts:455-463`), so provision records its `toolchain` signal
   and the narrowing reaches the PR (ENG-412, ENG-425: a narrowing is never silent). It is also the same
   list provision's snapshot input reads, so an unchanged host gives no false `inputs-changed`.
+- **The whole resume order:** the resume transaction → `recover()` → the narrowing and its pause → the
+  snapshot (§4) → the adopt pass (§7.6) → the registry → `driveToTerminal`. `assertInPlaceIdentity`
+  still runs on the profile before narrowing, as it does today.
+- Resume prints the same stderr notice of the narrowing that a fresh run prints.
 - Resume applies the same narrowing. It never exits 69, so
   `runtime-parameters.md:450` ("never on `--resume` or `--inspect`") stays true.
 - When the fresh-run gate would refuse (nothing usable, or a component whose suite is `required` is
@@ -605,7 +609,7 @@ Each key test is shown to fail when the code it guards is broken on purpose.
 | M4 restore set and checks-loop change | full diff of the generation, invalidate-superseded only, through `commitWorktree` (§6.3)  *(superseded by E9 in rev 4)* |
 | M5 handlers not safe to rerun | outputs written in `onSucceed` (§6.2) |
 | M6 reconcile units in the digest | `work_unit.origin` (§3.2) |
-| M7 checks over-fingerprint units | check owners only (§3) |
+| M7 checks over-fingerprint units | check owners only (§3)  *(superseded by E9 in rev 4)* |
 | M8 table does not match handlers | corrected table, signals owned by step, classify clearing, `ctx.inputs` (§3, §6.1)  *(superseded by E9 in rev 4)* |
 | M9 backup incomplete | `VACUUM INTO` (§7.1) |
 | M10 several shapes per version | known shapes and fixtures (§7.4, §7.5) |
