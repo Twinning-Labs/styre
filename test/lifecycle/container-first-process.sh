@@ -64,8 +64,10 @@ ENTRYPOINT ["/usr/local/bin/styre", "setup", "/repo", "--config", "/config.json"
 DOCKERFILE
 
 docker build -q -t "$tag" "$ctx" >/dev/null
-# --init=false: no init process, whatever the daemon's default, so styre is pid 1.
-docker run -d --init=false --name "$name" "$tag" >/dev/null
+# --init=false: no init process, whatever the daemon's default, so styre is pid 1. --ulimit core=0:
+# a crash stores no core file (on a host whose core_pattern is a pipe, such as apport, it would be
+# kept on the host).
+docker run -d --init=false --ulimit core=0 --name "$name" "$tag" >/dev/null
 
 first="$(docker exec "$name" cat /proc/1/cmdline | tr '\0' ' ')"
 case "$first" in

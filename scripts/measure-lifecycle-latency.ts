@@ -3,7 +3,8 @@
 // dispatch runs a stand-in CLI script that answers at once.
 //
 // Usage: bun run scripts/measure-lifecycle-latency.ts [--rounds <n>] [--dispatches <n>]
-//   (defaults: 5 rounds of 50 dispatches for each side). Takes about a minute on a laptop.
+//   (defaults: 5 rounds of 50 dispatches for each side; at least 2 rounds, since the noise is the
+//   spread between rounds). Takes about a minute on a laptop.
 //
 // What it measures:
 //   1. Normal dispatches, before and after: `runAgentDispatch` on a temporary repository, through
@@ -31,7 +32,10 @@
 // Safety: every process it starts gets XDG_STATE_HOME and TMPDIR under the script's temporary
 // folder, so the real ~/.local/state/styre-processes is never touched and every temporary file lands
 // in that folder, which is removed at the end: after a failure too, and on SIGINT, SIGTERM or SIGHUP
-// (a SIGKILL leaves it in $TMPDIR as styre-latency-*). It fails loudly (exit 1) if the baseline
+// (a SIGKILL leaves it in $TMPDIR as styre-latency-*). A Ctrl-C in the terminal reaches the
+// running worker too, so both end at once; a `kill -TERM` of this script alone is handled only once
+// the running worker has ended (each worker is waited for synchronously, up to its own time limit of
+// several minutes), and the cleanup runs then. It fails loudly (exit 1) if the baseline
 // branch is missing or already has the stop handlers. LATENCY_FAIL_AFTER_EXPORT=1 forces a failure
 // after the export, to check that cleanup.
 import {
@@ -305,6 +309,14 @@ function parseArgs(argv: string[]): { rounds: number; dispatches: number } {
       );
       process.exit(64);
     }
+  }
+  if (o.rounds < 2) {
+    // The noise is the spread of the round medians: one round has none, so any difference would
+    // read as "NOT WITHIN NOISE".
+    process.stderr.write(
+      "measure-lifecycle-latency: --rounds must be at least 2: the noise is the spread of the round medians, and one round has none\n",
+    );
+    process.exit(64);
   }
   return o;
 }
