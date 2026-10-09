@@ -16,20 +16,24 @@
 
 - Both schema copies stay byte-identical: `src/db/schema.sql` and `docs/architecture/schema.sql` (`cmp` them in every task that edits either).
 - New columns go last in their `CREATE TABLE`, after the last existing column and before any table constraint (`UNIQUE (...)`), in migration order, because `ALTER TABLE ADD COLUMN` appends.
-- No coined hyphenated compound words in prose, identifiers, messages or docs; write the words out ("starting commit", not a hyphenated coinage). Existing names (`step_key`, `--accept-head`) stay as they are.
+- No coined hyphenated compound words in prose, messages or docs; write the words out ("starting commit", not a hyphenated coinage). Existing names (`step_key`, `--accept-head`) stay as they are. Machine identifiers (event reasons such as `inputs-changed`, cause values such as `manifest-touched`, crash point names such as `before-commit`, shape ids such as `v7-signal-budget`) follow the codebase's existing kebab case convention for such names (`leftover-check`, `step-replay-no-progress`); they always appear in backticks, and prose never uses them as words.
 - Commit messages are Conventional Commits (`type(eng-477): subject`), and end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - Never commit to `main`. Work stays on `feat/eng-477-design-input-invalidation`. Never push in this plan.
 - Fail fast and loud: an invariant violation throws with the step, rule or file named; nothing is skipped silently.
 - Exit codes: `70` (`EX_SOFTWARE`) for a design table that breaks a rule of spec §3.1 and for a migration that fails; `75` (`EX_TEMPFAIL`) for the resume pause when a required suite's tools are missing (`needs_you`); `65` for a refused checkpoint (newer, unknown shape, older than v7). `--resume` never exits `69`.
 - Backups use `VACUUM INTO '<db file>.v<old version>.<UTC timestamp with milliseconds>.bak'`, written next to the database before the first migration; a failed backup stops the upgrade. Never a file copy.
 - Canonical encoding (spec §5.1): JSON with object keys sorted, every string (keys included) normalised to Unicode NFC, `undefined` object members dropped, no database ids and no timestamps in any digest, lists in their meaningful order (work units by `seq`, sets sorted), scheme version `FINGERPRINT_SCHEME = 1`.
-- No faked state in tests: new tests reach states only through real steps (`advanceOneStep` with `FakeAgentRunner`, `runImpl`, `resumeRun`) and public functions. No new test writes `workflow_step` rows directly. Fixture relocation (pointing a restored recording at its new temporary repository) is the one stated exception, in Task 12.
+- No faked state in tests: new tests reach states only through real steps (`advanceOneStep` with `FakeAgentRunner`, `runImpl`, `resumeRun`) and public functions. No new test writes `workflow_step` rows directly. The stated exceptions, each because no real step can produce the state:
+  - Task 12: fixture relocation (pointing a restored recording at its new temporary repository).
+  - Task 2: the structural probes. The CHECK probes (`SEED_ROWS_V8`/`V9`, `probeChecks`) insert valid rows inside a savepoint and roll them back; the foreign key test inserts an orphan `workflow_step` row with foreign keys off, because a real step can never write one.
+  - Task 13, `a succeeded design step with no manifest is refused loudly`: it calls the journal's public `runStep` for `provision` without the advance path. A succeeded design step without a manifest comes only from an older Styre, which an in process test cannot drive; Task 12's D9 test covers the real path through a recorded v8 run.
+  - Task 14 Step 6, `review-verdict.test.ts` `redesign loopback gives the design steps their attempt budget back (STYRE-7)`: an existing unit test of `applyReviewVerdict` whose whole file builds its state with repository calls; the rewrite changes which step it seeds (`design:dispatch` with two attempts), and a scripted agent cannot make a real `design:dispatch` fail twice and then succeed.
 - Operator test safety rules, in every step that runs tests:
   - put a time limit on every `bun test` as `perl -e 'alarm 600; exec @ARGV' bun test <file>`;
   - never `pkill` or `killall`; a test stops only the child it started, by its own pid;
   - never write to the real `~/.local/state`: every test and script sets `XDG_STATE_HOME` (the test preload already does; scripts and child processes get it explicitly);
   - no real `claude`: agents are `FakeAgentRunner`; the agent CLI preflight is injected as `() => ({ ok: true, version: null })`.
-- New stderr messages start with `run: `, `resume: ` or `migrate: `, never `styre: ` (the `styre: ` messages are pinned by `test/lifecycle/messages-doc.test.ts`).
+- New stderr messages start with `run: `, `resume: ` or `migrate: `, never `styre: ` (the `styre: ` messages are pinned by `test/lifecycle/messages-doc.test.ts`). One exemption: `styre migrate`'s closing summary line keeps its existing `<verb>: <path> (schema v<N>)` shape (`bootstrapped: ...`, `already current: ...`), and Task 2's new `upgraded from v<old>: <db> (schema v<new>)` is another verb of that same line.
 - Checks steps (`checks:dispatch`, `checks:classify`) are outside the table and keep today's rules (E9). No code in this plan changes their gating, feedback or identity rules.
 
 ## Review Focus
@@ -666,7 +670,7 @@ git commit -m "test(eng-477): historical database fixtures from each release's o
   - `interface Migration { version: number; note: string; up(db: Database): void }`
   - `rebuildTable(db: Database, spec: { table: string; createSql: string; columns: readonly string[]; indexes: readonly string[] }): void`
   - `MIGRATIONS: readonly Migration[]`, `CURRENT_VERSION: number`, `OLDEST_MIGRATABLE_VERSION = 7`
-  - `RUN_TABLE_V8_DDL: string`, `migration0008: Migration`
+  - `RUN_TABLE_V8_DDL: string`, `SIGNAL_V8_DDL: string`, `SIGNAL_V8_COLUMNS: readonly string[]`, `SIGNAL_V8_INDEXES: readonly string[]`, `migration0008: Migration`
   - `stripSqlComments(sql: string): string`, `normalizeSql(sql: string): string`, `describeSchema(db: Database): SchemaShape`, `diffShapes(expected: SchemaShape, actual: SchemaShape): string[]`
   - `type KnownShape = "v7-signal-budget" | "v7-signal-budget+run" | "v7" | "v7+run" | "v8"`, `detectShape(db: Database, version: number): KnownShape | null`
   - `migrate(path: string, opts?: MigrateOptions): MigrateResult` with `MigrateOptions = { log?: (line: string) => void; now?: () => Date; migrations?: readonly Migration[] }` and `MigrateResult = { version: number; created: boolean; migratedFrom: number | null; backupPath: string | null }`
@@ -867,7 +871,12 @@ import { EXIT, StyreError } from "../../src/cli/errors.ts";
 import { openDb } from "../../src/db/client.ts";
 import { migrate } from "../../src/db/migrate.ts";
 import { CURRENT_VERSION, MIGRATIONS } from "../../src/db/migrations/index.ts";
-import { migration0008 } from "../../src/db/migrations/0008-run-table.ts";
+import {
+  SIGNAL_V8_COLUMNS,
+  SIGNAL_V8_DDL,
+  SIGNAL_V8_INDEXES,
+  migration0008,
+} from "../../src/db/migrations/0008-run-table.ts";
 import { rebuildTable } from "../../src/db/migrations/rebuild.ts";
 import { describeSchema, diffShapes } from "../../src/db/schema-shape.ts";
 import { CHECK_PROBES_V8, SEED_ROWS_V8, probeChecks } from "../helpers/check-probes.ts";
@@ -1055,26 +1064,12 @@ describe("how migrations run", () => {
       const before = db.query("SELECT * FROM signal ORDER BY id").all();
       db.exec("PRAGMA foreign_keys = OFF;");
       db.transaction(() => {
+        // The same definition the v7 -> v8 migration rebuilds with, imported rather than repeated.
         rebuildTable(db, {
           table: "signal",
-          createSql: `CREATE TABLE signal (
-    id              INTEGER PRIMARY KEY,
-    ticket_id       INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
-    signal_type     TEXT    NOT NULL,
-    status          TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN (
-                        'pending','delivered','consumed')),
-    reason          TEXT,
-    payload_json    TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
-    idempotency_key TEXT,
-    requested_at    TEXT NOT NULL,
-    delivered_at    TEXT,
-    consumed_at     TEXT
-)`,
-          columns: ["id", "ticket_id", "signal_type", "status", "reason", "payload_json", "idempotency_key", "requested_at", "delivered_at", "consumed_at"],
-          indexes: [
-            "CREATE UNIQUE INDEX idx_signal_idempotency ON signal (idempotency_key) WHERE idempotency_key IS NOT NULL",
-            "CREATE INDEX idx_signal_pending ON signal (ticket_id, status)",
-          ],
+          createSql: SIGNAL_V8_DDL,
+          columns: SIGNAL_V8_COLUMNS,
+          indexes: SIGNAL_V8_INDEXES,
         });
         expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
       })();
@@ -1098,7 +1093,7 @@ describe("how migrations run", () => {
 - [ ] **Step 3: Run them and see them fail**
 
 Run: `perl -e 'alarm 600; exec @ARGV' bun test test/db/schema-shape.test.ts test/db/migrate-upgrade.test.ts`
-Expected: FAIL with `Cannot find module '../../src/db/schema-shape.ts'`.
+Expected: FAIL: `schema-shape.test.ts` with `Cannot find module '../../src/db/schema-shape.ts'`, and `migrate-upgrade.test.ts` with `Cannot find module '../../src/db/migrations/index.ts'` (its first missing import).
 
 - [ ] **Step 4: Write the structural description**
 
@@ -1330,7 +1325,9 @@ export const RUN_TABLE_V8_DDL = `CREATE TABLE run (
     attempt     INTEGER NOT NULL DEFAULT 1
 )`;
 
-const SIGNAL_V8_DDL = `CREATE TABLE signal (
+/** `signal` exactly as schema.sql v8 declares it, without the v0.8.0 to v0.9.0 wait budget columns.
+ *  Exported for the rebuild helper's test. */
+export const SIGNAL_V8_DDL = `CREATE TABLE signal (
     id              INTEGER PRIMARY KEY,
     ticket_id       INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
     signal_type     TEXT    NOT NULL,
@@ -1343,14 +1340,14 @@ const SIGNAL_V8_DDL = `CREATE TABLE signal (
     delivered_at    TEXT,
     consumed_at     TEXT
 )`;
-const SIGNAL_V8_COLUMNS = [
+export const SIGNAL_V8_COLUMNS: readonly string[] = [
   "id", "ticket_id", "signal_type", "status", "reason", "payload_json",
   "idempotency_key", "requested_at", "delivered_at", "consumed_at",
-] as const;
-const SIGNAL_V8_INDEXES = [
+];
+export const SIGNAL_V8_INDEXES: readonly string[] = [
   "CREATE UNIQUE INDEX idx_signal_idempotency ON signal (idempotency_key) WHERE idempotency_key IS NOT NULL",
   "CREATE INDEX idx_signal_pending ON signal (ticket_id, status)",
-] as const;
+];
 
 function columns(db: Database, table: string): string[] {
   return db
@@ -2268,8 +2265,10 @@ test("keys that look like integers are sorted as strings, not in JavaScript's ow
 });
 
 test("strings and keys are normalised to NFC", () => {
-  const composed = "café";
-  const decomposed = "café";
+  // Escapes, so no editor or copy can normalise the two spellings into one.
+  const composed = "caf\u00e9";
+  const decomposed = "cafe\u0301";
+  expect(composed).not.toBe(decomposed);
   expect(canonicalJson({ [decomposed]: decomposed })).toBe(canonicalJson({ [composed]: composed }));
 });
 
@@ -2446,7 +2445,7 @@ test("rule 3 refuses a step that reads what a later step produces", () => {
   expect(checkDesignTable(bad).join("\n")).toMatch(/rule 3: design:extract reads track, produced later by design:size/);
 });
 
-test("rule 4 refuses a routing that does not cover the steps exactly once, in table order", () => {
+test("rule 4 refuses a step listed twice; the routing is the step rows in table order", () => {
   const dup = [...DESIGN_TABLE, steps(DESIGN_TABLE)[1]];
   expect(checkDesignTable(dup).join("\n")).toMatch(/rule 4: design:dispatch appears twice/);
   expect(designRouting(DESIGN_TABLE)).toEqual([
@@ -2686,15 +2685,13 @@ export function checkDesignTable(table: readonly DesignRow[]): string[] {
   for (const g of table.filter((r): r is GateRow => r.kind === "gate")) {
     for (const n of g.reads) if (!producer.has(n)) out.push(`rule 1: gate ${g.name} reads ${n}, which no step produces`);
   }
+  // Rule 4: the routing is `designRouting(table)`, the step rows in table order, so order holds by
+  // construction (spec §3.1); what can still go wrong is a step listed twice.
   const seen = new Set<string>();
   for (const r of stepRows) {
     if (seen.has(r.stepKey)) out.push(`rule 4: ${r.stepKey} appears twice in the routing`);
     seen.add(r.stepKey);
   }
-  const routed = designRouting(table);
-  const ordered = stepRows.map((r) => r.stepKey);
-  if (JSON.stringify(routed) !== JSON.stringify(ordered))
-    out.push(`rule 4: the routing ${routed.join(", ")} is not the table order ${ordered.join(", ")}`);
   return out;
 }
 
@@ -2754,7 +2751,7 @@ git commit -m "feat(eng-477): the declared design table and its four rules" -m "
 - Create: `src/db/repos/ticket-input.ts`, `src/daemon/design-inputs.ts`
 - Create: `test/helpers/design-script.ts`, `test/helpers/design-steps.ts`, `test/helpers/design-harness.ts`
 - Modify: `src/daemon/run-ticket.ts:214-252` (`runTicket` takes `inputs` and captures the snapshot)
-- Modify: `src/cli/run.ts:338,441-477` (`RunDeps.probe`, in-place starting commit, `inputs`, `recordStartingCommit`), `src/cli/run.ts:149-160` (`RunDeps`)
+- Modify: `src/cli/run.ts:338,441-477` (`RunDeps.probe`, in-place starting commit, `inputs`, `recordStartingCommit`), `src/cli/run.ts:166` (`RunDeps`)
 - Modify: `src/dispatch/handlers.ts:175-196` (`RegistryDeps.recordStartingCommit`), `src/dispatch/handlers.ts:1341-1343` (provision records the worktree starting commit)
 - Modify: `src/cli/park.ts:445-453` (snapshot after `recover()`), `src/cli/run.ts:292-297` (pass `probe` into `resumeDeps`)
 - Modify: `test/helpers/db.ts` (capture a default snapshot), `test/cli/run-e2e.test.ts:40-47,88-96`, `test/daemon/run-ticket.test.ts:467` (pass `inputs`)
@@ -2772,7 +2769,7 @@ git commit -m "feat(eng-477): the declared design table and its four rules" -m "
   - `recordStartingCommit(db, ticketId, sha: string): boolean`, `startingCommit(db, ticketId): string | null`
   - `snapshotDigest(db, ticketId, name: SnapshotInputName): string`, `snapshotValue(db, ticketId, name: SnapshotInputName): unknown`, `requireSnapshot(db, ticketId): void`
   - `runTicket(deps)` gains the required field `inputs: RunInputs`; `RunDeps.probe?: (repoDir: string, command: string) => boolean`; `RegistryDeps.recordStartingCommit?: boolean`
-  - test helpers: `ScriptStep`, `ScriptUnit`, `ScriptFinding`, `DesignScript`, `ScriptCalls`, `newCalls()`, `defaultScript(overrides)`, `unitsOf(n, { behavioral, dir?, ext?, titleSuffix? })`, `sidecar(value)`, `scriptedRunner(script, calls)`, `stepOfPrompt(prompt)`, `ABSENT_RC`, `harnessProfileRaw(repo, slug?)`; `gitRepo(prefix?)`, `git(cwd, args)`, `DesignTicket`, `makeDesignTicket(opts)`, `driveUntil(t, stop, maxSteps?)`, `atStep(key)`, `reachDesignStep(opts)`; `class DesignHarness` (constructor `(mode?: "worktree" | "in-place", opts?: { slug?: string; repoDir?: string })`) with `fresh(opts?)`, `resume(opts?)`, `editProfile(fn)`, `editConfig(fn)`, `read(fn)`, `readAt(path, fn)`, `dbPath()`, `checkpointDir()`, `probe`, `stderr`, `calls`, `cleanup()`
+  - test helpers: `ScriptStep`, `ScriptUnit`, `ScriptFinding`, `DesignScript`, `ScriptCalls`, `newCalls()`, `defaultScript(overrides)`, `unitsOf(n, { behavioral, dir?, ext?, titleSuffix? })`, `sidecar(value)`, `scriptedRunner(script, calls)`, `stepOfPrompt(prompt)`, `ABSENT_RC`, `harnessProfileRaw(repo, slug?)`; `gitRepo(prefix?)`, `git(cwd, args)`, `DesignTicket`, `makeDesignTicket(opts)`, `driveUntil(t, stop, maxSteps?)`, `atStep(key)`; `class DesignHarness` (constructor `(mode?: "worktree" | "in-place", opts?: { slug?: string; repoDir?: string })`) with `fresh(opts?)`, `resume(opts?)`, `editProfile(fn)`, `editConfig(fn)`, `read(fn)`, `readAt(path, fn)`, `dbPath()`, `checkpointDir()`, `probe`, `stderr`, `calls`, `cleanup()`
   - `TEST_PROFILE` exported from `test/helpers/db.ts`
 
 - [ ] **Step 1: Write the test helpers**
@@ -2906,6 +2903,17 @@ export function defaultScript(overrides: Partial<DesignScript> = {}): DesignScri
 export const sidecar = (value: unknown): string =>
   `Done.\n\n\`\`\`styre-sidecar\n${JSON.stringify(value)}\n\`\`\`\n`;
 
+/** Every CDOT section addressed and none applying, so extraction passes `validateCdotImpact` under
+ *  any runtime context, including a profile that leaves it at its default (`unknown` presence,
+ *  which requires an analysis). `documentation.applies` is false, so `needs_docs` stays 0. */
+export const ADDRESSED_CDOT = {
+  data: { applies: false, analysis: "not affected", schemaChange: false },
+  caching: { applies: false, analysis: "not affected" },
+  observability: { applies: false, analysis: "not affected" },
+  configSecrets: { applies: false, analysis: "not affected" },
+  documentation: { applies: false, analysis: "not affected" },
+};
+
 const ok = (stdout: string): AgentRunResult => ({
   completed: true,
   exitCode: 0,
@@ -2956,7 +2964,7 @@ export function scriptedRunner(script: DesignScript, calls: ScriptCalls): FakeAg
         return ok("Plan written.");
       }
       case "design:extract":
-        return ok(sidecar({ units: script.units(n), cdotImpact: {} }));
+        return ok(sidecar({ units: script.units(n), cdotImpact: ADDRESSED_CDOT }));
       case "design:size":
         return ok(
           sidecar({ dimensions: { coupling: 0, blast_radius: 0, difficulty: 0 }, overall: script.grade(n) }),
@@ -3023,7 +3031,6 @@ import { join } from "node:path";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { DEFAULT_RUNTIME_CONFIG, type RuntimeConfig } from "../../src/config/runtime-config.ts";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
-import type { DesignStepKey } from "../../src/daemon/design-graph.ts";
 import { captureSnapshot } from "../../src/daemon/design-inputs.ts";
 import { type StepDescriptor, nextStepKey } from "../../src/daemon/resolver.ts";
 import type { StepRegistry } from "../../src/daemon/step-registry.ts";
@@ -3031,19 +3038,17 @@ import { openDb } from "../../src/db/client.ts";
 import { migrate } from "../../src/db/migrate.ts";
 import { insertProject } from "../../src/db/repos/project.ts";
 import { insertRun } from "../../src/db/repos/run.ts";
-import { getTicket, insertTicket } from "../../src/db/repos/ticket.ts";
+import { insertTicket } from "../../src/db/repos/ticket.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { type Profile, parseProfile } from "../../src/dispatch/profile.ts";
 import { nowUtc } from "../../src/util/time.ts";
 import {
   type DesignScript,
   type ScriptCalls,
-  type ScriptUnit,
   defaultScript,
   harnessProfileRaw,
   newCalls,
   scriptedRunner,
-  unitsOf,
 } from "./design-script.ts";
 
 export function git(cwd: string, args: string[]): string {
@@ -3131,36 +3136,6 @@ export const atStep =
   (stepKey: string) =>
   (d: StepDescriptor): boolean =>
     d.kind === "step" && d.stepKey === stepKey;
-
-/** For the existing tests that used to seed rows: run the real design steps, with a scripted agent,
- *  until `target` is the next step. Uses the caller's profile and worktree root, so the caller's own
- *  registry then finds the same worktree. */
-export async function reachDesignStep(opts: {
-  db: Database;
-  ticketId: number;
-  profile: Profile;
-  worktreeRoot: string;
-  target: DesignStepKey;
-  units?: ScriptUnit[];
-  config?: RuntimeConfig;
-}): Promise<ScriptCalls> {
-  const ident = getTicket(opts.db, opts.ticketId)?.ident ?? "ENG-1";
-  const calls = newCalls();
-  const units = opts.units ?? unitsOf(2, { behavioral: false, dir: "src", ext: "ts" });
-  const script = defaultScript({ ident, units: () => units });
-  const registry = buildDispatchRegistry({
-    runner: scriptedRunner(script, calls),
-    agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: opts.profile,
-    worktreeRoot: opts.worktreeRoot,
-  });
-  await driveUntil(
-    { db: opts.db, ticketId: opts.ticketId, registry, config: opts.config ?? DEFAULT_RUNTIME_CONFIG },
-    atStep(opts.target),
-    20,
-  );
-  return calls;
-}
 ```
 
 ```ts
@@ -3855,10 +3830,9 @@ git commit -m "feat(eng-477): snapshot the design inputs in ticket_input and rec
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `test/cli/preflight.test.ts`:
+Append to `test/cli/preflight.test.ts` (it already imports `parseProfile`, line 18; add only the new `preflight.ts` names below, in a new import statement at the top):
 
 ```ts
-import { parseProfile } from "../../src/dispatch/profile.ts";
 import { resumePauseReason, toolchainDecision, toolchainNotice } from "../../src/cli/preflight.ts";
 
 const twoComponents = (required: boolean) =>
@@ -4186,11 +4160,13 @@ git commit -m "fix(eng-477): resume narrows the profile like a fresh run and pau
 - Modify: `src/dispatch/handlers.ts:526-541` (`design:dispatch` returns `planDigest`)
 - Modify: `src/daemon/advance.ts:173-226` (snapshot precondition; `onSucceed` = own rows, then manifest, then verdict)
 - Modify (mocks): `test/helpers/skeleton-registry.ts:19`, `test/daemon/advance.test.ts:37,100,325,354`, `test/daemon/advance-leftovers.test.ts:69,101,125,158,176,198,221,243`, `test/daemon/loop.test.ts:14` (each normally returning `design:dispatch` mock adds `planDigest: EMPTY_PLAN_DIGEST` to its result); `test/daemon/loop.test.ts` and `test/lifecycle/e2e-interrupt.test.ts` (capture a snapshot after their direct `insertTicket`)
+- Modify (tests that seed a succeeded `design:dispatch` without a plan digest and then run `design:extract` or `design:review`; from this task those steps record a manifest whose `plan` input needs the digest, so they move onto real steps here, spec §8): `test/helpers/design-steps.ts` (add `reachDesignStep`), `test/dispatch/design-extract.test.ts`, `test/dispatch/design-extract-retry-feedback.test.ts`, `test/dispatch/completeness-e2e.test.ts:348-370`, `test/dispatch/design-review-e2e.test.ts` (`readyForDesignReview` and Flow 4 at 273-279), `test/dispatch/design-review-handler.test.ts`, `test/daemon/advance.test.ts:241-289` (`design:review step with blocking plan finding`)
 - Test: `test/daemon/manifest-recording.test.ts`, `test/daemon/design-digests.test.ts`
 
 **Interfaces:**
-- Consumes: `DESIGN_TABLE`, `StepRow`, `stepRow`, `isSnapshotInput`, `ensureDesignTableChecked`, `InputContext` (Task 6); `snapshotDigest`, `snapshotValue`, `requireSnapshot`, `captureSnapshot` (Task 7); `digestValue`, `FINGERPRINT_SCHEME` (Task 5); `makeDesignTicket`, `driveUntil`, `atStep`, `git`, `gitRepo` (Task 7).
+- Consumes: `DESIGN_TABLE`, `StepRow`, `stepRow`, `isSnapshotInput`, `ensureDesignTableChecked`, `InputContext` (Task 6); `snapshotDigest`, `snapshotValue`, `requireSnapshot`, `captureSnapshot` (Task 7); `digestValue`, `FINGERPRINT_SCHEME` (Task 5); `makeDesignTicket`, `driveUntil`, `atStep`, `git`, `gitRepo`, `defaultScript`, `newCalls`, `scriptedRunner`, `unitsOf`, `ScriptUnit`, `ScriptCalls`, `ABSENT_RC`, `TEST_PROFILE` (Task 7).
 - Produces:
+  - test helper: `reachDesignStep(opts: { db: Database; ticketId: number; profile: Profile; worktreeRoot: string; target: string; units?: ScriptUnit[]; config?: RuntimeConfig; inPlace?: boolean }): Promise<ScriptCalls>` in `test/helpers/design-steps.ts` (first used here; Tasks 13 and later reference it)
   - `type StepCommit = (db: Database, ticketId: number, result: unknown) => void`; `StepRegistry.register(handlerKey, handler, opts?: { commit?: StepCommit })`; `StepRegistry.resolveCommit(handlerKey): StepCommit | undefined`
   - `RunStepParams.onSucceed?: (step: WorkflowStepRow, result: unknown) => void`
   - `recordManifest(db, id, m: { manifest: Record<string, string>; fingerprint: string; outputDigest: string | null; scheme: number }): void`
@@ -4664,18 +4640,153 @@ captureSnapshot(db, ticketId, {
 
 (importing `captureSnapshot` from `src/daemon/design-inputs.ts`, `TEST_PROFILE` from `test/helpers/db.ts`, `DEFAULT_RUNTIME_CONFIG` from `src/config/runtime-config.ts`; use that file's own variable names for `db` and `ticketId`).
 
-- [ ] **Step 7: Run the tests and see them pass**
+One difference in `test/lifecycle/e2e-interrupt.test.ts`: its `setUp` builds the run's own `profile` (the `parseProfile({...})` after `seed(...)`). Move that `const profile = parseProfile({...})` above `insertTicket`, and capture with `profile: profile` instead of `TEST_PROFILE`. Its design stage case (Task 13) resumes with that profile; a snapshot of another profile would read as an edit at resume and rerun design work under the parking runner.
 
-Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon test/engine test/dispatch/design-review-e2e.test.ts test/dispatch/design-extract.test.ts`
+- [ ] **Step 7: Move the tests that seed a digestless `design:dispatch` onto real steps**
+
+From this task `design:extract` and `design:review` record a manifest whose `plan` input is `design:dispatch`'s recorded digest, and `outputDigest("plan")` throws when a test marked `design:dispatch` succeeded by hand. Spec §8: nothing is set up by writing step rows directly. So these tests reach their step through the real design steps, here, with a helper defined in this task.
+
+Append to `test/helpers/design-steps.ts` (add `getTicket` to its `ticket.ts` import, and `type ScriptUnit` and `unitsOf` to its `./design-script.ts` import):
+
+```ts
+/** For the existing tests that used to seed rows (spec §8): run the real design steps, with a
+ *  scripted agent, until `target` is the next step. `target` is a design table step or
+ *  `checks:dispatch`, the first step after the table. Uses the caller's profile, worktree root and
+ *  mode (`inPlace`), so the caller's own registry then finds the same worktree or checkout. `units`
+ *  is what the scripted `design:extract` returns. */
+export async function reachDesignStep(opts: {
+  db: Database;
+  ticketId: number;
+  profile: Profile;
+  worktreeRoot: string;
+  target: string;
+  units?: ScriptUnit[];
+  config?: RuntimeConfig;
+  inPlace?: boolean;
+}): Promise<ScriptCalls> {
+  const ident = getTicket(opts.db, opts.ticketId)?.ident ?? "ENG-1";
+  const calls = newCalls();
+  const units = opts.units ?? unitsOf(2, { behavioral: false, dir: "src", ext: "ts" });
+  const script = defaultScript({ ident, units: () => units });
+  const registry = buildDispatchRegistry({
+    runner: scriptedRunner(script, calls),
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: opts.profile,
+    worktreeRoot: opts.worktreeRoot,
+    inPlace: opts.inPlace ?? false,
+  });
+  await driveUntil(
+    { db: opts.db, ticketId: opts.ticketId, registry, config: opts.config ?? DEFAULT_RUNTIME_CONFIG },
+    atStep(opts.target),
+    20,
+  );
+  return calls;
+}
+```
+
+Everything it calls exists by now: `makeTestDb`'s snapshot and `defaultScript`/`scriptedRunner`/`unitsOf`/`ADDRESSED_CDOT` (Task 7), the manifest recording and the plan digest (this task). The scripted extract answers with every CDOT section addressed, so it passes `validateCdotImpact` under a profile whose runtime context is left at its default.
+
+The design handler tests: in each of `test/dispatch/design-extract.test.ts`, `design-extract-retry-feedback.test.ts`, `completeness-e2e.test.ts`, `design-review-e2e.test.ts` and `design-review-handler.test.ts`:
+1. Split the file's `registryFor(repo, runner, ...extra)`: move its `parseProfile({...})` argument, unchanged, into `function profileFor(repo: string, ...extra)` with the same extra parameters, and make `registryFor` call `profileFor(repo, ...extra)`.
+2. Give each repository one worktree root, shared by the seeder and the test's registry:
+
+```ts
+const roots = new Map<string, string>();
+function rootFor(repo: string): string {
+  let root = roots.get(repo);
+  if (root === undefined) {
+    root = mkdtempSync(join(tmpdir(), "styre-wtroot-"));
+    roots.set(repo, root);
+  }
+  return root;
+}
+```
+
+and in `registryFor` use `worktreeRoot: rootFor(repo)`.
+3. Replace the seeder with real steps (import `reachDesignStep` from `../helpers/design-steps.ts`, and `unitsOf` and `type ScriptUnit` from `../helpers/design-script.ts` where used):
+
+```ts
+async function readyForExtract(db: ReturnType<typeof makeTestDb>["db"], ticketId: number, repo: string): Promise<void> {
+  await reachDesignStep({ db, ticketId, profile: profileFor(repo), worktreeRoot: rootFor(repo), target: "design:extract" });
+}
+```
+
+`readyForDesignReview` keeps the units the file seeded (the scripted extract writes them; a planned unit names at least one file, so each gets one):
+
+```ts
+// design-review-e2e.test.ts: the two backend units it seeded, neither behavioural
+const REVIEW_UNITS: ScriptUnit[] = unitsOf(2, { behavioral: false, dir: "src", ext: "ts" }).map((u) => ({
+  ...u,
+  verify_check_types: ["test"],
+}));
+// design-review-handler.test.ts: the same first unit, and its docs unit as seeded
+const REVIEW_UNITS: ScriptUnit[] = [
+  { ...unitsOf(1, { behavioral: false, dir: "src", ext: "ts" })[0], verify_check_types: ["test"] },
+  {
+    seq: 2,
+    kind: "docs",
+    title: "Release note (plan Task 3)",
+    description: "Document enum serialization",
+    behavioral: false,
+    test_plan: null,
+    files_to_touch: ["docs/releases/3.0.txt"],
+    verify_check_types: ["test"],
+    depends_on: [],
+  },
+];
+
+async function readyForDesignReview(db: ReturnType<typeof makeTestDb>["db"], ticketId: number, repo: string): Promise<void> {
+  await reachDesignStep({
+    db,
+    ticketId,
+    profile: profileFor(repo),
+    worktreeRoot: rootFor(repo),
+    target: "design:review",
+    units: REVIEW_UNITS,
+  });
+}
+```
+
+(`readyForDesignReview` no longer calls `setTicketTrack`: two units size to `full`.)
+4. At every call site, `readyForX(db, ticketId);` becomes `await readyForX(db, ticketId, repo);`. In the `design-extract.test.ts` cases that pass `rc` or `pattern` to `registryFor`, pass the same values to `profileFor` inside `readyForExtract` by adding the same optional parameters to it and at those call sites.
+5. `design-review-e2e.test.ts` Flow 4 (`fast-track ticket ... WITHOUT ever creating design:review step`, lines 273-279): replace the hand seeded `design:dispatch` row with `await readyForExtract(db, ticketId, repo);` (add `readyForExtract`, as above, to that file). Its runner's first call is then `design:extract`, as its comments expect; provision has already run.
+6. Remove the imports these changes leave unused (`insertPending`, `setTicketTrack`, `insertWorkUnit`, `getByKey`, wherever no other use remains): `tsconfig.json` sets `noUnusedLocals`.
+
+`test/daemon/advance.test.ts`, `design:review step with blocking plan finding → outcome loopback and stage design`: replace its seeding (`seedProvisionDone`, `setTicketStage`, `setTicketTrack`, the `design:dispatch` row, the work unit) with
+
+```ts
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  const profile = parseProfile({
+    slug: "test-project",
+    targetRepo: repo,
+    components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
+    runtimeContext: ABSENT_RC,
+  });
+  await reachDesignStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-adv-wt-")),
+    target: "design:review",
+  });
+```
+
+(destructure `projectId` from `makeTestDb()`, and import `gitRepo`, `reachDesignStep` from `../helpers/design-steps.ts`, `ABSENT_RC` from `../helpers/design-script.ts`, `parseProfile`, `mkdtempSync`, `tmpdir`, `join`. The file's other imports keep other users at this point.)
+
+- [ ] **Step 8: Run the tests and see them pass**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon test/engine test/dispatch/design-extract.test.ts test/dispatch/design-extract-retry-feedback.test.ts test/dispatch/completeness-e2e.test.ts test/dispatch/design-review-e2e.test.ts test/dispatch/design-review-handler.test.ts`
 Expected: PASS.
 
-- [ ] **Step 8: Break it on purpose, see it fail, restore**
+- [ ] **Step 9: Break it on purpose, see it fail, restore**
 
 1. Add `status: u.status,` to the mapped unit in `digestWorkUnits`: the units digest test fails. Restore.
 2. Remove the `if (row) { recordStepManifest(...) }` block from `onSucceed`: the manifest recording tests fail. Restore.
 3. Remove `requireSnapshot(db, ticketId);`: the "does not run without a snapshot" test fails (the handler runs, then the step fails inside its transaction and is retried instead of stopping the run). Restore.
+4. In `test/dispatch/design-extract.test.ts`, put back the old `readyForExtract` body (a `design:dispatch` row marked succeeded by hand): its tests fail, because `design:extract`'s success transaction throws `the plan has no recorded digest` and the step is marked failed. Restore.
 
-- [ ] **Step 9: Run the whole suite, then commit**
+- [ ] **Step 10: Run the whole suite, then commit**
 
 Run: `perl -e 'alarm 600; exec @ARGV' bun test`
 Expected: PASS.
@@ -4998,7 +5109,9 @@ export interface InvalidateReason {
  *  a loopback, so v_rejection_counts and REVIEW_REPAIR_LIMIT do not count it); for each step, its
  *  row copied to workflow_step_history with that event's id, then reset to a fresh round in the
  *  next generation; then its outputs cleared (§6.1). Returns the event id and each step's new
- *  generation. The only path that resets a design table step. */
+ *  generation. The one function that invalidates a design table step. (recover() and the failure
+ *  policy still return a running or failed step to pending; that is a retry of the same round, not
+ *  an invalidation, and such a step holds no manifest.) */
 export function invalidateSteps(
   db: Database,
   ticketId: number,
@@ -5584,7 +5697,7 @@ Expected: PASS.
 
 - [ ] **Step 6: Break it on purpose, see it fail, restore**
 
-Comment out the `adoptUnfingerprinted(...)` call in `park.ts`. The D9 test still completes today (the resolver does not compare manifests until Task 13) but fails on `adopted.length` and on `fingerprint_scheme`. Restore. (Task 13 adds the stronger failure: without adoption the walk refuses the run.)
+Comment out the `adoptUnfingerprinted(...)` call in `park.ts`. The D9 test still completes but fails on `adopted.length` and on `fingerprint_scheme`. Restore. (The recorded run is paused in `implement`, where the walk does not run, so this stays the failure after Task 13 too.)
 
 - [ ] **Step 7: Run the whole suite, then commit**
 
@@ -5603,18 +5716,17 @@ git commit -m "feat(eng-477): adopt design steps finished under an older Styre o
 **Files:**
 - Create: `src/daemon/design-walk.ts`
 - Modify: `src/daemon/resolver.ts:1-10,99-135` (design case delegates to the walk; `requiredPlanFindings` import moves to the walk)
-- Modify (existing tests that seeded design rows directly; each now reaches its state through real steps):
+- Modify (existing tests that seeded design rows directly and break once the walk refuses a succeeded design step without a manifest; each now reaches its state through real steps. The tests that already broke at Task 9 moved there):
   - `test/daemon/resolver.test.ts:21-106` (the six design tests replaced, code below)
-  - `test/dispatch/design-extract.test.ts`, `test/dispatch/design-extract-retry-feedback.test.ts`, `test/dispatch/completeness-e2e.test.ts:365-370` (`readyForExtract`)
   - `test/dispatch/design-size.test.ts`, `test/dispatch/design-size-e2e.test.ts` (`readyForSize`)
-  - `test/dispatch/design-review-e2e.test.ts`, `test/dispatch/design-review-handler.test.ts` (`readyForDesignReview`)
-  - `test/daemon/advance.test.ts:24-30,95-130,241-290`, `test/daemon/advance-leftovers.test.ts:30-33` (`seedProvisionDone`), `test/helpers/skeleton-registry.ts:20-30`
+  - `test/daemon/advance.test.ts:24-30,94-132`, `test/daemon/advance-leftovers.test.ts:11,30-33` (`seedProvisionDone`), `test/helpers/skeleton-registry.ts:20-30`
   - `test/daemon/review-resume.test.ts:179-183`
+  - `test/helpers/design-steps.ts` (add `reachChecksStep`), and the checks tests that marked design done by hand: `test/dispatch/checks-handler.test.ts` (`markDesignDone`, 15 call sites), `test/dispatch/checks-reauthor-e2e.test.ts:43-51,142-150,242-250`, `test/dispatch/scope-disposition-smoke.test.ts:129-136,148-157,174-196,378-386`, `test/lifecycle/e2e-interrupt.test.ts:1016-1060` (`interruptChecksTestRun`)
 - Test: `test/daemon/design-walk.test.ts`, `test/cli/walk-resume-e2e.test.ts`
 
 **Interfaces:**
-- Consumes: `DESIGN_TABLE`, `GateRow`, `ensureDesignTableChecked` (Task 6); `currentManifest`, `changedInputs` (Task 9); `FINGERPRINT_SCHEME` (Task 5); `invalidate` descriptor and its interpreter (Task 10); `captureSnapshot` (Task 7); `makeDesignTicket`, `driveUntil`, `atStep`, `reachDesignStep`, `DesignHarness` (Task 7).
-- Produces: `walkDesign(db: Database, ticket: TicketRow): StepDescriptor | null` (null: past the table's last row).
+- Consumes: `DESIGN_TABLE`, `GateRow`, `ensureDesignTableChecked` (Task 6); `currentManifest`, `changedInputs` (Task 9); `FINGERPRINT_SCHEME` (Task 5); `invalidate` descriptor and its interpreter (Task 10); `captureSnapshot` (Task 7); `makeDesignTicket`, `driveUntil`, `atStep`, `DesignHarness`, `unitsOf`, `ScriptUnit` (Task 7); `reachDesignStep` (Task 9, with its `profileFor`/`rootFor` test pattern).
+- Produces: `walkDesign(db: Database, ticket: TicketRow): StepDescriptor | null` (null: past the table's last row); test helper `reachChecksStep(opts: { db: Database; ticketId: number; profile: Profile; worktreeRoot: string; inPlace?: boolean; unit: { kind: string; behavioral: boolean; verifyCheckTypes: string[]; filesToTouch?: string[]; testFile?: string } }): Promise<void>` in `test/helpers/design-steps.ts`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5887,85 +5999,130 @@ async function seedProvisionDone(db: Parameters<typeof advanceOneStep>[0], ticke
 }
 ```
 
-and `await` every call. In `advance.test.ts`'s `an advance descriptor sets the stage and writes a transition event`, register `design:size` (`(ctx) => { setTicketTrack(ctx.db, ctx.ticket.id, "fast"); return { track: "fast", graded: false }; }`), delete the manual `setTicketTrack(db, ticketId, "fast");`, and replace the six explicit `advanceOneStep` calls before the final one with `while (getTicket(db, ticketId)?.stage === "design") await advanceOneStep(db, ticketId, registry);` followed by `const outcome = await advanceOneStep(db, ticketId, registry);` (the stage transition collapses inline in the last design call, so assert `outcome` against `implement:wu1:dispatch` from the first call made while the stage is `implement`: keep the existing `expect(outcome).toEqual({ kind: "stepped", stepKey: "implement:wu1:dispatch" })`). In `design:review step with blocking plan finding → outcome loopback and stage design`, replace the seeding (`seedProvisionDone`, `setTicketStage`, `setTicketTrack`, the `design:dispatch` row, the work unit) with:
+and `await` every call. Then remove the imports this leaves unused (`tsconfig.json` sets `noUnusedLocals`): `markSucceeded` in `advance.test.ts`; `insertPending` and `markSucceeded` in `advance-leftovers.test.ts`.
+
+In `advance.test.ts`'s `an advance descriptor sets the stage and writes a transition event`, register `design:size` (`(ctx) => { setTicketTrack(ctx.db, ctx.ticket.id, "fast"); return { track: "fast", graded: false }; }`), delete the manual `setTicketTrack(db, ticketId, "fast");`, and replace the five `advanceOneStep` calls before the final one with a loop on the descriptor, not on the stage:
 
 ```ts
-  const repo = gitRepo();
-  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
-  const profile = parseProfile({
-    slug: "test-project",
-    targetRepo: repo,
-    components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
-    runtimeContext: ABSENT_RC,
-  });
-  await reachDesignStep({
-    db,
-    ticketId,
-    profile,
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-adv-wt-")),
-    target: "design:review",
-  });
+  // provision, design:dispatch, design:extract, design:size, checks:dispatch, checks:classify. Stop
+  // when the next descriptor is the advance: the call after it collapses the advance inline and
+  // runs implement:wu1:dispatch.
+  while (nextStepKey(db, ticketId).kind !== "advance") await advanceOneStep(db, ticketId, registry);
+  const outcome = await advanceOneStep(db, ticketId, registry);
 ```
 
-(destructure `projectId` from `makeTestDb()`, and import `gitRepo`, `reachDesignStep` from `../helpers/design-steps.ts`, `ABSENT_RC` from `../helpers/design-script.ts`, `parseProfile`, `mkdtempSync`, `tmpdir`, `join`.)
+and keep `expect(outcome).toEqual({ kind: "stepped", stepKey: "implement:wu1:dispatch" })` (import `nextStepKey` from `../../src/daemon/resolver.ts`). A loop on `stage === "design"` would be wrong: the call that collapses the advance starts while the stage is still `design`, so it runs inside such a loop and the final call would run the step after `implement:wu1:dispatch`.
 
-The design handler tests: in each of `design-extract.test.ts`, `design-extract-retry-feedback.test.ts`, `completeness-e2e.test.ts`, `design-size.test.ts`, `design-size-e2e.test.ts`, `design-review-e2e.test.ts`, `design-review-handler.test.ts`:
-1. Split the file's `registryFor(repo, runner, ...extra)`: move its `parseProfile({...})` argument, unchanged, into `function profileFor(repo: string, ...extra)` with the same extra parameters, and make `registryFor` call `profileFor(repo, ...extra)`.
-2. Give each repository one worktree root, shared by the seeder and the test's registry:
+`test/dispatch/design-size.test.ts` and `test/dispatch/design-size-e2e.test.ts`: apply Task 9 Step 7's pattern (items 1, 2, 4 and 6: `profileFor`, `rootFor`, `await` at the call sites, unused imports), with this seeder, which keeps the units they seeded (`backend` units that are not behavioural, with `verify_check_types: ["test"]`); `design-size-e2e`'s hand marked `design:extract` row goes with it:
 
 ```ts
-const roots = new Map<string, string>();
-function rootFor(repo: string): string {
-  let root = roots.get(repo);
-  if (root === undefined) {
-    root = mkdtempSync(join(tmpdir(), "styre-wtroot-"));
-    roots.set(repo, root);
-  }
-  return root;
-}
-```
-
-and in `registryFor` use `worktreeRoot: rootFor(repo)`.
-3. Replace the seeder body with real steps (import `reachDesignStep` from `../helpers/design-steps.ts` and `unitsOf` from `../helpers/design-script.ts`):
-
-```ts
-async function readyForExtract(db: Database, ticketId: number, repo: string): Promise<void> {
-  await reachDesignStep({ db, ticketId, profile: profileFor(repo), worktreeRoot: rootFor(repo), target: "design:extract" });
-}
-```
-
-```ts
-async function readyForSize(db: Database, ticketId: number, repo: string, unitCount: number): Promise<void> {
+async function readyForSize(
+  db: ReturnType<typeof makeTestDb>["db"],
+  ticketId: number,
+  repo: string,
+  unitCount: number,
+): Promise<void> {
   await reachDesignStep({
     db,
     ticketId,
     profile: profileFor(repo),
     worktreeRoot: rootFor(repo),
     target: "design:size",
-    units: unitsOf(unitCount, { behavioral: false, dir: "src", ext: "ts" }),
+    units: unitsOf(unitCount, { behavioral: false, dir: "src", ext: "ts" }).map((u) => ({
+      ...u,
+      verify_check_types: ["test"],
+    })),
   });
 }
 ```
 
+The checks tests that marked design done by hand. Append to `test/helpers/design-steps.ts` (add `basename`, `dirname` to its `node:path` import):
+
 ```ts
-async function readyForDesignReview(db: Database, ticketId: number, repo: string): Promise<void> {
-  await reachDesignStep({ db, ticketId, profile: profileFor(repo), worktreeRoot: rootFor(repo), target: "design:review" });
+/** For the checks tests that used to mark design done by hand (spec §8): run the real design
+ *  steps until `checks:dispatch` is next, with the one planned unit those tests seeded. Provision
+ *  runs here (creating the worktree), so the caller's first step is `checks:dispatch`. A behavioural
+ *  unit carries its own test file (validateExtraction requires it): `testFile`, or a `tests/` file
+ *  beside the unit's first file, which the default test file pattern matches. */
+export async function reachChecksStep(opts: {
+  db: Database;
+  ticketId: number;
+  profile: Profile;
+  worktreeRoot: string;
+  inPlace?: boolean;
+  unit: {
+    kind: string;
+    behavioral: boolean;
+    verifyCheckTypes: string[];
+    filesToTouch?: string[];
+    testFile?: string;
+  };
+}): Promise<void> {
+  const files = opts.unit.filesToTouch ?? ["src/unit1.py"];
+  const first = files[0] ?? "src/unit1.py";
+  const testFile = opts.unit.testFile ?? `${dirname(first)}/tests/test_${basename(first)}`;
+  await reachDesignStep({
+    db: opts.db,
+    ticketId: opts.ticketId,
+    profile: opts.profile,
+    worktreeRoot: opts.worktreeRoot,
+    inPlace: opts.inPlace,
+    target: "checks:dispatch",
+    units: [
+      {
+        seq: 1,
+        kind: opts.unit.kind,
+        title: "Unit 1",
+        description: "Change 1",
+        behavioral: opts.unit.behavioral,
+        test_plan: opts.unit.behavioral ? `${testFile} asserts change 1` : null,
+        files_to_touch: opts.unit.behavioral ? [...files, testFile] : files,
+        verify_check_types: opts.unit.verifyCheckTypes,
+        depends_on: [],
+      },
+    ],
+  });
 }
 ```
 
-(`readyForDesignReview` no longer calls `setTicketTrack`: two units size to `full`.)
-4. At every call site, `readyForX(db, ticketId[, n]);` becomes `await readyForX(db, ticketId, repo[, n]);`. In the `design-extract.test.ts` cases that pass `rc` or `pattern` to `registryFor`, pass the same values to `profileFor` inside `readyForExtract` by adding the same optional parameters to it and at those call sites.
+Each file keeps the unit kind, `behavioral` value and `verifyCheckTypes` it seeded (`insertWorkUnit` defaults `behavioral` to 1, so a seed that omitted it passes `behavioral: true`), and its fast track (one unit sizes to `fast`). Each imports `reachChecksStep` from `../helpers/design-steps.ts`. Then remove the imports each file is left without a use for (`runStep`, `insertWorkUnit`, `setTicketTrack`, `markSucceeded`, `insertPending`):
+
+- `test/dispatch/checks-handler.test.ts`: delete `markDesignDone`. At each of its call sites, delete the `await markDesignDone(...)`, `insertWorkUnit(...)` and `setTicketTrack(..., "fast")` lines; hoist the `parseProfile({...})` and the `worktreeRoot` the test passes to its first `buildDispatchRegistry` into `const profile` and `const worktreeRoot` (where they are inline); and replace the test's first `advanceOneStep(...)` marked `// provision` (or `// provision (no-op)`) with `await reachChecksStep({ db, ticketId, profile, worktreeRoot, unit: { kind, behavioral, verifyCheckTypes: ["test"], filesToTouch } })`, with `kind` and `filesToTouch` as the deleted `insertWorkUnit` had them, and `behavioral: fixture.behavioral !== 0` in `runSingleCheckDispatch`, `true` elsewhere. Where the step after it was `let outcome = await advanceOneStep(...); // provision` followed by `outcome = ...`, the second line becomes `let outcome = ...`. The two tests with no `// provision` call (lines 733 and 804) drive a bounded loop until `checks:dispatch` succeeds: call `reachChecksStep` just before the loop and leave the loop as it is.
+- `test/dispatch/checks-reauthor-e2e.test.ts`, in each of its three tests: delete the `runStep(... "design:dispatch" ...)`, `insertWorkUnit` and `setTicketTrack` seeding; hoist the registry's `profile` and `worktreeRoot` into consts; call `await reachChecksStep({ db, ticketId, profile, worktreeRoot, unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] } })` before the drive loop. The loop is bounded by its own condition and now starts at `checks:dispatch`.
+- `test/dispatch/scope-disposition-smoke.test.ts`: delete `markDesignDone` and its three seeding lines in `setupChecks` and in `A7`. In `driveChecks`, hoist `const profile = opts?.profile ?? pythonProfile(h.repo);`, pass it to `buildDispatchRegistry`, and replace `await advanceOneStep(h.db, h.ticketId, registry); // provision (creates the worktree)` with `await reachChecksStep({ db: h.db, ticketId: h.ticketId, profile, worktreeRoot: h.worktreeRoot, unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] } }); // provision (creates the worktree) and design, through real steps`. `beforeChecks(wt)` still runs between the worktree's creation and `checks:dispatch`.
+- `test/lifecycle/e2e-interrupt.test.ts`, `interruptChecksTestRun`: in its `seed` callback delete the `track = 'fast'` from the `UPDATE` (the ticket already starts in `design`, so the `UPDATE` goes), the `design:dispatch` row and the `insertWorkUnit`; keep `insertAc`. Right after `setUp(...)` returns, before `headAtStart` is read:
+
+```ts
+  // design through real steps, in place, with the run's own profile (Task 9 captured the snapshot
+  // from it), so the plan's commit lands before headAtStart
+  const designDb = openDb(run.dbPath);
+  try {
+    await reachChecksStep({
+      db: designDb,
+      ticketId: run.ticketId,
+      profile: run.profile,
+      worktreeRoot: run.repo,
+      inPlace: true,
+      unit: { kind: "backend", behavioral: false, verifyCheckTypes: [], filesToTouch: ["src/unit1.js"] },
+    });
+  } finally {
+    designDb.close();
+  }
+```
+
+  and, since design now leaves its own dispatch rows, narrow the dispatch row assertion to the checks step: `const rows = dispatchRows(run.dbPath).filter((d) => d.step_id === i.during.id);` (the `toHaveLength(1)` and the `clean-success` expectation stay).
 
 - [ ] **Step 5: Run the tests and see them pass**
 
-Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon test/dispatch test/cli/walk-resume-e2e.test.ts`
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon test/dispatch test/lifecycle/e2e-interrupt.test.ts test/cli/walk-resume-e2e.test.ts`
 Expected: PASS.
 
 - [ ] **Step 6: Break it on purpose, see it fail, restore**
 
 1. In `walkDesign`, delete the manifest comparison (treat every succeeded step as done). The `a changed input invalidates...`, `early cutoff` and `gated by the walk` tests fail. Restore.
 2. Return `stepKeys: [row.stepKey, ...later steps]` (invalidate everything after the mismatch): `early cutoff` fails (design:review is invalidated and called twice). Restore.
-3. In `park.ts`, comment out `adoptUnfingerprinted(...)`. `test/cli/adopt-v8-e2e.test.ts` now fails with `succeeded without an input manifest` (the D9 run is refused). Restore.
+3. In `park.ts`, comment out `adoptUnfingerprinted(...)`. `test/cli/adopt-v8-e2e.test.ts` fails on `adopted.length` and `fingerprint_scheme`, not in the walk: the recorded run is paused in `implement`, where the walk does not run. Restore.
+4. In `test/dispatch/checks-handler.test.ts`, put back one `markDesignDone(...)` seed in place of its `reachChecksStep` call: that test fails with `succeeded without an input manifest`. Restore.
 
 - [ ] **Step 7: Run the whole suite, then commit**
 
@@ -5991,12 +6148,13 @@ git commit -m "feat(eng-477): route the design stage by walking the declared tab
 - Test: `test/daemon/loopback-invalidate.test.ts`, `test/dispatch/design-feedback.test.ts` (add cases)
 
 **Interfaces:**
-- Consumes: `invalidateSteps` (Task 10); `makeDesignTicket`, `driveUntil`, `atStep` (Task 7); `captureSnapshot` (Task 7); `getByKey` with `generation` (Task 4).
+- Consumes: `invalidateSteps` (Task 10); `makeDesignTicket`, `driveUntil`, `atStep`, `newCalls`, `scriptedRunner`, `unitsOf` (Task 7); `captureSnapshot` (Task 7); `getByKey` with `generation` (Task 4); `stepRow` (Task 6); `currentManifest`, `changedInputs` (Task 9).
 - Produces:
   - `redesignLoopback(db, ticketId, signature: string, blocking: ReviewFindingRow[], dispatchId: string | null, invalidate: readonly ("design:dispatch" | "design:extract")[]): void`
   - design loopback event payload `{ findings, consumer: "design:dispatch", generation: number }`
-  - `interface ResumeContext { stepKey: string; transcript: string; generation: number }` exported from `src/dispatch/run-dispatch.ts`; `RegistryDeps.resumeContext?: ResumeContext`; `DispatchDeps.resumeContext?: ResumeContext`
-  - `transcript.json` gains `generation: number | null`
+  - `interface ResumeContext { stepKey: string; transcript: string; generation: number; manifest: Record<string, string> | null }` exported from `src/dispatch/run-dispatch.ts`; `RegistryDeps.resumeContext?: ResumeContext`; `DispatchDeps.resumeContext?: ResumeContext`
+  - `carryoverMismatch(ctx: HandlerContext, rc: ResumeContext): string[] | null` exported from `src/dispatch/run-dispatch.ts` (pure: null when the carryover is not this dispatch's, `[]` when it applies, else the changed input names)
+  - `transcript.json` gains `generation: number | null` and `manifest: Record<string, string> | null`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -6167,37 +6325,35 @@ test("a carryover recorded under other inputs is dropped, with a note naming the
 });
 ```
 
-Append to `test/dispatch/design-feedback.test.ts`:
+Append to `test/dispatch/design-feedback.test.ts` (it already imports `appendEvent`, `designFeedback` and `makeTestDb`; add only the two imports below, at the top):
 
 ```ts
 import { invalidateSteps } from "../../src/daemon/invalidate.ts";
-import { appendEvent } from "../../src/db/repos/event-log.ts";
-import { insertPending } from "../../src/db/repos/workflow-step.ts";
+import { atStep, driveUntil, makeDesignTicket } from "../helpers/design-steps.ts";
 
-test("a loopback written before ENG-477 (no consumer) is generation 0 feedback for design:dispatch", () => {
-  const { db, ticketId } = makeTestDb();
-  insertPending(db, { ticketId, stepKey: "design:dispatch", stepType: "dispatch" });
-  appendEvent(db, {
-    ticketId,
+test("a loopback written before ENG-477 (no consumer) is generation 0 feedback for design:dispatch", async () => {
+  // design:dispatch has really run once (generation 0); the loopback is written as an older Styre
+  // wrote it, with no consumer and no generation.
+  const t = makeDesignTicket();
+  await driveUntil(t, atStep("design:extract"));
+  appendEvent(t.db, {
+    ticketId: t.ticketId,
     kind: "loopback",
     loop: "design",
     routeTo: "review",
     signature: "s",
     payload: { findings: [{ category: "x", location: null, rationale: "LEGACY-FINDING" }] },
   });
-  expect(designFeedback(db, ticketId)).toContain("LEGACY-FINDING");
-  invalidateSteps(db, ticketId, ["design:dispatch"], { cause: "inputs", changed: ["profile.promptVars"] });
-  expect(designFeedback(db, ticketId)).toBe("");
-  db.close();
+  expect(designFeedback(t.db, t.ticketId)).toContain("LEGACY-FINDING");
+  invalidateSteps(t.db, t.ticketId, ["design:dispatch"], { cause: "inputs", changed: ["profile.promptVars"] });
+  expect(designFeedback(t.db, t.ticketId)).toBe("");
 });
 ```
-
-(`makeTestDb` and `designFeedback` are already imported in that file; add the three imports above at the top.)
 
 - [ ] **Step 2: Run them and see them fail**
 
 Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/loopback-invalidate.test.ts test/dispatch/design-feedback.test.ts`
-Expected: FAIL: `redesignLoopback` takes five arguments (type error at the call in the code-review test), the plan-review test finds `design:extract` and `design:review` reset by the old list, and the feedback and carryover tests see the old findings and transcript in later generations.
+Expected: FAIL. bun runs without type checking, so the sixth argument to the old five parameter `redesignLoopback` is ignored and the code-review test runs today's redesign; the plan-review test finds `design:extract` and `design:review` reset by the old list; the feedback and carryover tests see the old findings and transcript in later generations; and `buildDispatchRegistry` ignores the `manifest` field, so no `carryover-dropped` note is written. (`bun run typecheck` additionally reports the extra argument and the unknown `manifest` field.)
 
 - [ ] **Step 3: `redesignLoopback` invalidates its consumer**
 
@@ -6321,35 +6477,46 @@ export interface ResumeContext {
   manifest: Record<string, string> | null;
 }
 
-/** Whether the carryover still belongs to this dispatch (spec §6.5): same step, same generation, and,
- *  for a table step paused before it finished, the same inputs it was written under. A step that
- *  was never finished is not invalidated when an upstream step reruns, so its generation alone
- *  cannot tell. When the inputs differ, a `carryover-dropped` note names them. */
-function carryoverApplies(ctx: HandlerContext, rc: ResumeContext): boolean {
-  if (rc.stepKey !== ctx.step.step_key || rc.generation !== ctx.step.generation) return false;
-  if (rc.manifest === null) return true;
+/** The carryover's fit to this dispatch (spec §6.5), computed without side effects. Null: the
+ *  carryover is not this dispatch's (another step, or a generation invalidated since). `[]`: it
+ *  applies (same step, same generation, and, for a table step paused before it finished, the same
+ *  inputs, or a transcript written before ENG-477, kept as it is). Otherwise the input names that
+ *  differ: a step that was never finished is not invalidated when an upstream step reruns, so its
+ *  generation alone cannot tell. The caller (`dispatchAndRecord`) withholds the carryover on a
+ *  answer that is not empty and records one `carryover-dropped` note per dispatch that withholds it, so a
+ *  retried attempt of the same step writes another. */
+export function carryoverMismatch(ctx: HandlerContext, rc: ResumeContext): string[] | null {
+  if (rc.stepKey !== ctx.step.step_key || rc.generation !== ctx.step.generation) return null;
+  if (rc.manifest === null) return [];
   const row = stepRow(rc.stepKey);
   if (row === undefined) {
     throw new Error(`resume: a carryover manifest was recorded for ${rc.stepKey}, which is not a design table step`);
   }
-  const changed = changedInputs(rc.manifest, currentManifest(ctx.db, ctx.ticket.id, row));
-  if (changed.length === 0) return true;
-  appendEvent(ctx.db, {
-    ticketId: ctx.ticket.id,
-    kind: "note",
-    reason: "carryover-dropped",
-    payload: { event: "carryover-dropped", stepKey: rc.stepKey, changed },
-  });
-  return false;
+  return changedInputs(rc.manifest, currentManifest(ctx.db, ctx.ticket.id, row));
 }
 ```
 
-Imports in `run-dispatch.ts`: `stepRow` from `../daemon/design-graph.ts`; `changedInputs`, `currentManifest` from `../daemon/design-digests.ts` (`appendEvent` is already imported).
+Imports in `run-dispatch.ts`: `stepRow` from `../daemon/design-graph.ts`; `changedInputs`, `currentManifest` from `../daemon/design-digests.ts` (`appendEvent` and `HandlerContext` are already imported).
 
-`DispatchDeps.resumeContext?: ResumeContext;` and line 147:
+`DispatchDeps.resumeContext?: ResumeContext;` and, replacing lines 147-150:
 
 ```ts
-  if (deps.resumeContext && carryoverApplies(ctx, deps.resumeContext)) {
+  // spec §6.5: the carryover reaches only the dispatch it belongs to. When it is withheld because
+  // the inputs changed, a note names them: one `carryover-dropped` note per dispatch that withholds
+  // it (a retried attempt of the same step writes another).
+  const mismatch = deps.resumeContext ? carryoverMismatch(ctx, deps.resumeContext) : null;
+  if (mismatch !== null && mismatch.length > 0) {
+    appendEvent(ctx.db, {
+      ticketId: ctx.ticket.id,
+      kind: "note",
+      reason: "carryover-dropped",
+      payload: { event: "carryover-dropped", stepKey: ctx.step.step_key, changed: mismatch },
+    });
+  }
+  if (deps.resumeContext && mismatch !== null && mismatch.length === 0) {
+    // chain off `prompt` (NOT rendered.prompt) so both prepends compose (design §1, review Important)
+    prompt = `${CARRYOVER_PREFIX}\n\n${deps.resumeContext.transcript}\n\n${CARRYOVER_SUFFIX}\n\n${prompt}`;
+  }
 ```
 
 `src/dispatch/handlers.ts:192`: `resumeContext?: import("./run-dispatch.ts").ResumeContext;`.
@@ -6429,8 +6596,8 @@ Expected: PASS.
 - [ ] **Step 8: Break it on purpose, see it fail, restore**
 
 1. In `designFeedback`, drop the generation condition: the feedback test fails (the old findings reach generation 2). Restore.
-2. In `carryoverApplies`, drop `|| rc.generation !== ctx.step.generation`: the generation carryover test fails. Restore.
-2a. In `carryoverApplies`, replace `if (changed.length === 0) return true;` with `return true;`: the "recorded under other inputs" test fails. Restore.
+2. In `carryoverMismatch`, drop `|| rc.generation !== ctx.step.generation`: the generation carryover test fails. Restore.
+2a. In `carryoverMismatch`, replace the last `return changedInputs(...)` with `return [];`: the "recorded under other inputs" test fails. Restore.
 3. In `applyReviewVerdict`'s plan-defect path, pass `["design:dispatch"]` only: the code-review redesign test fails (units keep their ids, unit 1 is not implemented again). Restore.
 
 - [ ] **Step 9: Run the whole suite, then commit**
@@ -6884,7 +7051,7 @@ Earlier tasks own: §8.3 (Tasks 8, 13), §8.4 (Task 8), §8.5 (Task 14), §8.10 
 - Test: `test/cli/design-inputs-e2e.test.ts`, `test/cli/design-crash-e2e.test.ts`, `test/daemon/design-livelock.test.ts`
 
 **Interfaces:**
-- Consumes: `DesignHarness` (Task 7, with `slug`/`repoDir` options), `scriptedRunner`, `defaultScript`, `newCalls`, `unitsOf`, `harnessProfileRaw` (Task 7); `resumeRun`, `ResumeRegistryWiring` (Task 8); `redesignLoopback` (Task 14); `currentManifest`, `inputContext` (Task 9); `listStepHistory` (Task 10); `DESIGN_TABLE`, `StepRow` (Task 6); `StepRegistry` with `resolveCommit` (Task 9); `loadRunProfile` (`src/cli/load-profile.ts:40`); `discoverRuntimeConfig` (`src/config/discover.ts`).
+- Consumes: `DesignHarness` (Task 7, with `slug`/`repoDir` options), `scriptedRunner`, `defaultScript`, `newCalls`, `unitsOf`, `harnessProfileRaw` (Task 7); `resumeRun`, `ResumeRegistryWiring` (Task 8); `redesignLoopback` (Task 14); `currentManifest` (Task 9); `listStepHistory` (Task 10); `DESIGN_TABLE`, `StepRow` (Task 6); `StepRegistry` with `resolveCommit` (Task 9); `loadRunProfile` (`src/cli/load-profile.ts:40`); `discoverRuntimeConfig` (`src/config/discover.ts`).
 - Produces: nothing used by later tasks.
 
 - [ ] **Step 1: Write the per input, E6, feedback and output clearing tests**
@@ -7069,9 +7236,19 @@ test("§8.7: after a redesign, a profile edit and a resume, the next generation 
   });
   expect(await h.resume({ script: { ...script, parkAt: null, parkOnCall: null } })).toBe(75);
   const prompts = h.calls.prompts.filter((p) => p.step === "design:dispatch").map((p) => p.prompt);
-  // call 3: generation 1 resumed: its own findings and its own partial output
+  // call 3: generation 1 resumed. The parked step was never finished, so the edit did not
+  // invalidate it: it keeps its generation's findings. But the edit changed one of its inputs, so its
+  // partial output from before the pause is withheld, with one note naming the input (spec §6.5).
   expect(prompts[2]).toContain("ROUND-ONE");
-  expect(prompts[2]).toContain("partial output written before the session limit");
+  expect(prompts[2]).not.toContain("partial output written before the session limit");
+  const dropped = h.read((db, id) =>
+    listEvents(db, id)
+      .filter((e) => e.reason === "carryover-dropped")
+      .map((e) => JSON.parse(e.payload_json ?? "{}") as { stepKey: string; changed: string[] }),
+  );
+  expect(dropped).toHaveLength(1);
+  expect(dropped[0]?.stepKey).toBe("design:dispatch");
+  expect(dropped[0]?.changed).toContain("profile.promptVars");
   // call 4: generation 2, after the second redesign: only round two, no carryover
   expect(prompts[3]).toContain("ROUND-TWO");
   expect(prompts[3]).not.toContain("ROUND-ONE");
@@ -7402,7 +7579,7 @@ These tests exercise behaviour built in Tasks 7 to 16, so they pass on first run
 2. In `walkDesign`, invalidate every step after the first mismatch as well (`stepKeys: DESIGN_TABLE...slice(index)`): §8.1 fails for each case (extra reruns). Restore.
 3. In `src/daemon/design-outputs.ts`, move `writeExtractOutputs` into the extract handler (write before the success commit): the `design:extract, before-commit` crash case fails with a `UNIQUE constraint failed: work_unit.ticket_id, work_unit.seq` rerun failure. Restore.
 4. In `captureSnapshot`, set `pastDesign` to `false` always: §8.2 fails on the note. Restore.
-5. In `run-dispatch.ts`, drop the generation condition of the carryover: §8.7 fails on `prompts[3]`. Restore.
+5. In `resumeRun` (`park.ts`), build the resume context with `manifest: null` instead of `tj.manifest ?? null`: the first §8.7 test fails on `prompts[2]` (the carryover reaches call 3) and on the missing `carryover-dropped` note, and "drops its carryover when an edit changes the plan" fails on `prompts[1]`. Restore. (The generation condition is proven by Task 14's `the carryover transcript reaches only the generation it was written in`, whose transcript has no manifest.)
 5a. In `dumpPark`, write `manifest: null` always: "drops its carryover when an edit changes the plan" fails. Restore.
 6. Make `applyReviewVerdict`'s plan review path a no-op loopback that does not invalidate design:dispatch (pass `[]`, which `redesignLoopback` refuses): the livelock test fails loudly. Restore.
 
@@ -7423,7 +7600,7 @@ git commit -m "test(eng-477): end to end coverage of design input invalidation, 
 Both `schema.sql` copies and the `CLAUDE.md` table count were updated with the schema in Task 4. This task changes no code.
 
 **Files:**
-- Modify: `docs/architecture/minimal-loop.md:27-37` (§1 design branch), `:197` (§2 redesign row)
+- Modify: `docs/architecture/minimal-loop.md:29-37` (§1 design branch), `:197` (§2 redesign row)
 - Modify: `docs/architecture/control-loop.md:80-81` (start up), `:112-121` (§2.3 descriptor list), `:241-299` (§4 S1 guards), `:728-730` (§6.2), `:820-824` (§8.3 design rows), `:955` (§10)
 - Modify: `docs/architecture/build-operations.md:54,58`
 - Modify: `docs/architecture/runtime-parameters.md` (Resume flow, `styre migrate`, the exit code table rows `65`, `70`, `75`, a new section "Design inputs and invalidation", and line 24, the output stream of `styre migrate`)
@@ -7440,7 +7617,7 @@ Both `schema.sql` copies and the `CLAUDE.md` table count were updated with the s
 
 - [ ] **Step 1: `minimal-loop.md`**
 
-Replace the `'design':` branch of the pseudocode (lines 27-37) with:
+Replace the `'design':` branch of the pseudocode (lines 29-37) with:
 
 ```
   'design':
@@ -7693,10 +7870,10 @@ Not part of this plan's tasks, but required by `CLAUDE.md` before `gh pr create`
 1. **`design:review`'s inputs.** The spec's table lists "ticket title and description"; `designReviewVars` (`src/dispatch/prompt-vars.ts:220-248`) reads the title only. The spec says the exact fields come from the code, so the table declares `ticket.title` (Task 6), and the recording proxy test (Task 15) would fail if the handler started reading the description.
 2. **The cause for the manifest touch hook.** The spec names `worktree-recreated` for `resetProvision` and says `resetProvisionIfManifestTouched` "calls the same function"; it names no cause for it. The plan uses `manifest-touched` (Task 10).
 3. **A succeeded step without a manifest outside the adopt pass.** Spec §5.1 says a step under another scheme is "treated as unfingerprinted and adopted"; the adopt pass runs on resume and on a reused `--db`, the only paths that can bring one. The walk refuses such a step loudly (Task 13) rather than adopting silently, per the fail fast rule.
-4. **The worktree starting commit.** `ensureWorktree` (`src/dispatch/worktree.ts:71`) runs `git worktree add -B` on every resume (ENG-488), so "first created" is not visible in git. The plan records it only from a fresh run's provision, through a registry flag (Task 7).
+4. **The worktree starting commit.** `ensureWorktree` (`src/dispatch/worktree.ts:60`) runs `git worktree add -B` on every resume (ENG-488), so "first created" is not visible in git. The plan records it only from a fresh run's provision, through a registry flag (Task 7).
 5. **Exit codes for refused and failed migrations** are not specified. The plan uses `65` for refusals (with the resume refusals) and `70` for a failed migration (Task 2), documented in Task 18.
 6. **The carryover for a parked step that is not succeeded.** Such a step is never invalidated (the walk stops at it), so its generation does not change when an upstream step reruns first. Operator ruling (2026-10-09), now in spec §6.5: `transcript.json` records the parked table step's manifest, and the carryover is dropped, with a `carryover-dropped` note, when the inputs differ at dispatch (Tasks 14, 17, 18).
 7. **`readPlanFindings`.** The spec names it as an example accessor, but no design handler reads plan findings; only the resolver's gate does, outside any step. The plan builds `readWorkUnitsForDesign` only (Task 15); the gate keeps reading `review-round.ts`.
-8. **Existing tests that seeded design rows directly** (resolver, advance, design handler tests, review-resume) cannot keep doing so once the walk refuses unfingerprinted steps; Task 13 moves them onto real steps through `reachDesignStep`, and deletes the six resolver design tests in favour of real step equivalents.
+8. **Existing tests that seeded design rows directly** cannot keep doing so. The ones that run `design:extract` or `design:review` after a hand marked `design:dispatch` break as soon as manifests are recorded (the `plan` input needs its digest), so Task 9 moves them onto real steps through `reachDesignStep` (defined there). The rest (resolver, size, advance, review-resume, and the checks tests that marked design done by hand) break once the walk refuses unfingerprinted steps; Task 13 moves them, adds `reachChecksStep` for the checks tests, and deletes the six resolver design tests in favour of real step equivalents.
 9. **`runtime-parameters.md` and `CLAUDE.md` say `styre migrate` prints to stdout**; `src/cli/migrate.ts:15` writes to stderr. Operator ruling (2026-10-09): the code stays, and Task 18 corrects both docs.
 10. **Multiple resumes in worktree mode** are refused after the first (the recreated branch moves HEAD, ENG-488). Tests that resume more than once use in-place mode (Task 17 intro).
