@@ -177,6 +177,12 @@ export interface Expectation {
   /** Ctrl-\ (D13): the test's sleep may outlive the stop, but then Styre must have reported it
    *  with the exact leftover line for this pid and command. */
   reportSleep?: { pid: number; command: string };
+  /** Other processes that must be gone within the window too, by name (a wrapper's real CLI):
+   *  each is read from the observation's `alsoGoneMs`, and one never watched counts as running. */
+  alsoGone?: string[];
+  /** Pairs of lines where the first must come before the second (a follow-up command's sweep
+   *  line before its own refusal). A pair with either line missing is out of order. */
+  before?: [string | RegExp, string | RegExp][];
 }
 
 /** What one scenario showed. Times are counted from the scenario's trigger. */
@@ -187,10 +193,22 @@ export interface Observation {
   sleepGoneMs: number | null;
   /** Everything Styre said on stderr. */
   stderr: string;
+  /** When each process named in the expectation's `alsoGone` was first seen gone, or null. */
+  alsoGoneMs?: Record<string, number | null>;
 }
 
 const hasLine = (text: string, want: string | RegExp): boolean =>
   typeof want === "string" ? text.split("\n").includes(want) : want.test(text);
+
+/** The index of the first line of `text` that is `want` (whole) or matches it; -1 if none. */
+const lineIndex = (text: string, want: string | RegExp): number =>
+  text
+    .split("\n")
+    .findIndex((l) =>
+      typeof want === "string"
+        ? l === want
+        : new RegExp(want.source, want.flags.replace("g", "")).test(l),
+    );
 
 /** Every way the observation misses the expectation, in words; empty when the scenario held. */
 export function judge(want: Expectation, seen: Observation): string[] {
@@ -210,7 +228,15 @@ export function judge(want: Expectation, seen: Observation): string[] {
     if (!hasLine(seen.stderr, line))
       out.push(`the sleep (pid ${pid}) outlived the stop and was not reported`);
   }
+  for (const name of want.alsoGone ?? [])
+    if (late(seen.alsoGoneMs?.[name] ?? null))
+      out.push(`the ${name} was still running ${STOP_WINDOW_MS} ms after the trigger`);
   for (const l of want.lines) if (!hasLine(seen.stderr, l)) out.push(`missing line: ${String(l)}`);
+  for (const [a, b] of want.before ?? []) {
+    const i = lineIndex(seen.stderr, a);
+    const j = lineIndex(seen.stderr, b);
+    if (i < 0 || j < 0 || i >= j) out.push(`"${String(a)}" did not come before "${String(b)}"`);
+  }
   for (const re of want.absent ?? [])
     if (re.test(seen.stderr)) out.push(`unexpected line matching ${String(re)}`);
   return out;
@@ -221,6 +247,10 @@ export interface ControlResult {
   name: string;
   agentAlive: boolean;
   sleepAlive: boolean;
+  /** A wrapper scenario's real CLI (the wrapper's child), when there is one. */
+  cliAlive?: boolean;
+  /** What the old code leaves running in this scenario; by default the agent and its sleep. */
+  leaks?: ("agent" | "sleep" | "cli")[];
 }
 
 /**
@@ -230,12 +260,17 @@ export interface ControlResult {
  */
 export function controlVerdict(results: ControlResult[]): { blind: boolean; why: string } {
   if (results.length === 0) return { blind: true, why: "no control scenario ran" };
-  const why = results
-    .filter((r) => !r.agentAlive || !r.sleepAlive)
-    .map(
-      (r) =>
-        `${r.name}: the agent was ${r.agentAlive ? "running" : "gone"} and its sleep ${r.sleepAlive ? "running" : "gone"}`,
-    );
+  const what = { agent: "agent", sleep: "test's sleep", cli: "real CLI" } as const;
+  const why = results.flatMap((r) => {
+    if (r.leaks === undefined)
+      return !r.agentAlive || !r.sleepAlive
+        ? [
+            `${r.name}: the agent was ${r.agentAlive ? "running" : "gone"} and its sleep ${r.sleepAlive ? "running" : "gone"}`,
+          ]
+        : [];
+    const alive = { agent: r.agentAlive, sleep: r.sleepAlive, cli: r.cliAlive === true };
+    return r.leaks.filter((k) => !alive[k]).map((k) => `${r.name}: the ${what[k]} was gone`);
+  });
   return { blind: why.length > 0, why: why.join("; ") };
 }
 

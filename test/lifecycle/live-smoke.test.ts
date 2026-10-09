@@ -305,6 +305,39 @@ describe("judge: one scenario against what it must show", () => {
   test("Ctrl-\\: a sleep gone within 5 s needs no report", () => {
     expect(judge(quit, { ...ok, exit: { code: null, signal: "SIGQUIT" } })).toEqual([]);
   });
+  // Part 3 scenarios: a wrapper's real CLI must be gone too, and a follow-up command must stop the
+  // orphan before its own work.
+  test("every process named in alsoGone must be gone within 5 s of the trigger", () => {
+    const wrapped = { ...want, alsoGone: ["real CLI"] };
+    expect(judge(wrapped, { ...ok, alsoGoneMs: { "real CLI": 1_200 } })).toEqual([]);
+    expect(judge(wrapped, { ...ok, alsoGoneMs: { "real CLI": null } })).toEqual([
+      "the real CLI was still running 5000 ms after the trigger",
+    ]);
+    expect(judge(wrapped, { ...ok, alsoGoneMs: { "real CLI": 5_001 } })).toHaveLength(1);
+    // Not watched at all is a failure too, never a pass.
+    expect(judge(wrapped, ok)).toEqual([
+      "the real CLI was still running 5000 ms after the trigger",
+    ]);
+  });
+  test("an ordered pair: the first line must come before the second", () => {
+    const sweep =
+      "styre: stopped an orphaned agent from SMOKE-9 (pid 501), left running when Styre was force quit";
+    const own = /^styre clean: no styre effort/m;
+    const ordered = {
+      exit: { code: 64, signal: null },
+      lines: [sweep, own],
+      before: [[sweep, own]] as [string | RegExp, string | RegExp][],
+    };
+    const seen = { ...ok, exit: { code: 64, signal: null } };
+    expect(
+      judge(ordered, { ...seen, stderr: `${sweep}\nstyre clean: no styre effort on 'SMOKE-9'\n` }),
+    ).toEqual([]);
+    expect(
+      judge(ordered, { ...seen, stderr: `styre clean: no styre effort on 'SMOKE-9'\n${sweep}\n` }),
+    ).toEqual([`"${sweep}" did not come before "${String(own)}"`]);
+    // A pair whose lines are missing is named once as missing lines, and once as out of order.
+    expect(judge(ordered, { ...seen, stderr: "" })).toHaveLength(3);
+  });
 });
 
 describe("controlVerdict: the control must leak, or the probes are blind", () => {
@@ -338,6 +371,35 @@ describe("controlVerdict: the control must leak, or the probes are blind", () =>
   });
   test("blind with no control scenario at all", () => {
     expect(controlVerdict([]).blind).toBe(true);
+  });
+  test("a control that leaks something else names what must leak: a wrapper's CLI, a refused CLI's child", () => {
+    // The old timeout killed only the wrapper: its real CLI and the sleep stayed.
+    expect(
+      controlVerdict([
+        {
+          name: "wrapper",
+          agentAlive: false,
+          sleepAlive: true,
+          cliAlive: true,
+          leaks: ["cli", "sleep"],
+        },
+      ]),
+    ).toEqual({ blind: false, why: "" });
+    expect(
+      controlVerdict([
+        {
+          name: "wrapper",
+          agentAlive: false,
+          sleepAlive: true,
+          cliAlive: false,
+          leaks: ["cli", "sleep"],
+        },
+      ]),
+    ).toEqual({ blind: true, why: "wrapper: the real CLI was gone" });
+    // The old refusal killed only the CLI: its child stayed.
+    expect(
+      controlVerdict([{ name: "refusal", agentAlive: false, sleepAlive: false, leaks: ["sleep"] }]),
+    ).toEqual({ blind: true, why: "refusal: the test's sleep was gone" });
   });
 });
 
