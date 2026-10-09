@@ -3,10 +3,12 @@
 // temp folder (a browser profile karma never removed, a Python TemporaryDirectory a stop cut short)
 // stays out of the system temp folder, and Styre removes it on its way out. Each test gets its own
 // temp root, so the folder it inspects is the one these tests made.
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
+  mkdirSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -22,10 +24,15 @@ import {
   commandTempDir,
   removeCommandTempDir,
 } from "../../../src/util/process/command-temp.ts";
+import * as commandTemp from "../../../src/util/process/command-temp.ts";
 import * as door from "../../../src/util/process/door.ts";
 import { bootId } from "../../../src/util/process/proc-table.ts";
 import { processesDir } from "../../../src/util/process/records.ts";
-import { __resetSignalsForTests, handleStopSignal } from "../../../src/util/process/signals.ts";
+import {
+  HANDLER_DEADLINE_MS,
+  __resetSignalsForTests,
+  handleStopSignal,
+} from "../../../src/util/process/signals.ts";
 import { runBoundedCommand } from "../../../src/util/run-bounded-command.ts";
 import { runCommand } from "../../../src/util/run-command.ts";
 import { makeTempDir } from "../../helpers/temp.ts";
@@ -439,4 +446,82 @@ test("an abandoned folder's note goes from the folder it was written to, so no s
   await runCommand("true", { cwd, timeoutMs: 5000 });
   expect(readdirSync(first)).toEqual([]);
   expect(readdirSync(join(state, "later", "styre-processes")).length).toBe(1);
+});
+
+test("the remedy names the folder as one shell word, so a temp folder with a space is safe to paste", async () => {
+  const spaced = join(root, "My Temp");
+  mkdirSync(spaced);
+  process.env.TMPDIR = spaced;
+  await runCommand("true", { cwd, timeoutMs: 5000 });
+  const dir = commandTempDir();
+  chmodSync(spaced, 0o500);
+  const { out, say } = collect();
+  try {
+    removeCommandTempDir(say);
+  } finally {
+    chmodSync(spaced, 0o700);
+  }
+  expect(out.length).toBe(1);
+  expect(out[0]).toEndWith(`; remove it with: chmod -R u+w '${dir}' && rm -rf '${dir}'\n`);
+});
+
+test("at exit, a folder replaced by something else is left alone, unnamed, and its note goes", async () => {
+  await runCommand("true", { cwd, timeoutMs: 5000 });
+  const dir = commandTempDir();
+  rmSync(dir, { recursive: true, force: true });
+  const elsewhere = makeTempDir("styre-cmdtmp-elsewhere-");
+  writeFileSync(join(elsewhere, "precious"), "keep");
+  symlinkSync(elsewhere, dir);
+  const { out, say } = collect();
+  try {
+    removeCommandTempDir(say);
+    expect(out).toEqual([]);
+    expect(lstatSync(dir).isSymbolicLink()).toBe(true); // not Styre's: left as it is
+    expect(readdirSync(elsewhere)).toEqual(["precious"]);
+    expect(readdirSync(processesDir())).toEqual([]);
+  } finally {
+    rmSync(dir, { force: true });
+  }
+});
+
+test("the stop handler gives the removal only what is left of its deadline, short of its margins", async () => {
+  await runCommand("true", { cwd, timeoutMs: 5000 });
+  const seen: { budgetMs?: number }[] = [];
+  const real = commandTemp.removeCommandTempDir;
+  const spy = spyOn(commandTemp, "removeCommandTempDir").mockImplementation((say, opts) => {
+    seen.push({ budgetMs: opts?.budgetMs });
+    real(say, opts);
+  });
+  // The first look sets the deadline; every later look is 1 s after it.
+  const t0 = Date.now();
+  let first = true;
+  const now = () => {
+    const t = first ? t0 : t0 + 1000;
+    first = false;
+    return t;
+  };
+  try {
+    await handleStopSignal(
+      "SIGTERM",
+      { command: "run", run: null },
+      {
+        stderr: () => {},
+        emit: () => {},
+        reraise: () => {},
+        exit: () => {},
+        now,
+        leftovers: () => [],
+        noCore: () => {},
+      },
+    );
+  } finally {
+    spy.mockRestore();
+    door.__resetForTests();
+    __resetSignalsForTests();
+  }
+  expect(seen.length).toBe(1);
+  const budget = seen[0]?.budgetMs ?? Number.NaN;
+  // What is left (HANDLER_DEADLINE_MS - 1000), less the exit's reserve and the cleanup margin.
+  expect(budget).toBeGreaterThan(0);
+  expect(budget).toBeLessThanOrEqual(HANDLER_DEADLINE_MS - 1000 - 250);
 });

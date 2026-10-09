@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { verifyEnv } from "../../agent/agent-env.ts";
 import { RunInterrupted, isStopping, liveLaunches, selfIdentity } from "./door.ts";
+import { printable, shellWord } from "./printable.ts";
 import { bootId } from "./proc-table.ts";
 import { removeTempNote, writeTempNote } from "./records.ts";
 import { removeTree } from "./remove-tree.ts";
@@ -90,6 +91,13 @@ export function removeCommandTempDir(
 ): void {
   if (!made) return;
   const { dir, note } = made;
+  if (!stillOurs(dir)) {
+    // Gone, or something that is not Styre's now has its name: nothing of Styre's to remove, and
+    // what is there is left alone. Its note goes, so no sweep acts on it.
+    removeTempNote(note);
+    made = null;
+    return;
+  }
   if (liveLaunches().some((h) => h.record.kind === "group")) {
     say(
       `styre: kept the temp folder ${dir}: a command Styre started is still running; the next Styre command removes it once that command has stopped\n`,
@@ -107,8 +115,9 @@ export function removeCommandTempDir(
     }
     removeTempNote(note);
   } catch (e) {
+    const word = shellWord(printable(dir));
     say(
-      `styre: could not remove the temp folder ${dir}: ${e instanceof Error ? e.message : String(e)}; remove it with: chmod -R u+w ${dir} && rm -rf ${dir}\n`,
+      `styre: could not remove the temp folder ${dir}: ${e instanceof Error ? e.message : String(e)}; remove it with: chmod -R u+w ${word} && rm -rf ${word}\n`,
     );
     try {
       removeTempNote(note);

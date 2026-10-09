@@ -8,7 +8,7 @@ import {
   formatLeftover,
   skippedLine,
 } from "./leftovers.ts";
-import { printable } from "./printable.ts";
+import { printable, shellWord } from "./printable.ts";
 import {
   type Probe,
   type ProcInfo,
@@ -428,13 +428,17 @@ function removeTempFolders(
       leave("its name is not a command temp folder's");
       continue;
     }
+    let st: ReturnType<typeof lstatSync> | null = null;
     try {
-      let st: ReturnType<typeof lstatSync> | null = null;
-      try {
-        st = lstatSync(note.path);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      st = lstatSync(note.path);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        // Not a failure of the removal: a later command, or one with more access, may get further.
+        leave(`it could not be looked at (${errText(e)})`);
+        continue;
       }
+    }
+    try {
       if (st !== null) {
         if (!st.isDirectory()) {
           leave("it is not a folder (a symbolic link or another kind of file)");
@@ -452,8 +456,9 @@ function removeTempFolders(
     } catch (e) {
       // Said once, with how to finish it by hand: the note goes, so no later command says it again.
       const path = printable(note.path);
+      const word = shellWord(path);
       say(
-        `styre: could not remove the temp folder ${path} left by an earlier Styre: ${errText(e)}; remove it with: chmod -R u+w ${path} && rm -rf ${path}\n`,
+        `styre: could not remove the temp folder ${path} left by an earlier Styre: ${errText(e)}; remove it with: chmod -R u+w ${word} && rm -rf ${word}\n`,
       );
       try {
         removeTempNote(notePath);

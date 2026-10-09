@@ -395,3 +395,46 @@ test("a folder the sweep cannot remove is said once, with how to remove it, and 
   await sweepOrphans({ stderr: again.stderr });
   expect(again.lines).toEqual([]);
 });
+
+test("the sweep's remedy names the folder as one shell word, so a temp folder with a space is safe to paste", async () => {
+  const owner = await deadOwner();
+  const spaced = join(root, "My Temp");
+  mkdirSync(spaced);
+  const dir = join(spaced, "styre-cmd-Sp4ce0");
+  mkdirSync(join(dir, "x"), { recursive: true });
+  writeNote(owner, dir);
+  chmodSync(spaced, 0o500);
+  const out = collect();
+  try {
+    await sweepOrphans({ stderr: out.stderr });
+  } finally {
+    chmodSync(spaced, 0o700);
+  }
+  expect(out.lines.length).toBe(1);
+  expect(out.lines[0]).toEndWith(`; remove it with: chmod -R u+w '${dir}' && rm -rf '${dir}'\n`);
+});
+
+test("a folder the sweep cannot even look at keeps its note, so a later command can try", async () => {
+  const owner = await deadOwner();
+  const hidden = join(root, "hidden");
+  mkdirSync(hidden);
+  const dir = join(hidden, "styre-cmd-Zz9Yy8");
+  mkdirSync(dir);
+  const note = writeNote(owner, dir);
+  chmodSync(hidden, 0o000);
+  const out = collect();
+  try {
+    const r = await sweepOrphans({ stderr: out.stderr });
+    expect(r.tempFolders).toEqual([]);
+  } finally {
+    chmodSync(hidden, 0o700);
+  }
+  expect(out.lines.length).toBe(1);
+  expect(out.lines[0]).toStartWith(
+    `styre: did not remove ${dir}, named by the temp folder note ${note}: it could not be looked at (`,
+  );
+  expect(existsSync(note)).toBe(true);
+  const again = await sweepOrphans({ stderr: () => {} });
+  expect(again.tempFolders).toEqual([dir]);
+  expect(existsSync(note)).toBe(false);
+});

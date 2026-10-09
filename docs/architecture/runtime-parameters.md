@@ -278,7 +278,9 @@ that ignores SIGTERM made before its SIGKILL.
   cache filled can take seconds; what is left, the next command's sweep removes). While a command
   Styre started is still running (a stop that left survivors), the folder is kept and Styre says
   so. A read-only tree inside it (Go's module cache) is made writable and removed. A removal that
-  fails is said once, with the commands that finish it, and not again. Ctrl-C at a `styre setup`
+  fails is said once, with the commands that finish it (the path quoted as one shell word when it
+  must be), and not again. A folder that is gone, or that something not Styre's replaced, is left
+  as it is. Ctrl-C at a `styre setup`
   prompt ends setup at once, without either; the next command's sweep removes the folder then.
 - **A process that left the command's group** (a daemon a command started with `setsid`) keeps a
   TMPDIR that Styre removes when it exits.
@@ -413,8 +415,10 @@ started) and none of that Styre's launch records is still on disk, since a comma
 not stop may still be using it. It is removed only when it is exactly what the note says: an
 absolute path, named like a command temp folder (`styre-cmd-` and six letters or digits), a real
 folder of yours (not a symbolic link). Otherwise the sweep says why and leaves the note and the path
-in place. A read-only tree inside is made writable and removed; a folder that still cannot be
-removed is said once, with the commands that finish it, and its note goes. A note file that cannot be used is named
+in place, as it does for a folder it cannot look at (an unsearchable parent), so a later command
+can try again. A read-only tree inside is made writable and removed; a folder that still cannot be
+removed is said once, with the commands that finish it (the path quoted as one shell word when it
+must be), and its note goes. A note file that cannot be used is named
 in an `ignored the temp folder note` line, like a record.
 
 An orphaned command group whose leader has exited is never stopped: once the leader is gone,

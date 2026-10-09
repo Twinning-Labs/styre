@@ -9,3 +9,9 @@ export function printable(text: string): string {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point
   return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, "?");
 }
+
+/** A path or argument as one shell word (quoted only when it must be), so a command Styre prints for
+ *  the operator to paste does what it says even with a space or a quote in it. */
+export function shellWord(s: string): string {
+  return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replaceAll("'", "'\\''")}'`;
+}
