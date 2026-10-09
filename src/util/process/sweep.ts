@@ -391,7 +391,8 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
  * above could not end may still be using it. Only a folder that is exactly what the note says is
  * removed: an absolute path, named like a command temp folder, a real folder (not a link) of this
  * user's.
- * Anything else is said, and the note and the path are left in place. Silent when it removes one.
+ * Anything else is said, and the note and the path are left in place. A removal is announced in
+ * one line before it starts, since a large folder can take seconds.
  */
 function removeTempFolders(
   notes: ListedNote[],
@@ -449,6 +450,8 @@ function removeTempFolders(
           leave(`it is owned by uid ${st.uid}, not by you (uid ${me})`);
           continue;
         }
+        // Said first: a folder a tool cache filled can take seconds, and a pause must not be silent.
+        say(`styre: cleaning up the temp folder an earlier Styre left: ${printable(note.path)}\n`);
         removeTree(note.path);
         res.tempFolders.push(note.path);
       }

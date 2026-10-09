@@ -394,6 +394,7 @@ styre: ignored the launch records folder <folder>: <why>, so no orphans were sto
 styre: could not put back the launch record for pid <pid> from <ident>: <why>
 styre: could not read this process's own identity (<why>), so no orphans were stopped
 styre: ignored the temp folder note <file>: <why>; it was left in place
+styre: cleaning up the temp folder an earlier Styre left: <path>
 styre: could not read the launch records again (<why>), so no temp folders were removed
 styre: did not remove <path>, named by the temp folder note <file>: <why>; both were left in place
 styre: could not remove the temp folder <path> left by an earlier Styre: <why>; remove it with: chmod -R u+w <path> && rm -rf <path>
@@ -409,8 +410,9 @@ a regular file of yours of at most 64 KB, read without following a symbolic link
 with a record's name is named in an `ignored the launch record` line and left in place.
 
 After the orphans, the sweep removes the command temp folders of force quit Styres (see
-[Command temp folder](#command-temp-folder)). A note names each one. The folder goes, silently,
-once the Styre that wrote the note is gone (or the note was written before this machine last
+[Command temp folder](#command-temp-folder)). A note names each one. The folder goes, after a
+`cleaning up the temp folder` line said before the removal starts (a folder a tool cache filled can
+take seconds), once the Styre that wrote the note is gone (or the note was written before this machine last
 started) and none of that Styre's launch records is still on disk, since a command the sweep could
 not stop may still be using it. It is removed only when it is exactly what the note says: an
 absolute path, named like a command temp folder (`styre-cmd-` and six letters or digits), a real

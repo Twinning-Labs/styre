@@ -84,14 +84,20 @@ const collect = () => {
   return { lines, stderr: (s: string) => lines.push(s) };
 };
 
-test("a force quit Styre's temp folder is removed with what it held, and its note too, silently", async () => {
+const cleaning = (dir: string) =>
+  `styre: cleaning up the temp folder an earlier Styre left: ${dir}\n`;
+
+test("a force quit Styre's temp folder is removed with what it held, and its note too, after one line that says so", async () => {
   const owner = await deadOwner();
   const dir = folderOf(owner);
   const note = writeNote(owner, dir);
-  const out = collect();
-  const r = await sweepOrphans({ stderr: out.stderr });
+  // Said before the removal starts, so a pause on a large folder is never silent.
+  const said: { line: string; folderThere: boolean }[] = [];
+  const r = await sweepOrphans({
+    stderr: (line) => said.push({ line, folderThere: existsSync(dir) }),
+  });
   expect(r.tempFolders).toEqual([dir]);
-  expect(out.lines).toEqual([]);
+  expect(said).toEqual([{ line: cleaning(dir), folderThere: true }]);
   expect(existsSync(dir)).toBe(false);
   expect(existsSync(note)).toBe(false);
 });
@@ -369,7 +375,7 @@ test("a read-only tree in a force quit Styre's folder is removed too", async () 
       chmodSync(ro, 0o700);
     }
   }
-  expect(out.lines).toEqual([]);
+  expect(out.lines).toEqual([cleaning(dir)]);
   expect(existsSync(dir)).toBe(false);
 });
 
@@ -384,11 +390,12 @@ test("a folder the sweep cannot remove is said once, with how to remove it, and 
   } finally {
     chmodSync(root, 0o700);
   }
-  expect(out.lines.length).toBe(1);
-  expect(out.lines[0]).toStartWith(
+  expect(out.lines.length).toBe(2);
+  expect(out.lines[0]).toBe(cleaning(dir));
+  expect(out.lines[1]).toStartWith(
     `styre: could not remove the temp folder ${dir} left by an earlier Styre: `,
   );
-  expect(out.lines[0]).toEndWith(`; remove it with: chmod -R u+w ${dir} && rm -rf ${dir}\n`);
+  expect(out.lines[1]).toEndWith(`; remove it with: chmod -R u+w ${dir} && rm -rf ${dir}\n`);
   expect(existsSync(dir)).toBe(true);
   expect(existsSync(note)).toBe(false);
   const again = collect();
@@ -410,8 +417,8 @@ test("the sweep's remedy names the folder as one shell word, so a temp folder wi
   } finally {
     chmodSync(spaced, 0o700);
   }
-  expect(out.lines.length).toBe(1);
-  expect(out.lines[0]).toEndWith(`; remove it with: chmod -R u+w '${dir}' && rm -rf '${dir}'\n`);
+  expect(out.lines.length).toBe(2);
+  expect(out.lines[1]).toEndWith(`; remove it with: chmod -R u+w '${dir}' && rm -rf '${dir}'\n`);
 });
 
 test("a folder the sweep cannot even look at keeps its note, so a later command can try", async () => {
