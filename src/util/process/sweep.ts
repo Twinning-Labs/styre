@@ -78,9 +78,19 @@ const isAlive = (who: { pid: number; startedAt: string }): boolean =>
   aliveFrom(probe(who.pid), who);
 
 /** The run a record names, with its control characters replaced (the ident is read from a file
- *  that a record-shaped write could have put anything in). */
-const who = (r: LaunchRecord): string => (r.ident === null ? "an unknown run" : printable(r.ident));
-const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+ *  that a record-shaped write could have put anything in). Never throws: it is also used on the
+ *  sweep's error path. */
+const who = (r: LaunchRecord): string =>
+  typeof r.ident === "string" ? printable(r.ident) : "an unknown run";
+/** What went wrong, for a line. Never throws (an error whose message or string form throws is
+ *  still described), so the sweep's error path cannot fail on it. */
+const errText = (e: unknown): string => {
+  try {
+    return printable(e instanceof Error ? e.message : String(e));
+  } catch {
+    return "an error that could not be described";
+  }
+};
 
 /** What the identity check (section 5.4) found for one orphan. */
 type Identity =
@@ -303,13 +313,18 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
       if (r.worktree) checks.push(r);
     } catch (e) {
       // Anything else (a removal that could not finish, an unreadable process table) is said and
-      // the command goes on. The record stays for the next command.
+      // the command goes on. The record stays for the next command: it is put back first, and
+      // nothing here may throw (final record review I1), so no claim is ever left behind.
       const r = l.record;
-      say(
-        `styre: could not finish with the launch record for pid ${r.pid} from ${who(r)}: ${errText(e)}\n`,
-      );
       if (!res.failed.includes(r)) res.failed.push(r);
       if (mine !== null) putBack(mine);
+      try {
+        say(
+          `styre: could not finish with the launch record for pid ${r.pid} from ${who(r)}: ${errText(e)}\n`,
+        );
+      } catch {
+        /* the line could not be written; the record is back, and the command goes on */
+      }
     }
   }
 

@@ -256,6 +256,11 @@ function isOwner(o: unknown): o is Owner {
   );
 }
 
+const stringOrNull = (v: unknown): boolean => v === null || typeof v === "string";
+
+/** Every field of a version 1 record, each to its declared type (a record file is data from disk:
+ *  a record-shaped write could put anything in it, and what passes here reaches formatters that
+ *  expect those types, final record review I1). Anything else takes the "unreadable" path. */
 function isRecord(v: unknown, pid: number, startedAt: string): v is LaunchRecord {
   const x = v as LaunchRecord | null;
   return (
@@ -264,7 +269,11 @@ function isRecord(v: unknown, pid: number, startedAt: string): v is LaunchRecord
     x.version === 1 &&
     x.pid === pid &&
     x.startedAt === startedAt &&
+    stringOrNull(x.bootId) &&
     (x.kind === "agent" || x.kind === "group") &&
+    stringOrNull(x.ident) &&
+    (x.stepId === null || Number.isInteger(x.stepId)) &&
+    stringOrNull(x.worktree) &&
     typeof x.command === "string" &&
     isOwner(x.owner)
   );
