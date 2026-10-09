@@ -1,0 +1,121 @@
+// The process the live smoke (scripts/smoke-lifecycle.ts) stops: it plays `styre run` around one
+// agent dispatch, with the REAL Claude adapter of the code under test. $SMOKE_ROOT names that code:
+// the branch for the new code, or a checkout of main for the control run. When the code has the
+// ENG-485 stop handlers (src/util/process/signals.ts), they are installed as `styre run` installs
+// them; main has none, so there the driver dies as main's `styre run` did.
+//
+// It says on stderr, one `smoke-driver: …` line each:
+//   handlers installed|none   whether the stop handlers are in place;
+//   dispatch <epoch ms>       just before the dispatch starts (a timeout's instant is counted from it);
+//   result <json>             what the dispatch returned, if it returns;
+//   interrupted <name>        (suite mode) the suite's run threw, a stop having interrupted it.
+// Everything Styre itself says goes to the same stderr.
+//
+// Environment: SMOKE_ROOT, SMOKE_REPO (the agent's working folder), SMOKE_MODEL, SMOKE_TIMEOUT_MS,
+// SMOKE_IDENT, and SMOKE_CLAUDE, the agent CLI to run (an absolute path in the free mode, so no PATH
+// lookup can pick the real CLI). The caller points XDG_STATE_HOME at a folder of its own.
+//
+// SMOKE_MODE=suite runs no agent: it runs the repository's test suite (`sh test.sh`) through the
+// code's runBoundedCommand, as a verify step does, in a command group of its own (spec 6.2), and
+// says `result` with what that returned. SMOKE_LOG names a file that gets a copy of everything
+// written to stderr, first, so what Styre said can be read after its terminal has closed.
+import { appendFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import type * as Claude from "../src/agent/providers/claude.ts";
+import type * as Signals from "../src/util/process/signals.ts";
+import type * as Bounded from "../src/util/run-bounded-command.ts";
+
+const need = (name: string): string => {
+  const v = process.env[name];
+  if (!v) throw new Error(`smoke-driver: ${name} is not set`);
+  return v;
+};
+const root = need("SMOKE_ROOT");
+const repo = need("SMOKE_REPO");
+const model = need("SMOKE_MODEL");
+const timeoutMs = Number(need("SMOKE_TIMEOUT_MS"));
+const ident = need("SMOKE_IDENT");
+const command = need("SMOKE_CLAUDE");
+const mode = process.env.SMOKE_MODE ?? "agent";
+
+// The copy of stderr, installed before the stop handlers so it sees every line they write.
+const logFile = process.env.SMOKE_LOG;
+if (logFile) {
+  const write = process.stderr.write.bind(process.stderr) as (...a: unknown[]) => boolean;
+  process.stderr.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+    appendFileSync(logFile, chunk);
+    return write(chunk, ...rest);
+  }) as typeof process.stderr.write;
+  // A closed terminal fails the writes themselves; the copy above has already been made.
+  process.stderr.on("error", () => {});
+}
+
+const say = (line: string): void => {
+  process.stderr.write(`smoke-driver: ${line}\n`);
+};
+
+const signals = join(root, "src", "util", "process", "signals.ts");
+if (existsSync(signals)) {
+  const { installStopHandlers } = (await import(signals)) as typeof Signals;
+  installStopHandlers({ command: "run", run: null });
+  say("handlers installed");
+} else {
+  say("handlers none");
+}
+
+if (mode === "suite") {
+  // A verify step's suite, in a command group of its own. When a stop interrupts it, the stop
+  // handler owns the exit, as for an agent.
+  const { runBoundedCommand } = (await import(
+    join(root, "src", "util", "run-bounded-command.ts")
+  )) as typeof Bounded;
+  say(`dispatch ${Date.now()}`);
+  try {
+    const r = await runBoundedCommand("sh test.sh", { cwd: repo, timeoutMs });
+    say(`result ${JSON.stringify({ exitCode: r.exitCode, timedOut: r.timedOut })}`);
+    process.exit(0);
+  } catch (err) {
+    say(`interrupted ${err instanceof Error ? err.name : String(err)}`);
+    if (!(err instanceof Error && err.name === "RunInterrupted")) process.exit(1);
+  }
+} else {
+  await dispatchAgent();
+}
+
+async function dispatchAgent(): Promise<void> {
+  const { claudeAgentRunner } = (await import(
+    join(root, "src", "agent", "providers", "claude.ts")
+  )) as typeof Claude;
+
+  /** The prompt of the design's experiment (spec 2.1). */
+  const PROMPT =
+    "Run this project's test suite with the Bash tool: `sh test.sh` (in the foreground, with a 300000 ms timeout), then report whether it passed.";
+
+  say(`claude ${command}`);
+  say(`dispatch ${Date.now()}`);
+  const r = await claudeAgentRunner(command).run({
+    prompt: PROMPT,
+    model,
+    allowedTools: ["Read", "Bash(sh:*)"],
+    cwd: repo,
+    timeoutMs,
+    // Main's adapter has no `context` and ignores it.
+    context: { ident, stepId: null, worktree: repo },
+  });
+  say(
+    `result ${JSON.stringify({
+      completed: r.completed,
+      timedOut: r.timedOut,
+      exitCode: r.exitCode,
+      interrupted: r.interrupted === true,
+      // Why a startup refusal stopped the agent (ENG-476), when it did.
+      fault: r.capabilities?.error ?? null,
+      // The CLI's own complaint, when it failed: the tail of its stderr and plain output.
+      stderr: r.completed ? "" : r.stderr.slice(-600),
+      stdout: r.completed ? "" : r.stdout.slice(-600),
+    })}`,
+  );
+  // As the CLI's error boundary does (src/cli/output.ts guard): while a stop is in progress the stop
+  // handler owns the exit, so an interrupted dispatch ends nothing here; the handler re-raises.
+  if (r.interrupted !== true) process.exit(0);
+}

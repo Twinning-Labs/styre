@@ -1,4 +1,7 @@
 import { defineCommand } from "citty";
+import { printable } from "../util/process/printable.ts";
+import type { LaunchRecord } from "../util/process/records.ts";
+import { sweepOrphans } from "../util/process/sweep.ts";
 import { type Checkpoint, listCheckpoints } from "./checkpoints.ts";
 import { guard } from "./output.ts";
 
@@ -20,7 +23,14 @@ function leftoverRow(c: Checkpoint): string {
   return `  ${c.slug}/${c.ident}  [${c.kind}, ${humanAge(c.ageMs)}]  ${c.note ?? ""}`.trimEnd();
 }
 
-export async function lsImpl(opts?: { root?: string }): Promise<void> {
+/** One orphan the sweep stopped, for `ls`'s human output (section 8). */
+function sweptRow(r: LaunchRecord): string {
+  // The ident comes from the record file: its control characters are replaced, as the command's are.
+  const ident = r.ident === null ? "an unknown run" : printable(r.ident);
+  return `  ${ident}  [${r.kind}, pid ${r.pid}]  ${r.command}`.trimEnd();
+}
+
+export async function lsImpl(opts?: { root?: string; swept?: LaunchRecord[] }): Promise<void> {
   const all = listCheckpoints(opts?.root);
 
   const resumable = all.filter((c) => c.resumable && !c.live).sort((a, b) => a.ageMs - b.ageMs);
@@ -55,10 +65,22 @@ export async function lsImpl(opts?: { root?: string }): Promise<void> {
     }
   }
 
+  const swept = opts?.swept ?? [];
+  if (swept.length > 0) {
+    lines.push("");
+    lines.push("Stopped orphans (left running when Styre was force quit):");
+    for (const r of swept) lines.push(sweptRow(r));
+  }
+
   process.stdout.write(`${lines.join("\n")}\n`);
 }
 
 export const lsCommand = defineCommand({
   meta: { name: "ls", description: "List paused/resumable styre efforts and finished leftovers." },
-  run: () => guard("ls", () => lsImpl()),
+  // The sweep runs first, inside the error boundary (section 8); `ls` also lists what it stopped.
+  run: () =>
+    guard("ls", async () => {
+      const swept = await sweepOrphans();
+      await lsImpl({ swept: swept.stopped });
+    }),
 });

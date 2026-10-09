@@ -317,7 +317,13 @@ export interface ResumedRunResult {
  *  Profile: uses `commands: { build: "true", test: "true" }` so verify:integration passes. */
 export async function resumeParkedTicket(
   parked: ParkedRunResult,
-  opts?: { acceptHead?: boolean; inspect?: boolean; parkAgain?: boolean },
+  opts?: {
+    acceptHead?: boolean;
+    inspect?: boolean;
+    parkAgain?: boolean;
+    /** Called inside the fake agent, so a test can observe the step in flight. */
+    onDispatch?: () => void;
+  },
 ): Promise<ResumedRunResult> {
   // Restore the same XDG_STATE_HOME the park used so parkDir resolves to the same dumpDir.
   const xdgStateHome = join(parked.dumpDir, "..", "..", "..");
@@ -388,6 +394,7 @@ export async function resumeParkedTicket(
       {
         buildRegistry: (resumeContext) => {
           const runner = new FakeAgentRunner((input) => {
+            opts?.onDispatch?.();
             prompts.push(input.prompt);
             callCount++;
             if (opts?.parkAgain) {
@@ -600,19 +607,22 @@ function freshGitRepo(): string {
  *  this reliably parks a FRESH ticket after `provision` (a no-op with `components: []`) at its
  *  first real dispatch (`design:dispatch`) — driving to a terminal in two ticks without needing to
  *  script the full plan/implement/review sidecar protocol. */
-function sessionLimitRunner(): FakeAgentRunner {
-  return new FakeAgentRunner(() => ({
-    completed: false,
-    exitCode: 1,
-    stdout: "partial work from session-limit",
-    stderr: "You have reached your session limit · resets tomorrow",
-    timedOut: false,
-    costUsd: null,
-    tokensIn: null,
-    tokensOut: null,
-    cause: "session-limit" as const,
-    resetAt: "tomorrow",
-  }));
+function sessionLimitRunner(onDispatch?: () => void): FakeAgentRunner {
+  return new FakeAgentRunner(() => {
+    onDispatch?.();
+    return {
+      completed: false,
+      exitCode: 1,
+      stdout: "partial work from session-limit",
+      stderr: "You have reached your session limit · resets tomorrow",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+      cause: "session-limit" as const,
+      resetAt: "tomorrow",
+    };
+  });
 }
 
 export interface FreshTicketRun {
@@ -622,6 +632,8 @@ export interface FreshTicketRun {
   dbPath: string;
   /** The XDG_STATE_HOME used for this run — reuse via `reuseStateOf` to hit the same checkpoint. */
   stateRoot: string;
+  /** The target repo this run worked in (removed by `cleanup`). */
+  repoDir: string;
   /** Best-effort removal of every temp dir this call created (idempotent). */
   cleanup: () => void;
 }
@@ -648,6 +660,10 @@ export async function runFreshTicket(opts?: {
   fresh?: boolean;
   defaultBranch?: string;
   forge?: ForgePort;
+  /** Called inside the fake agent, so a test can observe the step in flight. */
+  onDispatch?: () => void;
+  /** Runs on the new target repo before the run starts (for example to move its checked out branch). */
+  repoSetup?: (repoDir: string) => void;
 }): Promise<FreshTicketRun> {
   const prevEnv = {
     state: process.env.XDG_STATE_HOME,
@@ -662,6 +678,7 @@ export async function runFreshTicket(opts?: {
   // anyway since ports/runner are injected, but reading them would be non-hermetic).
   const configRoot = mkdtempSync(join(tmpdir(), "styre-fresh-config-"));
   const repoDir = freshGitRepo();
+  opts?.repoSetup?.(repoDir);
   const profileDir = mkdtempSync(join(tmpdir(), "styre-fresh-profile-"));
   const profilePath = join(profileDir, "profile.json");
   writeFileSync(
@@ -716,7 +733,11 @@ export async function runFreshTicket(opts?: {
     };
     await runImpl(
       { args: { ticket: FRESH_IDENT, profile: profilePath, fresh: opts?.fresh } },
-      { ports, runner: sessionLimitRunner(), preflight: () => ({ ok: true, version: null }) },
+      {
+        ports,
+        runner: sessionLimitRunner(opts?.onDispatch),
+        preflight: () => ({ ok: true, version: null }),
+      },
     );
   } catch (err) {
     // The refuse-guard (and any other early throw) rejects before returning a `cleanup` handle to
@@ -732,6 +753,7 @@ export async function runFreshTicket(opts?: {
     checkpointDir,
     dbPath: join(checkpointDir, "run.db"),
     stateRoot,
+    repoDir,
     cleanup: localCleanup,
   };
 }

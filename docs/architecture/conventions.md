@@ -14,7 +14,7 @@ treated as unset.
 | Function | Variable | Fallback | Holds |
 |---|---|---|---|
 | `configDir()` | `XDG_CONFIG_HOME` | `~/.config` | `<config>/styre/` — profiles + `config.json` |
-| `stateDir()` | `XDG_STATE_HOME` | `~/.local/state` | `<state>/styre/` — DB, checkpoints, telemetry id |
+| `stateDir()` | `XDG_STATE_HOME` | `~/.local/state` | `<state>/styre/` — DB, checkpoints, telemetry id; and its sibling `<state>/styre-processes/` — launch records |
 
 `XDG_DATA_HOME` and `XDG_CACHE_HOME` are **not** read anywhere. Nothing Styre persists is classified
 as data or cache; ephemeral work goes to the OS temp dir instead (below).
@@ -44,6 +44,45 @@ The default DB lives here only for `styre migrate`. A `styre run` journals direc
 checkpoint (`<slug>/<ticket-ident>/run.db` above) unless you pass `--db` — the checkpoint IS the
 run's live location, not a temp file written only on pause.
 
+### Launch records — `$XDG_STATE_HOME/styre-processes/`
+
+One small JSON file per live long running launch (an agent, or a command: suites, probes,
+acceptance checks, provisioning, the macOS `lsof` of the leftover check), for the whole machine
+(`src/util/process/records.ts`, ENG-485). It is how a later Styre command finds and stops what a
+Styre killed with `kill -9` left running (the sweep, see
+[`runtime-parameters.md`](runtime-parameters.md#stopping-interruption-and-orphan-cleanup-eng-485)).
+
+```
+<state>/styre-processes/                                   # created (mode 0700) by the first record if missing
+  <pid>-<startedAt>.json                                   # a record (0600)
+  <pid>-<startedAt>.json.claimed-<claimerPid>-<claimerStartedAt>   # a record a sweep has claimed
+```
+
+- **A sibling of `styre/`, never inside it.** Any folder name inside `styre/` could collide with a
+  project slug, and `ls` and `clean --all` treat every child folder of `styre/` as one.
+- **`<startedAt>`** is the process's start time as the kernel reports it: clock ticks since boot on
+  Linux (digits only), `<seconds>.<microseconds>` (six digits) on macOS. With the pid it identifies
+  the process, so a pid reused by another program is never mistaken for it.
+- **A record holds** the pid, the start time, the boot ID (Linux), whether it is an `agent` or a
+  `group`, the ticket ident, step ID and worktree when known, the first 200 characters of the
+  command line, and the owner: the launching Styre's pid, start time and process group.
+- **Written** right after the spawn, to a temporary name that starts with a dot, then renamed, so a
+  reader never sees half a file. The temporary file is created new and never through a symbolic
+  link; a file already at that name makes the write fail. **Removed** only once the process, or for a group every member, is
+  confirmed gone.
+- **A claimed record** is one a sweep has renamed while it checks the owner (the name keeps
+  `.json`). A claim whose claimer is gone is taken again, so a sweep stopped midway strands nothing.
+- **Nothing else in the folder is touched.** Styre reads, renames and deletes only regular files
+  whose names match one of the two patterns exactly. A file with a record's name that cannot be used
+  (not a regular file, not yours, over 64 KB, or not a valid record) is reported once per command and
+  left in place.
+- **The folder must be yours alone.** Styre creates it with mode 0700 but does not change a folder
+  that already exists. The sweep uses it only when it is a real folder (not a symbolic link) owned by
+  you and writable by no one else; otherwise it says so and stops nothing (anyone who could write it
+  could make the sweep stop any of your processes). Fix it with `chmod 700`.
+- Tests point `XDG_STATE_HOME` at a temporary folder (`test/preload.ts`) and fail the run if a record
+  appears in the real folder.
+
 ---
 
 ## Slug derivation
@@ -56,7 +95,9 @@ The slug names a project's config/profile subdirectory and its checkpoint direct
    `https|ssh|git://github.com/owner/repo(.git)`), the slug is the **repo name only** (not
    `owner/repo`).
 3. On any failure — no remote, a non-GitHub host (GitLab/Bitbucket/self-hosted), an unparseable URL
-   — fall back to `basename(repoDir)`.
+   — fall back to `basename(repoDir)`. The one exception: a `git` call that times out (30 s) is not
+   an answer, so the command fails with an error naming it instead of silently using the folder
+   name, which would be a different state folder (`--resume` would not find its checkpoint).
 
 Consequences worth knowing: the GitHub match is case-sensitive on `github.com`; a nested path like
 `org/group/repo` yields a slug containing a slash, which becomes a nested directory under the config

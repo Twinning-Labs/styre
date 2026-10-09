@@ -100,8 +100,11 @@ runner writes its *intent* to the journal before the effect and makes the effect
    downstream projection rows in the same transaction, commit.
 
 A crash between steps 1 and 3 leaves the row in `running` state with a known key. On the next
-`styre run --resume`, `recover()` finds it, kills any orphaned dispatch process, and re-queues the
-step — the key ensures the re-applied effect is a safe no-op if it already landed.
+`styre run --resume`, the sweep first stops any process the dead run left behind (from its launch
+records, not the journal), then `recover()` finds the row and re-queues the step — the key ensures
+the re-applied effect is a safe no-op if it already landed. A stop signal (Ctrl-C, `kill`, CI's
+cancel) is not a crash: Styre stops the agent, records the interruption, and resume redoes the step
+without counting the attempt (see `control-loop.md` §6.1).
 
 ---
 

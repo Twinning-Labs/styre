@@ -22,10 +22,12 @@
   the zod schema before writing; a validation failure is logged to **stderr** (never stdout) and
   the event is written anyway. A schema-drift bug must never flip an otherwise-successful run into
   a crash.
-- **Idempotent under resume.** `event`/`dispatch`/`signal` rows are derived from the durable SQLite
-  SoT and streamed by watermark (`src/telemetry/emitter.ts`), so a re-spawned/resumed worker never
-  re-emits rows already flushed in a prior attempt of the same run. `summary` and `ci_handoff` are
-  each emitted once, at their respective terminal points.
+- **Not idempotent under resume.** `event`/`dispatch`/`signal` rows are derived from the durable
+  SQLite SoT and streamed by watermark (`src/telemetry/emitter.ts`), but each process starts its
+  watermarks at the first row, so a resumed run (`--resume`) streams every row of the checkpoint
+  again, including those an earlier process already emitted. Consumers dedupe by `run_id` plus
+  `ticket_id` and `seq` (`event`), `dispatch_id` (`dispatch`) or `id` (`signal`). `summary` and `ci_handoff` are each emitted
+  once per process, at their respective terminal points.
 - **Five event types:** `event`, `dispatch`, `signal`, `summary`, `ci_handoff` — one zod object
   each, joined into `TelemetryEventSchema` as a `discriminatedUnion` on `type`.
 
@@ -94,6 +96,19 @@ that outcome.
 | `reason` | string \| null | yes | `event_log.reason` — free-text (e.g. an escalation reason) |
 | `payload_json` | string \| null | yes, and optional (key may be absent) | `event_log.payload_json` — opaque JSON blob, kind-specific shape |
 | `created_at` | string | no | `event_log.created_at` (UTC timestamp string) |
+
+**Two `note` reasons from ENG-485** (no new kind, no schema change):
+- **`interrupted`** — written by the stop handler when a stop signal ends `styre run`, and emitted at
+  once as an ordinary `event` line. No `summary` follows: the process ends by the signal. `payload_json` holds `event: "interrupted"` and the `signal`, and,
+  when a step was in flight, its `stepId`, `attempt` (after the attempt was given back), `startedAt`,
+  `worktree`, `untrackedBefore`, `dispatchRowId`, `headAtStart` and `headAtStop`. On `--resume` the
+  stream carries this row again: each process's emitter starts its watermark at the first row.
+- **`leftover-check`** — the agent left processes running in its worktree, or the check could not
+  finish; `payload_json` holds the `worktree` and the stderr `lines` reported. **Each line carries a
+  process's command line** (up to 120 characters), so the run database and this stream can hold
+  command lines that are not Styre's: in in place mode the check also reports processes you started
+  yourself in the checkout during the step, with their command lines. Control characters in them are
+  replaced with `?` before they are stored or emitted.
 
 ### 3.2 `dispatch` — one completed agent invocation (`dispatch` row)
 

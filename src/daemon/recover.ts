@@ -1,61 +1,76 @@
 import type { Database } from "bun:sqlite";
 import * as steps from "../db/repos/workflow-step.ts";
 import { StepExecutionError } from "../engine/step-journal.ts";
+import {
+  findInterruption,
+  olderCheckpointWarning,
+  resetBranchAfterInterruption,
+  undoInterruptedEdits,
+} from "../util/process/interruption.ts";
 import { isSuiteStep } from "./verification-retry.ts";
 
-export interface RecoverDeps {
-  /** True if this PID is alive; a negative value denotes a POSIX process group. */
-  isAlive: (pid: number) => boolean;
-  /** Force-kill the process or negative-PID process group journaled before the crash. */
-  kill: (pid: number) => void;
+/** What `--resume` knows about the checkout (ENG-485 section 7.5). Without it (a fresh run's empty
+ *  database), a matched interruption is still free, but nothing on disk is touched. */
+export interface RecoverCtx {
+  inPlace: boolean;
+  repoPath: string;
+  branch: string;
+  acceptHead: boolean;
+  warn: (line: string) => void;
+}
+
+/** Only the warning channel: a fresh run has no checkout to repair, but an older checkpoint
+ *  reused through --db still gets its warning (section 5.5). */
+export interface RecoverWarnOnly {
+  warn: (line: string) => void;
 }
 
 export interface RecoverResult {
+  /** Steps left `running` that were returned to `pending`. */
   reset: number;
-  killed: number;
+  /** Of those, the ones matched to a recorded interruption. */
+  interrupted: number;
+  /** Older checkpoints whose journaled pid is still alive (section 5.5). */
+  warned: number;
 }
 
-/** Crash recovery (control-loop §6.1). A step left 'running' is the complete record
- *  that a crash interrupted it. Kill any journaled orphan still alive (the ENG-131
- *  lesson), then reset the step to 'pending' so the resolver re-picks it. A dispatch
- *  retry is a fresh attempt (§6.3); exactly-once for external effects is provided by
- *  keyed/probed effects (§3 / §5), added with the adapters in M6 — so resetting to
- *  pending is the correct, complete behavior for the substrate at M1. */
-export function recover(db: Database, deps: RecoverDeps): RecoverResult {
+/** Crash and interruption recovery (control-loop §6.1, ENG-485 section 7.5). Kills nothing: the
+ *  sweep (section 8) has already stopped any orphan, from its launch record.
+ *
+ *  For each step left `running`:
+ *  - matched to a recorded interruption (step ID, attempt and start): the attempt was already given
+ *    back, so it returns to `pending` without being marked failed, suite steps included. With a
+ *    context, the in-place edits are undone and then the branch is returned to the step's start
+ *    when that is safe;
+ *  - otherwise it was a crash or a `kill -9`: a suite step keeps its consumed attempt and a typed
+ *    error, so restarting cannot skip the bounded retry policy, and the step returns to `pending`. */
+export function recover(db: Database, ctx?: RecoverCtx | RecoverWarnOnly): RecoverResult {
+  const checkout = ctx && "repoPath" in ctx ? ctx : null;
   const running = steps.listByStatus(db, "running");
-  let killed = 0;
+  let interrupted = 0;
+  let warned = 0;
   for (const step of running) {
-    if (step.pid !== null && deps.isAlive(step.pid)) {
-      deps.kill(step.pid);
-      killed++;
+    const older = olderCheckpointWarning(step);
+    if (older) {
+      ctx?.warn(older);
+      warned++;
     }
-    // An interrupted suite is incomplete execution, not a verdict. Retain its consumed attempt
-    // and typed error so restarting cannot skip the same bounded retry policy as a timeout.
+    const p = findInterruption(db, step);
+    if (p) {
+      interrupted++;
+      if (checkout) {
+        const undo = undoInterruptedEdits(p, checkout);
+        if (undo) checkout.warn(undo);
+        const reset = resetBranchAfterInterruption(db, p, checkout);
+        if (reset) checkout.warn(reset);
+      }
+      steps.resetToPending(db, step.id);
+      continue;
+    }
     if (isSuiteStep(step)) {
       steps.markFailed(db, step.id, new StepExecutionError("verification execution interrupted"));
     }
     steps.resetToPending(db, step.id);
   }
-  return { reset: running.length, killed };
-}
-
-/** Production deps: liveness via signal 0 (throws if the pid is gone), SIGKILL to kill. */
-export function realRecoverDeps(): RecoverDeps {
-  return {
-    isAlive: (pid: number) => {
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    kill: (pid: number) => {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // already gone — nothing to kill
-      }
-    },
-  };
+  return { reset: running.length, interrupted, warned };
 }

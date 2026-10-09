@@ -689,21 +689,49 @@ effects (`pr_create`) await a signal the drainer delivers with `response_ref` (�
 
 ### 6.1 Recovery on start
 ```
-recover():
+sweep()                               # every command, first: stop orphans from the launch records
+recover():                            # kills nothing (ENG-485)
   for step in SELECT * FROM workflow_step WHERE status='running':
-    kill_orphan(step)                 # journaled PID still alive (dispatch) -> kill (ENG-131 lesson)
-    if reattemptable(step): reset to 'pending'
-    else (irreversible w/ probe): if probe_says_done: mark 'succeeded'(reconstructed) else 'pending'
+    if interruption_recorded(step):   # a stop signal: the attempt was already given back
+      undo the agent's edits (in place); return the branch to the step's start if safe
+      reset to 'pending'              # not failed, suite steps included
+    else:                             # a crash or kill -9
+      if suite step: mark failed (attempt kept) then reset to 'pending'
+      else: reset to 'pending'
   drain_outbox()
 ```
 Intent-before-effect (§3) makes a `running` row the complete record of "an effect may be half-done."
+
+**Crash recovery is the sweep plus the reset (ENG-485).** The journal no longer records process ids
+(`workflow_step.pid` stays in the schema and is always null for new runs). Every process Styre starts
+is recorded instead in a launch record on disk (`$XDG_STATE_HOME/styre-processes/`, see
+[`conventions.md`](conventions.md)). Before anything else, every Styre command sweeps those records:
+a record whose owning Styre is gone names an orphan, which is stopped (its whole tree, after its
+start time confirms it is the same process). `recover()` then only resets journal rows. A checkpoint
+written before ENG-485 can still hold a pid; `recover()`, `--fresh` and `clean` warn about it if it is
+alive, and stop nothing.
+
+**An interruption is free.** When a stop signal (Ctrl-C, `kill`, a closed terminal, CI's cancel)
+reaches `styre run`, the stop handler stops the agent and its commands and records the interruption
+on the step in flight, in one transaction: the attempt `markRunning` counted is given back, the
+dispatch row is closed as `interrupted`, and a `note` event (reason `interrupted`) holds the step's
+start, the files that were untracked before the dispatch, and the branch head at the step's start
+and at the stop. On `--resume`, `recover()` matches that note to the step (step ID, attempt and
+`started_at`) and resets the step to `pending` without marking it failed. In place, it undoes the
+agent's edits (sparing files that were untracked before). It returns the branch to where the step
+started when the step moved it, the branch still stands where the step left it, and `--accept-head`
+was not given; the step's dispatches since its start are then marked `reverted`. `--fresh` and
+`clean` run the same in-place undo before they discard the checkpoint. A step whose work finished
+during the few seconds of a stop is not recorded, so it is redone on resume, the same cost as a crash
+at that point.
 
 ### 6.2 Replay returns the recorded result
 The resolver never re-executes a `succeeded` step — it reads `result_json`. The journal is the memo
 table; with §5 idempotency every operation is at-least-once-attempted, exactly-once-effective.
 
 ### 6.3 Dispatch crash
-An agent CLI dies mid-run: step `{running, pid}`, no `result_json` → restart → `kill_orphan` →
+An agent CLI dies mid-run, or Styre dies under it: step `running`, no `result_json` → the next Styre
+command's sweep stops any orphan from its launch record → `recover()` resets the step →
 re-dispatch as a fresh `dispatch_id`. Partial work committed to the branch is the next worker's
 start point — git is the durable substrate for code, the journal for control. *Dispatch retry =
 fresh attempt, not cached replay; only external effects get exactly-once keys.*

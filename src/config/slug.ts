@@ -1,16 +1,29 @@
 import { basename } from "node:path";
+import { type BlockingResult, RunInterrupted, runBlocking } from "../util/process/door.ts";
 
-/** Run git in `cwd`, returning trimmed stdout, or null on ANY failure (probe-graceful). The
- *  try/catch matters: `Bun.spawnSync` THROWS (not `{success:false}`) when `cwd` does not exist, so
- *  an unguarded call would propagate — this honors the "null on any failure" contract and keeps
- *  `slugForCwd`/`deriveSlug` robust when the resolved repo dir is missing/fabricated. */
+/** Local git: a healthy call never takes this long (ENG-485 section 5.1). */
+const LOCAL_GIT_MS = 30_000;
+
+/** Run git in `cwd`, returning trimmed stdout, or null when git answered with a failure
+ *  (probe-graceful). The try/catch matters: the spawn THROWS (not `{success:false}`) when `cwd`
+ *  does not exist, so an unguarded call would propagate — this keeps `slugForCwd`/`deriveSlug`
+ *  robust when the resolved repo dir is missing/fabricated. Two things are not answers and are
+ *  thrown, never read as "no remote" or "no branch": a stop in progress (`RunInterrupted`), and a
+ *  call that outlived its timeout and was killed. Read as null, a timeout made `deriveSlug` pick the
+ *  folder name in silence: a different state folder, where `--resume` cannot find its checkpoint
+ *  (ENG-485 final review A F10). */
 export function tryGit(args: string[], cwd: string): string | null {
+  let res: BlockingResult;
   try {
-    const res = Bun.spawnSync(["git", ...args], { cwd });
-    return res.success ? res.stdout.toString().trim() : null;
-  } catch {
+    res = runBlocking(["git", ...args], { cwd, timeoutMs: LOCAL_GIT_MS });
+  } catch (err) {
+    if (err instanceof RunInterrupted) throw err;
     return null;
   }
+  if (res.timedOut) {
+    throw new Error(`git ${args.join(" ")} timed out after ${LOCAL_GIT_MS} ms in ${cwd}`);
+  }
+  return res.success ? res.stdout.trim() : null;
 }
 
 /** Parse a GitHub remote URL into { owner, repo }, or null. Pure/SDK-free so slug derivation
@@ -35,9 +48,9 @@ export function deriveSlug(repoDir: string): string {
 
 export type GitRun = (args: string[], cwd: string) => string;
 export const defaultGit: GitRun = (args, cwd) => {
-  const r = Bun.spawnSync(["git", ...args], { cwd });
-  if (!r.success) throw new Error(`git ${args.join(" ")} failed: ${r.stderr.toString().trim()}`);
-  return r.stdout.toString().trim();
+  const r = runBlocking(["git", ...args], { cwd, timeoutMs: LOCAL_GIT_MS });
+  if (!r.success) throw new Error(`git ${args.join(" ")} failed: ${r.stderr.trim()}`);
+  return r.stdout.trim();
 };
 
 /** cwd's git top-level, or throw (fail-closed). Message unchanged from in-place.ts. */

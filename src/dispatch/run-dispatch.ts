@@ -6,9 +6,9 @@ import { modelForTier } from "../config/agent-config.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../db/repos/dispatch.ts";
 import { appendEvent } from "../db/repos/event-log.ts";
-import { setPid } from "../db/repos/workflow-step.ts";
 import { ParkSignal } from "../engine/park-signal.ts";
 import { StepPrerequisiteError } from "../engine/step-journal.ts";
+import { beginDispatch, endDispatch, noteHead, runBlocking } from "../util/process/door.ts";
 import { nowUtc } from "../util/time.ts";
 import type { CommitScope } from "./commit-scope.ts";
 import type { Profile } from "./profile.ts";
@@ -100,22 +100,38 @@ function dispatchId(ident: string, seq: number): string {
 }
 
 /** The shared real-dispatch flow (control-loop §4), provider-agnostic: render (CL-PROFILE) →
- *  worktree → run the agent via the injected AgentRunner (model from the tier+config; pid
- *  journaled for orphan-kill) → daemon-commit (CL-COMMIT) → record the dispatch → enforce the
+ *  worktree → run the agent via the injected AgentRunner (model from the tier+config; the launch is
+ *  recorded on disk by the process door, ENG-485, not journaled) → daemon-commit (CL-COMMIT) → record the dispatch → enforce the
  *  postcondition (CL-POSTCOND). Throws on CL-PROFILE miss, transport failure, or postcondition
  *  failure (→ failure-policy). */
 export async function runAgentDispatch(
   ctx: HandlerContext,
   deps: DispatchDeps,
   spec: DispatchSpec,
-): Promise<{
+): Promise<DispatchOutcome> {
+  try {
+    return await dispatchAndRecord(ctx, deps, spec);
+  } finally {
+    // The dispatch row is completed by now (or the dispatch failed before it): the in-flight step
+    // no longer carries this dispatch (ENG-485 section 7.3 step 6).
+    endDispatch();
+  }
+}
+
+type DispatchOutcome = {
   dispatchId: string;
   sha: string;
   changed: boolean;
   output: string;
   discarded: string[];
   discardedSources: Map<string, string>;
-}> {
+};
+
+async function dispatchAndRecord(
+  ctx: HandlerContext,
+  deps: DispatchDeps,
+  spec: DispatchSpec,
+): Promise<DispatchOutcome> {
   const rendered = renderPrompt(spec.template, spec.vars);
   if (!rendered.ok) {
     throw new Error(`CL-PROFILE: unresolved prompt vars: ${rendered.missing.join(", ")}`);
@@ -165,13 +181,23 @@ export async function runAgentDispatch(
   });
 
   const allowedTools = allowlistFor(spec.handlerKey, { runnerCommands: spec.runnerCommands ?? [] });
+  const context = {
+    ident: ctx.ticket.ident,
+    stepId: ctx.step.id,
+    worktree: deps.worktreePath,
+    untrackedBefore: [...untrackedBefore],
+    dispatchRowId: inserted.id,
+  };
+  // Held by the in-flight step until the dispatch row is completed, so a stop that lands after the
+  // agent has left the live set (its output still draining) still records this dispatch.
+  beginDispatch(context);
   const { result, fault } = await launchAgent(deps.runner, {
     prompt,
     model,
     allowedTools,
     cwd: deps.worktreePath,
     timeoutMs: deps.timeoutMs,
-    onSpawn: (pid) => setPid(ctx.db, ctx.step.id, pid),
+    context,
   });
 
   // ENG-476: capability isolation is verified on every dispatch, never assumed — including a
@@ -351,11 +377,16 @@ export async function runAgentDispatch(
       spec.validateCommittedOutput?.(result.stdout, deps.worktreePath, sha);
     } catch (error) {
       if (changed) {
-        const reset = Bun.spawnSync(["git", "reset", "--hard", preHead], {
+        // `reset --hard` writes the whole tree, so it gets the longer bound (ENG-485 section 5.1).
+        const reset = runBlocking(["git", "reset", "--hard", preHead], {
           cwd: deps.worktreePath,
+          timeoutMs: 120_000,
         });
         if (!reset.success)
-          throw new Error(`failed to revert invalid committed review evidence: ${reset.stderr}`);
+          throw new Error(
+            `failed to revert invalid committed review evidence: ${reset.timedOut ? "timed out" : reset.stderr}`,
+          );
+        noteHead(preHead); // the branch is back at its head before this dispatch (ENG-485 section 7.5)
       }
       undoAttempt(deps.worktreePath, untrackedBefore);
       completion.branchHeadSha = preHead;

@@ -8,6 +8,12 @@ import { parseProfile } from "../../src/dispatch/profile.ts";
 import { observeSuiteCommand, suiteResult } from "../../src/dispatch/suite-observation.ts";
 import { planTestEnvironment, qualifyTestEnvironment } from "../../src/testing/environment.ts";
 import { karmaReporterConfig } from "../../src/testing/karma.ts";
+import { listProcesses } from "../../src/util/process/proc-table.ts";
+
+const liveChildren = (): number[] =>
+  listProcesses()
+    .filter((p) => p.ppid === process.pid && p.state !== "zombie")
+    .map((p) => p.pid);
 const deps = process.env.STYRE_KARMA_NATIVE_DEPS;
 test.skipIf(!deps)(
   "native Karma 4/Firefox: original context, passing/failing/empty/config-error/timeout",
@@ -96,26 +102,20 @@ test.skipIf(!deps)(
         join(root, "spec/example.js"),
         "describe('example',()=>{it('hangs',()=>{while(true){}});});",
       );
-      let group: number | undefined;
+      const childrenBefore = liveChildren();
       const timeout = await observeSuiteCommand({
         sha: "fixture-sha",
         command: "npm test",
         cwd: root,
         environment: c.testEnvironment,
         timeoutMs: 1000,
-        onSpawn: (pid) => {
-          group = pid;
-        },
       });
       expect(timeout.timedOut).toBe(true);
       expect(suiteResult(timeout)).toBe("error");
-      if (!group) throw Error("missing process group receipt");
+      // The timeout stops the whole group, so no new child of this process stays alive.
       let gone = false;
       for (let attempt = 0; attempt < 40; attempt++) {
-        try {
-          process.kill(-group, 0);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        if (liveChildren().every((pid) => childrenBefore.includes(pid))) {
           gone = true;
           break;
         }

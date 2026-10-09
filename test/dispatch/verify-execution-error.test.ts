@@ -107,7 +107,7 @@ for (const scope of ["unit", "integration"] as const) {
         stepType: "verify",
       });
       for (let i = 0; i < 3; i++) markRunning(f.db, step.id, {});
-      recover(f.db, { isAlive: () => false, kill: () => {} });
+      recover(f.db);
       expect(getByKey(f.db, f.ticketId, f.key)).toMatchObject({ status: "pending", attempt: 3 });
       f.db.transaction(() => resumeVerificationRetries(f.db, f.ticketId))();
       expect((await advanceOneStep(f.db, f.ticketId, f.registry)).kind).toBe("stepped");
@@ -131,13 +131,7 @@ for (const scope of ["unit", "integration"] as const) {
         for (let i = 0; i < 3; i++) markRunning(f.db, step.id, {});
         if (status === "failed")
           markFailed(f.db, step.id, new StepExecutionError("suite execution incomplete"));
-        else
-          recover(f.db, {
-            isAlive: () => false,
-            kill: () => {
-              throw new Error("no live process");
-            },
-          });
+        else recover(f.db);
         expect(await advanceOneStep(f.db, f.ticketId, f.registry)).toEqual({
           kind: "escalated",
           stepKey: f.key,

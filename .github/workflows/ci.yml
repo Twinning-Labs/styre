@@ -12,6 +12,8 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # The whole suite takes about 3.5 minutes; a hang must not hold the runner for GitHub's 6 hours.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7  # node24
       - uses: oven-sh/setup-bun@v2
@@ -94,6 +96,60 @@ jobs:
             -e STYRE_KARMA_NATIVE_DEPS=/suite/node_modules \
             -e STYRE_KARMA_SPHINX=/suite \
             styre-karma-native xvfb-run -a bun test /code/test/testing/karma-native.test.ts
+
+  lifecycle:
+    # ENG-485: the stop handling with real signals and in real terminals (test/lifecycle/terminal.test.ts
+    # drives Ctrl-C, Ctrl-\, kill and a closed terminal through `script`) on Linux x64 and arm64 and
+    # macOS arm64 and Intel. The Intel run also checks the macOS process table reader on x86_64 (R6).
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-15, macos-15-intel]
+    # A title or body edit changes no code: only pr-title needs to run again for it.
+    if: github.event_name != 'pull_request' || github.event.action != 'edited'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0 (node24)
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2.2.0
+        with:
+          bun-version: latest
+      - name: The Bun in use, and the tests run as an ordinary user
+        # A few permission tests (a folder Styre may not read or write) cannot fail for root.
+        run: |
+          bun --version
+          id
+          test "$(id -u)" != 0
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      # The two lifecycle folders, and every other test of ENG-485 code that starts real processes
+      # or depends on how the platform reports them (group stops, pgid reads, macOS EPERM from a
+      # dying group): the command runners' shared contract, the agent adapter, the worktree and
+      # dispatch callers, the step journal under a stop, and the leftover reports.
+      - run: >-
+          bun test test/lifecycle test/util/process
+          test/util/run-command.test.ts test/util/run-bounded-command.test.ts
+          test/util/launch-failure-loud.test.ts test/agent/providers/claude.test.ts
+          test/dispatch/worktree.test.ts test/dispatch/run-dispatch.test.ts
+          test/dispatch/verify-execution-error.test.ts test/engine/step-journal-stopping.test.ts
+          test/cli/step-head-threading.test.ts test/daemon/advance-leftovers.test.ts
+          test/daemon/run-ticket-leftovers.test.ts
+
+  lifecycle-container:
+    # ENG-485 spec 7.6: the compiled styre as a container's first process (no init) handles
+    # `docker stop`'s SIGTERM, stops its agent, and exits 143.
+    if: github.event_name != 'pull_request' || github.event.action != 'edited'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0 (node24)
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2.2.0
+        with:
+          bun-version: latest
+      - run: bun --version
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - run: bash test/lifecycle/container-first-process.sh
 
   pr-title:
     # Conventional-Commits lint on the PR title. Squash-merge makes the PR title

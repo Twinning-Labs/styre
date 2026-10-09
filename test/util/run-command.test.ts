@@ -1,8 +1,11 @@
-import { expect, test } from "bun:test";
-import { mkdtempSync, realpathSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as door from "../../src/util/process/door.ts";
+import { listRecords } from "../../src/util/process/records.ts";
 import { runCommand } from "../../src/util/run-command.ts";
+import { commandLifecycleTests } from "../helpers/command-lifecycle.ts";
 
 // realpathSync resolves macOS /var → /private/var so pwd output matches
 const cwd = realpathSync(mkdtempSync(join(tmpdir(), "styre-cmd-")));
@@ -67,4 +70,37 @@ test("scrubs the daemon-held creds from the spawned command's env", async () => 
     // biome-ignore lint/performance/noDelete: process.env must be unset via delete; assigning undefined leaves the string "undefined"
     delete process.env.STYRE_KEEP_ME;
   }
+});
+
+commandLifecycleTests("runCommand", runCommand, "throws");
+
+describe("runCommand context", () => {
+  const saved = process.env.XDG_STATE_HOME;
+  let state: string;
+  beforeEach(() => {
+    state = mkdtempSync(join(tmpdir(), "styre-cmdctx-state-"));
+    process.env.XDG_STATE_HOME = state;
+    door.__resetForTests();
+  });
+  afterEach(() => {
+    door.__resetForTests();
+    rmSync(state, { recursive: true, force: true });
+    if (saved === undefined) Reflect.deleteProperty(process.env, "XDG_STATE_HOME");
+    else process.env.XDG_STATE_HOME = saved;
+  });
+
+  test("the caller's context is written to the launch record", async () => {
+    const p = runCommand("sleep 1", {
+      cwd,
+      timeoutMs: 5000,
+      context: { ident: "ENG-9", stepId: 3, worktree: cwd },
+    });
+    const end = Date.now() + 3000;
+    while (listRecords().length === 0 && Date.now() < end) await Bun.sleep(20);
+    const rec = listRecords()[0]?.record;
+    expect(rec?.ident).toBe("ENG-9");
+    expect(rec?.stepId).toBe(3);
+    expect(rec?.kind).toBe("group");
+    await p;
+  });
 });

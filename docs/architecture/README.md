@@ -79,6 +79,11 @@ These are the load-bearing NOTs. Code that violates them is wrong even if it wor
   worktree is the only place a worker's file tools can write (verified at the start of every
   dispatch, ENG-476); declared commands still run as ordinary unconfined processes (`SECURITY.md`).
 
+- **No** process is started outside the door (`src/util/process/door.ts`; `proc-table.ts` may run
+  `ps` and `getconf` itself). Every long running launch is recorded on disk, so a stop reaches the
+  agent's whole tree and a later Styre command can stop what a killed Styre left running
+  (ENG-485; `SECURITY.md`).
+
 - The runner's default response to an anomaly is **not** halt-to-human — it is loop (bounded
   retry against ground truth). Human gates are MERGE approval and escalations only.
 

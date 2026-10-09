@@ -84,7 +84,6 @@ export async function observeSuiteCommand(p: {
   cwd: string;
   timeoutMs: number;
   environment?: TestEnvironmentPlan;
-  onSpawn?: (pid: number) => void;
   onSettled?: () => void;
 }): Promise<SuiteObservation> {
   const started = performance.now();

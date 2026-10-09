@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import * as steps from "../db/repos/workflow-step.ts";
+import { RunInterrupted, beginStep, endStep, isStopping } from "../util/process/door.ts";
 import { ParkSignal } from "./park-signal.ts";
 
 /** Thrown when a step is found 'running' — an in-flight or crash-interrupted run
@@ -38,6 +39,12 @@ export interface RunStepParams {
   /** Effectful steps journal 'running' + idempotency key BEFORE the effect (control-loop §3). */
   effectful?: boolean;
   idempotencyKey?: string | null;
+  /** The ticket's identifier, for the in-flight step record (ENG-485 section 5.5). Falls back to the
+   *  ticket's numeric id when a caller gives none. */
+  ident?: string;
+  /** Reads the ticket branch's HEAD, or null when the branch does not exist yet. Called once, at the
+   *  start of an effectful step, so a stop can return the branch there (ENG-485 section 7.5). */
+  readHead?: () => string | null;
   execute: (step: steps.WorkflowStepRow) => unknown | Promise<unknown>;
   /** Synchronous side effect committed ATOMICALLY with `markSucceeded` (one transaction). Use for a
    *  decision that must never be separated from the step's success by a crash — e.g. applying the
@@ -78,6 +85,9 @@ export interface RunStepResult {
  *   This is why pure steps need no `running` journal for safety.
  */
 export async function runStep(db: Database, params: RunStepParams): Promise<RunStepResult> {
+  // A stop that began before the step did: write nothing (no row, no markRunning, no attempt) and
+  // start nothing. The step stays as it was, so resume runs it as if it had never been tried.
+  if (params.effectful && isStopping()) throw new RunInterrupted();
   const existing = steps.getByKey(db, params.ticketId, params.stepKey);
   const step =
     existing ??
@@ -102,11 +112,9 @@ export async function runStep(db: Database, params: RunStepParams): Promise<RunS
 
   // pending | failed → (re)execute
   // Effectful only: write-ahead intent + idempotency key before the external effect (control-loop §3).
+  // No pid is journaled (ENG-485 section 5.5): the launch record on disk names what to stop.
   if (params.effectful) {
-    steps.markRunning(db, step.id, {
-      idempotencyKey: params.idempotencyKey ?? null,
-      pid: process.pid,
-    });
+    steps.markRunning(db, step.id, { idempotencyKey: params.idempotencyKey ?? null });
   }
 
   const current = steps.getById(db, step.id);
@@ -115,7 +123,27 @@ export async function runStep(db: Database, params: RunStepParams): Promise<RunS
   }
 
   try {
-    const result = await params.execute(current);
+    if (params.effectful) {
+      // Registered in flight, with the branch HEAD at its start, until it ends in any way.
+      beginStep({
+        stepId: step.id,
+        // markRunning set started_at in the same statement as the status; the interruption note
+        // is matched on this exact value.
+        startedAt: requireStartedAt(current),
+        ident: params.ident ?? String(params.ticketId),
+        headAtStart: params.readHead?.() ?? null,
+      });
+    }
+    let result: unknown;
+    try {
+      result = await params.execute(current);
+    } catch (err) {
+      // Section 7.5: any error while a stop is in progress is an interruption, whatever its type.
+      if (isStopping()) throw new RunInterrupted();
+      throw err;
+    }
+    // A call site that turns every error into an ordinary result returns normally; check here too.
+    if (isStopping()) throw new RunInterrupted();
     // markSucceeded + onSucceed commit together: a verdict-bearing step's decision is never split
     // from its success by a crash (control-loop §3 / §6.2). bun:sqlite nests as a SAVEPOINT, so an
     // onSucceed that opens its own transaction (applyReviewVerdict) composes correctly.
@@ -129,6 +157,14 @@ export async function runStep(db: Database, params: RunStepParams): Promise<RunS
     }
     return { step: finished, result, replayed: false };
   } catch (err) {
+    if (err instanceof RunInterrupted) {
+      // Leave the step 'running': the signal handler owns the interruption, and --resume returns
+      // the step to pending without consuming an attempt.
+      throw err;
+    }
+    // An ordinary error that surfaces while a stop is in progress (a refused write, say) is an
+    // interruption too, never a failure to record.
+    if (isStopping()) throw new RunInterrupted();
     if (err instanceof ParkSignal) {
       // Leave the step 'running': advance() records the park and resume()/recover() re-dispatch it.
       // Crucially, NOT markFailed → no attempt consumed (ENG-164: a quota pause is not a failure).
@@ -136,5 +172,18 @@ export async function runStep(db: Database, params: RunStepParams): Promise<RunS
     }
     steps.markFailed(db, step.id, err);
     throw err;
+  } finally {
+    // While a stop is in progress the record stays: the signal handler reads it after the stopped
+    // launch has already unwound this function, to write the interruption (ENG-485 section 7.5).
+    if (params.effectful && !isStopping()) endStep();
   }
+}
+
+/** `markRunning` sets `started_at` in the same statement as the status. A missing value afterwards
+ *  is a bug, and the interruption is matched on this exact value, so never invent one. */
+function requireStartedAt(row: steps.WorkflowStepRow): string {
+  if (row.started_at === null) {
+    throw new Error(`runStep: step ${row.id} has no started_at after markRunning`);
+  }
+  return row.started_at;
 }

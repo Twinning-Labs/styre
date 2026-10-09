@@ -1,3 +1,4 @@
+import { isStopping } from "../util/process/door.ts";
 import { EXIT, StyreError } from "./errors.ts";
 
 /** The one place operator text is shaped: `styre <cmd>: <headline>`, indented detail, recovery. */
@@ -26,11 +27,15 @@ export function renderInternal(cmd: string, err: unknown): string {
 }
 
 /** The error boundary. Wrap each subcommand's body so citty's runMain never sees a throw (its
- *  catch is the only place it double-prints + exits 1). Renders once, sets the exit code, returns. */
+ *  catch is the only place it double-prints + exits 1). Renders once, sets the exit code, returns.
+ *  While a stop is in progress any error is the interruption itself, whatever its type (a refused
+ *  write raises SQLite's "readonly database", not RunInterrupted): it says nothing and leaves the
+ *  exit code alone, because the stop handler owns the exit (ENG-485 section 7.5, m1). */
 export async function guard(cmd: string, body: () => Promise<void>): Promise<void> {
   try {
     await body();
   } catch (err) {
+    if (isStopping()) return;
     if (err instanceof StyreError) {
       process.stderr.write(`${renderError(cmd, err)}\n`);
       process.exitCode = err.code;
