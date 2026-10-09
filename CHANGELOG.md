@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.14.2] - 2026-10-09
+
+### Bug Fixes
+
+- **Project commands now get their own temp folder.** Styre points `TMPDIR`/`TMP`/`TEMP` at a dedicated folder for every command it runs, so a command that's killed, times out, or ignores a stop signal no longer leaves files behind in your system's shared temp directory. Styre cleans this folder up when a run finishes and also sweeps away any folder left behind by a prior run that was force-killed, printing a short note on stderr when it does.
+- Fixed a bug in the test suite where restoring environment variables could leave stray values set for later tests and their child processes; this doesn't affect normal `styre` usage.
+
 ## [0.14.1] - 2026-10-09
 
 ### Bug Fixes
