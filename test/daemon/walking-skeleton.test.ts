@@ -52,8 +52,8 @@ test("crash-resume: a step left running is recovered and the ticket still comple
   // Simulate a crash mid-first-step: design:dispatch left 'running' with a dead pid.
   const crashed = insertPending(db, { ticketId, stepKey: "design:dispatch", stepType: "dispatch" });
   markRunning(db, crashed.id, { pid: 999999 });
-  // Recovery (M1) resets running → pending after killing the orphan.
-  const result = recover(db, { isAlive: () => false, kill: () => {} });
+  // Recovery (M1) resets running → pending; it kills nothing (ENG-485: the sweep stops orphans).
+  const result = recover(db);
   expect(result.reset).toBe(1);
   // The loop now drives the recovered ticket to completion.
   await driveToDone(db, skeletonRegistry(), ticketId);

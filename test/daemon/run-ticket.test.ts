@@ -4,10 +4,11 @@ import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import { OUTBOX_RETRY_BUDGET } from "../../src/daemon/projector.ts";
 import { codeLoopback, redesignLoopback } from "../../src/daemon/review-verdict.ts";
-import { driveToTerminal } from "../../src/daemon/run-ticket.ts";
-import type { StepRegistry } from "../../src/daemon/step-registry.ts";
+import { driveToTerminal, runTicket } from "../../src/daemon/run-ticket.ts";
+import { StepRegistry } from "../../src/daemon/step-registry.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
 import { requeueFailedForge } from "../../src/db/repos/projection-outbox.ts";
+import { insertRun } from "../../src/db/repos/run.ts";
 import { insertPending } from "../../src/db/repos/signal.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { insertPending as insertStep } from "../../src/db/repos/workflow-step.ts";
@@ -17,6 +18,8 @@ import { fakeChecks } from "../../src/integrations/adapters/fake-checks.ts";
 import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import type { TelemetryEvent } from "../../src/telemetry/events.ts";
+import * as door from "../../src/util/process/door.ts";
+import { nowUtc } from "../../src/util/time.ts";
 import { makeTestDb } from "../helpers/db.ts";
 import { skeletonRegistry } from "../helpers/skeleton-registry.ts";
 import { makeTempDir } from "../helpers/temp.ts";
@@ -418,4 +421,75 @@ test("both loopbacks reset the merge steps with a fresh attempt budget", () => {
     ]);
     db.close();
   }
+});
+
+/** The skeleton registry, with every handler also recording the in-flight step it ran under. */
+function recordingRegistry(seen: Array<ReturnType<typeof door.inFlightStep>>): StepRegistry {
+  const inner = skeletonRegistry();
+  const r = new StepRegistry();
+  const resolve = (key: string) => {
+    const h = inner.resolve(key);
+    if (!h) return undefined;
+    return (ctx: Parameters<NonNullable<typeof h>>[0]) => {
+      seen.push(door.inFlightStep());
+      return h(ctx);
+    };
+  };
+  r.resolve = resolve;
+  r.has = (key) => inner.has(key);
+  return r;
+}
+
+test("driveToTerminal passes readHead to every step it runs", async () => {
+  door.__resetForTests();
+  const { db, ticketId } = makeTestDb();
+  const seen: Array<ReturnType<typeof door.inFlightStep>> = [];
+  await driveToTerminal(db, recordingRegistry(seen), {
+    ticketId,
+    config: DEFAULT_RUNTIME_CONFIG,
+    ports: { issueTracker: fakeIssueTracker(), forge: fakeForge(), checks: fakeChecks("passing") },
+    profile: { checksSystem: "none" },
+    cap: 3,
+    readHead: () => "driveHead",
+  });
+  db.close();
+  expect(seen.length).toBeGreaterThan(0);
+  expect(seen.every((s) => s?.headAtStart === "driveHead" && s.ident === "ENG-1")).toBe(true);
+});
+
+test("runTicket passes readHead to every step it runs", async () => {
+  door.__resetForTests();
+  const { db } = makeTestDb({ seedTicket: false });
+  insertRun(db, { runId: "test-run-head", startedAt: nowUtc(), provider: "claude" });
+  const seen: Array<ReturnType<typeof door.inFlightStep>> = [];
+  await runTicket({
+    db,
+    profile: parseProfile({
+      slug: "demo",
+      targetRepo: "/tmp/x",
+      defaultBranch: "main",
+      checksSystem: "none",
+    }),
+    runtimeConfig: DEFAULT_RUNTIME_CONFIG,
+    ports: {
+      issueTracker: fakeIssueTracker({
+        ticket: {
+          ident: "ENG-42",
+          title: "T",
+          description: "B",
+          typeLabel: "Feature",
+          externalId: "u",
+          url: null,
+        },
+      }),
+      forge: fakeForge(),
+      checks: fakeChecks("passing"),
+    },
+    registry: recordingRegistry(seen),
+    ticketRef: "ENG-42",
+    readHead: () => "runTicketHead",
+  });
+  db.close();
+  expect(seen.length).toBeGreaterThan(0);
+  expect(seen.every((s) => s?.headAtStart === "runTicketHead" && s.ident === "ENG-42")).toBe(true);
 });

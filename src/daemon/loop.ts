@@ -26,6 +26,8 @@ export async function tick(
     maxConcurrent?: number;
     config?: RuntimeConfig;
     ports?: ProjectorPorts;
+    /** The ticket branch's HEAD, for the step in flight (ENG-485 section 7.5). */
+    readHead?: () => string | null;
   },
 ): Promise<{ advanced: number; parked?: ParkInfo }> {
   const max = opts?.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
@@ -33,7 +35,10 @@ export async function tick(
   let advanced = 0;
   let parked: ParkInfo | undefined;
   for (const id of ids) {
-    const outcome = await advanceOneStep(db, id, registry, { config: opts?.config });
+    const outcome = await advanceOneStep(db, id, registry, {
+      config: opts?.config,
+      readHead: opts?.readHead,
+    });
     if (outcome.kind === "parked") {
       parked = outcome.park; // `styre run` is single-ticket so at most one park per drive is possible; multi-ticket daemon park handling is future work
     } else if (outcome.kind === "paused-noprogress") {

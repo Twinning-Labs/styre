@@ -51,10 +51,11 @@ test("a fresh process exits successfully after capturing a simulated CLI failure
     }
   `;
   // A bare `bun -e` has no test preload, so the script removes its folders on exit, and its TMPDIR
-  // is a folder this test owns in case it dies first. (Bun.spawn without `env` would pass the
-  // TMPDIR this process started with, not the preload's per-run root.)
+  // is a folder this test owns, so the check below sees exactly what the child left.
   const childTmp = makeTempDir("styre-child-tmp-");
   const child = Bun.spawnSync([process.execPath, "-e", script], {
+    // Bun.spawn's default environment is the one Bun started with, which lacks the preload's test
+    // state folder: pass this process's, so no launch record reaches the operator's real one (R29).
     env: { ...process.env, TMPDIR: childTmp },
     stdout: "pipe",
     stderr: "pipe",

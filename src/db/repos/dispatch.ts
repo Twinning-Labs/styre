@@ -73,6 +73,18 @@ export function listByTicketSince(db: Database, ticketId: number, afterId: numbe
     .all(ticketId, afterId);
 }
 
+/** The id of the newest dispatch row of a ticket, or 0 when it has none: the watermark for
+ *  `listByTicketSince`, taken before a step runs to find the dispatches that step made. */
+export function latestDispatchRowId(db: Database, ticketId: number): number {
+  return (
+    db
+      .query<{ m: number | null }, [number]>(
+        "SELECT MAX(id) AS m FROM dispatch WHERE ticket_id = ?",
+      )
+      .get(ticketId)?.m ?? 0
+  );
+}
+
 export function insertDispatch(
   db: Database,
   p: {

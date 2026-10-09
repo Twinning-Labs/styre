@@ -26,17 +26,17 @@ test("selectAgentRunner throws for an unregistered provider", () => {
   ).toThrow();
 });
 
-test("FakeAgentRunner records inputs and fires onSpawn", async () => {
-  const seen: number[] = [];
+test("FakeAgentRunner records inputs, including the launch context", async () => {
   const runner = new FakeAgentRunner(() => ok);
+  const context = { ident: "ENG-1", stepId: 3, worktree: "/tmp" };
   await runner.run({
     prompt: "p",
     model: "m",
     allowedTools: [],
     cwd: "/tmp",
     timeoutMs: 1,
-    onSpawn: (pid) => seen.push(pid),
+    context,
   });
-  expect(seen).toEqual([424242]);
   expect(runner.inputs[0]?.prompt).toBe("p");
+  expect(runner.inputs[0]?.context).toEqual(context);
 });

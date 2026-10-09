@@ -7,6 +7,7 @@ import {
   assertSlackConfigured,
   selectNotifier,
 } from "../integrations/notifier.ts";
+import { sweepOrphans } from "../util/process/sweep.ts";
 import { configError, usageError } from "./errors.ts";
 import { guard } from "./output.ts";
 
@@ -57,7 +58,12 @@ export const notifyCommand = defineCommand({
       description: "Project slug for per-project config (default: derived from the cwd repo)",
     },
   },
-  run: (ctx) => guard("notify", () => notifyImpl({ args: ctx.args as unknown as NotifyArgs })),
+  // The sweep runs first, inside the error boundary (section 8).
+  run: (ctx) =>
+    guard("notify", async () => {
+      await sweepOrphans();
+      await notifyImpl({ args: ctx.args as unknown as NotifyArgs });
+    }),
 });
 
 export interface NotifyArgs {

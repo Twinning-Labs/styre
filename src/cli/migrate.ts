@@ -1,6 +1,7 @@
 import { defineCommand } from "citty";
 import { defaultDbPath } from "../config/paths.ts";
 import { migrate } from "../db/migrate.ts";
+import { sweepOrphans } from "../util/process/sweep.ts";
 import { guard } from "./output.ts";
 
 export interface MigrateArgs {
@@ -19,5 +20,10 @@ export const migrateCommand = defineCommand({
   args: {
     db: { type: "string", description: "Path to the SQLite database file." },
   },
-  run: (ctx) => guard("migrate", () => migrateImpl({ args: ctx.args as unknown as MigrateArgs })),
+  // The sweep runs first, inside the error boundary (section 8).
+  run: (ctx) =>
+    guard("migrate", async () => {
+      await sweepOrphans();
+      await migrateImpl({ args: ctx.args as unknown as MigrateArgs });
+    }),
 });

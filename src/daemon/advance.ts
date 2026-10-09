@@ -1,6 +1,10 @@
 import type { Database } from "bun:sqlite";
 import { DEFAULT_RUNTIME_CONFIG, type RuntimeConfig } from "../config/runtime-config.ts";
-import { getLatestForTicket } from "../db/repos/dispatch.ts";
+import {
+  getLatestForTicket,
+  latestDispatchRowId,
+  listByTicketSince,
+} from "../db/repos/dispatch.ts";
 import { appendEvent } from "../db/repos/event-log.ts";
 import { getTicket, setTicketStage, setTicketStatus } from "../db/repos/ticket.ts";
 import { setStatus as setUnitStatus } from "../db/repos/work-unit.ts";
@@ -9,6 +13,9 @@ import { ParkSignal } from "../engine/park-signal.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { awaitSignal } from "../engine/signals.ts";
 import { runStep } from "../engine/step-journal.ts";
+import { isStopping } from "../util/process/door.ts";
+import { checkLeftoversInBackground } from "../util/process/leftovers.ts";
+import { nowToken } from "../util/process/proc-table.ts";
 import { applyArbiterVerdict, applyReauthorVerdict } from "./arbiter-verdict.ts";
 import {
   type GateVerdictResult,
@@ -25,6 +32,51 @@ import type { StepRegistry } from "./step-registry.ts";
 import { prepareVerificationRetry } from "./verification-retry.ts";
 
 const MAX_TRANSITIONS = 100;
+
+/**
+ * After a step that dispatched an agent (ENG-485 section 9.1): look, in the background and off the
+ * step's critical path, for processes the agent left running in its worktree. A step made an agent
+ * dispatch exactly when it inserted a `dispatch` row, and that row names the worktree. The check is
+ * never awaited here; `driveToTerminal` and the exit check wait for it. Its report goes to stderr
+ * and to the run's events, and it never changes the step's result.
+ */
+function checkAgentLeftovers(
+  db: Database,
+  ticketId: number,
+  since: string,
+  dispatchesBefore: number,
+): void {
+  // While a stop is in progress the signal handler runs its own check.
+  if (isStopping()) return;
+  try {
+    const worktrees = new Set<string>();
+    for (const row of listByTicketSince(db, ticketId, dispatchesBefore)) {
+      if (row.worktree_path !== null) worktrees.add(row.worktree_path);
+    }
+    for (const worktree of worktrees) {
+      void checkLeftoversInBackground({
+        worktree,
+        since,
+        report: (lines) => {
+          for (const line of lines) process.stderr.write(line);
+          try {
+            appendEvent(db, {
+              ticketId,
+              kind: "note",
+              reason: "leftover-check",
+              payload: { event: "leftover-check", worktree, lines },
+            });
+          } catch {
+            /* the run's database is already closed: the stderr line above is the report */
+          }
+        },
+      });
+    }
+  } catch (err) {
+    // A diagnostic must never fail a step that has already finished, or hide the step's own error.
+    process.stderr.write(`styre: could not start the leftover check (${String(err)})\n`);
+  }
+}
 
 const VERDICT_BEARING_STEPS = new Set([
   "review",
@@ -53,7 +105,7 @@ export async function advanceOneStep(
   db: Database,
   ticketId: number,
   registry: StepRegistry,
-  opts?: { config?: RuntimeConfig },
+  opts?: { config?: RuntimeConfig; readHead?: () => string | null },
 ): Promise<AdvanceOutcome> {
   try {
     registry.synchronize(db, ticketId);
@@ -130,6 +182,8 @@ export async function advanceOneStep(
     if (!handler) {
       throw new Error(`advanceOneStep: no handler registered for '${d.handlerKey}'`);
     }
+    const leftoverSince = nowToken();
+    const dispatchesBefore = latestDispatchRowId(db, ticketId);
     try {
       // The review verdict is applied in the SAME transaction that marks the step succeeded
       // (onSucceed). Otherwise a crash between the two would leave a `succeeded` review with an
@@ -144,6 +198,8 @@ export async function advanceOneStep(
         stepKey: d.stepKey,
         stepType: d.stepType,
         effectful: true,
+        ident: ticket.ident,
+        readHead: opts?.readHead,
         execute: (step) =>
           handler({
             db,
@@ -220,6 +276,8 @@ export async function advanceOneStep(
       }
       const { decision } = applyFailurePolicy(db, ticketId, failed);
       return { kind: decision, stepKey: d.stepKey };
+    } finally {
+      checkAgentLeftovers(db, ticketId, leftoverSince, dispatchesBefore);
     }
   }
   throw new Error(`advanceOneStep: exceeded ${MAX_TRANSITIONS} transitions for ticket ${ticketId}`);

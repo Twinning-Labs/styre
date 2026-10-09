@@ -13,9 +13,6 @@ export class FakeAgentRunner implements AgentRunner {
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
     this.inputs.push(input);
-    if (input.onSpawn) {
-      input.onSpawn(424242);
-    }
     const result = await this.handler(input);
     return result.capabilities !== undefined
       ? result

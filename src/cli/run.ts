@@ -13,7 +13,7 @@ import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { discoverRuntimeConfig } from "../config/discover.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
 import type { ProjectorPorts } from "../daemon/projector.ts";
-import { realRecoverDeps, recover } from "../daemon/recover.ts";
+import { recover } from "../daemon/recover.ts";
 import { runTicket } from "../daemon/run-ticket.ts";
 import { openDb } from "../db/client.ts";
 import { migrate } from "../db/migrate.ts";
@@ -21,7 +21,7 @@ import { getRun, insertRun } from "../db/repos/run.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { assertTestTargets } from "../dispatch/test-target.ts";
-import { reconcileWorktree } from "../dispatch/worktree.ts";
+import { branchHeadSha, reconcileWorktree } from "../dispatch/worktree.ts";
 import { assertSlackConfigured } from "../integrations/notifier.ts";
 import { branchPrefixFor } from "../integrations/ticket-source.ts";
 import type { AnalyticsClient } from "../telemetry/analytics/client.ts";
@@ -29,16 +29,20 @@ import { type Analytics, createAnalytics } from "../telemetry/analytics/index.ts
 import { stdoutSink } from "../telemetry/emit.ts";
 import { buildSummary } from "../telemetry/emitter.ts";
 import type { TelemetryEvent } from "../telemetry/events.ts";
+import { RunInterrupted, isStopping } from "../util/process/door.ts";
+import { undoBeforeDiscard } from "../util/process/interruption.ts";
+import { type HandlerDeps, installStopHandlers } from "../util/process/signals.ts";
+import { sweepOrphans } from "../util/process/sweep.ts";
 import { nowUtc } from "../util/time.ts";
 import { formatNonPrimaryComponents, noPrimaryLeft } from "./component-roles.ts";
 import { noPrimaryComponentError } from "./errors.ts";
 import { EXIT, StyreError, agentCliError, errorKindForExit, usageError } from "./errors.ts";
+import { guardWithExitCheck } from "./exit-check.ts";
 import { loadRunProfile } from "./load-profile.ts";
-import { guard } from "./output.ts";
-import { finishRunResult, parkDir } from "./park.ts";
+import { type StopWiring, finishRunResult, parkDir } from "./park.ts";
 import { applyToolchainGate, formatUnusableComponents } from "./preflight.ts";
 import { confirmPrBase } from "./resolve-pr-base.ts";
-import { acquireRunLock, releaseRunLock, runLockStatus } from "./run-lock.ts";
+import { type RunLock, acquireRunLock, releaseRunLock, runLockStatus } from "./run-lock.ts";
 
 /** Exit codes this command can produce: 0 success · 1 abandoned (reserved terminal) ·
  *  64 usage · 65 resume-refused · 69 toolchain missing · 70 internal · 75 paused (any reason) ·
@@ -132,22 +136,82 @@ export const runCommand = defineCommand({
       description: "Discard an existing checkpoint for this ticket and start over",
     },
   },
-  run: (ctx) => guard("run", () => runImpl({ args: ctx.args as unknown as RunArgs })),
+  run: (ctx) => runCommandBody(ctx.args as unknown as RunArgs),
 });
 
-export async function runImpl(
-  { args }: { args: RunArgs },
-  deps?: {
-    analyticsClient?: AnalyticsClient;
-    ports?: ProjectorPorts;
-    runner?: AgentRunner;
-    preflight?: (config: AgentConfig) => AgentCliPreflight;
-  },
-): Promise<void> {
+/** What `styre run` runs: the command behind its error boundary and exit check. */
+export async function runCommandBody(args: RunArgs, deps?: RunDeps): Promise<void> {
+  let removeHandlers = (): void => {};
+  await guardWithExitCheck(
+    "run",
+    async () => {
+      // The sweep runs first, inside the error boundary (section 8): before `--resume` recovers the
+      // interrupted step, and before `--fresh` discards a checkpoint.
+      await sweepOrphans();
+      await runImpl(
+        { args },
+        {
+          ...deps,
+          keepStopHandlers: (remove) => {
+            removeHandlers = remove;
+          },
+        },
+      );
+    },
+    () => removeHandlers(),
+  );
+}
+
+/** Test seams of `styre run`; production passes none. */
+export interface RunDeps {
+  analyticsClient?: AnalyticsClient;
+  ports?: ProjectorPorts;
+  runner?: AgentRunner;
+  preflight?: (config: AgentConfig) => AgentCliPreflight;
+  /** Replaces parts of the stop handler's real dependencies (tests: no real re-raise or exit). */
+  stopHandlerDeps?: Partial<HandlerDeps>;
+  /** Hands the removal of the stop handlers to the caller, which calls it after its exit check
+   *  (R27). Without it, `runImpl` removes them itself when it returns. The removal does nothing
+   *  while a stop is in progress. */
+  keepStopHandlers?: (remove: () => void) => void;
+}
+
+export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Promise<void> {
   // Hoisted so the single catch can emit `cliError` for throws that happen BEFORE analytics is
   // built (bad/absent profile, "not a git repo" usage error, config-discovery errors). When
   // config was never resolved, the catch builds a fallback client (env opt-outs still apply).
   let analytics: Analytics | undefined;
+  // The run lock the stop handler releases, last, on a stop (section 7.3 step 8). Set while a lock
+  // is held, by the fresh path below or by resumeRun.
+  let heldLock: RunLock | null = null;
+  // ENG-485 section 7.1: the handlers go in before anything else, so before any launch (the
+  // profile's git calls, the agent CLI preflight, provisioning). From a signal on, the handler owns
+  // the exit: the run code below then closes nothing and releases nothing.
+  const stop = installStopHandlers(
+    {
+      command: "run",
+      run: null,
+      releaseLock: () => {
+        const lock = heldLock;
+        heldLock = null;
+        if (lock) releaseRunLock(lock);
+      },
+      // The handler bounds this by the time left before its deadline.
+      shutdownAnalytics: async () => {
+        await analytics?.shutdown();
+      },
+    },
+    deps?.stopHandlerDeps,
+  );
+  deps?.keepStopHandlers?.(() => {
+    if (!isStopping()) stop.dispose();
+  });
+  const wiring: StopWiring = {
+    setRun: (r) => stop.setRun(r),
+    holdLock: (lock) => {
+      heldLock = lock;
+    },
+  };
   try {
     // ENG-435: loaded ALREADY NARROWED by component role. There is no "apply the gate here"
     // step any more, and therefore no ordering for a future consumer to get on the wrong side
@@ -225,6 +289,12 @@ export async function runImpl(
 
     if (args.resume && args.resume.length > 0) {
       const { resumeRun } = await import("./park.ts");
+      const resumeDeps = {
+        ports: deps?.ports,
+        preflight: deps?.preflight,
+        runner: deps?.runner,
+        stop: wiring,
+      };
       await resumeRun(
         {
           resume: args.resume,
@@ -236,7 +306,7 @@ export async function runImpl(
         },
         profile,
         runtimeConfig,
-        undefined,
+        resumeDeps,
         loaded.nonPrimary,
       );
       return;
@@ -291,6 +361,9 @@ export async function runImpl(
     const ports = deps?.ports ?? makeProjectorPorts(runtimeConfig, profile);
     await confirmPrBase(ports, profile);
     const ingested = await ports.issueTracker.fetchTicket(args.ticket);
+    // The last await before the checkpoint is touched: from here to the handler's setRun below the
+    // code is synchronous, so a stop that began before now is seen here, and none can begin between.
+    if (isStopping()) throw new RunInterrupted();
     const ident = ingested.ident;
 
     const explicitDb = !!(args.db && args.db.length > 0);
@@ -313,6 +386,9 @@ export async function runImpl(
           "Wait for it to finish, or remove the stale lock if that process is gone.",
         );
       }
+      // In place, an interrupted step's edits are still in the checkout: undo them before the
+      // checkpoint that names them is discarded (ENG-485 section 7.5). After the live lock check.
+      undoBeforeDiscard(join(checkpointDir, "run.db"), (line) => process.stderr.write(`${line}\n`));
       // Free a styre-owned holder (the common post-park leftover: the worktree dir still present,
       // lock already released) via the liveness gate BEFORE the whole-dir delete — ensureWorktree's
       // later prunable-only retry would refuse a non-prunable one (ENG-385).
@@ -347,10 +423,12 @@ export async function runImpl(
         "Wait for it to finish, or remove the stale lock if that process is gone.",
       );
     }
+    wiring.holdLock(lock);
     try {
       migrate(dbPath);
       const db = openDb(dbPath);
-      recover(db, realRecoverDeps());
+      // A reused --db can be an older checkpoint: its warning goes to stderr (section 5.5).
+      recover(db, { warn: (line) => process.stderr.write(`${line}\n`) });
       // Mint the run identity before any telemetry emit. Guard on getRun===null so a reused --db
       // (non-ephemeral) doesn't insert a second run row.
       if (getRun(db) === null) {
@@ -378,6 +456,11 @@ export async function runImpl(
         forge: runtimeConfig.forge,
       });
 
+      const runBranch = branchNameFor({
+        ident: ingested.ident,
+        branch_name: null,
+        branch_prefix: branchPrefixFor(ingested.typeLabel),
+      });
       const out = await runTicket({
         db,
         profile,
@@ -387,7 +470,13 @@ export async function runImpl(
         ticketRef: args.ticket,
         ingested,
         emit: stdoutSink,
+        // ENG-485 section 7.5: where the ticket branch stands when each step starts.
+        readHead: () => branchHeadSha(profile.targetRepo, runBranch),
+        // The handler can record an interruption from the moment the ticket row exists.
+        onTicket: (ticketId) => stop.setRun({ db, dbPath, ticketId, ident }),
       });
+      // A step that finished during a stop is not recorded (section 7.5): nothing below may run.
+      if (isStopping()) throw new RunInterrupted();
 
       a.runCompleted(
         buildSummary(db, out.ticketId, out, runtimeConfig.pricing) as Extract<
@@ -414,11 +503,19 @@ export async function runImpl(
             `Checkpoint: ${dir}`,
         );
       }
+      stop.setRun(null); // a normal exit: the db closes next
       finishRunResult(db, dbPath, profile.slug, ident, out);
     } finally {
-      if (lock) releaseRunLock(lock);
+      // During a stop the handler releases the lock, last (R7); the run code leaves it alone.
+      if (lock && !isStopping()) {
+        heldLock = null;
+        releaseRunLock(lock);
+      }
     }
   } catch (err) {
+    // Any error raised while stopping is the interruption itself (section 7.5, m1): no cli_error;
+    // the error boundary says nothing, and the handler owns the exit.
+    if (isStopping()) throw err;
     const code = err instanceof StyreError ? err.code : EXIT.INTERNAL;
     // Reached only when we threw before config could be resolved (unparseable config, or a failure
     // before config discovery) — so `analytics` is undefined and there is no config-level telemetry
@@ -433,6 +530,11 @@ export async function runImpl(
     });
     throw err; // rethrow → guard renders + sets process.exitCode
   } finally {
-    await analytics?.shutdown();
+    // During a stop the handler keeps its listeners (a second signal forces), and shuts analytics
+    // down within its deadline. A caller that took the removal does it after its exit check (R27).
+    if (!isStopping()) {
+      if (!deps?.keepStopHandlers) stop.dispose();
+      await analytics?.shutdown();
+    }
   }
 }

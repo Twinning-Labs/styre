@@ -7,7 +7,10 @@ import {
   parseCodexUsage,
   sandboxForTools,
 } from "../../../src/agent/providers/codex.ts";
+import { installVirtualGrace, resetDoorAfterEach } from "../../helpers/graceful-stop.ts";
 import { makeTempDir } from "../../helpers/temp.ts";
+
+resetDoorAfterEach();
 
 const cwd = realpathSync(makeTempDir("styre-codex-"));
 
@@ -104,14 +107,19 @@ test("run reads the final message from --output-last-message and parses usage", 
   expect(r.capabilities?.error).toContain("ENG-484");
 });
 
-test("run SIGKILLs and returns promptly on a process that traps SIGTERM and hangs", async () => {
-  const cli = fakeCli("codex-hang", "trap '' TERM\nsleep 30");
-  const start = Date.now();
+test("a timeout starts a graceful stop: the first signal sent to a hung CLI is SIGTERM, never SIGKILL (ENG-485 6.3)", async () => {
+  // Only the order of the first signal is asserted, which depends on no timing: whether the CLI
+  // yields to SIGTERM is not part of this test. The escalation after the grace period is tested at
+  // the stop level (test/lifecycle/graceful-escalation.test.ts), where the process is known to be
+  // ready. The stop's clock is virtual and signals are recorded.
+  const rec = installVirtualGrace();
+  const cli = fakeCli("codex-hang", "sleep 308");
   const r = await codexAgentRunner(cli).run({ ...runInput, timeoutMs: 300 });
   expect(r.timedOut).toBe(true);
   expect(r.completed).toBe(false);
-  expect(Date.now() - start).toBeLessThan(5000);
   expect(r.cause).toBe("transient");
+  expect(rec.sent.length).toBeGreaterThan(0);
+  expect(rec.sent[0]?.sig).toBe("SIGTERM");
 });
 
 test("parseCodexUsage reads cache_write_input_tokens into cacheCreate", () => {

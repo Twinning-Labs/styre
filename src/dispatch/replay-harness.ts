@@ -1,19 +1,27 @@
 import type { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { listByAc } from "../db/repos/ac-check.ts";
 import { signalForAcCheck } from "../db/repos/ground-truth-signal.ts";
+import { runBlocking } from "../util/process/door.ts";
 import type { CmdRunner } from "../util/run-command.ts";
+import { deferWorktreeRemoval } from "./baseline-rerun.ts";
 import { type CheckExecutionPlan, resolveCheckExecution } from "./check-execution.ts";
 import type { CoarseOrNone } from "./check-selector.ts";
 import { type CheckRunResult, runCheckExecution } from "./checks-run.ts";
 import type { Component } from "./profile.ts";
 import { resolvePythonInterpreter } from "./provision.ts";
 
+/** Writing or deleting a whole tree can pass 30 seconds on a large repository (ENG-485 section 5.1). */
+const TREE_GIT_MS = 120_000;
+
 function git(args: string[], cwd: string): { ok: boolean; out: string } {
-  const res = Bun.spawnSync(["git", ...args], { cwd });
-  return { ok: res.success, out: res.stdout.toString().trim() };
+  const res = runBlocking(["git", ...args], {
+    cwd,
+    timeoutMs: TREE_GIT_MS,
+  });
+  return { ok: res.success, out: res.stdout.trim() };
 }
 
 /** §5.2: the ticket's frozen clean-HEAD baseline for an AC = the ORIGINAL (first, lowest-id) check's
@@ -68,6 +76,9 @@ export async function replayCheckEvidence(
   }
 
   const wt = mkdtempSync(join(tmpdir(), "styre-baseline-wt-"));
+  // Held with the door until released below: a stop handler that ends Styre before this function
+  // unwinds removes the worktree itself (m3).
+  const removeWorktree = deferWorktreeRemoval(p.repoPath, wt);
   try {
     const added = git(["worktree", "add", "--detach", wt, p.baselineSha], p.repoPath);
     if (!added.ok) return null;
@@ -85,12 +96,7 @@ export async function replayCheckEvidence(
     });
     return { ...result, plan };
   } finally {
-    git(["worktree", "remove", "--force", wt], p.repoPath);
-    try {
-      rmSync(wt, { recursive: true, force: true });
-    } catch {
-      /* worktree remove already cleaned it */
-    }
+    removeWorktree();
   }
 }
 

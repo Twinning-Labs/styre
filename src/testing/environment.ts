@@ -469,10 +469,13 @@ export async function qualifyTestEnvironment(
           `${PYTHON_INVENTORY}\n${source}\ndata['source']=source\nprint('STYRE_ENVIRONMENT_JSON='+json.dumps(data))\n`,
           { mode: 0o600 },
         );
-        // No cache: with the probe outside the repo, pytest roots itself at the common ancestor of
-        // the two (e.g. /tmp beside a /tmp/styre-wt-* worktree) and would write .pytest_cache there.
+        // With the probe outside the repo, pytest roots itself at the common ancestor of the two
+        // (e.g. /tmp beside a /tmp/styre-wt-* worktree) and would write .pytest_cache there: keep the
+        // cache in the probe's own folder, removed below. (Disabling the cache plugin instead breaks
+        // an operator's PYTEST_ADDOPTS=--ff/--lf/--sw.)
+        const cacheDir = shellQuote(`cache_dir=${join(dir, ".pytest_cache")}`);
         const result = await run(
-          `${plan.checkLauncher} ${shellQuote(probe)} --collect-only -q -s -p no:cacheprovider`,
+          `${plan.checkLauncher} ${shellQuote(probe)} --collect-only -q -s -o ${cacheDir}`,
           { cwd: obs.cwd, timeoutMs: 30000 },
         );
         const records = result.stdout

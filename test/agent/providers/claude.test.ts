@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { chmodSync, existsSync, realpathSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { chmodSync, existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import {
@@ -10,7 +10,20 @@ import {
   parseClaudeStream,
 } from "../../../src/agent/providers/claude.ts";
 import { extractSidecar } from "../../../src/dispatch/sidecar.ts";
+import { nowToken } from "../../../src/util/process/proc-table.ts";
+
+import { claimLaunchesAtStops } from "../../helpers/claim-launches.ts";
+import { installVirtualGrace, resetDoorAfterEach } from "../../helpers/graceful-stop.ts";
+import { killOwned, ownPrinted, until } from "../../helpers/own-processes.ts";
 import { makeTempDir } from "../../helpers/temp.ts";
+
+resetDoorAfterEach();
+// Every stop a test causes claims what the launch is running first (test/helpers/claim-launches.ts),
+// so a stop that fails to end a fake CLI's child still leaves it to afterEach's cleanup.
+beforeEach(() => claimLaunchesAtStops());
+// The processes a fake CLI leaves behind on purpose, known by the pid it wrote: killed by that
+// identity after each test, never by searching for their command.
+afterEach(() => killOwned());
 
 const cwd = realpathSync(makeTempDir("styre-claude-"));
 
@@ -107,7 +120,7 @@ test("parseClaudeJson extracts usage incl. cache tokens, tolerating missing fiel
   });
 });
 
-test("run captures a clean exit, parses usage, and journals the pid", async () => {
+test("run captures a clean exit and parses usage", async () => {
   const cli = fakeCli(
     "claude-ok",
     printLines([
@@ -119,19 +132,12 @@ test("run captures a clean exit, parses usage, and journals the pid", async () =
       }),
     ]),
   );
-  let pid: number | undefined;
-  const r = await claudeAgentRunner(cli).run({
-    ...runInput,
-    onSpawn: (p) => {
-      pid = p;
-    },
-  });
+  const r = await claudeAgentRunner(cli).run({ ...runInput });
   expect(r.completed).toBe(true);
   expect(r.exitCode).toBe(0);
   expect(r.timedOut).toBe(false);
   expect(r.costUsd).toBe(0.5);
   expect(r.stdout).toBe("ok");
-  expect(typeof pid).toBe("number");
   expect(r.capabilities).toEqual({ tools: ["Read"], error: null });
 });
 
@@ -165,18 +171,21 @@ test("run passes the pinned argv to the CLI", async () => {
 
 // M1: the timeout is a HARD bound — a process that ignores SIGTERM must still be killed and the
 // call must return promptly (not hang on `proc.exited`).
-test("run SIGKILLs and returns promptly on a process that traps SIGTERM and hangs", async () => {
-  // trap '' TERM → ignore SIGTERM; then sleep far past the timeout. Only SIGKILL ends it.
-  const cli = fakeCli("claude-hang", "trap '' TERM\nsleep 30");
-  const start = Date.now();
+test("a timeout starts a graceful stop: the first signal sent to a hung CLI is SIGTERM, never SIGKILL (ENG-485 6.3)", async () => {
+  // Only the order of the first signal is asserted, which depends on no timing: whether the CLI
+  // yields to SIGTERM is not part of this test. The escalation after the grace period is tested at
+  // the stop level (test/lifecycle/graceful-escalation.test.ts), where the process is known to be
+  // ready. The stop's clock is virtual and signals are recorded.
+  const rec = installVirtualGrace();
+  const cli = fakeCli("claude-hang", "sleep 307");
   const r = await claudeAgentRunner(cli).run({ ...runInput, timeoutMs: 300 });
-  const elapsed = Date.now() - start;
   expect(r.timedOut).toBe(true);
   expect(r.completed).toBe(false);
-  expect(elapsed).toBeLessThan(5000); // returned on the timer, not after the 30s sleep
   // ENG-164: timeout path must classify as transient with no reset date
   expect(r.cause).toBe("transient");
   expect(r.resetAt).toBeNull();
+  expect(rec.sent.length).toBeGreaterThan(0);
+  expect(rec.sent[0]?.sig).toBe("SIGTERM");
 });
 
 test("run classifies spawn failure as transient (non-existent command)", async () => {
@@ -323,43 +332,50 @@ test("a null JSON line is ignored rather than crashing the parser", () => {
 
 test("a background process the CLI leaves behind cannot hang the run: the drain is bounded", async () => {
   // The straggler holds the output pipes; stopping it is ENG-485, but the run must still return.
+  // Its parent exits before the run's stop looks, so nothing stops it. It ends by itself once the
+  // test's `done` file exists. To be claimed for cleanup by descent, it must still be a descendant
+  // of this test when claimed: the fake CLI writes its pid, then waits for the `go` file.
+  const dir = realpathSync(makeTempDir("styre-straggler-"));
+  const [pidFile, go, done] = ["straggler.pid", "go", "done"].map((n) => join(dir, n));
   const cli = fakeCli(
     "claude-straggler",
-    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\n(sleep 30) &\nexit 0`,
+    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\n( while [ ! -e '${done}' ] && [ -d '${dir}' ]; do sleep 0.05; done ) &\necho $! > '${pidFile}'\nwhile [ ! -e '${go}' ] && [ -d '${dir}' ]; do sleep 0.05; done\nexit 0`,
   );
+  const since = nowToken();
   const start = Date.now();
-  const r = await claudeAgentRunner(cli).run({ ...runInput });
-  expect(Date.now() - start).toBeLessThan(9000); // the 5s drain bound, well under the straggler's 30s
+  let r: Awaited<ReturnType<ReturnType<typeof claudeAgentRunner>["run"]>>;
+  try {
+    const run = claudeAgentRunner(cli).run({ ...runInput });
+    await until(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").endsWith("\n"));
+    // Claimed by descent, for cleanup: it must succeed while the CLI waits for the go file.
+    expect(ownPrinted(Number(readFileSync(pidFile, "utf8")), since)).not.toBeNull();
+    writeFileSync(go, "");
+    r = await run;
+  } finally {
+    writeFileSync(go, ""); // even when the run threw: the CLI and the straggler end by themselves
+    writeFileSync(done, "");
+    rmSync(dir, { recursive: true, force: true }); // every loop here also ends once it is gone
+  }
+  expect(Date.now() - start).toBeLessThan(9000); // the 5s drain bound; the straggler outlives it
   expect(r.completed).toBe(true);
   expect(r.stdout).toBe("ok");
 }, 15000);
 
-test("if recording the spawn fails, the already-started agent is killed, not left running", async () => {
-  const started = join(cwd, "onspawn-agent-started.txt");
-  const acted = join(cwd, "onspawn-agent-acted.txt");
-  const cli = fakeCli("claude-onspawn", `touch '${started}'\nsleep 1\ntouch '${acted}'`);
-  const r = await claudeAgentRunner(cli).run({
-    ...runInput,
-    onSpawn: () => {
-      throw new Error("journal write failed");
-    },
-  });
-  expect(r.completed).toBe(false);
-  // If the agent was already running when the kill landed, it must not get to act; if the kill
-  // landed before it started, it never runs at all. Either way `acted` must never appear.
-  await Bun.sleep(2500);
-  expect(existsSync(acted)).toBe(false);
-});
-
 test("a detached leftover process holding the output pipe does not keep the runner alive", async () => {
   // python's setsid detaches the holder into a new session, so killing the CLI does not reach it.
-  const escaped = join(cwd, "holder-escaped.txt");
+  // It ends by itself once the test's `done` file exists (or after 20 s). To be claimed for cleanup
+  // by descent, it must still be a descendant of this test when claimed: the CLI and the python
+  // parent wait for the `go` file.
+  const dir = realpathSync(makeTempDir("styre-holder-"));
+  const [escaped, go, done] = ["holder-escaped.txt", "go", "done"].map((n) => join(dir, n));
   const cli = fakeCli(
     "claude-escaper",
     // The CLI exits only once the holder is established in its own session, outside the group.
-    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\npython3 -c 'import os,time\nif os.fork()==0:\n    os.setsid(); open("${escaped}","w").close(); time.sleep(20)' &\nwhile [ ! -f '${escaped}' ]; do sleep 0.05; done\nexit 0`,
+    // The holder writes its own pid into the file the CLI waits for.
+    `${printLines([initLine(["Read"]), resultLine({ result: "ok" })])}\npython3 -c 'import os,time\nif os.fork()==0:\n    os.setsid(); f=open("${escaped}.tmp","w"); f.write(str(os.getpid())); f.close(); os.rename("${escaped}.tmp","${escaped}")\n    t=time.time()\n    while not os.path.exists("${done}") and os.path.isdir("${dir}") and time.time()-t < 20: time.sleep(0.05)\nelse:\n    while not os.path.exists("${go}") and os.path.isdir("${dir}"): time.sleep(0.05)' &\nwhile [ ! -f '${escaped}' ] && [ -d '${dir}' ]; do sleep 0.05; done\nwhile [ ! -e '${go}' ] && [ -d '${dir}' ]; do sleep 0.05; done\nexit 0`,
   );
-  const script = join(cwd, "escaper-runner.ts");
+  const since = nowToken();
+  const script = join(dir, "escaper-runner.ts");
   writeFileSync(
     script,
     `import { claudeAgentRunner } from ${JSON.stringify(join(import.meta.dir, "../../../src/agent/providers/claude.ts"))};
@@ -367,9 +383,24 @@ const r = await claudeAgentRunner(${JSON.stringify(cli)}).run({ prompt: "x", mod
 console.log(JSON.stringify({ completed: r.completed, stdout: r.stdout }));`,
   );
   const start = Date.now();
-  const proc = Bun.spawn(["bun", "run", script], { stdout: "pipe" });
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
+  let out = "";
+  try {
+    // Bun.spawn's default environment is the one Bun started with, which lacks the preload's test
+    // state folder: pass this process's, so no launch record reaches the operator's real one (R29).
+    const proc = Bun.spawn(["bun", "run", script], { env: { ...process.env }, stdout: "pipe" });
+    const text = new Response(proc.stdout).text();
+    await until(() => existsSync(escaped), 10_000);
+    const holder = Number(readFileSync(escaped, "utf8"));
+    // Claimed by descent, for cleanup: it must succeed while the CLI and python wait for go.
+    expect(ownPrinted(holder, since, { pgid: holder })).not.toBeNull();
+    writeFileSync(go, "");
+    out = await text;
+    await proc.exited;
+  } finally {
+    writeFileSync(go, ""); // even when something threw: everything here ends by itself
+    writeFileSync(done, "");
+    rmSync(dir, { recursive: true, force: true }); // every loop here also ends once it is gone
+  }
   // drain timeout (5s) plus startup, well under the escaped holder's 20s
   expect(Date.now() - start).toBeLessThan(12000);
   expect(JSON.parse(out.trim().split("\n").pop() ?? "{}")).toEqual({

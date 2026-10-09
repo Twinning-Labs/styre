@@ -13,12 +13,13 @@ import { join } from "node:path";
 import { branchNameFor } from "../agent/branch.ts";
 import { type AgentCliPreflight, preflightAgentCli } from "../agent/preflight.ts";
 import { resolveAgentRunner } from "../agent/resolve.ts";
+import type { AgentRunner } from "../agent/runner.ts";
 import { type AgentConfig, DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { stateDir } from "../config/paths.ts";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
 import type { ProjectorPorts } from "../daemon/projector.ts";
-import { realRecoverDeps, recover } from "../daemon/recover.ts";
+import { recover } from "../daemon/recover.ts";
 import {
   type ReviewResumePlan,
   applyReviewResume,
@@ -44,13 +45,22 @@ import { resetProvision } from "../dispatch/provision.ts";
 import { branchHeadSha, reconcileWorktree } from "../dispatch/worktree.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
+import { RunInterrupted, isStopping } from "../util/process/door.ts";
+import type { HandlerCtx } from "../util/process/signals.ts";
 import { nowUtc } from "../util/time.ts";
 import type { NonPrimaryComponent } from "./component-roles.ts";
 import { agentCliError, usageError } from "./errors.ts";
 import { exitCodeForOutcome } from "./outcome.ts";
 import { formatMessage } from "./output.ts";
 import { confirmPrBase } from "./resolve-pr-base.ts";
-import { acquireRunLock, releaseRunLock } from "./run-lock.ts";
+import { type RunLock, acquireRunLock, releaseRunLock } from "./run-lock.ts";
+
+/** How `styre run` hands the stop handler (ENG-485 section 7) what it needs: the run once its
+ *  database and ticket row exist, and the run lock while it is held. */
+export interface StopWiring {
+  setRun(r: HandlerCtx["run"]): void;
+  holdLock(lock: RunLock | null): void;
+}
 
 /**
  * Handle the terminal result of a `styre run` after `runTicket`/`driveToTerminal` returns.
@@ -211,6 +221,10 @@ export async function resumeRun(
     ) => StepRegistry;
     ports?: ProjectorPorts;
     preflight?: (config: AgentConfig) => AgentCliPreflight;
+    /** The agent runner for the default registry (tests); the configured provider otherwise. */
+    runner?: AgentRunner;
+    /** The stop handler `styre run` installed (section 7.1). */
+    stop?: StopWiring;
   },
   /** ENG-435: components role-classification removed from `profile`, so a RESUMED run reports
    *  the narrowing in its PR the same way a fresh one does. `profile` arrives already narrowed
@@ -219,6 +233,9 @@ export async function resumeRun(
    *  Last, with a default, so existing callers are untouched. */
   nonPrimaryComponents: NonPrimaryComponent[] = [],
 ): Promise<void> {
+  // A stop that began before the resume (during an earlier await) leaves the checkpoint as it is.
+  // From here to the handler's setRun below the code is synchronous, so none can begin between.
+  if (isStopping()) throw new RunInterrupted();
   const dir = parkDir(profile.slug, args.resume);
   const dbPath = join(dir, "run.db");
   if (!existsSync(dbPath)) {
@@ -238,6 +255,7 @@ export async function resumeRun(
     process.exitCode = 65; // EXIT.RESUME_REFUSED — no db opened yet, nothing to close
     return;
   }
+  deps?.stop?.holdLock(lock);
   try {
     migrate(dbPath);
     const db = openDb(dbPath);
@@ -254,6 +272,13 @@ export async function resumeRun(
     const ticketId = onlyTicketId(db);
     const ticket = getTicket(db, ticketId);
     if (!ticket) throw new Error("resume: ticket vanished");
+    deps?.stop?.setRun({ db, dbPath, ticketId, ident: ticket.ident });
+    // Closes the run's connection on a normal exit only: during a stop the handler reads it (R26).
+    const closeDb = (): void => {
+      if (isStopping()) return;
+      deps?.stop?.setRun(null);
+      db.close();
+    };
     const project = getProject(db, ticket.project_id);
     if (!project) throw new Error("resume: project missing");
     // Same-container in-place derivation: no schema/dump change — the persisted worktree_path on
@@ -275,7 +300,7 @@ export async function resumeRun(
       process.stderr.write(
         `resume --inspect ${ticket.ident}\n  recorded base: ${recorded ?? "(none)"}\n  current head:  ${current ?? "(none)"}${moved ? "  [MOVED]" : ""}\n  would re-dispatch step: ${parkedStep?.step_key ?? "(none)"}\n  (no changes made)\n`,
       );
-      db.close();
+      closeDb();
       return;
     }
 
@@ -283,7 +308,7 @@ export async function resumeRun(
       process.stderr.write(
         `resume refused: branch HEAD moved since the run paused.\n  recorded base: ${recorded}\n  current head:  ${current}\n  would re-dispatch: ${parkedStep?.step_key ?? "(none)"}\n  Re-run with --accept-head to resume against the new HEAD (drops stale transcript),\n  or --inspect to review, or 'styre run ${ticket.ident} --fresh' to start fresh.\n`,
       );
-      db.close();
+      closeDb();
       process.exitCode = 65;
       return;
     }
@@ -299,7 +324,7 @@ export async function resumeRun(
       process.stderr.write(
         `resume refused: ${error instanceof Error ? error.message : String(error)}\n`,
       );
-      db.close();
+      closeDb();
       process.exitCode = 65;
       return;
     }
@@ -313,7 +338,7 @@ export async function resumeRun(
       runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG,
     );
     if (!cliPreflight.ok) {
-      db.close();
+      closeDb();
       throw agentCliError(cliPreflight);
     }
     if (cliPreflight.unauthHint) process.stderr.write(`resume: ${cliPreflight.unauthHint}\n`);
@@ -334,6 +359,7 @@ export async function resumeRun(
       );
       assertInPlaceMarker(project.target_repo); // language-agnostic disposability re-check before checkout -B
       await assertInPlaceIdentity(project.target_repo, profile);
+      if (isStopping()) throw new RunInterrupted();
     }
 
     // Confirm the PR base on the forge before the reconcile and the resume transaction below, so a
@@ -343,9 +369,10 @@ export async function resumeRun(
     try {
       await confirmPrBase(ports, profile);
     } catch (error) {
-      db.close();
+      closeDb();
       throw error;
     }
+    if (isStopping()) throw new RunInterrupted();
 
     // Mint the resumed run's worktree root once (in-place reuses the repo root) so the stale-worktree
     // reconcile and the dispatch registry below share it — and reconcile knows the real new target.
@@ -374,7 +401,7 @@ export async function resumeRun(
       process.stderr.write(
         "resume refused: branch HEAD changed while preparing review resume; inspect and retry\n",
       );
-      db.close();
+      closeDb();
       process.exitCode = 65;
       return;
     }
@@ -411,12 +438,22 @@ export async function resumeRun(
       requeueFailedForge(db, ticketId, profile.defaultBranch, current);
     })();
 
-    recover(db, realRecoverDeps()); // resets the interrupted 'running' step → pending
+    // Resets the interrupted 'running' step to pending. A recorded interruption is free: its attempt
+    // was given back, in-place edits are undone, and the branch returns to where the step started
+    // when that is safe (ENG-485 section 7.5). The old worktree is already gone (reconcile above),
+    // and the new one is created only when the step runs, so a worktree branch can move here.
+    recover(db, {
+      inPlace,
+      repoPath: project.target_repo,
+      branch,
+      acceptHead: args.acceptHead === true,
+      warn: (line) => process.stderr.write(`${line}\n`),
+    });
 
     const registry: StepRegistry = deps?.buildRegistry
       ? deps.buildRegistry(resumeContext)
       : buildDispatchRegistry({
-          runner: resolveAgentRunner(runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG),
+          runner: deps?.runner ?? resolveAgentRunner(runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG),
           agentConfig: runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG,
           profile,
           nonPrimaryComponents,
@@ -431,10 +468,15 @@ export async function resumeRun(
       ports,
       profile,
       emit: stdoutSink,
+      // ENG-485 section 7.5: where the ticket branch stands when each step starts.
+      readHead: () => branchHeadSha(project.target_repo, branch),
     });
+    // A step that finished during a stop is not recorded (section 7.5): nothing below may run.
+    if (isStopping()) throw new RunInterrupted();
     process.stderr.write(`${formatRunSummary(db, ticketId, result)}\n`);
 
     if (result.outcome === "paused" && result.reason === "budget" && result.park) {
+      deps?.stop?.setRun(null); // a normal exit: dumpPark closes the db
       dumpPark(db, dbPath, profile.slug, ticket.ident, result.park); // re-dump (closes db)
       process.stderr.write(
         `${formatMessage("run", `Paused again — out of budget: ${result.park.cause}. Checkpoint: ${dir}`)}\n`,
@@ -442,9 +484,13 @@ export async function resumeRun(
       process.exitCode = exitCodeForOutcome("paused"); // 75
       return;
     }
-    db.close();
+    closeDb();
     process.exitCode = exitCodeForOutcome(result.outcome); // 0 pr-ready/done · 75 paused · 1 abandoned
   } finally {
-    releaseRunLock(lock);
+    // During a stop the handler releases the lock, last (R7); the run code leaves it alone.
+    if (!isStopping()) {
+      deps?.stop?.holdLock(null);
+      releaseRunLock(lock);
+    }
   }
 }

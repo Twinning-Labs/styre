@@ -146,12 +146,15 @@ test("onSucceed commits atomically with markSucceeded (a verdict-bearing step)",
     onSucceed: (step) => {
       sideEffectRan = true;
       // a stand-in for applyReviewVerdict's state change — must land iff the step is marked succeeded
-      steps.setPid(db, step.id, 4242);
+      db.query("UPDATE workflow_step SET input_json = $v WHERE id = $id").run({
+        $v: '"verdict"',
+        $id: step.id,
+      });
     },
   });
   expect(sideEffectRan).toBe(true);
   expect(result.step.status).toBe("succeeded");
-  expect(steps.getByKey(db, ticketId, "review")?.pid).toBe(4242);
+  expect(steps.getByKey(db, ticketId, "review")?.input_json).toBe('"verdict"');
   db.close();
 });
 

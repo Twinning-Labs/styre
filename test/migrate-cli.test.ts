@@ -9,6 +9,10 @@ afterAll(() => rmSync(workdir, { recursive: true, force: true }));
 test("`styre migrate --db <path>` exits 0 and reports v8 on stderr (stdout stays empty)", async () => {
   const dbPath = join(workdir, "styre.db");
   const proc = Bun.spawn(["bun", "run", "src/index.ts", "migrate", "--db", dbPath], {
+    // Bun.spawn's default environment is the one this process started with, which lacks the test
+    // state folder the preload sets: pass it, so the command's sweep (ENG-485 section 8) reads the
+    // test's launch records, never the operator's ~/.local/state.
+    env: { ...process.env },
     stdout: "pipe",
     stderr: "pipe",
   });

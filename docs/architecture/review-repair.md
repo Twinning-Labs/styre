@@ -39,10 +39,11 @@ It records command, SHA, exit code, output, timeout, truncation, and worktree mu
 Exit zero establishes command execution, not that a specific assertion ran or passed.
 
 The entire process/pipe lifetime is bounded by the review timeout. Each captured stream is capped
-at 65,536 characters and continues draining after the cap. POSIX process groups allow cleanup of
-ordinary descendants, including descendants holding pipes open after the shell exits. The journal
-stores the negative group PID while a probe runs so crash recovery can kill that group. This is
-not an OS sandbox against deliberately hostile repository commands.
+at 65,536 characters and continues draining after the cap. Each probe leads a process group of its own,
+which allows cleanup of ordinary descendants, including descendants holding pipes open after the
+shell exits. While a probe runs, its group is recorded in a launch record on disk (ENG-485; the
+journal no longer stores a pid), so a later Styre command can stop that group if Styre is killed.
+This is not an OS sandbox against deliberately hostile repository commands.
 
 A probe that dirties the worktree records an error and restores tracked changes/removes newly
 created untracked files, preserving pre-existing untracked files. A moved HEAD requires operator

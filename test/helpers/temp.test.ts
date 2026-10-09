@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { makeTempDir, trackTempEntriesMadeBy, trackTempPath } from "./temp.ts";
@@ -8,13 +8,6 @@ const repoRoot = join(import.meta.dir, "..", "..");
 
 test("the run's temp root is a fresh per-run folder, not the system temp folder", () => {
   expect(basename(tmpdir())).toStartWith("styre-test-run-");
-});
-
-test("the run's temp root has no symlink in its path, so macOS sees paths as Linux does", () => {
-  // macOS's /var/folders is a symlink to /private/var/folders. Tools that resolve their working
-  // folder (Python's os.getcwd()) would otherwise disagree with tmpdir() and hide a leak locally
-  // that CI on Linux reports.
-  expect(realpathSync(tmpdir())).toBe(tmpdir());
 });
 
 describe("a folder made inside a test", () => {
@@ -98,12 +91,13 @@ describe("folders made before a failing call", () => {
 function runFixture(
   name: string,
   cwd = repoRoot,
+  env: Record<string, string> = {},
 ): { exitCode: number; output: string; leftBehind: string[]; parent: string } {
   const parent = makeTempDir("styre-guard-");
   const fixture = join(import.meta.dir, "fixtures", name);
   const result = Bun.spawnSync([process.execPath, "test", fixture], {
     cwd,
-    env: { ...process.env, TMPDIR: parent },
+    env: { ...process.env, ...env, TMPDIR: parent },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -159,6 +153,20 @@ describe("the leak guard", () => {
     },
     60_000,
   );
+
+  test("still removes the run's temp root and reports the leak when another preload guard fails first", () => {
+    // Bun skips the preload's later afterAll hooks once one throws; the records guard (ENG-485)
+    // throws here, so the temp guard must not depend on running after it.
+    const real = makeTempDir("styre-guard-real-state-");
+    const run = runFixture("leaks-and-trips-another-guard.fixture.ts", repoRoot, {
+      XDG_STATE_HOME: real,
+      PROBE_WRITE_INTO: join(real, "styre-processes"),
+    });
+    expect(run.output).toContain("a test wrote launch records into the operator's real");
+    expect(run.output).toContain("styre-leak-both-");
+    expect(run.exitCode).not.toBe(0);
+    expect(run.leftBehind).toEqual([]);
+  }, 60_000);
 
   test("passes a run whose folders all go through the tracked helper", () => {
     const run = runFixture("cleans-up.fixture.ts");

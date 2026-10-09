@@ -1,4 +1,5 @@
 import { type AgentConfig, requiredEnvFor } from "../config/agent-config.ts";
+import { runBlocking } from "../util/process/door.ts";
 import {
   CLAUDE_MIN_CLI_VERSION,
   CLAUDE_REQUIRED_HELP,
@@ -65,13 +66,12 @@ interface PreflightDeps {
 /** PATH-existence check via `command -v` (mirrors probeCommandExists; `sh` always exists, so a
  *  missing binary returns false rather than throwing — we never spawn the missing binary directly). */
 function defaultOnPath(command: string): boolean {
-  return Bun.spawnSync(["sh", "-c", 'command -v "$1"', "sh", command]).success;
+  return runBlocking(["sh", "-c", 'command -v "$1"', "sh", command], { timeoutMs: 5_000 }).success;
 }
 
 function defaultRunVersion(command: string): { ok: boolean; output: string } {
-  const r = Bun.spawnSync([command, "--version"], { timeout: 5_000 });
-  const dec = new TextDecoder();
-  return { ok: r.success, output: `${dec.decode(r.stdout)}${dec.decode(r.stderr)}` };
+  const r = runBlocking([command, "--version"], { timeoutMs: 5_000 });
+  return { ok: r.success, output: `${r.stdout}${r.stderr}` };
 }
 
 /** The name a missing requirement is reported under, e.g. `--permission-mode dontAsk`. */
@@ -96,9 +96,8 @@ export function helpLists(help: string, req: HelpRequirement): boolean {
 }
 
 function defaultRunHelp(command: string): { ok: boolean; output: string } {
-  const r = Bun.spawnSync([command, "--help"], { timeout: 10_000 });
-  const dec = new TextDecoder();
-  return { ok: r.success, output: `${dec.decode(r.stdout)}${dec.decode(r.stderr)}` };
+  const r = runBlocking([command, "--help"], { timeoutMs: 10_000 });
+  return { ok: r.success, output: `${r.stdout}${r.stderr}` };
 }
 
 function unauthHintFor(

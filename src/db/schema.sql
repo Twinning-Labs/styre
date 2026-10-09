@@ -183,7 +183,7 @@ CREATE TABLE workflow_step (
     input_json      TEXT CHECK (input_json  IS NULL OR json_valid(input_json)),
     result_json     TEXT CHECK (result_json IS NULL OR json_valid(result_json)),  -- returned on replay
     error_json      TEXT CHECK (error_json  IS NULL OR json_valid(error_json)),
-    pid             INTEGER,                           -- spawned worker PID (recover() orphan-kill)
+    pid             INTEGER,                           -- legacy (before ENG-485): always NULL now; launch records hold pids
 
     await_signal_id INTEGER REFERENCES signal(id),     -- set when step parks on a durable wait
     started_at      TEXT,

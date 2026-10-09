@@ -13,6 +13,8 @@ import type { CommitScope } from "../../src/dispatch/commit-scope.ts";
 import { checksScopeFor, implementScope } from "../../src/dispatch/commit-scope.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runAgentDispatch } from "../../src/dispatch/run-dispatch.ts";
+import { ensureWorktree } from "../../src/dispatch/worktree.ts";
+import * as door from "../../src/util/process/door.ts";
 import { makeTestDb } from "../helpers/db.ts";
 import { makeTempDir, trackTempPath } from "../helpers/temp.ts";
 
@@ -53,7 +55,7 @@ function depsFor(repo: string, wt: string) {
 test("runs the agent, commits its edits (CL-COMMIT), records the dispatch with the standard-tier model", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = trackTempPath(join(repo, "..", `wt-${Date.now()}`));
+  const wt = trackTempPath(`${repo}-wt-${Date.now()}`);
   const runner = new FakeAgentRunner((input) => {
     writeFileSync(join(input.cwd, "feature.ts"), "export const x = 1;\n");
     return {
@@ -91,7 +93,7 @@ test("runs the agent, commits its edits (CL-COMMIT), records the dispatch with t
 test("runAgentDispatch surfaces the agent stdout as output", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = trackTempPath(join(repo, "..", `wt-stdout-${Date.now()}`));
+  const wt = trackTempPath(`${repo}-wt-stdout-${Date.now()}`);
   const runner = new FakeAgentRunner((input) => {
     writeFileSync(join(input.cwd, "feature-stdout.ts"), "export const x = 1;\n");
     return {
@@ -138,7 +140,7 @@ test("a CL-PROFILE miss throws before running the agent", async () => {
   });
   const call = runAgentDispatch(
     ctxFor(db, ticketId),
-    { runner, ...depsFor(repo, trackTempPath(join(repo, "..", `wt2-${Date.now()}`))) },
+    { runner, ...depsFor(repo, trackTempPath(`${repo}-wt2-${Date.now()}`)) },
     {
       handlerKey: "implement:dispatch",
       template: "needs {{missing}}",
@@ -166,7 +168,7 @@ test("a postcondition failure throws and records postcondition-failed", async ()
   }));
   const call = runAgentDispatch(
     ctxFor(db, ticketId),
-    { runner, ...depsFor(repo, trackTempPath(join(repo, "..", `wt3-${Date.now()}`))) },
+    { runner, ...depsFor(repo, trackTempPath(`${repo}-wt3-${Date.now()}`)) },
     {
       handlerKey: "implement:dispatch",
       template: "implement {{ident}}",
@@ -185,7 +187,7 @@ test("a postcondition failure throws and records postcondition-failed", async ()
 test("retry-feedback: a prior attempt's error_json is prepended to the retry prompt", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = trackTempPath(join(repo, "..", `wt-retry-${Date.now()}`));
+  const wt = trackTempPath(`${repo}-wt-retry-${Date.now()}`);
   const ctx = ctxFor(db, ticketId);
   markFailed(db, ctx.step.id, new Error("REJECTED: unit seq 3 declares no files_to_touch"));
   const fresh = getById(db, ctx.step.id);
@@ -220,7 +222,7 @@ test("retry-feedback: a prior attempt's error_json is prepended to the retry pro
 test("no retry-feedback on the first attempt (error_json null)", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = trackTempPath(join(repo, "..", `wt-noretry-${Date.now()}`));
+  const wt = trackTempPath(`${repo}-wt-noretry-${Date.now()}`);
   const ctx = ctxFor(db, ticketId);
   const runner = new FakeAgentRunner(() => ({
     completed: true,
@@ -252,7 +254,7 @@ test("compose: retry-feedback AND resumeContext carryover both survive (fail→p
   // (both prepends present) that observes it — a direct regression guard (T2 review Minor-1).
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = trackTempPath(join(repo, "..", `wt-compose-${Date.now()}`));
+  const wt = trackTempPath(`${repo}-wt-compose-${Date.now()}`);
   const ctx = ctxFor(db, ticketId);
   markFailed(db, ctx.step.id, new Error("REJECTED: unit seq 3 declares no files_to_touch"));
   const fresh = getById(db, ctx.step.id);
@@ -293,7 +295,7 @@ test("compose: retry-feedback AND resumeContext carryover both survive (fail→p
 test("a transport failure records dispatch-failed and does NOT commit", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = trackTempPath(join(repo, "..", `wt4-${Date.now()}`));
+  const wt = trackTempPath(`${repo}-wt4-${Date.now()}`);
   const runner = new FakeAgentRunner((input) => {
     // Write a file to prove worktree changes do not get committed on transport failure
     writeFileSync(join(input.cwd, "should-not-be-committed.ts"), "export const x = 1;\n");
@@ -331,7 +333,7 @@ test("a transport failure records dispatch-failed and does NOT commit", async ()
 test("scope reject: an undeclared new file → dispatch-failed at preHead, worktree undone, offenders named", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = trackTempPath(join(repo, "..", `wt-scope-${Date.now()}`));
+  const wt = trackTempPath(`${repo}-wt-scope-${Date.now()}`);
   const runner = new FakeAgentRunner((input) => {
     writeFileSync(join(input.cwd, "fix.ts"), "export const x = 1;\n"); // legit edit target (new, undeclared)
     writeFileSync(join(input.cwd, "test_bug.py"), "scratch\n"); // undeclared scratch
@@ -372,7 +374,7 @@ test("scope reject: an undeclared new file → dispatch-failed at preHead, workt
 test("scratch drawer: styre_scratch/ is swept before judging → not an offender, not committed, note emitted", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = trackTempPath(join(repo, "..", `wt-scratch-${Date.now()}`));
+  const wt = trackTempPath(`${repo}-wt-scratch-${Date.now()}`);
   const runner = new FakeAgentRunner((input) => {
     writeFileSync(join(input.cwd, "fix.ts"), "export const x = 1;\n"); // declared deliverable
     mkdirSync(join(input.cwd, "pkg", "styre_scratch"), { recursive: true });
@@ -419,7 +421,7 @@ test("scratch drawer: styre_scratch/ is swept before judging → not an offender
 test("read-only stray: logged as an event_log note, dispatch still clean-success (non-gating)", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = trackTempPath(join(repo, "..", `wt-ro-${Date.now()}`));
+  const wt = trackTempPath(`${repo}-wt-ro-${Date.now()}`);
   const runner = new FakeAgentRunner((input) => {
     writeFileSync(join(input.cwd, "stray.txt"), "oops\n");
     return {
@@ -455,7 +457,7 @@ test("read-only stray: logged as an event_log note, dispatch still clean-success
 test("no-drop across a transport-failure retry: a re-created declared file commits, never dropped", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = trackTempPath(join(repo, "..", `wt-retry2-${Date.now()}`));
+  const wt = trackTempPath(`${repo}-wt-retry2-${Date.now()}`);
   const deps = depsFor(repo, wt);
   const stepCtx = ctxFor(db, ticketId); // same step across both attempts
   // Attempt 1: creates helper.ts then transport-fails (no revert in the old world → the bug).
@@ -521,7 +523,7 @@ test("no-drop across a transport-failure retry: a re-created declared file commi
 test("checks support file: an UNDECLARED styre_checks/__init__.py co-located with the canonical check is discarded, not auto-admitted (ENG-323 deleted)", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = trackTempPath(join(repo, "..", `wt-support-${Date.now()}`));
+  const wt = trackTempPath(`${repo}-wt-support-${Date.now()}`);
   const runner = new FakeAgentRunner((input) => {
     mkdirSync(join(input.cwd, "tests", "styre_checks"), { recursive: true });
     writeFileSync(
@@ -583,7 +585,7 @@ async function runWith(opts: {
 }) {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = trackTempPath(join(repo, "..", `wt-${Math.random().toString(36).slice(2)}`));
+  const wt = trackTempPath(`${repo}-wt-${Math.random().toString(36).slice(2)}`);
   const runner = new FakeAgentRunner((input) => {
     opts.apply(input.cwd);
     return {
@@ -679,4 +681,133 @@ test("default disposition is reject", async () => {
   });
   await expect(promise).rejects.toThrow(/out-of-scope files/);
   db.close();
+});
+
+test("the agent is launched with the context the interruption record needs (ENG-485 R3)", async () => {
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = trackTempPath(`${repo}-wt-context-${Date.now()}`);
+  ensureWorktree(repo, "feat/ENG-1", wt);
+  writeFileSync(join(wt, "stray-before.txt"), "left by an earlier step\n"); // untracked before the dispatch
+  const runner = new FakeAgentRunner(() => ({
+    completed: true,
+    exitCode: 0,
+    stdout: "ok",
+    stderr: "",
+    timedOut: false,
+    costUsd: 0,
+    tokensIn: 0,
+    tokensOut: 0,
+  }));
+  const ctx = ctxFor(db, ticketId);
+  await runAgentDispatch(
+    ctx,
+    { runner, ...depsFor(repo, wt) },
+    {
+      handlerKey: "implement:dispatch",
+      template: "implement {{ident}}",
+      vars: { ident: "ENG-1" },
+      postcondition: () => {},
+    },
+  );
+  const row = listByTicket(db, ticketId)[0];
+  db.close();
+  expect(runner.inputs[0]?.context).toEqual({
+    ident: ctx.ticket.ident,
+    stepId: ctx.step.id,
+    worktree: wt,
+    untrackedBefore: ["stray-before.txt"],
+    dispatchRowId: row?.id,
+  });
+  expect(row?.id).toBeGreaterThan(0);
+});
+
+test("a rejected committed output is reset to the starting head and that head is reported (ENG-485 section 7.5)", async () => {
+  door.__resetForTests();
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = trackTempPath(`${repo}-wt-reset-note-${Date.now()}`);
+  ensureWorktree(repo, "feat/ENG-1", wt);
+  const head = (cwd: string) =>
+    Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd }).stdout.toString().trim();
+  const start = head(wt);
+  door.beginStep({ stepId: 1, startedAt: "t", ident: "ENG-1", headAtStart: start });
+  const runner = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "feature-note.ts"), "export const x = 1;\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: '{}\n```styre-sidecar\n{"new_files":["feature-note.ts"]}\n```',
+      stderr: "",
+      timedOut: false,
+      costUsd: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+    };
+  });
+  let reportedAfterCommit: string | null = null;
+  await expect(
+    runAgentDispatch(
+      ctxFor(db, ticketId),
+      { runner, ...depsFor(repo, wt) },
+      {
+        handlerKey: "implement:dispatch",
+        template: "implement {{ident}}",
+        vars: { ident: "ENG-1" },
+        commitScope: implementScope,
+        postcondition: () => {},
+        validateCommittedOutput: (_out, _wt, sha) => {
+          reportedAfterCommit = door.inFlightStep()?.headAtStop ?? null;
+          expect(sha).not.toBe(start);
+          throw new Error("committed output rejected");
+        },
+      },
+    ),
+  ).rejects.toThrow("committed output rejected");
+  db.close();
+  expect(reportedAfterCommit).not.toBe(start); // the runner's commit was reported
+  expect(head(wt)).toBe(start); // the branch went back
+  expect(door.inFlightStep()?.headAtStop).toBe(start); // and the reset was reported
+  door.__resetForTests();
+});
+
+test("a rejected committed output keeps untracked files that existed before the dispatch (no git clean)", async () => {
+  door.__resetForTests();
+  const { db, ticketId } = makeTestDb();
+  const repo = gitRepo();
+  const wt = trackTempPath(`${repo}-wt-keep-untracked-${Date.now()}`);
+  ensureWorktree(repo, "feat/ENG-1", wt);
+  writeFileSync(join(wt, "operator-note.txt"), "left by an earlier step\n"); // untracked before
+  const runner = new FakeAgentRunner((input) => {
+    writeFileSync(join(input.cwd, "feature-keep.ts"), "export const x = 1;\n");
+    return {
+      completed: true,
+      exitCode: 0,
+      stdout: '{}\n```styre-sidecar\n{"new_files":["feature-keep.ts"]}\n```',
+      stderr: "",
+      timedOut: false,
+      costUsd: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+    };
+  });
+  await expect(
+    runAgentDispatch(
+      ctxFor(db, ticketId),
+      { runner, ...depsFor(repo, wt) },
+      {
+        handlerKey: "implement:dispatch",
+        template: "implement {{ident}}",
+        vars: { ident: "ENG-1" },
+        commitScope: implementScope,
+        postcondition: () => {},
+        validateCommittedOutput: () => {
+          throw new Error("committed output rejected");
+        },
+      },
+    ),
+  ).rejects.toThrow("committed output rejected");
+  db.close();
+  expect(existsSync(join(wt, "operator-note.txt"))).toBe(true); // survived the reset and the undo
+  expect(existsSync(join(wt, "feature-keep.ts"))).toBe(false); // the rejected commit is gone
 });

@@ -19,11 +19,11 @@ import type { TelemetrySink } from "./emit.ts";
 import { SCHEMA_VERSION, type TelemetryEvent } from "./events.ts";
 import { DEFAULT_PRICING_CONFIG, type PricingConfig, deriveCost } from "./pricing.ts";
 
-type RunCtx = { runId: string; provider: string; startedAt: string };
+export type RunCtx = { runId: string; provider: string; startedAt: string };
 
 /** Read the single run row; a missing row is an invariant violation (D9) — the runner always
  *  inserts it at start and resume backfills it, so null here means a broken caller, not a "0". */
-function runCtx(db: Database): RunCtx {
+export function runCtx(db: Database): RunCtx {
   const r = getRun(db);
   if (!r)
     throw new Error("telemetry: no run row — run identity is required (see ENG-349 design D9)");
@@ -39,7 +39,7 @@ function aggregate(ns: Array<number | null>): { value: number | null; reported: 
   };
 }
 
-function toEvent(r: EventLogRow, ctx: RunCtx): TelemetryEvent {
+export function toEvent(r: EventLogRow, ctx: RunCtx): TelemetryEvent {
   return {
     schema_version: SCHEMA_VERSION,
     type: "event",

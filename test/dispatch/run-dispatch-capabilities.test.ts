@@ -72,7 +72,7 @@ function rawRunner(result: (input: AgentRunInput) => AgentRunResult): AgentRunne
 async function dispatchWith(runner: AgentRunner) {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = trackTempPath(join(repo, "..", `wt-cap-${Date.now()}-${Math.random()}`));
+  const wt = trackTempPath(`${repo}-wt-cap-${Date.now()}-${Math.random()}`);
   const call = runAgentDispatch(
     ctxFor(db, ticketId),
     {

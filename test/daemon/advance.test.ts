@@ -18,6 +18,7 @@ import {
   markSucceeded,
 } from "../../src/db/repos/workflow-step.ts";
 import { StepInFlightError } from "../../src/engine/step-journal.ts";
+import * as door from "../../src/util/process/door.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 // A fresh design ticket now resolves `provision` first (hoisted). Tests that drive design steps
@@ -313,4 +314,48 @@ test("a blocked descriptor pauses the ticket via pauseTicket (waiting + pending 
   });
   expect(ticket?.status).toBe("waiting");
   expect(paused).toBe(true); // pauseTicket's pending human_resume signal fired
+});
+
+test("advanceOneStep registers the step in flight with the ticket ident and the branch head read from opts.readHead", async () => {
+  door.__resetForTests();
+  const { db, ticketId } = makeTestDb();
+  seedProvisionDone(db, ticketId);
+  const registry = new StepRegistry();
+  let seen: ReturnType<typeof door.inFlightStep> = null;
+  registry.register("design:dispatch", (ctx) => {
+    seen = door.inFlightStep();
+    expect(seen?.stepId).toBe(ctx.step.id);
+    return { plan: "ok" };
+  });
+  let reads = 0;
+  await advanceOneStep(db, ticketId, registry, {
+    readHead: () => {
+      reads++;
+      return "headAtStep0";
+    },
+  });
+  const step = getByKey(db, ticketId, "design:dispatch");
+  db.close();
+  expect(reads).toBe(1);
+  expect(seen).toMatchObject({
+    ident: "ENG-1",
+    headAtStart: "headAtStep0",
+    startedAt: step?.started_at,
+  });
+  expect(door.inFlightStep()).toBeNull();
+});
+
+test("advanceOneStep without readHead gives a null headAtStart", async () => {
+  door.__resetForTests();
+  const { db, ticketId } = makeTestDb();
+  seedProvisionDone(db, ticketId);
+  const registry = new StepRegistry();
+  let seen: ReturnType<typeof door.inFlightStep> = null;
+  registry.register("design:dispatch", () => {
+    seen = door.inFlightStep();
+    return {};
+  });
+  await advanceOneStep(db, ticketId, registry);
+  db.close();
+  expect(seen).toMatchObject({ ident: "ENG-1", headAtStart: null });
 });

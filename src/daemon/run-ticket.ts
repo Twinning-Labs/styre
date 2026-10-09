@@ -12,6 +12,7 @@ import { branchPrefixFor } from "../integrations/ticket-source.ts";
 import type { IngestedTicket } from "../integrations/ticket-source.ts";
 import { type TelemetrySink, noopSink } from "../telemetry/emit.ts";
 import { createTelemetryEmitter } from "../telemetry/emitter.ts";
+import { pendingLeftoverChecks } from "../util/process/leftovers.ts";
 import { tick } from "./loop.ts";
 import { createNotifier } from "./notify.ts";
 import { pauseTicket } from "./pause-ticket.ts";
@@ -106,6 +107,8 @@ export async function driveToTerminal(
     cap?: number;
     emit?: TelemetrySink;
     ciReadTimeoutMs?: number;
+    /** The ticket branch's HEAD, for the step in flight (ENG-485 section 7.5). */
+    readHead?: () => string | null;
   },
 ): Promise<RunResult> {
   const cap = opts.cap ?? DEFAULT_CAP;
@@ -113,6 +116,9 @@ export async function driveToTerminal(
   const emitter = createTelemetryEmitter(opts.emit ?? noopSink, opts.config.pricing);
   const notifier = createNotifier(opts.config);
   const finish = async (result: RunResult): Promise<RunResult> => {
+    // The leftover checks started after agent steps write to this database; let them end first
+    // (each is bounded by its own timeout), before anything closes it.
+    await pendingLeftoverChecks();
     emitter.flushNew(db, opts.ticketId);
     emitter.emitSummary(db, opts.ticketId, result);
     notifier.sweepNew(db, opts.ticketId); // backstop: the per-tick sweep already caught these; re-sweep in case a terminal enqueued late events
@@ -126,6 +132,7 @@ export async function driveToTerminal(
     const r = await tick(db, registry, {
       config: opts.config,
       ports: opts.ports,
+      readHead: opts.readHead,
     });
     emitter.flushNew(db, opts.ticketId);
     notifier.sweepNew(db, opts.ticketId);
@@ -215,6 +222,11 @@ export async function runTicket(deps: {
   ticketRef: string;
   ingested?: IngestedTicket;
   emit?: TelemetrySink;
+  /** The ticket branch's HEAD, for the step in flight (ENG-485 section 7.5). */
+  readHead?: () => string | null;
+  /** Called with the ticket row's id as soon as it exists, before any step runs (ENG-485: the
+   *  stop handler needs it to record an interruption). */
+  onTicket?: (ticketId: number) => void;
 }): Promise<RunResult & { ticketId: number; summary: string }> {
   const ingested = deps.ingested ?? (await deps.ports.issueTracker.fetchTicket(deps.ticketRef));
   const projectId = insertProject(deps.db, {
@@ -231,12 +243,14 @@ export async function runTicket(deps: {
     branchPrefix: branchPrefixFor(ingested.typeLabel),
     externalId: ingested.externalId,
   });
+  deps.onTicket?.(ticketId);
   const result = await driveToTerminal(deps.db, deps.registry, {
     ticketId,
     config: deps.runtimeConfig,
     ports: deps.ports,
     profile: deps.profile,
     emit: deps.emit,
+    readHead: deps.readHead,
   });
   return { ...result, ticketId, summary: formatRunSummary(deps.db, ticketId, result) };
 }

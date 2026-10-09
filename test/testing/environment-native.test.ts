@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   provesBehavioralFailure,
@@ -118,40 +118,50 @@ test.skipIf(!process.env.STYRE_ENV_NATIVE_PYTHON)(
   30000,
 );
 
-test.skipIf(!process.env.STYRE_ENV_NATIVE_PYTHON)(
-  "native Python: the launcher probe leaves no pytest cache outside the repo",
-  async () => {
-    // The probe script lives in its own temp folder, outside the repo. With no config file beside
-    // it, pytest roots itself at the common ancestor of the repo and that folder (the temp folder
-    // itself, e.g. /tmp when the worktree is /tmp/styre-wt-*) and would write .pytest_cache there.
-    // The test gives the call a temp root of its own, so afterwards that root must hold only the
-    // repo: production removes the probe's folder, and the probe must write nothing else.
-    const parent = makeTempDir("styre-native-py-cache-");
-    const root = join(parent, "repo");
-    mkdirSync(root);
-    writeFileSync(join(root, "pytest.ini"), "[pytest]\n");
-    writeFileSync(join(root, "test_example.py"), "def test_one():\n    assert True\n");
-    const c = parseProfile({
-      slug: "native",
-      targetRepo: root,
-      components: [
-        { name: "app", kind: "python", paths: ["**"], commands: { test: "python3 -m pytest" } },
-      ],
-    }).components[0];
-    c.testEnvironment = planTestEnvironment(root, c, "existing");
-    c.testAction = { framework: "pytest", launcher: "python3 -m pytest" };
-    const previousTmp = process.env.TMPDIR;
-    process.env.TMPDIR = parent;
-    try {
-      const qualified = await qualifyTestEnvironment(root, c, { collect: true });
-      expect(qualified.status).toBe("ready");
-    } finally {
-      process.env.TMPDIR = previousTmp;
-    }
-    expect(readdirSync(parent)).toEqual(["repo"]);
-  },
-  30000,
-);
+// An operator's PYTEST_ADDOPTS reaches the probe too; cache options like --ff need the cache plugin.
+for (const addopts of [undefined, "--ff"])
+  test.skipIf(!process.env.STYRE_ENV_NATIVE_PYTHON)(
+    `native Python: the launcher probe leaves no pytest cache outside the repo (PYTEST_ADDOPTS=${addopts ?? "unset"})`,
+    async () => {
+      // The probe script lives in its own temp folder, outside the repo. With no config file beside
+      // it, pytest roots itself at the common ancestor of the repo and that folder (the temp folder
+      // itself, e.g. /tmp when the worktree is /tmp/styre-wt-*) and would write .pytest_cache there.
+      // The call gets a temp root of its own, so afterwards that root must hold only the repo:
+      // production removes the probe's folder, and the probe must write nothing else. The root is
+      // resolved because Python resolves its working folder: on macOS an unresolved /var/folders
+      // path shares only / with it, and pytest then roots itself at the probe's folder instead.
+      const parent = realpathSync(makeTempDir("styre-native-py-cache-"));
+      const root = join(parent, "repo");
+      mkdirSync(root);
+      writeFileSync(join(root, "pytest.ini"), "[pytest]\n");
+      writeFileSync(join(root, "test_example.py"), "def test_one():\n    assert True\n");
+      const c = parseProfile({
+        slug: "native",
+        targetRepo: root,
+        components: [
+          { name: "app", kind: "python", paths: ["**"], commands: { test: "python3 -m pytest" } },
+        ],
+      }).components[0];
+      c.testEnvironment = planTestEnvironment(root, c, "existing");
+      c.testAction = { framework: "pytest", launcher: "python3 -m pytest" };
+      const previous = { tmp: process.env.TMPDIR, addopts: process.env.PYTEST_ADDOPTS };
+      process.env.TMPDIR = parent;
+      if (addopts === undefined) Reflect.deleteProperty(process.env, "PYTEST_ADDOPTS");
+      else process.env.PYTEST_ADDOPTS = addopts;
+      try {
+        const qualified = await qualifyTestEnvironment(root, c, { collect: true });
+        expect({ status: qualified.status, reason: qualified.reason }).toMatchObject({
+          status: "ready",
+        });
+      } finally {
+        process.env.TMPDIR = previous.tmp;
+        if (previous.addopts === undefined) Reflect.deleteProperty(process.env, "PYTEST_ADDOPTS");
+        else process.env.PYTEST_ADDOPTS = previous.addopts;
+      }
+      expect(readdirSync(parent)).toEqual(["repo"]);
+    },
+    30000,
+  );
 
 for (const launcher of [
   "python3 -m pytest -rA --durations 25",

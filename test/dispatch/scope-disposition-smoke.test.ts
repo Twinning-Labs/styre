@@ -793,7 +793,7 @@ function fakeApplyRunner(apply: (cwd: string) => void, stdout: string): FakeAgen
 test("B1 re-author commits a declared canonical test for the flagged AC", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = trackTempPath(join(repo, "..", `wt-b1-${Date.now()}`));
+  const wt = trackTempPath(`${repo}-wt-b1-${Date.now()}`);
   const runner = fakeApplyRunner(
     (cwd) => {
       const dir = join(cwd, "checks");
@@ -822,7 +822,7 @@ test("B1 re-author commits a declared canonical test for the flagged AC", async 
 test("B2 ⚔ re-author discards an undeclared loose scratch (+note), no reject", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = trackTempPath(join(repo, "..", `wt-b2-${Date.now()}`));
+  const wt = trackTempPath(`${repo}-wt-b2-${Date.now()}`);
   const runner = fakeApplyRunner(
     (cwd) => {
       const dir = join(cwd, "checks");
@@ -1108,7 +1108,7 @@ async function runPathScope(opts: {
 }) {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo(opts.repoExtra);
-  const wt = trackTempPath(join(repo, "..", `wt-ps-${Math.random().toString(36).slice(2)}`));
+  const wt = trackTempPath(`${repo}-wt-ps-${Math.random().toString(36).slice(2)}`);
   const runner = fakeApplyRunner(opts.apply, opts.stdout ?? "no sidecar");
   const promise = runAgentDispatch(
     rdCtx(db, ticketId, "design:dispatch"),
@@ -1206,7 +1206,7 @@ test("G1 ⚔ disposition omitted defaults to reject — CONTRAST with discard", 
   const scenario = (disposition?: "reject" | "discard") => {
     const { db, ticketId } = makeTestDb();
     const repo = gitRepo();
-    const wt = trackTempPath(join(repo, "..", `wt-g1-${Math.random().toString(36).slice(2)}`));
+    const wt = trackTempPath(`${repo}-wt-g1-${Math.random().toString(36).slice(2)}`);
     const runner = fakeApplyRunner(
       (cwd) => writeFileSync(join(cwd, "junk.ts"), "junk\n"),
       sidecar({ new_files: [] }),
@@ -1240,7 +1240,7 @@ test("G1 ⚔ disposition omitted defaults to reject — CONTRAST with discard", 
 test("G2 a read-only dispatch (no commitScope) leaves a stray NOTED, not deleted, not rejected", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = trackTempPath(join(repo, "..", `wt-g2-${Date.now()}`));
+  const wt = trackTempPath(`${repo}-wt-g2-${Date.now()}`);
   const runner = fakeApplyRunner((cwd) => writeFileSync(join(cwd, "stray.txt"), "oops\n"), "{}");
   await runAgentDispatch(
     rdCtx(db, ticketId, "review"),
