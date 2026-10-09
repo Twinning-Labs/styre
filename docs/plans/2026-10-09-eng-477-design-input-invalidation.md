@@ -1,0 +1,7600 @@
+# ENG-477 Design-Stage Input Invalidation and Database Upgrades Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Make every design stage step "done" only when its recorded inputs still match, rerun exactly the steps whose inputs changed (with early cutoff), and give Styre a real, proven upgrade path for checkpoints written by v7 and v8 databases.
+
+**Architecture:** One declared table (`src/daemon/design-graph.ts`) names each design step's inputs and outputs; the resolver's design routing is generated from it and walks it in order, comparing a manifest of input digests recorded at each step's success against digests recomputed from the run's SQLite (snapshot rows in `ticket_input`, output rows, and the plan digest recorded on `design:dispatch`). A mismatch returns an `invalidate` descriptor that `advance.ts` applies in one transaction (note event, history row, reset, output clearing); loopbacks use the same function with cause `feedback`. `migrate()` becomes a versioned runner with a `VACUUM INTO` backup, structural shape detection, one transaction per migration, and a structural proof against `schema.sql`; v7 → v8 replaces `ensureRunTable`, v8 → v9 adds the new columns and tables, and an adopt pass records manifests for runs paused by an older Styre.
+
+**Tech Stack:** TypeScript on Bun, bun:sqlite, bun:test
+
+**Spec:** docs/brainstorms/2026-10-09-eng-477-design-input-invalidation-design.md
+
+---
+
+## Global Constraints
+
+- Both schema copies stay byte-identical: `src/db/schema.sql` and `docs/architecture/schema.sql` (`cmp` them in every task that edits either).
+- New columns go last in their `CREATE TABLE`, after the last existing column and before any table constraint (`UNIQUE (...)`), in migration order, because `ALTER TABLE ADD COLUMN` appends.
+- No coined hyphenated compound words in prose, identifiers, messages or docs; write the words out ("starting commit", not a hyphenated coinage). Existing names (`step_key`, `--accept-head`) stay as they are.
+- Commit messages are Conventional Commits (`type(eng-477): subject`), and end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+- Never commit to `main`. Work stays on `feat/eng-477-design-input-invalidation`. Never push in this plan.
+- Fail fast and loud: an invariant violation throws with the step, rule or file named; nothing is skipped silently.
+- Exit codes: `70` (`EX_SOFTWARE`) for a design table that breaks a rule of spec §3.1 and for a migration that fails; `75` (`EX_TEMPFAIL`) for the resume pause when a required suite's tools are missing (`needs_you`); `65` for a refused checkpoint (newer, unknown shape, older than v7). `--resume` never exits `69`.
+- Backups use `VACUUM INTO '<db file>.v<old version>.<UTC timestamp with milliseconds>.bak'`, written next to the database before the first migration; a failed backup stops the upgrade. Never a file copy.
+- Canonical encoding (spec §5.1): JSON with object keys sorted, every string (keys included) normalised to Unicode NFC, `undefined` object members dropped, no database ids and no timestamps in any digest, lists in their meaningful order (work units by `seq`, sets sorted), scheme version `FINGERPRINT_SCHEME = 1`.
+- No faked state in tests: new tests reach states only through real steps (`advanceOneStep` with `FakeAgentRunner`, `runImpl`, `resumeRun`) and public functions. No new test writes `workflow_step` rows directly. Fixture relocation (pointing a restored recording at its new temporary repository) is the one stated exception, in Task 12.
+- Operator test safety rules, in every step that runs tests:
+  - time-bound every `bun test` as `perl -e 'alarm 600; exec @ARGV' bun test <file>`;
+  - never `pkill` or `killall`; a test stops only the child it started, by its own pid;
+  - never write to the real `~/.local/state`: every test and script sets `XDG_STATE_HOME` (the test preload already does; scripts and child processes get it explicitly);
+  - no real `claude`: agents are `FakeAgentRunner`; the agent CLI preflight is injected as `() => ({ ok: true, version: null })`.
+- New stderr messages start with `run: `, `resume: ` or `migrate: `, never `styre: ` (the `styre: ` messages are pinned by `test/lifecycle/messages-doc.test.ts`).
+- Checks steps (`checks:dispatch`, `checks:classify`) are outside the table and keep today's rules (E9). No code in this plan changes their gating, feedback or identity rules.
+
+## Review Focus
+
+1. **A profile with a component whose toolchain is missing, on resume.** A fresh run narrows it away; an unchanged resume on the same host must narrow identically and record no `inputs-changed` note. Test: Task 8, "no false change when a component's toolchain was already missing at the fresh run".
+2. **An unchanged resume in worktree mode.** The worktree is recreated (new absolute path), `provision` is reset with cause `worktree-recreated`, and nothing else may rerun. Test: Task 13, "an unchanged resume in worktree mode reruns only provision, for the recreated worktree".
+3. **A v7 checkpoint bridged by `ensureRunTable` on the v0.9.0 shape** (budget columns on `signal` plus a `run` table, still version 7). It must rebuild `signal`, keep `workflow_step.await_signal_id` valid, and not try to create `run` again. Test: Task 2, "v7 bridged on the v0.9.0 shape migrates: signal rebuilt, run kept, foreign keys intact".
+4. **A crash in the middle of `design:extract`**, after the agent returned but before the success commit. The rerun must not hit `UNIQUE (ticket_id, seq)` and must leave exactly one set of units. Tests: Task 11 (in process, a commit that throws once) and Task 17 (a child process SIGKILLed at that point).
+5. **A plan file renamed by the agent between design rounds.** The plan digest is over path and content, so a rename changes it and reruns the plan's readers; an unrelated `docs/plans/*.md` without this ticket's `linear:` frontmatter must not. Test: Task 9, "a renamed plan changes the digest; another ticket's plan does not".
+
+## File Structure
+
+Created:
+
+| File | Responsibility |
+|---|---|
+| `scripts/db-fixtures/generate.ts` | Regenerates every historical database fixture from git history (worktrees at each release). |
+| `scripts/db-fixtures/seed-era.ts` | Creates one database with a given release's own `migrate()` and repositories, and seeds it. |
+| `scripts/db-fixtures/drive-v8-run.ts` | Drives a real worktree mode run with the 2b05680 code to a budget pause in implement and records it. |
+| `test/fixtures/db/*.db`, `test/fixtures/db/v8-paused-worktree/*` | The committed fixtures (one per known shape, plus v6 for refusal, plus the recorded v8 paused run). |
+| `test/helpers/db-fixtures.ts` | Names the fixtures and copies them into temporary folders for a test. |
+| `test/helpers/check-probes.ts` | Seed rows and one forbidden update per CHECK constraint, for the behavioural CHECK proof. |
+| `src/db/migrations/types.ts` | The `Migration` interface. |
+| `src/db/migrations/rebuild.ts` | SQLite's documented table rebuild procedure as one helper. |
+| `src/db/migrations/0008-run-table.ts` | v7 → v8: rebuild `signal` without the budget columns when present; create `run` when absent. |
+| `src/db/migrations/0009-design-inputs.ts` | v8 → v9: new `workflow_step` columns, `work_unit.origin` with backfill, `ticket_input`, `workflow_step_history`. |
+| `src/db/migrations/index.ts` | The ordered migration list and `CURRENT_VERSION`. |
+| `src/db/migrations/shapes/v7-signal-budget.sql`, `v7.sql`, `v8.sql` | Reference DDL of each released shape (verbatim `git show`). |
+| `src/db/schema-shape.ts` | Structural description of a database and the difference between two descriptions. |
+| `src/db/known-shapes.ts` | Detects which known released shape a database has. |
+| `src/db/repos/checkpoint-read.ts` | Narrow, v7-safe reads for `ls`, `clean` and `--fresh`. |
+| `src/db/repos/ticket-input.ts` | The `ticket_input` repository. |
+| `src/db/repos/step-history.ts` | The `workflow_step_history` repository. |
+| `src/daemon/canonical.ts` | Canonical JSON, SHA-256, `FINGERPRINT_SCHEME`. |
+| `src/daemon/design-graph.ts` | The declared design table, its four rules, and lookups over it. |
+| `src/daemon/design-inputs.ts` | Snapshot values, `captureSnapshot`, the starting commit, snapshot reads. |
+| `src/daemon/design-digests.ts` | Output digests (units, track, plan), current manifests, manifest recording. |
+| `src/daemon/invalidate.ts` | `invalidateSteps`: note event, history, reset, output clearing, in one transaction. |
+| `src/daemon/design-outputs.ts` | The success commits of the design handlers and the clearing rules. |
+| `src/daemon/adopt.ts` | The adopt pass for steps that succeeded under an older Styre. |
+| `src/daemon/design-walk.ts` | The walk over the table that the resolver's design case delegates to. |
+| `src/daemon/current-step.ts` | The module slot holding the step key in flight. |
+| `src/daemon/design-reads.ts` | Named accessors for upstream rows, checked against the current step. |
+| `test/helpers/design-script.ts` | The scripted `FakeAgentRunner` for design runs (plan, units, grade, findings, park). |
+| `test/helpers/design-steps.ts` | In process ticket with real handlers, driven step by step through `advanceOneStep`. |
+| `test/helpers/design-harness.ts` | Whole `styre run` / `--resume` through `runImpl`, with editable profile, config and host tools. |
+| `test/fixtures/design/crash-resume.ts` | Child process driver that resumes a run and blocks at a named crash point. |
+| Tests listed per task. | |
+
+Modified:
+
+| File | Change |
+|---|---|
+| `src/db/migrate.ts` | Versioned runner, backup, shape detection, proof, refusals. |
+| `src/db/schema.sql`, `docs/architecture/schema.sql` | v9. |
+| `src/db/repos/run.ts` | `ensureRunTable` removed. |
+| `src/db/repos/workflow-step.ts` | New columns in the row, `recordManifest`, `resetForInvalidate`. |
+| `src/db/repos/work-unit.ts` | `origin`. |
+| `src/db/repos/ticket.ts` | `clearTicketTrack`. |
+| `src/daemon/failure-policy.ts` | Reconcile units inserted with `origin: "reconcile"`. |
+| `src/daemon/resolver.ts` | Design case delegates to the walk; `invalidate` descriptor. |
+| `src/daemon/advance.ts` | Snapshot precondition, success commit composition, manifest recording, invalidate, current step slot. |
+| `src/daemon/step-registry.ts` | Optional per handler success commit. |
+| `src/engine/step-journal.ts` | `onSucceed` receives the result. |
+| `src/daemon/review-verdict.ts`, `src/daemon/review-resume.ts` | `redesignLoopback` takes the set to invalidate; consumer and generation on the event. |
+| `src/daemon/run-ticket.ts` | `runTicket` captures the snapshot and runs the adopt pass. |
+| `src/dispatch/handlers.ts` | Design handlers return their rows and commit them in `onSucceed`; plan digest; starting commit; accessors. |
+| `src/dispatch/design-feedback.ts` | Feedback scoped to `design:dispatch`'s current generation. |
+| `src/dispatch/run-dispatch.ts`, `src/cli/park.ts` | Carryover tied to the parked step's generation; resume order; narrowing and pause. |
+| `src/dispatch/provision.ts` | `resetProvision` through `invalidateSteps`. |
+| `src/dispatch/plan-frontmatter.ts`, `src/dispatch/worktree.ts` | Frontmatter from text; plan files at a ref through git. |
+| `src/cli/run.ts`, `src/cli/preflight.ts`, `src/cli/migrate.ts`, `src/cli/checkpoints.ts`, `src/cli/clean.ts`, `src/util/process/interruption.ts` | Wiring, shared toolchain decision, migration messages, narrow readers. |
+| `test/helpers/db.ts`, `test/helpers/skeleton-registry.ts`, `test/helpers/run-harness.ts` and the existing tests named per task | Snapshot capture, plan digests in mocks, real steps instead of seeded rows. |
+| `CLAUDE.md`, `docs/architecture/{minimal-loop,control-loop,build-operations,runtime-parameters,conventions,telemetry-export}.md`, `SECURITY.md`, `docs/architecture/brainstorm.md` | Spec §9. |
+
+### Task order, and where it differs from the suggested order
+
+1. Fixtures (moved first): the migration tests in Task 2 consume them, and the recorded v8 paused run must be produced by v8 code (`2b05680`), which the generator reaches through a git worktree, so the order is free; generating them first keeps Task 2's tests real from their first run.
+2. `migrate()` and v7 → v8. 3. Non-migrating readers (moved before v9): they must be in place before `WorkflowStepRow` grows, or `ls`/`clean` break on old checkpoints in between. 4. v8 → v9.
+5. Canonical encoding. 6. The table. 7. Snapshot and starting commit (and the test harnesses). 8. Resume narrowing.
+9. Manifests on success. 10. `invalidateSteps` (moved before the walk): the walk returns `invalidate`, so the interpreter must exist first. 11. Handlers safe to rerun (before the walk, so an invalidated extract can rerun atomically). 12. The adopt pass (moved before the walk): the walk refuses a succeeded step without a manifest, so every path that can bring one (resume, reused `--db`) must adopt first.
+13. The walk. 14. Loopbacks, feedback, carryover. 15. Accessors, current step slot, recording proxy, source guard. 16. The invalidate loop guard. 17. End to end tests of spec §8. 18. Docs.
+
+---
+
+### Task 1: Historical database fixtures
+
+**Files:**
+- Create: `scripts/db-fixtures/generate.ts`, `scripts/db-fixtures/seed-era.ts`, `scripts/db-fixtures/drive-v8-run.ts`
+- Create (generated, committed): `test/fixtures/db/v6-v0.7.0.db`, `v7-v0.9.0.db`, `v7-v0.9.0-bridged.db`, `v7-v0.10.0.db`, `v7-v0.10.0-bridged.db`, `v8-v0.13.2.db`, `v8-main-2b05680.db`, `test/fixtures/db/v8-paused-worktree/{run.db,transcript.json,repo.bundle,meta.json}`
+- Create: `test/helpers/db-fixtures.ts`
+- Test: `test/db/fixtures.test.ts`
+
+The refs, found with `git tag` and `git log -p -- src/db/schema.sql` and `git show <ref>:src/db/schema.sql`:
+
+| Fixture | Ref | Shape |
+|---|---|---|
+| `v6-v0.7.0` | `v0.7.0` | version 6 (the last v6 release; `5450ae0` moved to v7) |
+| `v7-v0.9.0` | `v0.9.0` | version 7, `signal` has `attempts, max_attempts, first_attempt_at, last_attempt_at` (same schema as v0.8.0) |
+| `v7-v0.9.0-bridged` | `v0.9.0` + the `ensureRunTable` DDL from `b3be1be:src/db/repos/run.ts` | version 7, budget columns, plus `run` |
+| `v7-v0.10.0` | `v0.10.0` | version 7, budget columns dropped by `df03fad` without a version bump |
+| `v7-v0.10.0-bridged` | `v0.10.0` + the bridge DDL | version 7 plus `run` |
+| `v8-v0.13.2` | `v0.13.2` | version 8 (`b3be1be` text, v0.11.0 to v0.13.2) |
+| `v8-main-2b05680` | `2b05680` | version 8, main before this change (comment variants `6414689` and `2b05680` have the same structure; `6414689` is in no tag) |
+| `v8-paused-worktree` | `2b05680` code, driven | a real worktree mode run paused (budget) at `implement:wu1:dispatch` |
+
+**Interfaces:**
+- Consumes: nothing from this plan.
+- Produces: `FIXTURES: readonly FixtureName[]` where `type FixtureName = "v6-v0.7.0" | "v7-v0.9.0" | "v7-v0.9.0-bridged" | "v7-v0.10.0" | "v7-v0.10.0-bridged" | "v8-v0.13.2" | "v8-main-2b05680"`; `MIGRATABLE_FIXTURES: readonly FixtureName[]` (all but v6); `copyFixture(name: FixtureName): string` (path of a fresh temporary copy); `fixtureVersion(path: string): number`; `PAUSED_V8_DIR: string`.
+
+- [ ] **Step 1: Write the fixture sanity test (it fails: no fixtures yet)**
+
+```ts
+// test/db/fixtures.test.ts
+import { Database } from "bun:sqlite";
+import { describe, expect, test } from "bun:test";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { FIXTURES, PAUSED_V8_DIR, copyFixture, fixtureVersion } from "../helpers/db-fixtures.ts";
+
+const EXPECTED: Record<string, { version: number; budget: boolean; run: boolean }> = {
+  "v6-v0.7.0": { version: 6, budget: true, run: false },
+  "v7-v0.9.0": { version: 7, budget: true, run: false },
+  "v7-v0.9.0-bridged": { version: 7, budget: true, run: true },
+  "v7-v0.10.0": { version: 7, budget: false, run: false },
+  "v7-v0.10.0-bridged": { version: 7, budget: false, run: true },
+  "v8-v0.13.2": { version: 8, budget: false, run: true },
+  "v8-main-2b05680": { version: 8, budget: false, run: true },
+};
+
+describe("historical database fixtures", () => {
+  for (const name of FIXTURES) {
+    test(`${name} has the shape its release wrote`, () => {
+      const path = copyFixture(name);
+      const want = EXPECTED[name];
+      expect(fixtureVersion(path)).toBe(want.version);
+      const db = new Database(path, { readonly: true });
+      try {
+        const signalCols = db
+          .query<{ name: string }, []>("PRAGMA table_info('signal')")
+          .all()
+          .map((c) => c.name);
+        expect(signalCols.includes("attempts")).toBe(want.budget);
+        const hasRun =
+          db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='run'").get() !== null;
+        expect(hasRun).toBe(want.run);
+        if (want.version >= 7) {
+          // Seeded through that release's own repositories (seed-era.ts).
+          const running = db
+            .query<{ step_key: string }, []>(
+              "SELECT step_key FROM workflow_step WHERE status = 'running'",
+            )
+            .all();
+          expect(running.map((r) => r.step_key)).toEqual(["implement:wu1:dispatch"]);
+          const reconcile = db
+            .query("SELECT 1 FROM work_unit WHERE kind = 'reconcile'")
+            .get();
+          expect(reconcile).not.toBeNull();
+          const awaiting = db
+            .query("SELECT 1 FROM workflow_step WHERE await_signal_id IS NOT NULL")
+            .get();
+          expect(awaiting).not.toBeNull();
+        }
+      } finally {
+        db.close();
+      }
+    });
+  }
+
+  test("the recorded v8 paused run is a budget pause in implement, in worktree mode", () => {
+    for (const f of ["run.db", "transcript.json", "repo.bundle", "meta.json"]) {
+      expect(existsSync(join(PAUSED_V8_DIR, f))).toBe(true);
+    }
+    const meta = JSON.parse(readFileSync(join(PAUSED_V8_DIR, "meta.json"), "utf8")) as {
+      slug: string;
+      ident: string;
+      branch: string;
+      targetRepoAtRecording: string;
+    };
+    expect(meta.ident).toBe("ENG-1");
+    const db = new Database(join(PAUSED_V8_DIR, "run.db"), { readonly: true });
+    try {
+      expect(fixtureVersion(join(PAUSED_V8_DIR, "run.db"))).toBe(8);
+      const t = db
+        .query<{ stage: string; status: string }, []>("SELECT stage, status FROM ticket")
+        .get();
+      expect(t).toEqual({ stage: "implement", status: "waiting" });
+      const done = db
+        .query<{ step_key: string }, []>(
+          "SELECT step_key FROM workflow_step WHERE status = 'succeeded' ORDER BY seq",
+        )
+        .all()
+        .map((r) => r.step_key);
+      for (const k of ["provision", "design:dispatch", "design:extract", "design:size", "design:review"]) {
+        expect(done).toContain(k);
+      }
+      const latest = db
+        .query<{ worktree_path: string }, []>(
+          "SELECT worktree_path FROM dispatch WHERE worktree_path IS NOT NULL ORDER BY id DESC LIMIT 1",
+        )
+        .get();
+      expect(latest?.worktree_path).not.toBe(meta.targetRepoAtRecording); // worktree mode
+    } finally {
+      db.close();
+    }
+  });
+});
+```
+
+- [ ] **Step 2: Run it and see it fail**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/db/fixtures.test.ts`
+Expected: FAIL with `Cannot find module '../helpers/db-fixtures.ts'`.
+
+- [ ] **Step 3: Write the fixture helper**
+
+```ts
+// test/helpers/db-fixtures.ts
+import { Database } from "bun:sqlite";
+import { copyFileSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+/** One committed database per known released shape (spec §7.4, §7.5), plus v6 for the refusal.
+ *  Produced by scripts/db-fixtures/generate.ts from each release's own code; never hand-written. */
+export const FIXTURES = [
+  "v6-v0.7.0",
+  "v7-v0.9.0",
+  "v7-v0.9.0-bridged",
+  "v7-v0.10.0",
+  "v7-v0.10.0-bridged",
+  "v8-v0.13.2",
+  "v8-main-2b05680",
+] as const;
+export type FixtureName = (typeof FIXTURES)[number];
+export const MIGRATABLE_FIXTURES: readonly FixtureName[] = FIXTURES.filter(
+  (f) => f !== "v6-v0.7.0",
+);
+
+const DIR = join(import.meta.dir, "..", "fixtures", "db");
+export const PAUSED_V8_DIR = join(DIR, "v8-paused-worktree");
+
+/** A private copy, so no test ever writes a committed fixture. */
+export function copyFixture(name: FixtureName): string {
+  const dest = join(mkdtempSync(join(tmpdir(), `styre-fixture-${name}-`)), "run.db");
+  copyFileSync(join(DIR, `${name}.db`), dest);
+  return dest;
+}
+
+export function fixtureVersion(path: string): number {
+  const db = new Database(path, { readonly: true });
+  try {
+    const row = db.query<{ v: number }, []>("SELECT MAX(version) AS v FROM schema_meta").get();
+    if (row === null) throw new Error(`${path}: schema_meta is empty`);
+    return row.v;
+  } finally {
+    db.close();
+  }
+}
+```
+
+- [ ] **Step 4: Write the seeder (runs one release's own code)**
+
+```ts
+// scripts/db-fixtures/seed-era.ts
+// Usage: bun scripts/db-fixtures/seed-era.ts <eraRoot> <out.db> <bridge|plain>
+// Creates <out.db> with the release checked out at <eraRoot>: that release's own migrate() and
+// schema.sql, and rows written through that release's own repositories (spec §7.5). The rows cover
+// what the migrations and the readers that do not migrate must handle: succeeded design steps, a reconcile
+// unit, a step waiting on a signal (the incoming foreign key the v7 -> v8 `signal` rebuild must keep),
+// and an interrupted in-place step with its interruption note (what `--fresh` and `clean` read).
+import type { Database } from "bun:sqlite";
+import { join } from "node:path";
+
+const [eraRoot, out, mode] = process.argv.slice(2);
+if (!eraRoot || !out || (mode !== "bridge" && mode !== "plain")) {
+  throw new Error("usage: seed-era.ts <eraRoot> <out.db> <bridge|plain>");
+}
+const era = (p: string) => import(join(eraRoot, p));
+
+// Verbatim from b3be1be:src/db/repos/run.ts (ensureRunTable), the resume bridge v0.11+ applied to
+// v7 checkpoints without bumping their version.
+const BRIDGE_DDL = `CREATE TABLE IF NOT EXISTS run (
+       id          INTEGER PRIMARY KEY,
+       run_id      TEXT    NOT NULL,
+       started_at  TEXT    NOT NULL,
+       provider    TEXT    NOT NULL,
+       resumed     INTEGER NOT NULL DEFAULT 0 CHECK (resumed IN (0,1)),
+       attempt     INTEGER NOT NULL DEFAULT 1
+     )`;
+
+const { migrate } = await era("src/db/migrate.ts");
+const { openDb } = await era("src/db/client.ts");
+const projects = await era("src/db/repos/project.ts");
+const tickets = await era("src/db/repos/ticket.ts");
+
+migrate(out);
+const db: Database = openDb(out);
+const version = db
+  .query<{ v: number }, []>("SELECT MAX(version) AS v FROM schema_meta")
+  .get()?.v;
+if (version === undefined) throw new Error(`${out}: no schema_meta row`);
+
+const projectId = projects.insertProject(db, {
+  slug: "fixture",
+  targetRepo: "/nonexistent/styre-fixture-repo",
+  defaultBranch: "main",
+});
+const ticketId = tickets.insertTicket(db, {
+  projectId,
+  ident: "ENG-1",
+  title: "Fixture ticket",
+  description: "Fixture body",
+  typeLabel: "Feature",
+  branchPrefix: "feat",
+});
+
+if (version >= 7) {
+  const steps = await era("src/db/repos/workflow-step.ts");
+  const units = await era("src/db/repos/work-unit.ts");
+  const signals = await era("src/db/repos/signal.ts");
+  const dispatches = await era("src/db/repos/dispatch.ts");
+  const events = await era("src/db/repos/event-log.ts");
+  for (const [stepKey, stepType] of [
+    ["provision", "provision"],
+    ["design:dispatch", "dispatch"],
+    ["design:extract", "dispatch"],
+    ["design:size", "dispatch"],
+  ]) {
+    const s = steps.insertPending(db, { ticketId, stepKey, stepType });
+    steps.markSucceeded(db, s.id, { fixture: stepKey });
+  }
+  const u1 = units.insertWorkUnit(db, {
+    ticketId,
+    seq: 1,
+    kind: "backend",
+    title: "Unit one",
+    description: "Do the thing",
+    behavioral: 0,
+    testPlan: null,
+    filesToTouch: ["src/a.ts"],
+    verifyCheckTypes: [],
+    dependsOn: [],
+  });
+  units.insertWorkUnit(db, {
+    ticketId,
+    seq: 2,
+    kind: "reconcile",
+    behavioral: 0,
+    verifyCheckTypes: [],
+    dependsOn: [1],
+  });
+  tickets.setTicketTrack(db, ticketId, "fast");
+  tickets.setTicketStage(db, ticketId, "implement");
+  const signal = signals.insertPending(db, {
+    ticketId,
+    signalType: "human_resume",
+    reason: "fixture pause",
+  });
+  db.query(
+    "UPDATE workflow_step SET await_signal_id = ? WHERE ticket_id = ? AND step_key = 'design:size'",
+  ).run(signal.id, ticketId);
+  const running = steps.insertPending(db, {
+    ticketId,
+    workUnitId: u1.id,
+    stepKey: "implement:wu1:dispatch",
+    stepType: "dispatch",
+  });
+  steps.markRunning(db, running.id, {});
+  const startedAt = steps.getById(db, running.id).started_at;
+  dispatches.insertDispatch(db, {
+    ticketId,
+    dispatchId: "ENG-1-d0001",
+    seq: 1,
+    workUnitId: u1.id,
+    stepId: running.id,
+    stage: "implement",
+    model: "fixture-model",
+    startedAt,
+    worktreePath: "/nonexistent/styre-fixture-repo",
+  });
+  events.appendEvent(db, {
+    ticketId,
+    kind: "note",
+    reason: "interrupted",
+    payload: {
+      event: "interrupted",
+      stepId: running.id,
+      attempt: 1,
+      startedAt,
+      signal: "SIGTERM",
+      worktree: "/nonexistent/styre-fixture-repo",
+      untrackedBefore: [],
+      dispatchRowId: null,
+      headAtStart: null,
+      headAtStop: null,
+    },
+  });
+}
+if (mode === "bridge") db.exec(BRIDGE_DDL);
+db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+db.close();
+```
+
+The repository names used here (`insertProject`, `insertTicket`, `setTicketTrack`, `setTicketStage`, `insertPending`, `markSucceeded`, `markRunning`, `getById`, `insertWorkUnit`, signal `insertPending`, `insertDispatch`, `appendEvent`) exist with these parameter shapes at `v0.9.0` and every later ref (checked with `git show v0.9.0:src/db/repos/<file>.ts`); `v0.7.0` is seeded only with `migrate`, `insertProject` and `insertTicket`.
+
+- [ ] **Step 5: Write the v8 paused run driver (runs the 2b05680 code)**
+
+```ts
+// scripts/db-fixtures/drive-v8-run.ts
+// Usage: XDG_STATE_HOME=<tmp> XDG_CONFIG_HOME=<tmp> bun scripts/db-fixtures/drive-v8-run.ts <eraRoot> <outDir>
+// Drives a real worktree mode `styre run` with the 2b05680 code (the last v8 writer) and a scripted
+// fake agent: every design step succeeds (two units that are not behavioural, so the track is full and
+// design:review runs; no runnable check framework, so checks:dispatch authors nothing), then the
+// implement dispatch hits a session limit and the run parks. The checkpoint, the transcript and a
+// bundle of the target repository are written to <outDir> (spec §7.5: a recorded database of a real
+// paused run).
+import { mkdirSync, mkdtempSync, writeFileSync, copyFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const [eraRoot, outDir] = process.argv.slice(2);
+if (!eraRoot || !outDir) throw new Error("usage: drive-v8-run.ts <eraRoot> <outDir>");
+if (!process.env.XDG_STATE_HOME) throw new Error("set XDG_STATE_HOME to a temporary folder");
+const era = (p: string) => import(join(eraRoot, p));
+
+const { FakeAgentRunner } = await era("src/agent/fake-runner.ts");
+const { DEFAULT_AGENT_CONFIG } = await era("src/config/agent-config.ts");
+const { DEFAULT_RUNTIME_CONFIG } = await era("src/config/runtime-config.ts");
+const { runTicket } = await era("src/daemon/run-ticket.ts");
+const { openDb } = await era("src/db/client.ts");
+const { migrate } = await era("src/db/migrate.ts");
+const { insertRun } = await era("src/db/repos/run.ts");
+const { buildDispatchRegistry } = await era("src/dispatch/handlers.ts");
+const { parseProfile } = await era("src/dispatch/profile.ts");
+const { finishRunResult, parkDir } = await era("src/cli/park.ts");
+const { fakeIssueTracker } = await era("src/integrations/adapters/fake-issue-tracker.ts");
+const { fakeForge } = await era("src/integrations/adapters/fake-forge.ts");
+
+function git(args: string[], cwd: string): string {
+  const r = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+  return r.stdout.toString().trim();
+}
+
+const repo = mkdtempSync(join(tmpdir(), "styre-v8-recording-repo-"));
+git(["init", "-b", "main"], repo);
+git(["config", "user.email", "t@s.dev"], repo);
+git(["config", "user.name", "T"], repo);
+writeFileSync(join(repo, "README.md"), "fixture\n");
+git(["add", "-A"], repo);
+git(["commit", "-m", "init"], repo);
+
+const ABSENT_RC = {
+  topology: { type: "cli" },
+  data: { presence: "absent" },
+  caching: { presence: "absent" },
+  observability: { presence: "absent" },
+  configSecrets: { presence: "absent" },
+  documentation: { presence: "absent" },
+  releasePackaging: { mechanism: "none" },
+};
+const profile = parseProfile({
+  slug: "fixture",
+  targetRepo: repo,
+  defaultBranch: "main",
+  checksSystem: "none",
+  components: [
+    { name: "app", kind: "ruby", paths: ["**"], commands: { build: "true", test: "true", check: "true" } },
+  ],
+  promptVars: { stack: "ruby" },
+  runtimeContext: ABSENT_RC,
+});
+const sidecar = (v: unknown) => `Done.\n\n\`\`\`styre-sidecar\n${JSON.stringify(v)}\n\`\`\`\n`;
+const ok = (stdout: string) => ({
+  completed: true, exitCode: 0, stdout, stderr: "", timedOut: false,
+  costUsd: null, tokensIn: null, tokensOut: null,
+});
+const units = [1, 2].map((seq) => ({
+  seq, kind: "backend", title: `Unit ${seq}`, description: `Change ${seq}`, behavioral: false,
+  test_plan: null, files_to_touch: [`lib/u${seq}.rb`], verify_check_types: [], depends_on: [],
+}));
+const runner = new FakeAgentRunner((input: { prompt: string; cwd: string }) => {
+  if (input.prompt.includes("You are designing ticket")) {
+    mkdirSync(join(input.cwd, "docs", "plans"), { recursive: true });
+    writeFileSync(join(input.cwd, "docs", "plans", "eng-1-plan.md"), "---\nlinear: ENG-1\n---\n\nRecorded plan\n");
+    return ok("Plan written.");
+  }
+  if (input.prompt.includes("You are extracting the work breakdown")) return ok(sidecar({ units, cdotImpact: {} }));
+  if (input.prompt.includes("You are the independent plan reviewer")) return ok(sidecar({ findings: [] }));
+  if (input.prompt.includes("You are implementing work-unit")) {
+    return {
+      completed: false, exitCode: 1, stdout: "partial implement output", stderr: "You have reached your session limit · resets tomorrow",
+      timedOut: false, costUsd: null, tokensIn: null, tokensOut: null, cause: "session-limit", resetAt: "tomorrow",
+    };
+  }
+  throw new Error(`drive-v8-run: unexpected prompt: ${input.prompt.slice(0, 80)}`);
+});
+
+const dbPath = join(parkDir("fixture", "ENG-1"), "run.db");
+mkdirSync(parkDir("fixture", "ENG-1"), { recursive: true });
+migrate(dbPath);
+const db = openDb(dbPath);
+insertRun(db, { runId: "v8-recording-run", startedAt: new Date().toISOString(), provider: "claude" });
+const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-v8-recording-wt-"));
+const registry = buildDispatchRegistry({
+  runner, agentConfig: DEFAULT_AGENT_CONFIG, profile, worktreeRoot, inPlace: false,
+});
+const ingested = {
+  ident: "ENG-1", title: "Recorded ticket", description: "Recorded body",
+  typeLabel: "Feature", externalId: "uuid-v8-recording", url: null,
+};
+const out = await runTicket({
+  db, profile, runtimeConfig: DEFAULT_RUNTIME_CONFIG,
+  ports: { issueTracker: fakeIssueTracker({ ticket: ingested }), forge: fakeForge() },
+  registry, ticketRef: "ENG-1", ingested,
+});
+if (out.outcome !== "paused" || out.reason !== "budget") {
+  throw new Error(`drive-v8-run: expected a budget pause, got ${out.outcome}/${out.reason}`);
+}
+finishRunResult(db, dbPath, "fixture", "ENG-1", out); // dumpPark: checkpoints the WAL, writes transcript.json
+copyFileSync(dbPath, join(outDir, "run.db"));
+copyFileSync(join(parkDir("fixture", "ENG-1"), "transcript.json"), join(outDir, "transcript.json"));
+git(["worktree", "prune"], repo);
+git(["bundle", "create", join(outDir, "repo.bundle"), "--all"], repo);
+writeFileSync(
+  join(outDir, "meta.json"),
+  `${JSON.stringify({ slug: "fixture", ident: "ENG-1", branch: "feat/ENG-1", targetRepoAtRecording: repo, worktreeRootAtRecording: worktreeRoot }, null, 2)}\n`,
+);
+```
+
+- [ ] **Step 6: Write the generator**
+
+```ts
+// scripts/db-fixtures/generate.ts
+// Usage (from the repository root, with full history and tags): bun scripts/db-fixtures/generate.ts
+// Rewrites test/fixtures/db/. Each fixture is produced by its own release's code, checked out in a
+// temporary git worktree (spec §7.5). The v8 paused run is driven by 2b05680, with this checkout's
+// node_modules linked in (2b05680 is this branch's base; its lockfile is the same). Nothing is written
+// under the real ~/.local/state: the driver gets temporary XDG folders.
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+
+const ROOT = resolve(import.meta.dir, "../..");
+const OUT = join(ROOT, "test/fixtures/db");
+const ERAS = [
+  { name: "v6-v0.7.0", ref: "v0.7.0", bridge: false },
+  { name: "v7-v0.9.0", ref: "v0.9.0", bridge: false },
+  { name: "v7-v0.9.0-bridged", ref: "v0.9.0", bridge: true },
+  { name: "v7-v0.10.0", ref: "v0.10.0", bridge: false },
+  { name: "v7-v0.10.0-bridged", ref: "v0.10.0", bridge: true },
+  { name: "v8-v0.13.2", ref: "v0.13.2", bridge: false },
+  { name: "v8-main-2b05680", ref: "2b05680", bridge: false },
+] as const;
+
+function run(argv: string[], cwd: string, env: Record<string, string> = {}): void {
+  const r = Bun.spawnSync(argv, { cwd, stdout: "inherit", stderr: "inherit", env: { ...process.env, ...env } });
+  if (r.exitCode !== 0) throw new Error(`${argv.join(" ")} exited ${r.exitCode}`);
+}
+
+const work = mkdtempSync(join(tmpdir(), "styre-db-fixtures-"));
+const env = {
+  XDG_STATE_HOME: join(work, "state"),
+  XDG_CONFIG_HOME: join(work, "config"),
+  STYRE_TELEMETRY: "0",
+};
+try {
+  mkdirSync(OUT, { recursive: true });
+  for (const e of ERAS) {
+    const era = join(work, e.name);
+    run(["git", "worktree", "add", "--detach", era, e.ref], ROOT);
+    try {
+      const out = join(OUT, `${e.name}.db`);
+      rmSync(out, { force: true });
+      run([process.execPath, join(ROOT, "scripts/db-fixtures/seed-era.ts"), era, out, e.bridge ? "bridge" : "plain"], era, env);
+    } finally {
+      run(["git", "worktree", "remove", "--force", era], ROOT);
+    }
+  }
+  const era = join(work, "v8-driver");
+  run(["git", "worktree", "add", "--detach", era, "2b05680"], ROOT);
+  try {
+    symlinkSync(join(ROOT, "node_modules"), join(era, "node_modules"));
+    const outDir = join(OUT, "v8-paused-worktree");
+    rmSync(outDir, { recursive: true, force: true });
+    mkdirSync(outDir, { recursive: true });
+    run([process.execPath, join(ROOT, "scripts/db-fixtures/drive-v8-run.ts"), era, outDir], era, env);
+  } finally {
+    run(["git", "worktree", "remove", "--force", era], ROOT);
+  }
+} finally {
+  rmSync(work, { recursive: true, force: true });
+}
+```
+
+- [ ] **Step 7: Generate the fixtures**
+
+Run: `cd /Users/rajatgoyal/code/styre && git fetch --tags && perl -e 'alarm 600; exec @ARGV' bun scripts/db-fixtures/generate.ts && ls -la test/fixtures/db test/fixtures/db/v8-paused-worktree`
+Expected: seven `.db` files and the four files in `v8-paused-worktree/`; `git worktree list` shows no leftover worktree.
+
+- [ ] **Step 8: Run the test and see it pass**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/db/fixtures.test.ts`
+Expected: PASS (8 tests).
+
+- [ ] **Step 9: Break it on purpose, see it fail, restore**
+
+Change `EXPECTED["v7-v0.9.0-bridged"].run` to `false`, rerun the command in Step 8, expect `v7-v0.9.0-bridged has the shape its release wrote` to fail on `expect(hasRun).toBe(want.run)`; restore `true`.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add scripts/db-fixtures test/fixtures/db test/helpers/db-fixtures.ts test/db/fixtures.test.ts
+git commit -m "test(eng-477): historical database fixtures from each release's own code" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 2: `migrate()` with versioned migrations, backup, shape detection, structural proof, and v7 → v8
+
+**Files:**
+- Create: `src/db/migrations/types.ts`, `src/db/migrations/rebuild.ts`, `src/db/migrations/0008-run-table.ts`, `src/db/migrations/index.ts`
+- Create: `src/db/migrations/shapes/v7-signal-budget.sql`, `src/db/migrations/shapes/v7.sql`, `src/db/migrations/shapes/v8.sql`
+- Create: `src/db/schema-shape.ts`, `src/db/known-shapes.ts`
+- Create: `test/helpers/check-probes.ts`
+- Modify: `src/db/migrate.ts:1-43` (whole file), `src/cli/migrate.ts:11-16`, `src/cli/park.ts:38,259-262`, `src/cli/run.ts:428`, `src/db/repos/run.ts:14-28` (delete `ensureRunTable`), `src/db/schema.sql:486-491` and `docs/architecture/schema.sql` (the same comment lines: drop the sentence about `ensureRunTable`)
+- Modify tests: `test/db/run.test.ts:27-41` (delete the bridge test), `test/cli/dump-park-warning.test.ts:7-17`
+- Test: `test/db/migrate-upgrade.test.ts`, `test/db/schema-shape.test.ts`
+
+**Interfaces:**
+- Consumes: `FIXTURES`, `MIGRATABLE_FIXTURES`, `copyFixture`, `fixtureVersion` (Task 1).
+- Produces:
+  - `interface Migration { version: number; note: string; up(db: Database): void }`
+  - `rebuildTable(db: Database, spec: { table: string; createSql: string; columns: readonly string[]; indexes: readonly string[] }): void`
+  - `MIGRATIONS: readonly Migration[]`, `CURRENT_VERSION: number`, `OLDEST_MIGRATABLE_VERSION = 7`
+  - `RUN_TABLE_V8_DDL: string`, `migration0008: Migration`
+  - `stripSqlComments(sql: string): string`, `normalizeSql(sql: string): string`, `describeSchema(db: Database): SchemaShape`, `diffShapes(expected: SchemaShape, actual: SchemaShape): string[]`
+  - `type KnownShape = "v7-signal-budget" | "v7-signal-budget+run" | "v7" | "v7+run" | "v8"`, `detectShape(db: Database, version: number): KnownShape | null`
+  - `migrate(path: string, opts?: MigrateOptions): MigrateResult` with `MigrateOptions = { log?: (line: string) => void; now?: () => Date; migrations?: readonly Migration[] }` and `MigrateResult = { version: number; created: boolean; migratedFrom: number | null; backupPath: string | null }`
+  - `proveSchema(db: Database): string[]`, `backupPathFor(path: string, version: number, at: Date): string`
+  - test helper: `SEED_ROWS_V8: string[]`, `CHECK_PROBES_V8: CheckProbe[]`, `probeChecks(db: Database, seeds: readonly string[], probes: readonly CheckProbe[]): string[]` (returns the probes that were NOT rejected) where `CheckProbe = { table: string; set: string; where: string }`
+
+- [ ] **Step 1: Copy the reference shapes (verbatim, from git)**
+
+Run:
+```bash
+mkdir -p src/db/migrations/shapes
+git show v0.9.0:src/db/schema.sql > src/db/migrations/shapes/v7-signal-budget.sql
+git show v0.10.0:src/db/schema.sql > src/db/migrations/shapes/v7.sql
+git show 2b05680:src/db/schema.sql > src/db/migrations/shapes/v8.sql
+cmp src/db/migrations/shapes/v8.sql src/db/schema.sql && echo "v8 reference equals today's schema"
+```
+Expected: the last line prints `v8 reference equals today's schema`.
+
+- [ ] **Step 2: Write the failing tests**
+
+```ts
+// test/helpers/check-probes.ts
+import type { Database } from "bun:sqlite";
+
+/** One forbidden UPDATE per CHECK constraint. Pragmas do not expose CHECKs (spec §7.3), so the
+ *  migrated and the fresh database must both reject each of these. `where` picks the seeded row. */
+export interface CheckProbe {
+  table: string;
+  set: string;
+  where: string;
+}
+
+/** Valid rows, in foreign key order, that exist on every shape from v7 on. Ids 900 avoid fixture rows. */
+export const SEED_ROWS_V8: string[] = [
+  "INSERT INTO project (id, slug, target_repo, created_at, updated_at) VALUES (900, 'probe', '/x', 't', 't')",
+  "INSERT INTO ticket (id, project_id, ident, stage, created_at, updated_at) VALUES (900, 900, 'P-1', 'design', 't', 't')",
+  "INSERT INTO work_unit (id, ticket_id, seq, kind, created_at, updated_at) VALUES (900, 900, 1, 'backend', 't', 't')",
+  "INSERT INTO signal (id, ticket_id, signal_type, requested_at) VALUES (900, 900, 'x', 't')",
+  "INSERT INTO workflow_step (id, ticket_id, seq, step_key, step_type, created_at, updated_at) VALUES (900, 900, 1, 'probe', 'dispatch', 't', 't')",
+  "INSERT INTO dispatch (id, ticket_id, dispatch_id, seq, created_at) VALUES (900, 900, 'P-1-d0001', 1, 't')",
+  "INSERT INTO event_log (id, ticket_id, seq, kind, created_at) VALUES (900, 900, 1, 'note', 't')",
+  "INSERT INTO ground_truth_signal (id, ticket_id, signal_type, result, measured_at) VALUES (900, 900, 'x', 'pass', 't')",
+  "INSERT INTO review_finding (id, ticket_id, review_kind, severity, created_at) VALUES (900, 900, 'plan', 'minor', 't')",
+  "INSERT INTO acceptance_criterion (id, ticket_id, seq, text, source, created_at, updated_at) VALUES (900, 900, 1, 'x', 'checklist', 't', 't')",
+  "INSERT INTO ac_check (id, ticket_id, ac_id, selector, created_at, updated_at) VALUES (900, 900, 900, 's', 't', 't')",
+  "INSERT INTO external_id_cache (id, project_id, entity_type, name, uuid, refreshed_at) VALUES (900, 900, 'team', 'n', 'u', 't')",
+  "INSERT INTO projection_state (id, ticket_id, target) VALUES (900, 900, 'forge')",
+  "INSERT INTO projection_outbox (id, ticket_id, target, op, idempotency_key, created_at) VALUES (900, 900, 'forge', 'push', 'probe-1', 't')",
+  "INSERT INTO run (id, run_id, started_at, provider) VALUES (900, 'r', 't', 'claude')",
+];
+
+const p = (table: string, set: string): CheckProbe => ({ table, set, where: "id = 900" });
+
+/** Every CHECK in the v8 schema.sql (47; the three in the commented memory_record stub excluded). */
+export const CHECK_PROBES_V8: CheckProbe[] = [
+  p("project", "config_json = 'not json'"),
+  p("project", "checks_system = 'svn'"),
+  p("project", "checks_config_json = 'not json'"),
+  p("project", "paused = 2"),
+  p("ticket", "type_label = 'Chore'"),
+  p("ticket", "branch_prefix = 'chore'"),
+  p("ticket", "stage = 'building'"),
+  p("ticket", "status = 'halted'"),
+  p("ticket", "track = 'slow'"),
+  p("ticket", "needs_docs = 2"),
+  p("work_unit", "files_to_touch = 'x'"),
+  p("work_unit", "behavioral = 2"),
+  p("work_unit", "verify_check_types = 'x'"),
+  p("work_unit", "depends_on = 'x'"),
+  p("work_unit", "status = 'done'"),
+  p("workflow_step", "status = 'done'"),
+  p("workflow_step", "input_json = 'x'"),
+  p("workflow_step", "result_json = 'x'"),
+  p("workflow_step", "error_json = 'x'"),
+  p("signal", "status = 'lost'"),
+  p("signal", "payload_json = 'x'"),
+  p("dispatch", "partial = 2"),
+  p("dispatch", "envelope_json = 'x'"),
+  p("event_log", "kind = 'other'"),
+  p("event_log", "actor = 'daemon'"),
+  p("event_log", "payload_json = 'x'"),
+  p("ground_truth_signal", "result = 'maybe'"),
+  p("ground_truth_signal", "is_authoritative = 2"),
+  p("ground_truth_signal", "detail_json = 'x'"),
+  p("review_finding", "review_kind = 'docs'"),
+  p("review_finding", "severity = 'blocker'"),
+  p("review_finding", "factors_json = 'x'"),
+  p("review_finding", "deferral_candidate = 2"),
+  p("review_finding", "blocks_ship = 2"),
+  p("review_finding", "status = 'closed'"),
+  p("review_finding", "severity = 'critical', blocks_ship = 0"),
+  p("acceptance_criterion", "source = 'ticket'"),
+  p("ac_check", "red_first_result = 'blue'"),
+  p("ac_check", "red_class = 'x'"),
+  p("ac_check", "disposition = 'x'"),
+  p("external_id_cache", "entity_type = 'user'"),
+  p("projection_state", "target = 'slack'"),
+  p("projection_state", "projected_status_labels_json = 'x'"),
+  p("projection_outbox", "target = 'slack'"),
+  p("projection_outbox", "payload_json = 'x'"),
+  p("projection_outbox", "status = 'lost'"),
+  p("run", "resumed = 2"),
+];
+
+/** Seed inside a savepoint, try each forbidden update, roll everything back. Returns the probes the
+ *  database ACCEPTED (an empty list means every CHECK held). */
+export function probeChecks(
+  db: Database,
+  seeds: readonly string[],
+  probes: readonly CheckProbe[],
+): string[] {
+  const accepted: string[] = [];
+  db.exec("SAVEPOINT probe_checks");
+  try {
+    for (const s of seeds) db.exec(s);
+    for (const probe of probes) {
+      db.exec("SAVEPOINT one_probe");
+      try {
+        db.exec(`UPDATE ${probe.table} SET ${probe.set} WHERE ${probe.where}`);
+        accepted.push(`${probe.table}: ${probe.set}`);
+      } catch (err) {
+        if (!/CHECK constraint failed/.test(String(err))) throw err;
+      } finally {
+        db.exec("ROLLBACK TO one_probe");
+        db.exec("RELEASE one_probe");
+      }
+    }
+  } finally {
+    db.exec("ROLLBACK TO probe_checks");
+    db.exec("RELEASE probe_checks");
+  }
+  return accepted;
+}
+```
+
+```ts
+// test/db/schema-shape.test.ts
+import { Database } from "bun:sqlite";
+import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { describeSchema, diffShapes, stripSqlComments } from "../../src/db/schema-shape.ts";
+import { CHECK_PROBES_V8, SEED_ROWS_V8, probeChecks } from "../helpers/check-probes.ts";
+
+const SCHEMA = readFileSync(join(import.meta.dir, "../../src/db/schema.sql"), "utf8");
+const fresh = () => {
+  const db = new Database(":memory:");
+  db.exec(SCHEMA);
+  return db;
+};
+
+test("comments and whitespace do not change the shape", () => {
+  const a = fresh();
+  const b = new Database(":memory:");
+  b.exec(stripSqlComments(SCHEMA).replace(/\s+/g, " "));
+  expect(diffShapes(describeSchema(a), describeSchema(b))).toEqual([]);
+});
+
+test("a column added mid-table is a difference (column order is structure)", () => {
+  const a = new Database(":memory:");
+  a.exec("CREATE TABLE t (a INTEGER, b TEXT, c TEXT)");
+  const b = new Database(":memory:");
+  b.exec("CREATE TABLE t (a INTEGER, c TEXT)");
+  b.exec("ALTER TABLE t ADD COLUMN b TEXT");
+  expect(diffShapes(describeSchema(a), describeSchema(b)).join("\n")).toContain("columns differ");
+});
+
+test("AUTOINCREMENT is compared even though the pragmas cannot see it", () => {
+  const a = new Database(":memory:");
+  a.exec("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, x TEXT)");
+  const b = new Database(":memory:");
+  b.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)");
+  expect(diffShapes(describeSchema(a), describeSchema(b)).join("\n")).toContain("AUTOINCREMENT");
+});
+
+test("a partial index's WHERE text is compared", () => {
+  const a = new Database(":memory:");
+  a.exec("CREATE TABLE t (k TEXT); CREATE INDEX i ON t (k) WHERE k IS NOT NULL");
+  const b = new Database(":memory:");
+  b.exec("CREATE TABLE t (k TEXT); CREATE INDEX i ON t (k) WHERE k <> ''");
+  expect(diffShapes(describeSchema(a), describeSchema(b)).join("\n")).toContain("indexes differ");
+});
+
+test("every CHECK in schema.sql has a probe, and the fresh schema rejects each", () => {
+  const checks = (stripSqlComments(SCHEMA).match(/\bCHECK\s*\(/g) ?? []).length;
+  expect(CHECK_PROBES_V8.length).toBe(checks);
+  expect(probeChecks(fresh(), SEED_ROWS_V8, CHECK_PROBES_V8)).toEqual([]);
+});
+```
+
+```ts
+// test/db/migrate-upgrade.test.ts
+import { Database } from "bun:sqlite";
+import { describe, expect, test } from "bun:test";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { EXIT, StyreError } from "../../src/cli/errors.ts";
+import { openDb } from "../../src/db/client.ts";
+import { migrate } from "../../src/db/migrate.ts";
+import { CURRENT_VERSION, MIGRATIONS } from "../../src/db/migrations/index.ts";
+import { migration0008 } from "../../src/db/migrations/0008-run-table.ts";
+import { rebuildTable } from "../../src/db/migrations/rebuild.ts";
+import { describeSchema, diffShapes } from "../../src/db/schema-shape.ts";
+import { CHECK_PROBES_V8, SEED_ROWS_V8, probeChecks } from "../helpers/check-probes.ts";
+import { MIGRATABLE_FIXTURES, copyFixture, fixtureVersion } from "../helpers/db-fixtures.ts";
+import { makeTestDb } from "../helpers/db.ts";
+
+function count(path: string, sql: string): number {
+  const db = new Database(path, { readonly: true });
+  try {
+    return (db.query<{ n: number }, []>(sql).get() as { n: number }).n;
+  } finally {
+    db.close();
+  }
+}
+function refusalOf(fn: () => unknown): StyreError {
+  try {
+    fn();
+  } catch (err) {
+    if (err instanceof StyreError) return err;
+    throw err;
+  }
+  throw new Error("expected a refusal");
+}
+
+describe("migrate upgrades every known released shape", () => {
+  for (const name of MIGRATABLE_FIXTURES) {
+    test(`${name} reaches the current version with the structural proof and the CHECK probes`, () => {
+      const path = copyFixture(name);
+      const before = fixtureVersion(path);
+      const steps = count(path, "SELECT COUNT(*) AS n FROM workflow_step");
+      const units = count(path, "SELECT COUNT(*) AS n FROM work_unit");
+      const logs: string[] = [];
+      const r = migrate(path, { log: (l) => logs.push(l) });
+      expect(r.version).toBe(CURRENT_VERSION);
+      expect(r.migratedFrom).toBe(before === CURRENT_VERSION ? null : before);
+      expect(fixtureVersion(path)).toBe(CURRENT_VERSION);
+      // rows survive
+      expect(count(path, "SELECT COUNT(*) AS n FROM workflow_step")).toBe(steps);
+      expect(count(path, "SELECT COUNT(*) AS n FROM work_unit")).toBe(units);
+      // the step waiting on a signal still points at a signal that exists
+      expect(
+        count(
+          path,
+          "SELECT COUNT(*) AS n FROM workflow_step w JOIN signal s ON s.id = w.await_signal_id",
+        ),
+      ).toBe(1);
+      // structure equals a fresh database, and both reject the same forbidden values
+      const db = openDb(path);
+      const fresh = new Database(":memory:");
+      try {
+        fresh.exec(readFileSync(join(import.meta.dir, "../../src/db/schema.sql"), "utf8"));
+        expect(diffShapes(describeSchema(fresh), describeSchema(db))).toEqual([]);
+        expect(probeChecks(db, SEED_ROWS_V8, CHECK_PROBES_V8)).toEqual([]);
+        expect(probeChecks(fresh, SEED_ROWS_V8, CHECK_PROBES_V8)).toEqual([]);
+        expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
+      } finally {
+        db.close();
+        fresh.close();
+      }
+      if (before !== CURRENT_VERSION) {
+        expect(r.backupPath).not.toBeNull();
+        expect(existsSync(r.backupPath as string)).toBe(true);
+        expect(fixtureVersion(r.backupPath as string)).toBe(before);
+        expect(logs.join("\n")).toContain(r.backupPath as string);
+      }
+    });
+  }
+
+  test("v7 bridged on the v0.9.0 shape migrates: signal rebuilt, run kept, foreign keys intact", () => {
+    const path = copyFixture("v7-v0.9.0-bridged");
+    const signals = count(path, "SELECT COUNT(*) AS n FROM signal");
+    migrate(path);
+    const db = new Database(path, { readonly: true });
+    try {
+      const cols = db
+        .query<{ name: string }, []>("PRAGMA table_info('signal')")
+        .all()
+        .map((c) => c.name);
+      expect(cols).not.toContain("attempts");
+      expect(cols).not.toContain("max_attempts");
+      expect(db.query("SELECT COUNT(*) AS n FROM signal").get()).toEqual({ n: signals });
+      expect(db.query("SELECT COUNT(*) AS n FROM run").get()).toEqual({ n: 0 });
+      expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
+      // the view that reads signal was dropped and recreated around the rebuild
+      expect(db.query("SELECT COUNT(*) AS n FROM v_ready_tickets").get()).toEqual({ n: 0 });
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("migrate refuses what it cannot upgrade", () => {
+  test("a database newer than this binary is refused, naming both versions", () => {
+    const { db } = makeTestDb();
+    const path = db.filename;
+    db.query("INSERT INTO schema_meta (version, applied_at, note) VALUES (99, 't', 'future')").run();
+    db.close();
+    const e = refusalOf(() => migrate(path));
+    expect(e.code).toBe(EXIT.RESUME_REFUSED);
+    expect(e.headline).toContain("v99");
+    expect(e.headline).toContain(`v${CURRENT_VERSION}`);
+  });
+
+  test("a shape this binary does not know is refused with --fresh as the way out", () => {
+    const path = copyFixture("v7-v0.10.0");
+    const db = new Database(path);
+    db.exec("ALTER TABLE ticket ADD COLUMN surprise TEXT");
+    db.close();
+    const e = refusalOf(() => migrate(path));
+    expect(e.code).toBe(EXIT.RESUME_REFUSED);
+    expect(e.recovery).toContain("--fresh");
+    expect(fixtureVersion(path)).toBe(7);
+  });
+
+  test("v6 is refused", () => {
+    const e = refusalOf(() => migrate(copyFixture("v6-v0.7.0")));
+    expect(e.code).toBe(EXIT.RESUME_REFUSED);
+    expect(e.headline).toContain("v6");
+  });
+});
+
+describe("how migrations run", () => {
+  test("the backup holds every committed row while another reader holds a snapshot", () => {
+    const path = copyFixture("v7-v0.10.0");
+    const writer = new Database(path);
+    writer.exec("PRAGMA journal_mode = WAL;");
+    const ticketId = (writer.query("SELECT id FROM ticket LIMIT 1").get() as { id: number }).id;
+    const reader = new Database(path, { readonly: true });
+    reader.exec("BEGIN");
+    reader.query("SELECT COUNT(*) FROM event_log").get(); // the read snapshot is now held
+    for (let i = 0; i < 50; i++) {
+      writer
+        .query("INSERT INTO event_log (ticket_id, seq, kind, created_at) VALUES (?, ?, 'note', 't')")
+        .run(ticketId, 1000 + i);
+    }
+    const events = count(path, "SELECT COUNT(*) AS n FROM event_log");
+    const r = migrate(path);
+    reader.exec("COMMIT");
+    reader.close();
+    writer.close();
+    expect(count(r.backupPath as string, "SELECT COUNT(*) AS n FROM event_log")).toBe(events);
+  });
+
+  test("a retried upgrade does not collide with an earlier backup (timestamped name)", () => {
+    const path = copyFixture("v7-v0.10.0");
+    const failing = [{ version: 8, note: "fails", up: () => { throw new Error("boom"); } }];
+    expect(() =>
+      migrate(path, { now: () => new Date("2026-10-09T12:00:00.000Z"), migrations: failing }),
+    ).toThrow("boom");
+    // the retry backs up again under a new name; VACUUM INTO would refuse an existing file
+    expect(() =>
+      migrate(path, { now: () => new Date("2026-10-09T12:00:01.000Z"), migrations: failing }),
+    ).toThrow("boom");
+    const baks = readdirSync(dirname(path)).filter((f) => f.endsWith(".bak"));
+    expect(baks.length).toBe(2);
+    expect(fixtureVersion(path)).toBe(7);
+  });
+
+  test("a failing migration rolls back that step and leaves the previous version", () => {
+    const path = copyFixture("v7-v0.10.0");
+    const failing = [
+      migration0008,
+      { version: 9, note: "fails", up: () => { throw new Error("boom"); } },
+    ];
+    expect(() => migrate(path, { migrations: failing })).toThrow("boom");
+    expect(fixtureVersion(path)).toBe(8);
+  });
+
+  test("a failing foreign_key_check aborts the migration and keeps v7", () => {
+    const path = copyFixture("v7-v0.9.0");
+    const db = new Database(path);
+    db.exec("PRAGMA foreign_keys = OFF;");
+    db.exec(
+      "INSERT INTO workflow_step (ticket_id, seq, step_key, step_type, created_at, updated_at) VALUES (4242, 99, 'orphan', 'dispatch', 't', 't')",
+    );
+    db.close();
+    expect(() => migrate(path)).toThrow("foreign key violation");
+    expect(fixtureVersion(path)).toBe(7);
+  });
+
+  test("the shared rebuild keeps rows, incoming foreign keys and dependent views", () => {
+    const path = copyFixture("v8-main-2b05680");
+    const db = new Database(path);
+    try {
+      const before = db.query("SELECT * FROM signal ORDER BY id").all();
+      db.exec("PRAGMA foreign_keys = OFF;");
+      db.transaction(() => {
+        rebuildTable(db, {
+          table: "signal",
+          createSql: `CREATE TABLE signal (
+    id              INTEGER PRIMARY KEY,
+    ticket_id       INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
+    signal_type     TEXT    NOT NULL,
+    status          TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN (
+                        'pending','delivered','consumed')),
+    reason          TEXT,
+    payload_json    TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
+    idempotency_key TEXT,
+    requested_at    TEXT NOT NULL,
+    delivered_at    TEXT,
+    consumed_at     TEXT
+)`,
+          columns: ["id", "ticket_id", "signal_type", "status", "reason", "payload_json", "idempotency_key", "requested_at", "delivered_at", "consumed_at"],
+          indexes: [
+            "CREATE UNIQUE INDEX idx_signal_idempotency ON signal (idempotency_key) WHERE idempotency_key IS NOT NULL",
+            "CREATE INDEX idx_signal_pending ON signal (ticket_id, status)",
+          ],
+        });
+        expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
+      })();
+      db.exec("PRAGMA foreign_keys = ON;");
+      expect(db.query("SELECT * FROM signal ORDER BY id").all()).toEqual(before);
+      expect(db.query("SELECT COUNT(*) AS n FROM v_ready_tickets").get()).toEqual({ n: 0 });
+    } finally {
+      db.close();
+    }
+  });
+
+  test("the migration list is contiguous and ends at the version schema.sql seeds", () => {
+    const versions = MIGRATIONS.map((m) => m.version);
+    expect(versions[0]).toBe(8);
+    versions.forEach((v, i) => expect(v).toBe(8 + i));
+    expect(versions.at(-1)).toBe(CURRENT_VERSION);
+  });
+});
+```
+
+- [ ] **Step 3: Run them and see them fail**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/db/schema-shape.test.ts test/db/migrate-upgrade.test.ts`
+Expected: FAIL with `Cannot find module '../../src/db/schema-shape.ts'`.
+
+- [ ] **Step 4: Write the structural description**
+
+```ts
+// src/db/schema-shape.ts
+import type { Database } from "bun:sqlite";
+
+/** One table's structure as the pragmas report it (spec §7.3). Text is never compared: comments,
+ *  ADD COLUMN text and a rebuild's quoted rename all differ while the structure is the same. */
+export interface TableShape {
+  columns: string[];
+  indexes: string[];
+  foreignKeys: string[];
+  autoincrement: boolean;
+}
+export interface SchemaShape {
+  tables: Record<string, TableShape>;
+  views: Record<string, string>;
+  triggers: Record<string, string>;
+}
+
+function closingQuote(sql: string, start: number): number {
+  const q = sql[start];
+  let i = start + 1;
+  while (i < sql.length) {
+    if (sql[i] === q) {
+      if (sql[i + 1] === q) {
+        i += 2;
+        continue;
+      }
+      return i;
+    }
+    i++;
+  }
+  return sql.length - 1;
+}
+
+/** Remove `--` and block comments outside string literals and quoted identifiers. */
+export function stripSqlComments(sql: string): string {
+  let out = "";
+  let i = 0;
+  while (i < sql.length) {
+    const c = sql[i];
+    if (c === "'" || c === '"') {
+      const end = closingQuote(sql, i);
+      out += sql.slice(i, end + 1);
+      i = end + 1;
+      continue;
+    }
+    if (c === "-" && sql[i + 1] === "-") {
+      const nl = sql.indexOf("\n", i);
+      i = nl === -1 ? sql.length : nl;
+      continue;
+    }
+    if (c === "/" && sql[i + 1] === "*") {
+      const close = sql.indexOf("*/", i + 2);
+      i = close === -1 ? sql.length : close + 2;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/** Comments removed, whitespace collapsed, no spaces around punctuation. */
+export function normalizeSql(sql: string): string {
+  return stripSqlComments(sql)
+    .replace(/\s+/g, " ")
+    .replace(/\s*([(),;=])\s*/g, "$1")
+    .trim();
+}
+
+type Row = Record<string, unknown>;
+const lit = (name: string): string => `'${name.replaceAll("'", "''")}'`;
+
+export function describeSchema(db: Database): SchemaShape {
+  const master = db
+    .query<{ type: string; name: string; sql: string | null }, []>(
+      "SELECT type, name, sql FROM sqlite_master ORDER BY type, name",
+    )
+    .all();
+  const tables: Record<string, TableShape> = {};
+  for (const t of master.filter((m) => m.type === "table" && !m.name.startsWith("sqlite_"))) {
+    const pragma = (name: string): Row[] =>
+      db.query<Row, []>(`PRAGMA ${name}(${lit(t.name)})`).all();
+    const columns = pragma("table_xinfo").map(
+      (c) =>
+        `${c.cid}|${c.name}|${c.type}|notnull=${c.notnull}|default=${c.dflt_value}|pk=${c.pk}|hidden=${c.hidden}`,
+    );
+    const indexes = pragma("index_list")
+      .map((ix) => {
+        const cols = db
+          .query<Row, []>(`PRAGMA index_xinfo(${lit(String(ix.name))})`)
+          .all()
+          .filter((c) => c.key === 1)
+          .map((c) => `${c.name}:${c.desc}:${c.coll}`)
+          .join(",");
+        const own = master.find((m) => m.type === "index" && m.name === ix.name)?.sql ?? null;
+        const at = own === null ? -1 : own.search(/\bWHERE\b/i);
+        const where = own !== null && Number(ix.partial) === 1 && at >= 0 ? normalizeSql(own.slice(at)) : "";
+        // Automatic indexes are named after the table they were created on, which a rebuild changes.
+        const label = ix.origin === "c" ? String(ix.name) : `(${ix.origin})`;
+        return `${label}|unique=${ix.unique}|partial=${ix.partial}|cols=${cols}|${where}`;
+      })
+      .sort();
+    const foreignKeys = pragma("foreign_key_list")
+      .map(
+        (f) =>
+          `${f.id}|${f.seq}|${f.table}|${f.from}|${f.to}|${f.on_update}|${f.on_delete}|${f.match}`,
+      )
+      .sort();
+    const autoincrement = /\bAUTOINCREMENT\b/i.test(stripSqlComments(t.sql ?? ""));
+    tables[t.name] = { columns, indexes, foreignKeys, autoincrement };
+  }
+  const named = (type: string): Record<string, string> =>
+    Object.fromEntries(
+      master.filter((m) => m.type === type).map((m) => [m.name, normalizeSql(m.sql ?? "")]),
+    );
+  return { tables, views: named("view"), triggers: named("trigger") };
+}
+
+export function diffShapes(expected: SchemaShape, actual: SchemaShape): string[] {
+  const out: string[] = [];
+  const names = [...new Set([...Object.keys(expected.tables), ...Object.keys(actual.tables)])].sort();
+  for (const n of names) {
+    const e = expected.tables[n];
+    const a = actual.tables[n];
+    if (!e) {
+      out.push(`table ${n}: present but not expected`);
+      continue;
+    }
+    if (!a) {
+      out.push(`table ${n}: missing`);
+      continue;
+    }
+    for (const key of ["columns", "indexes", "foreignKeys"] as const) {
+      const ej = JSON.stringify(e[key]);
+      const aj = JSON.stringify(a[key]);
+      if (ej !== aj) out.push(`table ${n}: ${key} differ\n  expected ${ej}\n  actual   ${aj}`);
+    }
+    if (e.autoincrement !== a.autoincrement)
+      out.push(`table ${n}: AUTOINCREMENT expected ${e.autoincrement}, actual ${a.autoincrement}`);
+  }
+  for (const kind of ["views", "triggers"] as const) {
+    const keys = [...new Set([...Object.keys(expected[kind]), ...Object.keys(actual[kind])])].sort();
+    for (const k of keys) {
+      if (expected[kind][k] !== actual[kind][k])
+        out.push(`${kind} ${k}: expected ${expected[kind][k] ?? "(none)"}, actual ${actual[kind][k] ?? "(none)"}`);
+    }
+  }
+  return out;
+}
+```
+
+- [ ] **Step 5: Write the migration types, the rebuild helper and v7 → v8**
+
+```ts
+// src/db/migrations/types.ts
+import type { Database } from "bun:sqlite";
+
+/** One schema step. `migrate()` runs `up` inside its own immediate transaction with foreign keys
+ *  off, inserts the `schema_meta` row and runs `PRAGMA foreign_key_check` (spec §7.1). */
+export interface Migration {
+  /** The version this migration produces. */
+  version: number;
+  note: string;
+  up(db: Database): void;
+}
+```
+
+```ts
+// src/db/migrations/rebuild.ts
+import type { Database } from "bun:sqlite";
+
+export interface RebuildSpec {
+  table: string;
+  /** `CREATE TABLE <table> (...)` with the new definition. */
+  createSql: string;
+  /** The columns copied from the old table (all must exist in both). */
+  columns: readonly string[];
+  /** The table's indexes, recreated after the rename. */
+  indexes: readonly string[];
+}
+
+/** SQLite's documented procedure for a schema change ALTER TABLE cannot make ("Making Other Kinds Of
+ *  Table Schema Changes", sqlite.org/lang_altertable.html, spec §7.2): create the new table, copy
+ *  the rows, drop the old table, rename, recreate its indexes, and drop and recreate the views and
+ *  triggers that name it. Foreign keys must already be off (outside the transaction, where the
+ *  pragma is not a no op), and the caller's transaction must be open. */
+export function rebuildTable(db: Database, spec: RebuildSpec): void {
+  const fk = db.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get();
+  if (fk?.foreign_keys !== 0) throw new Error(`rebuildTable(${spec.table}): foreign keys must be off`);
+  if (!db.inTransaction) throw new Error(`rebuildTable(${spec.table}): must run inside a transaction`);
+  const head = new RegExp(`^\\s*CREATE TABLE ${spec.table}\\b`);
+  if (!head.test(spec.createSql)) throw new Error(`rebuildTable: createSql must start with CREATE TABLE ${spec.table}`);
+  const tmp = `${spec.table}__rebuild`;
+  const mentions = new RegExp(`\\b${spec.table}\\b`);
+  const dependents = db
+    .query<{ type: string; name: string; sql: string }, []>(
+      "SELECT type, name, sql FROM sqlite_master WHERE type IN ('view','trigger') AND sql IS NOT NULL ORDER BY type DESC, name",
+    )
+    .all()
+    .filter((d) => mentions.test(d.sql));
+  for (const d of dependents) db.exec(`DROP ${d.type === "view" ? "VIEW" : "TRIGGER"} ${d.name}`);
+  db.exec(spec.createSql.replace(head, `CREATE TABLE ${tmp}`));
+  const cols = spec.columns.join(", ");
+  db.exec(`INSERT INTO ${tmp} (${cols}) SELECT ${cols} FROM ${spec.table}`);
+  db.exec(`DROP TABLE ${spec.table}`);
+  db.exec(`ALTER TABLE ${tmp} RENAME TO ${spec.table}`);
+  for (const ix of spec.indexes) db.exec(ix);
+  for (const d of dependents) db.exec(d.sql);
+}
+```
+
+```ts
+// src/db/migrations/0008-run-table.ts
+import type { Database } from "bun:sqlite";
+import { rebuildTable } from "./rebuild.ts";
+import type { Migration } from "./types.ts";
+
+/** `run` exactly as schema.sql v8 declares it (ENG-349). */
+export const RUN_TABLE_V8_DDL = `CREATE TABLE run (
+    id          INTEGER PRIMARY KEY,
+    run_id      TEXT    NOT NULL,
+    started_at  TEXT    NOT NULL,
+    provider    TEXT    NOT NULL,
+    resumed     INTEGER NOT NULL DEFAULT 0 CHECK (resumed IN (0,1)),
+    attempt     INTEGER NOT NULL DEFAULT 1
+)`;
+
+const SIGNAL_V8_DDL = `CREATE TABLE signal (
+    id              INTEGER PRIMARY KEY,
+    ticket_id       INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
+    signal_type     TEXT    NOT NULL,
+    status          TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN (
+                        'pending','delivered','consumed')),
+    reason          TEXT,
+    payload_json    TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
+    idempotency_key TEXT,
+    requested_at    TEXT NOT NULL,
+    delivered_at    TEXT,
+    consumed_at     TEXT
+)`;
+const SIGNAL_V8_COLUMNS = [
+  "id", "ticket_id", "signal_type", "status", "reason", "payload_json",
+  "idempotency_key", "requested_at", "delivered_at", "consumed_at",
+] as const;
+const SIGNAL_V8_INDEXES = [
+  "CREATE UNIQUE INDEX idx_signal_idempotency ON signal (idempotency_key) WHERE idempotency_key IS NOT NULL",
+  "CREATE INDEX idx_signal_pending ON signal (ticket_id, status)",
+] as const;
+
+function columns(db: Database, table: string): string[] {
+  return db
+    .query<{ name: string }, []>(`PRAGMA table_info('${table}')`)
+    .all()
+    .map((c) => c.name);
+}
+
+/** v7 → v8 (spec §7.4). Each condition is handled on its own, because a v7 checkpoint resumed on
+ *  v0.11+ was bridged by ensureRunTable without a version bump: rebuild `signal` when the wait
+ *  budget columns (v0.8.0 to v0.9.0) are present; create `run` when it is absent. */
+export const migration0008: Migration = {
+  version: 8,
+  note: "v8: add run table for telemetry run identity (ENG-349); drop the signal wait budget columns",
+  up(db) {
+    if (columns(db, "signal").includes("attempts")) {
+      rebuildTable(db, {
+        table: "signal",
+        createSql: SIGNAL_V8_DDL,
+        columns: SIGNAL_V8_COLUMNS,
+        indexes: SIGNAL_V8_INDEXES,
+      });
+    }
+    if (columns(db, "run").length === 0) db.exec(RUN_TABLE_V8_DDL);
+  },
+};
+```
+
+```ts
+// src/db/migrations/index.ts
+import schemaSql from "../schema.sql" with { type: "text" };
+import { migration0008 } from "./0008-run-table.ts";
+import type { Migration } from "./types.ts";
+
+/** In order; each produces the version after the previous one. */
+export const MIGRATIONS: readonly Migration[] = [migration0008];
+
+/** v6 → v7 renamed columns; those checkpoints already could not resume (spec §7.4). */
+export const OLDEST_MIGRATABLE_VERSION = 7;
+
+/** The version a fresh database gets from schema.sql. */
+export const CURRENT_VERSION: number = (() => {
+  const m = schemaSql.match(/INSERT INTO schema_meta[\s\S]*?VALUES \((\d+),/);
+  if (!m) throw new Error("schema.sql: no schema_meta seed row");
+  return Number(m[1]);
+})();
+
+if (MIGRATIONS.at(-1)?.version !== CURRENT_VERSION) {
+  throw new Error(
+    `migrations end at v${MIGRATIONS.at(-1)?.version} but schema.sql seeds v${CURRENT_VERSION}`,
+  );
+}
+```
+
+- [ ] **Step 6: Write the shape detection**
+
+```ts
+// src/db/known-shapes.ts
+import { Database } from "bun:sqlite";
+import { RUN_TABLE_V8_DDL } from "./migrations/0008-run-table.ts";
+import v7SignalBudgetSql from "./migrations/shapes/v7-signal-budget.sql" with { type: "text" };
+import v7Sql from "./migrations/shapes/v7.sql" with { type: "text" };
+import v8Sql from "./migrations/shapes/v8.sql" with { type: "text" };
+import { type SchemaShape, describeSchema, diffShapes } from "./schema-shape.ts";
+
+/** The released shapes this binary upgrades (spec §7.4), each detected by structure, never by the
+ *  version number alone. `+run` is a v7 checkpoint bridged by ensureRunTable on v0.11+. */
+export type KnownShape = "v7-signal-budget" | "v7-signal-budget+run" | "v7" | "v7+run" | "v8";
+
+interface Known {
+  name: KnownShape;
+  version: number;
+  shape: SchemaShape;
+}
+
+function shapeOf(sql: string, extra?: string): SchemaShape {
+  const db = new Database(":memory:");
+  try {
+    db.exec(sql);
+    if (extra) db.exec(extra);
+    return describeSchema(db);
+  } finally {
+    db.close();
+  }
+}
+
+let known: Known[] | null = null;
+function knownShapes(): Known[] {
+  known ??= [
+    { name: "v7-signal-budget", version: 7, shape: shapeOf(v7SignalBudgetSql) },
+    { name: "v7-signal-budget+run", version: 7, shape: shapeOf(v7SignalBudgetSql, RUN_TABLE_V8_DDL) },
+    { name: "v7", version: 7, shape: shapeOf(v7Sql) },
+    { name: "v7+run", version: 7, shape: shapeOf(v7Sql, RUN_TABLE_V8_DDL) },
+    { name: "v8", version: 8, shape: shapeOf(v8Sql) },
+  ];
+  return known;
+}
+
+export function detectShape(db: Database, version: number): KnownShape | null {
+  const actual = describeSchema(db);
+  for (const k of knownShapes()) {
+    if (k.version === version && diffShapes(k.shape, actual).length === 0) return k.name;
+  }
+  return null;
+}
+```
+
+- [ ] **Step 7: Rewrite `migrate()`**
+
+Replace the whole of `src/db/migrate.ts`:
+
+```ts
+import { Database } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { EXIT, StyreError } from "../cli/errors.ts";
+import { nowUtc } from "../util/time.ts";
+import { openDb } from "./client.ts";
+import { detectShape } from "./known-shapes.ts";
+import { CURRENT_VERSION, MIGRATIONS, OLDEST_MIGRATABLE_VERSION } from "./migrations/index.ts";
+import type { Migration } from "./migrations/types.ts";
+import { describeSchema, diffShapes } from "./schema-shape.ts";
+import schemaSql from "./schema.sql" with { type: "text" };
+
+export interface MigrateResult {
+  version: number;
+  created: boolean;
+  /** The version the database had before this call upgraded it, or null when nothing ran. */
+  migratedFrom: number | null;
+  backupPath: string | null;
+}
+
+export interface MigrateOptions {
+  /** Human lines (the backup path, the upgrade). `run` sends them to stderr. */
+  log?: (line: string) => void;
+  now?: () => Date;
+  /** Tests only: run this list instead of MIGRATIONS. */
+  migrations?: readonly Migration[];
+}
+
+function readVersion(db: Database): number | null {
+  try {
+    const row = db
+      .query<{ version: number }, []>("SELECT version FROM schema_meta ORDER BY version DESC LIMIT 1")
+      .get();
+    return row ? row.version : null;
+  } catch {
+    return null; // schema_meta table absent
+  }
+}
+
+function hasTables(db: Database): boolean {
+  return db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1").get() !== null;
+}
+
+/** `<db>.v<old>.<UTC timestamp with milliseconds>.bak`, next to the database (spec §7.1). */
+export function backupPathFor(path: string, version: number, at: Date): string {
+  const stamp = at.toISOString().replace(/[-:]/g, "").replace(".", "");
+  return `${path}.v${version}.${stamp}.bak`;
+}
+
+function refused(headline: string, recovery: string): StyreError {
+  return new StyreError({ code: EXIT.RESUME_REFUSED, headline, recovery });
+}
+
+/** Differences between `db` and a fresh database built from schema.sql (spec §7.3). */
+export function proveSchema(db: Database): string[] {
+  const fresh = new Database(":memory:");
+  try {
+    fresh.exec(schemaSql);
+    return diffShapes(describeSchema(fresh), describeSchema(db));
+  } finally {
+    fresh.close();
+  }
+}
+
+function applyMigrations(db: Database, from: number, migrations: readonly Migration[]): number {
+  const pending = migrations.filter((m) => m.version > from);
+  pending.forEach((m, i) => {
+    if (m.version !== from + 1 + i)
+      throw new Error(`migrate: migrations are not contiguous: expected v${from + 1 + i}, found v${m.version}`);
+  });
+  // Inside a transaction the pragma is a silent no op, so it is set before the first BEGIN.
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    for (const m of pending) {
+      db.transaction(() => {
+        m.up(db);
+        db.query("INSERT INTO schema_meta (version, applied_at, note) VALUES (?, ?, ?)").run(
+          m.version,
+          nowUtc(),
+          m.note,
+        );
+        const violations = db.query<Record<string, unknown>, []>("PRAGMA foreign_key_check").all();
+        if (violations.length > 0)
+          throw new Error(
+            `migrate: v${m.version} left ${violations.length} foreign key violation(s); first: ${JSON.stringify(violations[0])}`,
+          );
+      }).immediate();
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+  return pending.at(-1)?.version ?? from;
+}
+
+/** Create, or upgrade, the run's database (control-loop §10, spec §7.1). No schema_meta: create
+ *  from schema.sql. Current: nothing. Newer, older than v7, or a shape this binary does not know:
+ *  refuse (exit 65). Otherwise back up with VACUUM INTO, run each pending migration in its own
+ *  transaction, and prove the result against schema.sql. */
+export function migrate(path: string, opts: MigrateOptions = {}): MigrateResult {
+  mkdirSync(dirname(path), { recursive: true });
+  const db = openDb(path);
+  try {
+    const existing = readVersion(db);
+    if (existing === null) {
+      if (hasTables(db))
+        throw refused(
+          `migrate: ${path} has tables but no schema_meta, a shape this Styre does not know`,
+          "Start that run over: styre run <ticket> --fresh.",
+        );
+      db.exec(schemaSql);
+      const version = readVersion(db);
+      if (version === null) throw new Error("migrate: schema_meta empty after bootstrap");
+      return { version, created: true, migratedFrom: null, backupPath: null };
+    }
+    if (existing === CURRENT_VERSION)
+      return { version: existing, created: false, migratedFrom: null, backupPath: null };
+    if (existing > CURRENT_VERSION)
+      throw refused(
+        `migrate: ${path} is schema v${existing}, newer than this Styre's v${CURRENT_VERSION}`,
+        "Use the newer Styre that wrote it, or start that run over: styre run <ticket> --fresh.",
+      );
+    if (existing < OLDEST_MIGRATABLE_VERSION)
+      throw refused(
+        `migrate: ${path} is schema v${existing}; Styre upgrades checkpoints from v${OLDEST_MIGRATABLE_VERSION} on`,
+        "Start that run over: styre run <ticket> --fresh.",
+      );
+    if (detectShape(db, existing) === null)
+      throw refused(
+        `migrate: ${path} is schema v${existing} but has a shape this Styre does not know`,
+        "Start that run over: styre run <ticket> --fresh.",
+      );
+    const backupPath = backupPathFor(path, existing, opts.now?.() ?? new Date());
+    // A file copy misses rows a reader's snapshot pins in the WAL; VACUUM INTO does not.
+    db.query("VACUUM INTO ?").run(backupPath);
+    opts.log?.(`migrate: backed up ${path} (schema v${existing}) to ${backupPath}`);
+    const reached = applyMigrations(db, existing, opts.migrations ?? MIGRATIONS);
+    if (reached === CURRENT_VERSION) {
+      const diff = proveSchema(db);
+      if (diff.length > 0)
+        throw new Error(
+          `migrate: ${path} does not match schema v${CURRENT_VERSION} after migrating:\n${diff.join("\n")}`,
+        );
+    }
+    opts.log?.(`migrate: upgraded ${path} from schema v${existing} to v${reached}`);
+    return { version: reached, created: false, migratedFrom: existing, backupPath };
+  } finally {
+    db.close();
+  }
+}
+```
+
+- [ ] **Step 8: Wire the callers and remove the bridge**
+
+`src/cli/migrate.ts`, replace lines 11-16:
+
+```ts
+export async function migrateImpl({ args }: { args: MigrateArgs }): Promise<void> {
+  const path = args.db && args.db.length > 0 ? args.db : defaultDbPath();
+  const result = migrate(path, { log: (line) => process.stderr.write(`${line}\n`) });
+  const verb = result.created
+    ? "bootstrapped"
+    : result.migratedFrom !== null
+      ? `upgraded from v${result.migratedFrom}`
+      : "already current";
+  process.stderr.write(`${verb}: ${path} (schema v${result.version})\n`);
+}
+```
+
+`src/cli/park.ts`: change the import on line 38 to `import { getRun, insertRun, markResumed } from "../db/repos/run.ts";`, and replace lines 260-262 with:
+
+```ts
+    migrate(dbPath, { log: (line) => process.stderr.write(`${line}\n`) });
+    const db = openDb(dbPath);
+```
+
+`src/cli/run.ts:428`: `migrate(dbPath, { log: (line) => process.stderr.write(`${line}\n`) });`
+
+`src/db/repos/run.ts`: delete lines 14-28 (`ensureRunTable` and its comment).
+
+`src/db/schema.sql` and `docs/architecture/schema.sql`, replace the comment block above `CREATE TABLE run` (lines 486-491) with:
+
+```sql
+-- ----------------------------------------------------------------------------
+-- run — per-invocation identity (ENG-349). Exactly one row per ephemeral run DB.
+-- The telemetry export stamps run_id/provider/started_at onto every emitted row so a
+-- consumer can correlate rows and tell two runs of the same ticket apart. ticket_id is a
+-- run-local rowid and is NOT a cross-run key. A v7 checkpoint gains this table through the
+-- v7 -> v8 migration (src/db/migrations/0008-run-table.ts).
+-- ----------------------------------------------------------------------------
+```
+
+`test/db/run.test.ts`: delete the test `ensureRunTable creates the table when missing (pre-upgrade park bridge)` (lines 27-41) and remove `ensureRunTable` from its import. `test/cli/dump-park-warning.test.ts`: replace the import of `ensureRunTable` with `import { migrate } from "../../src/db/migrate.ts";` and the body of `dbWithRun` with:
+
+```ts
+function dbWithRun(runId: string): string {
+  const path = join(mkdtempSync(join(tmpdir(), "dp-")), "run.db");
+  migrate(path);
+  const db = new Database(path);
+  insertRun(db, { runId, startedAt: "2026-07-21T00:00:00.000Z", provider: "claude" });
+  db.close();
+  return path;
+}
+```
+
+Run: `cmp src/db/schema.sql docs/architecture/schema.sql && echo same`
+Expected: `same`.
+
+- [ ] **Step 9: Run the tests and see them pass**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/db/schema-shape.test.ts test/db/migrate-upgrade.test.ts test/migrate.test.ts test/db/run.test.ts test/cli/dump-park-warning.test.ts test/migrate-cli.test.ts`
+Expected: PASS.
+
+- [ ] **Step 10: Break it on purpose, see it fail, restore**
+
+1. In `migration0008.up`, comment out the `rebuildTable(...)` call. Run Step 9's command: the `v7-v0.9.0` and `v7-v0.9.0-bridged` cases fail in the proof (`table signal: columns differ`). Restore.
+2. In `migrate()`, replace `db.query("VACUUM INTO ?").run(backupPath);` with a file copy (`copyFileSync(path, backupPath)` with the import). Run: the reader snapshot test fails (the backup has fewer `event_log` rows). Restore.
+3. In `applyMigrations`, delete the `foreign_key_check` block. Run: `a failing foreign_key_check aborts the migration and keeps v7` fails. Restore.
+4. In `describeSchema`, set `autoincrement: false` always. Run: `AUTOINCREMENT is compared` fails. Restore.
+
+- [ ] **Step 11: Run the whole suite**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test`
+Expected: PASS (0 failures). `bun run lint` and `bun run typecheck` pass.
+
+- [ ] **Step 12: Commit**
+
+```bash
+git add src/db test/helpers/check-probes.ts test/db src/cli/migrate.ts src/cli/park.ts src/cli/run.ts docs/architecture/schema.sql test/cli/dump-park-warning.test.ts
+git commit -m "feat(eng-477): versioned migrations with backup, shape detection and a structural proof" -m "migrate() now upgrades v7 and v8 checkpoints: VACUUM INTO backup, one transaction per migration with foreign_key_check, and a structural comparison against schema.sql. The v7 to v8 migration replaces ensureRunTable." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 3: Narrow readers for the commands that do not migrate (`ls`, `clean`, `--fresh`)
+
+**Files:**
+- Create: `src/db/repos/checkpoint-read.ts`
+- Modify: `src/cli/checkpoints.ts:6-7,46-58` (`classifyCheckpointDb`), `src/util/process/interruption.ts:8-10,113,225-274` (`findInterruption`, `olderCheckpointWarning`, `undoBeforeDiscard`)
+- Test: `test/cli/checkpoint-readers-fixtures.test.ts`
+
+**Interfaces:**
+- Consumes: `FIXTURES`, `copyFixture`, `fixtureVersion` (Task 1); `runFreshTicket`, `FreshTicketRun` (`test/helpers/run-harness.ts:654`).
+- Produces:
+  - `interface CheckpointTicket { id: number; project_id: number; ident: string; stage: string; status: string; branch_name: string | null; branch_prefix: string | null }`
+  - `readCheckpointTicket(db: Database, ticketId: number): CheckpointTicket | null`
+  - `readCheckpointTargetRepo(db: Database, projectId: number): string | null`
+  - `listCheckpointPendingSignals(db: Database, ticketId: number): { signal_type: string; reason: string | null }[]`
+  - `interface CheckpointRunningStep { id: number; ticket_id: number; step_key: string; attempt: number; pid: number | null; started_at: string | null }`
+  - `listCheckpointRunningSteps(db: Database): CheckpointRunningStep[]`
+  - `findInterruption(db, step: Pick<WorkflowStepRow, "id" | "ticket_id" | "attempt" | "started_at">)` and `olderCheckpointWarning(step: Pick<WorkflowStepRow, "pid" | "step_key">)` (widened parameter types; same behaviour).
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// test/cli/checkpoint-readers-fixtures.test.ts
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { listCheckpoints } from "../../src/cli/checkpoints.ts";
+import { cleanImpl } from "../../src/cli/clean.ts";
+import { openDb } from "../../src/db/client.ts";
+import { listCheckpointRunningSteps } from "../../src/db/repos/checkpoint-read.ts";
+import { undoBeforeDiscard } from "../../src/util/process/interruption.ts";
+import { FIXTURES, copyFixture, fixtureVersion } from "../helpers/db-fixtures.ts";
+import { type FreshTicketRun, runFreshTicket } from "../helpers/run-harness.ts";
+
+let stderr: string[] = [];
+let spy: ReturnType<typeof spyOn>;
+beforeEach(() => {
+  stderr = [];
+  spy = spyOn(process.stderr, "write").mockImplementation((c: unknown) => {
+    stderr.push(String(c));
+    return true;
+  });
+});
+afterEach(() => spy.mockRestore());
+
+function gitRepo(): string {
+  const root = mkdtempSync(join(tmpdir(), "styre-readers-repo-"));
+  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
+  run(["init", "-b", "main"]);
+  run(["config", "user.email", "t@s.dev"]);
+  run(["config", "user.name", "T"]);
+  writeFileSync(join(root, "README.md"), "x");
+  run(["add", "-A"]);
+  run(["commit", "-m", "init"]);
+  return root;
+}
+
+/** <root>/<slug>/ENG-1/run.db holding a private copy of the fixture. */
+function checkpointOf(name: (typeof FIXTURES)[number], slug: string): { root: string; dbPath: string } {
+  const root = mkdtempSync(join(tmpdir(), "styre-readers-state-"));
+  const dir = join(root, slug, "ENG-1");
+  mkdirSync(dir, { recursive: true });
+  const dbPath = join(dir, "run.db");
+  copyFileSync(copyFixture(name), dbPath);
+  return { root, dbPath };
+}
+
+describe("checkpoints are read without migrating them (spec §7.7)", () => {
+  for (const name of FIXTURES) {
+    test(`${name}: the narrow running step read works on the old shape`, () => {
+      const path = copyFixture(name);
+      const db = openDb(path);
+      try {
+        expect(listCheckpointRunningSteps(db).map((s) => s.step_key)).toEqual(
+          name === "v6-v0.7.0" ? [] : ["implement:wu1:dispatch"],
+        );
+      } finally {
+        db.close();
+      }
+    });
+
+    test(`${name}: ls lists it and leaves its version alone`, () => {
+      const { root, dbPath } = checkpointOf(name, "fixture");
+      const before = fixtureVersion(dbPath);
+      const found = listCheckpoints(root);
+      expect(found.map((c) => c.ident)).toEqual(["ENG-1"]);
+      expect(fixtureVersion(dbPath)).toBe(before);
+      expect(stderr.join("")).not.toContain("could not read");
+    });
+
+    test(`${name}: --fresh's discard reads it (the in-place undo is not skipped)`, () => {
+      const { dbPath } = checkpointOf(name, "fixture");
+      const before = fixtureVersion(dbPath);
+      const lines: string[] = [];
+      undoBeforeDiscard(dbPath, (l) => lines.push(l));
+      expect(lines.join("\n")).not.toContain("could not read");
+      expect(fixtureVersion(dbPath)).toBe(before);
+    });
+
+    test(`${name}: clean reaps it`, async () => {
+      const { root, dbPath } = checkpointOf(name, "fixture");
+      // `root` is the state root: cleanImpl reads <root>/<slug>/<ident> (src/cli/clean.ts:150).
+      await cleanImpl({ ident: "ENG-1", slug: "fixture" }, { root, targetRepo: gitRepo() });
+      expect(existsSync(dbPath)).toBe(false);
+      expect(stderr.join("")).not.toContain("could not read");
+    });
+
+    test(`${name}: styre run --fresh discards it and starts over`, async () => {
+      const state = mkdtempSync(join(tmpdir(), "styre-readers-fresh-"));
+      const dir = join(state, "styre", "test-project", "ENG-1");
+      mkdirSync(dir, { recursive: true });
+      copyFileSync(copyFixture(name), join(dir, "run.db"));
+      const run = await runFreshTicket({ fresh: true, reuseStateOf: { stateRoot: state } as FreshTicketRun });
+      try {
+        expect(fixtureVersion(run.dbPath)).toBeGreaterThanOrEqual(8); // a new checkpoint
+        expect(stderr.join("")).not.toContain("could not read");
+      } finally {
+        run.cleanup();
+      }
+    });
+  }
+});
+```
+
+- [ ] **Step 2: Run it and see it fail**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/cli/checkpoint-readers-fixtures.test.ts`
+Expected: FAIL with `Cannot find module '../../src/db/repos/checkpoint-read.ts'`.
+
+- [ ] **Step 3: Write the narrow readers**
+
+```ts
+// src/db/repos/checkpoint-read.ts
+import type { Database } from "bun:sqlite";
+
+/** Reads for the commands that look at a checkpoint WITHOUT migrating it: `styre ls`, `styre clean`
+ *  and `--fresh`'s discard (spec §7.7). Each query names only columns present since schema v7, so it
+ *  keeps working on an old checkpoint after the shared repository column lists grow (a growing list
+ *  would throw there, and ENG-485's in place undo would be skipped without a word). */
+
+export interface CheckpointTicket {
+  id: number;
+  project_id: number;
+  ident: string;
+  stage: string;
+  status: string;
+  branch_name: string | null;
+  branch_prefix: string | null;
+}
+
+export function readCheckpointTicket(db: Database, ticketId: number): CheckpointTicket | null {
+  return (
+    db
+      .query<CheckpointTicket, [number]>(
+        "SELECT id, project_id, ident, stage, status, branch_name, branch_prefix FROM ticket WHERE id = ?",
+      )
+      .get(ticketId) ?? null
+  );
+}
+
+export function readCheckpointTargetRepo(db: Database, projectId: number): string | null {
+  return (
+    db
+      .query<{ target_repo: string }, [number]>("SELECT target_repo FROM project WHERE id = ?")
+      .get(projectId)?.target_repo ?? null
+  );
+}
+
+export function listCheckpointPendingSignals(
+  db: Database,
+  ticketId: number,
+): { signal_type: string; reason: string | null }[] {
+  return db
+    .query<{ signal_type: string; reason: string | null }, [number]>(
+      "SELECT signal_type, reason FROM signal WHERE ticket_id = ? AND status = 'pending' ORDER BY id",
+    )
+    .all(ticketId);
+}
+
+export interface CheckpointRunningStep {
+  id: number;
+  ticket_id: number;
+  step_key: string;
+  attempt: number;
+  pid: number | null;
+  started_at: string | null;
+}
+
+export function listCheckpointRunningSteps(db: Database): CheckpointRunningStep[] {
+  return db
+    .query<CheckpointRunningStep, []>(
+      "SELECT id, ticket_id, step_key, attempt, pid, started_at FROM workflow_step WHERE status = 'running' ORDER BY ticket_id, seq",
+    )
+    .all();
+}
+```
+
+- [ ] **Step 4: Use them**
+
+`src/cli/checkpoints.ts`: replace the imports on lines 6-7 with `import { listCheckpointPendingSignals, readCheckpointTicket } from "../db/repos/checkpoint-read.ts";`; in `classifyCheckpointDb` replace `const t = getTicket(db, ticketId);` with `const t = readCheckpointTicket(db, ticketId);` and `const pending = listPending(db, ticketId);` with `const pending = listCheckpointPendingSignals(db, ticketId);`.
+
+`src/util/process/interruption.ts`:
+- imports: remove `import { getProject } from "../../db/repos/project.ts";` and `import { getTicket } from "../../db/repos/ticket.ts";`, add `import { listCheckpointRunningSteps, readCheckpointTargetRepo, readCheckpointTicket } from "../../db/repos/checkpoint-read.ts";`;
+- line 113: `export function findInterruption(db: Database, step: Pick<WorkflowStepRow, "id" | "ticket_id" | "attempt" | "started_at">): InterruptionPayload | null {`;
+- `olderCheckpointWarning(step: Pick<WorkflowStepRow, "pid" | "step_key">)`;
+- in `undoBeforeDiscard`: `let running: CheckpointRunningStep[];` (import the type), `running = listCheckpointRunningSteps(db);`, and replace the ticket and project reads with:
+
+```ts
+      const ticket = readCheckpointTicket(db, step.ticket_id);
+      const targetRepo = ticket ? readCheckpointTargetRepo(db, ticket.project_id) : null;
+      if (!ticket || !targetRepo) continue;
+      const inPlace = getLatestWorktreePath(db, step.ticket_id) === targetRepo;
+      const line = undoInterruptedEdits(p, {
+        inPlace,
+        repoPath: targetRepo,
+        branch: branchNameFor(ticket),
+      });
+```
+
+Check `recover.ts` still compiles: it passes full `WorkflowStepRow` values, which satisfy the narrower `Pick` types.
+
+- [ ] **Step 5: Run the test and see it pass**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/cli/checkpoint-readers-fixtures.test.ts test/cli/ls.test.ts test/cli/clean.test.ts test/cli/checkpoints.test.ts test/lifecycle/interruption.test.ts`
+Expected: PASS.
+
+- [ ] **Step 6: Break it on purpose, see it fail, restore**
+
+In `listCheckpointRunningSteps`, add `, generation` to the selected columns (a column that only exists from v9). Run Step 5's command: every `narrow running step read` case fails with `no such column: generation`, and the `--fresh` cases report `could not read`. Restore.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/db/repos/checkpoint-read.ts src/cli/checkpoints.ts src/util/process/interruption.ts test/cli/checkpoint-readers-fixtures.test.ts
+git commit -m "fix(eng-477): read checkpoints for ls, clean and --fresh with queries that work since v7" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 4: v8 → v9: the new columns, tables and the `origin` backfill
+
+**Files:**
+- Create: `src/db/migrations/0009-design-inputs.ts`
+- Modify: `src/db/migrations/index.ts` (add `migration0009`), `src/db/schema.sql` and `docs/architecture/schema.sql` (seed row lines 53-55; `work_unit` before line 161 `UNIQUE (ticket_id, seq)`; `workflow_step` before line 196 `UNIQUE (ticket_id, step_key)`; two new tables after `run`)
+- Modify: `src/db/repos/workflow-step.ts:4-27`, `src/db/repos/work-unit.ts:4-79`, `src/daemon/failure-policy.ts:209-216`
+- Modify: `test/helpers/check-probes.ts` (v9 seeds and probes), `test/db/migrate-upgrade.test.ts` and `test/db/schema-shape.test.ts` (use the v9 lists), `test/migrate.test.ts:12-58`
+- Modify: `CLAUDE.md:34`
+- Test: `test/db/migrate-v9.test.ts`
+
+**Interfaces:**
+- Consumes: `Migration`, `MIGRATIONS`, `CURRENT_VERSION`, `migrate`, `proveSchema` (Task 2); fixtures (Task 1).
+- Produces:
+  - `migration0009: Migration`
+  - `WorkflowStepRow` gains `input_manifest: string | null; input_fingerprint: string | null; output_digest: string | null; fingerprint_scheme: number | null; generation: number`
+  - `WorkUnitRow` gains `origin: WorkUnitOrigin` where `type WorkUnitOrigin = "extract" | "reconcile"`; `insertWorkUnit` accepts `origin?: WorkUnitOrigin` (default `"extract"`)
+  - tables `ticket_input (ticket_id, name, value_json, digest, captured_at)` and `workflow_step_history`
+  - test helper: `SEED_ROWS_V9`, `CHECK_PROBES_V9`
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// test/db/migrate-v9.test.ts
+import { Database } from "bun:sqlite";
+import { expect, test } from "bun:test";
+import { migrate } from "../../src/db/migrate.ts";
+import { CURRENT_VERSION } from "../../src/db/migrations/index.ts";
+import { insertWorkUnit, listByTicket } from "../../src/db/repos/work-unit.ts";
+import { MIGRATABLE_FIXTURES, copyFixture } from "../helpers/db-fixtures.ts";
+import { makeTestDb } from "../helpers/db.ts";
+
+test("the current version is 9", () => {
+  expect(CURRENT_VERSION).toBe(9);
+});
+
+for (const name of MIGRATABLE_FIXTURES) {
+  test(`${name}: origin is backfilled from kind = 'reconcile', manifests are empty, generation 0`, () => {
+    const path = copyFixture(name);
+    migrate(path);
+    const db = new Database(path, { readonly: true });
+    try {
+      const units = db
+        .query<{ kind: string; origin: string }, []>("SELECT kind, origin FROM work_unit ORDER BY seq")
+        .all();
+      expect(units).toEqual([
+        { kind: "backend", origin: "extract" },
+        { kind: "reconcile", origin: "reconcile" },
+      ]);
+      const steps = db
+        .query<{ m: string | null; g: number }, []>(
+          "SELECT input_manifest AS m, generation AS g FROM workflow_step",
+        )
+        .all();
+      expect(steps.every((s) => s.m === null && s.g === 0)).toBe(true);
+      expect(db.query("SELECT COUNT(*) AS n FROM ticket_input").get()).toEqual({ n: 0 });
+      expect(db.query("SELECT COUNT(*) AS n FROM workflow_step_history").get()).toEqual({ n: 0 });
+    } finally {
+      db.close();
+    }
+  });
+}
+
+test("insertWorkUnit records origin, defaulting to extract", () => {
+  const { db, ticketId } = makeTestDb();
+  insertWorkUnit(db, { ticketId, seq: 1, kind: "backend" });
+  insertWorkUnit(db, { ticketId, seq: 2, kind: "reconcile", origin: "reconcile" });
+  expect(listByTicket(db, ticketId).map((u) => u.origin)).toEqual(["extract", "reconcile"]);
+  db.close();
+});
+```
+
+- [ ] **Step 2: Run it and see it fail**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/db/migrate-v9.test.ts`
+Expected: FAIL: `expect(CURRENT_VERSION).toBe(9)` receives `8`.
+
+- [ ] **Step 3: Write the migration**
+
+```ts
+// src/db/migrations/0009-design-inputs.ts
+import type { Migration } from "./types.ts";
+
+// Each statement is the exact column or table text schema.sql v9 declares, so the structural proof
+// compares equal. Added columns land last, in this order (spec §7.3).
+export const TICKET_INPUT_DDL = `CREATE TABLE ticket_input (
+    ticket_id   INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
+    name        TEXT    NOT NULL,
+    value_json  TEXT    NOT NULL CHECK (json_valid(value_json)),
+    digest      TEXT    NOT NULL,
+    captured_at TEXT    NOT NULL,
+    PRIMARY KEY (ticket_id, name)
+)`;
+
+export const STEP_HISTORY_DDL = `CREATE TABLE workflow_step_history (
+    id                 INTEGER PRIMARY KEY,
+    step_id            INTEGER NOT NULL REFERENCES workflow_step(id) ON DELETE CASCADE,
+    ticket_id          INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
+    event_id           INTEGER NOT NULL REFERENCES event_log(id) ON DELETE CASCADE,
+    step_key           TEXT    NOT NULL,
+    status             TEXT    NOT NULL,
+    attempt            INTEGER NOT NULL,
+    result_json        TEXT,
+    error_json         TEXT,
+    input_manifest     TEXT,
+    input_fingerprint  TEXT,
+    output_digest      TEXT,
+    fingerprint_scheme INTEGER,
+    generation         INTEGER NOT NULL,
+    started_at         TEXT,
+    ended_at           TEXT,
+    archived_at        TEXT    NOT NULL
+)`;
+export const STEP_HISTORY_INDEX =
+  "CREATE INDEX idx_step_history_step ON workflow_step_history (step_id, generation)";
+
+/** v8 → v9 (ENG-477, spec §7.4): only added columns and new tables; event_log is not rebuilt. */
+export const migration0009: Migration = {
+  version: 9,
+  note: "v9: design input fingerprints, work_unit.origin, ticket_input, workflow_step_history (ENG-477)",
+  up(db) {
+    db.exec(
+      "ALTER TABLE workflow_step ADD COLUMN input_manifest TEXT CHECK (input_manifest IS NULL OR json_valid(input_manifest))",
+    );
+    db.exec("ALTER TABLE workflow_step ADD COLUMN input_fingerprint TEXT");
+    db.exec("ALTER TABLE workflow_step ADD COLUMN output_digest TEXT");
+    db.exec("ALTER TABLE workflow_step ADD COLUMN fingerprint_scheme INTEGER");
+    db.exec("ALTER TABLE workflow_step ADD COLUMN generation INTEGER NOT NULL DEFAULT 0");
+    db.exec(
+      "ALTER TABLE work_unit ADD COLUMN origin TEXT NOT NULL DEFAULT 'extract' CHECK (origin IN ('extract','reconcile'))",
+    );
+    // The integration failure path (failure-policy.ts) is the only writer of kind 'reconcile'.
+    db.exec("UPDATE work_unit SET origin = 'reconcile' WHERE kind = 'reconcile'");
+    db.exec(TICKET_INPUT_DDL);
+    db.exec(STEP_HISTORY_DDL);
+    db.exec(STEP_HISTORY_INDEX);
+  },
+};
+```
+
+`src/db/migrations/index.ts`: `import { migration0009 } from "./0009-design-inputs.ts";` and `export const MIGRATIONS: readonly Migration[] = [migration0008, migration0009];`.
+
+- [ ] **Step 4: Update both schema copies**
+
+In `src/db/schema.sql`:
+
+Seed row (lines 53-55):
+
+```sql
+INSERT INTO schema_meta (version, applied_at, note)
+VALUES (9, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+        'v9: design input fingerprints, work_unit.origin, ticket_input, workflow_step_history (ENG-477)');
+```
+
+`work_unit`, after `updated_at        TEXT NOT NULL,` and before `UNIQUE (ticket_id, seq)`:
+
+```sql
+    -- v9 (ENG-477): which step wrote the unit. 'reconcile' units come from the integration
+    -- failure path and stay out of design:extract's output digest. Added last (0009).
+    origin            TEXT NOT NULL DEFAULT 'extract' CHECK (origin IN ('extract','reconcile')),
+```
+
+`workflow_step`, after `updated_at      TEXT NOT NULL,` and before `UNIQUE (ticket_id, step_key)`:
+
+```sql
+    -- v9 (ENG-477, design input invalidation): what a design step's success was computed from.
+    -- input_manifest maps each declared input to its digest; output_digest is set only where the
+    -- output lives outside the database (the plan); generation counts invalidations. Added last,
+    -- in migration order (0009), so the structural proof holds.
+    input_manifest     TEXT CHECK (input_manifest IS NULL OR json_valid(input_manifest)),
+    input_fingerprint  TEXT,
+    output_digest      TEXT,
+    fingerprint_scheme INTEGER,
+    generation         INTEGER NOT NULL DEFAULT 0,
+```
+
+After the `run` table (before the `§H DERIVED VIEWS` banner):
+
+```sql
+-- ----------------------------------------------------------------------------
+-- ticket_input — the design inputs that are not already rows (ENG-477, spec §4): the ticket
+-- text and the starting commit (written once, never rewritten), and the profile and config
+-- values the design handlers receive (rewritten on resume, with an `inputs-changed` note).
+-- value_json is canonical JSON; digest is its SHA-256.
+-- ----------------------------------------------------------------------------
+CREATE TABLE ticket_input (
+    ticket_id   INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
+    name        TEXT    NOT NULL,
+    value_json  TEXT    NOT NULL CHECK (json_valid(value_json)),
+    digest      TEXT    NOT NULL,
+    captured_at TEXT    NOT NULL,
+    PRIMARY KEY (ticket_id, name)
+);
+
+-- workflow_step_history — a design step's row as it was before an invalidation reset it
+-- (ENG-477, spec §6). event_id is the `invalidated` note event that caused the reset.
+CREATE TABLE workflow_step_history (
+    id                 INTEGER PRIMARY KEY,
+    step_id            INTEGER NOT NULL REFERENCES workflow_step(id) ON DELETE CASCADE,
+    ticket_id          INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
+    event_id           INTEGER NOT NULL REFERENCES event_log(id) ON DELETE CASCADE,
+    step_key           TEXT    NOT NULL,
+    status             TEXT    NOT NULL,
+    attempt            INTEGER NOT NULL,
+    result_json        TEXT,
+    error_json         TEXT,
+    input_manifest     TEXT,
+    input_fingerprint  TEXT,
+    output_digest      TEXT,
+    fingerprint_scheme INTEGER,
+    generation         INTEGER NOT NULL,
+    started_at         TEXT,
+    ended_at           TEXT,
+    archived_at        TEXT    NOT NULL
+);
+CREATE INDEX idx_step_history_step ON workflow_step_history (step_id, generation);
+```
+
+Then: `cp src/db/schema.sql docs/architecture/schema.sql && cmp src/db/schema.sql docs/architecture/schema.sql && grep -c '^CREATE TABLE' src/db/schema.sql`
+Expected: `19`.
+
+`CLAUDE.md:34`, replace the first two sentences with: `4. **`schema.sql`** — the SQLite SoT: **19 `CREATE TABLE` statements** (`grep -c '^CREATE TABLE'`). `memory_record` (Memory/UGL) is a commented-out `-- DEFERRED` stub, not one of the 19;` and keep the rest of the line, then add after "`run` (ENG-349) is the per-invocation identity table and is live" the clause `; `ticket_input` and `workflow_step_history` (ENG-477) hold the design inputs and the rows an invalidation replaced`.
+
+- [ ] **Step 5: Grow the repositories**
+
+`src/db/repos/workflow-step.ts`: add to `WorkflowStepRow` after `updated_at: string;`:
+
+```ts
+  /** JSON map from each declared input to its digest at the step's success (ENG-477). */
+  input_manifest: string | null;
+  input_fingerprint: string | null;
+  /** Digest of an output that lives outside the database (the plan). */
+  output_digest: string | null;
+  fingerprint_scheme: number | null;
+  /** Incremented by each invalidation (0 for a new step). */
+  generation: number;
+```
+
+and `COLS`:
+
+```ts
+const COLS =
+  "id, ticket_id, work_unit_id, seq, step_key, step_type, status, attempt, idempotency_key, " +
+  "input_json, result_json, error_json, pid, await_signal_id, started_at, ended_at, created_at, updated_at, " +
+  "input_manifest, input_fingerprint, output_digest, fingerprint_scheme, generation";
+```
+
+`src/db/repos/work-unit.ts`: add `export type WorkUnitOrigin = "extract" | "reconcile";`, `origin: WorkUnitOrigin;` to `WorkUnitRow`, `, origin` at the end of `COLS`, `origin?: WorkUnitOrigin;` to `insertWorkUnit`'s parameter, and in its INSERT:
+
+```ts
+      `INSERT INTO work_unit
+         (ticket_id, seq, kind, title, description, status, behavioral, files_to_touch, test_plan, verify_check_types, depends_on, origin, created_at, updated_at)
+       VALUES ($t, $seq, $kind, $title, $desc, $status, $behavioral, $ftt, $tp, $vct, $dep, $origin, $now, $now)`,
+```
+
+with `$origin: p.origin ?? "extract",` in the bound values.
+
+`src/daemon/failure-policy.ts:209-216`: add `origin: "reconcile",` to the `insertWorkUnit` call.
+
+- [ ] **Step 6: Grow the CHECK probes and the existing migration tests**
+
+Append to `test/helpers/check-probes.ts`:
+
+```ts
+export const SEED_ROWS_V9: string[] = [
+  ...SEED_ROWS_V8,
+  "INSERT INTO ticket_input (ticket_id, name, value_json, digest, captured_at) VALUES (900, 'probe', '1', 'd', 't')",
+  "INSERT INTO workflow_step_history (id, step_id, ticket_id, event_id, step_key, status, attempt, generation, archived_at) VALUES (900, 900, 900, 900, 'probe', 'succeeded', 1, 0, 't')",
+];
+
+export const CHECK_PROBES_V9: CheckProbe[] = [
+  ...CHECK_PROBES_V8,
+  { table: "workflow_step", set: "input_manifest = 'x'", where: "id = 900" },
+  { table: "work_unit", set: "origin = 'manual'", where: "id = 900" },
+  { table: "ticket_input", set: "value_json = 'x'", where: "ticket_id = 900 AND name = 'probe'" },
+];
+```
+
+In `test/db/migrate-upgrade.test.ts` and `test/db/schema-shape.test.ts`, replace every `SEED_ROWS_V8` with `SEED_ROWS_V9` and every `CHECK_PROBES_V8` with `CHECK_PROBES_V9`. In `test/migrate.test.ts`, import `CURRENT_VERSION` from `../src/db/migrations/index.ts`, replace both `toBe(8)` with `toBe(CURRENT_VERSION)`, rename the first test to `bootstraps a fresh DB at the current schema version`, and add `"ticket_input"` and `"workflow_step_history"` to `CORE_TABLES`.
+
+- [ ] **Step 7: Run the tests and see them pass**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/db test/migrate.test.ts test/cli/checkpoint-readers-fixtures.test.ts`
+Expected: PASS, including every fixture reaching v9 with the proof and 50 CHECK probes.
+
+- [ ] **Step 8: Break it on purpose, see it fail, restore**
+
+1. In `schema.sql` (both copies), move the five new `workflow_step` columns to sit before `pid`. Run Step 7: every fixture fails the proof with `table workflow_step: columns differ`. Restore.
+2. Delete the `UPDATE work_unit SET origin = 'reconcile' ...` line. Run Step 7: the backfill tests fail. Restore.
+
+- [ ] **Step 9: Run the whole suite**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test`
+Expected: PASS. Typecheck and lint pass.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add src/db test/helpers/check-probes.ts test/db test/migrate.test.ts docs/architecture/schema.sql src/daemon/failure-policy.ts CLAUDE.md
+git commit -m "feat(eng-477): schema v9 with design input fingerprints, ticket_input and step history" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 5: Canonical encoding and digests
+
+**Files:**
+- Create: `src/daemon/canonical.ts`
+- Test: `test/daemon/canonical.test.ts`
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces: `FINGERPRINT_SCHEME = 1`, `canonicalJson(value: unknown): string`, `sha256Hex(text: string): string`, `digestValue(value: unknown): string`.
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// test/daemon/canonical.test.ts
+import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { canonicalJson, digestValue, sha256Hex } from "../../src/daemon/canonical.ts";
+
+test("object key order does not change the encoding; keys come out sorted", () => {
+  const a = canonicalJson({ b: 1, a: { d: 2, c: 3 } });
+  const b = canonicalJson({ a: { c: 3, d: 2 }, b: 1 });
+  expect(a).toBe(b);
+  expect(a).toBe('{"a":{"c":3,"d":2},"b":1}');
+});
+
+test("keys that look like integers are sorted as strings, not in JavaScript's own key order", () => {
+  expect(canonicalJson({ "9": "x", "10": "y" })).toBe('{"10":"y","9":"x"}');
+});
+
+test("strings and keys are normalised to NFC", () => {
+  const composed = "café";
+  const decomposed = "café";
+  expect(canonicalJson({ [decomposed]: decomposed })).toBe(canonicalJson({ [composed]: composed }));
+});
+
+test("undefined members are dropped and null is kept", () => {
+  expect(canonicalJson({ a: undefined, b: null })).toBe('{"b":null}');
+});
+
+test("array order is meaningful and kept", () => {
+  expect(canonicalJson([2, 1])).not.toBe(canonicalJson([1, 2]));
+});
+
+test("values that have no canonical form are refused loudly", () => {
+  expect(() => canonicalJson({ n: Number.NaN })).toThrow("non-finite");
+  expect(() => canonicalJson({ d: new Date(0) })).toThrow("unsupported");
+  expect(() => canonicalJson({ m: new Map() })).toThrow("unsupported");
+  expect(() => canonicalJson([undefined])).toThrow("undefined");
+  expect(() => canonicalJson({ b: 1n })).toThrow("unsupported");
+});
+
+test("digestValue is the SHA-256 of the canonical encoding", () => {
+  const v = { z: [1, "a"], a: true };
+  expect(digestValue(v)).toBe(createHash("sha256").update(canonicalJson(v), "utf8").digest("hex"));
+  expect(sha256Hex("x")).toHaveLength(64);
+});
+```
+
+- [ ] **Step 2: Run it and see it fail**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/canonical.test.ts`
+Expected: FAIL with `Cannot find module '../../src/daemon/canonical.ts'`.
+
+- [ ] **Step 3: Write the encoding**
+
+```ts
+// src/daemon/canonical.ts
+import { createHash } from "node:crypto";
+
+/** The canonical encoding's version (spec §5.1). A step recorded under another scheme is treated
+ *  as unfingerprinted and adopted (§7.6), never compared byte for byte. */
+export const FINGERPRINT_SCHEME = 1;
+
+function write(v: unknown, path: string): string {
+  if (v === null) return "null";
+  if (typeof v === "string") return JSON.stringify(v.normalize("NFC"));
+  if (typeof v === "boolean") return v ? "true" : "false";
+  if (typeof v === "number") {
+    if (!Number.isFinite(v)) throw new Error(`canonicalJson: non-finite number at ${path}`);
+    return JSON.stringify(v);
+  }
+  if (Array.isArray(v)) {
+    return `[${v
+      .map((x, i) => {
+        if (x === undefined) throw new Error(`canonicalJson: undefined array element at ${path}[${i}]`);
+        return write(x, `${path}[${i}]`);
+      })
+      .join(",")}]`;
+  }
+  if (typeof v === "object") {
+    const proto = Object.getPrototypeOf(v);
+    if (proto !== Object.prototype && proto !== null)
+      throw new Error(`canonicalJson: unsupported object at ${path}`);
+    const entries = Object.keys(v as object)
+      .filter((k) => (v as Record<string, unknown>)[k] !== undefined)
+      .map((k) => [k.normalize("NFC"), (v as Record<string, unknown>)[k]] as const)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    for (let i = 1; i < entries.length; i++) {
+      if (entries[i][0] === entries[i - 1][0])
+        throw new Error(`canonicalJson: two keys normalise to "${entries[i][0]}" at ${path}`);
+    }
+    return `{${entries.map(([k, x]) => `${JSON.stringify(k)}:${write(x, `${path}.${k}`)}`).join(",")}}`;
+  }
+  throw new Error(`canonicalJson: unsupported ${typeof v} at ${path}`);
+}
+
+/** JSON with object keys sorted and every string normalised to NFC (spec §5.1). Built by hand, so
+ *  keys that look like integers are not reordered by JavaScript. Throws on anything JSON cannot say exactly. */
+export function canonicalJson(value: unknown): string {
+  return write(value, "$");
+}
+
+export function sha256Hex(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+export function digestValue(value: unknown): string {
+  return sha256Hex(canonicalJson(value));
+}
+```
+
+- [ ] **Step 4: Run it and see it pass**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/canonical.test.ts`
+Expected: PASS (7 tests).
+
+- [ ] **Step 5: Break it on purpose, see it fail, restore**
+
+Remove `.sort(...)` from the object branch: the key order and integer key tests fail. Restore. Remove both `.normalize("NFC")` calls: the NFC test fails. Restore.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/daemon/canonical.ts test/daemon/canonical.test.ts
+git commit -m "feat(eng-477): canonical JSON encoding and SHA-256 digests for design inputs" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 6: The declared design table and its rules
+
+**Files:**
+- Create: `src/daemon/design-graph.ts`
+- Test: `test/daemon/design-graph.test.ts`
+
+The table's fields come from the handlers and their prompt variable functions, read for this plan:
+- `provision` (`handlers.ts:1341-1505`): `deps.profile.components` (loop, `planProvision`, and `environmentGate` at the end), `deps.unusableComponents`, `deps.nonPrimaryComponents`.
+- `design:dispatch` (`handlers.ts:526-541`): `environmentGate` reads `deps.profile.components`; `designVars` (`prompt-vars.ts:104-120`) reads `ticket.ident`, `ticket.title`, `ticket.description`, `profile.slug`, `profile.components` (detected stacks), `profile.promptVars`, `profile.runtimeContext`; feedback from `designFeedback`.
+- `design:extract` (`handlers.ts:543-588`): `extractVars` (`prompt-vars.ts:90-102`) reads `ticket.ident`, `ticket.title`, `profile.slug`, `profile.components`, `profile.promptVars`, `profile.runtimeContext`; `validateExtraction(units, profile.components)`; `validateCdotImpact(output, profile)` reads `profile.runtimeContext` (`extract-schema.ts:62-98`). The plan is read by the agent from the worktree.
+- `design:size` (`handlers.ts:590-615`): `ctx.config.complexityGrading`; the units; with grading on, `complexityGradeVars` (`prompt-vars.ts:205-218`) reads `ticket.ident`, `ticket.title`, `profile.slug`, `profile.promptVars`, and the grader reads the plan.
+- `design:review` (`handlers.ts:617-661`): `designReviewVars` (`prompt-vars.ts:220-248`) reads `ticket.ident`, `ticket.title`, `profile.slug`, `profile.promptVars`, the units; the reviewer reads the plan. It does NOT read `ticket.description` (the spec's table says it does; the code is authoritative per spec §3, see the hand off notes).
+- `ticket.ident` is read by every handler for dispatch ids and the branch name; the recording proxy treats it as infrastructure (Task 15). It stays declared for `design:extract`, as the spec lists it.
+
+**Interfaces:**
+- Consumes: `StyreError`, `EXIT` (`src/cli/errors.ts`); `TicketRow` (`src/db/repos/ticket.ts`).
+- Produces:
+  - `SNAPSHOT_INPUT_NAMES` (readonly tuple) and `type SnapshotInputName` = `"ticket.ident" | "ticket.title" | "ticket.description" | "profile.slug" | "profile.promptVars" | "profile.runtimeContext" | "profile.components" | "run.unusableComponents" | "run.nonPrimaryComponents" | "config.complexityGrading"`
+  - `TICKET_TEXT_INPUTS: readonly SnapshotInputName[]` (`ticket.ident`, `ticket.title`, `ticket.description`)
+  - `type OutputName = "plan" | "workUnits" | "track" | "planFindings"`, `type InputName = SnapshotInputName | OutputName`
+  - `type DesignStepKey = "provision" | "design:dispatch" | "design:extract" | "design:size" | "design:review"`
+  - `interface InputContext { complexityGrading: boolean }`
+  - `interface StepRow { kind: "step"; stepKey: DesignStepKey; stepType: string; handlerKey: string; appliesWhen: (t: Pick<TicketRow, "track">) => boolean; inputs: (c: InputContext) => readonly InputName[]; feedback: readonly string[]; produces: readonly OutputName[]; fileOutput: boolean }`
+  - `interface GateRow { kind: "gate"; name: "plan-review"; appliesWhen: (t: Pick<TicketRow, "track">) => boolean; reads: readonly OutputName[]; reason: string; signature: string; stepKey: DesignStepKey }`
+  - `type DesignRow = StepRow | GateRow`, `DESIGN_TABLE: readonly DesignRow[]`
+  - `checkDesignTable(table: readonly DesignRow[]): string[]`, `assertDesignTable(table?: readonly DesignRow[]): void` (throws `DesignTableError`, exit 70), `ensureDesignTableChecked(): void`, `class DesignTableError extends StyreError`
+  - `designRouting(table: readonly DesignRow[]): DesignStepKey[]`, `stepRow(stepKey: string): StepRow | undefined`, `isTableStep(stepKey: string): stepKey is DesignStepKey`, `declaresInput(stepKey: string, name: InputName): boolean` (true when declared under either value of `complexityGrading`), `isSnapshotInput(name: string): name is SnapshotInputName`
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// test/daemon/design-graph.test.ts
+import { expect, test } from "bun:test";
+import { EXIT } from "../../src/cli/errors.ts";
+import {
+  DESIGN_TABLE,
+  type DesignRow,
+  DesignTableError,
+  type InputName,
+  type StepRow,
+  assertDesignTable,
+  checkDesignTable,
+  declaresInput,
+  designRouting,
+} from "../../src/daemon/design-graph.ts";
+
+const steps = (t: readonly DesignRow[]) => t.filter((r): r is StepRow => r.kind === "step");
+const replace = (key: string, patch: Partial<StepRow>): DesignRow[] =>
+  DESIGN_TABLE.map((r) => (r.kind === "step" && r.stepKey === key ? { ...r, ...patch } : r));
+
+test("the shipped table satisfies every rule", () => {
+  expect(checkDesignTable(DESIGN_TABLE)).toEqual([]);
+});
+
+test("rule 1 refuses an input that is neither a snapshot input nor an earlier output", () => {
+  const bad = replace("design:extract", { inputs: () => ["ghost" as InputName] });
+  expect(checkDesignTable(bad).join("\n")).toMatch(/rule 1: design:extract reads ghost/);
+});
+
+test("rule 2 refuses an output with two producers", () => {
+  const bad = replace("design:extract", { produces: ["workUnits", "plan"] });
+  expect(checkDesignTable(bad).join("\n")).toMatch(/rule 2: plan is produced by design:dispatch and design:extract/);
+});
+
+test("rule 3 refuses a step that reads what a later step produces", () => {
+  const bad = replace("design:extract", { inputs: () => ["plan", "track"] });
+  expect(checkDesignTable(bad).join("\n")).toMatch(/rule 3: design:extract reads track, produced later by design:size/);
+});
+
+test("rule 4 refuses a routing that does not cover the steps exactly once, in table order", () => {
+  const dup = [...DESIGN_TABLE, steps(DESIGN_TABLE)[1]];
+  expect(checkDesignTable(dup).join("\n")).toMatch(/rule 4: design:dispatch appears twice/);
+  expect(designRouting(DESIGN_TABLE)).toEqual([
+    "provision",
+    "design:dispatch",
+    "design:extract",
+    "design:size",
+    "design:review",
+  ]);
+});
+
+test("a failed assertion is a StyreError with exit 70 naming the rule and the steps", () => {
+  const bad = replace("design:size", { produces: ["track", "workUnits"] });
+  try {
+    assertDesignTable(bad);
+    throw new Error("expected a refusal");
+  } catch (err) {
+    expect(err).toBeInstanceOf(DesignTableError);
+    expect((err as DesignTableError).code).toBe(EXIT.INTERNAL);
+    expect(String((err as DesignTableError).detail)).toContain("design:size");
+  }
+});
+
+test("design:size declares the plan only when grading is on, and declaresInput sees both", () => {
+  const size = steps(DESIGN_TABLE).find((r) => r.stepKey === "design:size") as StepRow;
+  expect(size.inputs({ complexityGrading: false })).not.toContain("plan");
+  expect(size.inputs({ complexityGrading: true })).toContain("plan");
+  expect(declaresInput("design:size", "plan")).toBe(true);
+  expect(declaresInput("design:dispatch", "workUnits")).toBe(false);
+  expect(declaresInput("checks:dispatch", "workUnits")).toBe(false);
+});
+```
+
+- [ ] **Step 2: Run it and see it fail**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/design-graph.test.ts`
+Expected: FAIL with `Cannot find module '../../src/daemon/design-graph.ts'`.
+
+- [ ] **Step 3: Write the table**
+
+```ts
+// src/daemon/design-graph.ts
+import { EXIT, StyreError } from "../cli/errors.ts";
+import type { TicketRow } from "../db/repos/ticket.ts";
+
+/** Inputs Styre hands a design step that are not rows of an earlier step (spec §4). */
+export const SNAPSHOT_INPUT_NAMES = [
+  "ticket.ident",
+  "ticket.title",
+  "ticket.description",
+  "profile.slug",
+  "profile.promptVars",
+  "profile.runtimeContext",
+  "profile.components",
+  "run.unusableComponents",
+  "run.nonPrimaryComponents",
+  "config.complexityGrading",
+] as const;
+export type SnapshotInputName = (typeof SNAPSHOT_INPUT_NAMES)[number];
+
+/** Fixed for the life of a run (E2): written once, never rewritten. */
+export const TICKET_TEXT_INPUTS: readonly SnapshotInputName[] = [
+  "ticket.ident",
+  "ticket.title",
+  "ticket.description",
+];
+
+export type OutputName = "plan" | "workUnits" | "track" | "planFindings";
+export type InputName = SnapshotInputName | OutputName;
+export type DesignStepKey =
+  | "provision"
+  | "design:dispatch"
+  | "design:extract"
+  | "design:size"
+  | "design:review";
+
+export interface InputContext {
+  complexityGrading: boolean;
+}
+
+export interface StepRow {
+  kind: "step";
+  stepKey: DesignStepKey;
+  stepType: string;
+  handlerKey: string;
+  appliesWhen: (t: Pick<TicketRow, "track">) => boolean;
+  /** What Styre hands the step, plus the upstream outputs it reads. */
+  inputs: (c: InputContext) => readonly InputName[];
+  /** Routed backwards on a loopback event; never fingerprinted (spec §6.7). */
+  feedback: readonly string[];
+  produces: readonly OutputName[];
+  /** True when the output lives outside the database (the plan), so its digest is recorded. */
+  fileOutput: boolean;
+}
+
+export interface GateRow {
+  kind: "gate";
+  name: "plan-review";
+  appliesWhen: (t: Pick<TicketRow, "track">) => boolean;
+  reads: readonly OutputName[];
+  reason: string;
+  signature: string;
+  stepKey: DesignStepKey;
+}
+
+export type DesignRow = StepRow | GateRow;
+
+const always = (): boolean => true;
+const fullTrack = (t: Pick<TicketRow, "track">): boolean => t.track === "full";
+
+/** The design stage, in order (spec §3). The resolver's design routing is generated from it. After
+ *  its last row the resolver continues with today's checks routing, unchanged (E9). */
+export const DESIGN_TABLE: readonly DesignRow[] = [
+  {
+    kind: "step",
+    stepKey: "provision",
+    stepType: "provision",
+    handlerKey: "provision",
+    appliesWhen: always,
+    inputs: () => ["profile.components", "run.unusableComponents", "run.nonPrimaryComponents"],
+    feedback: [],
+    produces: [],
+    fileOutput: false,
+  },
+  {
+    kind: "step",
+    stepKey: "design:dispatch",
+    stepType: "dispatch",
+    handlerKey: "design:dispatch",
+    appliesWhen: always,
+    inputs: () => [
+      "ticket.title",
+      "ticket.description",
+      "profile.slug",
+      "profile.promptVars",
+      "profile.runtimeContext",
+      "profile.components",
+    ],
+    feedback: ["design loopback findings"],
+    produces: ["plan"],
+    fileOutput: true,
+  },
+  {
+    kind: "step",
+    stepKey: "design:extract",
+    stepType: "dispatch",
+    handlerKey: "design:extract",
+    appliesWhen: always,
+    inputs: () => [
+      "ticket.ident",
+      "ticket.title",
+      "profile.slug",
+      "profile.promptVars",
+      "profile.runtimeContext",
+      "profile.components",
+      "plan",
+    ],
+    feedback: [],
+    produces: ["workUnits"],
+    fileOutput: false,
+  },
+  {
+    kind: "step",
+    stepKey: "design:size",
+    stepType: "dispatch",
+    handlerKey: "design:size",
+    appliesWhen: always,
+    inputs: (c) =>
+      c.complexityGrading
+        ? ["config.complexityGrading", "workUnits", "ticket.title", "profile.slug", "profile.promptVars", "plan"]
+        : ["config.complexityGrading", "workUnits"],
+    feedback: [],
+    produces: ["track"],
+    fileOutput: false,
+  },
+  {
+    kind: "step",
+    stepKey: "design:review",
+    stepType: "dispatch",
+    handlerKey: "design:review",
+    appliesWhen: fullTrack, // ENG-478's D11 widens this
+    inputs: () => ["ticket.title", "profile.slug", "profile.promptVars", "plan", "workUnits"],
+    feedback: [],
+    produces: ["planFindings"],
+    fileOutput: false,
+  },
+  {
+    kind: "gate",
+    name: "plan-review",
+    appliesWhen: fullTrack,
+    reads: ["planFindings"],
+    reason: "unresolved plan-review findings",
+    signature: "review:unresolved-plan",
+    stepKey: "design:review",
+  },
+];
+
+export class DesignTableError extends StyreError {
+  constructor(violations: string[]) {
+    super({
+      code: EXIT.INTERNAL,
+      headline: "the declared design table breaks its own rules",
+      detail: violations.join("\n"),
+      recovery: "This is a Styre defect; report it with the lines above.",
+    });
+    this.name = "DesignTableError";
+  }
+}
+
+const isSnapshot = (n: string): n is SnapshotInputName =>
+  (SNAPSHOT_INPUT_NAMES as readonly string[]).includes(n);
+export const isSnapshotInput = isSnapshot;
+
+const CONTEXTS: readonly InputContext[] = [{ complexityGrading: false }, { complexityGrading: true }];
+
+/** The four rules of spec §3.1. Returns one line per violation. */
+export function checkDesignTable(table: readonly DesignRow[]): string[] {
+  const out: string[] = [];
+  const stepRows = table.filter((r): r is StepRow => r.kind === "step");
+  const producer = new Map<OutputName, { key: DesignStepKey; index: number }>();
+  stepRows.forEach((r, index) => {
+    for (const o of r.produces) {
+      const prior = producer.get(o);
+      if (prior) out.push(`rule 2: ${o} is produced by ${prior.key} and ${r.stepKey}`);
+      else producer.set(o, { key: r.stepKey, index });
+    }
+  });
+  stepRows.forEach((r, index) => {
+    const read = new Set(CONTEXTS.flatMap((c) => r.inputs(c)));
+    for (const n of read) {
+      if (isSnapshot(n)) continue;
+      const p = producer.get(n as OutputName);
+      if (!p) out.push(`rule 1: ${r.stepKey} reads ${n}, which is neither a snapshot input nor an output`);
+      else if (p.index >= index) out.push(`rule 3: ${r.stepKey} reads ${n}, produced later by ${p.key}`);
+    }
+  });
+  for (const g of table.filter((r): r is GateRow => r.kind === "gate")) {
+    for (const n of g.reads) if (!producer.has(n)) out.push(`rule 1: gate ${g.name} reads ${n}, which no step produces`);
+  }
+  const seen = new Set<string>();
+  for (const r of stepRows) {
+    if (seen.has(r.stepKey)) out.push(`rule 4: ${r.stepKey} appears twice in the routing`);
+    seen.add(r.stepKey);
+  }
+  const routed = designRouting(table);
+  const ordered = stepRows.map((r) => r.stepKey);
+  if (JSON.stringify(routed) !== JSON.stringify(ordered))
+    out.push(`rule 4: the routing ${routed.join(", ")} is not the table order ${ordered.join(", ")}`);
+  return out;
+}
+
+/** The design routing the walk follows: the step rows, in table order. */
+export function designRouting(table: readonly DesignRow[]): DesignStepKey[] {
+  return table.filter((r): r is StepRow => r.kind === "step").map((r) => r.stepKey);
+}
+
+export function assertDesignTable(table: readonly DesignRow[] = DESIGN_TABLE): void {
+  const violations = checkDesignTable(table);
+  if (violations.length > 0) throw new DesignTableError(violations);
+}
+
+let checked = false;
+/** Asserted when the table is first used in a process (spec §3.1). */
+export function ensureDesignTableChecked(): void {
+  if (checked) return;
+  assertDesignTable();
+  checked = true;
+}
+
+export function stepRow(stepKey: string): StepRow | undefined {
+  return DESIGN_TABLE.find((r): r is StepRow => r.kind === "step" && r.stepKey === stepKey);
+}
+
+export function isTableStep(stepKey: string): stepKey is DesignStepKey {
+  return stepRow(stepKey) !== undefined;
+}
+
+export function declaresInput(stepKey: string, name: InputName): boolean {
+  const row = stepRow(stepKey);
+  return row !== undefined && CONTEXTS.some((c) => row.inputs(c).includes(name));
+}
+```
+
+- [ ] **Step 4: Run it and see it pass**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/design-graph.test.ts`
+Expected: PASS (7 tests).
+
+- [ ] **Step 5: Break it on purpose, see it fail, restore**
+
+In `checkDesignTable`, change `else if (p.index >= index)` to `else if (false)`. The rule 3 test fails. Restore.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/daemon/design-graph.ts test/daemon/design-graph.test.ts
+git commit -m "feat(eng-477): the declared design table and its four rules" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 7: The snapshot (`ticket_input`), the starting commit, and the design test harnesses
+
+**Files:**
+- Create: `src/db/repos/ticket-input.ts`, `src/daemon/design-inputs.ts`
+- Create: `test/helpers/design-script.ts`, `test/helpers/design-steps.ts`, `test/helpers/design-harness.ts`
+- Modify: `src/daemon/run-ticket.ts:214-252` (`runTicket` takes `inputs` and captures the snapshot)
+- Modify: `src/cli/run.ts:338,441-477` (`RunDeps.probe`, in-place starting commit, `inputs`, `recordStartingCommit`), `src/cli/run.ts:149-160` (`RunDeps`)
+- Modify: `src/dispatch/handlers.ts:175-196` (`RegistryDeps.recordStartingCommit`), `src/dispatch/handlers.ts:1341-1343` (provision records the worktree starting commit)
+- Modify: `src/cli/park.ts:445-453` (snapshot after `recover()`), `src/cli/run.ts:292-297` (pass `probe` into `resumeDeps`)
+- Modify: `test/helpers/db.ts` (capture a default snapshot), `test/cli/run-e2e.test.ts:40-47,88-96`, `test/daemon/run-ticket.test.ts:467` (pass `inputs`)
+- Test: `test/daemon/design-inputs.test.ts`, `test/cli/snapshot-e2e.test.ts`
+
+**Interfaces:**
+- Consumes: `canonicalJson`, `sha256Hex` (Task 5); `SNAPSHOT_INPUT_NAMES`, `SnapshotInputName`, `TICKET_TEXT_INPUTS` (Task 6); `ticket_input` table (Task 4).
+- Produces:
+  - repo: `interface TicketInputRow { ticket_id: number; name: string; value_json: string; digest: string; captured_at: string }`, `getInput(db, ticketId, name): TicketInputRow | null`, `listInputs(db, ticketId): TicketInputRow[]`, `insertInputIfAbsent(db, row: TicketInputRow): boolean`, `upsertInput(db, row: TicketInputRow): void`
+  - `STARTING_COMMIT_INPUT = "run.startingCommit"`
+  - `interface SnapshotSources { profile: Profile; unusableComponents: readonly UnusableComponent[]; nonPrimaryComponents: readonly NonPrimaryComponent[]; config: Pick<RuntimeConfig, "complexityGrading"> }`
+  - `interface RunInputs extends SnapshotSources { startingCommit: string | null }`
+  - `snapshotValues(ticket: Pick<TicketRow, "ident" | "title" | "description">, s: SnapshotSources): Record<SnapshotInputName, unknown>`
+  - `captureSnapshot(db, ticketId, sources: SnapshotSources): { changed: SnapshotInputName[] }`
+  - `recordStartingCommit(db, ticketId, sha: string): boolean`, `startingCommit(db, ticketId): string | null`
+  - `snapshotDigest(db, ticketId, name: SnapshotInputName): string`, `snapshotValue(db, ticketId, name: SnapshotInputName): unknown`, `requireSnapshot(db, ticketId): void`
+  - `runTicket(deps)` gains the required field `inputs: RunInputs`; `RunDeps.probe?: (repoDir: string, command: string) => boolean`; `RegistryDeps.recordStartingCommit?: boolean`
+  - test helpers: `ScriptStep`, `ScriptUnit`, `ScriptFinding`, `DesignScript`, `ScriptCalls`, `newCalls()`, `defaultScript(overrides)`, `unitsOf(n, { behavioral, dir?, ext?, titleSuffix? })`, `sidecar(value)`, `scriptedRunner(script, calls)`, `stepOfPrompt(prompt)`, `ABSENT_RC`, `harnessProfileRaw(repo, slug?)`; `gitRepo(prefix?)`, `git(cwd, args)`, `DesignTicket`, `makeDesignTicket(opts)`, `driveUntil(t, stop, maxSteps?)`, `atStep(key)`, `reachDesignStep(opts)`; `class DesignHarness` (constructor `(mode?: "worktree" | "in-place", opts?: { slug?: string; repoDir?: string })`) with `fresh(opts?)`, `resume(opts?)`, `editProfile(fn)`, `editConfig(fn)`, `read(fn)`, `readAt(path, fn)`, `dbPath()`, `checkpointDir()`, `probe`, `stderr`, `calls`, `cleanup()`
+  - `TEST_PROFILE` exported from `test/helpers/db.ts`
+
+- [ ] **Step 1: Write the test helpers**
+
+```ts
+// test/helpers/design-script.ts
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
+import type { AgentRunInput, AgentRunResult } from "../../src/agent/runner.ts";
+
+/** The agent steps a design run can reach, recognised by the first line of their prompt template. */
+export const SCRIPT_STEPS = [
+  "design:dispatch",
+  "design:extract",
+  "design:size",
+  "design:review",
+  "checks:dispatch",
+  "implement",
+  "review",
+] as const;
+export type ScriptStep = (typeof SCRIPT_STEPS)[number];
+
+const MARKERS: ReadonlyArray<readonly [string, ScriptStep]> = [
+  ["You are designing ticket", "design:dispatch"],
+  ["You are extracting the work breakdown", "design:extract"],
+  ["You are grading the COMPLEXITY", "design:size"],
+  ["You are the independent plan reviewer", "design:review"],
+  ["You are authoring acceptance checks", "checks:dispatch"],
+  ["You are implementing work-unit", "implement"],
+  ["You are the independent code reviewer", "review"],
+];
+
+export function stepOfPrompt(prompt: string): ScriptStep {
+  for (const [marker, step] of MARKERS) if (prompt.includes(marker)) return step;
+  throw new Error(`design script: unrecognised prompt: ${prompt.slice(0, 120)}`);
+}
+
+export interface ScriptUnit {
+  seq: number;
+  kind: string;
+  title: string;
+  description: string;
+  behavioral: boolean;
+  test_plan: string | null;
+  files_to_touch: string[];
+  verify_check_types: string[];
+  depends_on: number[];
+}
+
+export interface ScriptFinding {
+  severity: "critical" | "major" | "minor" | "nit";
+  category: string;
+  location: string | null;
+  rationale: string;
+  factors: null;
+  deferral_candidate: boolean;
+  work_unit_seq: number | null;
+}
+
+export interface DesignScript {
+  ident: string;
+  /** Plan body for the n-th design:dispatch call (1-based, counted across the whole harness). */
+  plan: (call: number) => string;
+  /** Plan file name under docs/plans/ for the n-th call. */
+  planFile: (call: number) => string;
+  /** Remove the other docs/plans/*.md files first, so a new planFile is a rename. */
+  renamePlan: boolean;
+  units: (call: number) => ScriptUnit[];
+  grade: (call: number) => number;
+  planFindings: (call: number) => ScriptFinding[];
+  /** This step gets a session-limit result: on the `parkOnCall`-th call (counted across the
+   *  harness), or, when that is null, on the first prompt of the step that reaches this runner. */
+  parkAt: ScriptStep | null;
+  parkOnCall: number | null;
+}
+
+export interface ScriptCalls {
+  counts: Record<ScriptStep, number>;
+  prompts: Array<{ step: ScriptStep; prompt: string }>;
+}
+
+export function newCalls(): ScriptCalls {
+  return {
+    counts: Object.fromEntries(SCRIPT_STEPS.map((s) => [s, 0])) as Record<ScriptStep, number>,
+    prompts: [],
+  };
+}
+
+/** `n` units. Behavioural units carry their own test file (validateExtraction requires it), so the
+ *  checks step finds work it cannot verify and pauses the run (`needs_you`) right after design. */
+export function unitsOf(
+  n: number,
+  opts: { behavioral: boolean; dir?: string; ext?: string; titleSuffix?: string },
+): ScriptUnit[] {
+  const dir = opts.dir ?? "lib";
+  const ext = opts.ext ?? "rb";
+  return Array.from({ length: n }, (_, i) => {
+    const seq = i + 1;
+    const code = `${dir}/u${seq}.${ext}`;
+    const test = ext === "rb" ? `test/u${seq}_test.rb` : `${dir}/u${seq}.test.${ext}`;
+    return {
+      seq,
+      kind: "backend",
+      title: `Unit ${seq}${opts.titleSuffix ?? ""}`,
+      description: `Change ${seq}`,
+      behavioral: opts.behavioral,
+      test_plan: opts.behavioral ? `${test} asserts change ${seq}` : null,
+      files_to_touch: opts.behavioral ? [code, test] : [code],
+      verify_check_types: opts.behavioral ? ["test"] : [],
+      depends_on: [],
+    };
+  });
+}
+
+export function defaultScript(overrides: Partial<DesignScript> = {}): DesignScript {
+  return {
+    ident: "ENG-1",
+    plan: () => "Plan body, version 1",
+    planFile: () => "eng-1-plan.md",
+    renamePlan: false,
+    units: () => unitsOf(2, { behavioral: true }),
+    grade: () => 6,
+    planFindings: () => [],
+    parkAt: null,
+    parkOnCall: null,
+    ...overrides,
+  };
+}
+
+export const sidecar = (value: unknown): string =>
+  `Done.\n\n\`\`\`styre-sidecar\n${JSON.stringify(value)}\n\`\`\`\n`;
+
+const ok = (stdout: string): AgentRunResult => ({
+  completed: true,
+  exitCode: 0,
+  stdout,
+  stderr: "",
+  timedOut: false,
+  costUsd: null,
+  tokensIn: null,
+  tokensOut: null,
+});
+
+const sessionLimit = (): AgentRunResult => ({
+  completed: false,
+  exitCode: 1,
+  stdout: "partial output written before the session limit",
+  stderr: "You have reached your session limit · resets tomorrow",
+  timedOut: false,
+  costUsd: null,
+  tokensIn: null,
+  tokensOut: null,
+  cause: "session-limit",
+  resetAt: "tomorrow",
+});
+
+/** A FakeAgentRunner that plays each design step from `script` and counts every call in `calls`. */
+export function scriptedRunner(script: DesignScript, calls: ScriptCalls): FakeAgentRunner {
+  let parked = false;
+  return new FakeAgentRunner((input: AgentRunInput) => {
+    const step = stepOfPrompt(input.prompt);
+    calls.counts[step] += 1;
+    calls.prompts.push({ step, prompt: input.prompt });
+    const n = calls.counts[step];
+    if (script.parkAt === step && (script.parkOnCall === null ? !parked : n === script.parkOnCall)) {
+      parked = true;
+      return sessionLimit();
+    }
+    switch (step) {
+      case "design:dispatch": {
+        const plans = join(input.cwd, "docs", "plans");
+        mkdirSync(plans, { recursive: true });
+        if (script.renamePlan) {
+          for (const f of readdirSync(plans)) if (f.endsWith(".md")) rmSync(join(plans, f));
+        }
+        writeFileSync(
+          join(plans, script.planFile(n)),
+          `---\nlinear: ${script.ident}\n---\n\n${script.plan(n)}\n`,
+        );
+        return ok("Plan written.");
+      }
+      case "design:extract":
+        return ok(sidecar({ units: script.units(n), cdotImpact: {} }));
+      case "design:size":
+        return ok(
+          sidecar({ dimensions: { coupling: 0, blast_radius: 0, difficulty: 0 }, overall: script.grade(n) }),
+        );
+      case "design:review":
+        return ok(sidecar({ findings: script.planFindings(n) }));
+      case "implement": {
+        const seq = Number(input.prompt.match(/You are implementing work-unit (\d+)/)?.[1]);
+        const unit = script.units(Math.max(1, calls.counts["design:extract"])).find((u) => u.seq === seq);
+        if (!unit) throw new Error(`design script: no unit ${seq} to implement`);
+        const created: string[] = [];
+        for (const f of unit.files_to_touch) {
+          const p = join(input.cwd, f);
+          if (existsSync(p)) appendFileSync(p, `# implement call ${n}\n`);
+          else {
+            mkdirSync(dirname(p), { recursive: true });
+            writeFileSync(p, `# unit ${seq}, implement call ${n}\n`);
+            created.push(f);
+          }
+        }
+        return ok(sidecar({ new_files: created }));
+      }
+      case "review":
+        return ok(sidecar({ findings: [] }));
+      case "checks:dispatch":
+        throw new Error("design script: checks:dispatch is not scripted (no runnable check framework)");
+    }
+  });
+}
+
+export const ABSENT_RC = {
+  topology: { type: "cli" },
+  data: { presence: "absent" },
+  caching: { presence: "absent" },
+  observability: { presence: "absent" },
+  configSecrets: { presence: "absent" },
+  documentation: { presence: "absent" },
+  releasePackaging: { mechanism: "none" },
+};
+
+/** One Ruby component whose commands are `true`: provision installs nothing, the toolchain probe
+ *  passes, and no check framework resolves, so behavioural work pauses at checks:dispatch. */
+export function harnessProfileRaw(repo: string, slug = "harness"): Record<string, unknown> {
+  return {
+    slug,
+    targetRepo: repo,
+    defaultBranch: "main",
+    checksSystem: "none",
+    components: [
+      { name: "app", kind: "ruby", paths: ["**"], commands: { build: "true", test: "true", check: "true" } },
+    ],
+    promptVars: { stack: "ruby" },
+    runtimeContext: ABSENT_RC,
+  };
+}
+```
+
+```ts
+// test/helpers/design-steps.ts
+import type { Database } from "bun:sqlite";
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
+import { DEFAULT_RUNTIME_CONFIG, type RuntimeConfig } from "../../src/config/runtime-config.ts";
+import { advanceOneStep } from "../../src/daemon/advance.ts";
+import type { DesignStepKey } from "../../src/daemon/design-graph.ts";
+import { captureSnapshot } from "../../src/daemon/design-inputs.ts";
+import { type StepDescriptor, nextStepKey } from "../../src/daemon/resolver.ts";
+import type { StepRegistry } from "../../src/daemon/step-registry.ts";
+import { openDb } from "../../src/db/client.ts";
+import { migrate } from "../../src/db/migrate.ts";
+import { insertProject } from "../../src/db/repos/project.ts";
+import { insertRun } from "../../src/db/repos/run.ts";
+import { getTicket, insertTicket } from "../../src/db/repos/ticket.ts";
+import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
+import { type Profile, parseProfile } from "../../src/dispatch/profile.ts";
+import { nowUtc } from "../../src/util/time.ts";
+import {
+  type DesignScript,
+  type ScriptCalls,
+  type ScriptUnit,
+  defaultScript,
+  harnessProfileRaw,
+  newCalls,
+  scriptedRunner,
+  unitsOf,
+} from "./design-script.ts";
+
+export function git(cwd: string, args: string[]): string {
+  const r = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+  return r.stdout.toString().trim();
+}
+
+export function gitRepo(prefix = "styre-ds-repo-"): string {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  git(root, ["init", "-q", "-b", "main"]);
+  git(root, ["config", "user.email", "t@s.dev"]);
+  git(root, ["config", "user.name", "T"]);
+  writeFileSync(join(root, "README.md"), "x\n");
+  git(root, ["add", "-A"]);
+  git(root, ["commit", "-q", "-m", "init"]);
+  return root;
+}
+
+/** A ticket in a migrated database, with its snapshot captured and the real dispatch registry over
+ *  a scripted fake agent. Steps run only through advanceOneStep. */
+export interface DesignTicket {
+  db: Database;
+  ticketId: number;
+  repo: string;
+  worktreeRoot: string;
+  profile: Profile;
+  config: RuntimeConfig;
+  script: DesignScript;
+  calls: ScriptCalls;
+  registry: StepRegistry;
+}
+
+export function makeDesignTicket(
+  opts: {
+    script?: Partial<DesignScript>;
+    profile?: (repo: string) => Record<string, unknown>;
+    config?: Partial<RuntimeConfig>;
+  } = {},
+): DesignTicket {
+  const repo = gitRepo();
+  const dbPath = join(mkdtempSync(join(tmpdir(), "styre-ds-db-")), "run.db");
+  migrate(dbPath);
+  const db = openDb(dbPath);
+  const profile = parseProfile((opts.profile ?? harnessProfileRaw)(repo));
+  const projectId = insertProject(db, { slug: profile.slug, targetRepo: repo, defaultBranch: "main" });
+  const ticketId = insertTicket(db, {
+    projectId,
+    ident: "ENG-1",
+    title: "Design ticket",
+    description: "Design body",
+    typeLabel: "Feature",
+    branchPrefix: "feat",
+  });
+  insertRun(db, { runId: "design-steps-run", startedAt: nowUtc(), provider: "claude" });
+  const config: RuntimeConfig = { ...DEFAULT_RUNTIME_CONFIG, ...opts.config };
+  captureSnapshot(db, ticketId, { profile, unusableComponents: [], nonPrimaryComponents: [], config });
+  const calls = newCalls();
+  const script = defaultScript({ ident: "ENG-1", ...opts.script });
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-ds-wt-"));
+  const registry = buildDispatchRegistry({
+    runner: scriptedRunner(script, calls),
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile,
+    worktreeRoot,
+  });
+  return { db, ticketId, repo, worktreeRoot, profile, config, script, calls, registry };
+}
+
+/** Advance until `stop` holds for the next descriptor (checked before each step). */
+export async function driveUntil(
+  t: Pick<DesignTicket, "db" | "ticketId" | "registry" | "config">,
+  stop: (d: StepDescriptor) => boolean,
+  maxSteps = 40,
+): Promise<StepDescriptor> {
+  for (let i = 0; i < maxSteps; i++) {
+    const d = nextStepKey(t.db, t.ticketId);
+    if (stop(d)) return d;
+    await advanceOneStep(t.db, t.ticketId, t.registry, { config: t.config });
+  }
+  throw new Error(`driveUntil: no stop after ${maxSteps} steps`);
+}
+
+export const atStep =
+  (stepKey: string) =>
+  (d: StepDescriptor): boolean =>
+    d.kind === "step" && d.stepKey === stepKey;
+
+/** For the existing tests that used to seed rows: run the real design steps, with a scripted agent,
+ *  until `target` is the next step. Uses the caller's profile and worktree root, so the caller's own
+ *  registry then finds the same worktree. */
+export async function reachDesignStep(opts: {
+  db: Database;
+  ticketId: number;
+  profile: Profile;
+  worktreeRoot: string;
+  target: DesignStepKey;
+  units?: ScriptUnit[];
+  config?: RuntimeConfig;
+}): Promise<ScriptCalls> {
+  const ident = getTicket(opts.db, opts.ticketId)?.ident ?? "ENG-1";
+  const calls = newCalls();
+  const units = opts.units ?? unitsOf(2, { behavioral: false, dir: "src", ext: "ts" });
+  const script = defaultScript({ ident, units: () => units });
+  const registry = buildDispatchRegistry({
+    runner: scriptedRunner(script, calls),
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: opts.profile,
+    worktreeRoot: opts.worktreeRoot,
+  });
+  await driveUntil(
+    { db: opts.db, ticketId: opts.ticketId, registry, config: opts.config ?? DEFAULT_RUNTIME_CONFIG },
+    atStep(opts.target),
+    20,
+  );
+  return calls;
+}
+```
+
+```ts
+// test/helpers/design-harness.ts
+import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { StyreError } from "../../src/cli/errors.ts";
+import { parkDir } from "../../src/cli/park.ts";
+import { type RunArgs, runImpl } from "../../src/cli/run.ts";
+import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
+import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
+import {
+  type DesignScript,
+  type ScriptCalls,
+  defaultScript,
+  harnessProfileRaw,
+  newCalls,
+  scriptedRunner,
+} from "./design-script.ts";
+import { gitRepo } from "./design-steps.ts";
+
+export type HostProbe = (repoDir: string, command: string) => boolean;
+
+export interface HarnessRunOptions {
+  script?: Partial<DesignScript>;
+  /** `styre run --db <path>` (a reused database). */
+  db?: string;
+  acceptHead?: boolean;
+  /** What the tracker would say now; resume must never ask it (E2). */
+  trackerTitle?: string;
+}
+
+/** The whole `styre run` and `styre run --resume`, through runImpl, with a scripted agent, fake
+ *  tracker and forge, a profile and a config file the test can edit between runs, and the host's
+ *  tools decided by `probe`. Every call sets XDG_STATE_HOME and XDG_CONFIG_HOME to this harness's
+ *  own folders and restores them after. Resume more than once only in "in-place" mode: in worktree
+ *  mode each resume recreates the ticket branch from the base (`git worktree add -B`, ENG-488),
+ *  which moves HEAD, so the next resume is refused (exit 65). */
+export class DesignHarness {
+  readonly stateRoot = mkdtempSync(join(tmpdir(), "styre-dh-state-"));
+  readonly configRoot = mkdtempSync(join(tmpdir(), "styre-dh-config-"));
+  readonly filesRoot = mkdtempSync(join(tmpdir(), "styre-dh-files-"));
+  readonly repoDir: string;
+  readonly profilePath = join(this.filesRoot, "profile.json");
+  readonly configPath = join(this.filesRoot, "config.json");
+  readonly calls: ScriptCalls = newCalls();
+  readonly ident = "ENG-1";
+  readonly slug: string;
+  probe: HostProbe = () => true;
+  stderr: string[] = [];
+  private profileRaw: Record<string, unknown>;
+  private configRaw: Record<string, unknown> = { complexityGrading: false };
+
+  /** `opts.repoDir` adopts an existing repository (a restored recording); `opts.slug` names the
+   *  project, which keys the checkpoint folder. */
+  constructor(
+    readonly mode: "worktree" | "in-place" = "worktree",
+    opts: { slug?: string; repoDir?: string } = {},
+  ) {
+    this.slug = opts.slug ?? "harness";
+    this.repoDir = opts.repoDir ?? gitRepo("styre-dh-repo-");
+    this.profileRaw = harnessProfileRaw(this.repoDir, this.slug);
+    if (mode === "in-place") {
+      writeFileSync(join(this.repoDir, ".styre-disposable"), "");
+      writeFileSync(join(this.repoDir, ".git", "info", "exclude"), ".styre-disposable\n");
+    }
+    this.write();
+  }
+
+  private write(): void {
+    writeFileSync(this.profilePath, JSON.stringify(this.profileRaw, null, 2));
+    writeFileSync(this.configPath, JSON.stringify(this.configRaw, null, 2));
+  }
+
+  editProfile(fn: (raw: Record<string, unknown>) => void): void {
+    fn(this.profileRaw);
+    this.write();
+  }
+
+  editConfig(fn: (raw: Record<string, unknown>) => void): void {
+    fn(this.configRaw);
+    this.write();
+  }
+
+  private withEnv<T>(fn: () => T): T {
+    const prev = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = this.stateRoot;
+    try {
+      return fn();
+    } finally {
+      if (prev === undefined) Reflect.deleteProperty(process.env, "XDG_STATE_HOME");
+      else process.env.XDG_STATE_HOME = prev;
+    }
+  }
+
+  checkpointDir(): string {
+    return this.withEnv(() => parkDir(this.slug, this.ident));
+  }
+
+  dbPath(): string {
+    return join(this.checkpointDir(), "run.db");
+  }
+
+  read<T>(fn: (db: Database, ticketId: number) => T): T {
+    return this.readAt(this.dbPath(), fn);
+  }
+
+  readAt<T>(path: string, fn: (db: Database, ticketId: number) => T): T {
+    const db = new Database(path, { readonly: true });
+    try {
+      const t = db.query<{ id: number }, []>("SELECT id FROM ticket ORDER BY id LIMIT 1").get();
+      if (!t) throw new Error(`harness: no ticket in ${path}`);
+      return fn(db, t.id);
+    } finally {
+      db.close();
+    }
+  }
+
+  async fresh(opts: HarnessRunOptions = {}): Promise<number> {
+    return this.invoke(
+      {
+        ticket: this.ident,
+        ...(opts.db ? { db: opts.db } : {}),
+        ...(this.mode === "in-place" ? { "in-place": true } : {}),
+      },
+      opts,
+    );
+  }
+
+  async resume(opts: HarnessRunOptions = {}): Promise<number> {
+    return this.invoke({ resume: this.ident, ...(opts.acceptHead ? { "accept-head": true } : {}) }, opts);
+  }
+
+  private async invoke(args: Partial<RunArgs>, opts: HarnessRunOptions): Promise<number> {
+    const script = defaultScript({ ident: this.ident, ...opts.script });
+    const runner = scriptedRunner(script, this.calls);
+    const ports = {
+      issueTracker: fakeIssueTracker({
+        ticket: {
+          ident: this.ident,
+          title: opts.trackerTitle ?? "Harness ticket",
+          description: "Harness body",
+          typeLabel: "Feature",
+          externalId: "uuid-harness",
+          url: null,
+        },
+      }),
+      forge: fakeForge(),
+    };
+    const prev = {
+      state: process.env.XDG_STATE_HOME,
+      config: process.env.XDG_CONFIG_HOME,
+      telemetry: process.env.STYRE_TELEMETRY,
+      exit: process.exitCode ?? 0,
+      cwd: process.cwd(),
+      write: process.stderr.write,
+    };
+    process.env.XDG_STATE_HOME = this.stateRoot;
+    process.env.XDG_CONFIG_HOME = this.configRoot;
+    process.env.STYRE_TELEMETRY = "0";
+    process.stderr.write = ((chunk: unknown) => {
+      this.stderr.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    if (args["in-place"]) process.chdir(this.repoDir); // in-place discovers the repo from the cwd
+    try {
+      process.exitCode = 0;
+      await runImpl(
+        { args: { profile: this.profilePath, config: this.configPath, ...args } },
+        { ports, runner, preflight: () => ({ ok: true, version: null }), probe: this.probe },
+      );
+      return Number(process.exitCode ?? 0);
+    } catch (err) {
+      if (err instanceof StyreError) return err.code;
+      throw err;
+    } finally {
+      process.stderr.write = prev.write;
+      process.chdir(prev.cwd);
+      process.exitCode = prev.exit;
+      const restore = (k: string, v: string | undefined) => {
+        if (v === undefined) Reflect.deleteProperty(process.env, k);
+        else process.env[k] = v;
+      };
+      restore("XDG_STATE_HOME", prev.state);
+      restore("XDG_CONFIG_HOME", prev.config);
+      restore("STYRE_TELEMETRY", prev.telemetry);
+    }
+  }
+
+  cleanup(): void {
+    for (const d of [this.stateRoot, this.configRoot, this.filesRoot, this.repoDir])
+      rmSync(d, { recursive: true, force: true });
+  }
+}
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+```ts
+// test/daemon/design-inputs.test.ts
+import { expect, test } from "bun:test";
+import { SNAPSHOT_INPUT_NAMES } from "../../src/daemon/design-graph.ts";
+import {
+  captureSnapshot,
+  recordStartingCommit,
+  requireSnapshot,
+  startingCommit,
+} from "../../src/daemon/design-inputs.ts";
+import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { insertProject } from "../../src/db/repos/project.ts";
+import { getInput, listInputs } from "../../src/db/repos/ticket-input.ts";
+import { insertTicket, setTicketStage } from "../../src/db/repos/ticket.ts";
+import { makeTestDb } from "../helpers/db.ts";
+import { makeDesignTicket } from "../helpers/design-steps.ts";
+
+const sources = (t: ReturnType<typeof makeDesignTicket>, promptVars = t.profile.promptVars) => ({
+  profile: { ...t.profile, promptVars },
+  unusableComponents: [],
+  nonPrimaryComponents: [],
+  config: t.config,
+});
+const notes = (t: ReturnType<typeof makeDesignTicket>) =>
+  listEvents(t.db, t.ticketId).filter((e) => e.reason === "inputs-changed");
+
+test("the first capture writes every declared input and the ticket text, with no note", () => {
+  const t = makeDesignTicket();
+  expect(listInputs(t.db, t.ticketId).map((r) => r.name).sort()).toEqual([...SNAPSHOT_INPUT_NAMES].sort());
+  expect(JSON.parse(getInput(t.db, t.ticketId, "ticket.title")?.value_json ?? "null")).toBe("Design ticket");
+  expect(notes(t)).toEqual([]);
+});
+
+test("an unchanged capture changes nothing", () => {
+  const t = makeDesignTicket();
+  const before = listInputs(t.db, t.ticketId);
+  expect(captureSnapshot(t.db, t.ticketId, sources(t)).changed).toEqual([]);
+  expect(listInputs(t.db, t.ticketId)).toEqual(before);
+  expect(notes(t)).toEqual([]);
+});
+
+test("a changed profile field is rewritten and named in one inputs-changed note", () => {
+  const t = makeDesignTicket();
+  const old = getInput(t.db, t.ticketId, "profile.promptVars")?.digest;
+  const r = captureSnapshot(t.db, t.ticketId, sources(t, { stack: "ruby", extra: "1" }));
+  expect(r.changed).toEqual(["profile.promptVars"]);
+  expect(getInput(t.db, t.ticketId, "profile.promptVars")?.digest).not.toBe(old);
+  const [note] = notes(t);
+  expect(JSON.parse(note.payload_json ?? "{}")).toMatchObject({
+    event: "inputs-changed",
+    names: ["profile.promptVars"],
+    pastDesign: false,
+  });
+});
+
+test("past design, the note says the change takes effect the next time the run is in design (E6)", () => {
+  const t = makeDesignTicket();
+  setTicketStage(t.db, t.ticketId, "implement");
+  captureSnapshot(t.db, t.ticketId, sources(t, { stack: "other" }));
+  const payload = JSON.parse(notes(t)[0].payload_json ?? "{}");
+  expect(payload.pastDesign).toBe(true);
+  expect(payload.message).toContain("next time the run is in design");
+});
+
+test("the starting commit is written once and never rewritten", () => {
+  const t = makeDesignTicket();
+  expect(recordStartingCommit(t.db, t.ticketId, "aaa")).toBe(true);
+  expect(recordStartingCommit(t.db, t.ticketId, "bbb")).toBe(false);
+  expect(startingCommit(t.db, t.ticketId)).toBe("aaa");
+});
+
+test("requireSnapshot names the inputs a ticket is missing", () => {
+  const { db } = makeTestDb({ seedTicket: false });
+  const projectId = insertProject(db, { slug: "p", targetRepo: "/tmp/x" });
+  const ticketId = insertTicket(db, { projectId, ident: "ENG-2" });
+  expect(() => requireSnapshot(db, ticketId)).toThrow("profile.components");
+  db.close();
+});
+```
+
+```ts
+// test/cli/snapshot-e2e.test.ts
+import { afterEach, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { startingCommit } from "../../src/daemon/design-inputs.ts";
+import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { getInput } from "../../src/db/repos/ticket-input.ts";
+import { DesignHarness } from "../helpers/design-harness.ts";
+import { git } from "../helpers/design-steps.ts";
+
+const harnesses: DesignHarness[] = [];
+const make = (mode: "worktree" | "in-place" = "worktree") => {
+  const h = new DesignHarness(mode);
+  harnesses.push(h);
+  return h;
+};
+afterEach(() => {
+  for (const h of harnesses.splice(0)) h.cleanup();
+});
+
+test("in place: the starting commit is HEAD at run start, unchanged by resume and --accept-head (§8.11)", async () => {
+  const h = make("in-place");
+  const head = git(h.repoDir, ["rev-parse", "HEAD"]);
+  expect(await h.fresh()).toBe(75); // pauses needs_you at checks:dispatch
+  expect(h.read((db, id) => startingCommit(db, id))).toBe(head);
+  expect(await h.resume()).toBe(75);
+  expect(h.read((db, id) => startingCommit(db, id))).toBe(head);
+  writeFileSync(join(h.repoDir, "operator.txt"), "an operator commit\n");
+  git(h.repoDir, ["add", "operator.txt"]);
+  git(h.repoDir, ["commit", "-q", "-m", "operator"]);
+  expect(await h.resume()).toBe(65); // HEAD moved
+  expect(await h.resume({ acceptHead: true })).toBe(75);
+  expect(h.read((db, id) => startingCommit(db, id))).toBe(head);
+});
+
+test("worktree mode: the starting commit is the commit the ticket branch was created from (§8.11)", async () => {
+  const h = make("worktree");
+  const main = git(h.repoDir, ["rev-parse", "main"]);
+  expect(await h.fresh()).toBe(75);
+  expect(h.read((db, id) => startingCommit(db, id))).toBe(main);
+  git(h.repoDir, ["commit", "-q", "--allow-empty", "-m", "main moves on"]); // a later main commit
+  expect(await h.resume()).toBe(75);
+  expect(h.read((db, id) => startingCommit(db, id))).toBe(main);
+});
+
+test("E2: resume never reads the tracker; the ticket text stays as the run started", async () => {
+  const h = make();
+  expect(await h.fresh()).toBe(75);
+  expect(await h.resume({ trackerTitle: "Edited in the tracker" })).toBe(75);
+  h.read((db, id) => {
+    expect(JSON.parse(getInput(db, id, "ticket.title")?.value_json ?? "null")).toBe("Harness ticket");
+    expect(listEvents(db, id).filter((e) => e.reason === "inputs-changed")).toEqual([]);
+  });
+});
+
+test("a reused --db keeps the ticket text and rewrites the profile with an inputs-changed note", async () => {
+  const h = make();
+  const dbFile = join(mkdtempSync(join(tmpdir(), "styre-reuse-")), "reuse.db");
+  expect(await h.fresh({ db: dbFile })).toBe(75);
+  const titleAt = h.readAt(dbFile, (db, id) => getInput(db, id, "ticket.title")?.captured_at);
+  h.editProfile((p) => {
+    p.promptVars = { stack: "ruby", tone: "terse" };
+  });
+  expect(await h.fresh({ db: dbFile })).toBe(75);
+  h.readAt(dbFile, (db, id) => {
+    expect(getInput(db, id, "ticket.title")?.captured_at).toBe(titleAt);
+    const note = listEvents(db, id).find((e) => e.reason === "inputs-changed");
+    expect(JSON.parse(note?.payload_json ?? "{}").names).toEqual(["profile.promptVars"]);
+  });
+});
+```
+
+- [ ] **Step 3: Run them and see them fail**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/design-inputs.test.ts test/cli/snapshot-e2e.test.ts`
+Expected: FAIL with `Cannot find module '../../src/daemon/design-inputs.ts'`.
+
+- [ ] **Step 4: Write the repository and the snapshot**
+
+```ts
+// src/db/repos/ticket-input.ts
+import type { Database } from "bun:sqlite";
+
+export interface TicketInputRow {
+  ticket_id: number;
+  name: string;
+  value_json: string;
+  digest: string;
+  captured_at: string;
+}
+
+const COLS = "ticket_id, name, value_json, digest, captured_at";
+
+export function getInput(db: Database, ticketId: number, name: string): TicketInputRow | null {
+  return (
+    db
+      .query<TicketInputRow, [number, string]>(
+        `SELECT ${COLS} FROM ticket_input WHERE ticket_id = ? AND name = ?`,
+      )
+      .get(ticketId, name) ?? null
+  );
+}
+
+export function listInputs(db: Database, ticketId: number): TicketInputRow[] {
+  return db
+    .query<TicketInputRow, [number]>(`SELECT ${COLS} FROM ticket_input WHERE ticket_id = ? ORDER BY name`)
+    .all(ticketId);
+}
+
+/** True when the row was written; an existing row is never touched. */
+export function insertInputIfAbsent(db: Database, row: TicketInputRow): boolean {
+  const res = db
+    .query(
+      `INSERT OR IGNORE INTO ticket_input (${COLS}) VALUES ($t, $n, $v, $d, $c)`,
+    )
+    .run({ $t: row.ticket_id, $n: row.name, $v: row.value_json, $d: row.digest, $c: row.captured_at });
+  return res.changes === 1;
+}
+
+export function upsertInput(db: Database, row: TicketInputRow): void {
+  db.query(
+    `INSERT INTO ticket_input (${COLS}) VALUES ($t, $n, $v, $d, $c)
+     ON CONFLICT (ticket_id, name) DO UPDATE SET value_json = $v, digest = $d, captured_at = $c`,
+  ).run({ $t: row.ticket_id, $n: row.name, $v: row.value_json, $d: row.digest, $c: row.captured_at });
+}
+```
+
+```ts
+// src/daemon/design-inputs.ts
+import type { Database } from "bun:sqlite";
+import type { NonPrimaryComponent } from "../cli/component-roles.ts";
+import type { UnusableComponent } from "../cli/preflight.ts";
+import type { RuntimeConfig } from "../config/runtime-config.ts";
+import { appendEvent } from "../db/repos/event-log.ts";
+import { getInput, insertInputIfAbsent, upsertInput } from "../db/repos/ticket-input.ts";
+import { type TicketRow, getTicket } from "../db/repos/ticket.ts";
+import type { Profile } from "../dispatch/profile.ts";
+import { nowUtc } from "../util/time.ts";
+import { canonicalJson, sha256Hex } from "./canonical.ts";
+import { SNAPSHOT_INPUT_NAMES, type SnapshotInputName, TICKET_TEXT_INPUTS } from "./design-graph.ts";
+
+/** The commit a run started from (spec §4.2). Not a fingerprinted input; ENG-478 reads it. */
+export const STARTING_COMMIT_INPUT = "run.startingCommit";
+
+/** What the design handlers receive, exactly (spec §4.1): the profile narrowed by role and by this
+ *  host's toolchain, the lists of what was narrowed away, and the config. */
+export interface SnapshotSources {
+  profile: Profile;
+  unusableComponents: readonly UnusableComponent[];
+  nonPrimaryComponents: readonly NonPrimaryComponent[];
+  config: Pick<RuntimeConfig, "complexityGrading">;
+}
+
+export interface RunInputs extends SnapshotSources {
+  /** In place: HEAD at run start. Worktree mode: null here; provision records it (§4.2). */
+  startingCommit: string | null;
+}
+
+const byComponent = <T extends { component: string }>(a: T, b: T): number =>
+  a.component < b.component ? -1 : a.component > b.component ? 1 : 0;
+
+export function snapshotValues(
+  ticket: Pick<TicketRow, "ident" | "title" | "description">,
+  s: SnapshotSources,
+): Record<SnapshotInputName, unknown> {
+  return {
+    "ticket.ident": ticket.ident,
+    "ticket.title": ticket.title,
+    "ticket.description": ticket.description,
+    "profile.slug": s.profile.slug,
+    "profile.promptVars": s.profile.promptVars,
+    "profile.runtimeContext": s.profile.runtimeContext,
+    "profile.components": s.profile.components,
+    // sets: sorted, so the host's discovery order cannot change the digest
+    "run.unusableComponents": [...s.unusableComponents].sort(byComponent),
+    "run.nonPrimaryComponents": [...s.nonPrimaryComponents].sort(byComponent),
+    "config.complexityGrading": s.config.complexityGrading,
+  };
+}
+
+/** Write the snapshot (spec §4). The ticket text is written once and never rewritten (E2); every
+ *  other input is rewritten when its digest changed, and the changed names go in one `note` event,
+ *  reason `inputs-changed`. Called at run start, on a reused --db, and on each resume. */
+export function captureSnapshot(
+  db: Database,
+  ticketId: number,
+  sources: SnapshotSources,
+): { changed: SnapshotInputName[] } {
+  const ticket = getTicket(db, ticketId);
+  if (!ticket) throw new Error(`captureSnapshot: ticket ${ticketId} not found`);
+  const values = snapshotValues(ticket, sources);
+  const changed: SnapshotInputName[] = [];
+  db.transaction(() => {
+    const at = nowUtc();
+    for (const name of SNAPSHOT_INPUT_NAMES) {
+      const value_json = canonicalJson(values[name]);
+      const row = { ticket_id: ticketId, name, value_json, digest: sha256Hex(value_json), captured_at: at };
+      if (TICKET_TEXT_INPUTS.includes(name)) {
+        insertInputIfAbsent(db, row);
+        continue;
+      }
+      const prior = getInput(db, ticketId, name);
+      if (prior === null) upsertInput(db, row);
+      else if (prior.digest !== row.digest) {
+        upsertInput(db, row);
+        changed.push(name);
+      }
+    }
+    if (changed.length > 0) {
+      const pastDesign = ticket.stage !== "design";
+      appendEvent(db, {
+        ticketId,
+        kind: "note",
+        reason: "inputs-changed",
+        payload: {
+          event: "inputs-changed",
+          names: changed,
+          pastDesign,
+          message: pastDesign
+            ? "recorded; the run carries on from where it paused, and the change takes effect the next time the run is in design"
+            : "the design steps that read these inputs are judged again before the run continues",
+        },
+      });
+    }
+  })();
+  return { changed };
+}
+
+export function recordStartingCommit(db: Database, ticketId: number, sha: string): boolean {
+  const value_json = canonicalJson(sha);
+  return insertInputIfAbsent(db, {
+    ticket_id: ticketId,
+    name: STARTING_COMMIT_INPUT,
+    value_json,
+    digest: sha256Hex(value_json),
+    captured_at: nowUtc(),
+  });
+}
+
+export function startingCommit(db: Database, ticketId: number): string | null {
+  const row = getInput(db, ticketId, STARTING_COMMIT_INPUT);
+  return row === null ? null : (JSON.parse(row.value_json) as string);
+}
+
+function requireRow(db: Database, ticketId: number, name: SnapshotInputName) {
+  const row = getInput(db, ticketId, name);
+  if (row === null)
+    throw new Error(`ticket ${ticketId}: ticket_input is missing ${name}; the snapshot was never captured`);
+  return row;
+}
+
+export function snapshotDigest(db: Database, ticketId: number, name: SnapshotInputName): string {
+  return requireRow(db, ticketId, name).digest;
+}
+
+export function snapshotValue(db: Database, ticketId: number, name: SnapshotInputName): unknown {
+  return JSON.parse(requireRow(db, ticketId, name).value_json);
+}
+
+/** A design table step may run only once the snapshot exists (fail fast, spec §5.2). */
+export function requireSnapshot(db: Database, ticketId: number): void {
+  const missing = SNAPSHOT_INPUT_NAMES.filter((n) => getInput(db, ticketId, n) === null);
+  if (missing.length > 0)
+    throw new Error(`ticket ${ticketId}: ticket_input is missing ${missing.join(", ")}; the snapshot was never captured`);
+}
+```
+
+- [ ] **Step 5: Wire the fresh run, the reused `--db`, the starting commit and the resume**
+
+`src/daemon/run-ticket.ts`: import `{ type RunInputs, captureSnapshot, recordStartingCommit } from "./design-inputs.ts"`; add to `runTicket`'s parameter type, after `onTicket?`:
+
+```ts
+  /** The design inputs exactly as the handlers receive them (spec §4); captured before any step. */
+  inputs: RunInputs;
+```
+
+and after `deps.onTicket?.(ticketId);`:
+
+```ts
+  // A new database gets every row; a reused --db keeps its ticket text and starting commit and
+  // rewrites the rest with an `inputs-changed` note (spec §4).
+  captureSnapshot(deps.db, ticketId, deps.inputs);
+  if (deps.inputs.startingCommit !== null)
+    recordStartingCommit(deps.db, ticketId, deps.inputs.startingCommit);
+```
+
+`src/cli/run.ts`:
+- in `RunDeps`, add `/** The toolchain probe (tests); the real `probeCommandExists` otherwise. */ probe?: (repoDir: string, command: string) => boolean;`
+- line 338: `const toolchain = applyToolchainGate(profile, deps?.probe);`
+- before `const runner = deps?.runner ?? resolveAgentRunner(agentConfig);` (line 441):
+
+```ts
+      const inPlace = (args["in-place"] as boolean | undefined) ?? false;
+      // spec §4.2: in place, the starting commit is HEAD of the checkout at run start.
+      const runStartingCommit = inPlace ? branchHeadSha(profile.targetRepo, "HEAD") : null;
+```
+
+- in the `buildDispatchRegistry({...})` call, replace `inPlace: (args["in-place"] as boolean | undefined) ?? false,` with `inPlace,` and add `recordStartingCommit: true,`
+- in the `runTicket({...})` call, add:
+
+```ts
+        inputs: {
+          profile,
+          unusableComponents: toolchain.unusable,
+          nonPrimaryComponents: loaded.nonPrimary,
+          config: runtimeConfig,
+          startingCommit: runStartingCommit,
+        },
+```
+
+- in `resumeDeps` (lines 292-297) add `probe: deps?.probe,`.
+
+`src/dispatch/handlers.ts`: add to `RegistryDeps`:
+
+```ts
+  /** A fresh run records, in worktree mode, the commit the ticket branch is created from, right
+   *  after provision first creates it (spec §4.2). Resume never sets it: there `worktree add -B`
+   *  recreates the branch (ENG-488), which is not its first creation. */
+  recordStartingCommit?: boolean;
+```
+
+import `recordStartingCommit` from `../daemon/design-inputs.ts`, and in the provision handler after `ensureWorktree(repoPath, branch, worktreePath);` (line 1343):
+
+```ts
+    if (deps.recordStartingCommit === true && !deps.inPlace) {
+      recordStartingCommit(ctx.db, ctx.ticket.id, worktreeHead(worktreePath));
+    }
+```
+
+`src/cli/park.ts`: import `captureSnapshot` from `../daemon/design-inputs.ts`; add `probe?: (repoDir: string, command: string) => boolean;` to `resumeRun`'s `deps` type; right after the `recover(db, {...});` call (line 451):
+
+```ts
+    // spec §4: after recover() and the provision reset, before the first resolver pass, the profile
+    // and config rows are rewritten from what the handlers will receive now. The ticket text and the
+    // starting commit never are (E2).
+    captureSnapshot(db, ticketId, {
+      profile,
+      unusableComponents: [],
+      nonPrimaryComponents,
+      config: runtimeConfig,
+    });
+```
+
+(Task 8 replaces `profile` and `[]` here with the narrowed profile and its unusable list.)
+
+`test/helpers/db.ts`: add the imports `DEFAULT_RUNTIME_CONFIG`, `captureSnapshot`, `parseProfile`, export
+
+```ts
+/** The profile every makeTestDb ticket's snapshot is captured from (the tests that use makeTestDb
+ *  build their own registries; the snapshot only has to exist and stay stable). */
+export const TEST_PROFILE = parseProfile({ slug: "test-project", targetRepo: "/tmp/repo", components: [] });
+```
+
+and after `insertRun(...)`:
+
+```ts
+    captureSnapshot(db, ticketId, {
+      profile: TEST_PROFILE,
+      unusableComponents: [],
+      nonPrimaryComponents: [],
+      config: DEFAULT_RUNTIME_CONFIG,
+    });
+```
+
+`test/cli/run-e2e.test.ts` (both `runTicket` calls) and `test/daemon/run-ticket.test.ts:467`: add `inputs: { profile: <the profile the call already passes>, unusableComponents: [], nonPrimaryComponents: [], config: DEFAULT_RUNTIME_CONFIG, startingCommit: null },` (in `run-e2e.test.ts` the profile is the local `profile`; in `run-ticket.test.ts` hoist the inline `parseProfile({...})` into a `const profile` and pass it to both fields).
+
+- [ ] **Step 6: Run the tests and see them pass**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/design-inputs.test.ts test/cli/snapshot-e2e.test.ts test/cli/run-e2e.test.ts test/daemon/run-ticket.test.ts`
+Expected: PASS.
+
+- [ ] **Step 7: Break it on purpose, see it fail, restore**
+
+1. In the provision hook, drop the `deps.recordStartingCommit === true &&` condition, and in `recordStartingCommit` call `upsertInput` instead of `insertInputIfAbsent`. Run `perl -e 'alarm 600; exec @ARGV' bun test test/cli/snapshot-e2e.test.ts`: the worktree test fails, because the resumed run's provision recreates the branch from the moved `main` (ENG-488) and records that commit. Restore both.
+2. In `captureSnapshot`, change `else if (prior.digest !== row.digest)` to `else if (false)`. The reused `--db` test fails (no note, profile row not rewritten). Restore.
+
+- [ ] **Step 8: Run the whole suite**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test`
+Expected: PASS. Typecheck and lint pass.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/db/repos/ticket-input.ts src/daemon/design-inputs.ts src/daemon/run-ticket.ts src/cli/run.ts src/cli/park.ts src/dispatch/handlers.ts test/helpers test/daemon/design-inputs.test.ts test/cli/snapshot-e2e.test.ts test/cli/run-e2e.test.ts test/daemon/run-ticket.test.ts
+git commit -m "feat(eng-477): snapshot the design inputs in ticket_input and record the starting commit" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 8: Resume narrows the profile like a fresh run, pauses instead of dropping a required suite, and wires the unusable list
+
+**Files:**
+- Modify: `src/cli/preflight.ts:156-189` (one decision shared by fresh runs and resumes; the notice; the pause reason)
+- Modify: `src/cli/run.ts:338-349` (fresh path uses the shared notice)
+- Modify: `src/cli/park.ts:214-234` (deps: `buildRegistry` gets the wiring), `src/cli/park.ts:441-473` (narrowing and its pause after `recover()`, snapshot from the narrowed profile, registry wiring)
+- Modify (hermetic probes): `test/cli/park.test.ts:171`, `test/cli/park-agent-preflight.test.ts:80`, `test/cli/park-inplace.test.ts:127,241,331,437`, `test/lifecycle/wiring.test.ts:1003`, `test/lifecycle/e2e-interrupt.test.ts:581`, `test/cli/run-pr-base.test.ts` (both `resumeRun` deps), `test/cli/resume-requeue-forge.test.ts` (its `resumeRun` deps), `test/helpers/run-harness.ts:390` (`resumeParkedTicket`'s deps)
+- Test: `test/cli/preflight.test.ts` (add cases), `test/cli/resume-narrowing-e2e.test.ts`
+
+**Interfaces:**
+- Consumes: `captureSnapshot` (Task 7), `DesignHarness` (Task 7), `pauseTicket` (`src/daemon/pause-ticket.ts:16`), `exitCodeForOutcome` (`src/cli/outcome.ts:28`), `partitionByToolchain`, `formatUnusableComponents`, `formatMissingTools`, `toolchainError` (existing).
+- Produces:
+  - `type ToolchainDecision = { kind: "use"; profile: Profile; unusable: UnusableComponent[] } | { kind: "refuse"; partition: ToolchainPartition; blocking: UnusableComponent[] }`
+  - `toolchainDecision(profile: Profile, probe?: (repoDir: string, command: string) => boolean): ToolchainDecision`
+  - `applyToolchainGate(profile, probe?)` (unchanged signature; now built on `toolchainDecision`)
+  - `toolchainNotice(unusable: readonly UnusableComponent[], profile: Profile): string`
+  - `resumePauseReason(blocking: readonly UnusableComponent[]): string`
+  - `interface ResumeRegistryWiring { profile: Profile; unusableComponents: UnusableComponent[]; nonPrimaryComponents: NonPrimaryComponent[]; inPlace: boolean; worktreeRoot: string }`
+  - `resumeRun` deps: `buildRegistry?: (resumeContext: ResumeContext | undefined, wiring: ResumeRegistryWiring) => StepRegistry` and `probe?: (repoDir: string, command: string) => boolean`
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `test/cli/preflight.test.ts`:
+
+```ts
+import { parseProfile } from "../../src/dispatch/profile.ts";
+import { resumePauseReason, toolchainDecision, toolchainNotice } from "../../src/cli/preflight.ts";
+
+const twoComponents = (required: boolean) =>
+  parseProfile({
+    slug: "p",
+    targetRepo: "/tmp/p",
+    components: [
+      { name: "app", kind: "ruby", paths: ["app/**"], commands: { build: "true", test: "true", check: "true" } },
+      {
+        name: "lib",
+        kind: "ruby",
+        paths: ["lib/**"],
+        commands: { build: "lib-build", test: "lib-test", check: "lib-check" },
+        ...(required ? { testPolicy: { suite: "required" } } : {}),
+      },
+    ],
+  });
+const libMissing = (_dir: string, cmd: string) => !cmd.startsWith("lib-");
+
+test("toolchainDecision narrows an optional component away, as the fresh gate does", () => {
+  const d = toolchainDecision(twoComponents(false), libMissing);
+  if (d.kind !== "use") throw new Error("expected use");
+  expect(d.profile.components.map((c) => c.name)).toEqual(["app"]);
+  expect(d.unusable.map((u) => u.component)).toEqual(["lib"]);
+  expect(toolchainNotice(d.unusable, d.profile)).toContain(
+    "skipping 1 component(s) whose toolchain is absent; the run continues with app.",
+  );
+});
+
+test("toolchainDecision refuses to drop a required suite and names it", () => {
+  const d = toolchainDecision(twoComponents(true), libMissing);
+  if (d.kind !== "refuse") throw new Error("expected refuse");
+  expect(d.blocking.map((u) => u.component)).toEqual(["lib"]);
+  const reason = resumePauseReason(d.blocking);
+  expect(reason).toContain("lib");
+  expect(reason).toContain("lib-build");
+});
+```
+
+```ts
+// test/cli/resume-narrowing-e2e.test.ts
+import { afterEach, expect, test } from "bun:test";
+import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { listByTicket as listSignals } from "../../src/db/repos/ground-truth-signal.ts";
+import { listPending } from "../../src/db/repos/signal.ts";
+import { getInput } from "../../src/db/repos/ticket-input.ts";
+import { DesignHarness } from "../helpers/design-harness.ts";
+
+const harnesses: DesignHarness[] = [];
+const make = (mode: "worktree" | "in-place", required: boolean): DesignHarness => {
+  const h = new DesignHarness(mode);
+  h.editProfile((p) => {
+    (p.components as unknown[]).push({
+      name: "lib",
+      kind: "ruby",
+      paths: ["vendor-lib/**"],
+      commands: { build: "lib-build", test: "lib-test", check: "lib-check" },
+      ...(required ? { testPolicy: { suite: "required" } } : {}),
+    });
+  });
+  harnesses.push(h);
+  return h;
+};
+afterEach(() => {
+  for (const h of harnesses.splice(0)) h.cleanup();
+});
+const libMissing = (_dir: string, cmd: string) => !cmd.startsWith("lib-");
+const changedNotes = (h: DesignHarness) =>
+  h.read((db, id) => listEvents(db, id).filter((e) => e.reason === "inputs-changed"));
+const components = (h: DesignHarness) =>
+  h.read((db, id) =>
+    (JSON.parse(getInput(db, id, "profile.components")?.value_json ?? "[]") as { name: string }[]).map(
+      (c) => c.name,
+    ),
+  );
+
+test("a resume missing an optional component's tools narrows it, says so, and reports it for the PR", async () => {
+  const h = make("worktree", false);
+  expect(await h.fresh()).toBe(75);
+  expect(components(h)).toEqual(["app", "lib"]);
+  h.probe = libMissing;
+  expect(await h.resume()).toBe(75);
+  expect(h.stderr.join("")).toContain(
+    "resume: skipping 1 component(s) whose toolchain is absent; the run continues with app.",
+  );
+  expect(components(h)).toEqual(["app"]);
+  const note = changedNotes(h).at(-1);
+  expect(JSON.parse(note?.payload_json ?? "{}").names).toEqual([
+    "profile.components",
+    "run.unusableComponents",
+  ]);
+  // worktree mode reruns provision (recreated worktree); it now carries the unusable list (ENG-412)
+  const toolchain = h.read((db, id) => listSignals(db, id).filter((s) => s.signal_type === "toolchain"));
+  expect(JSON.parse(toolchain.at(-1)?.detail_json ?? "{}").components).toEqual(["lib"]);
+});
+
+test("a resume missing a required suite's tools pauses needs_you (75) and drops nothing", async () => {
+  const h = make("in-place", true);
+  expect(await h.fresh()).toBe(75);
+  const agentCalls = JSON.stringify(h.calls.counts);
+  h.probe = libMissing;
+  expect(await h.resume()).toBe(75);
+  const out = h.stderr.join("");
+  expect(out).toContain("resume: paused:");
+  expect(out).toContain("lib-build");
+  expect(JSON.stringify(h.calls.counts)).toBe(agentCalls); // nothing ran
+  expect(components(h)).toEqual(["app", "lib"]);
+  expect(changedNotes(h)).toEqual([]);
+  h.read((db, id) => {
+    const pending = listPending(db, id).filter((s) => s.signal_type === "human_resume");
+    expect(pending.at(-1)?.reason).toContain("lib");
+  });
+  h.probe = () => true; // the operator installs the tools
+  expect(await h.resume()).toBe(75); // back to the checks pause, with nothing changed
+  expect(changedNotes(h)).toEqual([]);
+});
+
+for (const mode of ["in-place", "worktree"] as const) {
+  test(`${mode}: no false change when a component's toolchain was already missing at the fresh run`, async () => {
+    const h = make(mode, false);
+    h.probe = libMissing;
+    expect(await h.fresh()).toBe(75);
+    expect(components(h)).toEqual(["app"]);
+    expect(await h.resume()).toBe(75);
+    expect(changedNotes(h)).toEqual([]);
+  });
+}
+```
+
+- [ ] **Step 2: Run them and see them fail**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/cli/preflight.test.ts test/cli/resume-narrowing-e2e.test.ts`
+Expected: FAIL with `toolchainDecision is not a function` (or an export error), and the e2e cases fail on the missing `resume: skipping` notice.
+
+- [ ] **Step 3: Share the toolchain decision**
+
+Replace `src/cli/preflight.ts:156-189` (from `/** What the run decided about its own toolchain` to the end of `applyToolchainGate`) with:
+
+```ts
+/** What the run decided about its own toolchain: the components it will use, and the ones it
+ *  will not. Returned rather than applied in place so the caller can report the loss. */
+export interface ToolchainGate {
+  /** `profile`, narrowed to the components this machine can actually use. */
+  profile: Profile;
+  /** Components dropped from that profile, with the tools whose absence dropped them. */
+  unusable: UnusableComponent[];
+}
+
+/** The one toolchain decision, for fresh runs and resumes alike (spec §4.1), so both hand the
+ *  handlers the same profile. `refuse` when nothing is usable, or when a component whose suite is
+ *  `required` is unusable (narrowing it away would drop the suite's declaration and its evidence). */
+export type ToolchainDecision =
+  | { kind: "use"; profile: Profile; unusable: UnusableComponent[] }
+  | { kind: "refuse"; partition: ToolchainPartition; blocking: UnusableComponent[] };
+
+export function toolchainDecision(
+  profile: Profile,
+  probe: (repoDir: string, command: string) => boolean = probeCommandExists,
+): ToolchainDecision {
+  const partition = partitionByToolchain(profile, probe);
+  const required = partition.unusable.filter((u) =>
+    profile.components.some((c) => c.name === u.component && suiteRequirement(c) === "required"),
+  );
+  if (partition.fatal || required.length > 0)
+    return { kind: "refuse", partition, blocking: partition.fatal ? partition.unusable : required };
+  if (partition.unusable.length === 0) return { kind: "use", profile, unusable: [] };
+  return {
+    kind: "use",
+    profile: { ...profile, components: partition.usable },
+    unusable: partition.unusable,
+  };
+}
+
+/**
+ * The toolchain decision at run start (ENG-412), extracted so it is testable without driving a
+ * whole run: throws `toolchainError` (exit 69) iff the decision refuses, else returns the narrowed
+ * profile plus what it dropped. Fresh runs only: `--resume` pauses instead (spec §4.1).
+ *
+ * The narrowing is returned as a NEW profile and never written back to disk. What is missing is a
+ * property of this machine; the profile describes the repo.
+ */
+export function applyToolchainGate(
+  profile: Profile,
+  probe: (repoDir: string, command: string) => boolean = probeCommandExists,
+): ToolchainGate {
+  const d = toolchainDecision(profile, probe);
+  if (d.kind === "refuse") throw toolchainError(formatMissingTools(d.partition.missing));
+  return { profile: d.profile, unusable: d.unusable };
+}
+
+/** The stderr notice of a narrowing, the same sentence on a fresh run (`run: `) and a resume
+ *  (`resume: `). */
+export function toolchainNotice(unusable: readonly UnusableComponent[], profile: Profile): string {
+  return (
+    `skipping ${unusable.length} component(s) whose toolchain is absent; ` +
+    `the run continues with ${profile.components.map((c) => c.name).join(", ")}.\n` +
+    formatUnusableComponents([...unusable])
+  );
+}
+
+/** Why a resume paused instead of narrowing: each blocking component and its missing tools. */
+export function resumePauseReason(blocking: readonly UnusableComponent[]): string {
+  const named = blocking
+    .map((u) => `${u.component} (missing: ${u.missing.map((m) => `\`${m.command}\``).join(", ")})`)
+    .join("; ");
+  return `this host lacks the tools for ${named}; resuming without them would drop a required suite or leave nothing to run. Install them and resume.`;
+}
+```
+
+`src/cli/run.ts:340-349` becomes:
+
+```ts
+    if (toolchain.unusable.length > 0) {
+      // Said here for whoever is watching the run, and again in the PR body (the `toolchain`
+      // signal emitted by `provision`).
+      process.stderr.write(`run: ${toolchainNotice(toolchain.unusable, profile)}\n`);
+    }
+```
+
+with `toolchainNotice` added to the `./preflight.ts` import and `formatUnusableComponents` removed from it if unused.
+
+- [ ] **Step 4: Narrow, pause and wire on resume**
+
+`src/cli/park.ts`:
+- imports: `import { pauseTicket } from "../daemon/pause-ticket.ts";`, `import { type UnusableComponent, resumePauseReason, toolchainDecision, toolchainNotice } from "./preflight.ts";`
+- export near `ResumeArgs`:
+
+```ts
+/** What the resumed run's registry is built from (spec §4.1): the profile after the toolchain
+ *  narrowing, and the lists of what was narrowed away, so provision reports them (ENG-412, ENG-425). */
+export interface ResumeRegistryWiring {
+  profile: Profile;
+  unusableComponents: UnusableComponent[];
+  nonPrimaryComponents: NonPrimaryComponent[];
+  inPlace: boolean;
+  worktreeRoot: string;
+}
+```
+
+- `deps.buildRegistry` type becomes `(resumeContext: { stepKey: string; transcript: string } | undefined, wiring: ResumeRegistryWiring) => StepRegistry`.
+- Replace everything from the `captureSnapshot(db, ticketId, {...})` call added in Task 7 to the end of the `const registry = ...` statement (lines 453-463 before Task 7) with:
+
+```ts
+    // spec §4.1: the same toolchain narrowing as a fresh run, here: after --inspect, after the resume
+    // transaction (a pause written before it would be consumed by it) and recover(), before the
+    // snapshot. Never exit 69: where the fresh gate would refuse, pause for the operator instead.
+    const toolchain = toolchainDecision(profile, deps?.probe);
+    if (toolchain.kind === "refuse") {
+      const reason = resumePauseReason(toolchain.blocking);
+      pauseTicket(db, ticketId, reason);
+      process.stderr.write(`resume: paused: ${reason}\n`);
+      closeDb();
+      process.exitCode = exitCodeForOutcome("paused"); // 75, needs_you
+      return;
+    }
+    const runProfile = toolchain.profile;
+    if (toolchain.unusable.length > 0) {
+      process.stderr.write(`resume: ${toolchainNotice(toolchain.unusable, runProfile)}\n`);
+    }
+
+    // spec §4: after recover() and the provision reset, before the first resolver pass, the profile
+    // and config rows are rewritten from what the handlers will receive now. The ticket text and the
+    // starting commit never are (E2).
+    captureSnapshot(db, ticketId, {
+      profile: runProfile,
+      unusableComponents: toolchain.unusable,
+      nonPrimaryComponents,
+      config: runtimeConfig,
+    });
+
+    const wiring: ResumeRegistryWiring = {
+      profile: runProfile,
+      unusableComponents: toolchain.unusable,
+      nonPrimaryComponents,
+      inPlace,
+      worktreeRoot, // minted once above (in-place = repo root), shared with the reconcile
+    };
+    const registry: StepRegistry = deps?.buildRegistry
+      ? deps.buildRegistry(resumeContext, wiring)
+      : buildDispatchRegistry({
+          runner: deps?.runner ?? resolveAgentRunner(runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG),
+          agentConfig: runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG,
+          ...wiring,
+          resumeContext,
+        });
+```
+
+and in the `driveToTerminal(...)` call below it, `profile,` becomes `profile: runProfile,`.
+
+- [ ] **Step 5: Make the existing resume tests hermetic**
+
+In each `resumeRun(...)` deps object named in **Files** (and in `resumeParkedTicket` in `test/helpers/run-harness.ts`), add `probe: () => true,`. These tests are about other behaviour; the real `probeCommandExists` would make them depend on the host's tools.
+
+- [ ] **Step 6: Run the tests and see them pass**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/cli/preflight.test.ts test/cli/resume-narrowing-e2e.test.ts test/cli/toolchain-gate-invariant.test.ts test/cli/run-preflight.test.ts test/cli/park.test.ts test/cli/park-inplace.test.ts test/cli/park-resume-e2e.test.ts`
+Expected: PASS.
+
+- [ ] **Step 7: Break it on purpose, see it fail, restore**
+
+1. In `resumeRun`, replace the `toolchainDecision(...)` block with `const runProfile = profile; const toolchain = { unusable: [] as UnusableComponent[] };` (no narrowing, as before this task). The optional component test and both "no false change" tests fail (the snapshot gains `lib`, an `inputs-changed` note appears). Restore.
+2. Move the narrowing block above the resume transaction (`db.transaction(() => {...})()` at line 409). The required suite test fails: the pause's `human_resume` is consumed by the transaction and the run proceeds. Restore.
+
+- [ ] **Step 8: Run the whole suite**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test`
+Expected: PASS.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/cli/preflight.ts src/cli/run.ts src/cli/park.ts test/cli test/lifecycle/wiring.test.ts test/lifecycle/e2e-interrupt.test.ts test/helpers/run-harness.ts
+git commit -m "fix(eng-477): resume narrows the profile like a fresh run and pauses rather than drop a required suite" -m "Resume now applies the same toolchain decision as a fresh run after the resume transaction and recover(), prints the same notice, passes the unusable list to provision, and pauses needs_you (exit 75) where the fresh gate would refuse. It never exits 69." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 9: Record each table step's manifest in its success transaction
+
+**Files:**
+- Create: `src/daemon/design-digests.ts`
+- Modify: `src/daemon/step-registry.ts:16-41` (optional success commit per handler), `src/engine/step-journal.ts:54,152` (`onSucceed` receives the result)
+- Modify: `src/db/repos/workflow-step.ts` (add `recordManifest`)
+- Modify: `src/dispatch/plan-frontmatter.ts:8-19` (`linearFromFrontmatter`), `src/dispatch/worktree.ts` (add `planFilesAt` after `fileContentAt`, line 330)
+- Modify: `src/dispatch/handlers.ts:526-541` (`design:dispatch` returns `planDigest`)
+- Modify: `src/daemon/advance.ts:173-226` (snapshot precondition; `onSucceed` = own rows, then manifest, then verdict)
+- Modify (mocks): `test/helpers/skeleton-registry.ts:19`, `test/daemon/advance.test.ts:37,100,325,354`, `test/daemon/advance-leftovers.test.ts:69,101,125,158,176,198,221,243`, `test/daemon/loop.test.ts:14` (each normally returning `design:dispatch` mock adds `planDigest: EMPTY_PLAN_DIGEST` to its result); `test/daemon/loop.test.ts` and `test/lifecycle/e2e-interrupt.test.ts` (capture a snapshot after their direct `insertTicket`)
+- Test: `test/daemon/manifest-recording.test.ts`, `test/daemon/design-digests.test.ts`
+
+**Interfaces:**
+- Consumes: `DESIGN_TABLE`, `StepRow`, `stepRow`, `isSnapshotInput`, `ensureDesignTableChecked`, `InputContext` (Task 6); `snapshotDigest`, `snapshotValue`, `requireSnapshot`, `captureSnapshot` (Task 7); `digestValue`, `FINGERPRINT_SCHEME` (Task 5); `makeDesignTicket`, `driveUntil`, `atStep`, `git`, `gitRepo` (Task 7).
+- Produces:
+  - `type StepCommit = (db: Database, ticketId: number, result: unknown) => void`; `StepRegistry.register(handlerKey, handler, opts?: { commit?: StepCommit })`; `StepRegistry.resolveCommit(handlerKey): StepCommit | undefined`
+  - `RunStepParams.onSucceed?: (step: WorkflowStepRow, result: unknown) => void`
+  - `recordManifest(db, id, m: { manifest: Record<string, string>; fingerprint: string; outputDigest: string | null; scheme: number }): void`
+  - `linearFromFrontmatter(text: string): string | null`; `planFilesAt(repoPath: string, ref: string): { path: string; content: string }[]`
+  - `digestWorkUnits(db, ticketId): string`, `digestTrack(db, ticketId): string`, `planDigestAt(repoPath: string, ref: string, ident: string): string`, `EMPTY_PLAN_DIGEST: string`, `inputContext(db, ticketId): InputContext`, `currentManifest(db, ticketId, row: StepRow): Record<string, string>`, `changedInputs(recorded: Record<string, string>, current: Record<string, string>): string[]`, `recordStepManifest(db, ticketId, stepId: number, row: StepRow, outputDigest: string | null): void`, `planDigestFromResult(result: unknown): string`
+  - `design:dispatch`'s result gains `planDigest: string`
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// test/daemon/design-digests.test.ts
+import { expect, test } from "bun:test";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { digestWorkUnits, planDigestAt } from "../../src/daemon/design-digests.ts";
+import { insertTicket, setNeedsDocs } from "../../src/db/repos/ticket.ts";
+import { insertWorkUnit, setBaseSha, setStatus } from "../../src/db/repos/work-unit.ts";
+import { makeTestDb } from "../helpers/db.ts";
+import { git, gitRepo } from "../helpers/design-steps.ts";
+
+const plan = (ident: string, body: string) => `---\nlinear: ${ident}\n---\n\n${body}\n`;
+function commitAll(repo: string, msg: string) {
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-q", "-m", msg]);
+}
+
+test("a renamed plan changes the digest; another ticket's plan and a nested file do not", () => {
+  const repo = gitRepo();
+  mkdirSync(join(repo, "docs", "plans", "sub"), { recursive: true });
+  writeFileSync(join(repo, "docs", "plans", "a.md"), plan("ENG-1", "body"));
+  commitAll(repo, "plan a");
+  const first = planDigestAt(repo, "main", "ENG-1");
+  renameSync(join(repo, "docs", "plans", "a.md"), join(repo, "docs", "plans", "b.md"));
+  commitAll(repo, "rename");
+  const renamed = planDigestAt(repo, "main", "ENG-1");
+  expect(renamed).not.toBe(first);
+  writeFileSync(join(repo, "docs", "plans", "other.md"), plan("ENG-9", "another ticket"));
+  writeFileSync(join(repo, "docs", "plans", "sub", "x.md"), plan("ENG-1", "nested"));
+  commitAll(repo, "unrelated");
+  expect(planDigestAt(repo, "main", "ENG-1")).toBe(renamed);
+  writeFileSync(join(repo, "docs", "plans", "b.md"), plan("ENG-1", "edited body"));
+  commitAll(repo, "edit");
+  expect(planDigestAt(repo, "main", "ENG-1")).not.toBe(renamed);
+});
+
+test("the plan digest reads git at the ref, never the working tree", () => {
+  const repo = gitRepo();
+  mkdirSync(join(repo, "docs", "plans"), { recursive: true });
+  writeFileSync(join(repo, "docs", "plans", "a.md"), plan("ENG-1", "committed"));
+  commitAll(repo, "plan");
+  const committed = planDigestAt(repo, "main", "ENG-1");
+  writeFileSync(join(repo, "docs", "plans", "a.md"), plan("ENG-1", "uncommitted edit"));
+  expect(planDigestAt(repo, "main", "ENG-1")).toBe(committed);
+});
+
+test("a missing ref fails loudly", () => {
+  expect(() => planDigestAt(gitRepo(), "feat/never", "ENG-1")).toThrow("git ls-tree");
+});
+
+test("the units digest ignores ids, status, base_sha and reconcile units, and covers needs_docs", () => {
+  const { db, projectId } = makeTestDb();
+  const a = insertTicket(db, { projectId, ident: "ENG-10" });
+  const b = insertTicket(db, { projectId, ident: "ENG-11" });
+  const unit = (ticketId: number) =>
+    insertWorkUnit(db, {
+      ticketId,
+      seq: 1,
+      kind: "backend",
+      title: "t",
+      description: "d",
+      behavioral: 0,
+      filesToTouch: ["a.ts"],
+      verifyCheckTypes: [],
+      dependsOn: [],
+    });
+  const ua = unit(a);
+  unit(b); // a different id
+  expect(digestWorkUnits(db, a)).toBe(digestWorkUnits(db, b));
+  setStatus(db, ua.id, "verified");
+  setBaseSha(db, ua.id, "abc");
+  insertWorkUnit(db, { ticketId: a, seq: 2, kind: "reconcile", origin: "reconcile", dependsOn: [1] });
+  expect(digestWorkUnits(db, a)).toBe(digestWorkUnits(db, b));
+  setNeedsDocs(db, a, 1);
+  expect(digestWorkUnits(db, a)).not.toBe(digestWorkUnits(db, b));
+  db.close();
+});
+```
+
+```ts
+// test/daemon/manifest-recording.test.ts
+import { expect, test } from "bun:test";
+import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
+import { advanceOneStep } from "../../src/daemon/advance.ts";
+import { digestValue } from "../../src/daemon/canonical.ts";
+import { DESIGN_TABLE, type StepRow } from "../../src/daemon/design-graph.ts";
+import { currentManifest, inputContext, planDigestAt } from "../../src/daemon/design-digests.ts";
+import { StepRegistry } from "../../src/daemon/step-registry.ts";
+import { insertProject } from "../../src/db/repos/project.ts";
+import { insertTicket, setTicketStage } from "../../src/db/repos/ticket.ts";
+import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
+import { getByKey } from "../../src/db/repos/workflow-step.ts";
+import { makeTestDb } from "../helpers/db.ts";
+import { atStep, driveUntil, makeDesignTicket } from "../helpers/design-steps.ts";
+
+const rows = DESIGN_TABLE.filter((r): r is StepRow => r.kind === "step");
+
+test("every design step records its manifest, fingerprint and scheme at success; the plan its digest", async () => {
+  const t = makeDesignTicket(); // two behavioural units: full track, design:review runs
+  await driveUntil(t, atStep("checks:dispatch"));
+  for (const row of rows) {
+    const step = getByKey(t.db, t.ticketId, row.stepKey);
+    expect(step?.status).toBe("succeeded");
+    const manifest = JSON.parse(step?.input_manifest ?? "null") as Record<string, string>;
+    expect(Object.keys(manifest).sort()).toEqual([...row.inputs(inputContext(t.db, t.ticketId))].sort());
+    expect(step?.input_fingerprint).toBe(digestValue(manifest));
+    expect(step?.fingerprint_scheme).toBe(1);
+    expect(manifest).toEqual(currentManifest(t.db, t.ticketId, row)); // stable on recompute
+    if (row.fileOutput) expect(step?.output_digest).toBe(planDigestAt(t.repo, "feat/ENG-1", "ENG-1"));
+    else expect(step?.output_digest).toBeNull();
+  }
+});
+
+test("provision run while the ticket is in implement records its manifest too (§5.2)", async () => {
+  const t = makeDesignTicket();
+  setTicketStage(t.db, t.ticketId, "implement");
+  insertWorkUnit(t.db, { ticketId: t.ticketId, seq: 1, kind: "backend", status: "verifying" });
+  const outcome = await advanceOneStep(t.db, t.ticketId, t.registry, { config: t.config });
+  expect(outcome).toEqual({ kind: "stepped", stepKey: "provision" });
+  expect(getByKey(t.db, t.ticketId, "provision")?.input_manifest).not.toBeNull();
+});
+
+test("a table step does not run without a snapshot; the run stops loudly", async () => {
+  const { db } = makeTestDb({ seedTicket: false });
+  const projectId = insertProject(db, { slug: "p", targetRepo: "/tmp/x" });
+  const ticketId = insertTicket(db, { projectId, ident: "ENG-3" });
+  const registry = new StepRegistry();
+  let ran = false;
+  registry.register("provision", () => {
+    ran = true;
+    return {};
+  });
+  await expect(advanceOneStep(db, ticketId, registry, { config: DEFAULT_RUNTIME_CONFIG })).rejects.toThrow(
+    "ticket_input is missing",
+  );
+  expect(ran).toBe(false);
+  db.close();
+});
+```
+
+- [ ] **Step 2: Run them and see them fail**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/design-digests.test.ts test/daemon/manifest-recording.test.ts`
+Expected: FAIL with `Cannot find module '../../src/daemon/design-digests.ts'`.
+
+- [ ] **Step 3: Add the plan file reader and the frontmatter parser**
+
+`src/dispatch/plan-frontmatter.ts`, replace `planFrontmatterLinear` with:
+
+```ts
+/** The `linear:` value from a plan's leading `---`-fenced frontmatter, or null. Only the leading
+ *  frontmatter block is scanned, so a `linear:` mention in the plan BODY does not count. */
+export function linearFromFrontmatter(text: string): string | null {
+  const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (fm === null) return null;
+  const line = fm[1].match(/^linear:\s*(\S+)\s*$/m);
+  return line ? line[1] : null;
+}
+
+/** `linearFromFrontmatter` of a file on disk; null when it is missing or unreadable. */
+export function planFrontmatterLinear(path: string): string | null {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  return linearFromFrontmatter(text);
+}
+```
+
+`src/dispatch/worktree.ts`, after `fileContentAt`:
+
+```ts
+/** Every `docs/plans/*.md` (not nested) at `ref`, read through git, never the working tree (spec
+ *  §5.3: the resolver and the plan digest never read the worktree). A missing ref throws. */
+export function planFilesAt(repoPath: string, ref: string): { path: string; content: string }[] {
+  const paths = gitPathsZ(["ls-tree", "-r", "--name-only", "-z", ref, "--", "docs/plans/"], repoPath)
+    .filter((p) => /^docs\/plans\/[^/]+\.md$/.test(p))
+    .sort();
+  return paths.map((path) => {
+    const content = fileContentAt(ref, path, repoPath);
+    if (content === null) throw new Error(`git show ${ref}:${path} returned nothing for a listed file`);
+    return { path, content };
+  });
+}
+```
+
+- [ ] **Step 4: Write the digests**
+
+```ts
+// src/daemon/design-digests.ts
+import type { Database } from "bun:sqlite";
+import { getTicket } from "../db/repos/ticket.ts";
+import {
+  listByTicket as listUnits,
+  parseDependsOn,
+  parseFilesToTouch,
+  parseVerifyCheckTypes,
+} from "../db/repos/work-unit.ts";
+import { getByKey, recordManifest } from "../db/repos/workflow-step.ts";
+import { linearFromFrontmatter } from "../dispatch/plan-frontmatter.ts";
+import { planFilesAt } from "../dispatch/worktree.ts";
+import { FINGERPRINT_SCHEME, digestValue } from "./canonical.ts";
+import { type InputContext, type OutputName, type StepRow, isSnapshotInput } from "./design-graph.ts";
+import { snapshotDigest, snapshotValue } from "./design-inputs.ts";
+
+/** design:extract's output (spec §5.3): only the fields it wrote, units of origin `extract` by
+ *  seq, plus ticket.needs_docs. No ids, no timestamps, no status or base_sha (later stages change them). */
+export function digestWorkUnits(db: Database, ticketId: number): string {
+  const ticket = getTicket(db, ticketId);
+  if (!ticket) throw new Error(`digestWorkUnits: ticket ${ticketId} not found`);
+  const units = listUnits(db, ticketId)
+    .filter((u) => u.origin === "extract")
+    .map((u) => ({
+      seq: u.seq,
+      kind: u.kind,
+      title: u.title,
+      description: u.description,
+      behavioral: u.behavioral,
+      test_plan: u.test_plan,
+      files_to_touch: parseFilesToTouch(u),
+      verify_check_types: parseVerifyCheckTypes(u),
+      depends_on: parseDependsOn(u),
+    }));
+  return digestValue({ units, needsDocs: ticket.needs_docs });
+}
+
+/** design:size's output. */
+export function digestTrack(db: Database, ticketId: number): string {
+  return digestValue(getTicket(db, ticketId)?.track ?? null);
+}
+
+/** The plan (spec §5.3): the `docs/plans/*.md` files at `ref` whose frontmatter `linear:` is this
+ *  ticket, path and content, sorted by path. A renamed or extra plan file changes it. */
+export function planDigestAt(repoPath: string, ref: string, ident: string): string {
+  const files = planFilesAt(repoPath, ref)
+    .filter((f) => linearFromFrontmatter(f.content) === ident)
+    .map((f) => ({ path: f.path, content: f.content }));
+  return digestValue(files);
+}
+
+/** The digest of "no plan file for this ticket". Test mocks of design:dispatch return it. */
+export const EMPTY_PLAN_DIGEST = digestValue([]);
+
+export function inputContext(db: Database, ticketId: number): InputContext {
+  return { complexityGrading: snapshotValue(db, ticketId, "config.complexityGrading") === true };
+}
+
+function outputDigest(db: Database, ticketId: number, name: OutputName): string {
+  switch (name) {
+    case "plan": {
+      const s = getByKey(db, ticketId, "design:dispatch");
+      if (!s || s.status !== "succeeded" || s.output_digest === null)
+        throw new Error(
+          `ticket ${ticketId}: the plan has no recorded digest (design:dispatch is ${s?.status ?? "absent"})`,
+        );
+      return s.output_digest;
+    }
+    case "workUnits":
+      return digestWorkUnits(db, ticketId);
+    case "track":
+      return digestTrack(db, ticketId);
+    case "planFindings":
+      throw new Error("plan findings are read only by the gate; they are never a fingerprinted input");
+  }
+}
+
+/** The manifest `row` would record now: each declared input's current digest. Database only. */
+export function currentManifest(db: Database, ticketId: number, row: StepRow): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of row.inputs(inputContext(db, ticketId))) {
+    out[name] = isSnapshotInput(name) ? snapshotDigest(db, ticketId, name) : outputDigest(db, ticketId, name);
+  }
+  return out;
+}
+
+/** Input names whose digest differs, or that are present on one side only, sorted. */
+export function changedInputs(recorded: Record<string, string>, current: Record<string, string>): string[] {
+  return [...new Set([...Object.keys(recorded), ...Object.keys(current)])]
+    .filter((n) => recorded[n] !== current[n])
+    .sort();
+}
+
+/** Called inside the success transaction (spec §5.2). `outputDigest` is computed before it. */
+export function recordStepManifest(
+  db: Database,
+  ticketId: number,
+  stepId: number,
+  row: StepRow,
+  outputDigest: string | null,
+): void {
+  if (row.fileOutput && outputDigest === null)
+    throw new Error(`${row.stepKey} succeeded without the digest of its file output`);
+  const manifest = currentManifest(db, ticketId, row);
+  recordManifest(db, stepId, {
+    manifest,
+    fingerprint: digestValue(manifest),
+    outputDigest: row.fileOutput ? outputDigest : null,
+    scheme: FINGERPRINT_SCHEME,
+  });
+}
+
+export function planDigestFromResult(result: unknown): string {
+  const d = (result as { planDigest?: unknown } | null)?.planDigest;
+  if (typeof d !== "string") throw new Error("design:dispatch succeeded without a plan digest");
+  return d;
+}
+```
+
+`src/db/repos/workflow-step.ts`, after `markSucceeded`:
+
+```ts
+/** The manifest a design table step's success was computed from (ENG-477 §5.2). */
+export function recordManifest(
+  db: Database,
+  id: number,
+  m: { manifest: Record<string, string>; fingerprint: string; outputDigest: string | null; scheme: number },
+): void {
+  db.query(
+    `UPDATE workflow_step
+       SET input_manifest = $m, input_fingerprint = $f, output_digest = $o, fingerprint_scheme = $s,
+           updated_at = $now
+     WHERE id = $id`,
+  ).run({
+    $m: JSON.stringify(m.manifest),
+    $f: m.fingerprint,
+    $o: m.outputDigest,
+    $s: m.scheme,
+    $now: nowUtc(),
+    $id: id,
+  });
+}
+```
+
+- [ ] **Step 5: The registry commit, the journal's result, and advance**
+
+`src/daemon/step-registry.ts`:
+
+```ts
+/** Writes a step's own database outputs inside its success transaction (spec §6.2), from the
+ *  handler's result, before any verdict reads them. */
+export type StepCommit = (db: Database, ticketId: number, result: unknown) => void;
+
+export class StepRegistry {
+  constructor(readonly synchronize: (db: Database, ticketId: number) => void = () => {}) {}
+
+  private readonly handlers = new Map<string, StepHandler>();
+  private readonly commits = new Map<string, StepCommit>();
+
+  register(handlerKey: string, handler: StepHandler, opts?: { commit?: StepCommit }): void {
+    if (this.handlers.has(handlerKey)) {
+      throw new Error(`StepRegistry: handlerKey '${handlerKey}' already registered`);
+    }
+    this.handlers.set(handlerKey, handler);
+    if (opts?.commit) this.commits.set(handlerKey, opts.commit);
+  }
+
+  resolve(handlerKey: string): StepHandler | undefined {
+    return this.handlers.get(handlerKey);
+  }
+
+  resolveCommit(handlerKey: string): StepCommit | undefined {
+    return this.commits.get(handlerKey);
+  }
+
+  has(handlerKey: string): boolean {
+    return this.handlers.has(handlerKey);
+  }
+}
+```
+
+`src/engine/step-journal.ts`: line 54 `onSucceed?: (step: steps.WorkflowStepRow, result: unknown) => void;` and line 152 `params.onSucceed?.(current, result);`.
+
+`src/dispatch/handlers.ts` `design:dispatch` (lines 526-541):
+
+```ts
+  registry.register("design:dispatch", async (ctx: HandlerContext) => {
+    await environmentGate(ctx);
+    const outcome = await runAgentDispatch(ctx, depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS), {
+      handlerKey: "design:dispatch",
+      template: DESIGN_TEMPLATE,
+      vars: designVars(ctx.ticket, deps.profile, designFeedback(ctx.db, ctx.ticket.id)),
+      commitScope: planScope,
+      postcondition: ({ worktreePath }) => {
+        if (!hasTicketPlan(join(worktreePath, "docs", "plans"), ctx.ticket.ident)) {
+          throw new Error("design:dispatch postcondition: no plan for this ticket under docs/plans/");
+        }
+      },
+    });
+    // spec §5.3: the plan's digest at the branch head, read through git before the success
+    // transaction (anything slow is computed before it, §5.2).
+    const { repoPath, branch } = worktreeFor(ctx, deps);
+    return { ...outcome, planDigest: planDigestAt(repoPath, branch, ctx.ticket.ident) };
+  });
+```
+
+(import `planDigestAt` from `../daemon/design-digests.ts`).
+
+`src/daemon/advance.ts`: imports `ensureDesignTableChecked, stepRow` from `./design-graph.ts`, `planDigestFromResult, recordStepManifest` from `./design-digests.ts`, `requireSnapshot` from `./design-inputs.ts`, `type WorkflowStepRow` from `../db/repos/workflow-step.ts`. After `const handler = registry.resolve(...)` and its check (line 184):
+
+```ts
+    // A design table step needs the table checked and the snapshot present before it may run
+    // (spec §3.1, §5.2). Thrown here, outside the step's try: a missing snapshot is a defect, not a
+    // step failure to retry.
+    const row = stepRow(d.stepKey);
+    if (row) {
+      ensureDesignTableChecked();
+      requireSnapshot(db, ticketId);
+    }
+    const commit = registry.resolveCommit(d.handlerKey);
+```
+
+and replace the `onSucceed:` property (lines 211-225) with:
+
+```ts
+        onSucceed:
+          commit || row || VERDICT_BEARING_STEPS.has(d.stepKey)
+            ? (step: WorkflowStepRow, result: unknown) => {
+                // In this order (spec §6.2): the step's own rows, then its manifest, then any
+                // verdict that reads those rows.
+                commit?.(db, ticketId, result);
+                if (row) {
+                  recordStepManifest(
+                    db,
+                    ticketId,
+                    step.id,
+                    row,
+                    row.fileOutput ? planDigestFromResult(result) : null,
+                  );
+                }
+                if (!VERDICT_BEARING_STEPS.has(d.stepKey)) return;
+                const cfg = opts?.config ?? DEFAULT_RUNTIME_CONFIG;
+                verdictBox.value =
+                  d.stepKey === "checks:classify"
+                    ? applyChecksVerdict(db, ticketId, { stepKey: d.stepKey })
+                    : d.stepKey === "verify:checks-gate"
+                      ? applyAcCheckGateVerdict(db, ticketId, { stepKey: d.stepKey })
+                      : d.stepKey === "checks:arbitrate"
+                        ? applyArbiterVerdict(db, ticketId, { stepKey: d.stepKey })
+                        : d.stepKey === "checks:reauthor"
+                          ? applyReauthorVerdict(db, ticketId, { stepKey: d.stepKey })
+                          : applyReviewVerdict(db, ticketId, cfg, { stepKey: d.stepKey });
+              }
+            : undefined,
+```
+
+- [ ] **Step 6: Update the existing mocks and direct ticket inserts**
+
+Every `registry.register("design:dispatch", ...)` mock listed in **Files** that returns normally gets `planDigest: EMPTY_PLAN_DIGEST` in its returned object (import `EMPTY_PLAN_DIGEST` from `src/daemon/design-digests.ts`); for example `test/helpers/skeleton-registry.ts:19` becomes `r.register("design:dispatch", () => ({ plan: "ok", planDigest: EMPTY_PLAN_DIGEST }));` and a mock that returns `{}` returns `{ planDigest: EMPTY_PLAN_DIGEST }`. Mocks that throw stay as they are.
+
+In `test/daemon/loop.test.ts` and `test/lifecycle/e2e-interrupt.test.ts`, right after each direct `insertTicket(...)` add:
+
+```ts
+captureSnapshot(db, ticketId, {
+  profile: TEST_PROFILE,
+  unusableComponents: [],
+  nonPrimaryComponents: [],
+  config: DEFAULT_RUNTIME_CONFIG,
+});
+```
+
+(importing `captureSnapshot` from `src/daemon/design-inputs.ts`, `TEST_PROFILE` from `test/helpers/db.ts`, `DEFAULT_RUNTIME_CONFIG` from `src/config/runtime-config.ts`; use that file's own variable names for `db` and `ticketId`).
+
+- [ ] **Step 7: Run the tests and see them pass**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon test/engine test/dispatch/design-review-e2e.test.ts test/dispatch/design-extract.test.ts`
+Expected: PASS.
+
+- [ ] **Step 8: Break it on purpose, see it fail, restore**
+
+1. Add `status: u.status,` to the mapped unit in `digestWorkUnits`: the units digest test fails. Restore.
+2. Remove the `if (row) { recordStepManifest(...) }` block from `onSucceed`: the manifest recording tests fail. Restore.
+3. Remove `requireSnapshot(db, ticketId);`: the "does not run without a snapshot" test fails (the handler runs, then the step fails inside its transaction and is retried instead of stopping the run). Restore.
+
+- [ ] **Step 9: Run the whole suite, then commit**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test`
+Expected: PASS.
+
+```bash
+git add src/daemon/design-digests.ts src/daemon/step-registry.ts src/engine/step-journal.ts src/db/repos/workflow-step.ts src/dispatch/plan-frontmatter.ts src/dispatch/worktree.ts src/dispatch/handlers.ts src/daemon/advance.ts test
+git commit -m "feat(eng-477): record each design step's input manifest and the plan digest at success" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 10: `invalidateSteps`: note event, history, reset and output clearing in one transaction
+
+**Files:**
+- Create: `src/daemon/invalidate.ts`, `src/daemon/design-outputs.ts` (the clearing rules; Task 11 adds the commits), `src/db/repos/step-history.ts`
+- Modify: `src/db/repos/workflow-step.ts` (add `resetForInvalidate`), `src/db/repos/ticket.ts` (add `clearTicketTrack` after `setTicketTrack`, line 104)
+- Modify: `src/daemon/resolver.ts:12-25` (the `invalidate` descriptor), `src/daemon/advance.ts:118-135` (apply it)
+- Modify: `src/dispatch/provision.ts:258-283` (`resetProvision` and `resetProvisionIfManifestTouched` through `invalidateSteps`)
+- Modify: `src/db/repos/review-finding.ts` (add `listByTicket` after `listOpenByTicket`, line 99)
+- Test: `test/daemon/invalidate.test.ts`
+
+**Interfaces:**
+- Consumes: `DesignStepKey`, `isTableStep` (Task 6); `makeDesignTicket`, `driveUntil`, `atStep` (Task 7); `WorkflowStepRow` with `generation` (Task 4).
+- Produces:
+  - `listByTicket(db, ticketId): ReviewFindingRow[]` in `src/db/repos/review-finding.ts`
+  - `type InvalidateCause = "inputs" | "feedback" | "worktree-recreated" | "manifest-touched"`
+  - `interface InvalidateReason { cause: InvalidateCause; changed?: string[] }`
+  - `invalidateSteps(db, ticketId, stepKeys: readonly DesignStepKey[], reason: InvalidateReason): { eventId: number; generations: Partial<Record<DesignStepKey, number>> }` (the generation after the bump, per step that had a row)
+  - `CLEAR_OUTPUTS: Record<DesignStepKey, (db: Database, ticketId: number) => void>`
+  - `archiveStep(db, step: WorkflowStepRow, eventId: number): void`, `listStepHistory(db, ticketId, stepKey?: string): StepHistoryRow[]`, `interface StepHistoryRow`
+  - `resetForInvalidate(db, id): void`, `clearTicketTrack(db, id): void`
+  - `StepDescriptor` gains `{ kind: "invalidate"; stepKeys: DesignStepKey[]; reason: InvalidateReason }`
+  - `resetProvision(db, ticketId, cause?: "worktree-recreated" | "manifest-touched"): void`
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// test/daemon/invalidate.test.ts
+import { expect, test } from "bun:test";
+import { invalidateSteps } from "../../src/daemon/invalidate.ts";
+import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { listByTicket as listFindings } from "../../src/db/repos/review-finding.ts";
+import { listStepHistory } from "../../src/db/repos/step-history.ts";
+import { getTicket, setNeedsDocs } from "../../src/db/repos/ticket.ts";
+import { insertWorkUnit, listByTicket as listUnits } from "../../src/db/repos/work-unit.ts";
+import { getByKey } from "../../src/db/repos/workflow-step.ts";
+import { resetProvision, resetProvisionIfManifestTouched } from "../../src/dispatch/provision.ts";
+import { atStep, driveUntil, makeDesignTicket } from "../helpers/design-steps.ts";
+
+/** A ticket whose design ran for real: two behavioural units, full track, one minor plan finding
+ *  tied to unit 1, a reconcile unit, needs_docs set. */
+async function designedTicket() {
+  const t = makeDesignTicket({
+    script: {
+      planFindings: () => [
+        {
+          severity: "minor",
+          category: "clarity",
+          location: "plan:Unit 1",
+          rationale: "name the file",
+          factors: null,
+          deferral_candidate: false,
+          work_unit_seq: 1,
+        },
+      ],
+    },
+  });
+  await driveUntil(t, atStep("checks:dispatch"));
+  insertWorkUnit(t.db, { ticketId: t.ticketId, seq: 3, kind: "reconcile", origin: "reconcile", dependsOn: [1, 2] });
+  setNeedsDocs(t.db, t.ticketId, 1);
+  return t;
+}
+
+test("invalidating design:extract archives, resets, clears every unit and needs_docs, and keeps the plan findings detached", async () => {
+  const t = await designedTicket();
+  const before = getByKey(t.db, t.ticketId, "design:extract");
+  const { eventId, generations } = invalidateSteps(t.db, t.ticketId, ["design:extract"], {
+    cause: "inputs",
+    changed: ["plan"],
+  });
+  expect(generations).toEqual({ "design:extract": 1 });
+  expect(listUnits(t.db, t.ticketId)).toEqual([]); // reconcile unit included
+  expect(getTicket(t.db, t.ticketId)?.needs_docs).toBe(0);
+  const findings = listFindings(t.db, t.ticketId).filter((f) => f.review_kind === "plan");
+  expect(findings.length).toBe(1);
+  expect(findings[0].work_unit_id).toBeNull();
+  const after = getByKey(t.db, t.ticketId, "design:extract");
+  expect(after).toMatchObject({
+    status: "pending",
+    attempt: 0,
+    result_json: null,
+    error_json: null,
+    input_manifest: null,
+    input_fingerprint: null,
+    output_digest: null,
+    fingerprint_scheme: null,
+    generation: 1,
+  });
+  const [h] = listStepHistory(t.db, t.ticketId, "design:extract");
+  expect(h).toMatchObject({
+    event_id: eventId,
+    status: "succeeded",
+    attempt: before?.attempt,
+    input_manifest: before?.input_manifest,
+    generation: 0,
+  });
+  const note = listEvents(t.db, t.ticketId).find((e) => e.id === eventId);
+  expect(note?.kind).toBe("note");
+  expect(note?.reason).toBe("invalidated");
+  expect(JSON.parse(note?.payload_json ?? "{}")).toEqual({
+    event: "invalidated",
+    stepKeys: ["design:extract"],
+    cause: "inputs",
+    changed: ["plan"],
+  });
+  expect(listEvents(t.db, t.ticketId).some((e) => e.kind === "loopback")).toBe(false);
+});
+
+test("design:size clears the track; provision, design:dispatch and design:review clear nothing", async () => {
+  const t = await designedTicket();
+  invalidateSteps(t.db, t.ticketId, ["design:size"], { cause: "inputs", changed: ["workUnits"] });
+  expect(getTicket(t.db, t.ticketId)?.track).toBeNull();
+  const units = listUnits(t.db, t.ticketId).length;
+  invalidateSteps(t.db, t.ticketId, ["provision", "design:dispatch", "design:review"], { cause: "feedback" });
+  expect(listUnits(t.db, t.ticketId).length).toBe(units);
+  expect(listFindings(t.db, t.ticketId).length).toBe(1);
+  for (const k of ["provision", "design:dispatch", "design:review"]) {
+    expect(getByKey(t.db, t.ticketId, k)?.generation).toBe(1);
+  }
+});
+
+test("resetProvision and the manifest touch hook go through the same function, with their causes", async () => {
+  const t = await designedTicket();
+  resetProvision(t.db, t.ticketId);
+  await driveUntil(t, atStep("checks:dispatch")); // provision reruns and succeeds again
+  resetProvisionIfManifestTouched(t.db, t.ticketId, ["Gemfile.lock"]);
+  const causes = listStepHistory(t.db, t.ticketId, "provision").map((h) => {
+    const note = listEvents(t.db, t.ticketId).find((e) => e.id === h.event_id);
+    return JSON.parse(note?.payload_json ?? "{}").cause;
+  });
+  expect(causes).toEqual(["worktree-recreated", "manifest-touched"]);
+  expect(getByKey(t.db, t.ticketId, "provision")?.generation).toBe(2);
+});
+
+test("only design table steps can be invalidated", async () => {
+  const t = makeDesignTicket();
+  expect(() =>
+    invalidateSteps(t.db, t.ticketId, ["checks:dispatch" as never], { cause: "inputs" }),
+  ).toThrow("not a design table step");
+});
+```
+
+Add `listByTicket` to `src/db/repos/review-finding.ts` (it exports only `getById`, `insertFinding`, `listByDispatch`, `listOpenByTicket`, `latestDispatchForStep` and `setStatus` today), after `listOpenByTicket`:
+
+```ts
+export function listByTicket(db: Database, ticketId: number): ReviewFindingRow[] {
+  return db
+    .query<ReviewFindingRow, [number]>(`SELECT ${COLS} FROM review_finding WHERE ticket_id = ? ORDER BY id`)
+    .all(ticketId);
+}
+```
+
+- [ ] **Step 2: Run it and see it fail**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/invalidate.test.ts`
+Expected: FAIL with `Cannot find module '../../src/daemon/invalidate.ts'`.
+
+- [ ] **Step 3: Write the repositories**
+
+```ts
+// src/db/repos/step-history.ts
+import type { Database } from "bun:sqlite";
+import { nowUtc } from "../../util/time.ts";
+import type { WorkflowStepRow } from "./workflow-step.ts";
+
+export interface StepHistoryRow {
+  id: number;
+  step_id: number;
+  ticket_id: number;
+  event_id: number;
+  step_key: string;
+  status: string;
+  attempt: number;
+  result_json: string | null;
+  error_json: string | null;
+  input_manifest: string | null;
+  input_fingerprint: string | null;
+  output_digest: string | null;
+  fingerprint_scheme: number | null;
+  generation: number;
+  started_at: string | null;
+  ended_at: string | null;
+  archived_at: string;
+}
+
+const COLS =
+  "id, step_id, ticket_id, event_id, step_key, status, attempt, result_json, error_json, input_manifest, " +
+  "input_fingerprint, output_digest, fingerprint_scheme, generation, started_at, ended_at, archived_at";
+
+/** Copy `step` as it is now, before an invalidation resets it (spec §6 step 2). */
+export function archiveStep(db: Database, step: WorkflowStepRow, eventId: number): void {
+  db.query(
+    `INSERT INTO workflow_step_history
+       (step_id, ticket_id, event_id, step_key, status, attempt, result_json, error_json, input_manifest,
+        input_fingerprint, output_digest, fingerprint_scheme, generation, started_at, ended_at, archived_at)
+     VALUES ($sid, $tid, $eid, $key, $status, $attempt, $result, $error, $manifest,
+        $fingerprint, $output, $scheme, $generation, $started, $ended, $now)`,
+  ).run({
+    $sid: step.id,
+    $tid: step.ticket_id,
+    $eid: eventId,
+    $key: step.step_key,
+    $status: step.status,
+    $attempt: step.attempt,
+    $result: step.result_json,
+    $error: step.error_json,
+    $manifest: step.input_manifest,
+    $fingerprint: step.input_fingerprint,
+    $output: step.output_digest,
+    $scheme: step.fingerprint_scheme,
+    $generation: step.generation,
+    $started: step.started_at,
+    $ended: step.ended_at,
+    $now: nowUtc(),
+  });
+}
+
+export function listStepHistory(db: Database, ticketId: number, stepKey?: string): StepHistoryRow[] {
+  return stepKey === undefined
+    ? db
+        .query<StepHistoryRow, [number]>(
+          `SELECT ${COLS} FROM workflow_step_history WHERE ticket_id = ? ORDER BY id`,
+        )
+        .all(ticketId)
+    : db
+        .query<StepHistoryRow, [number, string]>(
+          `SELECT ${COLS} FROM workflow_step_history WHERE ticket_id = ? AND step_key = ? ORDER BY id`,
+        )
+        .all(ticketId, stepKey);
+}
+```
+
+`src/db/repos/workflow-step.ts`, after `resetAttempt`:
+
+```ts
+/** spec §6 step 3: a fresh round in a new generation, keeping nothing the step recorded. */
+export function resetForInvalidate(db: Database, id: number): void {
+  db.query(
+    `UPDATE workflow_step
+       SET status = 'pending', attempt = 0, result_json = NULL, error_json = NULL, pid = NULL,
+           input_manifest = NULL, input_fingerprint = NULL, output_digest = NULL,
+           fingerprint_scheme = NULL, generation = generation + 1, updated_at = $now
+     WHERE id = $id`,
+  ).run({ $now: nowUtc(), $id: id });
+}
+```
+
+`src/db/repos/ticket.ts`, after `setTicketTrack`:
+
+```ts
+/** design:size's output cleared by an invalidation (spec §6.1). */
+export function clearTicketTrack(db: Database, id: number): void {
+  db.query("UPDATE ticket SET track = NULL, updated_at = $now WHERE id = $id").run({
+    $now: nowUtc(),
+    $id: id,
+  });
+}
+```
+
+- [ ] **Step 4: Write the clearing rules and `invalidateSteps`**
+
+```ts
+// src/daemon/design-outputs.ts
+import type { Database } from "bun:sqlite";
+import { clearTicketTrack, setNeedsDocs } from "../db/repos/ticket.ts";
+import { deleteByTicket as deleteUnits } from "../db/repos/work-unit.ts";
+import type { DesignStepKey } from "./design-graph.ts";
+
+/** What an invalidation clears, per step (spec §6.1). */
+export const CLEAR_OUTPUTS: Record<DesignStepKey, (db: Database, ticketId: number) => void> = {
+  // reruns; nothing in the database
+  provision: () => {},
+  // the rerun revises the plan file in place
+  "design:dispatch": () => {},
+  "design:extract": (db, ticketId) => {
+    // Every unit goes, reconcile units included (a stale one would collide on UNIQUE (ticket_id,
+    // seq) or depend on units that no longer exist). Findings tied to a unit are detached first, so
+    // the unit foreign key's cascade does not delete them: code findings as today, and plan
+    // findings too (spec §6.1).
+    db.query(
+      "UPDATE review_finding SET work_unit_id = NULL WHERE ticket_id = ? AND work_unit_id IS NOT NULL",
+    ).run(ticketId);
+    deleteUnits(db, ticketId);
+    setNeedsDocs(db, ticketId, 0);
+  },
+  "design:size": (db, ticketId) => clearTicketTrack(db, ticketId),
+  // requiredPlanFindings already reads only the latest design:review dispatch
+  "design:review": () => {},
+};
+```
+
+```ts
+// src/daemon/invalidate.ts
+import type { Database } from "bun:sqlite";
+import { appendEvent } from "../db/repos/event-log.ts";
+import { archiveStep } from "../db/repos/step-history.ts";
+import { getByKey, resetForInvalidate } from "../db/repos/workflow-step.ts";
+import { type DesignStepKey, isTableStep } from "./design-graph.ts";
+import { CLEAR_OUTPUTS } from "./design-outputs.ts";
+
+export type InvalidateCause = "inputs" | "feedback" | "worktree-recreated" | "manifest-touched";
+
+export interface InvalidateReason {
+  cause: InvalidateCause;
+  /** The input names whose digests changed (cause `inputs`). */
+  changed?: string[];
+}
+
+/** Apply an invalidate (spec §6), in one transaction: one `note` event, reason `invalidated` (not
+ *  a loopback, so v_rejection_counts and REVIEW_REPAIR_LIMIT do not count it); for each step, its
+ *  row copied to workflow_step_history with that event's id, then reset to a fresh round in the
+ *  next generation; then its outputs cleared (§6.1). Returns the event id and each step's new
+ *  generation. The only path that resets a design table step. */
+export function invalidateSteps(
+  db: Database,
+  ticketId: number,
+  stepKeys: readonly DesignStepKey[],
+  reason: InvalidateReason,
+): { eventId: number; generations: Partial<Record<DesignStepKey, number>> } {
+  for (const key of stepKeys) {
+    if (!isTableStep(key)) throw new Error(`invalidateSteps: '${key}' is not a design table step`);
+  }
+  return db.transaction(() => {
+    const event = appendEvent(db, {
+      ticketId,
+      kind: "note",
+      reason: "invalidated",
+      payload: { event: "invalidated", stepKeys: [...stepKeys], cause: reason.cause, changed: reason.changed ?? [] },
+    });
+    const generations: Partial<Record<DesignStepKey, number>> = {};
+    for (const key of stepKeys) {
+      const step = getByKey(db, ticketId, key);
+      if (step) {
+        archiveStep(db, step, event.id);
+        resetForInvalidate(db, step.id);
+        generations[key] = step.generation + 1;
+      }
+      CLEAR_OUTPUTS[key](db, ticketId);
+    }
+    return { eventId: event.id, generations };
+  })();
+}
+```
+
+- [ ] **Step 5: The descriptor, its interpreter, and `resetProvision`**
+
+`src/daemon/resolver.ts`: import `type DesignStepKey` from `./design-graph.ts` and `type InvalidateReason` from `./invalidate.ts`; add to `StepDescriptor`:
+
+```ts
+  | { kind: "invalidate"; stepKeys: DesignStepKey[]; reason: InvalidateReason }
+```
+
+`src/daemon/advance.ts`, import `invalidateSteps` from `./invalidate.ts`; after the `mark-verified` branch (line 136):
+
+```ts
+    if (d.kind === "invalidate") {
+      // The resolver only detected the mismatch; the reset happens here, in one transaction
+      // (spec §6). The next pass runs the invalidated step.
+      invalidateSteps(db, ticketId, d.stepKeys, d.reason);
+      continue;
+    }
+```
+
+`src/dispatch/provision.ts`: import `invalidateSteps` from `../daemon/invalidate.ts` (remove `resetToPending`, `resetAttempt` from its imports if no longer used), and replace `resetProvision` and `resetProvisionIfManifestTouched`:
+
+```ts
+/** Reset a succeeded `provision` through the invalidate function (spec §6), so it leaves history
+ *  and opens a new generation: on resume when the worktree was recreated (its installed deps are
+ *  gone), and from implement:dispatch when a diff touched a dependency manifest. A no-op unless
+ *  provision is currently `succeeded`. */
+export function resetProvision(
+  db: Database,
+  ticketId: number,
+  cause: "worktree-recreated" | "manifest-touched" = "worktree-recreated",
+): void {
+  const s = getByKey(db, ticketId, "provision");
+  if (s && s.status === "succeeded") invalidateSteps(db, ticketId, ["provision"], { cause });
+}
+
+export function resetProvisionIfManifestTouched(
+  db: Database,
+  ticketId: number,
+  changedFiles: string[],
+): void {
+  if (diffTouchesManifest(changedFiles)) resetProvision(db, ticketId, "manifest-touched");
+}
+```
+
+- [ ] **Step 6: Run the tests and see them pass**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/invalidate.test.ts test/dispatch/provision.test.ts test/dispatch/checks-provision-reset.test.ts test/cli/park.test.ts`
+Expected: PASS.
+
+- [ ] **Step 7: Break it on purpose, see it fail, restore**
+
+1. Remove the `UPDATE review_finding ...` statement from `CLEAR_OUTPUTS["design:extract"]`: the first test fails (the plan finding is cascade-deleted). Restore.
+2. Remove `archiveStep(db, step, event.id);`: the first test fails on the history row. Restore.
+3. Make `resetProvision` call `resetToPending` again: the third test fails (no history, generation 0). Restore.
+
+- [ ] **Step 8: Run the whole suite, then commit**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test`
+Expected: PASS.
+
+```bash
+git add src/daemon/invalidate.ts src/daemon/design-outputs.ts src/db/repos/step-history.ts src/db/repos/workflow-step.ts src/db/repos/ticket.ts src/db/repos/review-finding.ts src/daemon/resolver.ts src/daemon/advance.ts src/dispatch/provision.ts test/daemon/invalidate.test.ts
+git commit -m "feat(eng-477): invalidate design steps in one transaction with history and output clearing" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 11: Design handlers write their database outputs in the success transaction
+
+**Files:**
+- Modify: `src/daemon/design-outputs.ts` (add the commits)
+- Modify: `src/dispatch/handlers.ts:543-661` (`design:extract`, `design:size`, `design:review` return their rows and register a commit)
+- Test: `test/dispatch/design-commits.test.ts`
+
+**Interfaces:**
+- Consumes: `StepCommit`, `register(..., { commit })` (Task 9); `ExtractedWorkUnit` (`src/dispatch/extract-schema.ts:20`); `insertWorkUnit` with `origin` (Task 4); `insertFinding` (`src/db/repos/review-finding.ts:35`).
+- Produces:
+  - `interface ExtractResult { units: number; extracted: ExtractedWorkUnit[]; needsDocs: boolean }`; `writeExtractOutputs(db, ticketId, result: unknown): void`
+  - `interface SizeResult { track: "fast" | "full"; graded: boolean; overall?: number }`; `writeSizeOutput(db, ticketId, result: unknown): void`
+  - `interface PlanFindingInput { workUnitId: number | null; severity: string; category: string; factorsJson: string | null; deferralCandidate: 0 | 1; blocksShip: 0 | 1 | null; location: string | null; rationale: string }`; `interface ReviewResult { findings: number; blocking: number; dispatchId: string; filed: PlanFindingInput[] }`; `writePlanFindings(db, ticketId, result: unknown): void`
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// test/dispatch/design-commits.test.ts
+import { expect, test } from "bun:test";
+import { advanceOneStep } from "../../src/daemon/advance.ts";
+import { StepRegistry } from "../../src/daemon/step-registry.ts";
+import { listByTicket as listFindings } from "../../src/db/repos/review-finding.ts";
+import { getTicket } from "../../src/db/repos/ticket.ts";
+import { listByTicket as listUnits } from "../../src/db/repos/work-unit.ts";
+import { getByKey } from "../../src/db/repos/workflow-step.ts";
+import { atStep, driveUntil, makeDesignTicket } from "../helpers/design-steps.ts";
+
+/** The real registry, with one step's commit made to throw on its first call: the handler's work is
+ *  done and returned, but the success transaction never commits (a crash at that point). */
+function failFirstCommit(real: StepRegistry, handlerKey: string): StepRegistry {
+  let failed = false;
+  const wrapped = new StepRegistry(real.synchronize);
+  for (const key of ["provision", "design:dispatch", "design:extract", "design:size", "design:review", "checks:dispatch", "checks:classify"]) {
+    const handler = real.resolve(key);
+    if (!handler) continue;
+    const commit = real.resolveCommit(key);
+    wrapped.register(key, handler, {
+      commit: (db, ticketId, result) => {
+        if (key === handlerKey && !failed) {
+          failed = true;
+          throw new Error(`injected: the success transaction of ${key} did not commit`);
+        }
+        commit?.(db, ticketId, result);
+      },
+    });
+  }
+  return wrapped;
+}
+
+test("a design:extract whose success did not commit leaves no units, and its rerun writes them once", async () => {
+  const t = makeDesignTicket();
+  await driveUntil(t, atStep("design:extract"));
+  const registry = failFirstCommit(t.registry, "design:extract");
+  const first = await advanceOneStep(t.db, t.ticketId, registry, { config: t.config });
+  expect(first.kind).toBe("retry");
+  expect(listUnits(t.db, t.ticketId)).toEqual([]);
+  expect(getByKey(t.db, t.ticketId, "design:extract")?.status).not.toBe("succeeded");
+  await driveUntil({ ...t, registry }, atStep("design:size"));
+  expect(listUnits(t.db, t.ticketId).map((u) => u.seq)).toEqual([1, 2]); // no UNIQUE (ticket_id, seq) error
+  expect(t.calls.counts["design:extract"]).toBe(2);
+});
+
+test("design:size writes the track only when its success commits", async () => {
+  const t = makeDesignTicket();
+  await driveUntil(t, atStep("design:size"));
+  const registry = failFirstCommit(t.registry, "design:size");
+  await advanceOneStep(t.db, t.ticketId, registry, { config: t.config });
+  expect(getTicket(t.db, t.ticketId)?.track).toBeNull();
+  await advanceOneStep(t.db, t.ticketId, registry, { config: t.config });
+  expect(getTicket(t.db, t.ticketId)?.track).toBe("full");
+});
+
+test("design:review's findings are written before its verdict reads them, and only on success", async () => {
+  const t = makeDesignTicket({
+    script: {
+      planFindings: () => [
+        {
+          severity: "critical",
+          category: "feasibility",
+          location: "plan:Unit 1",
+          rationale: "not feasible",
+          factors: null,
+          deferral_candidate: false,
+          work_unit_seq: 1,
+        },
+      ],
+    },
+  });
+  await driveUntil(t, atStep("design:review"));
+  const registry = failFirstCommit(t.registry, "design:review");
+  await advanceOneStep(t.db, t.ticketId, registry, { config: t.config }); // commit fails: no rows
+  expect(listFindings(t.db, t.ticketId)).toEqual([]);
+  const outcome = await advanceOneStep(t.db, t.ticketId, registry, { config: t.config });
+  expect(outcome).toEqual({ kind: "loopback", stepKey: "design:review" }); // the verdict saw the row
+  expect(listFindings(t.db, t.ticketId).filter((f) => f.review_kind === "plan").length).toBe(1);
+});
+```
+
+- [ ] **Step 2: Run it and see it fail**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/dispatch/design-commits.test.ts`
+Expected: FAIL: the first test finds units after the failed commit (`expect(listUnits(...)).toEqual([])` receives two units), because extract still inserts them before `markSucceeded`.
+
+- [ ] **Step 3: Write the commits**
+
+Append to `src/daemon/design-outputs.ts`:
+
+```ts
+import { insertFinding } from "../db/repos/review-finding.ts";
+import { setTicketTrack } from "../db/repos/ticket.ts";
+import { insertWorkUnit } from "../db/repos/work-unit.ts";
+import type { ExtractedWorkUnit } from "../dispatch/extract-schema.ts";
+
+/** design:extract's result: its rows, written by writeExtractOutputs in the success transaction. */
+export interface ExtractResult {
+  units: number;
+  extracted: ExtractedWorkUnit[];
+  needsDocs: boolean;
+}
+
+export function writeExtractOutputs(db: Database, ticketId: number, result: unknown): void {
+  const r = result as ExtractResult;
+  for (const u of r.extracted) {
+    insertWorkUnit(db, {
+      ticketId,
+      seq: u.seq,
+      kind: u.kind,
+      title: u.title,
+      description: u.description,
+      behavioral: u.behavioral ? 1 : 0, // the carry: classify explicitly, never default
+      testPlan: u.test_plan,
+      filesToTouch: u.files_to_touch,
+      verifyCheckTypes: u.verify_check_types,
+      dependsOn: u.depends_on,
+      origin: "extract",
+    });
+  }
+  setNeedsDocs(db, ticketId, r.needsDocs ? 1 : 0);
+}
+
+export interface SizeResult {
+  track: "fast" | "full";
+  graded: boolean;
+  overall?: number;
+}
+
+export function writeSizeOutput(db: Database, ticketId: number, result: unknown): void {
+  setTicketTrack(db, ticketId, (result as SizeResult).track);
+}
+
+export interface PlanFindingInput {
+  workUnitId: number | null;
+  severity: string;
+  category: string;
+  factorsJson: string | null;
+  deferralCandidate: 0 | 1;
+  blocksShip: 0 | 1 | null;
+  location: string | null;
+  rationale: string;
+}
+
+export interface ReviewResult {
+  findings: number;
+  blocking: number;
+  dispatchId: string;
+  filed: PlanFindingInput[];
+}
+
+/** design:review's rows, as rows of this step's dispatch (spec §3.1 rule 2), written before
+ *  applyReviewVerdict reads them in the same transaction (spec §6.2). */
+export function writePlanFindings(db: Database, ticketId: number, result: unknown): void {
+  const r = result as ReviewResult;
+  for (const f of r.filed) {
+    insertFinding(db, {
+      ticketId,
+      reviewKind: "plan",
+      dispatchId: r.dispatchId,
+      workUnitId: f.workUnitId,
+      severity: f.severity,
+      category: f.category,
+      factorsJson: f.factorsJson,
+      deferralCandidate: f.deferralCandidate,
+      blocksShip: f.blocksShip,
+      location: f.location,
+      rationale: f.rationale,
+    });
+  }
+}
+```
+
+(merge the new `import` lines with the file's existing imports at the top: `setNeedsDocs` and `clearTicketTrack` are already imported from `../db/repos/ticket.ts`; add `setTicketTrack` there.)
+
+- [ ] **Step 4: Return rows from the handlers and register the commits**
+
+In `src/dispatch/handlers.ts` import `writeExtractOutputs, writePlanFindings, writeSizeOutput, type ExtractResult, type PlanFindingInput, type ReviewResult, type SizeResult` from `../daemon/design-outputs.ts`, and remove `insertWorkUnit`, `setNeedsDocs`, `setTicketTrack`, `insertFinding` from the imports if they have no other user.
+
+`design:extract`: replace lines 570-588 (from `for (const u of parsed.value.units) {` through the registration's closing `});`) with:
+
+```ts
+    // Written by writeExtractOutputs inside the success transaction (spec §6.2): a crash before
+    // markSucceeded leaves no partial units, so the rerun cannot hit UNIQUE (ticket_id, seq).
+    const result: ExtractResult = {
+      units: parsed.value.units.length,
+      extracted: parsed.value.units,
+      needsDocs: parsed.value.cdotImpact.documentation.applies,
+    };
+    return result;
+  }, { commit: writeExtractOutputs });
+```
+
+`design:size` (lines 590-615):
+
+```ts
+  registry.register(
+    "design:size",
+    async (ctx: HandlerContext) => {
+      const units = listUnits(ctx.db, ctx.ticket.id);
+      if (!ctx.config.complexityGrading) {
+        const off: SizeResult = { track: sizeTrack(units), graded: false }; // sprawl only, no agent
+        return off;
+      }
+      // on: cold cheap-tier grader → daemon combines the grade with sprawl.
+      const result = await runAgentDispatch(ctx, depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS), {
+        handlerKey: "design:size",
+        template: DESIGN_COMPLEXITY_GRADE_TEMPLATE,
+        vars: complexityGradeVars(ctx.ticket, deps.profile, units),
+        postcondition: () => {}, // read-only: nothing commits
+      });
+      const parsed = extractSidecar(result.output, ComplexityGradeSchema);
+      if (!parsed.ok) {
+        throw new Error(`design:size grade sidecar ${parsed.reason}: ${parsed.detail}`);
+      }
+      const on: SizeResult = {
+        track: combineTrack(units.length, parsed.value.overall),
+        graded: true,
+        overall: parsed.value.overall,
+      };
+      return on;
+    },
+    { commit: writeSizeOutput },
+  );
+```
+
+`design:review`: replace lines 640-661 (from `let blocking = 0;` through the registration's closing `});`) with:
+
+```ts
+    const filed: PlanFindingInput[] = parsed.value.findings.map((f) => ({
+      workUnitId: f.work_unit_seq === null ? null : (seqToId.get(f.work_unit_seq) ?? null),
+      severity: f.severity,
+      category: f.category,
+      factorsJson: f.factors === null ? null : JSON.stringify(f.factors),
+      deferralCandidate: f.deferral_candidate ? 1 : 0,
+      blocksShip: computeBlocksShip(f.severity, f.deferral_candidate),
+      location: f.location,
+      rationale: f.rationale,
+    }));
+    const review: ReviewResult = {
+      findings: filed.length,
+      blocking: filed.filter((f) => f.blocksShip === 1).length,
+      dispatchId: result.dispatchId,
+      filed,
+    };
+    return review;
+  }, { commit: writePlanFindings });
+```
+
+Check that nothing reads the old result shapes: `grep -rn '"design:extract"\|"design:size"\|"design:review"' src | grep -n result_json` must show no reader of `result_json` for these steps (the review step's `result_json` reader in `review-resume.ts:60` is for the code `review` step only).
+
+- [ ] **Step 5: Run the tests and see them pass**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/dispatch/design-commits.test.ts test/dispatch/design-extract.test.ts test/dispatch/design-size.test.ts test/dispatch/design-size-e2e.test.ts test/dispatch/design-review-e2e.test.ts test/dispatch/design-review-handler.test.ts test/dispatch/design-extract-retry-feedback.test.ts`
+Expected: PASS.
+
+- [ ] **Step 6: Break it on purpose, see it fail, restore**
+
+Move the `writeExtractOutputs(ctx.db, ctx.ticket.id, result)` call into the extract handler before its `return` (writing before the success commit). The first test fails (units present after the failed commit, then the rerun throws `UNIQUE constraint failed: work_unit.ticket_id, work_unit.seq`). Restore.
+
+- [ ] **Step 7: Run the whole suite, then commit**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test`
+Expected: PASS.
+
+```bash
+git add src/daemon/design-outputs.ts src/dispatch/handlers.ts test/dispatch/design-commits.test.ts
+git commit -m "fix(eng-477): design handlers write their rows in the success transaction" -m "A crash between design:extract's work and its success no longer leaves partial units for the rerun to collide with." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 12: The adopt pass for runs paused by an older Styre (D9)
+
+**Files:**
+- Create: `src/daemon/adopt.ts`
+- Modify: `src/cli/park.ts` (call the adopt pass right after `captureSnapshot`, before the registry), `src/daemon/run-ticket.ts` (call it right after `captureSnapshot`, for a reused `--db`)
+- Test: `test/daemon/adopt.test.ts`, `test/cli/adopt-v8-e2e.test.ts`
+
+**Interfaces:**
+- Consumes: `DESIGN_TABLE`, `StepRow`, `DesignStepKey` (Task 6); `planDigestAt`, `recordStepManifest` (Task 9); `FINGERPRINT_SCHEME` (Task 5); `PAUSED_V8_DIR` (Task 1); `DesignHarness` with `slug` and `repoDir` options (Task 7); `listStepHistory` (Task 10).
+- Produces: `interface AdoptContext { repoPath: string; branch: string }`; `adoptUnfingerprinted(db: Database, ticketId: number, ctx: AdoptContext): DesignStepKey[]` (the adopted steps, in table order; `[]` and no event when there is nothing to adopt).
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// test/daemon/adopt.test.ts
+import { expect, test } from "bun:test";
+import { adoptUnfingerprinted } from "../../src/daemon/adopt.ts";
+import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { atStep, driveUntil, makeDesignTicket } from "../helpers/design-steps.ts";
+
+test("a run whose design steps all carry manifests adopts nothing and writes no event", async () => {
+  const t = makeDesignTicket();
+  await driveUntil(t, atStep("checks:dispatch"));
+  expect(adoptUnfingerprinted(t.db, t.ticketId, { repoPath: t.repo, branch: "feat/ENG-1" })).toEqual([]);
+  expect(listEvents(t.db, t.ticketId).some((e) => e.reason === "adopted")).toBe(false);
+});
+```
+
+```ts
+// test/cli/adopt-v8-e2e.test.ts
+import { Database } from "bun:sqlite";
+import { afterEach, expect, test } from "bun:test";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { getByKey } from "../../src/db/repos/workflow-step.ts";
+import { PAUSED_V8_DIR, fixtureVersion } from "../helpers/db-fixtures.ts";
+import { DesignHarness } from "../helpers/design-harness.ts";
+import { unitsOf } from "../helpers/design-script.ts";
+import { git } from "../helpers/design-steps.ts";
+
+const harnesses: DesignHarness[] = [];
+afterEach(() => {
+  for (const h of harnesses.splice(0)) h.cleanup();
+});
+
+/** Restore the recorded v8 run: its repository from the bundle, its checkpoint into the harness's
+ *  state folder. The recording's absolute repository path does not exist here, so the project row
+ *  is pointed at the restored repository: the one direct write, and it is a relocation, not state. */
+function restoreRecordedRun(): DesignHarness {
+  const meta = JSON.parse(readFileSync(join(PAUSED_V8_DIR, "meta.json"), "utf8")) as {
+    slug: string;
+    ident: string;
+    branch: string;
+  };
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), "styre-v8-restored-")));
+  git(tmpdir(), ["clone", "-q", join(PAUSED_V8_DIR, "repo.bundle"), repo]);
+  git(repo, ["branch", meta.branch, `origin/${meta.branch}`]);
+  git(repo, ["config", "user.email", "t@s.dev"]);
+  git(repo, ["config", "user.name", "T"]);
+  const h = new DesignHarness("worktree", { slug: meta.slug, repoDir: repo });
+  harnesses.push(h);
+  mkdirSync(h.checkpointDir(), { recursive: true });
+  copyFileSync(join(PAUSED_V8_DIR, "run.db"), h.dbPath());
+  copyFileSync(join(PAUSED_V8_DIR, "transcript.json"), join(h.checkpointDir(), "transcript.json"));
+  const db = new Database(h.dbPath());
+  db.query("UPDATE project SET target_repo = ?").run(repo);
+  db.close();
+  return h;
+}
+
+test("D9: a v8 run paused in worktree mode resumes, is adopted, reruns no finished design step, and completes", async () => {
+  const h = restoreRecordedRun();
+  expect(fixtureVersion(h.dbPath())).toBe(8);
+  const code = await h.resume({ script: { units: () => unitsOf(2, { behavioral: false }) } });
+  expect(code).toBe(0); // pr-ready
+  expect(fixtureVersion(h.dbPath())).toBe(9);
+  expect(readdirSync(h.checkpointDir()).some((f) => /^run\.db\.v8\.\d{8}T\d{9}Z\.bak$/.test(f))).toBe(true);
+  // no design agent ran again
+  for (const s of ["design:dispatch", "design:extract", "design:size", "design:review"] as const) {
+    expect(h.calls.counts[s]).toBe(0);
+  }
+  h.read((db, id) => {
+    const adopted = listEvents(db, id).filter((e) => e.reason === "adopted");
+    expect(adopted.length).toBe(1);
+    const payload = JSON.parse(adopted[0].payload_json ?? "{}");
+    // provision was reset for the recreated worktree before the pass, so it reran instead
+    expect(payload.stepKeys).toEqual(["design:dispatch", "design:extract", "design:size", "design:review"]);
+    expect(payload.message).toContain("cannot be detected");
+    const invalidated = listEvents(db, id)
+      .filter((e) => e.reason === "invalidated")
+      .map((e) => JSON.parse(e.payload_json ?? "{}"));
+    expect(invalidated).toEqual([
+      { event: "invalidated", stepKeys: ["provision"], cause: "worktree-recreated", changed: [] },
+    ]);
+    for (const k of ["provision", "design:dispatch", "design:extract", "design:size", "design:review"]) {
+      expect(getByKey(db, id, k)?.fingerprint_scheme).toBe(1);
+    }
+  });
+});
+```
+
+- [ ] **Step 2: Run them and see them fail**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/adopt.test.ts test/cli/adopt-v8-e2e.test.ts`
+Expected: FAIL with `Cannot find module '../../src/daemon/adopt.ts'`.
+
+- [ ] **Step 3: Write the adopt pass**
+
+```ts
+// src/daemon/adopt.ts
+import type { Database } from "bun:sqlite";
+import { appendEvent } from "../db/repos/event-log.ts";
+import { getTicket } from "../db/repos/ticket.ts";
+import { getByKey } from "../db/repos/workflow-step.ts";
+import { FINGERPRINT_SCHEME } from "./canonical.ts";
+import { planDigestAt, recordStepManifest } from "./design-digests.ts";
+import { DESIGN_TABLE, type DesignStepKey, type StepRow } from "./design-graph.ts";
+
+export interface AdoptContext {
+  repoPath: string;
+  branch: string;
+}
+
+/** spec §7.6 (D9): a run paused by an older Styre has finished design steps with no manifest, or
+ *  one under another scheme. Record each one's manifest from the current inputs (and, for
+ *  design:dispatch, the plan's digest at the branch head), so it counts as done with today's
+ *  inputs and the run continues under the new rules without rerunning it. One `note`, reason
+ *  `adopted`, says so, and says that an edit made between the pause and the upgrade cannot be
+ *  detected. A step that is not succeeded is left alone and reruns as usual. Runs after the
+ *  snapshot and before the first resolver pass: on every resume and on a reused --db. */
+export function adoptUnfingerprinted(db: Database, ticketId: number, ctx: AdoptContext): DesignStepKey[] {
+  const ticket = getTicket(db, ticketId);
+  if (!ticket) throw new Error(`adopt: ticket ${ticketId} not found`);
+  const candidates = DESIGN_TABLE.filter((r): r is StepRow => r.kind === "step").filter((row) => {
+    const s = getByKey(db, ticketId, row.stepKey);
+    return (
+      s !== null &&
+      s.status === "succeeded" &&
+      (s.input_manifest === null || s.fingerprint_scheme !== FINGERPRINT_SCHEME)
+    );
+  });
+  if (candidates.length === 0) return [];
+  // git is read before the transaction (spec §5.2)
+  const planDigest = candidates.some((r) => r.fileOutput)
+    ? planDigestAt(ctx.repoPath, ctx.branch, ticket.ident)
+    : null;
+  const keys = candidates.map((r) => r.stepKey);
+  db.transaction(() => {
+    // table order: design:extract's manifest reads the plan digest adopted just before it
+    for (const row of candidates) {
+      const step = getByKey(db, ticketId, row.stepKey);
+      if (!step) throw new Error(`adopt: ${row.stepKey} vanished`);
+      recordStepManifest(db, ticketId, step.id, row, row.fileOutput ? planDigest : null);
+    }
+    appendEvent(db, {
+      ticketId,
+      kind: "note",
+      reason: "adopted",
+      payload: {
+        event: "adopted",
+        stepKeys: keys,
+        message:
+          "these design steps finished under an older Styre; their inputs are recorded as they are now, so an edit made between the pause and the upgrade cannot be detected",
+      },
+    });
+  })();
+  return keys;
+}
+```
+
+- [ ] **Step 4: Call it on resume and on a reused `--db`**
+
+`src/cli/park.ts`: import `adoptUnfingerprinted` from `../daemon/adopt.ts`; right after the `captureSnapshot(db, ticketId, {...})` call (Task 8):
+
+```ts
+    // spec §7.6: after the snapshot, before the first resolver pass.
+    adoptUnfingerprinted(db, ticketId, { repoPath: project.target_repo, branch });
+```
+
+`src/daemon/run-ticket.ts`: import `adoptUnfingerprinted` from `./adopt.ts`, `getProject` from `../db/repos/project.ts`, `branchNameFor` from `../agent/branch.ts`; after the `recordStartingCommit` lines added in Task 7:
+
+```ts
+  // A reused --db can hold steps an older Styre finished (spec §7.6); a new database has none.
+  const ticketRow = getTicket(deps.db, ticketId);
+  const project = getProject(deps.db, projectId);
+  if (!ticketRow || !project) throw new Error(`runTicket: ticket ${ticketId} or its project vanished`);
+  adoptUnfingerprinted(deps.db, ticketId, { repoPath: project.target_repo, branch: branchNameFor(ticketRow) });
+```
+
+- [ ] **Step 5: Run the tests and see them pass**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/adopt.test.ts test/cli/adopt-v8-e2e.test.ts test/cli/park.test.ts test/cli/park-inplace.test.ts`
+Expected: PASS.
+
+- [ ] **Step 6: Break it on purpose, see it fail, restore**
+
+Comment out the `adoptUnfingerprinted(...)` call in `park.ts`. The D9 test still completes today (the resolver does not compare manifests until Task 13) but fails on `adopted.length` and on `fingerprint_scheme`. Restore. (Task 13 adds the stronger failure: without adoption the walk refuses the run.)
+
+- [ ] **Step 7: Run the whole suite, then commit**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test`
+Expected: PASS.
+
+```bash
+git add src/daemon/adopt.ts src/cli/park.ts src/daemon/run-ticket.ts test/daemon/adopt.test.ts test/cli/adopt-v8-e2e.test.ts
+git commit -m "feat(eng-477): adopt design steps finished under an older Styre on resume" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 13: The walk: design routing generated from the table, early cutoff, extract and size gating
+
+**Files:**
+- Create: `src/daemon/design-walk.ts`
+- Modify: `src/daemon/resolver.ts:1-10,99-135` (design case delegates to the walk; `requiredPlanFindings` import moves to the walk)
+- Modify (existing tests that seeded design rows directly; each now reaches its state through real steps):
+  - `test/daemon/resolver.test.ts:21-106` (the six design tests replaced, code below)
+  - `test/dispatch/design-extract.test.ts`, `test/dispatch/design-extract-retry-feedback.test.ts`, `test/dispatch/completeness-e2e.test.ts:365-370` (`readyForExtract`)
+  - `test/dispatch/design-size.test.ts`, `test/dispatch/design-size-e2e.test.ts` (`readyForSize`)
+  - `test/dispatch/design-review-e2e.test.ts`, `test/dispatch/design-review-handler.test.ts` (`readyForDesignReview`)
+  - `test/daemon/advance.test.ts:24-30,95-130,241-290`, `test/daemon/advance-leftovers.test.ts:30-33` (`seedProvisionDone`), `test/helpers/skeleton-registry.ts:20-30`
+  - `test/daemon/review-resume.test.ts:179-183`
+- Test: `test/daemon/design-walk.test.ts`, `test/cli/walk-resume-e2e.test.ts`
+
+**Interfaces:**
+- Consumes: `DESIGN_TABLE`, `GateRow`, `ensureDesignTableChecked` (Task 6); `currentManifest`, `changedInputs` (Task 9); `FINGERPRINT_SCHEME` (Task 5); `invalidate` descriptor and its interpreter (Task 10); `captureSnapshot` (Task 7); `makeDesignTicket`, `driveUntil`, `atStep`, `reachDesignStep`, `DesignHarness` (Task 7).
+- Produces: `walkDesign(db: Database, ticket: TicketRow): StepDescriptor | null` (null: past the table's last row).
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// test/daemon/design-walk.test.ts
+import { expect, test } from "bun:test";
+import { captureSnapshot } from "../../src/daemon/design-inputs.ts";
+import { nextStepKey } from "../../src/daemon/resolver.ts";
+import { runStep } from "../../src/engine/step-journal.ts";
+import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { setTicketStage } from "../../src/db/repos/ticket.ts";
+import { getByKey } from "../../src/db/repos/workflow-step.ts";
+import { type DesignTicket, atStep, driveUntil, makeDesignTicket } from "../helpers/design-steps.ts";
+import { unitsOf } from "../helpers/design-script.ts";
+
+const recapture = (t: DesignTicket, profile = t.profile, complexityGrading = false) =>
+  captureSnapshot(t.db, t.ticketId, {
+    profile,
+    unusableComponents: [],
+    nonPrimaryComponents: [],
+    config: { complexityGrading },
+  });
+
+test("the design stage routes provision, dispatch, extract, size, review, then the checks steps, then advances", async () => {
+  const t = makeDesignTicket({ script: { units: () => unitsOf(2, { behavioral: false }) } });
+  const seen: string[] = [];
+  const d = await driveUntil(t, (next) => {
+    if (next.kind === "step") seen.push(next.stepKey);
+    return next.kind === "advance";
+  });
+  expect(d).toEqual({ kind: "advance", from: "design", to: "implement" });
+  expect(seen).toEqual([
+    "provision",
+    "design:dispatch",
+    "design:extract",
+    "design:size",
+    "design:review",
+    "checks:dispatch",
+    "checks:classify",
+  ]);
+});
+
+test("a fast track skips design:review and its gate", async () => {
+  const t = makeDesignTicket({ script: { units: () => unitsOf(1, { behavioral: false }) } });
+  const seen: string[] = [];
+  await driveUntil(t, (next) => {
+    if (next.kind === "step") seen.push(next.stepKey);
+    return next.kind === "advance";
+  });
+  expect(seen).not.toContain("design:review");
+});
+
+test("a changed input invalidates exactly the first step that reads it, naming the input", async () => {
+  const t = makeDesignTicket();
+  await driveUntil(t, atStep("checks:dispatch"));
+  recapture(t, { ...t.profile, promptVars: { stack: "ruby", tone: "terse" } });
+  expect(nextStepKey(t.db, t.ticketId)).toEqual({
+    kind: "invalidate",
+    stepKeys: ["design:dispatch"],
+    reason: { cause: "inputs", changed: ["profile.promptVars"] },
+  });
+});
+
+test("early cutoff: an unchanged output leaves its readers done; a changed one invalidates them next", async () => {
+  // runtimeContext is read by dispatch and extract only. The plan is unchanged, so size and review
+  // (which read the plan and the units) stay done.
+  const t = makeDesignTicket();
+  await driveUntil(t, atStep("checks:dispatch"));
+  recapture(t, { ...t.profile, runtimeContext: { ...t.profile.runtimeContext, topology: { type: "web-service", detail: "" } } });
+  await driveUntil(t, atStep("checks:dispatch"));
+  const invalidated = listEvents(t.db, t.ticketId)
+    .filter((e) => e.reason === "invalidated")
+    .map((e) => JSON.parse(e.payload_json ?? "{}").stepKeys[0]);
+  expect(invalidated).toEqual(["design:dispatch", "design:extract"]);
+  expect(t.calls.counts["design:review"]).toBe(1);
+});
+
+test("design:extract and design:size are gated by the walk, not by rows or columns", async () => {
+  const t = makeDesignTicket();
+  await driveUntil(t, atStep("checks:dispatch"));
+  recapture(t, t.profile, true); // grading on: size's inputs change; the track column is still set
+  expect(nextStepKey(t.db, t.ticketId)).toMatchObject({ kind: "invalidate", stepKeys: ["design:size"] });
+});
+
+test("the walk runs only in design: past design an edit is not compared (E6)", async () => {
+  const t = makeDesignTicket();
+  await driveUntil(t, atStep("checks:dispatch"));
+  setTicketStage(t.db, t.ticketId, "implement");
+  recapture(t, { ...t.profile, promptVars: { stack: "other" } });
+  expect(nextStepKey(t.db, t.ticketId).kind).not.toBe("invalidate");
+});
+
+test("a succeeded design step with no manifest is refused loudly (the adopt pass did not run)", async () => {
+  const t = makeDesignTicket();
+  await runStep(t.db, { ticketId: t.ticketId, stepKey: "provision", stepType: "provision", execute: () => ({}) });
+  expect(() => nextStepKey(t.db, t.ticketId)).toThrow("without an input manifest");
+});
+
+test("the plan-review gate escalates while blocking findings remain on the latest review", async () => {
+  const blocking = {
+    severity: "critical" as const,
+    category: "feasibility",
+    location: "plan:Unit 1",
+    rationale: "not feasible",
+    factors: null,
+    deferral_candidate: false,
+    work_unit_seq: 1,
+  };
+  const t = makeDesignTicket({ script: { planFindings: () => [blocking] } });
+  // round 1 blocks → redesign; the plan does not change, so the latest review's blocking findings
+  // remain and the gate row fires
+  await driveUntil(t, (d) => d.kind === "escalate", 30);
+  expect(getByKey(t.db, t.ticketId, "design:review")?.status).toBe("succeeded");
+  expect(nextStepKey(t.db, t.ticketId)).toMatchObject({
+    kind: "escalate",
+    signature: "review:unresolved-plan",
+    stepKey: "design:review",
+  });
+});
+```
+
+```ts
+// test/cli/walk-resume-e2e.test.ts
+import { afterEach, expect, test } from "bun:test";
+import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { DesignHarness } from "../helpers/design-harness.ts";
+
+const harnesses: DesignHarness[] = [];
+afterEach(() => {
+  for (const h of harnesses.splice(0)) h.cleanup();
+});
+const invalidations = (h: DesignHarness) =>
+  h.read((db, id) =>
+    listEvents(db, id)
+      .filter((e) => e.reason === "invalidated")
+      .map((e) => JSON.parse(e.payload_json ?? "{}") as { stepKeys: string[]; cause: string }),
+  );
+
+test("an unchanged resume in worktree mode reruns only provision, for the recreated worktree", async () => {
+  const h = new DesignHarness("worktree");
+  harnesses.push(h);
+  expect(await h.fresh()).toBe(75); // design done, paused at checks:dispatch
+  const before = { ...h.calls.counts };
+  expect(await h.resume()).toBe(75);
+  expect(invalidations(h)).toEqual([
+    { event: "invalidated", stepKeys: ["provision"], cause: "worktree-recreated", changed: [] },
+  ]);
+  for (const s of ["design:dispatch", "design:extract", "design:review"] as const) {
+    expect(h.calls.counts[s]).toBe(before[s]);
+  }
+  expect(h.read((db, id) => listEvents(db, id).some((e) => e.reason === "inputs-changed"))).toBe(false);
+});
+
+test("an unchanged resume in place reruns nothing", async () => {
+  const h = new DesignHarness("in-place");
+  harnesses.push(h);
+  expect(await h.fresh()).toBe(75);
+  const before = { ...h.calls.counts };
+  expect(await h.resume()).toBe(75);
+  expect(await h.resume()).toBe(75);
+  expect(invalidations(h)).toEqual([]);
+  expect(h.calls.counts).toEqual(before);
+});
+```
+
+- [ ] **Step 2: Run them and see them fail**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/design-walk.test.ts test/cli/walk-resume-e2e.test.ts`
+Expected: FAIL: `a changed input invalidates exactly...` receives `{ kind: "step", stepKey: "checks:dispatch", ... }` instead of an `invalidate`, and `a succeeded design step with no manifest` does not throw.
+
+- [ ] **Step 3: Write the walk**
+
+```ts
+// src/daemon/design-walk.ts
+import type { Database } from "bun:sqlite";
+import { requiredPlanFindings } from "../db/repos/review-round.ts";
+import type { TicketRow } from "../db/repos/ticket.ts";
+import { getByKey } from "../db/repos/workflow-step.ts";
+import { FINGERPRINT_SCHEME } from "./canonical.ts";
+import { changedInputs, currentManifest } from "./design-digests.ts";
+import { DESIGN_TABLE, type GateRow, ensureDesignTableChecked } from "./design-graph.ts";
+import type { StepDescriptor } from "./resolver.ts";
+
+const GATE_FIRES: Record<GateRow["name"], (db: Database, ticketId: number) => boolean> = {
+  // today's resolver rule: blocking findings of the latest design:review dispatch remain
+  "plan-review": (db, ticketId) => requiredPlanFindings(db, ticketId).length > 0,
+};
+
+/** The design routing, generated from the declared table (spec §5.4). Walks the rows in order:
+ *  skip a row whose "applies when" is false; a step that is not succeeded is the next step and the
+ *  walk stops there; a succeeded step's manifest is recomputed and compared with the recorded one,
+ *  and a mismatch invalidates that step alone (its readers are judged afresh after it reruns: early
+ *  cutoff); a gate that fires returns its escalation. Null past the last row. Reads the database
+ *  only, never the worktree. Pure: the interpreter applies what it returns. */
+export function walkDesign(db: Database, ticket: TicketRow): StepDescriptor | null {
+  ensureDesignTableChecked();
+  for (const row of DESIGN_TABLE) {
+    if (!row.appliesWhen(ticket)) continue;
+    if (row.kind === "gate") {
+      if (GATE_FIRES[row.name](db, ticket.id))
+        return { kind: "escalate", reason: row.reason, signature: row.signature, stepKey: row.stepKey };
+      continue;
+    }
+    const step = getByKey(db, ticket.id, row.stepKey);
+    if (step?.status !== "succeeded") {
+      return { kind: "step", stepKey: row.stepKey, stepType: row.stepType, handlerKey: row.handlerKey, workUnitId: null };
+    }
+    if (step.input_manifest === null || step.fingerprint_scheme !== FINGERPRINT_SCHEME) {
+      throw new Error(
+        `design walk: '${row.stepKey}' succeeded without an input manifest under scheme ${FINGERPRINT_SCHEME}; ` +
+          "the adopt pass (resume, reused --db) should have recorded one",
+      );
+    }
+    const changed = changedInputs(
+      JSON.parse(step.input_manifest) as Record<string, string>,
+      currentManifest(db, ticket.id, row),
+    );
+    if (changed.length > 0) {
+      return { kind: "invalidate", stepKeys: [row.stepKey], reason: { cause: "inputs", changed } };
+    }
+  }
+  return null;
+}
+```
+
+`src/daemon/resolver.ts`: remove `import { requiredPlanFindings, unresolvedReviewReason }` → `import { unresolvedReviewReason } from "../db/repos/review-round.ts";`, import `walkDesign` from `./design-walk.ts`, and replace the whole `case "design": {...}` (lines 99-135) with:
+
+```ts
+    case "design": {
+      // Generated from the declared design table (src/daemon/design-graph.ts, spec §3, §5.4):
+      // provision, design:dispatch, design:extract, design:size, design:review and its gate, each
+      // "done" only when done with the inputs it has now.
+      const designStep = walkDesign(db, ticket);
+      if (designStep !== null) return designStep;
+      // Past the table's last row: today's checks routing, unchanged (E9).
+      if (!done(db, ticketId, "checks:dispatch")) {
+        return step("checks:dispatch", "dispatch", "checks:dispatch", null);
+      }
+      if (!done(db, ticketId, "checks:classify")) {
+        return step("checks:classify", "dispatch", "checks:classify", null);
+      }
+      return { kind: "advance", from: "design", to: "implement" };
+    }
+```
+
+- [ ] **Step 4: Move the existing tests off seeded rows**
+
+`test/daemon/resolver.test.ts`: delete the six tests from `design: first asks for provision` through `design full-track: provision + units + track=full, asks for design:review before advancing` (lines 25-106); their behaviour is covered by the first two tests of `test/daemon/design-walk.test.ts` above. Keep the `succeed()` helper (the implement stage tests use it).
+
+`test/daemon/review-resume.test.ts`, in `plan review cannot accept risks...`: delete the `for (const key of ["provision", "design:dispatch"]) {...}` loop and the `expect(nextStepKey(db, ticketId)).toMatchObject({ kind: "escalate", stepKey: "design:review" });` line (the gate is covered by `the plan-review gate escalates...` above, through real steps), and remove `nextStepKey` from the imports if unused.
+
+`test/helpers/skeleton-registry.ts`: delete the `setTicketTrack(ctx.db, ctx.ticket.id, "fast");` line from the `design:extract` mock and register a size mock after it:
+
+```ts
+  r.register("design:size", (ctx: HandlerContext) => {
+    setTicketTrack(ctx.db, ctx.ticket.id, "fast");
+    return { track: "fast", graded: false };
+  });
+```
+
+`test/daemon/advance.test.ts` and `test/daemon/advance-leftovers.test.ts`: replace each `seedProvisionDone` body with a real run of a provision step:
+
+```ts
+async function seedProvisionDone(db: Parameters<typeof advanceOneStep>[0], ticketId: number): Promise<void> {
+  const r = new StepRegistry();
+  r.register("provision", () => ({}));
+  const outcome = await advanceOneStep(db, ticketId, r);
+  if (outcome.kind !== "stepped" || outcome.stepKey !== "provision")
+    throw new Error(`seedProvisionDone: expected provision to run, got ${JSON.stringify(outcome)}`);
+}
+```
+
+and `await` every call. In `advance.test.ts`'s `an advance descriptor sets the stage and writes a transition event`, register `design:size` (`(ctx) => { setTicketTrack(ctx.db, ctx.ticket.id, "fast"); return { track: "fast", graded: false }; }`), delete the manual `setTicketTrack(db, ticketId, "fast");`, and replace the six explicit `advanceOneStep` calls before the final one with `while (getTicket(db, ticketId)?.stage === "design") await advanceOneStep(db, ticketId, registry);` followed by `const outcome = await advanceOneStep(db, ticketId, registry);` (the stage transition collapses inline in the last design call, so assert `outcome` against `implement:wu1:dispatch` from the first call made while the stage is `implement`: keep the existing `expect(outcome).toEqual({ kind: "stepped", stepKey: "implement:wu1:dispatch" })`). In `design:review step with blocking plan finding → outcome loopback and stage design`, replace the seeding (`seedProvisionDone`, `setTicketStage`, `setTicketTrack`, the `design:dispatch` row, the work unit) with:
+
+```ts
+  const repo = gitRepo();
+  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+  const profile = parseProfile({
+    slug: "test-project",
+    targetRepo: repo,
+    components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
+    runtimeContext: ABSENT_RC,
+  });
+  await reachDesignStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-adv-wt-")),
+    target: "design:review",
+  });
+```
+
+(destructure `projectId` from `makeTestDb()`, and import `gitRepo`, `reachDesignStep` from `../helpers/design-steps.ts`, `ABSENT_RC` from `../helpers/design-script.ts`, `parseProfile`, `mkdtempSync`, `tmpdir`, `join`.)
+
+The design handler tests: in each of `design-extract.test.ts`, `design-extract-retry-feedback.test.ts`, `completeness-e2e.test.ts`, `design-size.test.ts`, `design-size-e2e.test.ts`, `design-review-e2e.test.ts`, `design-review-handler.test.ts`:
+1. Split the file's `registryFor(repo, runner, ...extra)`: move its `parseProfile({...})` argument, unchanged, into `function profileFor(repo: string, ...extra)` with the same extra parameters, and make `registryFor` call `profileFor(repo, ...extra)`.
+2. Give each repository one worktree root, shared by the seeder and the test's registry:
+
+```ts
+const roots = new Map<string, string>();
+function rootFor(repo: string): string {
+  let root = roots.get(repo);
+  if (root === undefined) {
+    root = mkdtempSync(join(tmpdir(), "styre-wtroot-"));
+    roots.set(repo, root);
+  }
+  return root;
+}
+```
+
+and in `registryFor` use `worktreeRoot: rootFor(repo)`.
+3. Replace the seeder body with real steps (import `reachDesignStep` from `../helpers/design-steps.ts` and `unitsOf` from `../helpers/design-script.ts`):
+
+```ts
+async function readyForExtract(db: Database, ticketId: number, repo: string): Promise<void> {
+  await reachDesignStep({ db, ticketId, profile: profileFor(repo), worktreeRoot: rootFor(repo), target: "design:extract" });
+}
+```
+
+```ts
+async function readyForSize(db: Database, ticketId: number, repo: string, unitCount: number): Promise<void> {
+  await reachDesignStep({
+    db,
+    ticketId,
+    profile: profileFor(repo),
+    worktreeRoot: rootFor(repo),
+    target: "design:size",
+    units: unitsOf(unitCount, { behavioral: false, dir: "src", ext: "ts" }),
+  });
+}
+```
+
+```ts
+async function readyForDesignReview(db: Database, ticketId: number, repo: string): Promise<void> {
+  await reachDesignStep({ db, ticketId, profile: profileFor(repo), worktreeRoot: rootFor(repo), target: "design:review" });
+}
+```
+
+(`readyForDesignReview` no longer calls `setTicketTrack`: two units size to `full`.)
+4. At every call site, `readyForX(db, ticketId[, n]);` becomes `await readyForX(db, ticketId, repo[, n]);`. In the `design-extract.test.ts` cases that pass `rc` or `pattern` to `registryFor`, pass the same values to `profileFor` inside `readyForExtract` by adding the same optional parameters to it and at those call sites.
+
+- [ ] **Step 5: Run the tests and see them pass**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon test/dispatch test/cli/walk-resume-e2e.test.ts`
+Expected: PASS.
+
+- [ ] **Step 6: Break it on purpose, see it fail, restore**
+
+1. In `walkDesign`, delete the manifest comparison (treat every succeeded step as done). The `a changed input invalidates...`, `early cutoff` and `gated by the walk` tests fail. Restore.
+2. Return `stepKeys: [row.stepKey, ...later steps]` (invalidate everything after the mismatch): `early cutoff` fails (design:review is invalidated and called twice). Restore.
+3. In `park.ts`, comment out `adoptUnfingerprinted(...)`. `test/cli/adopt-v8-e2e.test.ts` now fails with `succeeded without an input manifest` (the D9 run is refused). Restore.
+
+- [ ] **Step 7: Run the whole suite, then commit**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test`
+Expected: PASS.
+
+```bash
+git add src/daemon/design-walk.ts src/daemon/resolver.ts test
+git commit -m "feat(eng-477): route the design stage by walking the declared table with input manifests" -m "A succeeded design step is done only when its recorded inputs still match; a mismatch invalidates that step alone, and its readers are judged again after it reruns (early cutoff). design:extract and design:size move from row and column gating to this rule." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 14: Loopbacks invalidate their consumer; feedback and the carryover belong to a generation
+
+**Files:**
+- Modify: `src/daemon/review-verdict.ts:1-28,162-220,255-285` (`redesignLoopback` takes the steps to invalidate; consumer and generation on the event)
+- Modify: `src/daemon/review-resume.ts:139-149` (retry-plan with a moved HEAD invalidates dispatch and extract)
+- Modify: `src/dispatch/design-feedback.ts:18-30` (only the current generation's feedback)
+- Modify: `src/dispatch/run-dispatch.ts:36-38,147-150` (`ResumeContext` with a generation), `src/dispatch/handlers.ts:192` (`RegistryDeps.resumeContext` type)
+- Modify: `src/cli/park.ts:127-159` (`dumpPark` records the parked step's generation), `src/cli/park.ts:219-221,408-434` (`resumeContext` carries it)
+- Modify tests: `test/daemon/review-verdict.test.ts:336-372,433-466,510-540`, `test/daemon/review-resume.test.ts:185-209`
+- Test: `test/daemon/loopback-invalidate.test.ts`, `test/dispatch/design-feedback.test.ts` (add cases)
+
+**Interfaces:**
+- Consumes: `invalidateSteps` (Task 10); `makeDesignTicket`, `driveUntil`, `atStep` (Task 7); `captureSnapshot` (Task 7); `getByKey` with `generation` (Task 4).
+- Produces:
+  - `redesignLoopback(db, ticketId, signature: string, blocking: ReviewFindingRow[], dispatchId: string | null, invalidate: readonly ("design:dispatch" | "design:extract")[]): void`
+  - design loopback event payload `{ findings, consumer: "design:dispatch", generation: number }`
+  - `interface ResumeContext { stepKey: string; transcript: string; generation: number }` exported from `src/dispatch/run-dispatch.ts`; `RegistryDeps.resumeContext?: ResumeContext`; `DispatchDeps.resumeContext?: ResumeContext`
+  - `transcript.json` gains `generation: number | null`
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// test/daemon/loopback-invalidate.test.ts
+import { expect, test } from "bun:test";
+import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
+import { captureSnapshot } from "../../src/daemon/design-inputs.ts";
+import { redesignLoopback } from "../../src/daemon/review-verdict.ts";
+import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { getById as getFinding, insertFinding } from "../../src/db/repos/review-finding.ts";
+import { listStepHistory } from "../../src/db/repos/step-history.ts";
+import { getTicket } from "../../src/db/repos/ticket.ts";
+import { listByTicket as listUnits } from "../../src/db/repos/work-unit.ts";
+import { getByKey } from "../../src/db/repos/workflow-step.ts";
+import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
+import { type ScriptFinding, newCalls, scriptedRunner, unitsOf } from "../helpers/design-script.ts";
+import { type DesignTicket, atStep, driveUntil, makeDesignTicket } from "../helpers/design-steps.ts";
+
+const blocking: ScriptFinding = {
+  severity: "critical",
+  category: "feasibility",
+  location: "plan:Unit 1",
+  rationale: "FIX-THE-PLAN",
+  factors: null,
+  deferral_candidate: false,
+  work_unit_seq: 1,
+};
+const generation = (t: DesignTicket, key: string) => getByKey(t.db, t.ticketId, key)?.generation ?? 0;
+const invalidated = (t: DesignTicket) =>
+  listEvents(t.db, t.ticketId)
+    .filter((e) => e.reason === "invalidated")
+    .map((e) => JSON.parse(e.payload_json ?? "{}") as { stepKeys: string[]; cause: string });
+
+test("a plan-review redesign invalidates design:dispatch with cause feedback and records the consumer's generation", async () => {
+  const t = makeDesignTicket({
+    script: { planFindings: (n) => (n === 1 ? [blocking] : []), plan: (n) => `Plan body, version ${n}` },
+  });
+  await driveUntil(t, () => generation(t, "design:dispatch") === 1);
+  expect(invalidated(t)).toEqual([
+    { event: "invalidated", stepKeys: ["design:dispatch"], cause: "feedback", changed: [] },
+  ]);
+  const loopback = listEvents(t.db, t.ticketId).filter((e) => e.kind === "loopback").at(-1);
+  expect(JSON.parse(loopback?.payload_json ?? "{}")).toMatchObject({ consumer: "design:dispatch", generation: 1 });
+  expect(listUnits(t.db, t.ticketId).length).toBe(2); // the units stay until the plan's readers are judged
+  expect(getByKey(t.db, t.ticketId, "design:review")?.status).toBe("succeeded");
+});
+
+test("early cutoff after a plan-review redesign: a changed plan reruns extract and review, not size (§8.5)", async () => {
+  const t = makeDesignTicket({
+    script: { planFindings: (n) => (n === 1 ? [blocking] : []), plan: (n) => `Plan body, version ${n}` },
+  });
+  await driveUntil(t, atStep("checks:dispatch"));
+  expect(invalidated(t).map((i) => [i.stepKeys[0], i.cause])).toEqual([
+    ["design:dispatch", "feedback"],
+    ["design:extract", "inputs"],
+    ["design:review", "inputs"],
+  ]);
+  expect(t.calls.counts["design:review"]).toBe(2);
+  expect(generation(t, "design:size")).toBe(0);
+});
+
+test("a redesign that changes the units reruns size and review (§8.5)", async () => {
+  const t = makeDesignTicket({
+    script: {
+      planFindings: (n) => (n === 1 ? [blocking] : []),
+      plan: (n) => `Plan body, version ${n}`,
+      units: (n) => unitsOf(n === 1 ? 2 : 3, { behavioral: true }),
+    },
+  });
+  await driveUntil(t, atStep("checks:dispatch"));
+  const keys = invalidated(t).map((i) => i.stepKeys[0]);
+  expect(keys).toContain("design:size");
+  expect(keys).toContain("design:review");
+  expect(listUnits(t.db, t.ticketId).length).toBe(3);
+});
+
+test("a code-review redesign re-creates and re-implements the units even when the plan is identical (§8.5)", async () => {
+  const t = makeDesignTicket({ script: { units: () => unitsOf(2, { behavioral: false }) } });
+  await driveUntil(t, atStep("implement:wu2:dispatch"));
+  const oldIds = listUnits(t.db, t.ticketId).map((u) => u.id);
+  const finding = insertFinding(t.db, {
+    ticketId: t.ticketId,
+    reviewKind: "code",
+    severity: "major",
+    category: "plan-defect",
+    blocksShip: 1,
+    workUnitId: oldIds[0],
+    rationale: "CODE-FINDING",
+  });
+  redesignLoopback(t.db, t.ticketId, "review:plan-defect", [finding], null, ["design:dispatch", "design:extract"]);
+  expect(getTicket(t.db, t.ticketId)?.stage).toBe("design");
+  expect(getFinding(t.db, finding.id)?.work_unit_id).toBeNull(); // detached, kept open
+  await driveUntil(t, atStep("implement:wu1:dispatch"));
+  const newIds = listUnits(t.db, t.ticketId).map((u) => u.id);
+  expect(newIds.length).toBe(2);
+  expect(newIds).not.toEqual(oldIds);
+  expect(t.calls.counts["design:dispatch"]).toBe(2);
+  expect(t.calls.counts["design:extract"]).toBe(2);
+  expect(generation(t, "design:size")).toBe(0); // same units: size stays done
+  const implementBefore = t.calls.counts.implement;
+  await driveUntil(t, atStep("implement:wu2:dispatch"));
+  expect(t.calls.counts.implement).toBe(implementBefore + 1); // unit 1 implemented again
+});
+
+test("feedback reaches only its own generation; a later rerun for changed inputs gets none (§6.5, §8.7)", async () => {
+  const t = makeDesignTicket({
+    script: { planFindings: (n) => (n === 1 ? [blocking] : []), plan: (n) => `Plan body, version ${n}` },
+  });
+  await driveUntil(t, atStep("checks:dispatch"));
+  const prompts = () => t.calls.prompts.filter((p) => p.step === "design:dispatch").map((p) => p.prompt);
+  expect(prompts()[1]).toContain("FIX-THE-PLAN"); // generation 1 got the findings
+  captureSnapshot(t.db, t.ticketId, {
+    profile: { ...t.profile, promptVars: { stack: "ruby", tone: "terse" } },
+    unusableComponents: [],
+    nonPrimaryComponents: [],
+    config: t.config,
+  });
+  await driveUntil(t, atStep("checks:dispatch"));
+  expect(generation(t, "design:dispatch")).toBe(2);
+  expect(prompts()[2]).not.toContain("FIX-THE-PLAN");
+  expect(listStepHistory(t.db, t.ticketId, "design:dispatch").length).toBe(2);
+});
+
+test("the carryover transcript reaches only the generation it was written in (§6.5, §8.7)", async () => {
+  const t = makeDesignTicket({
+    script: { planFindings: (n) => (n === 1 ? [blocking] : []), plan: (n) => `Plan body, version ${n}` },
+  });
+  const calls = newCalls();
+  const registry = buildDispatchRegistry({
+    runner: scriptedRunner(t.script, calls),
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: t.profile,
+    worktreeRoot: t.worktreeRoot,
+    resumeContext: { stepKey: "design:dispatch", transcript: "CARRIED-PARTIAL-OUTPUT", generation: 0 },
+  });
+  await driveUntil({ ...t, registry }, atStep("checks:dispatch"));
+  const dispatchPrompts = calls.prompts.filter((p) => p.step === "design:dispatch").map((p) => p.prompt);
+  expect(dispatchPrompts[0]).toContain("CARRIED-PARTIAL-OUTPUT"); // generation 0
+  expect(dispatchPrompts[1]).not.toContain("CARRIED-PARTIAL-OUTPUT"); // generation 1, after the redesign
+});
+```
+
+Append to `test/dispatch/design-feedback.test.ts`:
+
+```ts
+import { invalidateSteps } from "../../src/daemon/invalidate.ts";
+import { appendEvent } from "../../src/db/repos/event-log.ts";
+import { insertPending } from "../../src/db/repos/workflow-step.ts";
+
+test("a loopback written before ENG-477 (no consumer) is generation 0 feedback for design:dispatch", () => {
+  const { db, ticketId } = makeTestDb();
+  insertPending(db, { ticketId, stepKey: "design:dispatch", stepType: "dispatch" });
+  appendEvent(db, {
+    ticketId,
+    kind: "loopback",
+    loop: "design",
+    routeTo: "review",
+    signature: "s",
+    payload: { findings: [{ category: "x", location: null, rationale: "LEGACY-FINDING" }] },
+  });
+  expect(designFeedback(db, ticketId)).toContain("LEGACY-FINDING");
+  invalidateSteps(db, ticketId, ["design:dispatch"], { cause: "inputs", changed: ["profile.promptVars"] });
+  expect(designFeedback(db, ticketId)).toBe("");
+  db.close();
+});
+```
+
+(`makeTestDb` and `designFeedback` are already imported in that file; add the three imports above at the top.)
+
+- [ ] **Step 2: Run them and see them fail**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/loopback-invalidate.test.ts test/dispatch/design-feedback.test.ts`
+Expected: FAIL: `redesignLoopback` takes five arguments (type error at the call in the code-review test), the plan-review test finds `design:extract` and `design:review` reset by the old list, and the feedback and carryover tests see the old findings and transcript in later generations.
+
+- [ ] **Step 3: `redesignLoopback` invalidates its consumer**
+
+`src/daemon/review-verdict.ts`: import `invalidateSteps` from `./invalidate.ts`; remove `deleteByTicket` from the work-unit import. Replace `redesignLoopback` (lines 162-220):
+
+```ts
+/** The redesign loopback (spec §6.4, §6.7). It invalidates the step that consumes its feedback,
+ *  design:dispatch, with cause `feedback`, through the one invalidate function, then appends its
+ *  event carrying the findings, the consumer and the consumer's generation after the bump (§6.5),
+ *  so the rerun sees exactly this round's findings. A code review redesign (and review-resume's
+ *  retry-plan when HEAD moved) also invalidates design:extract: the units are re-created and
+ *  re-implemented even when the plan comes back identical, with findings tied to a unit detached first
+ *  (§6.1). Everything else in design follows from fingerprints. The later-stage resets (review,
+ *  verify, merge) stay until ENG-475. */
+export function redesignLoopback(
+  db: Database,
+  ticketId: number,
+  signature: string,
+  blocking: ReviewFindingRow[],
+  dispatchId: string | null,
+  invalidate: readonly ("design:dispatch" | "design:extract")[],
+): void {
+  if (!invalidate.includes("design:dispatch"))
+    throw new Error("redesignLoopback: a redesign must invalidate design:dispatch, its feedback's consumer");
+  // The snapshot rides event_log.payload_json and survives replacement of the old plan (ENG-272).
+  const findings = blocking.map((f) => ({
+    category: f.category,
+    location: f.location,
+    rationale: f.rationale,
+  }));
+  db.transaction(() => {
+    const ticket = getTicket(db, ticketId);
+    const from = ticket?.stage ?? "review";
+    const { generations } = invalidateSteps(db, ticketId, invalidate, { cause: "feedback" });
+    const consumerGeneration =
+      generations["design:dispatch"] ?? getByKey(db, ticketId, "design:dispatch")?.generation ?? 0;
+    const reviewStep = getByKey(db, ticketId, "review");
+    if (reviewStep) {
+      resetToPending(db, reviewStep.id);
+      resetAttempt(db, reviewStep.id);
+    }
+    resetTicketVerifySteps(db, ticketId);
+    resetMergeSteps(db, ticketId);
+    setTicketStage(db, ticketId, "design");
+    appendEvent(db, {
+      ticketId,
+      dispatchId: dispatchId ?? undefined,
+      kind: "loopback",
+      loop: "design",
+      routeTo: "review",
+      signature,
+      payload: { findings, consumer: "design:dispatch", generation: consumerGeneration },
+    });
+    // Project the rewind to design when it actually changes stage (code-review plan-defect: review→
+    // design). Plan-review redesign is already IN design → no spurious projection.
+    if (ticket && from !== "design") {
+      enqueueStageProjection(db, ticket, from, "design");
+    }
+  })();
+}
+```
+
+In `applyReviewVerdict`: line 264 becomes `redesignLoopback(db, ticketId, signature, blocking, dispatchId, ["design:dispatch"]);` (plan review) and line 283 becomes `redesignLoopback(db, ticketId, signature, blocking, dispatchId, ["design:dispatch", "design:extract"]);` (code review plan defect).
+
+`src/daemon/review-resume.ts:140-147`:
+
+```ts
+    if (plan.moved)
+      redesignLoopback(
+        db,
+        ticketId,
+        "review:operator-plan-head-changed",
+        requiredPlanFindings(db, ticketId),
+        latestDispatchForStep(db, ticketId, "design:review"),
+        ["design:dispatch", "design:extract"],
+      );
+    else applyReviewVerdict(db, ticketId, config, { stepKey: "design:review" }); // design:dispatch only
+```
+
+- [ ] **Step 4: Feedback scoped to the generation**
+
+Replace `designFeedback` in `src/dispatch/design-feedback.ts` (lines 18-30), adding `import { getByKey } from "../db/repos/workflow-step.ts";`:
+
+```ts
+export function designFeedback(db: Database, ticketId: number): string {
+  // spec §6.5: only the loopback addressed to design:dispatch's CURRENT generation. A rerun for
+  // changed inputs starts a new generation with no feedback, so old findings never return.
+  const current = getByKey(db, ticketId, "design:dispatch")?.generation ?? 0;
+  const ours = listEvents(db, ticketId).filter((e) => {
+    if (e.kind !== "loopback" || e.loop !== "design" || e.payload_json === null) return false;
+    const p = JSON.parse(e.payload_json) as { consumer?: string; generation?: number };
+    // A loopback written before ENG-477 names no consumer: it was for design:dispatch, and an
+    // upgraded checkpoint's steps start at generation 0.
+    return (p.consumer ?? "design:dispatch") === "design:dispatch" && (p.generation ?? 0) === current;
+  });
+  const latest = ours[ours.length - 1];
+  if (!latest?.payload_json) return "";
+  const findings = (JSON.parse(latest.payload_json) as { findings?: FindingSnapshot[] }).findings;
+  if (!findings || findings.length === 0) return "";
+  const lines = findings.map(
+    (f) => `- [${f.category ?? "?"}] ${f.location ?? "plan-wide"}: ${f.rationale ?? ""}`,
+  );
+  return `## Prior plan-review feedback (address before finalizing)\n\nA prior plan review raised the following. For EACH, either revise the plan to address it, or state explicitly in the plan why it does not apply or is an accepted trade-off — a bare "no changes needed" is not a disposition:\n${lines.join("\n")}`;
+}
+```
+
+- [ ] **Step 5: The carryover belongs to a generation**
+
+`src/dispatch/run-dispatch.ts`:
+
+```ts
+/** Set only when resuming a parked run: the interrupted step's partial output, prepended to THAT
+ *  step's re-dispatch while its generation is still current (spec §6.5), so a step invalidated
+ *  since never receives output written under its old inputs. */
+export interface ResumeContext {
+  stepKey: string;
+  transcript: string;
+  generation: number;
+}
+```
+
+`DispatchDeps.resumeContext?: ResumeContext;` and line 147:
+
+```ts
+  if (
+    deps.resumeContext &&
+    deps.resumeContext.stepKey === ctx.step.step_key &&
+    deps.resumeContext.generation === ctx.step.generation
+  ) {
+```
+
+`src/dispatch/handlers.ts:192`: `resumeContext?: import("./run-dispatch.ts").ResumeContext;`.
+
+`src/cli/park.ts`:
+- in `dumpPark`, before `db.exec("PRAGMA wal_checkpoint(TRUNCATE);")`:
+
+```ts
+  // The step the park left running: its generation scopes the carryover (spec §6.5).
+  const parkedGeneration = listByStatus(db, "running").at(0)?.generation ?? null;
+```
+
+and add `generation: parkedGeneration,` to the `transcript.json` object;
+- `resumeContext` becomes `let resumeContext: ResumeContext | undefined;` (import the type from `../dispatch/run-dispatch.ts`), the `buildRegistry` deps type uses `ResumeContext | undefined`, and its assignment (lines 428-431):
+
+```ts
+          const tj = JSON.parse(readFileSync(join(dir, "transcript.json"), "utf8")) as {
+            transcript: string;
+            generation?: number | null;
+          };
+          resumeContext = {
+            stepKey: parkedStep.step_key,
+            transcript: tj.transcript,
+            // A transcript written before ENG-477 has no generation: it belongs to the parked step
+            // as it is now.
+            generation: tj.generation ?? parkedStep.generation,
+          };
+```
+
+- [ ] **Step 6: Update the existing redesign assertions**
+
+`test/daemon/review-verdict.test.ts`:
+- `plan-review redesign preserves a per-unit blocking finding for the redesign feedback`: `expect(units.length).toBe(1); // the units stay; design:extract reruns only if the new plan changes`.
+- `plan review: a blocking plan finding loops back to re-design`: replace the last two expectations with
+
+```ts
+  expect(units.length).toBe(1); // kept: design:extract is judged again once the new plan exists
+  expect(drAfter?.status).toBe("succeeded"); // reruns when its input, the plan, changes
+  expect(dispatchAfter?.status).toBe("pending");
+  expect(dispatchAfter?.generation).toBe(1);
+```
+
+adding `const dispatchAfter = getByKey(db, ticketId, "design:dispatch");` before `db.close()`.
+- `redesign loopback gives the design steps their attempt budget back (STYRE-7)`: the step that gets its budget back is the consumer. Replace the `design:extract` setup with a succeeded `design:dispatch` that used two attempts:
+
+```ts
+  const dispatch = insertPending(db, { ticketId, stepKey: "design:dispatch", stepType: "dispatch" });
+  markRunning(db, dispatch.id, {});
+  markRunning(db, dispatch.id, {});
+  markSucceeded(db, dispatch.id, {});
+  expect(getByKey(db, ticketId, "design:dispatch")?.attempt).toBe(2);
+```
+
+and read `const after = getByKey(db, ticketId, "design:dispatch");` (import `markSucceeded`).
+
+`test/daemon/review-resume.test.ts`:
+- in `plan review cannot accept risks...`, the last line becomes `expect(getByKey(db, ticketId, "design:review")?.status).toBe("succeeded");` followed by
+
+```ts
+  const loopback = events(db, ticketId).filter((e) => e.kind === "loopback").at(-1);
+  expect(JSON.parse(loopback?.payload_json ?? "{}")).toMatchObject({ consumer: "design:dispatch" });
+```
+
+- in `same-HEAD repeated plan findings stay paused; explicit moved HEAD re-arms design`, the last line becomes `expect(listUnits(db, ticketId)).toEqual([]); // dispatch and extract invalidated: units re-created` (import `listByTicket as listUnits` from `../../src/db/repos/work-unit.ts`).
+
+- [ ] **Step 7: Run the tests and see them pass**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon test/dispatch test/cli/park.test.ts test/cli/park-resume-e2e.test.ts`
+Expected: PASS.
+
+- [ ] **Step 8: Break it on purpose, see it fail, restore**
+
+1. In `designFeedback`, drop the generation condition: the feedback test fails (the old findings reach generation 2). Restore.
+2. In `run-dispatch.ts`, drop `&& deps.resumeContext.generation === ctx.step.generation`: the carryover test fails. Restore.
+3. In `applyReviewVerdict`'s plan-defect path, pass `["design:dispatch"]` only: the code-review redesign test fails (units keep their ids, unit 1 is not re-implemented). Restore.
+
+- [ ] **Step 9: Run the whole suite, then commit**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test`
+Expected: PASS.
+
+```bash
+git add src/daemon/review-verdict.ts src/daemon/review-resume.ts src/dispatch/design-feedback.ts src/dispatch/run-dispatch.ts src/dispatch/handlers.ts src/cli/park.ts test
+git commit -m "feat(eng-477): redesign loopbacks invalidate their consumer; feedback and carryover belong to a generation" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 15: Enforcement: the current step slot, named accessors, the recording proxy test, the source guard
+
+**Files:**
+- Create: `src/daemon/current-step.ts`, `src/daemon/design-reads.ts`
+- Modify: `src/daemon/advance.ts:187-281` (set the slot before `runStep`, clear it in `finally`)
+- Modify: `src/dispatch/handlers.ts` (`design:size` and `design:review` read units through `readWorkUnitsForDesign`)
+- Test: `test/daemon/design-reads.test.ts`, `test/daemon/design-reads-proxy.test.ts`, `test/dispatch/design-handler-guard.test.ts`
+
+**Interfaces:**
+- Consumes: `declaresInput`, `DESIGN_TABLE`, `isSnapshotInput`, `InputName` (Task 6); `makeDesignTicket`, `driveUntil`, `atStep` (Task 7); `scriptedRunner`, `newCalls`, `defaultScript` (Task 7).
+- Produces:
+  - `setCurrentStep(stepKey: string | null): void`, `currentStepKey(): string | null`
+  - `class UndeclaredReadError extends Error`, `readWorkUnitsForDesign(db: Database, ticketId: number): WorkUnitRow[]`
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// test/daemon/design-reads.test.ts
+import { afterEach, expect, test } from "bun:test";
+import { setCurrentStep } from "../../src/daemon/current-step.ts";
+import { UndeclaredReadError, readWorkUnitsForDesign } from "../../src/daemon/design-reads.ts";
+import { makeTestDb } from "../helpers/db.ts";
+
+afterEach(() => setCurrentStep(null));
+
+test("an accessor answers the step that declares the read", () => {
+  const { db, ticketId } = makeTestDb();
+  for (const key of ["design:size", "design:review"]) {
+    setCurrentStep(key);
+    expect(readWorkUnitsForDesign(db, ticketId)).toEqual([]);
+  }
+  db.close();
+});
+
+test("an accessor called while another step is current throws (§8.10)", () => {
+  const { db, ticketId } = makeTestDb();
+  setCurrentStep("design:dispatch");
+  expect(() => readWorkUnitsForDesign(db, ticketId)).toThrow(UndeclaredReadError);
+  setCurrentStep("checks:dispatch"); // outside the table: reads the repositories directly instead
+  expect(() => readWorkUnitsForDesign(db, ticketId)).toThrow(UndeclaredReadError);
+  setCurrentStep(null);
+  expect(() => readWorkUnitsForDesign(db, ticketId)).toThrow("no step in flight");
+  db.close();
+});
+```
+
+```ts
+// test/daemon/design-reads-proxy.test.ts
+import { expect, test } from "bun:test";
+import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
+import { currentStepKey } from "../../src/daemon/current-step.ts";
+import { DESIGN_TABLE, type InputName, type StepRow, declaresInput, isSnapshotInput } from "../../src/daemon/design-graph.ts";
+import { type HandlerContext, StepRegistry } from "../../src/daemon/step-registry.ts";
+import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
+import { defaultScript, newCalls, scriptedRunner } from "../helpers/design-script.ts";
+import { atStep, driveUntil, makeDesignTicket } from "../helpers/design-steps.ts";
+
+type Label = "ticket" | "profile" | "config";
+/** Fields every handler may read: identity and routing of the ticket, not design inputs. `ident`
+ *  names dispatches and the branch for every step (it is fixed for the run, E2). */
+const INFRASTRUCTURE: Record<Label, ReadonlySet<string>> = {
+  ticket: new Set(["id", "project_id", "ident", "stage", "branch_name", "branch_prefix"]),
+  profile: new Set(),
+  config: new Set(),
+};
+
+function recording<T extends object>(target: T, label: Label, reads: Map<string, Set<string>>): T {
+  return new Proxy(target, {
+    get(obj, prop, receiver) {
+      const step = currentStepKey();
+      if (step !== null && typeof prop === "string") {
+        const seen = reads.get(step) ?? new Set<string>();
+        seen.add(`${label}.${prop}`);
+        reads.set(step, seen);
+      }
+      return Reflect.get(obj, prop, receiver);
+    },
+  });
+}
+
+/** Wraps each handler so the ticket and config it receives are recording proxies. */
+class RecordingRegistry extends StepRegistry {
+  constructor(
+    private readonly real: StepRegistry,
+    private readonly reads: Map<string, Set<string>>,
+  ) {
+    super(real.synchronize);
+  }
+  override resolve(handlerKey: string) {
+    const h = this.real.resolve(handlerKey);
+    if (!h) return h;
+    return (ctx: HandlerContext) =>
+      h({ ...ctx, ticket: recording(ctx.ticket, "ticket", this.reads), config: recording(ctx.config, "config", this.reads) });
+  }
+  override resolveCommit(handlerKey: string) {
+    return this.real.resolveCommit(handlerKey);
+  }
+}
+
+async function readsOf(complexityGrading: boolean): Promise<Map<string, Set<string>>> {
+  const t = makeDesignTicket({ config: { complexityGrading } });
+  const reads = new Map<string, Set<string>>();
+  const real = buildDispatchRegistry({
+    runner: scriptedRunner(defaultScript(), newCalls()),
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: recording(t.profile, "profile", reads),
+    worktreeRoot: t.worktreeRoot,
+  });
+  await driveUntil({ ...t, registry: new RecordingRegistry(real, reads) }, atStep("checks:dispatch"));
+  return reads;
+}
+
+const tableSteps = DESIGN_TABLE.filter((r): r is StepRow => r.kind === "step");
+
+for (const grading of [false, true]) {
+  test(`grading ${grading ? "on" : "off"}: no design handler reads a field the table does not declare for it (§8.10)`, async () => {
+    const reads = await readsOf(grading);
+    const undeclared: string[] = [];
+    for (const row of tableSteps) {
+      for (const read of reads.get(row.stepKey) ?? []) {
+        const [label, field] = read.split(".") as [Label, string];
+        if (INFRASTRUCTURE[label].has(field)) continue;
+        if (!declaresInput(row.stepKey, read as InputName)) undeclared.push(`${row.stepKey} reads ${read}`);
+      }
+    }
+    expect(undeclared).toEqual([]);
+  });
+}
+
+test("every declared ticket, profile and config input is read by its step in some branch", async () => {
+  const off = await readsOf(false);
+  const on = await readsOf(true);
+  const missing: string[] = [];
+  for (const row of tableSteps) {
+    const seen = new Set([...(off.get(row.stepKey) ?? []), ...(on.get(row.stepKey) ?? [])]);
+    for (const name of [...row.inputs({ complexityGrading: false }), ...row.inputs({ complexityGrading: true })]) {
+      if (!isSnapshotInput(name) || name.startsWith("run.")) continue; // run.* come from the registry, not the proxied objects
+      if (!seen.has(name)) missing.push(`${row.stepKey} never reads ${name}`);
+    }
+  }
+  expect([...new Set(missing)]).toEqual([]);
+});
+```
+
+```ts
+// test/dispatch/design-handler-guard.test.ts
+import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+// spec §3 (E8): design handlers read upstream rows only through the named accessors in
+// src/daemon/design-reads.ts, which check the current step at run time. This guard keeps the
+// design handler blocks in handlers.ts from calling the upstream repositories directly.
+const SOURCE = readFileSync(join(import.meta.dir, "../../src/dispatch/handlers.ts"), "utf8");
+const GUARDED = ["work-unit", "review-finding", "review-round", "ticket"];
+
+function importedNames(source: string): string[] {
+  const names: string[] = [];
+  const re = /import\s*\{([^}]*)\}\s*from\s*"\.\.\/db\/repos\/([a-z-]+)\.ts"/g;
+  for (const m of source.matchAll(re)) {
+    if (!GUARDED.includes(m[2])) continue;
+    for (const part of m[1].split(",")) {
+      const local = part.trim().split(/\s+as\s+/).pop()?.replace(/^type\s+/, "").trim();
+      if (local && !/^[A-Z]/.test(local)) names.push(local); // values, not types
+    }
+  }
+  return names;
+}
+
+/** The text of each `registry.register("<key>", ...)` call for the design table's steps. */
+function designBlocks(source: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const re = /registry\.register\(\s*"(provision|design:[a-z]+)"/g;
+  for (const m of source.matchAll(re)) {
+    let depth = 0;
+    let i = source.indexOf("(", m.index);
+    const start = i;
+    for (; i < source.length; i++) {
+      if (source[i] === "(") depth++;
+      else if (source[i] === ")" && --depth === 0) break;
+    }
+    out.set(m[1], source.slice(start, i + 1));
+  }
+  return out;
+}
+
+test("design handlers do not call the upstream repositories directly", () => {
+  const names = importedNames(SOURCE);
+  expect(names.length).toBeGreaterThan(0);
+  const blocks = designBlocks(SOURCE);
+  expect([...blocks.keys()].sort()).toEqual(
+    ["design:dispatch", "design:extract", "design:review", "design:size", "provision"].sort(),
+  );
+  const offences: string[] = [];
+  for (const [key, text] of blocks) {
+    for (const name of names) {
+      if (new RegExp(`\\b${name}\\s*\\(`).test(text)) offences.push(`${key} calls ${name}`);
+    }
+  }
+  expect(offences).toEqual([]);
+});
+```
+
+- [ ] **Step 2: Run them and see them fail**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/design-reads.test.ts test/daemon/design-reads-proxy.test.ts test/dispatch/design-handler-guard.test.ts`
+Expected: FAIL: the first two files with `Cannot find module '../../src/daemon/current-step.ts'`, and the guard with `design:size calls listUnits` and `design:review calls listUnits`.
+
+- [ ] **Step 3: Write the slot and the accessor**
+
+```ts
+// src/daemon/current-step.ts
+/** The step key in flight, set by advance.ts around runStep and cleared after (spec §3, E8). Steps
+ *  run one at a time per ticket, and `styre run` drives one ticket, so one slot suffices. */
+let current: string | null = null;
+
+export function setCurrentStep(stepKey: string | null): void {
+  current = stepKey;
+}
+
+export function currentStepKey(): string | null {
+  return current;
+}
+```
+
+```ts
+// src/daemon/design-reads.ts
+import type { Database } from "bun:sqlite";
+import { type WorkUnitRow, listByTicket } from "../db/repos/work-unit.ts";
+import { currentStepKey } from "./current-step.ts";
+import { type OutputName, declaresInput } from "./design-graph.ts";
+
+/** A design handler read an upstream output its row does not declare (spec §3, E8). */
+export class UndeclaredReadError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UndeclaredReadError";
+  }
+}
+
+function assertDeclared(output: OutputName): void {
+  const step = currentStepKey();
+  if (step === null) throw new UndeclaredReadError(`no step in flight reads ${output}`);
+  if (!declaresInput(step, output))
+    throw new UndeclaredReadError(`${step} reads ${output}, which the design table does not declare for it`);
+}
+
+/** design:extract's units, for the design steps that declare them (design:size, design:review).
+ *  Steps outside the table keep reading the repository directly. */
+export function readWorkUnitsForDesign(db: Database, ticketId: number): WorkUnitRow[] {
+  assertDeclared("workUnits");
+  return listByTicket(db, ticketId);
+}
+```
+
+- [ ] **Step 4: Set the slot in advance, and use the accessor in the handlers**
+
+`src/daemon/advance.ts`: import `setCurrentStep` from `./current-step.ts`; immediately before `const execution = await runStep(db, {` add `setCurrentStep(d.stepKey);`, and at the start of the existing `finally {` block (line 279) add `setCurrentStep(null);` before `checkAgentLeftovers(...)`.
+
+`src/dispatch/handlers.ts`: import `readWorkUnitsForDesign` from `../daemon/design-reads.ts`; in `design:size` and `design:review`, replace `const units = listUnits(ctx.db, ctx.ticket.id);` with `const units = readWorkUnitsForDesign(ctx.db, ctx.ticket.id);`.
+
+- [ ] **Step 5: Run the tests and see them pass**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/design-reads.test.ts test/daemon/design-reads-proxy.test.ts test/dispatch/design-handler-guard.test.ts test/dispatch/design-size.test.ts test/dispatch/design-review-e2e.test.ts`
+Expected: PASS.
+
+- [ ] **Step 6: Break it on purpose, see it fail, restore**
+
+1. At the top of the `design:review` handler add `void ctx.ticket.description;`. The proxy test fails with `design:review reads ticket.description`. Restore.
+2. In `design:size`, put back `listUnits(ctx.db, ctx.ticket.id)`. The guard fails with `design:size calls listUnits`. Restore.
+3. Remove `setCurrentStep(d.stepKey);` from advance. design:size and design:review throw `no step in flight reads workUnits` (the size test fails). Restore.
+
+- [ ] **Step 7: Run the whole suite, then commit**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test`
+Expected: PASS.
+
+```bash
+git add src/daemon/current-step.ts src/daemon/design-reads.ts src/daemon/advance.ts src/dispatch/handlers.ts test/daemon/design-reads.test.ts test/daemon/design-reads-proxy.test.ts test/dispatch/design-handler-guard.test.ts
+git commit -m "test(eng-477): enforce the design table: accessors checked at run time, a recording proxy, a source guard" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 16: The invalidate loop guard
+
+**Files:**
+- Modify: `src/daemon/design-walk.ts` (escalate before a fourth `inputs` invalidation of one step since the last `resumed` event)
+- Test: `test/daemon/invalidate-loop.test.ts`
+
+**Interfaces:**
+- Consumes: `walkDesign` (Task 13); `captureSnapshot` (Task 7); `makeDesignTicket`, `driveUntil`, `atStep` (Task 7).
+- Produces: `INVALIDATE_LOOP_LIMIT = 3`; `inputsInvalidationsSinceResume(db: Database, ticketId: number, stepKey: string): number`; the escalation `{ kind: "escalate", signature: "invalidate-loop:<step>", stepKey: <step> }`.
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// test/daemon/invalidate-loop.test.ts
+import { expect, test } from "bun:test";
+import { advanceOneStep } from "../../src/daemon/advance.ts";
+import { captureSnapshot } from "../../src/daemon/design-inputs.ts";
+import { invalidateSteps } from "../../src/daemon/invalidate.ts";
+import { nextStepKey } from "../../src/daemon/resolver.ts";
+import { appendEvent, listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { getTicket } from "../../src/db/repos/ticket.ts";
+import { type DesignTicket, atStep, driveUntil, makeDesignTicket } from "../helpers/design-steps.ts";
+
+/** A digest that changes on every pass: the stand-in for a defect such as an unstable encoding. */
+function unstable(t: DesignTicket, i: number): void {
+  captureSnapshot(t.db, t.ticketId, {
+    profile: { ...t.profile, promptVars: { stack: "ruby", pass: String(i) } },
+    unusableComponents: [],
+    nonPrimaryComponents: [],
+    config: t.config,
+  });
+}
+
+test("a step invalidated for inputs more than three times since the last resume escalates invalidate-loop (§8.14)", async () => {
+  const t = makeDesignTicket();
+  await driveUntil(t, atStep("checks:dispatch"));
+  for (let i = 1; i <= 3; i++) {
+    unstable(t, i);
+    await driveUntil(t, atStep("checks:dispatch"));
+  }
+  unstable(t, 4);
+  const d = nextStepKey(t.db, t.ticketId);
+  expect(d).toMatchObject({ kind: "escalate", signature: "invalidate-loop:design:dispatch", stepKey: "design:dispatch" });
+});
+
+test("feedback invalidations do not count toward the guard", async () => {
+  const t = makeDesignTicket();
+  await driveUntil(t, atStep("checks:dispatch"));
+  for (let i = 1; i <= 4; i++) {
+    invalidateSteps(t.db, t.ticketId, ["design:dispatch"], { cause: "feedback" });
+    await driveUntil(t, atStep("checks:dispatch"));
+  }
+  unstable(t, 1);
+  expect(nextStepKey(t.db, t.ticketId)).toMatchObject({ kind: "invalidate", stepKeys: ["design:dispatch"] });
+});
+
+test("the count starts again after a resumed event", async () => {
+  const t = makeDesignTicket();
+  await driveUntil(t, atStep("checks:dispatch"));
+  for (let i = 1; i <= 3; i++) {
+    unstable(t, i);
+    await driveUntil(t, atStep("checks:dispatch"));
+  }
+  appendEvent(t.db, { ticketId: t.ticketId, kind: "resumed", reason: "resume" });
+  unstable(t, 4);
+  expect(nextStepKey(t.db, t.ticketId)).toMatchObject({ kind: "invalidate", stepKeys: ["design:dispatch"] });
+});
+
+test("the interpreter escalates the loop to the operator", async () => {
+  const t = makeDesignTicket();
+  await driveUntil(t, atStep("checks:dispatch"));
+  for (let i = 1; i <= 4; i++) {
+    unstable(t, i);
+    await driveUntil(t, (d) => (d.kind === "step" && d.stepKey === "checks:dispatch") || d.kind === "escalate");
+  }
+  expect(await advanceOneStep(t.db, t.ticketId, t.registry, { config: t.config })).toEqual({
+    kind: "escalated",
+    stepKey: "design:dispatch",
+  });
+  expect(getTicket(t.db, t.ticketId)?.status).toBe("waiting");
+  expect(listEvents(t.db, t.ticketId).at(-1)?.signature).toBe("invalidate-loop:design:dispatch");
+});
+```
+
+- [ ] **Step 2: Run it and see it fail**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/invalidate-loop.test.ts`
+Expected: FAIL: the first test receives `{ kind: "invalidate", stepKeys: ["design:dispatch"], ... }` instead of the escalation.
+
+- [ ] **Step 3: Add the guard to the walk**
+
+In `src/daemon/design-walk.ts`, import `listByTicket as listEvents` from `../db/repos/event-log.ts`, add:
+
+```ts
+/** spec §6.6: an unchanged step cannot be invalidated again after it reruns, so more than three
+ *  `inputs` invalidations of one step since the last resume is a defect (an unstable digest, say).
+ *  Fail fast. */
+export const INVALIDATE_LOOP_LIMIT = 3;
+
+export function inputsInvalidationsSinceResume(db: Database, ticketId: number, stepKey: string): number {
+  const events = listEvents(db, ticketId);
+  const since = events.filter((e) => e.kind === "resumed").at(-1)?.seq ?? 0;
+  return events.filter((e) => {
+    if (e.seq <= since || e.kind !== "note" || e.reason !== "invalidated" || e.payload_json === null) return false;
+    const p = JSON.parse(e.payload_json) as { cause?: string; stepKeys?: string[] };
+    return p.cause === "inputs" && (p.stepKeys ?? []).includes(stepKey);
+  }).length;
+}
+```
+
+and in `walkDesign` replace the mismatch return with:
+
+```ts
+    if (changed.length > 0) {
+      if (inputsInvalidationsSinceResume(db, ticket.id, row.stepKey) >= INVALIDATE_LOOP_LIMIT) {
+        return {
+          kind: "escalate",
+          reason: `design step '${row.stepKey}' keeps finding changed inputs (${changed.join(", ")}) after rerunning; an input digest is unstable`,
+          signature: `invalidate-loop:${row.stepKey}`,
+          stepKey: row.stepKey,
+        };
+      }
+      return { kind: "invalidate", stepKeys: [row.stepKey], reason: { cause: "inputs", changed } };
+    }
+```
+
+- [ ] **Step 4: Run it and see it pass**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/invalidate-loop.test.ts test/daemon/design-walk.test.ts`
+Expected: PASS.
+
+- [ ] **Step 5: Break it on purpose, see it fail, restore**
+
+1. Set `INVALIDATE_LOOP_LIMIT = 1_000`: the first and fourth tests fail. Restore.
+2. Drop `p.cause === "inputs" &&` from the filter: `feedback invalidations do not count toward the guard` fails (it escalates). Restore.
+3. Drop the `e.seq <= since ||` condition: `the count starts again after a resumed event` fails. Restore.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/daemon/design-walk.ts test/daemon/invalidate-loop.test.ts
+git commit -m "feat(eng-477): escalate invalidate-loop when a design step keeps being invalidated for inputs" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 17: The end to end tests of spec §8 not already written
+
+Earlier tasks own: §8.3 (Tasks 8, 13), §8.4 (Task 8), §8.5 (Task 14), §8.10 (Tasks 6, 15), §8.11 (Task 7), §8.12 (Tasks 2, 3, 4), §8.13 (Task 12), §8.14 (Task 16), §8.15 (Tasks 5, 9). This task adds §8.1, §8.2, §8.6, §8.7, §8.8 and §8.9 end to end. Tests that resume more than once use in-place mode: in worktree mode every resume recreates the ticket branch from the base (`git worktree add -B`, ENG-488), which moves HEAD and refuses the next resume; that is the known limit the PR names.
+
+**Files:**
+- Create: `test/fixtures/design/crash-resume.ts`
+- Test: `test/cli/design-inputs-e2e.test.ts`, `test/cli/design-crash-e2e.test.ts`, `test/daemon/design-livelock.test.ts`
+
+**Interfaces:**
+- Consumes: `DesignHarness` (Task 7, with `slug`/`repoDir` options), `scriptedRunner`, `defaultScript`, `newCalls`, `unitsOf`, `harnessProfileRaw` (Task 7); `resumeRun`, `ResumeRegistryWiring` (Task 8); `redesignLoopback` (Task 14); `currentManifest`, `inputContext` (Task 9); `listStepHistory` (Task 10); `DESIGN_TABLE`, `StepRow` (Task 6); `StepRegistry` with `resolveCommit` (Task 9); `loadRunProfile` (`src/cli/load-profile.ts:40`); `discoverRuntimeConfig` (`src/config/discover.ts`).
+- Produces: nothing used by later tasks.
+
+- [ ] **Step 1: Write the per input, E6, feedback and output clearing tests**
+
+```ts
+// test/cli/design-inputs-e2e.test.ts
+import { afterEach, describe, expect, test } from "bun:test";
+import { captureSnapshot } from "../../src/daemon/design-inputs.ts";
+import { redesignLoopback } from "../../src/daemon/review-verdict.ts";
+import { openDb } from "../../src/db/client.ts";
+import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { listByTicket as listFindings } from "../../src/db/repos/review-finding.ts";
+import { listStepHistory } from "../../src/db/repos/step-history.ts";
+import { listByTicket as listUnits } from "../../src/db/repos/work-unit.ts";
+import { DesignHarness } from "../helpers/design-harness.ts";
+import { type ScriptFinding, type ScriptStep, unitsOf } from "../helpers/design-script.ts";
+import { atStep, driveUntil, makeDesignTicket } from "../helpers/design-steps.ts";
+
+const harnesses: DesignHarness[] = [];
+const make = (): DesignHarness => {
+  const h = new DesignHarness("in-place");
+  harnesses.push(h);
+  return h;
+};
+afterEach(() => {
+  for (const h of harnesses.splice(0)) h.cleanup();
+});
+
+const inputInvalidations = (h: DesignHarness): string[] =>
+  h.read((db, id) =>
+    listEvents(db, id)
+      .filter((e) => e.reason === "invalidated")
+      .map((e) => JSON.parse(e.payload_json ?? "{}") as { stepKeys: string[]; cause: string })
+      .filter((p) => p.cause === "inputs")
+      .flatMap((p) => p.stepKeys),
+  );
+const AGENT_STEPS: Record<string, ScriptStep | null> = {
+  provision: null,
+  "design:dispatch": "design:dispatch",
+  "design:extract": "design:extract",
+  "design:size": "design:size",
+  "design:review": "design:review",
+};
+
+interface InputCase {
+  input: string;
+  edit: (h: DesignHarness) => void;
+  reruns: string[];
+}
+
+const CASES: InputCase[] = [
+  {
+    input: "profile.components",
+    edit: (h) =>
+      h.editProfile((p) => {
+        p.components = [
+          ...(p.components as unknown[]),
+          { name: "extra", kind: "ruby", paths: ["extra/**"], commands: { build: "true", test: "true", check: "true" } },
+        ];
+      }),
+    reruns: ["provision", "design:dispatch", "design:extract"],
+  },
+  {
+    input: "profile.promptVars",
+    edit: (h) =>
+      h.editProfile((p) => {
+        p.promptVars = { stack: "ruby", tone: "terse" };
+      }),
+    reruns: ["design:dispatch", "design:extract", "design:review"],
+  },
+  {
+    input: "profile.runtimeContext",
+    edit: (h) =>
+      h.editProfile((p) => {
+        p.runtimeContext = { ...(p.runtimeContext as object), topology: { type: "web-service" } };
+      }),
+    reruns: ["design:dispatch", "design:extract"],
+  },
+  {
+    input: "run.nonPrimaryComponents",
+    edit: (h) =>
+      h.editProfile((p) => {
+        p.components = [
+          ...(p.components as unknown[]),
+          { name: "fixture-app", kind: "ruby", role: "fixture", paths: ["fixtures/**"], commands: { build: "true", test: "true", check: "true" } },
+        ];
+      }),
+    reruns: ["provision"], // the narrowed profile is unchanged; only provision reads the list
+  },
+  {
+    input: "config.complexityGrading",
+    edit: (h) =>
+      h.editConfig((c) => {
+        c.complexityGrading = true;
+      }),
+    reruns: ["design:size"], // grade 6 keeps the track full, so design:review stays done
+  },
+];
+
+describe("§8.1: each input reruns exactly its dependants", () => {
+  for (const c of CASES) {
+    test(`${c.input}`, async () => {
+      const h = make();
+      expect(await h.fresh()).toBe(75); // design done; paused at checks:dispatch
+      const before = { ...h.calls.counts };
+      c.edit(h);
+      expect(await h.resume()).toBe(75);
+      expect(inputInvalidations(h).sort()).toEqual([...c.reruns].sort());
+      for (const [key, agent] of Object.entries(AGENT_STEPS)) {
+        if (agent === null) continue;
+        // design:size calls an agent only with grading on, which is the one case that reruns it
+        expect(h.calls.counts[agent]).toBe(c.reruns.includes(key) ? before[agent] + 1 : before[agent]);
+      }
+      // the checks steps are outside the table: never invalidated, no history (E9)
+      h.read((db, id) => {
+        expect(listStepHistory(db, id).some((r) => r.step_key.startsWith("checks:"))).toBe(false);
+      });
+    });
+  }
+
+  test("profile.slug (not editable across a resume: the checkpoint folder is keyed by it)", async () => {
+    const t = makeDesignTicket();
+    await driveUntil(t, atStep("checks:dispatch"));
+    captureSnapshot(t.db, t.ticketId, {
+      profile: { ...t.profile, slug: "renamed" },
+      unusableComponents: [],
+      nonPrimaryComponents: [],
+      config: t.config,
+    });
+    await driveUntil(t, atStep("checks:dispatch"));
+    const invalidated = listEvents(t.db, t.ticketId)
+      .filter((e) => e.reason === "invalidated")
+      .map((e) => JSON.parse(e.payload_json ?? "{}").stepKeys[0]);
+    expect(invalidated).toEqual(["design:dispatch", "design:extract", "design:review"]);
+  });
+});
+
+test("§8.2 (E6): an edit while paused in implement reruns nothing now, says so, and a later redesign picks it up", async () => {
+  const h = make();
+  const script = { units: () => unitsOf(2, { behavioral: false }), parkAt: "implement" as const };
+  expect(await h.fresh({ script })).toBe(75); // parked at implement:wu1:dispatch
+  const designCalls = () => [h.calls.counts["design:dispatch"], h.calls.counts["design:extract"], h.calls.counts["design:review"]];
+  const before = designCalls();
+  h.editProfile((p) => {
+    p.promptVars = { stack: "ruby", tone: "terse" };
+  });
+  expect(await h.resume({ script })).toBe(75); // parks at implement again
+  expect(designCalls()).toEqual(before);
+  expect(inputInvalidations(h)).toEqual([]);
+  const note = h.read((db, id) => listEvents(db, id).find((e) => e.reason === "inputs-changed"));
+  expect(JSON.parse(note?.payload_json ?? "{}")).toMatchObject({ pastDesign: true, names: ["profile.promptVars"] });
+  // a redesign (as code review's plan-defect route would make) returns the run to design
+  const db = openDb(h.dbPath()); // foreign keys on, so deleting the units cascades as in a run
+  const id = (db.query("SELECT id FROM ticket").get() as { id: number }).id;
+  redesignLoopback(db, id, "review:plan-defect", [], null, ["design:dispatch", "design:extract"]);
+  db.close();
+  expect(await h.resume({ script })).toBe(75);
+  expect(inputInvalidations(h)).toContain("design:review"); // the edit took effect in design
+});
+
+test("§8.7: after a redesign, a profile edit and a resume, the next generation gets no stale findings and no carryover", async () => {
+  const finding = (rationale: string, location: string): ScriptFinding => ({
+    severity: "critical",
+    category: "feasibility",
+    location,
+    rationale,
+    factors: null,
+    deferral_candidate: false,
+    work_unit_seq: null,
+  });
+  const script = {
+    plan: (n: number) => `Plan body, version ${n}`,
+    planFindings: (n: number) =>
+      n === 1 ? [finding("ROUND-ONE", "plan:a")] : n === 2 ? [finding("ROUND-TWO", "plan:b")] : [],
+    parkAt: "design:dispatch" as const,
+    parkOnCall: 2, // the generation 1 dispatch, right after the first redesign
+  };
+  const h = make();
+  expect(await h.fresh({ script })).toBe(75); // budget pause, transcript for design:dispatch gen 1
+  h.editProfile((p) => {
+    p.promptVars = { stack: "ruby", tone: "terse" };
+  });
+  expect(await h.resume({ script: { ...script, parkAt: null, parkOnCall: null } })).toBe(75);
+  const prompts = h.calls.prompts.filter((p) => p.step === "design:dispatch").map((p) => p.prompt);
+  // call 3: generation 1 resumed: its own findings and its own partial output
+  expect(prompts[2]).toContain("ROUND-ONE");
+  expect(prompts[2]).toContain("partial output written before the session limit");
+  // call 4: generation 2, after the second redesign: only round two, no carryover
+  expect(prompts[3]).toContain("ROUND-TWO");
+  expect(prompts[3]).not.toContain("ROUND-ONE");
+  expect(prompts[3]).not.toContain("partial output written before the session limit");
+});
+
+test("§8.9: an extract invalidated by an edit clears every unit and needs_docs, keeps the plan finding detached, and leaves history", async () => {
+  const h = make();
+  const script = {
+    planFindings: () => [
+      {
+        severity: "minor" as const,
+        category: "clarity",
+        location: "plan:Unit 1",
+        rationale: "name it",
+        factors: null,
+        deferral_candidate: false,
+        work_unit_seq: 1,
+      },
+    ],
+  };
+  expect(await h.fresh({ script })).toBe(75);
+  const oldIds = h.read((db, id) => listUnits(db, id).map((u) => u.id));
+  h.editProfile((p) => {
+    p.runtimeContext = { ...(p.runtimeContext as object), topology: { type: "web-service" } };
+  });
+  expect(await h.resume({ script })).toBe(75);
+  h.read((db, id) => {
+    const units = listUnits(db, id);
+    expect(units.map((u) => u.seq)).toEqual([1, 2]);
+    expect(units.map((u) => u.id)).not.toEqual(oldIds);
+    const planFindings = listFindings(db, id).filter((f) => f.review_kind === "plan");
+    expect(planFindings.length).toBe(1); // design:review did not rerun: same plan, same units
+    expect(planFindings[0].work_unit_id).toBeNull(); // detached when the units were deleted
+    expect(listStepHistory(db, id, "design:extract").length).toBe(1);
+  });
+});
+```
+
+`make()` is in-place; for `§8.9` the review's inputs are unchanged (the runtime context is read by dispatch and extract only), so it stays done and its finding stays as the latest review's, detached.
+
+- [ ] **Step 2: Write the livelock test**
+
+```ts
+// test/daemon/design-livelock.test.ts
+import { expect, test } from "bun:test";
+import { advanceOneStep } from "../../src/daemon/advance.ts";
+import { nextStepKey } from "../../src/daemon/resolver.ts";
+import { getTicket } from "../../src/db/repos/ticket.ts";
+import { unitsOf } from "../helpers/design-script.ts";
+import { makeDesignTicket } from "../helpers/design-steps.ts";
+
+test("§8.6: plan review goes from findings to none and design finishes in a fixed number of steps", async () => {
+  const t = makeDesignTicket({
+    script: {
+      units: () => unitsOf(2, { behavioral: false }),
+      plan: (n) => `Plan body, version ${n}`,
+      planFindings: (n) =>
+        n === 1
+          ? [
+              {
+                severity: "major",
+                category: "completeness",
+                location: "plan:1",
+                rationale: "missing a step",
+                factors: null,
+                deferral_candidate: false,
+                work_unit_seq: null,
+              },
+            ]
+          : [],
+    },
+  });
+  let steps = 0;
+  while (getTicket(t.db, t.ticketId)?.stage === "design") {
+    expect(nextStepKey(t.db, t.ticketId).kind).not.toBe("escalate");
+    await advanceOneStep(t.db, t.ticketId, t.registry, { config: t.config });
+    steps++;
+    if (steps > 20) throw new Error("design did not finish: livelock");
+  }
+  // provision, dispatch, extract, size, review (blocks) | dispatch, extract, review (clean),
+  // checks:dispatch, checks:classify | the advance to implement, collapsed inline into the call
+  // that runs implement:wu1:dispatch. Invalidations collapse inline too: eleven calls.
+  expect(steps).toBe(11);
+  expect(t.calls.counts["design:dispatch"]).toBe(2);
+  expect(t.calls.counts["design:extract"]).toBe(2);
+  expect(t.calls.counts["design:review"]).toBe(2);
+});
+```
+
+- [ ] **Step 3: Write the crash driver and the crash tests**
+
+```ts
+// test/fixtures/design/crash-resume.ts
+// Usage: bun test/fixtures/design/crash-resume.ts <spec.json>
+// Resumes a paused design harness run (in place) with the real handlers and a scripted agent, and
+// blocks at one crash point, writing <readyFile> first, so the parent test can SIGKILL this process:
+//   before-commit    the step's handler returned; its success transaction has not run
+//   after-commit     the step's success committed (seen at the start of the next step)
+//   after-invalidate the step was invalidated and its handler is about to start
+// XDG_STATE_HOME and XDG_CONFIG_HOME come from the parent; no real agent runs.
+import { readFileSync, writeFileSync } from "node:fs";
+import { resumeRun } from "../../../src/cli/park.ts";
+import { loadRunProfile } from "../../../src/cli/load-profile.ts";
+import { DEFAULT_AGENT_CONFIG } from "../../../src/config/agent-config.ts";
+import { discoverRuntimeConfig } from "../../../src/config/discover.ts";
+import { type HandlerContext, StepRegistry } from "../../../src/daemon/step-registry.ts";
+import { getByKey } from "../../../src/db/repos/workflow-step.ts";
+import { buildDispatchRegistry } from "../../../src/dispatch/handlers.ts";
+import { fakeForge } from "../../../src/integrations/adapters/fake-forge.ts";
+import { fakeIssueTracker } from "../../../src/integrations/adapters/fake-issue-tracker.ts";
+import { defaultScript, newCalls, scriptedRunner } from "../../helpers/design-script.ts";
+
+interface CrashSpec {
+  profilePath: string;
+  configPath: string;
+  ident: string;
+  step: string;
+  point: "before-commit" | "after-commit" | "after-invalidate";
+  readyFile: string;
+}
+const spec = JSON.parse(readFileSync(process.argv[2] ?? "", "utf8")) as CrashSpec;
+
+function block(): never {
+  writeFileSync(spec.readyFile, "ready");
+  for (;;) Bun.sleepSync(60_000); // synchronous: nothing else in this process runs until SIGKILL
+}
+
+class CrashRegistry extends StepRegistry {
+  private ran = false;
+  constructor(private readonly real: StepRegistry) {
+    super((db, ticketId) => {
+      real.synchronize(db, ticketId);
+      if (spec.point === "after-commit" && this.ran && getByKey(db, ticketId, spec.step)?.status === "succeeded") block();
+    });
+  }
+  override resolve(handlerKey: string) {
+    const h = this.real.resolve(handlerKey);
+    if (!h) return h;
+    return async (ctx: HandlerContext) => {
+      const ours = ctx.step.step_key === spec.step;
+      if (ours && spec.point === "after-invalidate") block();
+      const result = await h(ctx);
+      if (ours) this.ran = true;
+      if (ours && spec.point === "before-commit") block();
+      return result;
+    };
+  }
+  override resolveCommit(handlerKey: string) {
+    return this.real.resolveCommit(handlerKey);
+  }
+}
+
+const loaded = loadRunProfile({ profile: spec.profilePath });
+const config = discoverRuntimeConfig({ explicitPath: spec.configPath, slug: loaded.slug });
+await resumeRun({ resume: spec.ident }, loaded.profile, config, {
+  ports: {
+    issueTracker: fakeIssueTracker({
+      ticket: { ident: spec.ident, title: "Harness ticket", description: "Harness body", typeLabel: "Feature", externalId: "uuid-harness", url: null },
+    }),
+    forge: fakeForge(),
+  },
+  preflight: () => ({ ok: true, version: null }),
+  probe: () => true,
+  buildRegistry: (resumeContext, wiring) =>
+    new CrashRegistry(
+      buildDispatchRegistry({
+        runner: scriptedRunner(defaultScript({ ident: spec.ident }), newCalls()),
+        agentConfig: DEFAULT_AGENT_CONFIG,
+        ...wiring,
+        resumeContext,
+      }),
+    ),
+}, loaded.nonPrimary);
+throw new Error(`crash-resume: the run ended without reaching ${spec.point} of ${spec.step}`);
+```
+
+```ts
+// test/cli/design-crash-e2e.test.ts
+import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { currentManifest } from "../../src/daemon/design-digests.ts";
+import { DESIGN_TABLE, type StepRow } from "../../src/daemon/design-graph.ts";
+import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { listByTicket as listUnits } from "../../src/db/repos/work-unit.ts";
+import { getByKey } from "../../src/db/repos/workflow-step.ts";
+import { DesignHarness } from "../helpers/design-harness.ts";
+
+const DRIVER = join(import.meta.dir, "../fixtures/design/crash-resume.ts");
+const harnesses: DesignHarness[] = [];
+afterEach(() => {
+  for (const h of harnesses.splice(0)) h.cleanup();
+});
+
+type Point = "before-commit" | "after-commit" | "after-invalidate";
+/** The edit that makes each step rerun on the next resume (in place, so provision reruns only
+ *  when its own inputs change). */
+const EDITS: Record<string, (h: DesignHarness) => void> = {
+  provision: (h) =>
+    h.editProfile((p) => {
+      p.components = [
+        ...(p.components as unknown[]),
+        { name: "extra", kind: "ruby", paths: ["extra/**"], commands: { build: "true", test: "true", check: "true" } },
+      ];
+    }),
+  "design:dispatch": (h) => h.editProfile((p) => void (p.promptVars = { stack: "ruby", tone: "terse" })),
+  "design:extract": (h) => h.editProfile((p) => void (p.promptVars = { stack: "ruby", tone: "terse" })),
+  "design:size": (h) => h.editConfig((c) => void (c.complexityGrading = true)),
+  "design:review": (h) => h.editProfile((p) => void (p.promptVars = { stack: "ruby", tone: "terse" })),
+};
+
+/** Dispatch rows written by `step` (agent steps), counted through the dispatch's step id. */
+const dispatches = (h: DesignHarness, step: string): number =>
+  h.read(
+    (db, id) =>
+      (db
+        .query("SELECT COUNT(*) AS n FROM dispatch d JOIN workflow_step w ON w.id = d.step_id WHERE d.ticket_id = ? AND w.step_key = ? AND d.outcome = 'clean-success'")
+        .get(id, step) as { n: number }).n,
+  );
+
+async function crashChild(h: DesignHarness, step: string, point: Point): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), "styre-crash-"));
+  const readyFile = join(dir, "ready");
+  const specPath = join(dir, "spec.json");
+  writeFileSync(specPath, JSON.stringify({ profilePath: h.profilePath, configPath: h.configPath, ident: h.ident, step, point, readyFile }));
+  const log = join(dir, "stderr.log");
+  const child = Bun.spawn([process.execPath, DRIVER, specPath], {
+    env: { ...process.env, XDG_STATE_HOME: h.stateRoot, XDG_CONFIG_HOME: h.configRoot, STYRE_TELEMETRY: "0" },
+    stdout: "ignore",
+    stderr: Bun.file(log), // a file, so a full pipe can never stall the child before its crash point
+  });
+  const deadline = Date.now() + 120_000;
+  while (!existsSync(readyFile)) {
+    if (child.exitCode !== null || Date.now() > deadline) {
+      child.kill("SIGKILL");
+      await child.exited;
+      throw new Error(`crash driver did not reach ${point} of ${step}: ${existsSync(log) ? readFileSync(log, "utf8") : ""}`);
+    }
+    await Bun.sleep(50);
+  }
+  child.kill("SIGKILL"); // this child only, by its own pid
+  await child.exited;
+}
+
+const rows = DESIGN_TABLE.filter((r): r is StepRow => r.kind === "step");
+
+describe("§8.8: a child process SIGKILLed at each design step leaves nothing duplicated or stale", () => {
+  for (const row of rows) {
+    for (const point of ["before-commit", "after-commit", "after-invalidate"] as const) {
+      test(`${row.stepKey}, ${point}`, async () => {
+        const h = new DesignHarness("in-place");
+        harnesses.push(h);
+        expect(await h.fresh()).toBe(75); // design done; paused at checks:dispatch
+        // provision runs no agent; design:size runs one only once its edit turns grading on, so its
+        // fresh run wrote no dispatch row to compare against
+        const agent = row.stepKey !== "provision" && row.stepKey !== "design:size";
+        const before = agent ? dispatches(h, row.stepKey) : 0;
+        EDITS[row.stepKey](h);
+        await crashChild(h, row.stepKey, point);
+        const endedAtCrash = h.read((db, id) => getByKey(db, id, row.stepKey)?.ended_at);
+        expect(await h.resume()).toBe(75); // the next resume finishes design again
+        h.read((db, id) => {
+          // no duplicate or partial outputs
+          expect(listUnits(db, id).map((u) => u.seq)).toEqual([1, 2]);
+          // every design step's recorded manifest matches its inputs now
+          for (const r of rows) {
+            const s = getByKey(db, id, r.stepKey);
+            if (!r.appliesWhen({ track: "full" }) || s?.status !== "succeeded") continue;
+            expect(JSON.parse(s.input_manifest ?? "null")).toEqual(currentManifest(db, id, r));
+          }
+          // one invalidation of the crashed step, whatever the crash point
+          const invalidations = listEvents(db, id).filter(
+            (e) => e.reason === "invalidated" && (JSON.parse(e.payload_json ?? "{}").stepKeys as string[]).includes(row.stepKey),
+          );
+          expect(invalidations.length).toBe(1);
+        });
+        if (point === "after-commit") {
+          // committed before the crash: never run again for the same inputs
+          expect(h.read((db, id) => getByKey(db, id, row.stepKey)?.ended_at)).toBe(endedAtCrash);
+        }
+        if (agent) {
+          const ran = dispatches(h, row.stepKey) - before;
+          // before-commit: the uncommitted success is redone once; otherwise exactly one run
+          expect(ran).toBe(point === "before-commit" ? 2 : 1);
+        }
+      });
+    }
+  }
+});
+```
+
+- [ ] **Step 4: Run them and see them fail, then pass**
+
+These tests exercise behaviour built in Tasks 7 to 16, so they pass on first run if those tasks are correct. Prove each can fail before trusting it:
+1. Run: `perl -e 'alarm 600; exec @ARGV' bun test test/cli/design-inputs-e2e.test.ts test/daemon/design-livelock.test.ts test/cli/design-crash-e2e.test.ts`. Expected: PASS.
+2. In `walkDesign`, invalidate every step after the first mismatch as well (`stepKeys: DESIGN_TABLE...slice(index)`): §8.1 fails for each case (extra reruns). Restore.
+3. In `src/daemon/design-outputs.ts`, move `writeExtractOutputs` into the extract handler (write before the success commit): the `design:extract, before-commit` crash case fails with a `UNIQUE constraint failed: work_unit.ticket_id, work_unit.seq` rerun failure. Restore.
+4. In `captureSnapshot`, set `pastDesign` to `false` always: §8.2 fails on the note. Restore.
+5. In `run-dispatch.ts`, drop the generation condition of the carryover: §8.7 fails on `prompts[3]`. Restore.
+6. Make `applyReviewVerdict`'s plan review path a no-op loopback that does not invalidate design:dispatch (pass `[]`, which `redesignLoopback` refuses): the livelock test fails loudly. Restore.
+
+- [ ] **Step 5: Run the whole suite, then commit**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test`
+Expected: PASS.
+
+```bash
+git add test/fixtures/design/crash-resume.ts test/cli/design-inputs-e2e.test.ts test/cli/design-crash-e2e.test.ts test/daemon/design-livelock.test.ts
+git commit -m "test(eng-477): end to end coverage of design input invalidation, E6, feedback, crashes and clearing" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 18: Docs (spec §9)
+
+Both `schema.sql` copies and the `CLAUDE.md` table count were updated with the schema in Task 4. This task changes no code.
+
+**Files:**
+- Modify: `docs/architecture/minimal-loop.md:27-37` (§1 design branch), `:197` (§2 redesign row)
+- Modify: `docs/architecture/control-loop.md:80-81` (start up), `:112-121` (§2.3 descriptor list), `:241-299` (§4 S1 guards), `:728-730` (§6.2), `:820-824` (§8.3 design rows), `:955` (§10)
+- Modify: `docs/architecture/build-operations.md:54,58`
+- Modify: `docs/architecture/runtime-parameters.md` (Resume flow, `styre migrate`, the exit code table rows `65`, `70`, `75`, a new section "Design inputs and invalidation")
+- Modify: `docs/architecture/conventions.md:142-152` (Checkpoints)
+- Modify: `docs/architecture/telemetry-export.md:101` (after the ENG-485 note reasons)
+- Modify: `SECURITY.md:169-176` (Limits, stated plainly)
+- Modify: `docs/architecture/brainstorm.md:422` (§11, a new first entry)
+- Test: `test/lifecycle/messages-doc.test.ts` (existing; must stay green: no new `styre: ` messages were added)
+
+**Interfaces:**
+- Consumes: the names and messages of Tasks 2 to 16.
+- Produces: none.
+
+- [ ] **Step 1: `minimal-loop.md`**
+
+Replace the `'design':` branch of the pseudocode (lines 27-37) with:
+
+```
+  'design':
+    # Generated from the declared table (src/daemon/design-graph.ts; ENG-477). For each row, in order:
+    #   skip it when its "applies when" is false (design:review and its gate: track == 'full');
+    #   not succeeded                          → return it (the walk stops at the first step not done)
+    #   succeeded, manifest ≠ current inputs   → invalidate it alone (cause inputs), recurse
+    #   succeeded, manifest = current inputs   → done; next row
+    # Rows: provision → design:dispatch → design:extract → design:size → design:review → plan review gate
+    if gate fires (blocking findings on the latest design:review): escalate('review:unresolved-plan')
+    if the same step was invalidated for inputs > 3 times since the last resume: escalate('invalidate-loop:<step>')
+    # past the table: today's checks routing, unchanged (E9)
+    if not done('checks:dispatch'):                    return 'checks:dispatch'
+    if not done('checks:classify'):                    return 'checks:classify'
+    advance('design' -> 'implement'); recurse
+```
+
+and add, after the code block, the paragraph:
+
+```
+**"Done" in design means done with these inputs (ENG-477).** Each design table step records, in its
+success transaction, a manifest of its inputs' digests: snapshot inputs from `ticket_input` (the
+ticket text, fixed for the run; the profile and config values as the handlers receive them,
+rewritten on each resume), the outputs it reads (units, track, and the plan's digest recorded on
+`design:dispatch`). The walk recomputes the manifest from SQLite (it never reads the worktree) and
+invalidates a step whose inputs changed; its readers are judged again after it reruns (early cutoff).
+The walk runs only while the ticket is in design: an edit made while paused later is recorded and
+takes effect the next time the run is in design. The checks steps keep today's gating (E9).
+```
+
+In §2's table, replace the `plan-review blocking, or code-review plan-defect ...` row with:
+
+```
+| plan review blocking | `invalidate(design:dispatch)` with cause `feedback` (history, reset, generation + 1); the loopback event carries the findings, `consumer: design:dispatch` and that generation; reset+zero `review`; reset ticket verify steps; reset+zero `merge:push`/`merge:pr-ensure`; `stage='design'`. Everything else in design follows from fingerprints | `design` |
+| code review `plan-defect` with `onPlanDefect='redesign'`, or `--resume` retry-plan after HEAD moved | the same, invalidating `design:dispatch` and `design:extract` (all units deleted, reconcile units included; unit-tied findings detached first; `needs_docs` = 0), so the units are re-created and re-implemented even when the plan is identical | `design` |
+```
+
+- [ ] **Step 2: `control-loop.md`**
+
+- Line 81: `migrate()                       # §10 create, or upgrade (backup, versioned migrations, structural proof)`.
+- §2.3, in the descriptor list after `'mark-verified'`:
+
+```
+  'invalidate'    → design only (ENG-477): one transaction — a `note` event (reason `invalidated`,
+                    with the step keys, the cause and the changed input names; not a loopback), the
+                    step's row copied to workflow_step_history, the step reset to a fresh round in the
+                    next generation, its outputs cleared (minimal-loop §2); recurse
+```
+
+- §4, S1a guard: `- **Guard:** `stage='design'`; `provision` done with its current inputs; worktree exists. "Done" for every design step (S1a, S1b, S1b2, S1c, and provision) means succeeded **and** its recorded input manifest equals its inputs now (ENG-477, minimal-loop §1).`
+- S1b guard: `- **Guard:** S1a done with its current inputs (the plan's digest is one of S1b's inputs). Rows are no longer the gate.`
+- S1b output, append: `Units are written in the success transaction, with `origin='extract'`; a crash before it leaves none.`
+- S1b2 guard: `- **Guard:** S1b done with its current inputs; `design:size` not done with its current inputs (the `ticket.track` column is no longer the gate).`
+- S1a output, append: `The runner records the plan's digest (path and content of the `docs/plans/*.md` files whose frontmatter names this ticket, at the branch head, read through git) when S1a succeeds.`
+- §6.2, append:
+
+```
+**Replay beside invalidate (ENG-477).** In the design stage a succeeded step is replayed only while
+its recorded input manifest matches its inputs now. When it does not, the resolver returns
+`invalidate` instead of the step, so the journal's replay is never asked to stand for a step whose
+inputs changed (that request would escalate `step-replay-no-progress`).
+```
+
+- §8.3, after the DV2 row:
+
+```
+| DI1 | design walk | a succeeded design step's inputs changed (an edit while paused, another host's toolchain) | invalidate that step (cause `inputs`); readers judged again after it reruns | step | `invalidate-loop:<step>` after 3 since the last resume → escalate |
+```
+
+and change DV1's "Routes to" to `→ S1a re-design with findings (invalidate design:dispatch, cause feedback)`.
+- §10, line 955: `- **Self-bootstrapping schema** — `migrate()` creates the DB, or upgrades it: a `VACUUM INTO` backup next to it, each pending migration in its own transaction with a foreign key check, then a structural comparison against `schema.sql`. Checkpoints from v7 on are upgraded; newer, older or unknown shapes are refused (exit 65). No manual SQL.`
+
+- [ ] **Step 3: `build-operations.md`**
+
+Line 54: `  - **Upgrade** (any target): replace the binary/image; `migrate()` applies schema migrations on start, after a `VACUUM INTO` backup, and proves the result against `schema.sql` (ENG-477). Paused runs from v7 on resume on the new binary.`
+Line 58: `  - **`styre migrate`** — bootstraps the SQLite SoT under `$XDG_STATE_HOME/styre/`, or upgrades an existing one the same way `run` does.`
+
+- [ ] **Step 4: `runtime-parameters.md`**
+
+- In **Resume flow**, append:
+
+```
+Resume also re-reads the profile and config and narrows the profile to this host's toolchain exactly
+as a fresh run does, printing the same notice (`resume: skipping N component(s) whose toolchain is
+absent; …`). Where a fresh run would refuse (nothing usable, or a component whose suite is
+`required` is unusable), resume never exits `69`: it pauses for the operator (`needs_you`, exit `75`)
+with `resume: paused: this host lacks the tools for <component> (missing: <tools>); …`. Install the
+tools and resume. A database written by an older Styre (schema v7 or v8) is upgraded first, and its
+finished design steps are adopted (see Design inputs and invalidation).
+```
+
+- In **`styre migrate`**, after the first paragraph:
+
+```
+An older database (schema v7 or v8) is upgraded: first a backup next to it,
+`<db>.v<old>.<UTC timestamp>.bak` (`VACUUM INTO`), then each migration in its own transaction, then
+a structural comparison with `schema.sql`. It prints, on stderr,
+`migrate: backed up <db> (schema v<old>) to <backup>` and `migrate: upgraded <db> from schema
+v<old> to v<new>`, then `upgraded from v<old>: <db> (schema v<new>)`. `styre run` (fresh and
+`--resume`) upgrades the same way. Refusals (exit `65`): `migrate: <db> is schema v<N>, newer than
+this Styre's v<M>`; `migrate: <db> is schema v<N> but has a shape this Styre does not know`;
+`migrate: <db> is schema v<N>; Styre upgrades checkpoints from v7 on`. Each says to start that run
+over with `--fresh`. A migration that fails leaves the database at the last version that completed
+(exit `70`); the backup is kept. `styre ls`, `styre clean` and `--fresh` read a checkpoint without
+upgrading it.
+```
+
+- In the exit code table: row `65` add `, or a database that cannot be upgraded: newer than this Styre, older than v7, or of an unknown shape (start that run over with `--fresh`)` to the Meaning; row `70` add `Also: a migration that failed (the database stays at the last version that completed; the backup is kept), and a declared design table that breaks its own rules (`the declared design table breaks its own rules`, a Styre defect).`; row `75` add `, or a resume paused because this host lacks a required suite's tools` inside the `needs_you` parenthesis, and `, or an invalidate-loop escalation` after it.
+- New section before `## Exit codes (error codes) and their meaning`:
+
+```
+## Design inputs and invalidation (ENG-477)
+
+A design step is done only while its recorded inputs still match. What counts as an input is the
+declared table in `src/daemon/design-graph.ts`: the ticket text (fixed for the run; resume never
+reads the tracker, so start over with `--fresh` to pick up an edited ticket), the profile's slug,
+prompt variables, runtime context and components, the lists of components narrowed away for this
+host or as not part of the product, and `complexityGrading`. Model choices and `onPlanDefect` are
+not inputs.
+
+Notes written to the run's events (and emitted as `event` rows):
+- `inputs-changed`: on a resume (or a reused `--db`), the inputs whose values changed. Past design,
+  the note says the change takes effect the next time the run is in design; the run carries on.
+- `invalidated`: a design step was reset (cause `inputs`, `feedback`, `worktree-recreated` or
+  `manifest-touched`), with the changed input names; its previous row is kept in
+  `workflow_step_history`.
+- `adopted`: on the first resume after an upgrade, the finished design steps of a run paused by an
+  older Styre, recorded with today's inputs; an edit made between the pause and the upgrade cannot
+  be detected.
+
+Escalation `invalidate-loop:<step>`: a design step was invalidated for changed inputs more than three
+times since the last resume. This is a defect (an unstable digest); the run pauses (`needs_you`).
+```
+
+- [ ] **Step 5: `conventions.md`, `telemetry-export.md`, `SECURITY.md`, `brainstorm.md`**
+
+`conventions.md`, append to **Checkpoints**:
+
+```
+When `styre run` (or `styre migrate`) upgrades a checkpoint written by an older Styre, it first
+writes a backup next to it: `run.db.v<old version>.<UTC timestamp>.bak`, made with `VACUUM INTO`
+(complete even while another reader holds a snapshot). It is never deleted by Styre; `styre clean`
+removes it with the checkpoint folder.
+```
+
+`telemetry-export.md`, after the ENG-485 note reasons:
+
+```
+**Three `note` reasons from ENG-477** (no new kind, no schema change), all with `payload_json.event`
+equal to the reason:
+- **`inputs-changed`** — `names` (the changed inputs), `pastDesign`, `message`.
+- **`invalidated`** — `stepKeys`, `cause` (`inputs` | `feedback` | `worktree-recreated` |
+  `manifest-touched`), `changed`.
+- **`adopted`** — `stepKeys`, `message`.
+A design `loopback` event's payload also carries `consumer` (`design:dispatch`) and `generation`.
+```
+
+`SECURITY.md`, in **Limits, stated plainly**, after the **Interrupted checks step, worktree mode** bullet:
+
+```
+- **Design reruns in worktree mode depend on the ticket branch surviving a resume** (ENG-488). The
+  plan's digest is recorded from the branch, and the starting commit is read right after a fresh run
+  creates it. `git worktree add -B` on resume recreates the branch from the base, which drops the
+  run's commits and moves HEAD (so a second resume is refused until `--accept-head`). In-place mode
+  is unaffected. Until ENG-488 lands this is the known limit of design input invalidation.
+```
+
+`brainstorm.md` §11, a new first entry right under `## 11. Changelog`:
+
+```
+- **2026-10-09 — ENG-477: design steps rerun when their recorded inputs change; Styre upgrades old databases.** Design: `docs/brainstorms/2026-10-09-eng-477-design-input-invalidation-design.md` (rev 5, decisions E1 to E9; E7 withdrawn); plan: `docs/plans/2026-10-09-eng-477-design-input-invalidation.md`. Implements umbrella D7 for the design stage and D9: a declared table (`src/daemon/design-graph.ts`) generates the design routing; each step records a manifest of input digests (snapshot rows in `ticket_input`, output rows, the plan digest) and the walk invalidates only a step whose inputs changed (early cutoff). Loopbacks invalidate the step that consumes their feedback, and feedback and the carryover belong to that step's generation. `migrate()` now upgrades: `VACUUM INTO` backup, versioned migrations (v7 → v8 replaces `ensureRunTable`, v8 → v9 adds the new columns and tables), structural proof; old paused runs are adopted on resume. Resume narrows the profile like a fresh run and pauses rather than drop a required suite. The checks steps keep today's rules (E9, ENG-475; ENG-490). Known limit: ENG-488 in worktree mode.
+```
+
+- [ ] **Step 6: Check, then commit**
+
+Run: `cmp src/db/schema.sql docs/architecture/schema.sql && grep -c '^CREATE TABLE' docs/architecture/schema.sql && perl -e 'alarm 600; exec @ARGV' bun test test/lifecycle/messages-doc.test.ts`
+Expected: `19`, then PASS.
+
+Read every paragraph written in Steps 1 to 5 once more for coined hyphenated compounds (Global Constraints); write any you find out in plain words.
+
+```bash
+git add docs/architecture SECURITY.md
+git commit -m "docs(eng-477): design input invalidation, database upgrades and resume narrowing" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+## Before opening the PR
+
+Not part of this plan's tasks, but required by `CLAUDE.md` before `gh pr create`: dispatch an independent adversarial reviewer over the exact HEAD, write `.claude/reviews/<full-sha>.md` with its findings and the `reviewed-sha:` and `reviewed-remote:` lines, and re-review after any fix commit. The PR body names ENG-488 as the known limit for worktree mode (spec §4.2) and lists the hand off notes below that the operator has not yet ruled on.
+
+## Spec coverage
+
+| Spec section / requirement | Task |
+|---|---|
+| E1 an edit reruns its readers and their dependants | 13, 17 (§8.1) |
+| E2 ticket text fixed; resume never reads the tracker | 7 |
+| E3 only `complexityGrading` among config keys | 6, 7 |
+| E4 scope is the design stage | 6, 13 |
+| E5 manifests, output digests, early cutoff | 9, 13, 14 |
+| E6 an edit past design takes effect at the next design visit | 7, 13, 17 (§8.2) |
+| E8 table enforced by tests, proxy, accessors | 15 |
+| E9 checks steps unchanged | 13 (routing kept), 17 (never invalidated) |
+| §3 the table, generated routing | 6, 13 |
+| §3 recording proxy, accessors, current step slot, source guard | 15 |
+| §3.1 four rules, unit test and assertion on first use, exit 70 | 6, 9 (assertion before a table step), 13 (walk) |
+| §3.2 environment observations out; reconcile units out via `origin` | 4, 9 (digest), 10 (clearing) |
+| §4 `ticket_input`, run start, reused `--db`, resume, `inputs-changed` note | 7, 8 |
+| §4.1 one profile for fresh runs and resumes; placement; wiring; pause; notice; never 69 | 8 |
+| §4.2 starting commit per mode, never rewritten | 7 |
+| §5.1 canonical encoding | 5 |
+| §5.2 manifest columns, recorded in any stage, slow work outside the transaction | 4, 9 |
+| §5.3 digests: snapshot, units, track, plan through git | 9 |
+| §5.4 the walk; only in design; extract and size gating moved | 13 |
+| §6 invalidate in one transaction; `resetProvision` and the manifest touch hook through it | 10 |
+| §6.1 clearing rules | 10 |
+| §6.2 outputs written in `onSucceed`; own rows before the verdict | 9 (ordering), 11 |
+| §6.3 no files restored | (nothing to build; the plan file is revised in place by the rerun) |
+| §6.4 loopbacks: plan review, code review, retry-plan; later stage resets kept | 14 |
+| §6.5 feedback and carryover per generation | 14, 17 (§8.7) |
+| §6.6 livelock reasoning; invalidate loop guard | 16, 17 (§8.6) |
+| §6.7 the general rule (applied to design) | 14 |
+| §7.1 migrations runner, table of outcomes, backup, foreign keys, per migration transaction | 2 |
+| §7.2 table rebuild helper, test exercising it (on `signal`, with its incoming foreign key, foreign keys off and inside a transaction, as a migration runs it) | 2 |
+| §7.3 structural proof, column order, AUTOINCREMENT, CHECK probes in tests | 2, 4 |
+| §7.4 known shapes, v7 → v8 conditions, v8 → v9, v6 refused, `ensureRunTable` removed | 2, 4 |
+| §7.5 one fixture per shape from each release's own code | 1 |
+| §7.6 adopt pass | 12 |
+| §7.7 readers that do not migrate, for ls, clean, `--fresh`, test per fixture | 3 |
+| §8.1 to §8.15 | 17 (8.1, 8.2, 8.6, 8.7, 8.8, 8.9); 13 and 8 (8.3); 8 (8.4); 14 (8.5); 6 and 15 (8.10); 7 (8.11); 2, 3, 4 (8.12); 12 (8.13); 16 (8.14); 5 and 9 (8.15) |
+| §9 docs, both schema copies, CLAUDE.md count, brainstorm changelog | 4, 18 |
+| §10 acceptance criteria | 13, 16, 17, 10, 12, 6, 18 |
+| §11 out of scope (other stages, checks steps, new design steps, checklist derivation, ticket refetch, ENG-488) | not built; ENG-488 named (18) |
+
+## Hand off notes (places where the code and the spec differ, and how this plan resolves each)
+
+1. **`design:review`'s inputs.** The spec's table lists "ticket title and description"; `designReviewVars` (`src/dispatch/prompt-vars.ts:220-248`) reads the title only. The spec says the exact fields come from the code, so the table declares `ticket.title` (Task 6), and the recording proxy test (Task 15) would fail if the handler started reading the description.
+2. **The cause for the manifest touch hook.** The spec names `worktree-recreated` for `resetProvision` and says `resetProvisionIfManifestTouched` "calls the same function"; it names no cause for it. The plan uses `manifest-touched` (Task 10).
+3. **A succeeded step without a manifest outside the adopt pass.** Spec §5.1 says a step under another scheme is "treated as unfingerprinted and adopted"; the adopt pass runs on resume and on a reused `--db`, the only paths that can bring one. The walk refuses such a step loudly (Task 13) rather than adopting silently, per the fail fast rule.
+4. **The worktree starting commit.** `ensureWorktree` (`src/dispatch/worktree.ts:71`) runs `git worktree add -B` on every resume (ENG-488), so "first created" is not visible in git. The plan records it only from a fresh run's provision, through a registry flag (Task 7).
+5. **Exit codes for refused and failed migrations** are not specified. The plan uses `65` for refusals (with the resume refusals) and `70` for a failed migration (Task 2), documented in Task 18.
+6. **The carryover for a parked step that is not succeeded.** Such a step is never invalidated (the walk stops at it), so its generation does not change when an upstream step reruns first; its carryover from the old inputs is still prepended. The spec's rule (§6.5) is implemented literally; this case is not covered by it.
+7. **`readPlanFindings`.** The spec names it as an example accessor, but no design handler reads plan findings; only the resolver's gate does, outside any step. The plan builds `readWorkUnitsForDesign` only (Task 15); the gate keeps reading `review-round.ts`.
+8. **Existing tests that seeded design rows directly** (resolver, advance, design handler tests, review-resume) cannot keep doing so once the walk refuses unfingerprinted steps; Task 13 moves them onto real steps through `reachDesignStep`, and deletes the six resolver design tests in favour of real step equivalents.
+9. **`runtime-parameters.md` says `styre migrate` prints to stdout**; `src/cli/migrate.ts:15` writes to stderr. The plan does not change that; its new lines go to stderr and Task 18's text says so.
+10. **Multiple resumes in worktree mode** are refused after the first (the recreated branch moves HEAD, ENG-488). Tests that resume more than once use in-place mode (Task 17 intro).
