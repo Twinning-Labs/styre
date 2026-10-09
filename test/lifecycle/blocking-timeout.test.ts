@@ -132,9 +132,14 @@ test("pushBranch: a timeout throws and names the timeout; a plain failure keeps 
   expect(() => pushBranch("/repo", "feat/x")).not.toThrow();
 });
 
-test("fileContentAt: a timeout reads as null, the same as an absent path (pinned as it is today)", () => {
+test("fileContentAt: a timeout throws, never reads as an absent path (the check integrity gate must not pass on it, A F7)", () => {
   seam(() => TIMED_OUT);
-  expect(fileContentAt("abc", "a.txt", "/wt")).toBeNull();
+  expect(() => fileContentAt("abc", "a.txt", "/wt")).toThrow(
+    /git show abc:a\.txt failed: timed out after 30000 ms/,
+  );
+  // Ended by a signal, with no exit code: no answer either.
+  seam(() => ({ ...fail(0), exitCode: null, signalCode: "SIGKILL" }));
+  expect(() => fileContentAt("abc", "a.txt", "/wt")).toThrow(/git show abc:a\.txt failed/);
   seam(() => fail(128, "fatal: path does not exist"));
   expect(fileContentAt("abc", "a.txt", "/wt")).toBeNull();
   seam(() => ok("content\n"));

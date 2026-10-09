@@ -308,13 +308,21 @@ export function addedFilesAt(sha: string, worktreePath: string): string[] {
 /** The committed content of `file` at `sha` (`git show <sha>:<file>`), or `null` when the path is
  *  absent at that commit. Used by checks-identity (§5.1) to confirm the authored `test_name` is
  *  present in the committed added file (every line of an added file is a `+` line, so "on a `+`
- *  line" reduces to substring presence — M2a plan-time decision 2). */
+ *  line" reduces to substring presence — M2a plan-time decision 2). A call that timed out or was
+ *  ended by a signal gave no answer, so it throws: read as "absent", two such reads would compare
+ *  equal and pass the check integrity gate (ENG-485 final review A F7). */
 export function fileContentAt(sha: string, file: string, worktreePath: string): string | null {
   const res = runBlocking(["git", "show", `${sha}:${file}`], {
     cwd: worktreePath,
     timeoutMs: LOCAL_GIT_MS,
   });
-  return res.success ? res.stdout : null;
+  if (res.success) return res.stdout;
+  if (res.timedOut || res.exitCode === null) {
+    throw new Error(
+      `git show ${sha}:${file} failed: ${why(res, LOCAL_GIT_MS) || "ended by a signal"}`,
+    );
+  }
+  return null;
 }
 
 /** Like the module-private `git`, but returns RAW stdout (NO trim). Required for `--porcelain -z`
