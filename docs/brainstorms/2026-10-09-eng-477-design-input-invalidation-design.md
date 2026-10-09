@@ -1,7 +1,7 @@
 # ENG-477: design-stage steps rerun when their recorded inputs change, with a real database upgrade path
 
 **Date:** 2026-10-09
-**Status:** rev 4, for independent review
+**Status:** rev 5, for the operator's review
 **Ticket:** ENG-477 (deliverable 2 of the grounded-requirements split, parent ENG-483)
 **Umbrella design:** `docs/brainstorms/2026-09-24-grounded-requirements-design.md` §9, §14, §15 (branch
 `feat/grounded-requirements`), with the rev 2 review findings C3, M3 and M4
@@ -47,6 +47,9 @@
   - a resume whose narrowing would drop a required suite pauses for the operator instead (§4.1);
   - accessor reads are attributed to steps at run time (§3);
   - an interrupted attempt's carryover transcript is dropped when its step is invalidated (§6.5).
+- **rev 5**: the fourth review found no critical problem and one major ambiguity: where the resume
+  narrowing and its pause go, and how the unusable list reaches provision (§4.1). Text fixes for six
+  minor items (§13).
 
 ---
 
@@ -88,7 +91,7 @@ paused runs are upgraded and continue under the new rules) stand.
 
 | # | Decision |
 |---|---|
-| E1 | An edit made while a run is paused, to the profile or to a content-shaping config key, reruns the design-stage steps that read it and everything downstream. Untouched steps stay done. |
+| E1 | An edit made while a run is paused, to the profile or to a content-shaping config key, reruns the design-stage steps that read it and everything downstream of them in the table. Untouched steps stay done. The checks steps are outside the table (E9) and never rerun on an edit. |
 | E2 | The ticket text is fixed for the life of a run. Resume never reads the tracker. To pick up an edited ticket, start over with `--fresh`. |
 | E3 | Only config keys a step's handler reads to decide its output count. Today that is `complexityGrading`. Model choices and `onPlanDefect` do not count. |
 | E4 | The scope is the design stage: `provision`, `design:dispatch`, `design:extract`, `design:size`, `design:review`. (Narrowed by E9.) |
@@ -124,8 +127,9 @@ table's last row, the resolver continues with today's checks routing (`checks:di
     `readPlanFindings`, and so on). Handlers are closures in one function and share helpers
     (`environmentGate` serves several steps), so a source guard cannot attribute calls. Instead
     `advance.ts` sets the current step key in a module-level slot (steps run one at a time per
-    ticket), and each accessor asserts that the current step declares the read; an undeclared read
-    throws. A source guard keeps design handlers from importing the upstream repositories directly.
+    ticket) and clears it after, and each accessor asserts that the current step declares the read; an
+    undeclared read throws. The accessors are only for table steps: steps outside the table, such as
+    `checks:dispatch`, keep reading the repositories directly. A source guard keeps design handlers from importing the upstream repositories directly.
   - The recording proxy has an allowlist of infrastructure fields every handler may read (for example
     the worktree path), and the test drives each handler branch that reads the profile.
   - Agents still read files with their own tools; that cannot be declared. The table claims only what
@@ -169,7 +173,8 @@ A new table holds the inputs that are not already rows.
 | `captured_at` | UTC |
 
 - **At run start**, after the toolchain and role narrowing (§4.1), Styre writes every declared
-  snapshot input, the starting commit (§4.2), and the ticket text.
+  snapshot input and the ticket text. The starting commit is written when it is known: at run start in
+  in-place mode, right after the branch is first created in worktree mode (§4.2).
 - **On a reused `--db`** (run.ts:369, :428-440), rows that already exist for the ticket text and the
   starting commit are never rewritten; the profile and config rows are rewritten as on a resume, with
   the same `inputs-changed` note.
@@ -187,7 +192,14 @@ A fresh run applies `applyToolchainGate` and drops components whose toolchain is
 therefore see a different profile on resume than on the fresh run: a defect today, and a false
 "inputs changed" on every resume once the profile is fingerprinted.
 
-- Resume applies the same narrowing, after the `--inspect` return. It never exits 69, so
+- **Where.** Resume narrows after the `--inspect` return and after the resume transaction that consumes
+  pending `human_resume` signals and sets the ticket active (`park.ts:418-422`), and before
+  `driveToTerminal`. A pause written before that transaction would be consumed by it.
+- **Wiring.** Resume passes the narrowing's `unusableComponents` to the registry, as a fresh run does
+  (`run.ts:446`; resume does not today, `park.ts:455-463`), so provision records its `toolchain` signal
+  and the narrowing reaches the PR (ENG-412, ENG-425: a narrowing is never silent). It is also the same
+  list provision's snapshot input reads, so an unchanged host gives no false `inputs-changed`.
+- Resume applies the same narrowing. It never exits 69, so
   `runtime-parameters.md:450` ("never on `--resume` or `--inspect`") stays true.
 - When the fresh-run gate would refuse (nothing usable, or a component whose suite is `required` is
   unusable, `preflight.ts:179-186`), resume does not narrow that component away, because that would
@@ -216,14 +228,15 @@ therefore see a different profile on resume than on the fresh run: a defect toda
 
 - JSON with object keys sorted; strings normalised to Unicode NFC.
 - No database ids and no timestamps.
-- Lists in their meaningful order: work units by `seq`, checks by `ac_id` then `selector`, sets
-  sorted.
+- Lists in their meaningful order: work units by `seq`, sets sorted.
 - A scheme version, starting at 1. A step recorded under another scheme is treated as unfingerprinted
   and adopted (§7.6), never compared byte for byte.
 
 ### 5.2 What a step records
 
-When a design-stage step succeeds, in the same transaction as `markSucceeded` and its `onSucceed`,
+When a table step succeeds, in any stage (provision also reruns during implement, and a missing
+manifest would make the next design visit reinstall it), in the same transaction as `markSucceeded` and
+its `onSucceed`,
 `workflow_step` gets these new nullable columns:
 - `input_manifest`: a JSON map from each declared input name to its digest at that moment;
 - `input_fingerprint`: SHA-256 of the canonical manifest;
@@ -344,9 +357,9 @@ expires, so an invalidate caused by inputs would re-send an old redesign's findi
 - `designFeedback` returns only the event for `design:dispatch`'s current generation. An invalidate
   caused by inputs starts a new generation with no feedback.
 - **The carryover transcript.** On resume, an interrupted attempt's partial output is prepended for the
-  same step key (`run-dispatch.ts:147-149`). If the walk invalidates that step before it reruns, the
-  carryover is dropped, as `--accept-head` already drops it (`park.ts:423-425`), so a new generation
-  never receives output written under the old inputs.
+  same step key (`run-dispatch.ts:147-149`). `transcript.json` records the step's generation, and the
+  carryover is prepended only while that generation is still current, so a new generation never
+  receives output written under the old inputs (`--accept-head` already drops it, `park.ts:423-425`).
 - The checks steps' lookups (`latestChecksReauthorAcs`, `checksFeedback`) are unchanged (E9).
 
 ### 6.6 Livelock and the guard
@@ -477,7 +490,8 @@ Every test that involves design steps drives the real handlers through `advanceO
 `FakeAgentRunner`, and counts dispatches per step. Nothing is set up by writing step rows directly.
 
 1. **Each input reruns exactly its dependants.** For every snapshot input: pause in design, edit,
-   resume. Exactly the dependants rerun, and every other step keeps its dispatch count.
+   resume. Exactly its dependants in the table rerun, every other table step keeps its dispatch count,
+   and the checks steps never rerun (E9).
 2. **E6.** Pause in implement, edit, resume: nothing in design reruns, the note says so, and a later
    redesign picks up the edit.
 3. **No false changes.** A resume with nothing edited reruns nothing, in both in-place and worktree
@@ -521,7 +535,8 @@ Each key test is shown to fail when the code it guards is broken on purpose.
 
 ## 9. Docs, in the same PR
 
-- **`minimal-loop.md`:** §1 design routing from the table; §2 the redesign rows.
+- **`minimal-loop.md`:** §1 design routing from the table, and that the checks steps keep today's
+  gating (E9); §2 the redesign rows.
 - **`control-loop.md`:**
   - §2.3 the `invalidate` descriptor;
   - §4 the S1 guards ("done with these inputs");
@@ -568,8 +583,8 @@ Each key test is shown to fail when the code it guards is broken on purpose.
   "no false changes" tests (§8.3) and the `invalidate-loop` guard.
 - **The plan is outside the database.** If a later stage edits it, the recorded digest is stale. That
   only matters when the ticket is back in design, and a redesign names `design:dispatch` explicitly.
-- **Checks after a redesign.** Out of this ticket (E9), a redesign that changes the units keeps the
-  acceptance tests written for the old units, as today. ENG-475 owns it.
+- **Checks after a redesign or an edit.** Out of this ticket (E9), a redesign that changes the units, or a
+  profile or config edit, keeps the acceptance tests written before it, as today. ENG-475 owns it.
 - **The `signal` rebuild for v0.8–v0.9 checkpoints** is the first real rebuild. The backup, the
   per-migration transaction, the foreign key check and the structural proof bound the damage.
 
@@ -581,17 +596,17 @@ Each key test is shown to fail when the code it guards is broken on purpose.
 | Finding | Answer |
 |---|---|
 | C1 plan-review redesign drops unit-tied findings and skips re-review | plan as an input of `design:review` and graded `design:size` (§3); plan findings detached before units are deleted (§6.1) |
-| C2 checks rerun scoped to stale ACs | feedback belongs to a generation (§6.5) |
+| C2 checks rerun scoped to stale ACs | feedback belongs to a generation (§6.5)  *(superseded by E9 in rev 4)* |
 | C3 textual schema proof fails on real databases | structural proof plus CHECK probes (§7.3) |
 | C4 ordinary resumes rerun design | one profile narrowing (§4.1); environment observations out of the model (§3.2) |
 | M1 edits paused after design | E6 (§2, §5.4) |
 | M2 walk semantics, fast track | stop at the first step not done; "applies when" column; routing generated from the table (§3, §5.4) |
-| M3 checks hard-deleted | supersede only (§6.1) |
-| M4 restore set and checks-loop change | full diff of the generation, invalidate-superseded only, through `commitWorktree` (§6.3) |
+| M3 checks hard-deleted | supersede only (§6.1)  *(superseded by E9 in rev 4)* |
+| M4 restore set and checks-loop change | full diff of the generation, invalidate-superseded only, through `commitWorktree` (§6.3)  *(superseded by E9 in rev 4)* |
 | M5 handlers not safe to rerun | outputs written in `onSucceed` (§6.2) |
 | M6 reconcile units in the digest | `work_unit.origin` (§3.2) |
 | M7 checks over-fingerprint units | check owners only (§3) |
-| M8 table does not match handlers | corrected table, signals owned by step, classify clearing, `ctx.inputs` (§3, §6.1) |
+| M8 table does not match handlers | corrected table, signals owned by step, classify clearing, `ctx.inputs` (§3, §6.1)  *(superseded by E9 in rev 4)* |
 | M9 backup incomplete | `VACUUM INTO` (§7.1) |
 | M10 several shapes per version | known shapes and fixtures (§7.4, §7.5) |
 | M11 non-migrating readers | narrow queries and a test per fixture (§7.7) |
@@ -649,3 +664,15 @@ Each key test is shown to fail when the code it guards is broken on purpose.
 | Minor: compare first for failed or recovered steps | moot: only succeeded steps hold a manifest (§5.4) |
 | Minor: the guard threshold after C1 | C1 left with the checks steps |
 | Minor: ENG-296's declared-path fallback under E7 | E7 withdrawn; ENG-490 keeps it |
+
+- **rev 4 → rev 5**, independent review (2026-10-09), no critical finding; one major, six minor.
+
+| Finding | Answer |
+|---|---|
+| M1 where the resume narrowing and pause go, and the unusable list wiring | §4.1 |
+| Minor 1 manifests recorded in any stage | §5.2 |
+| Minor 2 starting commit timing | §4 |
+| Minor 3 the accessor slot | §3 |
+| Minor 4 the carryover mechanism | §6.5 |
+| Minor 5 E1 and §8.1 wording, risk, Linear text | E1, §8.1, §12; ENG-477 and ENG-475 amended in Linear |
+| Minor 6 leftover text | §5.1, §9, §13 rows marked |
