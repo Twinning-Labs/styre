@@ -104,7 +104,11 @@ that outcome.
   `worktree`, `untrackedBefore`, `dispatchRowId`, `headAtStart` and `headAtStop`. On `--resume` the
   stream carries this row again: each process's emitter starts its watermark at the first row.
 - **`leftover-check`** — the agent left processes running in its worktree, or the check could not
-  finish; `payload_json` holds the `worktree` and the stderr `lines` reported.
+  finish; `payload_json` holds the `worktree` and the stderr `lines` reported. **Each line carries a
+  process's command line** (up to 120 characters), so the run database and this stream can hold
+  command lines that are not Styre's: in in place mode the check also reports processes you started
+  yourself in the checkout during the step, with their command lines. Control characters in them are
+  replaced with `?` before they are stored or emitted.
 
 ### 3.2 `dispatch` — one completed agent invocation (`dispatch` row)
 
