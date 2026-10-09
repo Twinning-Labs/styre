@@ -26,7 +26,7 @@ Read the architecture docs in order, starting at [`docs/architecture/README.md`]
 - **Clean-break stage vocab.** Stages are `design → implement → verify → review → merge → released`. No legacy gerund stages, no hardcoded `ui` stage.
 - **Capability isolation.** Agents get no `gh`/tracker/branch tools and no tracker/forge credentials in their environment; each step gets exactly its allowlisted tools, and the worktree is the only place their file tools can write. (See [`SECURITY.md`](SECURITY.md) for the exact env-scrub policy.)
 
-- **One door for processes.** Only `src/util/process/door.ts` (and `proc-table.ts`'s `ps` and `getconf` calls) starts a process; a source guard enforces it. See the invariant in `CLAUDE.md`.
+- **One door for processes.** Only `src/util/process/door.ts` (and `proc-table.ts`'s `ps` and `getconf` calls) starts a process; a source guard enforces it. See the invariant in `CLAUDE.md`. The same guard refuses, anywhere in `src/`, the APIs that run the event loop from inside a callback (`bun:test` and its matchers, `HTMLRewriter`, `Bun.build`, `Bun.plugin`, `Bun.serve`, `Bun.Transpiler`, macros, IPC), because on macOS that loses a child's exit (oven-sh/bun#33261, ENG-489).
 
 For the security and isolation model, see [`SECURITY.md`](SECURITY.md).
 

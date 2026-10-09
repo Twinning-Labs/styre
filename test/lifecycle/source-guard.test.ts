@@ -1004,3 +1004,183 @@ test("the stop handler's own beginStopping is not a hit", () => {
     ),
   ).toEqual([]);
 });
+
+// --- no API that runs the event loop from inside a callback (operator decision 2026-10-09) -------
+// Bun's exit watch on macOS is a one-shot kqueue NOTE_EXIT. When a callback runs the event loop
+// again synchronously, the inner tick overwrites the batch of ready events and the outer loop never
+// delivers the rest: a child's exit is then lost for good, `proc.exited` never resolves, and a
+// finished agent dispatch or a passing verify command is reported as a timeout after its full
+// bound (oven-sh/bun#33261, still open; exited-delay-investigation.md in the ENG-485 SDD folder).
+// src/ has no such call today. This rule keeps it that way, in every src file, the door and the
+// process table included: the known loop-running callers from #33261's audit are refused. ENG-489
+// tracks the runtime fallback (a bounded probe of the launch when `exited` stays pending).
+//
+// Refused: anything from "bun:test" (the `.resolves`/`.rejects` matchers, async `toThrow`, async
+// `expect.extend`), and the `.resolves`/`.rejects` member names themselves; `Bun.jest` (another
+// way to reach `expect`); `HTMLRewriter` (`transform` with async handlers); `Bun.build` (plugin
+// `setup()`), `Bun.plugin` and `Bun.serve` (bake plugins); `Bun.Transpiler` (`transformSync` with
+// async macros); an import marked `type: "macro"`; and IPC: an `ipc` or `serialization` option (the
+// advanced serialization decoder), `process.send`, `process.channel`, and `process.on("message")`.
+// A namespace or default import of "bun", or an import of those names from it, is refused too, since
+// it reaches the same members.
+//
+// STATED LIMITS: the same as the rules above (an alias reached through an indirection the scan does
+// not follow, a built name, a dependency's own code). A dependency that runs the loop is not seen.
+const LOOP_BUN_MEMBERS = new Set(["build", "plugin", "serve", "Transpiler", "jest"]);
+
+/** Every use of a known event loop runner in `text` (all src files: no file is exempt). */
+function loopOffences(rel: string, text: string): string[] {
+  const sf = ts.createSourceFile(rel, text, ts.ScriptTarget.Latest, true);
+  const out: string[] = [];
+  const flag = (n: ts.Node, what: string): void => {
+    out.push(`${rel}:${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}: ${what}`);
+  };
+  const spec = (n: ts.Node, s: string): void => {
+    if (s === "bun:test") flag(n, "loads bun:test (its async matchers run the event loop)");
+  };
+  /** The member name of `Bun.<x>` or `Bun["x"]` when `n` is that access's `Bun`. */
+  const memberOf = (n: ts.Node): string | undefined => {
+    const p = n.parent;
+    if (ts.isPropertyAccessExpression(p) && p.expression === n) return p.name.text;
+    if (ts.isElementAccessExpression(p) && p.expression === n) return lit(p.argumentExpression);
+    return undefined;
+  };
+  const visit = (n: ts.Node): void => {
+    if (ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) {
+      const s = lit(n.moduleSpecifier);
+      if (s !== undefined) spec(n, s);
+      if (ts.isImportDeclaration(n) && s === "bun" && !n.importClause?.isTypeOnly) {
+        const nb = n.importClause?.namedBindings;
+        if (n.importClause?.name) flag(n, 'default import of "bun" (reaches Bun.build and others)');
+        if (nb && ts.isNamespaceImport(nb))
+          flag(n, 'namespace import of "bun" (reaches Bun.build and others)');
+        if (nb && ts.isNamedImports(nb))
+          for (const el of nb.elements)
+            if (!el.isTypeOnly && LOOP_BUN_MEMBERS.has((el.propertyName ?? el.name).text))
+              flag(el, `imports ${(el.propertyName ?? el.name).text} from bun`);
+      }
+      const attrs = ts.isImportDeclaration(n) ? n.attributes : undefined;
+      for (const a of attrs?.elements ?? [])
+        if (a.name.text === "type" && lit(a.value) === "macro") flag(n, "imports a macro");
+    }
+    if (ts.isCallExpression(n)) {
+      const callee = n.expression;
+      const isLoader =
+        callee.kind === ts.SyntaxKind.ImportKeyword ||
+        (ts.isIdentifier(callee) && callee.text === "require");
+      const s = isLoader ? lit(n.arguments[0]) : undefined;
+      if (s !== undefined) spec(n, s);
+      // process.on("message") / process.once("message"): the IPC channel.
+      if (
+        ts.isPropertyAccessExpression(callee) &&
+        ts.isIdentifier(callee.expression) &&
+        callee.expression.text === "process" &&
+        ["on", "once", "addListener", "prependListener"].includes(callee.name.text) &&
+        lit(n.arguments[0]) === "message"
+      )
+        flag(n, `listens for process ${callee.name.text}("message") (IPC)`);
+    }
+    if (ts.isIdentifier(n)) {
+      if (n.text === "HTMLRewriter") flag(n, "uses HTMLRewriter");
+      if (n.text === "Bun") {
+        const m = memberOf(n);
+        if (m !== undefined && LOOP_BUN_MEMBERS.has(m)) flag(n, `uses Bun.${m}`);
+      }
+      if (
+        (n.text === "resolves" || n.text === "rejects") &&
+        ts.isPropertyAccessExpression(n.parent) &&
+        n.parent.name === n
+      )
+        flag(n, `uses the .${n.text} matcher`);
+      if (
+        (n.text === "send" || n.text === "channel") &&
+        ts.isPropertyAccessExpression(n.parent) &&
+        n.parent.name === n &&
+        ts.isIdentifier(n.parent.expression) &&
+        n.parent.expression.text === "process"
+      )
+        flag(n, `uses process.${n.text} (IPC)`);
+    }
+    if (
+      ts.isElementAccessExpression(n) &&
+      ["resolves", "rejects"].includes(lit(n.argumentExpression) ?? "")
+    )
+      flag(n, `uses the .${lit(n.argumentExpression)} matcher`);
+    // An `ipc` or `serialization` key in any object literal: a spawn option that opens IPC.
+    if (
+      (ts.isPropertyAssignment(n) ||
+        ts.isShorthandPropertyAssignment(n) ||
+        ts.isMethodDeclaration(n)) &&
+      ts.isObjectLiteralExpression(n.parent)
+    ) {
+      const k = n.name;
+      const key =
+        ts.isIdentifier(k) || ts.isStringLiteralLike(k)
+          ? k.text
+          : ts.isComputedPropertyName(k)
+            ? lit(k.expression)
+            : undefined;
+      if (key === "ipc" || key === "serialization") flag(n, `passes an ${key} option (IPC)`);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return out;
+}
+
+test("no src file uses an API that runs the event loop from a callback (oven-sh/bun#33261, ENG-489)", () => {
+  const problems = files(join(ROOT, "src")).flatMap((p) =>
+    loopOffences(relative(ROOT, p), readFileSync(p, "utf8")),
+  );
+  expect(problems).toEqual([]);
+});
+
+test.each([
+  ["bun:test imported", "import { expect } from 'bun:test';"],
+  ["bun:test imported for types and values", "import { expect, type Mock } from 'bun:test';"],
+  ["bun:test required", "const { expect } = require('bun:test');"],
+  ["bun:test loaded dynamically", "const t = await import('bun:test');"],
+  ["a .resolves matcher", "declare const expect: any; await expect(p).resolves.toBe(1);"],
+  ["a .rejects matcher", "declare const expect: any; await expect(p).rejects.toThrow();"],
+  ["a .resolves element access", "declare const e: any; e['resolves'];"],
+  ["Bun.jest", "const { expect } = Bun.jest(import.meta.path);"],
+  ["HTMLRewriter", "new HTMLRewriter().on('a', { async element() {} }).transform(r);"],
+  ["globalThis.HTMLRewriter", "new globalThis.HTMLRewriter();"],
+  ["Bun.build", "await Bun.build({ entrypoints: ['a.ts'], plugins: [] });"],
+  ["Bun.build by element access", "await Bun['build']({ entrypoints: ['a.ts'] });"],
+  ["Bun.plugin", "Bun.plugin({ name: 'x', setup() {} });"],
+  ["Bun.serve", "Bun.serve({ fetch() { return new Response(''); } });"],
+  ["Bun.Transpiler", "new Bun.Transpiler({ loader: 'ts' }).transformSync('a');"],
+  ["a named import of build from bun", "import { build } from 'bun';"],
+  ["a named import of Transpiler from bun", "import { Transpiler as T } from 'bun';"],
+  ["a namespace import of bun", "import * as bun from 'bun';"],
+  ["a default import of bun", "import bun from 'bun';"],
+  ["a macro import", "import { m } from './m.ts' with { type: 'macro' };"],
+  ["a macro import with a string key", "import { m } from './m.ts' with { 'type': 'macro' };"],
+  ["an ipc option", "spawn(['x'], { ipc(message) {} });"],
+  ["an ipc shorthand", "const ipc = () => {}; spawn(['x'], { ipc });"],
+  ["a serialization option", "spawn(['x'], { serialization: 'advanced' });"],
+  ["process.send", "process.send?.({ a: 1 });"],
+  ["process.channel", "process.channel?.ref();"],
+  ["process.on('message')", "process.on('message', () => {});"],
+  ["process.once('message')", "process.once('message', () => {});"],
+])("the event loop guard rejects %s", (_name, source) => {
+  // Every src file is held to it, the door and the process table included.
+  for (const rel of [NEG, "src/util/process/door.ts", "src/util/process/proc-table.ts"])
+    expect(loopOffences(rel, source).length).toBeGreaterThanOrEqual(1);
+});
+
+test("what src does today is not an event loop hit", () => {
+  const fine = [
+    "import type { Subprocess } from 'bun';",
+    "import { file, type Subprocess } from 'bun'; file('a');",
+    "Bun.spawn(['x'], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' }); Bun.spawnSync(['x']);",
+    "Bun.sleep(1); Bun.which('git'); new Bun.Glob('*'); Bun.TOML.parse('');",
+    "process.on('SIGINT', () => {}); process.once('exit', () => {}); process.kill(1, 'SIGTERM');",
+    "const p = new Promise((resolve, reject) => resolve(1)); p.then(() => 1, () => 2);",
+    "import { m } from './m.ts' with { type: 'json' };",
+    "const o = { build: 1, serve: 2 }; o.build; o.serve;",
+    "// HTMLRewriter, Bun.build and bun:test in a comment\nexport const s = 'HTMLRewriter bun:test .resolves';",
+  ];
+  for (const src of fine) expect(loopOffences(NEG, src), src).toEqual([]);
+});
