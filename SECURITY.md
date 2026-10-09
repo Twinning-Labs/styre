@@ -80,6 +80,14 @@ messages and exit statuses are in [`runtime-parameters.md`](docs/architecture/ru
   command group whose leader has exited is reported, never stopped: without its leader nothing
   confirms the group is still that command's. On Linux, a record from before the last restart stops
   nothing (the boot ID differs). Processes Styre may not inspect are reported, never treated as gone.
+- **What a stopped command leaves in its temp folder is removed.** Every project command gets
+  `TMPDIR`, `TMP` and `TEMP` pointed at one folder its Styre process owns (mode 0700), removed when
+  that Styre exits, or by the next Styre command's sweep after a `kill -9`. The sweep removes only a
+  folder a note in the records folder names, once its Styre is gone and none of that Styre's
+  records is left, and only when it is a real folder of yours named like a command temp folder;
+  it never follows a symbolic link at or below that folder. If the folder disappears while Styre runs, the next command gets a
+  new one under a new name: a name in a shared `/tmp` that someone else took meanwhile is never
+  written through, and its note is dropped so no sweep acts on it.
 - **The records folder must be yours alone.** The sweep acts on launch records only when their
   folder is a real folder owned by you that no one else can write, and only on record files of
   yours of at most 64 KB, read without following a symbolic link. Otherwise it says so and stops
@@ -110,6 +118,17 @@ messages and exit statuses are in [`runtime-parameters.md`](docs/architecture/ru
   it. If that leader has exited too, the group's id could by then belong to an unrelated program that
   daemonized, so the sweep stops nothing: it names each process still in the group with `kill <pid>`
   to stop it, and removes the launch record. Stopping them is your call.
+- **Temp files outside the command temp folder are not removed.** A tool that ignores `TMPDIR`,
+  `TMP` and `TEMP` (a JVM on Linux uses `/tmp` unless told otherwise) still writes where it likes.
+  After a `kill -9`, a command left running in a group whose leader has exited may lose its temp
+  folder: the sweep removes the record (see above), and with it the last sign that the folder is
+  still in use. A process that left a command's group (a daemon started with `setsid`) loses its
+  temp folder when Styre exits. A `kill -9` between making the folder and noting it (a few
+  milliseconds) leaves the folder, which nothing will remove.
+- **A state folder shared between machines or pid namespaces** (an NFS home, containers sharing
+  `XDG_STATE_HOME` and `/tmp`) can make one Styre's sweep take another's live note for a dead one:
+  the boot ID differs, or the pid is not visible. Then it can remove a live run's temp folder. The
+  launch records have the same limit; give each machine or container its own state folder.
 - **The unrecorded window.** Between the spawn and the record write there are a few milliseconds. A
   `kill -9` landing there leaves an orphan with no record, which nothing will stop.
 - **Detached leftovers are reported, not stopped.** A process the agent left running in its worktree

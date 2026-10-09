@@ -390,7 +390,14 @@ describe("what the sweep leaves alone", () => {
     const before = files();
     const out = collect();
     const r = await sweepOrphans({ stderr: out.stderr });
-    expect(r).toEqual({ stopped: [], failed: [], stale: 0, reported: [], leftoverLines: [] });
+    expect(r).toEqual({
+      stopped: [],
+      failed: [],
+      stale: 0,
+      reported: [],
+      leftoverLines: [],
+      tempFolders: [],
+    });
     expect(files()).toEqual(before);
     expect(out.lines.sort()).toEqual(
       [
@@ -406,7 +413,14 @@ describe("what the sweep leaves alone", () => {
     writeFileSync(join(state, "styre-processes"), "");
     const out = collect();
     const r = await sweepOrphans({ stderr: out.stderr });
-    expect(r).toEqual({ stopped: [], failed: [], stale: 0, reported: [], leftoverLines: [] });
+    expect(r).toEqual({
+      stopped: [],
+      failed: [],
+      stale: 0,
+      reported: [],
+      leftoverLines: [],
+      tempFolders: [],
+    });
     expect(out.lines.length).toBe(1);
     expect(out.lines[0]).toStartWith(
       `styre: could not read the launch records in ${processesDir()} (`,
@@ -617,7 +631,14 @@ describe("claims", () => {
     try {
       const out = collect();
       const r = await sweepOrphans({ stderr: out.stderr });
-      expect(r).toEqual({ stopped: [], failed: [], stale: 0, reported: [], leftoverLines: [] });
+      expect(r).toEqual({
+        stopped: [],
+        failed: [],
+        stale: 0,
+        reported: [],
+        leftoverLines: [],
+        tempFolders: [],
+      });
       expect(out.lines).toEqual([]);
     } finally {
       scan.mockRestore();

@@ -1,3 +1,4 @@
+import { removeCommandTempDir } from "../util/process/command-temp.ts";
 import { describeProcess, isStopping, liveLaunches } from "../util/process/door.ts";
 import { pendingLeftoverChecks } from "../util/process/leftovers.ts";
 import { reportSurvivors } from "../util/run-command.ts";
@@ -33,9 +34,11 @@ export async function assertNoLeakedLaunches(): Promise<void> {
 }
 
 /** `guard`, plus the exit check. The check also runs when the command threw: a leaked launch is
- *  stopped and named either way, and the error boundary's exit code stands. `after` runs last, once
- *  the check is done, whatever happened: `styre run` and `styre setup` remove their stop handlers
- *  there, so a signal during the check's wait for leftover checks is still handled (R27). */
+ *  stopped and named either way, and the error boundary's exit code stands. Then the commands' temp
+ *  folder goes (command-temp.ts), unless a stop is in progress: the stop handler owns that. `after`
+ *  runs last, once the check is done, whatever happened: `styre run` and `styre setup` remove their
+ *  stop handlers there, so a signal during the check's wait for leftover checks is still handled
+ *  (R27). */
 export async function guardWithExitCheck(
   cmd: string,
   body: () => Promise<void>,
@@ -44,6 +47,18 @@ export async function guardWithExitCheck(
   try {
     await guard(cmd, body);
     await assertNoLeakedLaunches();
+    if (!isStopping()) {
+      removeCommandTempDir(
+        (s) => {
+          try {
+            process.stderr.write(s);
+          } catch {
+            /* a closed stderr must not fail the exit */
+          }
+        },
+        { announce: true },
+      );
+    }
   } finally {
     after?.();
   }

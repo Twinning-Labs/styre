@@ -191,3 +191,31 @@ test("styre ls lists a stopped orphan's ident with no control character", async 
   expect(text).toContain(`  ${SAFE_IDENT}  [agent, pid 4321]  claude\n`);
   for (const line of text.split("\n")) expect(CONTROL.test(line)).toBe(false);
 });
+
+test("shellWord leaves a plain path as it is and makes any other one a single quoted shell word", async () => {
+  const { shellWord } = await import("../../../src/util/process/printable.ts");
+  expect(shellWord("/var/folders/qb/T/styre-cmd-Ab3xY9")).toBe(
+    "/var/folders/qb/T/styre-cmd-Ab3xY9",
+  );
+  expect(shellWord("/Users/me/work tmp/styre-cmd-Ab3xY9")).toBe(
+    "'/Users/me/work tmp/styre-cmd-Ab3xY9'",
+  );
+  expect(shellWord("/tmp/it's/x")).toBe("'/tmp/it'\\''s/x'");
+  expect(shellWord("/tmp/$(rm -rf ~)")).toBe("'/tmp/$(rm -rf ~)'");
+  // No space needed for a path to need quoting: expansion, globs, separators.
+  for (const s of [
+    "/tmp/a$(id)b",
+    "/tmp/a`id`b",
+    "/tmp/a*b",
+    "/tmp/a;b",
+    "/tmp/a&b",
+    "/tmp/~a",
+    "/tmp/a|b",
+  ])
+    expect(shellWord(s)).toBe(`'${s}'`);
+  // What a shell makes of each: the one word it was.
+  for (const s of ["/Users/me/work tmp/x", "/tmp/it's/x", "/tmp/$(echo hi)", "/tmp/a;b"]) {
+    const r = Bun.spawnSync(["sh", "-c", `printf '%s' ${shellWord(s)}`]);
+    expect(r.stdout.toString()).toBe(s);
+  }
+});

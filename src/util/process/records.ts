@@ -45,6 +45,18 @@ export type Listed = {
 // and `<sec>.<usec, 6 digits>` on macOS.
 const RECORD = /^(\d+)-(\d+(?:\.\d{6})?)\.json$/;
 const CLAIMED = /^(\d+)-(\d+(?:\.\d{6})?)\.json\.claimed-(\d+)-(\d+(?:\.\d{6})?)$/;
+/** A temp folder note: `tmp-<pid>-<start>.json`, named after the Styre that wrote it. */
+const NOTE = /^tmp-(\d+)-(\d+(?:\.\d{6})?)\.json$/;
+
+/** The temp folder a Styre gives the project commands it starts (command-temp.ts), noted here while
+ *  it exists so the sweep can remove it after that Styre was force quit. */
+export interface TempNote {
+  version: 1;
+  owner: { pid: number; startedAt: string };
+  bootId: string | null;
+  path: string;
+}
+export type ListedNote = { file: string; note: TempNote };
 
 export function processesDir(): string {
   const xdg = process.env.XDG_STATE_HOME;
@@ -57,13 +69,28 @@ export function recordFileName(r: { pid: number; startedAt: string }): string {
 
 /** Throws on any failure: a launch must not go on unrecorded without the caller knowing. */
 export function writeRecord(r: LaunchRecord): void {
+  writeInRecordsFolder(recordFileName(r), JSON.stringify(r));
+}
+
+/** Notes a temp folder; returns the note's path, which `removeTempNote` takes. Throws on any
+ *  failure: a folder the sweep could not find after a force quit must not be used. */
+export function writeTempNote(n: TempNote): string {
+  return writeInRecordsFolder(`tmp-${n.owner.pid}-${n.owner.startedAt}.json`, JSON.stringify(n));
+}
+
+/** Removes a note; one that is already gone is fine. */
+export function removeTempNote(path: string): void {
+  unlinkIfThere(path);
+}
+
+function writeInRecordsFolder(name: string, text: string): string {
   const dir = processesDir();
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const final = join(dir, recordFileName(r));
-  // The temporary name starts with a dot and matches neither pattern, so no reader or sweep sees it.
+  const final = join(dir, name);
+  // The temporary name starts with a dot and matches no pattern, so no reader or sweep sees it.
   // It is created new (O_EXCL) and never through a symbolic link (O_NOFOLLOW): a file or link
   // already at that name makes the write fail, loudly, instead of writing somewhere else.
-  const tmp = join(dir, `.${recordFileName(r)}.tmp-${process.pid}`);
+  const tmp = join(dir, `.${name}.tmp-${process.pid}`);
   let created = false;
   try {
     const fd = openSync(
@@ -73,11 +100,12 @@ export function writeRecord(r: LaunchRecord): void {
     );
     created = true;
     try {
-      writeSync(fd, JSON.stringify(r));
+      writeSync(fd, text);
     } finally {
       closeSync(fd);
     }
     renameSync(tmp, final); // a rename replaces a link at `final`; it never follows one
+    return final;
   } catch (e) {
     if (created) {
       try {
@@ -286,19 +314,70 @@ export interface Unreadable {
   reason: string;
 }
 
-/** Every well formed record, claimed or not, and every file named like one that could not be used.
- *  A file that vanished between the directory read and its own read (a peer claimed or removed it)
- *  is in neither list. Throws when the folder itself cannot be read (anything but "no folder"), and
- *  `UnsafeRecordsFolder` when it cannot be trusted. */
-export function scanRecords(): { listed: Listed[]; unreadable: Unreadable[] } {
+function isNote(v: unknown, pid: number, startedAt: string): v is TempNote {
+  const x = v as TempNote | null;
+  return (
+    typeof x === "object" &&
+    x !== null &&
+    x.version === 1 &&
+    typeof x.owner === "object" &&
+    x.owner !== null &&
+    x.owner.pid === pid &&
+    x.owner.startedAt === startedAt &&
+    stringOrNull(x.bootId) &&
+    typeof x.path === "string"
+  );
+}
+
+/** Every well formed record, claimed or not, every temp folder note, and every file named like one
+ *  that could not be used. A file that vanished between the directory read and its own read (a peer
+ *  claimed or removed it) is in no list. Throws when the folder itself cannot be read (anything but
+ *  "no folder"), and `UnsafeRecordsFolder` when it cannot be trusted. */
+export function scanRecords(): {
+  listed: Listed[];
+  unreadable: Unreadable[];
+  notes: ListedNote[];
+  unreadableNotes: Unreadable[];
+} {
   const dir = processesDir();
   const listed: Listed[] = [];
   const unreadable: Unreadable[] = [];
-  // Normally nothing has a record's name, and this one directory read is the whole cost. The folder
-  // is checked before anything in it is read.
-  const names = namesIn(dir).filter((n) => RECORD.test(n) || CLAIMED.test(n));
-  if (names.length === 0) return { listed, unreadable };
+  const notes: ListedNote[] = [];
+  const unreadableNotes: Unreadable[] = [];
+  // Normally nothing has a record's or a note's name, and this one directory read is the whole
+  // cost. The folder is checked before anything in it is read.
+  const all = namesIn(dir);
+  const names = all.filter((n) => RECORD.test(n) || CLAIMED.test(n));
+  const noteNames = all.filter((n) => NOTE.test(n));
+  if (names.length === 0 && noteNames.length === 0)
+    return { listed, unreadable, notes, unreadableNotes };
   checkFolder(dir);
+  for (const file of noteNames) {
+    const m = NOTE.exec(file);
+    if (!m) continue;
+    const read = readRecordFile(join(dir, file));
+    if (read === null) continue; // removed by its owner or another sweep meanwhile
+    if ("reason" in read) {
+      unreadableNotes.push({ file, reason: read.reason });
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(read.text);
+    } catch {
+      unreadableNotes.push({ file, reason: "it is not valid JSON" });
+      continue;
+    }
+    if (!isNote(parsed, Number(m[1]), m[2])) {
+      unreadableNotes.push({
+        file,
+        reason:
+          "its content is not a version 1 temp folder note for the pid and start time in its name",
+      });
+      continue;
+    }
+    notes.push({ file, note: parsed });
+  }
   for (const file of names) {
     const rm = RECORD.exec(file);
     const cm = rm ? null : CLAIMED.exec(file);
@@ -333,7 +412,7 @@ export function scanRecords(): { listed: Listed[]; unreadable: Unreadable[] } {
       claimedBy: cm ? { pid: Number(cm[3]), startedAt: cm[4] } : null,
     });
   }
-  return { listed, unreadable };
+  return { listed, unreadable, notes, unreadableNotes };
 }
 
 /** Every well formed record, claimed or not. Files that are not regular files, do not match a name

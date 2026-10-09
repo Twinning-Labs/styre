@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -7,8 +7,9 @@ import { parseProfile } from "../../src/dispatch/profile.ts";
 import { observeSuiteCommand, suiteResult } from "../../src/dispatch/suite-observation.ts";
 import { planTestEnvironment, qualifyTestEnvironment } from "../../src/testing/environment.ts";
 import { karmaReporterConfig } from "../../src/testing/karma.ts";
+import { commandTempDir } from "../../src/util/process/command-temp.ts";
 import { listProcesses } from "../../src/util/process/proc-table.ts";
-import { makeTempDir, trackTempEntriesMadeBy } from "../helpers/temp.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const liveChildren = (): number[] =>
   listProcesses()
@@ -103,19 +104,19 @@ test.skipIf(!deps)(
         "describe('example',()=>{it('hangs',()=>{while(true){}});});",
       );
       const childrenBefore = liveChildren();
-      // Killed on timeout, karma never removes its browser profile (os.tmpdir()/karma-*): track
-      // just that, so Styre's own temp folders from this run stay under the leak guard.
-      const timeout = await trackTempEntriesMadeBy("karma-", () =>
-        observeSuiteCommand({
-          sha: "fixture-sha",
-          command: "npm test",
-          cwd: root,
-          environment: c.testEnvironment,
-          timeoutMs: 1000,
-        }),
-      );
+      const timeout = await observeSuiteCommand({
+        sha: "fixture-sha",
+        command: "npm test",
+        cwd: root,
+        environment: c.testEnvironment,
+        timeoutMs: 1000,
+      });
       expect(timeout.timedOut).toBe(true);
       expect(suiteResult(timeout)).toBe("error");
+      // Karma keeps each browser's profile in os.tmpdir()/karma-<id>, which for a suite command is
+      // Styre's command temp folder. A timeout stops the group with SIGTERM first, so karma removes
+      // the profile before it exits; an immediate SIGKILL (before ENG-485) left one per timeout.
+      expect(readdirSync(commandTempDir()).filter((n) => n.startsWith("karma-"))).toEqual([]);
       // The timeout stops the whole group, so no new child of this process stays alive.
       let gone = false;
       for (let attempt = 0; attempt < 40; attempt++) {

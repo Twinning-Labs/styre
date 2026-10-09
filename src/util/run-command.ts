@@ -1,4 +1,4 @@
-import { verifyEnv } from "../agent/agent-env.ts";
+import { commandEnv } from "./process/command-temp.ts";
 import {
   type LaunchContext,
   type LaunchHandle,
@@ -22,7 +22,9 @@ export interface CommandResult {
  *
  *  Capability isolation (move 4): the command is **agent authored worktree code** (the implement
  *  agent wrote the source and tests this build or test runs), so it is spawned with the daemon's
- *  creds scrubbed (`verifyEnv`: no LINEAR_API_KEY, GITHUB_TOKEN or ANTHROPIC_API_KEY).
+ *  creds scrubbed (`verifyEnv`: no LINEAR_API_KEY, GITHUB_TOKEN or ANTHROPIC_API_KEY), and with
+ *  TMPDIR, TMP and TEMP pointed at this process's command temp folder (`commandEnv`,
+ *  command-temp.ts), which Styre removes on its way out.
  *
  *  Process handling (ENG-485 section 6.2): the command leads a process group of its own (through the
  *  door). A timeout or a stop reaches every member of the group, not `sh` alone. After a normal exit,
@@ -46,7 +48,7 @@ export async function runCommand(
   const h: LaunchHandle = launch({
     argv: ["sh", "-c", command],
     cwd: opts.cwd,
-    env: verifyEnv(process.env),
+    env: commandEnv(),
     kind: "group",
     context: opts.context ?? { ident: null, stepId: null, worktree: opts.cwd },
   });

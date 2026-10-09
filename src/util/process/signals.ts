@@ -9,6 +9,7 @@ import { constants } from "node:os";
 import type { EventLogRow } from "../../db/repos/event-log.ts";
 import { stdoutSink } from "../../telemetry/emit.ts";
 import { runCtx, toEvent } from "../../telemetry/emitter.ts";
+import { removeCommandTempDir } from "./command-temp.ts";
 import {
   type LaunchContext,
   type LaunchHandle,
@@ -280,6 +281,11 @@ export async function handleStopSignal(
     })) {
       say(`styre: could not clean up after the run: ${why}\n`);
     }
+    // The commands' temp folder (command-temp.ts), once nothing that may use it is still running,
+    // within what is left of the deadline like the cleanups above. A tree a tool cache filled can
+    // take seconds to remove; what is not removed in time, or kept, the next command's sweep removes.
+    const tempMs = deadline - EXIT_RESERVE_MS - CLEANUP_MARGIN_MS - d.now();
+    removeCommandTempDir(say, { budgetMs: tempMs >= MIN_CLEANUP_MS ? tempMs : 0, now: d.now });
     // 8. Exit as Styre would have without a handler.
     const left = deadline - EXIT_RESERVE_MS - d.now();
     const shutdown = ctx.shutdownAnalytics;
