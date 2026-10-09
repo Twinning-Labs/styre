@@ -297,6 +297,11 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
         // and releases the launch record. Such leftovers are not stopped here; the leftover check
         // after the step reports them if they run in the worktree (ENG-485 sections 6.3 and 9). A
         // leftover holding the output pipes costs at most the drain bound below.
+        // After a startup refusal whose stop named a survivor, finish() still releases the agent's
+        // record once the agent itself is gone. Nothing is lost: the sweep judges an agent record
+        // by the agent's own pid and start time only, and drops it without stopping anything once
+        // that process has exited (`identify` in src/util/process/sweep.ts), so a kept record
+        // would never reach the survivor; the survivor line already says how to stop it.
         reportStop(h, await h.finish());
         if (h.interrupted) {
           stdoutRead.cancel();
