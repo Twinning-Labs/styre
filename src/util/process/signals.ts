@@ -256,8 +256,13 @@ export async function handleStopSignal(
       }
     });
     for (const l of [...lines, ...survivorLines, ...leftoverLines]) say(l);
-    if (recordable) {
+    // The resume line promises a free resume, so only a recorded interruption gets it (C M3).
+    if (recordable && row) {
       say(`styre: run interrupted; resume with: styre run --resume ${recordable.ident}\n`);
+    } else if (recordable) {
+      say(
+        `styre: run interrupted, but not recorded; styre run --resume ${recordable.ident} treats it as a crash (the attempt counts, and in place the agent's partial edits are not undone), or start over with: styre run ${recordable.ident} --fresh\n`,
+      );
     }
   } catch (err) {
     say(`styre: the stop handler failed: ${message(err)}\n`);

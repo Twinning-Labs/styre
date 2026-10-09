@@ -302,6 +302,7 @@ styre: stopped the agent (pid <pid>) and <n> of its commands.
 styre: could not stop <command> (pid <pid>); stop it with: kill -9 <pid>
 styre: could not confirm that <command> (pid <pid>) stopped (<why>); if it is still running, stop it with: kill -9 <target>
 styre: run interrupted; resume with: styre run --resume <ident>
+styre: run interrupted, but not recorded; styre run --resume <ident> treats it as a crash (the attempt counts, and in place the agent's partial edits are not undone), or start over with: styre run <ident> --fresh
 styre: could not record the interruption: <why>
 styre: could not write the interruption's telemetry event: <why>
 styre: could not clean up after the run: <why>
@@ -318,7 +319,10 @@ styre: the stop handler failed: <why>
 - `could not clean up after the run` covers a temporary worktree the handler could not remove. Its
   `<why>` names the worktree and the command that finishes the removal by hand, and starts with
   `no time was left before the stop deadline to` when the deadline was too close to try.
-- The resume line appears for `styre run` only, once the interruption is recorded.
+- The resume line appears for `styre run` only, and only once the interruption is recorded. When it
+  could not be recorded (the line before says why, or the run database is gone), the `but not
+  recorded` line appears instead: a `--resume` then takes the crash path, so the attempt counts and,
+  in place, the agent's partial edits are not undone; `--fresh` starts the ticket over.
 
 **Setup's prompts** (`src/util/process/signals.ts`, `suspendStopHandlers`):
 
