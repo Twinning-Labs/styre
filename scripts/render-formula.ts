@@ -27,6 +27,9 @@ export function renderFormula(version: string, shas: FormulaShas): string {
   assertSha("darwin-x64", shas.darwinX64);
   assertSha("linux-arm64", shas.linuxArm64);
   assertSha("linux-x64", shas.linuxX64);
+  // Keep the explicit `version`: Homebrew before 6.0.14 scans the asset
+  // filename and reads `64` (from arm64/x64). Newer Homebrew calls it
+  // redundant, so the release audit skips that check (`--except=version`).
   return `class Styre < Formula
   desc "Open-source autonomous-SDLC execution core"
   homepage "https://github.com/Twinning-Labs/styre"
