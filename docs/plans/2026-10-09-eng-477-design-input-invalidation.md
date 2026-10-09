@@ -1059,7 +1059,7 @@ git commit -m "test(eng-477): historical database fixtures from each release's o
 - Create: `src/db/migrations/shapes/v7-signal-budget.sql`, `src/db/migrations/shapes/v7.sql`, `src/db/migrations/shapes/v8.sql`
 - Create: `src/db/schema-shape.ts`, `src/db/known-shapes.ts`
 - Create: `test/helpers/check-probes.ts`
-- Modify: `src/db/migrate.ts:1-43` (whole file), `src/cli/migrate.ts:11-16`, `src/cli/park.ts:38,259-262` (Task 3 keeps `--inspect` from upgrading), `src/cli/run.ts:428`, `src/db/repos/run.ts:14-28` (delete `ensureRunTable`), `src/db/schema.sql:486-491` and `docs/architecture/schema.sql` (the same comment lines: drop the sentence about `ensureRunTable`)
+- Modify: `src/db/migrate.ts:1-43` (whole file), `src/cli/migrate.ts:11-16`, `src/cli/park.ts:38,89,102-119,143,259-262,480` (the migration; `priorRunIdAt` through `readCopyOf` and `dumpPark`'s new `prefix`; Task 3 keeps `--inspect` from upgrading), `src/cli/run.ts:428`, `src/db/repos/run.ts:14-28` (delete `ensureRunTable`), `src/db/schema.sql:486-491` and `docs/architecture/schema.sql` (the same comment lines: drop the sentence about `ensureRunTable`)
 - Modify tests: `test/db/run.test.ts:27-40` (delete the bridge test; line 41 is the `describe`'s closing `});` and stays), `test/cli/dump-park-warning.test.ts:6,9-16` (rewritten by PR #154: it already uses `makeTempDir`)
 - Test: `test/db/migrate-upgrade.test.ts`, `test/db/schema-shape.test.ts`
 
@@ -2196,6 +2196,110 @@ function dbWithRun(runId: string): string {
 }
 ```
 
+`priorRunIdAt` reads a checkpoint that must not change, so it reads through `readCopyOf` too (operator ruling, 2026-10-09: the private copy covers every such read, as a class), and it no longer hides an unreadable file. `src/cli/park.ts`: add `import { readCopyOf } from "../db/read-copy.ts";` and replace `priorRunIdAt` and its comment (lines 102-119) with:
+
+```ts
+/** The run_id in an existing paused copy's run.db, read through a private copy (operator ruling,
+ *  2026-10-09): null when the file is absent or predates the run table (pre-upgrade). Throws when
+ *  the file exists but cannot be read, so dumpPark says so instead of skipping its warning. */
+export function priorRunIdAt(destPath: string): string | null {
+  if (!existsSync(destPath)) return null;
+  return readCopyOf(destPath, (db) => {
+    const hasRun =
+      db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'run'").get() !== null;
+    if (!hasRun) return null; // a copy from before the run table: no run identity was ever minted
+    return (
+      db.query<{ run_id: string }, []>("SELECT run_id FROM run ORDER BY id LIMIT 1").get()
+        ?.run_id ?? null
+    );
+  });
+}
+```
+
+`dumpPark` gains a last parameter `prefix: "run: " | "resume: "` (its callers: `finishRunResult`, line 89, passes `"run: "`; `resumeRun`'s second dump, line 480, passes `"resume: "`), and its `const prior = priorRunIdAt(destPath);` (line 143) becomes:
+
+```ts
+    let prior: string | null = null;
+    try {
+      prior = priorRunIdAt(destPath);
+    } catch (err) {
+      // Said, not skipped: the copy about to be overwritten could not be read.
+      process.stderr.write(
+        `${prefix}could not read the paused run at ${destPath} before overwriting it: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+```
+
+Append to `test/cli/dump-park-warning.test.ts` (add `spyOn` to its `bun:test` import, `rmSync` and `writeFileSync` from `node:fs`, `dumpPark` and `parkDir` beside `priorRunIdAt`, and `openDb` from `../../src/db/client.ts`):
+
+```ts
+describe("dumpPark reads the paused copy it overwrites through a private copy", () => {
+  const park = {
+    cause: "session-limit" as const,
+    resetAt: null,
+    dispatchId: "ENG-1-d0001",
+    transcript: "partial",
+  };
+  let stderr: string[] = [];
+  let spy: ReturnType<typeof spyOn>;
+  let prevState: string | undefined;
+  beforeEach(() => {
+    stderr = [];
+    spy = spyOn(process.stderr, "write").mockImplementation((c: unknown) => {
+      stderr.push(String(c));
+      return true;
+    });
+    prevState = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = makeTempDir("dp-state-");
+  });
+  afterEach(() => {
+    spy.mockRestore();
+    if (prevState === undefined) Reflect.deleteProperty(process.env, "XDG_STATE_HOME");
+    else process.env.XDG_STATE_HOME = prevState;
+  });
+
+  /** The live run being paused: a database with run `runId`, left open for dumpPark to close. */
+  function liveRun(runId: string) {
+    const path = join(makeTempDir("dp-live-"), "run.db");
+    migrate(path);
+    const db = openDb(path);
+    insertRun(db, { runId, startedAt: "2026-07-21T00:00:00.000Z", provider: "claude" });
+    return { db, path };
+  }
+
+  test("a paused copy in WAL mode with no -wal or -shm still produces the overwriting warning", () => {
+    const dest = join(parkDir("dp-slug", "ENG-1"), "run.db");
+    mkdirSync(parkDir("dp-slug", "ENG-1"), { recursive: true });
+    // the earlier pause's copy: WAL mode in its header, its side files gone (a read only open of
+    // such a file fails on macOS)
+    migrate(dest);
+    const earlier = new Database(dest);
+    insertRun(earlier, {
+      runId: "run-A",
+      startedAt: "2026-07-21T00:00:00.000Z",
+      provider: "claude",
+    });
+    earlier.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    earlier.close();
+    for (const ext of ["-wal", "-shm"]) rmSync(`${dest}${ext}`, { force: true });
+    const { db, path } = liveRun("run-B");
+    dumpPark(db, path, "dp-slug", "ENG-1", park, "run: ");
+    expect(stderr.join("")).toContain("overwriting paused run run-A with run-B for ENG-1");
+  });
+
+  test("a paused copy that cannot be read is said so, with the caller's prefix", () => {
+    const dest = join(parkDir("dp-slug", "ENG-1"), "run.db");
+    mkdirSync(parkDir("dp-slug", "ENG-1"), { recursive: true });
+    writeFileSync(dest, "not a database");
+    const { db, path } = liveRun("run-B");
+    dumpPark(db, path, "dp-slug", "ENG-1", park, "resume: ");
+    expect(stderr.join("")).toContain(`resume: could not read the paused run at ${dest}`);
+  });
+});
+```
+
+(also add `afterEach`, `beforeEach` to the `bun:test` import and `mkdirSync` to `node:fs`; the test file already imports `Database`, `join` and `makeTempDir`.)
+
 Run: `cmp src/db/schema.sql docs/architecture/schema.sql && echo same`
 Expected: `same`.
 
@@ -2253,6 +2357,7 @@ git commit -m "feat(eng-477): versioned migrations with backup, shape detection 
 
 ```ts
 // test/cli/checkpoint-readers-fixtures.test.ts
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import {
   copyFileSync,
@@ -2260,6 +2365,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -2419,7 +2525,11 @@ describe("checkpoints are read without migrating them (spec §7.7)", () => {
 test("a WAL checkpoint without -wal or -shm beside it is read through a private copy and left as it was", () => {
   // operator ruling, 2026-10-09: a read only open of such a file fails on macOS; a private copy reads it
   const { root, dbPath } = checkpointOf("v8-main-2b05680", "fixture");
-  migrate(dbPath); // openDb leaves the file in WAL mode; closing removes its -wal and -shm
+  migrate(dbPath); // openDb leaves the file in WAL mode (Bun keeps its -wal and -shm after close)
+  const fold = new Database(dbPath);
+  fold.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+  fold.close();
+  for (const ext of ["-wal", "-shm"]) rmSync(`${dbPath}${ext}`, { force: true }); // as when copied alone
   const dir = dirname(dbPath);
   const files = () =>
     readdirSync(dir)
@@ -10211,4 +10321,4 @@ Not part of this plan's tasks, but required by `CLAUDE.md` before `gh pr create`
 15. **`--resume --inspect` never upgrades.** Operator ruling (2026-10-09), replacing the first revision's choice: `--inspect` decides from a read only `readDatabaseState` before any migration; a checkpoint that is not at the current version is reported through the narrow readers (Task 3), with "resume will upgrade this checkpoint from v<old> to v<new>, after writing a backup" or the reason resume would refuse it, no migration and no backup, so it also works where resume refuses. A current checkpoint takes today's path, whose existing `insertRun`/`markResumed` writes and its existing "(no changes made)" line are unchanged (they existed before this change). `CLAUDE.md:80` ("diagnostics only") stays; Task 18's docs say `--inspect` never upgrades.
 16. **The loop guard also counts from a `reused-database` note** (second review m5). Spec §6.6 named only the `resumed` event; counting from the note (written by a run on a reused `--db` whose ticket exists) is a deliberate extension, now recorded in spec §6.6 as a ruling (2026-10-09).
 17. **The scheme rule** (operator ruling, 2026-10-09, spec §5.1). A manifest recorded under an older `FINGERPRINT_SCHEME` counts as changed and the step reruns at the next design visit; the adopt pass adopts only steps with no manifest. `test/daemon/fingerprint-pin.test.ts` (Task 9) pins the digests of a fixed set of inputs per scheme, so a change to encoding, parsing, defaults, declared inputs or output digests fails until the scheme is bumped and a new pin added.
-18. **Reads through a private copy** (operator ruling, 2026-10-09; spec §7.7). `readCopyOf` (Task 1) is the one place that reads a database that must not change: `--inspect` (`readDatabaseState`, `inspectWithoutUpgrading`), `ls` (`listCheckpoints`), `clean` (`reapEffort`, `cleanImpl`), `--fresh` and `clean`'s undo (`undoBeforeDiscard`), and in tests `fixtureVersion`, the fixture tests, `count` in the migration tests and `DesignHarness.read`. Not converted, outside the ruling's list: `priorRunIdAt` (`park.ts:105-121`), which reads the dump it is about to overwrite and already treats an unreadable file as "no prior run". The fixture generator converts every fixture to DELETE mode (`toDeleteMode`), and a test checks the committed files' headers.
+18. **Reads through a private copy** (operator ruling, 2026-10-09; spec §7.7). Closed: the ruling covers every read of a checkpoint or fixture that must not change it, as a class, and `readCopyOf` (Task 1) is the one place that does such a read. Converted: `readDatabaseState` (Task 2) and `inspectWithoutUpgrading` (Task 3) for `--inspect`; `listCheckpoints` (`checkpoints.ts:117`), `reapEffort` and `cleanImpl` (`clean.ts:38,166`), `undoBeforeDiscard` (`interruption.ts:243`) for `ls`, `clean` and `--fresh` (Task 3); `priorRunIdAt` (`park.ts:102-119`, Task 2), which now also says on stderr, with the caller's `run: ` or `resume: ` prefix, when the paused copy it is about to overwrite cannot be read, instead of skipping its warning; in tests `fixtureVersion`, the fixture shape tests, `count` and the bridged test in the migration tests, the v9 migration test and `DesignHarness.read`. Ruled out after a grep of `src/` and the plan for `new Database(` with `readonly`, `mode=ro` and `openDb` on a checkpoint path: the remaining opens write on purpose (`openDb` in `migrate`, `run.ts:429` and `park.ts:261`, which run or resume the checkpoint; `recordInterruption`, `interruption.ts:49`, which records the stop; the fixture seeder and drivers; the tests that set up or relocate state on their own copies), and the one read only open left in the plan (`migrate-upgrade.test.ts`, the reader that holds a snapshot while the backup is taken) is the scenario's second connection on a private copy. Existing tests the plan does not touch (`test/lifecycle/*`, `test/cli/run-pr-base.test.ts`) and `test/migrate.test.ts:41` open databases the test itself created and that Bun left with their side files (Bun keeps `-wal` and `-shm` after close; probed); they read no checkpoint or fixture. The fixture generator converts every fixture to DELETE mode (`toDeleteMode`), and a test checks the committed files' headers.
