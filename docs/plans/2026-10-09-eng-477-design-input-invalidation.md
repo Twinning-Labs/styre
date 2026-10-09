@@ -6482,7 +6482,7 @@ export interface ResumeContext {
  *  applies (same step, same generation, and, for a table step paused before it finished, the same
  *  inputs, or a transcript written before ENG-477, kept as it is). Otherwise the input names that
  *  differ: a step that was never finished is not invalidated when an upstream step reruns, so its
- *  generation alone cannot tell. The caller (`dispatchAndRecord`) withholds the carryover on a
+ *  generation alone cannot tell. The caller (`dispatchAndRecord`) withholds the carryover on an
  *  answer that is not empty and records one `carryover-dropped` note per dispatch that withholds it, so a
  *  retried attempt of the same step writes another. */
 export function carryoverMismatch(ctx: HandlerContext, rc: ResumeContext): string[] | null {
