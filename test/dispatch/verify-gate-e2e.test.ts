@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -19,10 +18,11 @@ import { getById as getUnit, insertWorkUnit } from "../../src/db/repos/work-unit
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 /** A fresh git repo with one commit ("init") on `main`. Mirrors the other *-e2e.test.ts fixtures. */
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-vge-"));
+  const root = makeTempDir("styre-vge-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -177,7 +177,7 @@ test("the gate defers a not-green (behavioral) assertion check to the arbiter: c
       targetRepo: repo,
       components: [CHECKS_COMPONENT, appComponent("true")],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vge1-wt-")),
+    worktreeRoot: makeTempDir("styre-vge1-wt-"),
     runCheckCommand: async () => ({ exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false }), // stays red
   });
 
@@ -263,7 +263,7 @@ test("the integrity gate fails on a tampered check, even though the scripted re-
       targetRepo: repo,
       components: [CHECKS_COMPONENT, appComponent("true")],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vge2-wt-")),
+    worktreeRoot: makeTempDir("styre-vge2-wt-"),
     // Would read GREEN if it were even trusted — the integrity violation must gate first (§2b).
     runCheckCommand: async () => ({ exitCode: 0, stdout: "1 passed", stderr: "", timedOut: false }),
   });
@@ -323,7 +323,7 @@ test("a passing AC-check gate advances implement->review despite both a failing 
       targetRepo: repo,
       components: [CHECKS_COMPONENT, appComponent("false")], // the whole-suite command always fails
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vge3-wt-")),
+    worktreeRoot: makeTempDir("styre-vge3-wt-"),
     runCheckCommand: async () => ({ exitCode: 0, stdout: "1 passed", stderr: "", timedOut: false }), // AC-check flips green
   });
 
@@ -415,7 +415,7 @@ test("a code-review loopback that moves HEAD re-runs verify:checks-gate (reset s
       targetRepo: repo,
       components: [CHECKS_COMPONENT, appComponent("true")],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vge4-wt-")),
+    worktreeRoot: makeTempDir("styre-vge4-wt-"),
     runCheckCommand: async () => ({ exitCode: 0, stdout: "1 passed", stderr: "", timedOut: false }), // always flips green
   });
 

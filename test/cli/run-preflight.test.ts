@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runImpl } from "../../src/cli/run.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 // Invoke the real `run` body (the unwrapped `runImpl` behind `runCommand.run`'s `guard` wrapper —
 // bypassing `guard` here so throws are observable) with telemetry off and isolated XDG dirs.
@@ -36,7 +36,7 @@ async function invokeRun(args: Record<string, unknown>, xdg: string, state: stri
 // Write a profile.json whose must-have commands are resolved (assertResolved passes) but whose
 // `build` invokes a program guaranteed absent on any machine.
 function writeProfile(build: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-preflight-prof-"));
+  const dir = makeTempDir("styre-preflight-prof-");
   const path = join(dir, "profile.json");
   writeFileSync(
     path,
@@ -57,8 +57,8 @@ function writeProfile(build: string): string {
 }
 
 test("run: a missing toolchain program throws before any dispatch, and writes no dump", async () => {
-  const xdg = mkdtempSync(join(tmpdir(), "styre-xdg-"));
-  const state = mkdtempSync(join(tmpdir(), "styre-state-"));
+  const xdg = makeTempDir("styre-xdg-");
+  const state = makeTempDir("styre-state-");
   const profile = writeProfile("styre-definitely-absent-xyz build");
   // The preflight throws a toolchainError (rendered/exit-coded by `guard` in production; here we
   // call the unwrapped `runImpl`, so the throw itself is the observable proof of the early return
@@ -69,8 +69,8 @@ test("run: a missing toolchain program throws before any dispatch, and writes no
 });
 
 test("run --resume / --inspect are NOT gated by the toolchain preflight (ungated even with a missing tool)", async () => {
-  const xdg = mkdtempSync(join(tmpdir(), "styre-xdg-"));
-  const state = mkdtempSync(join(tmpdir(), "styre-state-"));
+  const xdg = makeTempDir("styre-xdg-");
+  const state = makeTempDir("styre-state-");
   const profile = writeProfile("styre-definitely-absent-xyz build"); // the build tool is missing
 
   // AC7: --resume must enter resumeRun (which errors on the absent dump) BEFORE the preflight, so a

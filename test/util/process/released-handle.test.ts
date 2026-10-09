@@ -6,18 +6,17 @@
 // Safety: the stop functions here are stand-ins that count calls and refuse every signal, so this
 // test sends no real signal. The command (`true`) ends by itself.
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import * as door from "../../../src/util/process/door.ts";
 import { type ProcInfo, listProcesses } from "../../../src/util/process/proc-table.ts";
 import { realStopDeps } from "../../../src/util/process/stop.ts";
 import { until } from "../../helpers/own-processes.ts";
+import { makeTempDir } from "../../helpers/temp.ts";
 
 let state: string;
 const saved = process.env.XDG_STATE_HOME;
 beforeEach(() => {
-  state = mkdtempSync(join(tmpdir(), "styre-released-"));
+  state = makeTempDir("styre-released-");
   process.env.XDG_STATE_HOME = state;
   door.__resetForTests();
 });

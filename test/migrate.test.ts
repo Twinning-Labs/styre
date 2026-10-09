@@ -1,12 +1,11 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { migrate } from "../src/db/migrate.ts";
+import { makeTempDir } from "./helpers/temp.ts";
 
 function tmpDbPath(): string {
-  return join(mkdtempSync(join(tmpdir(), "styre-mig-")), "styre.db");
+  return join(makeTempDir("styre-mig-"), "styre.db");
 }
 
 const CORE_TABLES = [

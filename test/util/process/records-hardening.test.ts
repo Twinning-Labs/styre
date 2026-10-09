@@ -12,14 +12,12 @@ import {
   chownSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as door from "../../../src/util/process/door.ts";
 import { bootId, probe } from "../../../src/util/process/proc-table.ts";
@@ -33,11 +31,12 @@ import {
 } from "../../../src/util/process/records.ts";
 import { sweepOrphans } from "../../../src/util/process/sweep.ts";
 import { isAlive, killOwned, own } from "../../helpers/own-processes.ts";
+import { makeTempDir } from "../../helpers/temp.ts";
 
 let state: string;
 const saved = process.env.XDG_STATE_HOME;
 beforeEach(() => {
-  state = mkdtempSync(join(tmpdir(), "styre-rec-hard-"));
+  state = makeTempDir("styre-rec-hard-");
   process.env.XDG_STATE_HOME = state;
   door.__resetForTests();
 });

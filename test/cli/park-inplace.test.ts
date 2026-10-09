@@ -5,8 +5,7 @@ import { afterEach, expect, test } from "bun:test";
 afterEach(() => {
   process.exitCode = 0;
 });
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parkDir, resumeRun } from "../../src/cli/park.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
@@ -26,6 +25,7 @@ import { runStep } from "../../src/engine/step-journal.ts";
 import { fakeChecks } from "../../src/integrations/adapters/fake-checks.ts";
 import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 // helper: journal a step straight to succeeded (mirrors park.test.ts's local `succeed`, which is
 // not shared/importable — see plan Task 7 review F5).
@@ -43,7 +43,7 @@ async function succeed(db: Parameters<typeof runStep>[0], ticketId: number, step
  *  created (not checked out) at that same commit — mirrors what an in-place park would have left
  *  behind: HEAD still needs a checkout to `branch` (the eventual `ensureWorktree` in-place call). */
 function gitRepo(branch: string): { root: string; sha: string } {
-  const root = mkdtempSync(join(tmpdir(), "styre-park-inplace-repo-"));
+  const root = makeTempDir("styre-park-inplace-repo-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -57,7 +57,7 @@ function gitRepo(branch: string): { root: string; sha: string } {
 }
 
 test("resumeRun derives in-place from the persisted worktree path: skips wipe/reset and threads inPlace into the registry (S4)", async () => {
-  const stateRoot = mkdtempSync(join(tmpdir(), "styre-park-inplace-state-"));
+  const stateRoot = makeTempDir("styre-park-inplace-state-");
   const prevXdgStateHome = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = stateRoot;
   const slug = "inplace-test";
@@ -178,7 +178,7 @@ test("resumeRun derives in-place from the persisted worktree path: skips wipe/re
 });
 
 test("resumeRun re-checks in-place identity before mutating: throws when the active env's <pkg> doesn't resolve under target_repo (I-2)", async () => {
-  const stateRoot = mkdtempSync(join(tmpdir(), "styre-park-inplace-identity-state-"));
+  const stateRoot = makeTempDir("styre-park-inplace-identity-state-");
   const prevXdgStateHome = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = stateRoot;
   const slug = "inplace-identity-test";
@@ -275,7 +275,7 @@ test("resumeRun re-checks in-place identity before mutating: throws when the act
 });
 
 test("resumeRun refuses in-place resume when the disposability marker is absent: throws before any repo mutation (Task 3)", async () => {
-  const stateRoot = mkdtempSync(join(tmpdir(), "styre-park-inplace-marker-state-"));
+  const stateRoot = makeTempDir("styre-park-inplace-marker-state-");
   const prevXdgStateHome = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = stateRoot;
   const slug = "inplace-marker-test";
@@ -374,7 +374,7 @@ test("resumeRun refuses in-place resume when the disposability marker is absent:
 });
 
 test("resumeRun with the marker present re-applies profile.targetRepo (the discovered override) before the ports build (Task 3)", async () => {
-  const stateRoot = mkdtempSync(join(tmpdir(), "styre-park-inplace-override-state-"));
+  const stateRoot = makeTempDir("styre-park-inplace-override-state-");
   const prevXdgStateHome = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = stateRoot;
   const slug = "inplace-override-test";

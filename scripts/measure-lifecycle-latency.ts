@@ -117,6 +117,10 @@ function gitRepo(dir: string): string {
 
 /** Everything a dispatch needs, loaded from `root`'s own code (the baseline or this checkout). */
 async function dispatcher(root: string, work: string, standin: string) {
+  // A checkout whose test helpers track their temp folders (test/helpers/temp.ts) refuses to make one
+  // outside `bun test` unless the process removes them on exit; the baseline predates it.
+  const tempHelpers = join(root, "test/helpers/temp.ts");
+  if (existsSync(tempHelpers)) (await import(tempHelpers)).removeTempDirsOnExit();
   const { makeTestDb } = await import(join(root, "test/helpers/db.ts"));
   const { insertPending } = await import(join(root, "src/db/repos/workflow-step.ts"));
   const { getTicket } = await import(join(root, "src/db/repos/ticket.ts"));

@@ -1,15 +1,15 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runBoundedCommand } from "../../src/util/run-bounded-command.ts";
 import { commandLifecycleTests } from "../helpers/command-lifecycle.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
 
 async function withDirectory(run: (cwd: string) => Promise<void>): Promise<void> {
-  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "styre-bounded-command-")));
+  const cwd = realpathSync(makeTempDir("styre-bounded-command-"));
   try {
     await run(cwd);
   } finally {

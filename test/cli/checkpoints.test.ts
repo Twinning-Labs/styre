@@ -1,15 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { listCheckpoints } from "../../src/cli/checkpoints.ts";
 import { insertPending } from "../../src/db/repos/signal.ts";
 import { setTicketStage, setTicketStatus } from "../../src/db/repos/ticket.ts";
 import { seedCheckpoint } from "../helpers/checkpoint.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 describe("listCheckpoints", () => {
   test("classifies needs_you, pr-ready, done, and crashed→interrupted efforts", () => {
-    const root = mkdtempSync(join(tmpdir(), "styre-ckpt-"));
+    const root = makeTempDir("styre-ckpt-");
     try {
       seedCheckpoint(root, "proj", "ENG-1", (db, id) => {
         setTicketStatus(db, id, "waiting");

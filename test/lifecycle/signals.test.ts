@@ -3,8 +3,7 @@
 // processes; the last ones run a child process with the real handlers installed.
 import { Database } from "bun:sqlite";
 import { afterAll, afterEach, describe, expect, jest, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import * as door from "../../src/util/process/door.ts";
 import {
@@ -42,6 +41,7 @@ import {
   toolPid,
   until,
 } from "../helpers/own-processes.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 // The temporary folders the lifecycle helpers made for this file.
 afterAll(removeLifecycleFolders);
@@ -80,7 +80,7 @@ function deps(): { out: Out; d: HandlerDeps } {
   };
 }
 
-const scratch = realpathSync(mkdtempSync(join(tmpdir(), "styre-signals-")));
+const scratch = realpathSync(makeTempDir("styre-signals-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 /** An agent launch, claimed at once while it is certainly this test's child; what it starts later
  *  is claimed by the tests that wait for it, and by afterEach's tree walk. */

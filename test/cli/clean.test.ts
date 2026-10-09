@@ -1,7 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanImpl } from "../../src/cli/clean.ts";
 import { insertDispatch } from "../../src/db/repos/dispatch.ts";
@@ -9,10 +8,11 @@ import { insertPending } from "../../src/db/repos/signal.ts";
 import { setBranch, setTicketStage, setTicketStatus } from "../../src/db/repos/ticket.ts";
 import { listWorktrees } from "../../src/dispatch/worktree.ts";
 import { seedCheckpoint } from "../helpers/checkpoint.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 /** A real temp git repo with one commit, mirroring run-live-location.test.ts's harness. */
 function makeTargetRepo(): string {
-  const repoDir = mkdtempSync(join(tmpdir(), "styre-clean-repo-"));
+  const repoDir = makeTempDir("styre-clean-repo-");
   const git = (args: string[]) => {
     const res = Bun.spawnSync(["git", ...args], { cwd: repoDir });
     if (!res.success) throw new Error(`git ${args.join(" ")} failed: ${res.stderr.toString()}`);
@@ -31,7 +31,7 @@ function makeTargetRepo(): string {
  *  (ENG-386 Task 5). Returns both repo dirs; caller is responsible for cleaning up `origin` too. */
 function makeTargetRepoWithOrigin(): { repoDir: string; originDir: string } {
   const repoDir = makeTargetRepo();
-  const originDir = mkdtempSync(join(tmpdir(), "styre-clean-origin-"));
+  const originDir = makeTempDir("styre-clean-origin-");
   const git = (args: string[], cwd: string) => {
     const res = Bun.spawnSync(["git", ...args], { cwd });
     if (!res.success) throw new Error(`git ${args.join(" ")} failed: ${res.stderr.toString()}`);
@@ -56,7 +56,7 @@ function seedPrReadyEffort(
   ident: string,
 ): { dir: string; branch: string; leftover: string; wtParent: string } {
   const branch = `feat/${ident}`;
-  const wtParent = mkdtempSync(join(tmpdir(), "styre-wt-"));
+  const wtParent = makeTempDir("styre-wt-");
   const leftover = join(wtParent, "held");
   const addRes = Bun.spawnSync(["git", "worktree", "add", "-b", branch, leftover], {
     cwd: repoDir,
@@ -99,7 +99,7 @@ function seedEffortWithWorktree(
   shape: (db: Database, ticketId: number) => void,
 ): { dir: string; branch: string; leftover: string; wtParent: string } {
   const branch = `feat/${ident}`;
-  const wtParent = mkdtempSync(join(tmpdir(), "styre-wt-"));
+  const wtParent = makeTempDir("styre-wt-");
   const leftover = join(wtParent, "held");
   const addRes = Bun.spawnSync(["git", "worktree", "add", "-b", branch, leftover], {
     cwd: repoDir,
@@ -116,7 +116,7 @@ function seedEffortWithWorktree(
 
 describe("cleanImpl", () => {
   test("reap: frees the worktree and removes the checkpoint dir for a pr-ready effort", async () => {
-    const root = mkdtempSync(join(tmpdir(), "styre-clean-state-"));
+    const root = makeTempDir("styre-clean-state-");
     const repoDir = makeTargetRepo();
     const slug = "proj";
     const ident = "ENG-9";
@@ -137,7 +137,7 @@ describe("cleanImpl", () => {
   });
 
   test("refuse-when-live: a live run.lock refuses (exit 75) and leaves worktree + dir untouched", async () => {
-    const root = mkdtempSync(join(tmpdir(), "styre-clean-state-"));
+    const root = makeTempDir("styre-clean-state-");
     const repoDir = makeTargetRepo();
     const slug = "proj";
     const ident = "ENG-10";
@@ -163,7 +163,7 @@ describe("cleanImpl", () => {
   });
 
   test("--all: reaps pr-ready and done leftovers, protects needs_you and interrupted", async () => {
-    const root = mkdtempSync(join(tmpdir(), "styre-clean-state-"));
+    const root = makeTempDir("styre-clean-state-");
     const repoDir = makeTargetRepo();
     const slug = "proj";
 
@@ -226,7 +226,7 @@ describe("cleanImpl", () => {
   });
 
   test("--purge: reaps the effort AND deletes the local + remote branch", async () => {
-    const root = mkdtempSync(join(tmpdir(), "styre-clean-state-"));
+    const root = makeTempDir("styre-clean-state-");
     const { repoDir, originDir } = makeTargetRepoWithOrigin();
     const slug = "proj";
     const ident = "ENG-30";
@@ -253,7 +253,7 @@ describe("cleanImpl", () => {
   });
 
   test("--purge: with no branch anywhere, still reaps the effort and writes no error output", async () => {
-    const root = mkdtempSync(join(tmpdir(), "styre-clean-state-"));
+    const root = makeTempDir("styre-clean-state-");
     const { repoDir, originDir } = makeTargetRepoWithOrigin();
     const slug = "proj";
     const ident = "ENG-31";
@@ -286,7 +286,7 @@ describe("cleanImpl", () => {
   });
 
   test("--purge: refuses to delete the default branch, local and remote, even for an explicit branch_name of 'main'", async () => {
-    const root = mkdtempSync(join(tmpdir(), "styre-clean-state-"));
+    const root = makeTempDir("styre-clean-state-");
     const { repoDir, originDir } = makeTargetRepoWithOrigin();
     // main was pushed to origin by makeTargetRepoWithOrigin while repoDir was checked out on
     // main; move the primary worktree off main so `main` isn't "held" by repoDir itself — same
@@ -346,7 +346,7 @@ describe("cleanImpl", () => {
     // the repo's real default branch (from the on-disk profile) was something else, e.g. 'master'.
     // This test drives that exact path: no opts.profile, no opts.targetRepo — cleanImpl must
     // resolve everything itself via a real profile.json under a temp XDG_CONFIG_HOME.
-    const root = mkdtempSync(join(tmpdir(), "styre-clean-state-"));
+    const root = makeTempDir("styre-clean-state-");
     const { repoDir, originDir } = makeTargetRepoWithOrigin();
     const slug = "proj-eng386-master";
     const ident = "ENG-41";
@@ -366,7 +366,7 @@ describe("cleanImpl", () => {
 
     // A real on-disk profile whose defaultBranch is 'master' — what `loadProfileByConvention`
     // must resolve (and `cleanImpl` must PERSIST) for the guard to see the real default branch.
-    const configHome = mkdtempSync(join(tmpdir(), "styre-clean-config-"));
+    const configHome = makeTempDir("styre-clean-config-");
     const profileDir = join(configHome, "styre", slug);
     mkdirSync(profileDir, { recursive: true });
     writeFileSync(
@@ -426,7 +426,7 @@ describe("cleanImpl", () => {
   });
 
   test("--all --purge: rejected as a usage error (exit 64)", async () => {
-    const root = mkdtempSync(join(tmpdir(), "styre-clean-state-"));
+    const root = makeTempDir("styre-clean-state-");
     const repoDir = makeTargetRepo();
     const slug = "proj";
 

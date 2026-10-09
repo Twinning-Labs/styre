@@ -1,7 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -17,9 +16,10 @@ import { getByKey, insertPending } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-ce-"));
+  const root = makeTempDir("styre-ce-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -129,7 +129,7 @@ test("A1 darkreader: a redundant unit whose declared file a sibling touched is c
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
     profile,
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-cewt-")),
+    worktreeRoot: makeTempDir("styre-cewt-"),
   });
 
   await driveUntilCompleteness(db, ticketId, registry, wu2.id);
@@ -169,7 +169,7 @@ test("A2 under-delivered: a unit that touches a file it did NOT declare loops ba
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
     profile,
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-cewt-")),
+    worktreeRoot: makeTempDir("styre-cewt-"),
   });
 
   await driveUntilCompleteness(db, ticketId, registry, wu1.id);
@@ -225,7 +225,7 @@ test("over-delivery uses the unit's OWN diff, not the cumulative (guards the two
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
     profile,
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-cewt-")),
+    worktreeRoot: makeTempDir("styre-cewt-"),
   });
 
   await driveUntilCompleteness(db, ticketId, registry, wu3.id);
@@ -270,7 +270,7 @@ test("A3' honest limit: unrelated work on a sibling-covered declared file is NOT
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
     profile,
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-cewt-")),
+    worktreeRoot: makeTempDir("styre-cewt-"),
   });
 
   await driveUntilCompleteness(db, ticketId, registry, wu2.id);
@@ -308,7 +308,7 @@ test("reconcile exemption: a reconcile unit with no declared files never comes b
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
     profile,
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-cewt-")),
+    worktreeRoot: makeTempDir("styre-cewt-"),
   });
 
   // Drive wu1 all the way to verified before the reconcile unit is added (mirrors the real
@@ -355,7 +355,7 @@ function registryFor(repo: string, runner: FakeAgentRunner) {
       components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
       runtimeContext: ABSENT_RC,
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-cewt6-")),
+    worktreeRoot: makeTempDir("styre-cewt6-"),
   });
 }
 

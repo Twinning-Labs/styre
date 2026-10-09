@@ -5,8 +5,7 @@ import { afterEach, expect, test } from "bun:test";
 afterEach(() => {
   process.exitCode = 0;
 });
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   finishRunResult,
@@ -31,6 +30,7 @@ import { fakeChecks } from "../../src/integrations/adapters/fake-checks.ts";
 import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir, trackTempEntriesMadeBy } from "../helpers/temp.ts";
 
 // helper: journal a step straight to succeeded (mirrors resolver.test.ts's local `succeed`,
 // which is not shared/importable — see plan Task 7 review F5). `effectful: true` matches how
@@ -105,7 +105,7 @@ test("resetProvisionForResume is a no-op when provision is still pending/running
  *  `gitRepo`, which isn't exported). Only needed so `resumeRun`'s `branchHeadSha` git calls have
  *  a real repo to run against; the ticket's feature branch itself need not exist. */
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-park-wire-repo-"));
+  const root = makeTempDir("styre-park-wire-repo-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -121,7 +121,7 @@ test("resumeRun wires resetProvisionForResume into the resume path (S4)", async 
   // with a `provision` step already 'succeeded' — simulating a prior attempt that installed deps
   // into a worktree which has since been wiped. `resumeRun` must reset it to 'pending' as part of
   // its resume prep, BEFORE it ever dispatches another step.
-  const stateRoot = mkdtempSync(join(tmpdir(), "styre-park-wire-state-"));
+  const stateRoot = makeTempDir("styre-park-wire-state-");
   const prevXdgStateHome = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = stateRoot;
   const repoPath = gitRepo();
@@ -168,33 +168,36 @@ test("resumeRun wires resetProvisionForResume into the resume path (S4)", async 
     class Sentinel extends Error {}
     let observedStatus: string | undefined;
     await expect(
-      resumeRun({ resume: ident }, profile, DEFAULT_RUNTIME_CONFIG, {
-        ports: {
-          issueTracker: fakeIssueTracker({
-            ticket: {
-              ident,
-              title: "Wire test",
-              description: "body",
-              typeLabel: "Feature",
-              externalId: "uuid-wire",
-              url: null,
-            },
-          }),
-          forge: fakeForge(),
-          checks: fakeChecks("passing"),
-        },
-        preflight: () => ({ ok: true, version: null }),
-        buildRegistry: () => {
-          const checkDb = openDb(dbPath);
-          observedStatus = getByKey(checkDb, ticketId, "provision")?.status;
-          expect(getByKey(checkDb, ticketId, "verify:integration")).toMatchObject({
-            status: "pending",
-            attempt: 0,
-          });
-          checkDb.close();
-          throw new Sentinel("stop before dispatch");
-        },
-      }),
+      // resumeRun mints and keeps a styre-wt-* worktree root before buildRegistry throws.
+      trackTempEntriesMadeBy("styre-wt-", () =>
+        resumeRun({ resume: ident }, profile, DEFAULT_RUNTIME_CONFIG, {
+          ports: {
+            issueTracker: fakeIssueTracker({
+              ticket: {
+                ident,
+                title: "Wire test",
+                description: "body",
+                typeLabel: "Feature",
+                externalId: "uuid-wire",
+                url: null,
+              },
+            }),
+            forge: fakeForge(),
+            checks: fakeChecks("passing"),
+          },
+          preflight: () => ({ ok: true, version: null }),
+          buildRegistry: () => {
+            const checkDb = openDb(dbPath);
+            observedStatus = getByKey(checkDb, ticketId, "provision")?.status;
+            expect(getByKey(checkDb, ticketId, "verify:integration")).toMatchObject({
+              status: "pending",
+              attempt: 0,
+            });
+            checkDb.close();
+            throw new Sentinel("stop before dispatch");
+          },
+        }),
+      ),
     ).rejects.toThrow("stop before dispatch");
 
     expect(observedStatus).toBe("pending");
@@ -213,7 +216,7 @@ test("resumeRun --inspect names a failed step, not (none), when no step is 'runn
   // Build a parked-run dump whose only stepped work is a FAILED step (an escalated attempt —
   // no 'running' step exists). `--inspect` must still name it as the re-dispatch target,
   // not print "would re-dispatch step: (none)" (parkedStep today only looks at 'running').
-  const stateRoot = mkdtempSync(join(tmpdir(), "styre-park-inspect-state-"));
+  const stateRoot = makeTempDir("styre-park-inspect-state-");
   const prevXdgStateHome = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = stateRoot;
   const repoPath = gitRepo();

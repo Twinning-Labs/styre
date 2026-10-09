@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { insertAcCheck } from "../../src/db/repos/ac-check.ts";
 import { insertAc } from "../../src/db/repos/acceptance-criterion.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
 import { baselineShaForAc, replayCheckAtBaseline } from "../../src/dispatch/replay-harness.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 // FIX (transcription bug in the brief's Step 1): `Component` (profile.ts) has a REQUIRED
 // `extensions: string[]` field (schemaVersion 3 file-identity routing) — the brief's fixture
@@ -30,7 +30,7 @@ function seedAc(db: Parameters<typeof insertAc>[0], ticketId: number): number {
 }
 
 function baselineRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-replay-"));
+  const root = makeTempDir("styre-replay-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);

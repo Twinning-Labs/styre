@@ -3,8 +3,7 @@
 // orphan on disk (a dead owner, a live `sleep` this file started), and checks that the orphan was
 // stopped, that the sweep spoke on stderr only, and that the command's own work came after.
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CommandDef } from "citty";
 import { cleanCommand } from "../../src/cli/clean.ts";
@@ -17,6 +16,7 @@ import * as door from "../../src/util/process/door.ts";
 import { bootId, probe } from "../../src/util/process/proc-table.ts";
 import { processesDir, writeRecord } from "../../src/util/process/records.ts";
 import { killOwned, ownChild } from "../helpers/own-processes.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 /** A sleep length no other test uses. */
 const NAP = "4179";
@@ -28,8 +28,8 @@ let log: { stream: "out" | "err"; text: string }[] = [];
 let spies: { mockRestore(): void }[] = [];
 
 beforeEach(() => {
-  state = mkdtempSync(join(tmpdir(), "styre-sweep-cmd-"));
-  scratch = mkdtempSync(join(tmpdir(), "styre-sweep-cmd-scratch-"));
+  state = makeTempDir("styre-sweep-cmd-");
+  scratch = makeTempDir("styre-sweep-cmd-scratch-");
   process.env.XDG_STATE_HOME = state;
   process.env.DO_NOT_TRACK = "1";
   door.__resetForTests();

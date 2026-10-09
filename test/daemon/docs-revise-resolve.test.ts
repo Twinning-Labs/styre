@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import type { AgentRunResult } from "../../src/agent/runner.ts";
@@ -34,6 +33,7 @@ import { fakeChecks } from "../../src/integrations/adapters/fake-checks.ts";
 import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import { gitRepoWithProject } from "../helpers/git-project.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 /** A minimal successful (non-sidecar) agent result: no cost/token accounting, no timeout. */
 function ok(stdout = ""): AgentRunResult {
@@ -113,7 +113,7 @@ function harness(repoPath: string, runner: FakeAgentRunner) {
     defaultBranch: "main",
     checksSystem: "none",
   });
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-dr-resolve-"));
+  const worktreeRoot = makeTempDir("styre-dr-resolve-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,

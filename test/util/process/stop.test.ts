@@ -1,7 +1,6 @@
 // test/util/process/stop.test.ts
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   type ProcInfo,
@@ -25,6 +24,7 @@ import {
   ownPrinted,
   ownTree,
 } from "../../helpers/own-processes.ts";
+import { makeTempDir } from "../../helpers/temp.ts";
 
 // ---------------------------------------------------------------------------------------------
 // A small simulated process world. It lets the stop logic be driven through exact sequences
@@ -996,7 +996,7 @@ describe("stopTree and stopGroup on real processes", () => {
     // The tool command leads a group of its own; a subshell of it started a sleep and exited, so the
     // sleep's parent is gone (it is no descendant of the agent) but it is still in the tool's group.
     // Only the group link reaches it: a collection that took in descendants alone would leave it.
-    const dir = mkdtempSync(join(tmpdir(), "styre-stop-orphan-"));
+    const dir = makeTempDir("styre-stop-orphan-");
     try {
       const pidFile = join(dir, "pid");
       const go = join(dir, "go");

@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { launchAgent } from "../../src/agent/launch.ts";
 import { claudeAgentRunner } from "../../src/agent/providers/claude.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 // launchAgent through the REAL Claude adapter (a fake CLI binary, real spawn and parsing): the
 // fault rule must keep ordinary failures ordinary and confinement faults loud.
-const cwd = realpathSync(mkdtempSync(join(tmpdir(), "styre-launch-")));
+const cwd = realpathSync(makeTempDir("styre-launch-"));
 function fakeCli(name: string, lines: unknown[], tail: string): string {
   const path = join(cwd, name);
   const body = lines.map((l) => JSON.stringify(l)).join("\n");

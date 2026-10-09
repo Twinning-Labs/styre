@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { parkDir } from "../../src/cli/park.ts";
@@ -9,6 +8,7 @@ import { worktreeHoldingBranch } from "../../src/dispatch/worktree.ts";
 import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import { runFreshTicket } from "../helpers/run-harness.ts";
+import { makeTempDir, trackTempEntriesMadeBy } from "../helpers/temp.ts";
 
 test("a fresh run journals its SoT to parkDir/run.db, not a temp dir", async () => {
   const run = await runFreshTicket(); // drives real runImpl to a terminal; returns { checkpointDir, dbPath, cleanup }
@@ -87,12 +87,12 @@ test("--fresh reconciles a non-prunable, styre-owned leftover worktree (the comm
     config: process.env.XDG_CONFIG_HOME,
     telemetry: process.env.STYRE_TELEMETRY,
   };
-  const stateRoot = mkdtempSync(join(tmpdir(), "styre-fresh-state-"));
-  const configRoot = mkdtempSync(join(tmpdir(), "styre-fresh-config-"));
-  const repoDir = mkdtempSync(join(tmpdir(), "styre-fresh-repo-"));
-  const profileDir = mkdtempSync(join(tmpdir(), "styre-fresh-profile-"));
+  const stateRoot = makeTempDir("styre-fresh-state-");
+  const configRoot = makeTempDir("styre-fresh-config-");
+  const repoDir = makeTempDir("styre-fresh-repo-");
+  const profileDir = makeTempDir("styre-fresh-profile-");
   // A parent dir separate from repoDir/profileDir/etc — cleaned up alongside them.
-  const leftoverParent = mkdtempSync(join(tmpdir(), "styre-wt-leftover-"));
+  const leftoverParent = makeTempDir("styre-wt-leftover-");
 
   const git = (args: string[]) => {
     const res = Bun.spawnSync(["git", ...args], { cwd: repoDir });
@@ -157,24 +157,27 @@ test("--fresh reconciles a non-prunable, styre-owned leftover worktree (the comm
   try {
     // Must SUCCEED (frees the leftover via the liveness gate, then starts fresh) — not abort at
     // ensureWorktree's prunable-only refuse.
-    await runImpl(
-      { args: { ticket: IDENT, profile: profilePath, fresh: true } },
-      {
-        ports,
-        runner: new FakeAgentRunner(() => ({
-          completed: false,
-          exitCode: 1,
-          stdout: "partial work from session-limit",
-          stderr: "You have reached your session limit · resets tomorrow",
-          timedOut: false,
-          costUsd: null,
-          tokensIn: null,
-          tokensOut: null,
-          cause: "session-limit" as const,
-          resetAt: "tomorrow",
-        })),
-        preflight: () => ({ ok: true, version: null }),
-      },
+    // runImpl keeps the run's styre-wt-* worktree root after the pause (resume needs it).
+    await trackTempEntriesMadeBy("styre-wt-", () =>
+      runImpl(
+        { args: { ticket: IDENT, profile: profilePath, fresh: true } },
+        {
+          ports,
+          runner: new FakeAgentRunner(() => ({
+            completed: false,
+            exitCode: 1,
+            stdout: "partial work from session-limit",
+            stderr: "You have reached your session limit · resets tomorrow",
+            timedOut: false,
+            costUsd: null,
+            tokensIn: null,
+            tokensOut: null,
+            cause: "session-limit" as const,
+            resetAt: "tomorrow",
+          })),
+          preflight: () => ({ ok: true, version: null }),
+        },
+      ),
     );
 
     // A real fresh checkpoint was journaled (not the stale placeholder).

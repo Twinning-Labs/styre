@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { StyreError } from "../../src/cli/errors.ts";
@@ -8,6 +7,7 @@ import { runSetup, unknownRuntimeSections } from "../../src/cli/setup.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import type { EnrichDeps } from "../../src/setup/enrich.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 // A no-op enrichment: emits all sections with empty detail and no presence proposals, so the
 // merge leaves the deterministic scan unchanged (keeps existing setup assertions valid).
@@ -35,7 +35,7 @@ function fakeDeps(enrichment: unknown = NOOP_ENRICH): EnrichDeps {
 }
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-setup-"));
+  const root = makeTempDir("styre-setup-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["remote", "add", "origin", "git@github.com:acme/widget.git"]);
@@ -45,7 +45,7 @@ function gitRepo(): string {
 
 test("runSetup probes and writes a valid profile to --out", async () => {
   const repo = gitRepo();
-  const out = join(mkdtempSync(join(tmpdir(), "styre-out-")), "profile.json");
+  const out = join(makeTempDir("styre-out-"), "profile.json");
   const { outPath, profile } = await runSetup({ repo, out, deps: fakeDeps() });
   expect(outPath).toBe(out);
   expect(profile.slug).toBe("widget");
@@ -55,7 +55,7 @@ test("runSetup probes and writes a valid profile to --out", async () => {
 
 test("runSetup defaults the path to configDir()/<slug>/profile.json", async () => {
   const repo = gitRepo();
-  const cfg = mkdtempSync(join(tmpdir(), "styre-xdg-"));
+  const cfg = makeTempDir("styre-xdg-");
   const prev = process.env.XDG_CONFIG_HOME;
   process.env.XDG_CONFIG_HOME = cfg;
   try {
@@ -71,9 +71,9 @@ test("runSetup defaults the path to configDir()/<slug>/profile.json", async () =
 });
 
 test("re-running setup preserves an operator-resolved section", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "styre-repo-"));
+  const repo = makeTempDir("styre-repo-");
   writeFileSync(join(repo, "package.json"), "{}");
-  const out = join(mkdtempSync(join(tmpdir(), "styre-cfg-")), "profile.json");
+  const out = join(makeTempDir("styre-cfg-"), "profile.json");
 
   await runSetup({ repo, out, deps: fakeDeps() }); // first probe → caching unknown
   // operator fills caching by hand:
@@ -87,9 +87,9 @@ test("re-running setup preserves an operator-resolved section", async () => {
 });
 
 test("--reprobe discards operator edits", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "styre-repo-"));
+  const repo = makeTempDir("styre-repo-");
   writeFileSync(join(repo, "package.json"), "{}");
-  const out = join(mkdtempSync(join(tmpdir(), "styre-cfg-")), "profile.json");
+  const out = join(makeTempDir("styre-cfg-"), "profile.json");
   await runSetup({ repo, out, deps: fakeDeps() });
   const p = JSON.parse(readFileSync(out, "utf8"));
   p.runtimeContext.caching = { presence: "present", detail: "redis (operator)" };
@@ -99,9 +99,9 @@ test("--reprobe discards operator edits", async () => {
 });
 
 test("--force discards operator edits", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "styre-repo-"));
+  const repo = makeTempDir("styre-repo-");
   writeFileSync(join(repo, "package.json"), "{}");
-  const out = join(mkdtempSync(join(tmpdir(), "styre-cfg-")), "profile.json");
+  const out = join(makeTempDir("styre-cfg-"), "profile.json");
   await runSetup({ repo, out, deps: fakeDeps() });
   const p = JSON.parse(readFileSync(out, "utf8"));
   p.runtimeContext.caching = { presence: "present", detail: "redis (operator)" };
@@ -111,18 +111,18 @@ test("--force discards operator edits", async () => {
 });
 
 test("runSetup writes the agent-enriched detail into the profile", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "styre-repo-"));
+  const repo = makeTempDir("styre-repo-");
   writeFileSync(join(repo, "package.json"), "{}");
-  const out = join(mkdtempSync(join(tmpdir(), "styre-cfg-")), "profile.json");
+  const out = join(makeTempDir("styre-cfg-"), "profile.json");
   const enrichment = { ...NOOP_ENRICH, documentation: { detail: "README + docs/ with mkdocs" } };
   const { profile } = await runSetup({ repo, out, deps: fakeDeps(enrichment) });
   expect(profile.runtimeContext.documentation.detail).toBe("README + docs/ with mkdocs");
 });
 
 test("re-probe failure leaves existing file byte-unchanged", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "styre-repo-"));
+  const repo = makeTempDir("styre-repo-");
   writeFileSync(join(repo, "package.json"), "{}");
-  const out = join(mkdtempSync(join(tmpdir(), "styre-cfg-")), "profile.json");
+  const out = join(makeTempDir("styre-cfg-"), "profile.json");
   await runSetup({ repo, out, deps: fakeDeps() });
   const before = readFileSync(out, "utf8");
   const failing: EnrichDeps = {
@@ -151,9 +151,9 @@ test("re-probe failure leaves existing file byte-unchanged", async () => {
 });
 
 test("runSetup throws and writes no profile when enrichment fails", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "styre-repo-"));
+  const repo = makeTempDir("styre-repo-");
   writeFileSync(join(repo, "package.json"), "{}");
-  const out = join(mkdtempSync(join(tmpdir(), "styre-cfg-")), "profile.json");
+  const out = join(makeTempDir("styre-cfg-"), "profile.json");
   const failing: EnrichDeps = {
     runner: new FakeAgentRunner(() => ({
       completed: true,
@@ -183,14 +183,14 @@ test("runSetup throws and writes no profile when enrichment fails", async () => 
 
 test("interactive confirm block prints prepare line for components that carry it", async () => {
   // Set up a ruby-only git repo (Gemfile + .rspec → ruby component with prepare: "bundle install")
-  const repo = mkdtempSync(join(tmpdir(), "styre-setup-ruby-"));
+  const repo = makeTempDir("styre-setup-ruby-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: repo });
   run(["init", "-b", "main"]);
   run(["remote", "add", "origin", "git@github.com:acme/myapp.git"]);
   writeFileSync(join(repo, "Gemfile"), "source 'https://rubygems.org'\ngem 'rspec'\n");
   writeFileSync(join(repo, ".rspec"), "--format documentation\n");
 
-  const out = join(mkdtempSync(join(tmpdir(), "styre-out-ruby-")), "profile.json");
+  const out = join(makeTempDir("styre-out-ruby-"), "profile.json");
 
   // Capture stderr output (setup's human output moved from console.log to process.stderr.write)
   const logs: string[] = [];
@@ -262,7 +262,7 @@ test("unselected tox persists as unresolved; ordinary setup preserves explicit t
     join(repo, "tox.ini"),
     "[tox]\nenvlist = docs,lint,py311,py312\n[testenv]\ncommands = pytest {posargs}\n",
   );
-  const out = join(mkdtempSync(join(tmpdir(), "styre-target-out-")), "profile.json");
+  const out = join(makeTempDir("styre-target-out-"), "profile.json");
   const first = await runSetup({ repo, out, deps: fakeDeps() });
   expect(first.unresolvedCommands.some((p) => p.startsWith("python.test:"))).toBe(true);
   const py = first.profile.components.find((c) => c.kind === "python");
@@ -288,7 +288,7 @@ test("setup never inherits another repository's commands from a shared output pa
     writeFileSync(join(path, "setup.py"), "");
     writeFileSync(join(path, "tox.ini"), "[tox]\nenvlist=docs,unit\n");
   }
-  const out = join(mkdtempSync(join(tmpdir(), "styre-target-identity-")), "profile.json");
+  const out = join(makeTempDir("styre-target-identity-"), "profile.json");
   const first = await runSetup({ repo, out, deps: fakeDeps() });
   const py = first.profile.components.find((c) => c.kind === "python");
   if (!py) throw new Error("missing Python component");
@@ -304,7 +304,7 @@ test("setup never inherits another repository's commands from a shared output pa
 
 test("setup preserves explicit suite policy and disables authored actions without disabling suites", async () => {
   const repo = gitRepo();
-  const out = join(mkdtempSync(join(tmpdir(), "styre-policy-out-")), "profile.json");
+  const out = join(makeTempDir("styre-policy-out-"), "profile.json");
   const first = await runSetup({ repo, out, deps: fakeDeps() });
   const c = first.profile.components.find((c) => c.kind === "node");
   if (!c) throw Error("missing Node component");

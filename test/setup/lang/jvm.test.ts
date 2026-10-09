@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { jvmGradleDef, jvmMavenDef } from "../../../src/setup/lang/jvm.ts";
+import { makeTempDir } from "../../helpers/temp.ts";
 
 function fixture(files: Record<string, string>): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-jvm-"));
+  const root = makeTempDir("styre-jvm-");
   for (const [rel, content] of Object.entries(files)) {
     const p = join(root, rel);
     mkdirSync(join(p, ".."), { recursive: true });

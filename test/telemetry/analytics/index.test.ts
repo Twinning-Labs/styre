@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AnalyticsClient } from "../../../src/telemetry/analytics/client.ts";
 import { createAnalytics } from "../../../src/telemetry/analytics/index.ts";
 import { ALLOWED_KEYS } from "../../../src/telemetry/analytics/properties.ts";
+import { makeTempDir } from "../../helpers/temp.ts";
 
 interface Captured {
   distinctId: string;
@@ -25,7 +25,7 @@ function fakeClient(): { client: AnalyticsClient; events: Captured[] } {
 let prev: string | undefined;
 beforeEach(() => {
   prev = process.env.XDG_STATE_HOME;
-  process.env.XDG_STATE_HOME = mkdtempSync(join(tmpdir(), "styre-an-"));
+  process.env.XDG_STATE_HOME = makeTempDir("styre-an-");
 });
 afterEach(() => {
   if (prev === undefined) Reflect.deleteProperty(process.env, "XDG_STATE_HOME");
@@ -60,7 +60,7 @@ test("enabled → events carry super-props + a distinct_id, all keys allow-liste
 test("setup failure (unwritable state dir) → NOOP, never throws", async () => {
   // Point XDG_STATE_HOME at a path nested under an existing FILE so mkdirSync(recursive)
   // throws ENOTDIR when id.ts tries to persist state. createAnalytics must swallow it.
-  const f = join(mkdtempSync(join(tmpdir(), "styre-an-")), "afile");
+  const f = join(makeTempDir("styre-an-"), "afile");
   writeFileSync(f, "not a dir");
   process.env.XDG_STATE_HOME = join(f, "x");
 

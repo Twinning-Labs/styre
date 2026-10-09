@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -17,9 +16,10 @@ import { buildVerifyReport } from "../../src/dispatch/verify-report.ts";
 import { worktreeHead } from "../../src/dispatch/worktree.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-dr-"));
+  const root = makeTempDir("styre-dr-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -78,7 +78,7 @@ test("a docs-only edit commits and carries the verified verdict forward", async 
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-drwt-"));
+  const worktreeRoot = makeTempDir("styre-drwt-");
 
   // Measure at the actual git head, then exercise the real scoped docs commit and carry.
   const measuredSha = worktreeHead(repo);
@@ -134,7 +134,7 @@ test("a tracked source edit is rejected by docScope: nothing commits, no carry-f
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-drwt-"));
+  const worktreeRoot = makeTempDir("styre-drwt-");
 
   // Edit a TRACKED non-doc file (isNew=false). docScope ignores isNew — a non-doc path is out of
   // scope whether newly added or an existing edit — so this must be rejected too.
@@ -169,7 +169,7 @@ test("a no-op dispatch does not commit or carry forward", async () => {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-drwt-"));
+  const worktreeRoot = makeTempDir("styre-drwt-");
 
   // Seed an integration signal so a spurious carry-forward would be observable.
   insertSignal(db, { ticketId, signalType: "integration", result: "pass", branchHeadSha: "V" });

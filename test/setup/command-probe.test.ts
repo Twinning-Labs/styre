@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { probeCommandExists } from "../../src/setup/discover-schema.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function repo(opts: { scripts?: Record<string, string>; localBins?: string[] } = {}): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-probe-"));
+  const dir = makeTempDir("styre-probe-");
   if (opts.scripts) {
     writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: opts.scripts }));
   }
@@ -93,7 +93,7 @@ describe("ENG-414: a script invocation is checked against the script list", () =
   });
 
   test("a malformed package.json rejects rather than throwing", () => {
-    const dir = mkdtempSync(join(tmpdir(), "styre-probe-bad-"));
+    const dir = makeTempDir("styre-probe-bad-");
     writeFileSync(join(dir, "package.json"), "{not json");
     expect(probeCommandExists(dir, "npm run build")).toBe(false);
   });

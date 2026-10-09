@@ -1,14 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { realpathSync, rmSync } from "node:fs";
 import * as door from "../../src/util/process/door.ts";
 import { listRecords } from "../../src/util/process/records.ts";
 import { runCommand } from "../../src/util/run-command.ts";
 import { commandLifecycleTests } from "../helpers/command-lifecycle.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 // realpathSync resolves macOS /var → /private/var so pwd output matches
-const cwd = realpathSync(mkdtempSync(join(tmpdir(), "styre-cmd-")));
+const cwd = realpathSync(makeTempDir("styre-cmd-"));
 
 test("captures stdout and a zero exit on success", async () => {
   const r = await runCommand("echo hello", { cwd, timeoutMs: 5000 });
@@ -78,7 +77,7 @@ describe("runCommand context", () => {
   const saved = process.env.XDG_STATE_HOME;
   let state: string;
   beforeEach(() => {
-    state = mkdtempSync(join(tmpdir(), "styre-cmdctx-state-"));
+    state = makeTempDir("styre-cmdctx-state-");
     process.env.XDG_STATE_HOME = state;
     door.__resetForTests();
   });

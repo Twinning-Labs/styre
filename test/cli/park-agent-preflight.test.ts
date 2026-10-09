@@ -4,8 +4,7 @@ afterEach(() => {
   process.exitCode = 0;
 });
 
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parkDir, resumeRun } from "../../src/cli/park.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -19,10 +18,11 @@ import { runStep } from "../../src/engine/step-journal.ts";
 import { fakeChecks } from "../../src/integrations/adapters/fake-checks.ts";
 import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 /** Real temp git repo with one commit (resumeRun's branchHeadSha needs a repo to run against). */
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-agentpf-resume-repo-"));
+  const root = makeTempDir("styre-agentpf-resume-repo-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -34,7 +34,7 @@ function gitRepo(): string {
 }
 
 test("resumeRun: a missing agent CLI throws (exit 69 error) before re-dispatch", async () => {
-  const stateRoot = mkdtempSync(join(tmpdir(), "styre-agentpf-resume-state-"));
+  const stateRoot = makeTempDir("styre-agentpf-resume-state-");
   const prev = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = stateRoot;
   const repoPath = gitRepo();

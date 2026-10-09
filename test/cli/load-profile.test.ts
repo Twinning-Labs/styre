@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { noPrimaryLeft } from "../../src/cli/component-roles.ts";
 import { loadRunProfile } from "../../src/cli/load-profile.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 /**
  * BEHAVIOURAL tests for ENG-435. The previous branch shipped only grep-over-source guards, and
@@ -11,7 +11,7 @@ import { loadRunProfile } from "../../src/cli/load-profile.ts";
  * claimed. These do.
  */
 function profileFile(components: unknown[]): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-lp-"));
+  const dir = makeTempDir("styre-lp-");
   const p = join(dir, "profile.json");
   writeFileSync(p, JSON.stringify({ schemaVersion: 4, slug: "demo", targetRepo: dir, components }));
   return p;

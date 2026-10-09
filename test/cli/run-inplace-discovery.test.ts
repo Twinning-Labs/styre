@@ -1,9 +1,9 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type RunArgs, runImpl } from "../../src/cli/run.ts";
 import { assertInPlaceSafe } from "../../src/dispatch/in-place.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 // This suite exercises the REAL `run.ts` entrypoint (`runImpl`, the unwrapped body behind
 // `runCommand.run`'s `guard` wrapper) directly — not a reimplementation of its preflight block —
@@ -30,7 +30,7 @@ function run(args: string[], cwd: string): void {
 /** A real git repo on a named branch, clean tracked tree, optionally carrying the
  *  `.styre-disposable` marker file that `assertInPlaceSafe` requires. */
 function makeRepo(withMarker: boolean): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-run-inplace-disc-"));
+  const dir = makeTempDir("styre-run-inplace-disc-");
   roots.push(dir);
   run(["init", "-q", "-b", "main"], dir);
   run(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-qm", "base"], dir);
@@ -39,7 +39,7 @@ function makeRepo(withMarker: boolean): string {
 }
 
 function writeProfile(targetRepo: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-run-inplace-disc-profile-"));
+  const dir = makeTempDir("styre-run-inplace-disc-profile-");
   roots.push(dir);
   const path = join(dir, "profile.json");
   writeFileSync(path, JSON.stringify({ slug: "inplace-discovery-test", targetRepo }));
@@ -53,7 +53,7 @@ async function invokeRun(profilePath: string): Promise<void> {
   const prevTelemetry = process.env.STYRE_TELEMETRY;
   const prevXdg = process.env.XDG_CONFIG_HOME;
   process.env.STYRE_TELEMETRY = "0"; // NOOP analytics — no network/file I/O from createAnalytics
-  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "styre-xdg-empty-")); // no convention files
+  process.env.XDG_CONFIG_HOME = makeTempDir("styre-xdg-empty-"); // no convention files
   try {
     await runImpl({
       args: {
@@ -125,7 +125,7 @@ test("run --in-place: warns on stderr when the discovered repo root differs from
 });
 
 test("run --in-place: fails closed when cwd is not a git repo — never falls through to the stale profile.targetRepo", async () => {
-  const nonRepoDir = mkdtempSync(join(tmpdir(), "styre-run-inplace-disc-nonrepo-"));
+  const nonRepoDir = makeTempDir("styre-run-inplace-disc-nonrepo-");
   roots.push(nonRepoDir);
   // A valid, marker-bearing repo as the stale profile value: if the fail-closed throw were ever
   // swallowed (e.g. wrapped in try/catch) and execution fell through to the OLD stale-path

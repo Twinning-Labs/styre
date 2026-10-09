@@ -25,7 +25,6 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listProcesses, probe } from "../../src/util/process/proc-table.ts";
 import {
@@ -36,6 +35,7 @@ import {
   signalOwned,
   until,
 } from "../helpers/own-processes.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const ROOT = join(import.meta.dir, "../..");
 const SMOKE = join(ROOT, "scripts", "smoke-lifecycle.ts");
@@ -43,7 +43,7 @@ const CONTAINER = join(ROOT, "scripts", "smoke-lifecycle-container.sh");
 /** A made-up value: never a real key. */
 const SENTINEL = "SENTINEL-KEY-not-real-0xABCDEF";
 
-const scratch = realpathSync(mkdtempSync(join(tmpdir(), "styre-smoke-guards-")));
+const scratch = realpathSync(makeTempDir("styre-smoke-guards-"));
 afterEach(() => {
   killOwned();
 });

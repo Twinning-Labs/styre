@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as door from "../../src/util/process/door.ts";
 import { type ProcInfo, listProcesses, nowToken } from "../../src/util/process/proc-table.ts";
@@ -15,6 +14,7 @@ import {
   ownPrinted,
   registeredGroups,
 } from "./own-processes.ts";
+import { makeTempDir } from "./temp.ts";
 
 type Run = (command: string, opts: { cwd: string; timeoutMs: number }) => Promise<CommandResult>;
 
@@ -74,8 +74,8 @@ export function commandLifecycleTests(
     };
 
     beforeEach(() => {
-      dir = mkdtempSync(join(tmpdir(), "styre-cmdlife-"));
-      state = mkdtempSync(join(tmpdir(), "styre-cmdlife-state-"));
+      dir = makeTempDir("styre-cmdlife-");
+      state = makeTempDir("styre-cmdlife-state-");
       process.env.XDG_STATE_HOME = state;
       door.__resetForTests();
     });

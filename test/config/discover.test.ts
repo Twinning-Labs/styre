@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   discoverRuntimeConfig,
@@ -8,9 +7,10 @@ import {
   profilePathFor,
   slugForCwd,
 } from "../../src/config/discover.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function freshHome(): string {
-  return mkdtempSync(join(tmpdir(), "styre-cfghome-"));
+  return makeTempDir("styre-cfghome-");
 }
 function writeJson(path: string, obj: unknown): void {
   mkdirSync(join(path, ".."), { recursive: true });

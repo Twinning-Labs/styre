@@ -1,15 +1,15 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   detectChecksSystem,
   detectCommands,
   detectPackageManager,
 } from "../../src/setup/detect.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function tmpRepo(): string {
-  return mkdtempSync(join(tmpdir(), "styre-detect-"));
+  return makeTempDir("styre-detect-");
 }
 
 test("detectPackageManager reads the lockfile, defaults npm", () => {

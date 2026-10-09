@@ -1,6 +1,4 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -14,9 +12,10 @@ import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-cc-"));
+  const root = makeTempDir("styre-cc-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -68,7 +67,7 @@ function registryWith(repo: string, runner: FakeAgentRunner) {
       targetRepo: repo,
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-ccwt-")),
+    worktreeRoot: makeTempDir("styre-ccwt-"),
   });
 }
 

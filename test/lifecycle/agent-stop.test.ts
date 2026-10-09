@@ -10,7 +10,6 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { launchAgent } from "../../src/agent/launch.ts";
 import { claudeAgentRunner } from "../../src/agent/providers/claude.ts";
@@ -33,6 +32,7 @@ import {
   toolPid,
   until,
 } from "../helpers/own-processes.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const FX = join(import.meta.dir, "fixtures");
 const input = {
@@ -98,7 +98,7 @@ async function toolsRunning(): Promise<ProcInfo[]> {
   return tools;
 }
 
-const scratch = realpathSync(mkdtempSync(join(tmpdir(), "styre-agent-stop-")));
+const scratch = realpathSync(makeTempDir("styre-agent-stop-"));
 /** Each test gets a state folder of its own, inside `scratch` (removed after the file): the
  *  records a stop that left survivors keeps never reach the run's shared test state folder. */
 const savedState = process.env.XDG_STATE_HOME;

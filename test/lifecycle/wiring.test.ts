@@ -6,7 +6,7 @@
 // The pseudo terminal test of Ctrl-C at a setup prompt is in terminal.test.ts, with its pty helper (R4).
 import { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
@@ -48,6 +48,7 @@ import {
 import { makeOutboxDb, removeLifecycleFolders } from "../helpers/lifecycle.ts";
 import { killOwned, ownGroupMembers, ownLaunch } from "../helpers/own-processes.ts";
 import { cleanupParkedRun, runParkedTicket } from "../helpers/run-harness.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 // The temporary folders the lifecycle helpers made for this file.
 afterAll(removeLifecycleFolders);
@@ -56,7 +57,7 @@ afterAll(removeLifecycleFolders);
 // and `--resume` makes, the profile and database folders below) goes into one folder of its own,
 // removed after the file.
 const savedTmpdir = process.env.TMPDIR;
-const tmpRoot = mkdtempSync(join(tmpdir(), "styre-wiring-"));
+const tmpRoot = makeTempDir("styre-wiring-");
 beforeAll(() => {
   process.env.TMPDIR = tmpRoot;
 });
@@ -151,8 +152,8 @@ const ENV_KEYS = [
 function isolate(state?: string) {
   const prev = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   const prevExit = process.exitCode;
-  const stateRoot = state ?? mkdtempSync(join(tmpdir(), "styre-wiring-state-"));
-  const configRoot = mkdtempSync(join(tmpdir(), "styre-wiring-config-"));
+  const stateRoot = state ?? makeTempDir("styre-wiring-state-");
+  const configRoot = makeTempDir("styre-wiring-config-");
   process.env.XDG_STATE_HOME = stateRoot;
   process.env.XDG_CONFIG_HOME = configRoot;
   for (const k of ["STYRE_TELEMETRY", "DO_NOT_TRACK", "SLACK_BOT_TOKEN"]) {
@@ -176,7 +177,7 @@ function isolate(state?: string) {
 }
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-wiring-repo-"));
+  const root = makeTempDir("styre-wiring-repo-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -701,7 +702,7 @@ describe("styre run", () => {
       const env = isolate();
       const repo = gitRepo();
       const profile = writeProfile(join(env.configRoot, "p", "profile.json"), "test-project", repo);
-      const dbPath = join(mkdtempSync(join(tmpdir(), "styre-wiring-db-")), "reused.db");
+      const dbPath = join(makeTempDir("styre-wiring-db-"), "reused.db");
       // Earlier rows, so this run's ticket is neither the first ticket nor shares its project's id.
       migrate(dbPath);
       const c = openDb(dbPath);
@@ -1045,7 +1046,7 @@ function enrichDeps(onDispatch?: () => void): EnrichDeps {
 }
 /** A ruby repository: setup asks for its missing commands, then for approval. */
 function rubyRepo(): string {
-  const repo = mkdtempSync(join(tmpdir(), "styre-wiring-ruby-"));
+  const repo = makeTempDir("styre-wiring-ruby-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: repo });
   run(["init", "-b", "main"]);
   run(["remote", "add", "origin", "git@github.com:acme/myapp.git"]);
@@ -1189,7 +1190,7 @@ describe("styre setup", () => {
 
   test("both prompts run with the handlers removed, and the handlers come back after each", async () => {
     const repo = rubyRepo();
-    const out = join(mkdtempSync(join(tmpdir(), "styre-wiring-out-")), "profile.json");
+    const out = join(makeTempDir("styre-wiring-out-"), "profile.json");
     const base = counts();
     const h = installStopHandlers({ command: "setup", run: null }, handlerDeps().d);
     const asked: { q: string; listening: number[] }[] = [];
@@ -1217,7 +1218,7 @@ describe("styre setup", () => {
 
   test("a stop during the agent's enrichment: setup writes no profile and no environment file", async () => {
     const repo = rubyRepo();
-    const out = join(mkdtempSync(join(tmpdir(), "styre-wiring-out-")), "profile.json");
+    const out = join(makeTempDir("styre-wiring-out-"), "profile.json");
     try {
       const result = withPrompt(
         false,
@@ -1234,7 +1235,7 @@ describe("styre setup", () => {
 
   test("a stop at the approval prompt: setup writes nothing", async () => {
     const repo = rubyRepo();
-    const out = join(mkdtempSync(join(tmpdir(), "styre-wiring-out-")), "profile.json");
+    const out = join(makeTempDir("styre-wiring-out-"), "profile.json");
     try {
       await captured(async () => {
         const result = withPrompt(

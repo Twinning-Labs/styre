@@ -13,8 +13,7 @@
 // non-vacuous via a contrast pair that differs only in the guarded dimension (see smoke-report.md).
 
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { branchNameFor } from "../../src/agent/branch.ts";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
@@ -41,6 +40,7 @@ import { ensureWorktree } from "../../src/dispatch/worktree.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
 import { scriptedCheckRunner } from "../helpers/check-runner.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir, trackTempPath } from "../helpers/temp.ts";
 
 // ---------------------------------------------------------------------------------------------------
 // git + worktree helpers
@@ -54,7 +54,7 @@ function git(cwd: string, args: string[]): string {
 
 /** A fresh git repo with README.md committed plus any `extra` tracked files. */
 function gitRepo(extra: Record<string, string> = {}): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-sds-"));
+  const root = makeTempDir("styre-sds-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -153,7 +153,7 @@ async function setupChecks(desc: string): Promise<ChecksHarness> {
   await markDesignDone(db, ticketId);
   insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
   setTicketTrack(db, ticketId, "fast");
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-sdswt-"));
+  const worktreeRoot = makeTempDir("styre-sdswt-");
   return {
     db,
     ticketId,
@@ -383,7 +383,7 @@ test("A7 a git-detected paired rename commits both halves (not discarded)", asyn
   await markDesignDone(db, ticketId);
   insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
   setTicketTrack(db, ticketId, "fast");
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-sdswt-"));
+  const worktreeRoot = makeTempDir("styre-sdswt-");
   const h: ChecksHarness = {
     db,
     ticketId,
@@ -793,7 +793,7 @@ function fakeApplyRunner(apply: (cwd: string) => void, stdout: string): FakeAgen
 test("B1 re-author commits a declared canonical test for the flagged AC", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = `${repo}-wt-b1-${Date.now()}`;
+  const wt = trackTempPath(`${repo}-wt-b1-${Date.now()}`);
   const runner = fakeApplyRunner(
     (cwd) => {
       const dir = join(cwd, "checks");
@@ -822,7 +822,7 @@ test("B1 re-author commits a declared canonical test for the flagged AC", async 
 test("B2 ⚔ re-author discards an undeclared loose scratch (+note), no reject", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = `${repo}-wt-b2-${Date.now()}`;
+  const wt = trackTempPath(`${repo}-wt-b2-${Date.now()}`);
   const runner = fakeApplyRunner(
     (cwd) => {
       const dir = join(cwd, "checks");
@@ -877,7 +877,7 @@ function setupImplement(opts?: {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo(opts?.repoExtra);
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-sdsimpl-"));
+  const worktreeRoot = makeTempDir("styre-sdsimpl-");
   const wt = join(worktreeRoot, "ENG-1");
   const unit = insertWorkUnit(db, {
     ticketId,
@@ -1108,7 +1108,7 @@ async function runPathScope(opts: {
 }) {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo(opts.repoExtra);
-  const wt = `${repo}-wt-ps-${Math.random().toString(36).slice(2)}`;
+  const wt = trackTempPath(`${repo}-wt-ps-${Math.random().toString(36).slice(2)}`);
   const runner = fakeApplyRunner(opts.apply, opts.stdout ?? "no sidecar");
   const promise = runAgentDispatch(
     rdCtx(db, ticketId, "design:dispatch"),
@@ -1206,7 +1206,7 @@ test("G1 ⚔ disposition omitted defaults to reject — CONTRAST with discard", 
   const scenario = (disposition?: "reject" | "discard") => {
     const { db, ticketId } = makeTestDb();
     const repo = gitRepo();
-    const wt = `${repo}-wt-g1-${Math.random().toString(36).slice(2)}`;
+    const wt = trackTempPath(`${repo}-wt-g1-${Math.random().toString(36).slice(2)}`);
     const runner = fakeApplyRunner(
       (cwd) => writeFileSync(join(cwd, "junk.ts"), "junk\n"),
       sidecar({ new_files: [] }),
@@ -1240,7 +1240,7 @@ test("G1 ⚔ disposition omitted defaults to reject — CONTRAST with discard", 
 test("G2 a read-only dispatch (no commitScope) leaves a stray NOTED, not deleted, not rejected", async () => {
   const { db, ticketId } = makeTestDb();
   const repo = gitRepo();
-  const wt = `${repo}-wt-g2-${Date.now()}`;
+  const wt = trackTempPath(`${repo}-wt-g2-${Date.now()}`);
   const runner = fakeApplyRunner((cwd) => writeFileSync(join(cwd, "stray.txt"), "oops\n"), "{}");
   await runAgentDispatch(
     rdCtx(db, ticketId, "review"),
@@ -1266,7 +1266,7 @@ test("G4 ⚔ verify:check sweeps a styre_scratch/ present at verify time (before
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
-  const worktreeRoot = mkdtempSync(join(tmpdir(), "styre-sdsverify-"));
+  const worktreeRoot = makeTempDir("styre-sdsverify-");
   const wt = join(worktreeRoot, "ENG-1");
   const unit = insertWorkUnit(db, { ticketId, seq: 1, kind: "node", verifyCheckTypes: ["test"] });
   const runner = new FakeAgentRunner(() => ({

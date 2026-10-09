@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -11,9 +10,10 @@ import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { resolvePythonInterpreter } from "../../src/dispatch/provision.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-int-"));
+  const root = makeTempDir("styre-int-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -78,7 +78,7 @@ test("verify:integration runs all components' build+test + repoCommands and reco
       ],
       repoCommands: { integration: "true" },
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-int-wt-")),
+    worktreeRoot: makeTempDir("styre-int-wt-"),
   });
 
   await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
@@ -153,7 +153,7 @@ test("verify:integration records an advisory fail when one component's test comm
       ],
       repoCommands: { integration: "true" },
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-int-fail-")),
+    worktreeRoot: makeTempDir("styre-int-fail-"),
   });
 
   await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
@@ -201,7 +201,7 @@ test("verify:integration preserves a selected Python suite command", async () =>
         },
       ],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-int-pynoready-")),
+    worktreeRoot: makeTempDir("styre-int-pynoready-"),
   });
 
   await advanceOneStep(db, ticketId, registry); // provision (no prepare configured -> no-op)
@@ -228,7 +228,7 @@ const live = process.env.RUN_LIVE === "1" ? test : test.skip;
 live(
   "verify:integration: a ready python env preserves the explicit suite command",
   async () => {
-    const root = mkdtempSync(join(tmpdir(), "styre-int-pyready-"));
+    const root = makeTempDir("styre-int-pyready-");
     const interp = resolvePythonInterpreter();
     const pytestCheck = Bun.spawnSync([interp, "-m", "pytest", "--version"]);
     const installedPytest = pytestCheck.exitCode !== 0;
@@ -277,7 +277,7 @@ live(
             },
           ],
         }),
-        worktreeRoot: mkdtempSync(join(tmpdir(), "styre-int-pyreadywt-")),
+        worktreeRoot: makeTempDir("styre-int-pyreadywt-"),
       });
 
       await advanceOneStep(db, ticketId, registry); // provision → real editable install (env → ready)

@@ -4,8 +4,7 @@ import { Database } from "bun:sqlite";
 // is free: the attempt is given back, edits are undone in place, the branch goes back to where the
 // step started when that is safe. Anything unmatched takes the crash path. recover() kills nothing.
 import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { branchNameFor } from "../../src/agent/branch.ts";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
@@ -36,6 +35,7 @@ import {
 import { nowUtc } from "../../src/util/time.ts";
 import { git, makeGitProject, makeTicketDb, removeLifecycleFolders } from "../helpers/lifecycle.ts";
 import { cleanupParkedRun, resumeParkedTicket, runParkedTicket } from "../helpers/run-harness.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 // The temporary folders the lifecycle helpers made for this file.
 afterAll(removeLifecycleFolders);
@@ -43,7 +43,7 @@ afterAll(removeLifecycleFolders);
 // The worktree root each `styre run --resume` makes in the temporary folder goes into one folder of
 // this file's own, removed after the file.
 const savedTmpdir = process.env.TMPDIR;
-const tmpRoot = mkdtempSync(join(tmpdir(), "styre-interruption-tmp-"));
+const tmpRoot = makeTempDir("styre-interruption-tmp-");
 beforeAll(() => {
   process.env.TMPDIR = tmpRoot;
 });
@@ -56,7 +56,7 @@ afterAll(() => {
 let state: string;
 const savedState = process.env.XDG_STATE_HOME;
 beforeEach(() => {
-  state = mkdtempSync(join(tmpdir(), "styre-interruption-"));
+  state = makeTempDir("styre-interruption-");
   process.env.XDG_STATE_HOME = state;
   door.__resetForTests();
 });

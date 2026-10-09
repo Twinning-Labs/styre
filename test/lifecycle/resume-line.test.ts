@@ -3,8 +3,7 @@
 // handler says what resume will do instead and how to start over. No process is started here.
 import { Database } from "bun:sqlite";
 import { afterAll, afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as door from "../../src/util/process/door.ts";
 import {
@@ -13,6 +12,7 @@ import {
   handleStopSignal,
 } from "../../src/util/process/signals.ts";
 import { makeTicketDb, removeLifecycleFolders } from "../helpers/lifecycle.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 // The temporary folders the lifecycle helpers made for this file.
 afterAll(removeLifecycleFolders);
@@ -56,7 +56,7 @@ test("the resume line appears when the interruption was recorded", async () => {
 });
 
 test("when recording fails, the resume line is not printed; what resume will do instead is", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "styre-resume-line-"));
+  const dir = makeTempDir("styre-resume-line-");
   dirs.push(dir);
   // The run's own connection is open, but the file the handler records through is not a database.
   const bad = join(dir, "run.db");
@@ -75,7 +75,7 @@ test("when recording fails, the resume line is not printed; what resume will do 
 });
 
 test("when the run database is gone, nothing is recorded and the resume line is not printed", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "styre-resume-line-"));
+  const dir = makeTempDir("styre-resume-line-");
   dirs.push(dir);
   const db = new Database(":memory:");
   const lines: string[] = [];

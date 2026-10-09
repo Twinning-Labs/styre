@@ -7,18 +7,18 @@
 // No process is started or signalled here: every record names pid 4321 from another boot (the sweep
 // removes such a record without looking at its pid), or is refused before anything is looked at.
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { lsCommand } from "../../../src/cli/ls.ts";
 import * as door from "../../../src/util/process/door.ts";
 import { processesDir, recordFileName } from "../../../src/util/process/records.ts";
 import { sweepOrphans } from "../../../src/util/process/sweep.ts";
+import { makeTempDir } from "../../helpers/temp.ts";
 
 let state: string;
 const saved = process.env.XDG_STATE_HOME;
 beforeEach(() => {
-  state = mkdtempSync(join(tmpdir(), "styre-malformed-"));
+  state = makeTempDir("styre-malformed-");
   process.env.XDG_STATE_HOME = state;
   door.__resetForTests();
 });

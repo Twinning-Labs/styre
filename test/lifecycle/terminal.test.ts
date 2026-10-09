@@ -18,7 +18,6 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ProcInfo } from "../../src/util/process/proc-table.ts";
 import { makeTicketDb, removeLifecycleFolders } from "../helpers/lifecycle.ts";
@@ -31,6 +30,7 @@ import {
   signalOwned,
   until,
 } from "../helpers/own-processes.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 import { CTRL_BACKSLASH, CTRL_C, type Pty, shellStatus, underPty } from "./pty.ts";
 
 // The temporary folders the lifecycle helpers made for this file.
@@ -46,7 +46,7 @@ const opening = (sig: string): string => `styre: received a stop request (${sig}
 const FORCING = "styre: forcing stop…\n";
 const SLOW = 30_000;
 
-const scratch = realpathSync(mkdtempSync(join(tmpdir(), "styre-terminal-")));
+const scratch = realpathSync(makeTempDir("styre-terminal-"));
 const ptys: Pty[] = [];
 afterEach(() => {
   killOwned();

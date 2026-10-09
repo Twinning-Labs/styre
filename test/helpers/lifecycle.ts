@@ -1,7 +1,6 @@
 // Fixtures for the interruption tests (ENG-485 section 7.5): a run database holding one ticket whose
 // step is `running`, and the same database pointed at a real git repository.
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ProjectorPorts } from "../../src/daemon/projector.ts";
 import { openDb } from "../../src/db/client.ts";
@@ -14,13 +13,14 @@ import { insertTicket } from "../../src/db/repos/ticket.ts";
 import * as steps from "../../src/db/repos/workflow-step.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import { nowUtc } from "../../src/util/time.ts";
+import { makeTempDir } from "./temp.ts";
 
 /** Every temporary folder these helpers made (and the `-wt` folder beside a repository, which a
  *  worktree mode run may create). A test file that uses the helpers removes them all after its
  *  tests: `afterAll(removeLifecycleFolders)`. */
 const made: string[] = [];
 function tempFolder(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = makeTempDir(prefix);
   made.push(dir);
   return dir;
 }

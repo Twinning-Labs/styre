@@ -4,8 +4,7 @@
 // and start time, and removed by that identity, even when a test fails: never by searching for the
 // marker (R28).
 import { expect } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { LaunchHandle } from "../../src/util/process/door.ts";
 import { listProcesses, nowToken, probe, tokenValue } from "../../src/util/process/proc-table.ts";
@@ -19,6 +18,7 @@ import {
   registerGroup,
   until,
 } from "./own-processes.ts";
+import { makeTempDir } from "./temp.ts";
 
 export { until };
 
@@ -33,7 +33,7 @@ export function marker(): string {
 }
 
 export function folder(prefix: string): string {
-  const d = mkdtempSync(join(tmpdir(), prefix));
+  const d = makeTempDir(prefix);
   roots.push(d);
   return d;
 }

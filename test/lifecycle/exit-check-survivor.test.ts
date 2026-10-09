@@ -6,21 +6,20 @@
 // pids end at 99999). The stop's kill function refuses every signal with EPERM, so this test sends
 // no real signal at all: it only makes a stop do less. The command (`true`) ends by itself.
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { assertNoLeakedLaunches } from "../../src/cli/exit-check.ts";
 import * as door from "../../src/util/process/door.ts";
 import { checkLeftoversInBackground } from "../../src/util/process/leftovers.ts";
 import { type ProcInfo, listProcesses, nowToken } from "../../src/util/process/proc-table.ts";
 import { realStopDeps } from "../../src/util/process/stop.ts";
 import { runCommand } from "../../src/util/run-command.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const FAKE = 999999;
 let state: string;
 const saved = process.env.XDG_STATE_HOME;
 beforeEach(() => {
-  state = mkdtempSync(join(tmpdir(), "styre-exit-check-"));
+  state = makeTempDir("styre-exit-check-");
   process.env.XDG_STATE_HOME = state;
   door.__resetForTests();
 });

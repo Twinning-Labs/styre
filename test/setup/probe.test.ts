@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { probeProfile } from "../../src/setup/probe.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 /** A temp git repo with an origin remote + a package.json + a workflow. */
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-probe-"));
+  const root = makeTempDir("styre-probe-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -28,7 +28,7 @@ test("probeProfile derives slug from the git remote and produces components + re
 });
 
 test("probeProfile honors overrides and falls back to dir basename for slug", () => {
-  const bare = mkdtempSync(join(tmpdir(), "styre-bare-")); // not a git repo
+  const bare = makeTempDir("styre-bare-"); // not a git repo
   const p = probeProfile(bare, { slug: "custom", checksSystem: "external" });
   expect(p.slug).toBe("custom");
   expect(p.checksSystem).toBe("external");

@@ -1,6 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { runSetup } from "../../src/cli/setup.ts";
@@ -10,6 +9,7 @@ import { unresolvedTestTargets } from "../../src/dispatch/test-target.ts";
 import { DiscoverSchema, normalizeDiscovery } from "../../src/setup/discover-schema.ts";
 import { discoverComponents } from "../../src/setup/discover.ts";
 import { planTestEnvironment } from "../../src/testing/environment.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -44,7 +44,7 @@ function required<T>(value: T | undefined): T {
 const policy = { interactive: false, trustAgentCommands: true };
 
 test("recorded Sphinx shape retains both fixture roles, unresolved observations and a valid primary command", async () => {
-  const root = mkdtempSync(join(tmpdir(), "styre-discovery-contract-"));
+  const root = makeTempDir("styre-discovery-contract-");
   roots.push(root);
   writeFileSync(
     join(root, "package.json"),
@@ -202,7 +202,7 @@ test("malformed JSON and metadata failures report locations without leaking inpu
 });
 
 test("full setup persists fixture classification while still refusing the unsupported primary frontend", async () => {
-  const root = mkdtempSync(join(tmpdir(), "styre-discovery-setup-"));
+  const root = makeTempDir("styre-discovery-setup-");
   roots.push(root);
   writeFileSync(
     join(root, "package.json"),

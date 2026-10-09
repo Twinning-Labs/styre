@@ -8,8 +8,7 @@
 // No process is started here apart from git: the agent is a stand-in in this process.
 import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { toolNamesFor } from "../../src/agent/capabilities.ts";
 import type { AgentRunInput, AgentRunResult, AgentRunner } from "../../src/agent/runner.ts";
@@ -24,6 +23,7 @@ import { runAgentDispatch } from "../../src/dispatch/run-dispatch.ts";
 import * as door from "../../src/util/process/door.ts";
 import { __resetSignalsForTests, handleStopSignal } from "../../src/util/process/signals.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 afterEach(() => {
   door.__resetForTests();
@@ -37,7 +37,7 @@ afterAll(() => {
 });
 
 function gitRepo(): string {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "styre-dctx-")));
+  const root = realpathSync(makeTempDir("styre-dctx-"));
   repos.push(root);
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);

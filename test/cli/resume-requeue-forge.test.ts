@@ -9,6 +9,7 @@ import { branchHeadSha } from "../../src/dispatch/worktree.ts";
 import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import { cleanupParkedRun, runParkedTicket } from "../helpers/run-harness.ts";
+import { trackTempEntriesMadeBy } from "../helpers/temp.ts";
 
 // A checkpoint paused because its PR request failed (the Sphinx `base invalid` case) must retry
 // that request on a plain resume, against the profile's current base — not stay failed forever
@@ -50,27 +51,30 @@ test("resume re-queues failed forge rows for the current head only, with the pro
     );
     seed.close();
     await expect(
-      resumeRun(
-        { resume: parked.ident },
-        parseProfile({
-          slug: parked.slug,
-          targetRepo: repo,
-          // The Sphinx case: the profile names a branch the forge lacks. The resume confirms the
-          // base on the forge first, so the re-queued request targets the branch that exists.
-          defaultBranch: "master",
-          checksSystem: "none",
-        }),
-        DEFAULT_RUNTIME_CONFIG,
-        {
-          ports: {
-            issueTracker: fakeIssueTracker(),
-            forge: fakeForge({ defaultBranch: "main", branches: ["main"] }),
+      // resumeRun mints and keeps a styre-wt-* worktree root before buildRegistry throws.
+      trackTempEntriesMadeBy("styre-wt-", () =>
+        resumeRun(
+          { resume: parked.ident },
+          parseProfile({
+            slug: parked.slug,
+            targetRepo: repo,
+            // The Sphinx case: the profile names a branch the forge lacks. The resume confirms the
+            // base on the forge first, so the re-queued request targets the branch that exists.
+            defaultBranch: "master",
+            checksSystem: "none",
+          }),
+          DEFAULT_RUNTIME_CONFIG,
+          {
+            ports: {
+              issueTracker: fakeIssueTracker(),
+              forge: fakeForge({ defaultBranch: "main", branches: ["main"] }),
+            },
+            preflight: () => ({ ok: true, version: null }),
+            buildRegistry: () => {
+              throw new Error("stop before dispatch");
+            },
           },
-          preflight: () => ({ ok: true, version: null }),
-          buildRegistry: () => {
-            throw new Error("stop before dispatch");
-          },
-        },
+        ),
       ),
     ).rejects.toThrow("stop before dispatch");
     const db = new Database(dbPath);

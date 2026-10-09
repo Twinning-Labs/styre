@@ -3,8 +3,7 @@ import { runAtBaseline } from "../../src/dispatch/baseline-rerun.ts";
 
 // -- ENG-402: a delivered test must be shown to bind ---------------------------------------
 
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { deliveredTestBindsAtBaseline } from "../../src/dispatch/baseline-rerun.ts";
 
@@ -14,7 +13,7 @@ function git(args: string[], cwd: string) {
 
 /** A repo whose baseline has a buggy `add`, with the fix applied on top. */
 function repoWithBaseline(): { repoPath: string; baselineSha: string } {
-  const dir = mkdtempSync(join(tmpdir(), "styre-bind-repo-"));
+  const dir = makeTempDir("styre-bind-repo-");
   git(["init", "-q", "."], dir);
   git(["config", "user.email", "t@t"], dir);
   git(["config", "user.name", "t"], dir);
@@ -29,7 +28,7 @@ function repoWithBaseline(): { repoPath: string; baselineSha: string } {
 
 test("an unqualified failing command cannot prove a delivered test binds", async () => {
   const { repoPath, baselineSha } = repoWithBaseline();
-  const src = mkdtempSync(join(tmpdir(), "styre-bind-src-"));
+  const src = makeTempDir("styre-bind-src-");
   mkdirSync(join(src, "t"), { recursive: true });
   // Exits non-zero at the baseline → it distinguishes the two revisions.
   writeFileSync(join(src, "t", "a.test.sh"), "exit 1\n");
@@ -49,7 +48,7 @@ test("an unqualified successful command cannot prove test execution", async () =
   // fails identically and reads as fine. This is what styre already proves for its own AC checks
   // via ac-check-red-first, and previously proved for nothing it delivered.
   const { repoPath, baselineSha } = repoWithBaseline();
-  const src = mkdtempSync(join(tmpdir(), "styre-bind-src2-"));
+  const src = makeTempDir("styre-bind-src2-");
   mkdirSync(join(src, "t"), { recursive: true });
   writeFileSync(join(src, "t", "a.test.sh"), "exit 0\n");
   const verdict = await deliveredTestBindsAtBaseline({
@@ -65,7 +64,7 @@ test("an unqualified successful command cannot prove test execution", async () =
 
 test("an unusable baseline is unknown, never a verdict either way", async () => {
   const { repoPath } = repoWithBaseline();
-  const src = mkdtempSync(join(tmpdir(), "styre-bind-src3-"));
+  const src = makeTempDir("styre-bind-src3-");
   mkdirSync(join(src, "t"), { recursive: true });
   writeFileSync(join(src, "t", "a.test.sh"), "exit 1\n");
   const verdict = await deliveredTestBindsAtBaseline({
@@ -82,6 +81,7 @@ test("an unusable baseline is unknown, never a verdict either way", async () => 
 import { existsSync } from "node:fs";
 import { deliveredTestEvidenceAtBaseline } from "../../src/dispatch/baseline-rerun.ts";
 import { resolveCheckExecution } from "../../src/dispatch/check-execution.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 test.each([
   [1, "E       assert 1 == 2\n1 failed in 0.01s", "binds"],

@@ -3,20 +3,19 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as rec from "../../../src/util/process/records.ts";
+import { makeTempDir } from "../../helpers/temp.ts";
 
 let state: string;
 const saved = process.env.XDG_STATE_HOME;
 beforeEach(() => {
-  state = mkdtempSync(join(tmpdir(), "styre-rec-"));
+  state = makeTempDir("styre-rec-");
   process.env.XDG_STATE_HOME = state;
 });
 afterEach(() => {

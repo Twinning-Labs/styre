@@ -1,19 +1,18 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import * as steps from "../../src/db/repos/workflow-step.ts";
 import { ParkSignal } from "../../src/engine/park-signal.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
 import * as door from "../../src/util/process/door.ts";
 import * as timeModule from "../../src/util/time.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 let state: string;
 const savedState = process.env.XDG_STATE_HOME;
 
 beforeEach(() => {
-  state = mkdtempSync(join(tmpdir(), "styre-journal-"));
+  state = makeTempDir("styre-journal-");
   process.env.XDG_STATE_HOME = state;
   door.__resetForTests();
 });

@@ -8,8 +8,7 @@
 // regression let them claim, a candidate or the tree `ownTree` found under it, is never signalled.
 // Breaks that weaken who may be signalled are proved in a container, never on a developer machine.
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   type ProcInfo,
@@ -38,6 +37,7 @@ import {
   until,
   wouldClaim,
 } from "../helpers/own-processes.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 /** Every child a test here spawned, killed through its own Bun handle after the test. */
 const children: Bun.Subprocess[] = [];
@@ -66,7 +66,7 @@ async function orphan(detached: boolean): Promise<{
   since: string;
   end: () => void;
 }> {
-  const done = join(mkdtempSync(join(tmpdir(), "styre-own-")), "done");
+  const done = join(makeTempDir("styre-own-"), "done");
   doneFiles.push(done);
   const since = nowToken();
   const c = Bun.spawn(

@@ -9,7 +9,6 @@
 // this test's own, claimed through test/helpers/own-processes.ts and stopped in afterEach.
 import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claudeAgentRunner } from "../../src/agent/providers/claude.ts";
 import * as door from "../../src/util/process/door.ts";
@@ -18,9 +17,10 @@ import { processesDir } from "../../src/util/process/records.ts";
 import { realStopDeps } from "../../src/util/process/stop.ts";
 import { claimLaunchesAtStops, claimingStopDeps } from "../helpers/claim-launches.ts";
 import { killOwned, ownLaunch, until } from "../helpers/own-processes.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const FAKE = 999999;
-const scratch = realpathSync(mkdtempSync(join(tmpdir(), "styre-refusal-")));
+const scratch = realpathSync(makeTempDir("styre-refusal-"));
 const pollers: ReturnType<typeof setInterval>[] = [];
 
 const savedState = process.env.XDG_STATE_HOME;

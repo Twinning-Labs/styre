@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -10,9 +9,10 @@ import { getById as getUnit, insertWorkUnit } from "../../src/db/repos/work-unit
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-vr-"));
+  const root = makeTempDir("styre-vr-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -60,7 +60,7 @@ test("a unit whose suite fails on the first attempt still ends verified (advisor
         { name: "app", kind: "node", paths: ["**"], commands: { test: "test -f PASS" } },
       ],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-vrwt-")),
+    worktreeRoot: makeTempDir("styre-vrwt-"),
   });
 
   for (let i = 0; i < 12; i++) {

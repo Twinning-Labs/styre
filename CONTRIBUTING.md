@@ -16,6 +16,8 @@ bun run typecheck    # TypeScript type-check (no emit)
 bun run build        # compile → dist/styre
 ```
 
+Tests make temp folders with `makeTempDir` / `trackTempPath` from `test/helpers/temp.ts`, which removes them when the test ends, even if it fails. Each `bun test` run gets its own temp root (`test/preload.ts`), and the run fails if anything is still in it at the end. `bunfig.toml` loads that preload only when `bun test` runs from the repo root; from anywhere else pass `--preload <repo>/test/preload.ts`, or the helpers refuse to make folders.
+
 ## Before you change anything
 
 Read the architecture docs in order, starting at [`docs/architecture/README.md`](docs/architecture/README.md). That index lists the files and the order to read them. The load-bearing invariants are non-negotiable:

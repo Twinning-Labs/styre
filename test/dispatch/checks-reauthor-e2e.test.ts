@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -18,9 +17,10 @@ import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
 import { scriptedCheckRunner } from "../helpers/check-runner.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-re-"));
+  const root = makeTempDir("styre-re-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -93,7 +93,7 @@ test("green-on-HEAD check → vacuous → scoped re-author → repeated vacuous 
       targetRepo: repo,
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-rewt-")),
+    worktreeRoot: makeTempDir("styre-rewt-"),
     // The authored check GREENS on clean HEAD (exit 0) → green-on-HEAD adjudication.
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 0,
@@ -196,7 +196,7 @@ test("a weak classification (surface-only assertion) drives the same re-author l
       targetRepo: repo,
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-weak-wt-")),
+    worktreeRoot: makeTempDir("styre-weak-wt-"),
     // The authored check stays RED (a `weak` verdict is only valid on a red coarse bucket, §2/Task 2).
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 1,
@@ -299,7 +299,7 @@ test("supersede, not delete: a healed AC (vacuous -> re-author -> already-satisf
       targetRepo: repo,
       components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-heal-wt-")),
+    worktreeRoot: makeTempDir("styre-heal-wt-"),
     // Green-on-HEAD both rounds — only the ADJUDICATOR's judgment changes between rounds.
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 0,

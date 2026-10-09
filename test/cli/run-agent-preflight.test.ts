@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runImpl } from "../../src/cli/run.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 // Mirrors test/cli/run-preflight.test.ts's harness: run the unwrapped runImpl (bypassing `guard`
 // so the throw is observable) with telemetry off and isolated XDG dirs. `state` is where a park
@@ -35,7 +35,7 @@ async function invokeRun(args: Record<string, unknown>, xdg: string, state: stri
 // A profile whose toolchain preflight PASSES (build/test run `sh`, which exists) — so the run
 // reaches the agent-CLI probe rather than failing earlier on a missing build tool.
 function writeProfile(): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-agentpf-prof-"));
+  const dir = makeTempDir("styre-agentpf-prof-");
   const path = join(dir, "profile.json");
   writeFileSync(
     path,
@@ -61,7 +61,7 @@ function writeProfile(): string {
 
 // A hermetic runtime config whose agent.command points at a guaranteed-absent binary.
 function writeBadAgentConfig(): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-agentpf-cfg-"));
+  const dir = makeTempDir("styre-agentpf-cfg-");
   const path = join(dir, "config.json");
   writeFileSync(
     path,
@@ -77,8 +77,8 @@ function writeBadAgentConfig(): string {
 }
 
 test("run: a missing agent CLI throws before dispatch (exit 69 error) and writes no dump", async () => {
-  const xdg = mkdtempSync(join(tmpdir(), "styre-xdg-"));
-  const state = mkdtempSync(join(tmpdir(), "styre-state-"));
+  const xdg = makeTempDir("styre-xdg-");
+  const state = makeTempDir("styre-state-");
   const profile = writeProfile();
   const config = writeBadAgentConfig();
   await expect(invokeRun({ ticket: "ENG-1", profile, config }, xdg, state)).rejects.toThrow(

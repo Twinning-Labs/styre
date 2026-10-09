@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { readdirSync } from "node:fs";
 import {
   advanceBranchHead,
   cleanupParkedRun,
@@ -7,6 +8,7 @@ import {
   runNeedsYouTicket,
   runParkedTicket,
 } from "../helpers/run-harness.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 test("park/resume helpers return CLI exits without overwriting their caller's exit status", async () => {
   const original = process.exitCode ?? 0;
@@ -36,8 +38,11 @@ test("park/resume helpers return CLI exits without overwriting their caller's ex
 
 test("a fresh process exits successfully after capturing a simulated CLI failure", () => {
   const helper = new URL("../helpers/run-harness.ts", import.meta.url).href;
+  const temp = new URL("../helpers/temp.ts", import.meta.url).href;
   const script = `
     import { runParkedTicket, cleanupParkedRun } from ${JSON.stringify(helper)};
+    import { removeTempDirsOnExit } from ${JSON.stringify(temp)};
+    removeTempDirsOnExit();
     const parked = await runParkedTicket();
     try {
       if (parked.exitCode !== 75) throw new Error("lost observed CLI exit");
@@ -45,14 +50,18 @@ test("a fresh process exits successfully after capturing a simulated CLI failure
       cleanupParkedRun(parked);
     }
   `;
+  // A bare `bun -e` has no test preload, so the script removes its folders on exit, and its TMPDIR
+  // is a folder this test owns, so the check below sees exactly what the child left.
+  const childTmp = makeTempDir("styre-child-tmp-");
   const child = Bun.spawnSync([process.execPath, "-e", script], {
     // Bun.spawn's default environment is the one Bun started with, which lacks the preload's test
     // state folder: pass this process's, so no launch record reaches the operator's real one (R29).
-    env: { ...process.env },
+    env: { ...process.env, TMPDIR: childTmp },
     stdout: "pipe",
     stderr: "pipe",
   });
   expect(child.exitCode).toBe(0);
+  expect(readdirSync(childTmp)).toEqual([]);
 });
 
 test("fresh-run helper preserves caller status on success and a thrown refusal", async () => {

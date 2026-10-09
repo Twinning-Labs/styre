@@ -43,6 +43,7 @@ import { probeCommandExists } from "../../src/setup/discover-schema.ts";
 import * as door from "../../src/util/process/door.ts";
 import { __resetSignalsForTests, handleStopSignal } from "../../src/util/process/signals.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const dirs: string[] = [];
 const savedState = process.env.XDG_STATE_HOME;
@@ -52,7 +53,7 @@ const savedState = process.env.XDG_STATE_HOME;
 const sharedTmp = tmpdir();
 const savedTmpdir = process.env.TMPDIR;
 const tmp = (p: string): string => {
-  const d = mkdtempSync(join(tmpdir(), p));
+  const d = makeTempDir(p);
   dirs.push(d);
   return d;
 };
@@ -852,7 +853,7 @@ test("deferWorktreeRemoval refuses a folder that is not a styre-baseline folder 
   for (const d of notOurs) expect(readFileSync(join(d, "keep.txt"), "utf8")).toBe("not Styre's");
   // The folders the call sites make are accepted.
   for (const prefix of ["styre-baseline-adv-", "styre-baseline-bind-", "styre-baseline-wt-"]) {
-    const ok = mkdtempSync(join(tmpdir(), prefix));
+    const ok = makeTempDir(prefix);
     deferWorktreeRemoval(r.path, ok)();
     expect(existsSync(ok)).toBe(false);
   }

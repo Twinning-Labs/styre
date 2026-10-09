@@ -1,14 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import {
-  chmodSync,
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import {
@@ -24,6 +15,7 @@ import { nowToken } from "../../../src/util/process/proc-table.ts";
 import { claimLaunchesAtStops } from "../../helpers/claim-launches.ts";
 import { installVirtualGrace, resetDoorAfterEach } from "../../helpers/graceful-stop.ts";
 import { killOwned, ownPrinted, until } from "../../helpers/own-processes.ts";
+import { makeTempDir } from "../../helpers/temp.ts";
 
 resetDoorAfterEach();
 // Every stop a test causes claims what the launch is running first (test/helpers/claim-launches.ts),
@@ -33,7 +25,7 @@ beforeEach(() => claimLaunchesAtStops());
 // identity after each test, never by searching for their command.
 afterEach(() => killOwned());
 
-const cwd = realpathSync(mkdtempSync(join(tmpdir(), "styre-claude-")));
+const cwd = realpathSync(makeTempDir("styre-claude-"));
 
 /** Write an executable stand-in for the `claude` CLI that ignores its argv and runs `body`. */
 function fakeCli(name: string, body: string): string {
@@ -343,7 +335,7 @@ test("a background process the CLI leaves behind cannot hang the run: the drain 
   // Its parent exits before the run's stop looks, so nothing stops it. It ends by itself once the
   // test's `done` file exists. To be claimed for cleanup by descent, it must still be a descendant
   // of this test when claimed: the fake CLI writes its pid, then waits for the `go` file.
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "styre-straggler-")));
+  const dir = realpathSync(makeTempDir("styre-straggler-"));
   const [pidFile, go, done] = ["straggler.pid", "go", "done"].map((n) => join(dir, n));
   const cli = fakeCli(
     "claude-straggler",
@@ -374,7 +366,7 @@ test("a detached leftover process holding the output pipe does not keep the runn
   // It ends by itself once the test's `done` file exists (or after 20 s). To be claimed for cleanup
   // by descent, it must still be a descendant of this test when claimed: the CLI and the python
   // parent wait for the `go` file.
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "styre-holder-")));
+  const dir = realpathSync(makeTempDir("styre-holder-"));
   const [escaped, go, done] = ["holder-escaped.txt", "go", "done"].map((n) => join(dir, n));
   const cli = fakeCli(
     "claude-escaper",

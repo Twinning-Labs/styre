@@ -6,17 +6,17 @@
 //    deriveSlug silently pick the folder name, a different state folder, where --resume could not
 //    find its checkpoint.
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { deriveSlug, tryGit } from "../../src/config/slug.ts";
 import * as door from "../../src/util/process/door.ts";
 import { runCommand } from "../../src/util/run-command.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 let state: string;
 const saved = process.env.XDG_STATE_HOME;
 beforeEach(() => {
-  state = mkdtempSync(join(tmpdir(), "styre-loud-"));
+  state = makeTempDir("styre-loud-");
   process.env.XDG_STATE_HOME = state;
   door.__resetForTests();
 });

@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
 import * as door from "../../../src/util/process/door.ts";
 import { listProcesses, probe } from "../../../src/util/process/proc-table.ts";
 import { listRecords, processesDir } from "../../../src/util/process/records.ts";
 import { type StopDeps, realStopDeps } from "../../../src/util/process/stop.ts";
 import { claimLaunchesAtStops } from "../../helpers/claim-launches.ts";
 import { killOwned, ownChild, ownGroupMembers, ownLaunch } from "../../helpers/own-processes.ts";
+import { makeTempDir } from "../../helpers/temp.ts";
 
 const sh = (script: string): string[] => ["sh", "-c", script];
 const ctx = { ident: "ENG-1", stepId: 1, worktree: null };
@@ -41,7 +41,7 @@ function start(argv: string[], kind: "agent" | "group", env = process.env) {
 }
 
 beforeEach(() => {
-  state = mkdtempSync(join(tmpdir(), "styre-door-"));
+  state = makeTempDir("styre-door-");
   process.env.XDG_STATE_HOME = state;
   door.__resetForTests();
   // Every stop claims what a launch is running before it signals (a test's own stop functions
@@ -238,7 +238,7 @@ test("a stop signal in flight (stopAbort.forced) cuts a graceful stop's wait sho
 });
 
 test("a launch starts in the cwd it was given, for both kinds", async () => {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "styre-door-cwd-")));
+  const dir = realpathSync(makeTempDir("styre-door-cwd-"));
   try {
     for (const kind of ["group", "agent"] as const) {
       const h = door.launch({ argv: ["pwd"], cwd: dir, env: process.env, kind, context: ctx });

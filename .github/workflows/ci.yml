@@ -95,7 +95,7 @@ jobs:
             -v "$(command -v bun):/usr/local/bin/bun:ro" \
             -e STYRE_KARMA_NATIVE_DEPS=/suite/node_modules \
             -e STYRE_KARMA_SPHINX=/suite \
-            styre-karma-native xvfb-run -a bun test /code/test/testing/karma-native.test.ts
+            styre-karma-native xvfb-run -a bun test --preload /code/test/preload.ts /code/test/testing/karma-native.test.ts
 
   lifecycle:
     # ENG-485: the stop handling with real signals and in real terminals (test/lifecycle/terminal.test.ts

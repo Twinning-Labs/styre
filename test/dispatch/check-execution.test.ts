@@ -1,6 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   CheckExecutionPlanSchema,
@@ -13,6 +12,7 @@ import { runCheckExecution } from "../../src/dispatch/checks-run.ts";
 import type { Component } from "../../src/dispatch/profile.ts";
 import { resolveTestAction } from "../../src/setup/test-action.ts";
 import type { CommandResult } from "../../src/util/run-command.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const component: Component = {
   name: "ui",
@@ -202,7 +202,7 @@ const nativeRoot = process.env.STYRE_TEST_NATIVE_ROOT;
 const native = nativeRoot ? test : test.skip;
 const roots: string[] = [];
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "styre-native-contract-"));
+  const root = makeTempDir("styre-native-contract-");
   roots.push(root);
   return root;
 }

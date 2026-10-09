@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -18,6 +17,7 @@ import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { worktreeHead } from "../../src/dispatch/worktree.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const sidecar = (value: unknown) => `\`\`\`styre-sidecar\n${JSON.stringify(value)}\n\`\`\``;
 const finding = {
@@ -32,7 +32,7 @@ const finding = {
 const evidence = [{ kind: "source", path: "README.md", line: 1 }];
 function fixture() {
   const f = makeTestDb();
-  const root = mkdtempSync(join(tmpdir(), "styre-review-contract-"));
+  const root = makeTempDir("styre-review-contract-");
   const git = (...args: string[]) => {
     const r = Bun.spawnSync(["git", ...args], { cwd: root });
     if (!r.success) throw new Error(r.stderr.toString());
@@ -69,7 +69,7 @@ function fixture() {
       runner,
       profile,
       agentConfig: DEFAULT_AGENT_CONFIG,
-      worktreeRoot: mkdtempSync(join(tmpdir(), "styre-review-wt-")),
+      worktreeRoot: makeTempDir("styre-review-wt-"),
     });
   const ticket = getTicket(f.db, f.ticketId);
   if (!ticket) throw new Error("missing fixture ticket");
@@ -292,7 +292,7 @@ test("review requests only a declared job and receives recorded execution eviden
 
 test("symlinked job cwd cannot escape the worktree", async () => {
   const f = fixture();
-  const outside = mkdtempSync(join(tmpdir(), "styre-review-outside-"));
+  const outside = makeTempDir("styre-review-outside-");
   symlinkSync(outside, join(f.root, "component"));
   const profile = parseProfile({
     ...f.profile,

@@ -1,6 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { probeComponent } from "../../src/dispatch/check-capability.ts";
 import { frameworkFor } from "../../src/dispatch/check-selector.ts";
@@ -8,13 +7,14 @@ import { parseProfile } from "../../src/dispatch/profile.ts";
 import { testCapabilities } from "../../src/testing/environment-schema.ts";
 import { planTestEnvironment, testEnvironmentProblem } from "../../src/testing/environment.ts";
 import { karmaVerdict } from "../../src/testing/karma.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 function fixture(body = "./node_modules/.bin/karma start --browsers Firefox --single-run") {
-  const root = mkdtempSync(join(tmpdir(), "styre-karma-contract-"));
+  const root = makeTempDir("styre-karma-contract-");
   roots.push(root);
   writeFileSync(join(root, "package.json"), JSON.stringify({ scripts: { test: body } }));
   writeFileSync(join(root, "karma.conf.js"), 'module.exports=c=>c.set({frameworks:["jasmine"]});');

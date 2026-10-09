@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -12,10 +11,11 @@ import { insertPending, markSucceeded } from "../../src/db/repos/workflow-step.t
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function fixture(scope: "unit" | "integration", command: string) {
   const { db, ticketId, projectId } = makeTestDb();
-  const root = mkdtempSync(join(tmpdir(), "styre-execution-error-"));
+  const root = makeTempDir("styre-execution-error-");
   const repo = join(root, "repo");
   const git = (...args: string[]) => {
     const r = Bun.spawnSync(["git", "-C", repo, ...args]);
@@ -90,7 +90,7 @@ function fixture(scope: "unit" | "integration", command: string) {
 for (const scope of ["unit", "integration"] as const) {
   for (const command of ["tox -e unit -- -q", "nox -s tests", "pytest tests/unit -m fast"]) {
     test(`${scope}: executes selected ${command} verbatim without readiness substitution`, async () => {
-      const bin = mkdtempSync(join(tmpdir(), "styre-suite-bins-"));
+      const bin = makeTempDir("styre-suite-bins-");
       const probe = join(bin, "unexpected-python-probe");
       const before = process.env.PATH;
       const executable = (name: string, script: string) => {

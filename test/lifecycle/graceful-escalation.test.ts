@@ -4,17 +4,17 @@
 // SIGTERM trap installed), and waits for "gone" with a bounded poll, never a fixed sleep, so neither
 // start up speed nor reaping lag on a loaded machine can change the outcome.
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import * as door from "../../src/util/process/door.ts";
 import type { ProcInfo } from "../../src/util/process/proc-table.ts";
 import { installVirtualGrace } from "../helpers/graceful-stop.ts";
 import { allGone, commandOf, killOwned, ownLaunch, ownTree } from "../helpers/own-processes.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 let dir: string;
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "styre-escalation-"));
+  dir = makeTempDir("styre-escalation-");
   door.__resetForTests();
 });
 afterEach(() => {

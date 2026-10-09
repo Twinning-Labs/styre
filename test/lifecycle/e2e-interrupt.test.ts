@@ -24,8 +24,7 @@
 //    status, a dispatch outcome or any other column changed in place.
 import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { claudeAgentRunner } from "../../src/agent/providers/claude.ts";
@@ -68,6 +67,7 @@ import {
 } from "../../src/util/process/signals.ts";
 import { nowUtc } from "../../src/util/time.ts";
 import { killOwned, ownGroupMembers, ownLaunch } from "../helpers/own-processes.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const FX = join(import.meta.dir, "fixtures");
 const SLUG = "test-project";
@@ -300,11 +300,11 @@ function setUp(
   seed: (db: Database, ids: { ticketId: number; repo: string; aux: string }) => void,
   repoFiles: Record<string, string> = {},
 ): Run {
-  const state = mkdtempSync(join(tmpdir(), "styre-e2e-int-state-"));
+  const state = makeTempDir("styre-e2e-int-state-");
   const prevState = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = state;
-  const repo = realpathSync(mkdtempSync(join(tmpdir(), "styre-e2e-int-repo-")));
-  const aux = realpathSync(mkdtempSync(join(tmpdir(), "styre-e2e-int-aux-")));
+  const repo = realpathSync(makeTempDir("styre-e2e-int-repo-"));
+  const aux = realpathSync(makeTempDir("styre-e2e-int-aux-"));
   cleanups.push(() => {
     if (prevState === undefined) Reflect.deleteProperty(process.env, "XDG_STATE_HOME");
     else process.env.XDG_STATE_HOME = prevState;

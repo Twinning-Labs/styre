@@ -1,9 +1,7 @@
 // ENG-485 section 7.7: the drive loop lets the leftover checks started after agent steps end
 // before it returns, so they never write to a database a caller has already closed.
 import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
@@ -23,6 +21,7 @@ import {
 } from "../../src/util/process/leftovers.ts";
 import { makeTestDb } from "../helpers/db.ts";
 import { cleanupFixtures, folder, until } from "../helpers/leftover-fixtures.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const profile = parseProfile({
   slug: "demo",
@@ -34,7 +33,7 @@ const profile = parseProfile({
 /** The worktree roots this file made, removed after its tests. */
 const roots: string[] = [];
 const worktreeRoot = (): string => {
-  const dir = mkdtempSync(join(tmpdir(), "styre-rt-"));
+  const dir = makeTempDir("styre-rt-");
   roots.push(dir);
   return dir;
 };

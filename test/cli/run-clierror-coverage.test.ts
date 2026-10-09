@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runImpl } from "../../src/cli/run.ts";
 import type { AnalyticsClient } from "../../src/telemetry/analytics/client.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 interface Captured {
   event: string;
@@ -22,7 +22,7 @@ function fakeClient(): { client: AnalyticsClient; events: Captured[] } {
 
 /** Write a raw JSON object to a temp file and return its path. */
 function tmpJson(prefix: string, obj: unknown): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = makeTempDir(prefix);
   const path = join(dir, `${prefix}.json`);
   writeFileSync(path, JSON.stringify(obj));
   return path;
@@ -48,7 +48,7 @@ beforeEach(() => {
   prevDnt = process.env.DO_NOT_TRACK;
   prevStyre = process.env.STYRE_TELEMETRY;
   prevSlack = process.env.SLACK_BOT_TOKEN;
-  process.env.XDG_STATE_HOME = mkdtempSync(join(tmpdir(), "styre-clierr-state-"));
+  process.env.XDG_STATE_HOME = makeTempDir("styre-clierr-state-");
   Reflect.deleteProperty(process.env, "DO_NOT_TRACK");
   Reflect.deleteProperty(process.env, "STYRE_TELEMETRY");
   Reflect.deleteProperty(process.env, "SLACK_BOT_TOKEN");

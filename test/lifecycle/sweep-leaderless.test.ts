@@ -12,15 +12,7 @@
 // promise (Bun resolved it two minutes late here for a process whose child had called setsid): every
 // wait reads the process table, bounded.
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import {
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as door from "../../src/util/process/door.ts";
 import { __setCwdReadersForTests } from "../../src/util/process/leftovers.ts";
@@ -28,6 +20,7 @@ import { bootId, nowToken, probe, tokenValue } from "../../src/util/process/proc
 import { type LaunchRecord, processesDir, writeRecord } from "../../src/util/process/records.ts";
 import { sweepOrphans } from "../../src/util/process/sweep.ts";
 import { isAlive, killOwned, own, registerGroup, until } from "../helpers/own-processes.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 /** A sleep length no other test uses, in seconds: it also bounds how long a process this file
  *  starts can outlive the run if the run is killed before its cleanup. */
@@ -36,7 +29,7 @@ const NAP = "29.4719";
 let state: string;
 const saved = process.env.XDG_STATE_HOME;
 beforeEach(() => {
-  state = mkdtempSync(join(tmpdir(), "styre-leaderless-"));
+  state = makeTempDir("styre-leaderless-");
   process.env.XDG_STATE_HOME = state;
   door.__resetForTests();
 });

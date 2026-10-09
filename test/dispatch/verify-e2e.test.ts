@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
@@ -9,9 +8,10 @@ import { getById as getUnit, insertWorkUnit } from "../../src/db/repos/work-unit
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function gitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-ve2e-"));
+  const root = makeTempDir("styre-ve2e-");
   const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
@@ -56,7 +56,7 @@ test("implement then real verify:check drives a work-unit to verified", async ()
       targetRepo: repo,
       components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "true" } }],
     }),
-    worktreeRoot: mkdtempSync(join(tmpdir(), "styre-ve2ewt-")),
+    worktreeRoot: makeTempDir("styre-ve2ewt-"),
   });
 
   // Tick the resolver until the unit is verified (implement:dispatch → verify:wu1:test → mark-verified).

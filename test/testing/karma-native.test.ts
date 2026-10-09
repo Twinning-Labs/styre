@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { observeSuiteCommand, suiteResult } from "../../src/dispatch/suite-observation.ts";
 import { planTestEnvironment, qualifyTestEnvironment } from "../../src/testing/environment.ts";
 import { karmaReporterConfig } from "../../src/testing/karma.ts";
 import { listProcesses } from "../../src/util/process/proc-table.ts";
+import { makeTempDir, trackTempEntriesMadeBy } from "../helpers/temp.ts";
 
 const liveChildren = (): number[] =>
   listProcesses()
@@ -19,7 +19,7 @@ test.skipIf(!deps)(
   "native Karma 4/Firefox: original context, passing/failing/empty/config-error/timeout",
   async () => {
     if (!deps) throw Error("missing native dependencies");
-    const root = mkdtempSync(join(tmpdir(), "styre-karma-native-"));
+    const root = makeTempDir("styre-karma-native-");
     try {
       symlinkSync(deps, join(root, "node_modules"), "dir");
       writeFileSync(
@@ -103,13 +103,17 @@ test.skipIf(!deps)(
         "describe('example',()=>{it('hangs',()=>{while(true){}});});",
       );
       const childrenBefore = liveChildren();
-      const timeout = await observeSuiteCommand({
-        sha: "fixture-sha",
-        command: "npm test",
-        cwd: root,
-        environment: c.testEnvironment,
-        timeoutMs: 1000,
-      });
+      // Killed on timeout, karma never removes its browser profile (os.tmpdir()/karma-*): track
+      // just that, so Styre's own temp folders from this run stay under the leak guard.
+      const timeout = await trackTempEntriesMadeBy("karma-", () =>
+        observeSuiteCommand({
+          sha: "fixture-sha",
+          command: "npm test",
+          cwd: root,
+          environment: c.testEnvironment,
+          timeoutMs: 1000,
+        }),
+      );
       expect(timeout.timedOut).toBe(true);
       expect(suiteResult(timeout)).toBe("error");
       // The timeout stops the whole group, so no new child of this process stays alive.
@@ -177,7 +181,7 @@ test.skipIf(!deps)(
   "native Karma config/reporter protocol preserves original paths and writes completion",
   () => {
     if (!deps) throw Error("missing native dependencies");
-    const root = realpathSync(mkdtempSync(join(tmpdir(), "styre-karma-config-")));
+    const root = realpathSync(makeTempDir("styre-karma-config-"));
     try {
       symlinkSync(deps, join(root, "node_modules"), "dir");
       writeFileSync(

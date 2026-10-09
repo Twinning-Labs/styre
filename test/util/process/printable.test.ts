@@ -6,8 +6,7 @@
 // The real processes here are this test's own (a shell and its sleep), claimed at start and stopped
 // in afterEach; the sleep ends by itself after 22.8 s whatever happens.
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { lsImpl } from "../../../src/cli/ls.ts";
 import { describeProcess } from "../../../src/util/process/door.ts";
@@ -22,6 +21,7 @@ import { probe } from "../../../src/util/process/proc-table.ts";
 import { processesDir, recordFileName, scanRecords } from "../../../src/util/process/records.ts";
 import { sweepOrphans } from "../../../src/util/process/sweep.ts";
 import { killOwned, own, ownTree, until } from "../../helpers/own-processes.ts";
+import { makeTempDir } from "../../helpers/temp.ts";
 
 afterEach(() => {
   killOwned();
@@ -96,7 +96,7 @@ test("the leftover check's command of a real process whose argv holds escapes ha
 });
 
 test("a record read from disk has a printable command", () => {
-  const dir = mkdtempSync(join(tmpdir(), "styre-printable-"));
+  const dir = makeTempDir("styre-printable-");
   const saved = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = dir;
   try {
@@ -127,7 +127,7 @@ const EVIL_IDENT = "ENG-1\u001b]52;c;eA==\u0007\nstyre: forged";
 const SAFE_IDENT = "ENG-1?]52;c;eA==??styre: forged";
 
 test("the sweep's lines carry a record's ident with no control character (final re-review A N2, C D3)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "styre-printable-"));
+  const dir = makeTempDir("styre-printable-");
   const saved = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = dir;
   try {
@@ -159,7 +159,7 @@ test("the sweep's lines carry a record's ident with no control character (final 
 });
 
 test("styre ls lists a stopped orphan's ident with no control character", async () => {
-  const root = mkdtempSync(join(tmpdir(), "styre-printable-"));
+  const root = makeTempDir("styre-printable-");
   const out: string[] = [];
   const write = spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
     out.push(String(chunk));

@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { unrootedManifestWarnings } from "../../../src/setup/detect-components.ts";
 import { pythonDef, pythonImportName, pythonPrepare } from "../../../src/setup/lang/python.ts";
+import { makeTempDir } from "../../helpers/temp.ts";
 
 function fixture(files: Record<string, string>): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-python-"));
+  const root = makeTempDir("styre-python-");
   for (const [rel, content] of Object.entries(files)) {
     const p = join(root, rel);
     mkdirSync(join(p, ".."), { recursive: true });

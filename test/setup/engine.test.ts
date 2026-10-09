@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Component } from "../../src/dispatch/profile.ts";
 import { isCommandSafe } from "../../src/setup/command-safety.ts";
@@ -8,9 +7,10 @@ import { runRegistry, uniquifyNames } from "../../src/setup/detect-components.ts
 import type { LangDef } from "../../src/setup/lang/types.ts";
 import { isSafePath, safeMember } from "../../src/setup/manifests.ts";
 import { REGISTRY } from "../../src/setup/registry.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 function fixture(files: Record<string, string>): string {
-  const root = mkdtempSync(join(tmpdir(), "styre-eng-"));
+  const root = makeTempDir("styre-eng-");
   for (const [rel, content] of Object.entries(files)) {
     const p = join(root, rel);
     mkdirSync(join(p, ".."), { recursive: true });

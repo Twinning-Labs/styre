@@ -5,8 +5,7 @@
 // identity. No test signals a process it did not start, and no cleanup signals a bare pid or group.
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as door from "../../src/util/process/door.ts";
 import {
@@ -41,6 +40,7 @@ import {
   ownPrinted,
   ownTree,
 } from "../helpers/own-processes.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const FX = join(import.meta.dir, "fixtures");
 /** A sleep length no other test uses, so nothing else ever matches these processes. */
@@ -50,7 +50,7 @@ let state: string;
 const saved = process.env.XDG_STATE_HOME;
 
 beforeEach(() => {
-  state = mkdtempSync(join(tmpdir(), "styre-sweep-"));
+  state = makeTempDir("styre-sweep-");
   process.env.XDG_STATE_HOME = state;
   door.__resetForTests();
 });
@@ -734,7 +734,7 @@ describe("the leftover check", () => {
   });
 
   test("the shell that started this command in the worktree is not reported as a leftover (R30)", async () => {
-    const worktree = fs.realpathSync(mkdtempSync(join(tmpdir(), "styre-sweep-wt-")));
+    const worktree = fs.realpathSync(makeTempDir("styre-sweep-wt-"));
     try {
       const owner = await deadOwner();
       const gone = await deadOwner(); // an orphan that had already exited, in this worktree
@@ -783,7 +783,7 @@ describe("the leftover check", () => {
   });
 
   test("after stopping an orphan, what it left in its worktree is reported, never stopped", async () => {
-    const worktree = fs.realpathSync(mkdtempSync(join(tmpdir(), "styre-sweep-wt-")));
+    const worktree = fs.realpathSync(makeTempDir("styre-sweep-wt-"));
     try {
       const owner = await deadOwner();
       const agent = spawn(["sleep", NAP]);
@@ -808,7 +808,7 @@ describe("the leftover check", () => {
   });
 
   test("a check that could not finish says so", async () => {
-    const worktree = mkdtempSync(join(tmpdir(), "styre-sweep-wt-"));
+    const worktree = makeTempDir("styre-sweep-wt-");
     try {
       __setCwdReadersForTests({ sync: () => "skipped" });
       const owner = await deadOwner();

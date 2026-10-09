@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
 import { execSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import type { AgentRunResult } from "../../src/agent/runner.ts";
 import { runSetup } from "../../src/cli/setup.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const okRes = (stdout: string): AgentRunResult => ({
   completed: true,
@@ -40,7 +40,7 @@ function runnerFor(discover: object): FakeAgentRunner {
   return new FakeAgentRunner(() => okRes(body));
 }
 function gitRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), "styre-setup-"));
+  const dir = makeTempDir("styre-setup-");
   execSync("git init -q", { cwd: dir });
   writeFileSync(
     join(dir, "package.json"),

@@ -4,12 +4,12 @@
 // `bun test` of a probe with XDG_STATE_HOME pointing at a stand-in "real" folder made here.
 import { afterAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { makeTempDir } from "../helpers/temp.ts";
 
 const ROOT = join(import.meta.dir, "../..");
 const PROBE = "./test/lifecycle/fixtures/preload-probe.ts";
-const scratch = realpathSync(mkdtempSync(join(tmpdir(), "styre-preload-iso-")));
+const scratch = realpathSync(makeTempDir("styre-preload-iso-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 function probe(env: Record<string, string>) {
