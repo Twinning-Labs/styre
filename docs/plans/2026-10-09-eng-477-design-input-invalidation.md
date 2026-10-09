@@ -41,7 +41,7 @@
 - Temporary folders (PR #154, on `main` and under this branch): `test/preload.ts` fails any `bun test` run that leaves something in its temp root. Every new test and helper makes its folders with `makeTempDir(prefix)` (or registers a path it creates itself with `trackTempPath(path)`) from `test/helpers/temp.ts`, never with a bare `mkdtempSync`; the helpers remove them when the test (or, for a folder made outside a test, the run) ends. A call that runs `styre run` or a resume (which keep the run's `styre-wt-*` worktree root, also in place) is wrapped in `trackTempEntriesMadeBy("styre-wt-", () => ...)`. Scripts that run outside `bun test` (`scripts/db-fixtures/`) put every temporary folder, their children's included (`TMPDIR`), under one work folder they remove at the end.
 - Fixtures and reads (operator ruling, 2026-10-09): a test never opens a committed fixture in place; it works on a private copy (`copyFixture`, `copyRecordedRun`). Every read of a database that must not change it, in production (`--inspect`, the narrow readers of `ls`, `clean` and `--fresh`, and `priorRunIdAt`, the pause's read of the copy it overwrites) and in tests (`fixtureVersion`, the fixture tests, the harness's `read`, and every existing test that reads a run database), goes through the one helper `readCopyOf` (`src/db/read-copy.ts`, Task 1): it copies the file and its `-wal`/`-shm` files into a private temporary folder, opens the copy, and removes the folder in a `finally`. The original is never opened, in any journal mode (a read only open of a WAL database without its side files fails on macOS, and with them it can write beside it). The committed fixtures are in rollback journal (DELETE) mode, checked by a test that reads their file headers. The `.db` fixtures are tracked through a `.gitignore` negation (Task 1), proved with `git ls-files`.
 - Lint: `bun run lint` is `biome check .` (formatter on, `lineWidth` 100, organized imports, the recommended rules). The whole file blocks in this plan are formatted with the repository's `biome.json`; the fragments that edit existing files are not, so before each commit run `perl -e 'alarm 300; exec @ARGV' bunx biome check --write <the files the task touched>` and then `bun run lint`.
-- New stderr messages start with `run: `, `resume: ` or `migrate: `, never `styre: ` (the `styre: ` messages are pinned by `test/lifecycle/messages-doc.test.ts`). One exemption: `styre migrate`'s closing summary line keeps its existing `<verb>: <path> (schema v<N>)` shape (`bootstrapped: ...`, `already current: ...`), and Task 2's new `upgraded from v<old>: <db> (schema v<new>)` is another verb of that same line.
+- New stderr messages start with `run: `, `resume: ` or `migrate: ` (and `clean`'s own new lines with `styre clean: `, as all of `clean`'s messages already do), never `styre: ` (the `styre: ` messages are pinned by `test/lifecycle/messages-doc.test.ts`). One exemption: `styre migrate`'s closing summary line keeps its existing `<verb>: <path> (schema v<N>)` shape (`bootstrapped: ...`, `already current: ...`), and Task 2's new `upgraded from v<old>: <db> (schema v<new>)` is another verb of that same line.
 - Checks steps (`checks:dispatch`, `checks:classify`) are outside the table and keep today's rules (E9). No code in this plan changes their gating, feedback or identity rules.
 
 ## Review Focus
@@ -121,7 +121,7 @@ Modified:
 | `src/dispatch/run-dispatch.ts`, `src/cli/park.ts` | Carryover tied to the parked step's generation; resume order; narrowing and pause. |
 | `src/dispatch/provision.ts` | `resetProvision` through `invalidateSteps`. |
 | `src/dispatch/plan-frontmatter.ts`, `src/dispatch/worktree.ts` | Frontmatter from text; plan files at a ref through git. |
-| `src/cli/run.ts`, `src/cli/preflight.ts`, `src/cli/migrate.ts`, `src/cli/checkpoints.ts`, `src/cli/clean.ts`, `src/util/process/interruption.ts` | Wiring, shared toolchain decision, migration messages, narrow readers; every read of a checkpoint that must not change it goes through `readCopyOf` (Task 3). |
+| `src/cli/run.ts`, `src/cli/preflight.ts`, `src/cli/migrate.ts`, `src/cli/checkpoints.ts`, `src/cli/clean.ts`, `src/cli/ls.ts`, `src/util/process/interruption.ts` | Wiring, shared toolchain decision, migration messages, narrow readers; every read of a checkpoint that must not change it goes through `readCopyOf` (Task 3). |
 | `test/helpers/db.ts`, `test/helpers/skeleton-registry.ts`, `test/helpers/run-harness.ts` and the existing tests named per task (among them `test/migrate-cli.test.ts` and `test/cli/toolchain-gate-invariant.test.ts`) | Snapshot capture, plan digests in mocks, real steps instead of seeded rows, the new schema version and toolchain notice. |
 | `CLAUDE.md`, `docs/architecture/{minimal-loop,control-loop,build-operations,runtime-parameters,conventions,telemetry-export}.md`, `SECURITY.md`, `docs/architecture/brainstorm.md` | Spec §9. |
 
@@ -337,10 +337,12 @@ function walHeaderOf(file: string): string | null {
   }
 }
 
-/** Size, modification time and (for -wal) the WAL header of the database and its side files. */
+/** Size, modification time and (for -wal) the WAL header of the database and its -wal. The -shm is
+ *  copied but not compared: the copy's first connection rebuilds that index from the -wal, and a
+ *  reader of the original updates its read marks there, which would force retries for nothing. */
 function sourceState(path: string): string {
   return JSON.stringify(
-    [path, `${path}-wal`, `${path}-shm`].map((file) => {
+    [path, `${path}-wal`].map((file) => {
       try {
         if (!existsSync(file)) return [file, "absent"];
         const st = statSync(file);
@@ -361,10 +363,20 @@ function sourceState(path: string): string {
  *  Against a live writer: the size, modification time and WAL header of each source file are taken
  *  before and after the copy, and a copy during which any of them moved is taken again, up to
  *  READ_COPY_ATTEMPTS times; then it throws `could not get a stable copy of <path> after 3
- *  attempts`. The limit: a write that changes none of those (the same size, a modification time
+ *  attempts`. The limits: a write that changes none of those (the same size, a modification time
  *  within the file system's resolution, no WAL restart) is not seen, so under a writer that never
- *  pauses a copy is very likely, not certain, to be consistent. The callers read under the run lock
- *  or after its check, except `styre ls`, which only displays what it read. */
+ *  pauses a copy is very likely, not certain, to be consistent; and a database in rollback journal
+ *  (DELETE) mode is copied without its `-journal`, so a write in progress there is not seen either
+ *  (no Styre writer uses that mode; the committed fixtures, which do, have no writer). The callers
+ *  read under the run lock or after its check, except `styre ls`, which only displays what it read.
+ *
+ *  A caller must not copy a database its own process holds open: copying opens and closes the
+ *  original, and on POSIX closing any handle to a file drops every lock the process holds on it,
+ *  including those its own open connection relies on (SQLite's documented hazard). No production
+ *  caller does it (`priorRunIdAt` runs after `dumpPark` closed the run's connection). The tests
+ *  that do (`signals.test.ts`, `e2e-interrupt.test.ts`, reading a run database their own writer
+ *  still has open) are a stated case: one process, no other user of the file, and the copy is
+ *  only read. */
 export function readCopyOf<T>(
   path: string,
   fn: (db: Database) => T,
@@ -2458,7 +2470,7 @@ git commit -m "feat(eng-477): versioned migrations with backup, shape detection 
 **Files:**
 - Create: `src/db/repos/checkpoint-read.ts`
 - Modify: `src/cli/checkpoints.ts:6-7,45-61` (`classifyCheckpointDb`), `src/util/process/interruption.ts:7-8,113,225-274` (the `getProject` and `getTicket` imports; `findInterruption`, `olderCheckpointWarning`, `undoBeforeDiscard`). Reads only: nothing here changes who may be signalled.
-- Modify: `src/cli/clean.ts:38-44,166-172` (its two direct reads go through `readCopyOf`)
+- Modify: `src/cli/clean.ts:38-44,166-175` (its two direct reads go through `readCopyOf`; an unreadable checkpoint is removed when no run holds it, and `--purge` on one refuses)
 - Modify: `src/cli/ls.ts:34-66` (an effort `listCheckpoints` could not read is listed as unreadable, with the reason)
 - Modify tests (their read only opens of run databases go through `readCopyOf`): `test/lifecycle/e2e-interrupt.test.ts:25,170,222,242,562`, `test/lifecycle/interruption.test.ts:907`, `test/lifecycle/terminal.test.ts:10,358`, `test/lifecycle/signals.test.ts:152,306,330,361`, `test/cli/run-pr-base.test.ts:13`, `test/migrate.test.ts:1,41`
 - Modify: `src/cli/park.ts:259-260` (`--inspect` decides from `readDatabaseState` before `migrate`, and reports an older or refused checkpoint through the narrow readers; operator ruling, 2026-10-09)
@@ -2690,9 +2702,87 @@ test("ls lists an effort it cannot read as unreadable, with the reason, instead 
   } finally {
     stdout.mockRestore();
   }
-  expect(out.join("")).toContain("Unreadable checkpoints (left as they are):");
+  expect(out.join("")).toContain("Unreadable checkpoints (remove one with `styre clean <ident>`):");
   expect(out.join("")).toContain("fixture/ENG-9  could not read it:");
 });
+
+/** A checkpoint folder `<root>/fixture/<ident>` whose run.db is not a database. */
+function unreadableEffort(ident: string): { root: string; dir: string } {
+  const root = makeTempDir("styre-readers-state-");
+  const dir = join(root, "fixture", ident);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "run.db"), "not a database");
+  return { root, dir };
+}
+
+/** The lock of a run that is alive: this test's parent process, which outlives the test. */
+const lockByLiveRun = (dir: string) => writeFileSync(join(dir, "run.lock"), String(process.ppid));
+
+test("ls lists a checkpoint whose ticket table is empty as unreadable, and says when it is running", async () => {
+  const root = makeTempDir("styre-readers-state-");
+  const dir = join(root, "fixture", "ENG-8");
+  mkdirSync(dir, { recursive: true });
+  migrate(join(dir, "run.db")); // tables, no ticket
+  lockByLiveRun(dir);
+  const found = listCheckpoints(root);
+  expect(found.map((c) => [c.ident, c.kind, c.note, c.live])).toEqual([
+    ["ENG-8", "unreadable", "no ticket recorded", true],
+  ]);
+  const out: string[] = [];
+  const stdout = spyOn(process.stdout, "write").mockImplementation((c: unknown) => {
+    out.push(String(c));
+    return true;
+  });
+  try {
+    await lsImpl({ root, swept: [] });
+  } finally {
+    stdout.mockRestore();
+  }
+  expect(out.join("")).toContain("fixture/ENG-8 (running)  no ticket recorded");
+  expect(out.join("")).not.toContain("Running:");
+});
+
+test(
+  "clean removes an unreadable effort no run holds, with its Styre worktree, and says why",
+  async () => {
+    const { root, dir } = unreadableEffort("ENG-9");
+    const repo = gitRepo();
+    const wt = join(makeTempDir("styre-wt-"), "ENG-9");
+    const added = Bun.spawnSync(["git", "worktree", "add", "-q", "-b", "feat/ENG-9", wt], {
+      cwd: repo,
+      timeout: 30_000,
+    });
+    expect(added.exitCode).toBe(0);
+    await cleanImpl({ ident: "ENG-9", slug: "fixture" }, { root, targetRepo: repo });
+    expect(existsSync(dir)).toBe(false);
+    expect(existsSync(wt)).toBe(false);
+    expect(stderr.join("")).toContain("styre clean: could not read the checkpoint of ENG-9");
+  },
+  TIMEOUT_MS,
+);
+
+test(
+  "clean refuses an unreadable effort a live run holds (exit 75), and --purge refuses one",
+  async () => {
+    const live = unreadableEffort("ENG-9");
+    lockByLiveRun(live.dir);
+    const refusal = await cleanImpl(
+      { ident: "ENG-9", slug: "fixture" },
+      { root: live.root, targetRepo: gitRepo() },
+    ).catch((e: unknown) => e);
+    expect((refusal as { code?: number }).code).toBe(75);
+    expect(existsSync(live.dir)).toBe(true);
+
+    const idle = unreadableEffort("ENG-9");
+    const purge = await cleanImpl(
+      { ident: "ENG-9", slug: "fixture", purge: true },
+      { root: idle.root, targetRepo: gitRepo() },
+    ).catch((e: unknown) => e);
+    expect(String((purge as { headline?: string }).headline)).toContain("cannot --purge 'ENG-9'");
+    expect(existsSync(idle.dir)).toBe(true);
+  },
+  TIMEOUT_MS,
+);
 ```
 
 - [ ] **Step 2: Run it and see it fail**
@@ -2789,13 +2879,17 @@ export function findCheckpointParkedStepKey(db: Database, ticketId: number): str
 
 Every read below goes through `readCopyOf` (Task 1, operator ruling 2026-10-09): the checkpoint itself is never opened, in any journal mode, so a WAL checkpoint without its `-wal`/`-shm` files is still read (a read only open of one fails on macOS with `unable to open database file`), and nothing beside it changes.
 
-`src/cli/checkpoints.ts`: replace the imports on lines 6-7 with `import { listCheckpointPendingSignals, readCheckpointTicket } from "../db/repos/checkpoint-read.ts";` and add `import { readCopyOf } from "../db/read-copy.ts";`; in `classifyCheckpointDb` replace `const t = getTicket(db, ticketId);` with `const t = readCheckpointTicket(db, ticketId);` and `const pending = listPending(db, ticketId);` with `const pending = listCheckpointPendingSignals(db, ticketId);`; in `listCheckpoints` (lines 115-124) replace the `try { new Database(dbPath, { readonly: true }) ... } catch { continue; }` block with the one below, so an effort it cannot read is listed as such, with the reason, instead of dropped (operator ruling, 2026-10-09). `Database` is then a type only import (`import type { Database } from "bun:sqlite";`). `CheckpointKind` (line 10) gains `"unreadable"`, which `RESUMABLE` does not contain and `clean --all` never reaps (it reaps `pr-ready` and `done` only).
+`src/cli/checkpoints.ts`: replace the imports on lines 6-7 with `import { listCheckpointPendingSignals, readCheckpointTicket } from "../db/repos/checkpoint-read.ts";` and add `import { readCopyOf } from "../db/read-copy.ts";`; in `classifyCheckpointDb` replace `const t = getTicket(db, ticketId);` with `const t = readCheckpointTicket(db, ticketId);` and `const pending = listPending(db, ticketId);` with `const pending = listCheckpointPendingSignals(db, ticketId);`; in `listCheckpoints` replace lines 115-126 (from `let cls` through `if (cls === null) continue;`) with the block below, so an effort it cannot read, or whose `ticket` table is empty, is listed as unreadable with the reason instead of dropped (operator rulings, 2026-10-09: never silently drop). `Database` is then a type only import (`import type { Database } from "bun:sqlite";`). `CheckpointKind` (line 10) gains `"unreadable"`, which `RESUMABLE` does not contain and `clean --all` never reaps (it reaps `pr-ready` and `done` only).
 
 ```ts
       let cls: ReturnType<typeof classifyCheckpointDb> = null;
+      let reason = "no ticket recorded";
       try {
         cls = readCopyOf(dbPath, (db) => classifyCheckpointDb(db, dir));
       } catch (err) {
+        reason = `could not read it: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      if (cls === null) {
         // Said, never dropped: `ls` shows the effort as unreadable, with the reason.
         const lock = runLockStatus(dir);
         out.push({
@@ -2808,7 +2902,7 @@ Every read below goes through `readCopyOf` (Task 1, operator ruling 2026-10-09):
           stage: "unknown",
           branch: "",
           kind: "unreadable",
-          note: `could not read it: ${err instanceof Error ? err.message : String(err)}`,
+          note: reason,
           ageMs: 0,
           live: lock !== null && !lock.self,
           resumable: false,
@@ -2817,18 +2911,59 @@ Every read below goes through `readCopyOf` (Task 1, operator ruling 2026-10-09):
       }
 ```
 
-`src/cli/ls.ts`: in `lsImpl`, leave unreadable efforts out of the running list (`const running = all.filter((c) => c.live && c.kind !== "unreadable");`), and after the leftovers section add:
+`src/cli/ls.ts`: in `lsImpl`, leave unreadable efforts out of the running list (`const running = all.filter((c) => c.live && c.kind !== "unreadable");`), and right after the leftovers section, before the running section, add the one below. A live unreadable effort (a run holds its lock) says so with `(running)`:
 
 ```ts
 const unreadable = all.filter((c) => c.kind === "unreadable");
 if (unreadable.length > 0) {
   lines.push("");
-  lines.push("Unreadable checkpoints (left as they are):");
-  for (const c of unreadable) lines.push(`  ${c.slug}/${c.ident}  ${c.note ?? ""}`.trimEnd());
+  lines.push("Unreadable checkpoints (remove one with `styre clean <ident>`):");
+  for (const c of unreadable) {
+    const running = c.live ? " (running)" : "";
+    lines.push(`  ${c.slug}/${c.ident}${running}  ${c.note ?? ""}`.trimEnd());
+  }
 }
 ```
 
-`src/cli/clean.ts` (it reaches the checkpoint directly in two places): add `import { readCopyOf } from "../db/read-copy.ts";`; in `reapEffort` (lines 38-44) replace the `db`/`stale`/`try`/`finally` lines with `const stale = readCopyOf(c.dbPath, (db) => getLatestWorktreePath(db, c.ticketId));`; in `cleanImpl` (lines 166-172) replace them with `const cls = readCopyOf(dbPath, (db) => classifyCheckpointDb(db, dir));`. `import { Database }` then has no use left: remove it.
+`src/cli/clean.ts` (it reaches the checkpoint directly in two places): add `import { readCopyOf } from "../db/read-copy.ts";`; in `reapEffort` (lines 38-44) replace the `db`/`stale`/`try`/`finally` lines with `const stale = readCopyOf(c.dbPath, (db) => getLatestWorktreePath(db, c.ticketId));`; in `cleanImpl` replace lines 166-175 (from `const db = new Database(dbPath, { readonly: true });` through the `if (cls === null) { throw usageError(...) }` block) with the block below, and add the helper above `cleanImpl`. `import { Database }` then has no use left: remove it. Add `basename` to the `node:path` import, `listWorktrees` and `removeWorktree` to the `../dispatch/worktree.ts` import.
+
+An effort whose checkpoint cannot be read (or holds no ticket) is never left stuck (operator ruling, 2026-10-09): with no run holding its lock (the refuse gate above already exited `75` otherwise, unchanged), `styre clean <ident>` removes it anyway, saying it could not read the checkpoint and why. Its worktree path and branch are recorded in that unreadable database, so the worktrees are found by what Styre names them: a `styre-wt-*` root holding a folder named after the ident. The repository itself (an in place run) is never one of them, and no branch is touched. `--purge` needs the branch name from the database, so it refuses with a clear message. `clean --all` keeps skipping unreadable efforts (they are never `pr-ready` or `done`).
+
+```ts
+/** The worktrees Styre made for `ident` in `targetRepo` (under a `styre-wt-*` root, in a folder
+ *  named after the ident): what an unreadable checkpoint can no longer name. Never the
+ *  repository itself. */
+function styreWorktreesFor(targetRepo: string, ident: string): string[] {
+  return listWorktrees(targetRepo)
+    .map((w) => w.path)
+    .filter((p) => p.includes("/styre-wt-") && basename(p) === ident);
+}
+```
+
+```ts
+  let cls: ReturnType<typeof classifyCheckpointDb> = null;
+  let unreadable = "no ticket recorded";
+  try {
+    cls = readCopyOf(dbPath, (db) => classifyCheckpointDb(db, dir));
+  } catch (err) {
+    unreadable = err instanceof Error ? err.message : String(err);
+  }
+  if (cls === null) {
+    if (args.purge) {
+      throw usageError(
+        `cannot --purge '${ident}': its checkpoint could not be read (${unreadable}), and the branch to delete is recorded there`,
+        `Run 'styre clean ${ident}' without --purge to remove its worktree and checkpoint, then delete the branch yourself.`,
+      );
+    }
+    process.stderr.write(
+      `styre clean: could not read the checkpoint of ${ident} (${unreadable}); removing it anyway, since no run holds it\n`,
+    );
+    for (const path of styreWorktreesFor(targetRepo, ident)) removeWorktree(targetRepo, path);
+    rmSync(dir, { recursive: true, force: true });
+    process.stdout.write(`styre clean: reaped ${ident} (freed worktree, removed checkpoint)\n`);
+    return;
+  }
+```
 
 `src/util/process/interruption.ts`:
 - imports: remove `import { getProject } from "../../db/repos/project.ts";` and `import { getTicket } from "../../db/repos/ticket.ts";`, add `import { listCheckpointRunningSteps, readCheckpointTargetRepo, readCheckpointTicket } from "../../db/repos/checkpoint-read.ts";`;
@@ -2954,7 +3089,7 @@ and in `resumeRun`, right after `try {` (line 259) and before the `migrate(dbPat
 
 These existing tests open a run database read only to check what a run left. Each such read goes through `readCopyOf` too, so the rule holds for every reader and the source guard (Task 4) can refuse read only opens everywhere else. In each site below, `const c = new Database(P, { readonly: true }); try { BODY } finally { c.close(); }` becomes `return readCopyOf(P, (c) => { BODY });` (without `return` where the block returns nothing), and `const check = new Database(P, { readonly: true }); ...; check.close();` becomes `readCopyOf(P, (check) => { ... });`. Add `import { readCopyOf } from "../../src/db/read-copy.ts";` (`"../src/db/read-copy.ts"` in `test/migrate.test.ts`), and remove the `bun:sqlite` import where no other use of `Database` is left.
 
-- `test/lifecycle/e2e-interrupt.test.ts`: `dbRows` (line 170; its comment says "read through a connection of its own", now "read through a private copy"), `stepRow` (222), `dispatchRows` (242), and the in place check in `resume` (562: `readCopyOf(run.dbPath, (c) => expect(getLatestWorktreePath(c, run.ticketId)).toBe(run.repo));`). No other `Database` use: remove the import (line 25).
+- `test/lifecycle/e2e-interrupt.test.ts`: `dbRows` (line 170; its comment says "read through a connection of its own", now "read through a private copy"), `stepRow` (222), `dispatchRows` (242), and the in place check in `resume` (562: `readCopyOf(run.dbPath, (c) => expect(getLatestWorktreePath(c, run.ticketId)).toBe(run.repo));`). The file uses `Database` as a type elsewhere (lines 300, 754, 771): keep the import as `import type { Database } from "bun:sqlite";` (line 25).
 - `test/lifecycle/interruption.test.ts`: `rowAfterResume` (907). The file keeps `Database` for its writers.
 - `test/lifecycle/terminal.test.ts`: `interruptions` (358). Remove the import (line 10).
 - `test/lifecycle/signals.test.ts`: `notes` (152) and the three `check` connections (306, 330, 361). The run's own writer `db` is open during these reads; the copy takes its `-wal` and `-shm` too, so it sees what the writer committed. The file keeps `Database` for its writers.
@@ -3271,7 +3406,9 @@ import { join } from "node:path";
 
 /** Operator ruling (2026-10-09, spec §7.7): a database that must not change is read through
  *  readCopyOf (src/db/read-copy.ts), never by opening it read only. These files may, each for the
- *  reason given. */
+ *  reason given. The guard is against a read only open coming back by accident: it reads the source
+ *  text, so a spelling it does not list (a quoted key, a flag held in a variable, numeric open
+ *  flags, `immutable=1`) passes it, and an exception covers its whole file. */
 const EXCEPTIONS: Record<string, string> = {
   "test/db/migrate-upgrade.test.ts":
     "the second connection that holds a read snapshot while the backup runs: the scenario under test, on a private copy",
@@ -10244,7 +10381,8 @@ Both `schema.sql` copies and the `CLAUDE.md` table count were updated with the s
 - Modify: `docs/architecture/minimal-loop.md:29-37` (§1 design branch), `:197` (§2 redesign row)
 - Modify: `docs/architecture/control-loop.md:80-81` (start up), `:112-121` (§2.3 descriptor list), `:241-299` (§4 S1 guards), `:728-730` (§6.2), `:820-824` (§8.3 design rows), `:955` (§10)
 - Modify: `docs/architecture/build-operations.md:54,58`
-- Modify: `docs/architecture/runtime-parameters.md` (Resume flow, `styre migrate`, the exit code table rows `65`, `70`, `75`, a new section "Design inputs and invalidation", and line 24, the output stream of `styre migrate`)
+- Modify: `docs/architecture/runtime-parameters.md` (Resume flow, `styre migrate`, `styre ls` (93-129), `styre clean <ident>` (136 on), the exit code table rows `65`, `70`, `75`, a new section "Design inputs and invalidation", and line 24, the output stream of `styre migrate`)
+- Modify: `docs/architecture/glossary.md:169-172` (`styre ls`: the unreadable checkpoints section)
 - Modify: `CLAUDE.md:86` (Stream contract: `styre migrate` prints to stderr)
 - Modify: `docs/architecture/conventions.md:142-152` (Checkpoints)
 - Modify: `docs/architecture/telemetry-export.md:101` (after the ENG-485 note reasons)
@@ -10377,15 +10515,28 @@ and `--resume --inspect` read a checkpoint without upgrading it; `--inspect` nev
 writes no backup.
 ```
 
-- In the `styre ls` section, add the paragraph:
+- In the `styre ls` section (lines 93-129): "Prints three sections, in order" becomes "Prints up to four sections, in order"; in its code block, between the `Finished leftovers` lines and `Running:`, add
 
 ```
-An effort whose checkpoint cannot be read (damaged, or written to so steadily that no stable copy
-could be taken in 3 attempts) is listed under "Unreadable checkpoints (left as they are)", with the
-reason. `ls`, `clean`, `--fresh` and `--inspect` never open a checkpoint itself: they read a private
-copy of it, and of its `-wal` and `-shm`, which is removed afterwards.
+Unreadable checkpoints (remove one with `styre clean <ident>`):
+  <slug>/<ident>[ (running)]  <reason>
 ```
 
+  after the **Finished leftovers** bullet add
+
+```
+- **Unreadable checkpoints** — checkpoints `ls` could not read (damaged, written to so steadily
+  that no stable copy could be taken in 3 attempts, or holding no ticket), with the reason; never
+  dropped from the listing. `(running)` marks one a live run holds. They are never resumable and
+  `styre clean --all` never reaps them; `styre clean <ident>` removes one when no run holds it. The
+  section is omitted entirely when empty. `ls`, `clean`, `--fresh` and `--inspect` never open a
+  checkpoint itself: they read a private copy of it, and of its `-wal` and `-shm`, removed
+  afterwards.
+```
+
+  and "a fourth section follows" (the stopped orphans) becomes "a last section follows".
+- In the `styre clean <ident>` section (line 136 on): add `A checkpoint that cannot be read, or that holds no ticket, is removed when no run holds its lock: clean says on stderr that it could not read it and why, frees the worktrees Styre made for that ident (a `styre-wt-*` folder named after it; never the repository itself) and deletes the checkpoint folder; no branch is touched. With a live lock it refuses as for any live run (exit `75`). `--purge` on such a checkpoint refuses (exit `64`): the branch to delete is recorded in the database it cannot read. `styre clean --all` keeps skipping unreadable checkpoints.`
+- `docs/architecture/glossary.md:169-172` (`styre ls`): "lists every effort in three sections" becomes "lists every effort in up to four sections", with `Unreadable checkpoints (remove one with \`styre clean <ident>\`):` (the checkpoints it could not read, with the reason) named between the leftovers and `Running:`.
 - In the exit code table: row `65` add `, or a database that cannot be upgraded: newer than this Styre, older than v7, or of an unknown shape (start that run over with `--fresh`)` to the Meaning; row `70` add `Also: a migration that failed (the database stays at the last version that completed; the backup is kept), and a declared design table that breaks its own rules (`the declared design table breaks its own rules`, a Styre defect).`; row `75` add `, or a resume paused because this host lacks a required suite's tools` inside the `needs_you` parenthesis, and `, or the invalidate loop guard's escalation (signature `invalidate-loop:<step>`: a design step kept finding changed inputs)` after it.
 - New section before `## Exit codes (error codes) and their meaning`:
 
