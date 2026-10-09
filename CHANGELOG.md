@@ -1,6 +1,41 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.14.0] - 2026-10-09
+
+### Features
+
+- **Agent runs are now confined to their declared tools and the project folder.** Each step's agent process runs with an exact, enforced tool set and permission mode, scoped to the working directory; a mismatch or an unconfirmed launch pauses the run instead of proceeding unguarded.
+- **Agent runs and their whole process trees are now stopped cleanly on every exit path.** Ctrl-C, `kill`, a closed terminal, and `Ctrl-\` all stop the agent and everything it started (including process groups and wrapper scripts), record the interruption so `--resume` redoes the step for free, and exit with the matching signal code.
+- **Styre now recovers after being killed outright.** Every command sweeps for processes a killed Styre left running and stops them, after confirming each one is still the process it thinks it is.
+- **Background processes an agent leaves running are now reported, not silently ignored.** After each step, Styre looks for leftover processes in the worktree and surfaces them (without stopping them).
+- **`styre run` now confirms the PR base branch with the forge before any agent work starts,** falling back to the forge's default branch (with a notice) when the configured one doesn't exist there, and refusing to start if neither does.
+- **`pr-ready` now means a PR actually exists at the current branch head.** A pending push or PR request is resolved before the run reports success; otherwise the run pauses as needs-you with the recorded error, and `--resume` retries the right thing.
+- **Required test suites are now verified against framework-neutral contracts** instead of trusting whatever report an adapter happened to produce, closing a gap where unrelated passing evidence could authorize publication.
+- **Karma/browser test suites can now be run and qualified in their own right,** separately from authored single-check support, so a repository's browser suite is exercised instead of skipped.
+- **Setup now resolves each component's real test runner** (for example Django's `runtests.py`) instead of assuming every Python project uses pytest, and probes that the resolved framework can actually execute before authoring any checks.
+- **Setup now classifies components by role** (primary, fixture, example, vendored) so a decoy or fixture package can no longer block a whole run over tooling it doesn't need.
+- **A missing toolchain now disqualifies only the component that needs it,** instead of refusing to start the entire run; the operator is told clearly which component was skipped and why.
+- **A run that produced no executed evidence can no longer report success.** Reaching `pr-ready` now requires an actual green acceptance check or suite run at the verified head.
+
+### Bug Fixes
+
+- **Setup no longer rejects valid build/test/lint commands** that live in a repo's local `node_modules/.bin` or virtualenv, and no longer waves through a mistyped package-manager script.
+- **Setup now accepts pytest's reporting-only options** (`-rA`, `--durations`, etc.) without letting them corrupt collection counts or pass/fail evidence.
+- **Setup preserves correct component classifications** even when discovery proposes a command Styre can't use, instead of discarding the whole result.
+- **Python and Node test environments are now qualified** (interpreter, dependencies, source checkout) before a command is selected, instead of trusting an unverified guess.
+- **Bare `tox`/`nox` invocations are no longer run as a whole CI matrix;** setup now requires explicit, concrete test targets and preserves the exact configured command.
+- **Verification retries are now bounded.** A timing-out suite no longer gets replayed endlessly against an exhausted tick budget, and incomplete runs are no longer treated as completed evidence.
+- **Acceptance checks now carry the original ticket requirements** into authoring, review, and arbitration, and suite failures are no longer blamed on "pre-existing" status without evidence.
+- **Review repair is now durable.** Unresolved major and critical findings must be explicitly repaired or disputed with evidence, and can't be silently dropped by an empty review or a later resume.
+- **Test identity and selectors are preserved correctly across the whole workflow,** including Mocha's package wrapper and Django's module/class/method naming, instead of being rebuilt inconsistently between steps.
+- **The evidence floor is now checked at the point a run claims "ready for review,"** not only later, so a run can no longer skip straight to review with no acceptance checks executed.
+- **A check's reported environmental-failure classification can no longer shield a real, later failure** from gating the run.
+- **Check executors (initial run, post-implement re-run, and baseline replay) now all use the same qualified launcher,** so a check that only passes through a wrapper script (like `npm test --`) is no longer reported as failing to even run.
+- **A component's declared runtime kind is now validated against a closed set** instead of free text, so an agent-supplied label can no longer silently defeat framework detection.
+- **The PR advisory block now tells the truth about test results:** a passing suite is no longer reported as failed just because it lacked an authored test, a delivered regression test that doesn't actually distinguish old from new behavior is flagged as unproven, and an advisory failure is checked against the baseline before being blamed on the change.
+- **Test runs now clean up after themselves.** `bun test` no longer leaves thousands of temporary database, worktree, and cache folders behind, and a run that leaks one now fails loudly instead of silently.
+
 ## [0.13.2] - 2026-07-29
 
 ### Bug Fixes
