@@ -57,7 +57,7 @@
 9. **A release that changes what a digest depends on** (operator ruling, 2026-10-09). A manifest under an older `FINGERPRINT_SCHEME` must count as changed in design, never be adopted again, and the pin test must fail until the scheme is bumped. Tests: Task 9 `fingerprint-pin.test.ts`, Task 13 "a manifest recorded under an older scheme counts as changed", Task 12 "a manifest from an older scheme is never adopted again".
 10. **`--resume --inspect` on a checkpoint resume would upgrade or refuse** (operator ruling, 2026-10-09): no migration, no backup, a report either way. Test: Task 3, `--resume --inspect reports it without upgrading it` for every fixture.
 11. **Reads that must not change a database** (operator ruling, 2026-10-09). `--inspect`, the narrow readers of `ls`, `clean` and `--fresh`, `priorRunIdAt`, and every test's read of a run database go through `readCopyOf` (a source guard, Task 4, refuses read only opens elsewhere): a WAL checkpoint with no `-wal`/`-shm` beside it is read, a live `-wal` is included, and the original's bytes and folder are unchanged. Tests: Task 1 `test/db/read-copy.test.ts`, Task 3 `a WAL checkpoint without -wal or -shm beside it is read through a private copy and left as it was`.
-12. **`clean` on a checkpoint it cannot use, and the names it builds paths from** (operator ruling, 2026-10-10: ENG-477 adds no new way to delete anything). `styre clean <ident>` (and `--purge`) on an unreadable or incompatible checkpoint must exit 65 and leave every file, worktree and branch as it was, printing shell quoted removal commands; a folder without `run.db` stays exit 64; `clean --all` skips both kinds; and an ident or slug of `""`, `.`, `..`, or one containing `/`, `\` or NUL exits 64 before any path is built from it (`styre clean .`, `..` and `../styre.db` delete nothing). Tests: Task 3 `test/cli/checkpoint-readers-fixtures.test.ts`, with the three deliberate breaks of Task 3 Step 6.
+12. **`clean` on a checkpoint it cannot use, and the names it builds paths from** (operator ruling, 2026-10-10: ENG-477 adds no new way to delete anything). `styre clean <ident>` (and `--purge`) on an unreadable or incompatible checkpoint must exit 65 and leave every file, worktree and branch as it was, printing shell quoted removal commands that survive a quote or a newline in a path; a folder without `run.db` stays exit 64; `clean --all` skips both kinds; and an ident or slug of `""`, `.`, `..`, or one containing `/`, `\` or NUL exits 64 before any path is built from it, in `clean` and in `styre run` fresh and `--resume` (`styre clean .`, `..` and `../styre.db` delete nothing; `--resume ..` does not inspect the `run.db` placed where it leads). Tests: Task 3 `test/cli/checkpoint-readers-fixtures.test.ts`, with the deliberate breaks of Task 3 Step 6.
 
 ## File Structure
 
@@ -2474,7 +2474,8 @@ git commit -m "feat(eng-477): versioned migrations with backup, shape detection 
 - Modify: `src/cli/clean.ts:38-44,62,87-93,166-175` (its two direct reads go through `readCopyOf`; the ident and slug are checked before any file is touched; a checkpoint it cannot use, by schema or by damage, is refused with exit 65 and nothing removed, with the worktrees that look like its own printed with the commands to remove them by hand)
 - Modify: `src/cli/ls.ts:34-66` (an effort `listCheckpoints` could not read, or cannot use because of its schema, is listed in its own section with the reason)
 - Modify tests (their read only opens of run databases go through `readCopyOf`): `test/lifecycle/e2e-interrupt.test.ts:25,170,222,242,562`, `test/lifecycle/interruption.test.ts:907`, `test/lifecycle/terminal.test.ts:10,358`, `test/lifecycle/signals.test.ts:152,306,330,361`, `test/cli/run-pr-base.test.ts:13`, `test/migrate.test.ts:1,41`
-- Modify: `src/cli/park.ts:239` (`--resume` checks the ident and slug before building the checkpoint path)
+- Create: `src/cli/checkpoint-name.ts` (`assertCheckpointName`: the one name check)
+- Modify: `src/cli/park.ts:98-100` (`parkDir` checks both names first: every checkpoint path a fresh run, a resume and a pause build goes through it), `src/cli/load-profile.ts:40-56` (the `--slug` flag, a derived slug and the profile's own slug are checked before a path is built from them), `src/cli/errors.ts:11,124-126` (comments only: exit 65 also covers `clean` refusing a checkpoint it cannot use)
 - Modify: `src/cli/park.ts:259-260` (`--inspect` decides from `readDatabaseState` before `migrate`, and reports an older or refused checkpoint through the narrow readers; operator ruling, 2026-10-09)
 - Test: `test/cli/checkpoint-readers-fixtures.test.ts`
 
@@ -2490,7 +2491,8 @@ git commit -m "feat(eng-477): versioned migrations with backup, shape detection 
   - `readCheckpointOnlyTicket(db: Database): CheckpointTicket | null` (the run's one ticket), `findCheckpointParkedStepKey(db: Database, ticketId: number): string | null` (the step left running, else failed, as resume picks it)
   - in `src/cli/park.ts`: `inspectWithoutUpgrading(dbPath: string, ident: string, state: DatabaseState): string`; `--resume --inspect` never migrates and writes no backup
   - `findInterruption(db, step: Pick<WorkflowStepRow, "id" | "ticket_id" | "attempt" | "started_at">)` and `olderCheckpointWarning(step: Pick<WorkflowStepRow, "pid" | "step_key">)` (widened parameter types; same behaviour).
-  - in `src/cli/checkpoints.ts`: `interface CheckpointRead { state: DatabaseState; cls: ReturnType<typeof classifyCheckpointDb> }` (`cls` is `null` when the schema is refused or the checkpoint cannot be classified); `readCheckpoint(dbPath: string, dir: string): CheckpointRead` (one private copy for both answers); `incompatibleReason(state: DatabaseState): string` (throws on a usable schema); `assertCheckpointName(what: "ident" | "slug", value: string): void` (a usage error, exit 64, for `""`, `.`, `..`, or a value holding `/`, `\` or NUL); the `Checkpoint` kinds `unreadable` and `incompatible`
+  - in `src/cli/checkpoints.ts`: `interface CheckpointRead { state: DatabaseState; cls: ReturnType<typeof classifyCheckpointDb> }` (`cls` is `null` when the schema is refused or the checkpoint cannot be classified); `readCheckpoint(dbPath: string, dir: string): CheckpointRead` (one private copy for both answers); `incompatibleReason(state: DatabaseState): string` (throws on a usable schema); the `Checkpoint` kinds `unreadable` and `incompatible`
+  - in `src/cli/checkpoint-name.ts`: `assertCheckpointName(what: "ident" | "slug", value: string): void` (a usage error, exit 64, for `""`, `.`, `..`, or a value holding `/`, `\` or NUL); called by `parkDir`, `loadRunProfile` and `cleanImpl`
   - in `src/cli/clean.ts`: `styreWorktreeCandidates(targetRepo: string, ident: string): string[]` (worktrees of the target repository named after the ident inside a `styre-wt-` folder, never the repository itself); `clean` on an unusable checkpoint throws a `StyreError` with exit 65 and removes nothing
 
 - [ ] **Step 1: Write the failing test**
@@ -2513,8 +2515,11 @@ import {
 import { dirname, join } from "node:path";
 import { listCheckpoints } from "../../src/cli/checkpoints.ts";
 import { cleanImpl, styreWorktreeCandidates } from "../../src/cli/clean.ts";
+import { StyreError } from "../../src/cli/errors.ts";
+import { loadRunProfile } from "../../src/cli/load-profile.ts";
 import { lsImpl } from "../../src/cli/ls.ts";
-import { resumeRun } from "../../src/cli/park.ts";
+import { renderError } from "../../src/cli/output.ts";
+import { parkDir, resumeRun } from "../../src/cli/park.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import { openDb } from "../../src/db/client.ts";
 import { migrate } from "../../src/db/migrate.ts";
@@ -2722,9 +2727,13 @@ test("ls lists an effort it cannot read as unreadable, with the reason, instead 
   expect(out.join("")).toContain("fixture/ENG-9  could not read it:");
 });
 
-/** A checkpoint folder `<root>/fixture/<ident>` whose run.db is not a database. */
-function unreadableEffort(ident: string): { root: string; dir: string } {
-  const root = makeTempDir("styre-readers-state-");
+/** A checkpoint folder `<root>/fixture/<ident>` whose run.db is not a database. The state root's
+ *  name holds a single quote, so a printed path that is not shell quoted shows in the tests. */
+function unreadableEffort(
+  ident: string,
+  prefix = "styre-readers-state-o'q-",
+): { root: string; dir: string } {
+  const root = makeTempDir(prefix);
   const dir = join(root, "fixture", ident);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "run.db"), "not a database");
@@ -2792,14 +2801,15 @@ test(
   "clean refuses an unreadable effort (exit 65), removes nothing, and lists exactly the worktrees that look like its own",
   async () => {
     const { root, dir } = unreadableEffort("ENG-9");
-    // The repository itself sits at <styre-wt-*>/ENG-9 and its parent folder holds a single
-    // quote: it is the main entry, never a candidate, and every printed path must stay quoted.
-    const repo = repoAt(join(makeTempDir("styre-wt-"), "o'brien", "ENG-9"));
+    // The repository itself has the shape of a candidate (<styre-wt-*>/ENG-9): it is the main
+    // entry and never listed. Every printed path holds a single quote (the repository, `mine`
+    // and the state root), so each one must be shell quoted to be right.
+    const repo = repoAt(join(makeTempDir("styre-wt-o'q-"), "ENG-9"));
     const add = (path: string, branch: string) => {
       gitIn(repo, ["worktree", "add", "-q", "-b", branch, path]);
       return realpathSync(path); // git reports real paths
     };
-    const mine = add(join(makeTempDir("styre-wt-"), "ENG-9"), "feat/ENG-9");
+    const mine = add(join(makeTempDir("styre-wt-o'q-"), "ENG-9"), "feat/ENG-9");
     const nested = add(join(makeTempDir("styre-wt-"), "sub", "ENG-9"), "nested"); // parent is "sub"
     const elsewhere = add(join(makeTempDir("scratch-"), "ENG-9"), "elsewhere");
     const otherIdent = add(join(makeTempDir("styre-wt-"), "ENG-7"), "feat/ENG-7");
@@ -2814,10 +2824,26 @@ test(
     expect(e.code).toBe(65);
     expect(e.headline).toContain("cannot clean 'ENG-9'");
     expect(e.detail).toContain(`checkpoint folder: ${dir}`);
-    expect(e.detail).toContain(`git -C ${shellQuote(repo)} worktree remove ${shellQuote(mine)}`);
-    for (const wt of [nested, elsewhere, otherIdent]) expect(e.detail).not.toContain(wt);
-    expect(e.recovery).toContain("Nothing was removed");
-    expect(e.recovery).toContain(`rm -r ${shellQuote(dir)}`);
+    expect(e.detail).toContain("1 worktree(s) of");
+    const lines = String(e.recovery).split("\n");
+    expect(lines[0]).toBe("Nothing was removed. To remove this run by hand:");
+    const plain = `git -C ${shellQuote(repo)} worktree remove ${shellQuote(mine)}`;
+    const forced = `git -C ${shellQuote(repo)} worktree remove --force ${shellQuote(mine)}`;
+    // each command on a line of its own; the forced one only after the warning, never alone
+    expect(lines).toContain(plain);
+    expect(lines).toContain(`rm -r ${shellQuote(dir)}`);
+    expect(lines.indexOf(forced)).toBe(
+      lines.indexOf("only if you choose to throw that work away too (this deletes it for good):") +
+        1,
+    );
+    expect(lines.indexOf(plain)).toBeLessThan(lines.indexOf(forced));
+    expect(e.recovery).toContain("git refuses one that holds uncommitted or untracked work");
+    expect(e.recovery).not.toContain("use the Styre that wrote it");
+    for (const wt of [nested, elsewhere, otherIdent]) {
+      expect(`${e.detail}\n${e.recovery}`).not.toContain(wt);
+    }
+    // the repository itself is never offered for removal: one plain and one forced command only
+    expect(lines.filter((l) => l.includes(" worktree remove "))).toEqual([plain, forced]);
     // nothing removed: the checkpoint, every worktree and the repository are as they were
     expect(treeOf(root)).toEqual(before);
     for (const wt of [mine, nested, elsewhere, otherIdent]) expect(existsSync(wt)).toBe(true);
@@ -2839,6 +2865,9 @@ test(
     expect((purge as { detail?: string }).detail).toContain(
       `no worktree of ${repo} looks like this run's`,
     );
+    const recovery = String((purge as { recovery?: string }).recovery);
+    expect(recovery).not.toContain("worktree remove");
+    expect(recovery).toContain(`rm -r ${shellQuote(idle.dir)}`);
     expect(existsSync(idle.dir)).toBe(true);
 
     const live = unreadableEffort("ENG-9");
@@ -2849,6 +2878,23 @@ test(
     ).catch((e: unknown) => e);
     expect((refusal as { code?: number }).code).toBe(75);
     expect(existsSync(live.dir)).toBe(true);
+  },
+  TIMEOUT_MS,
+);
+
+test(
+  "the printed commands survive a path holding a newline: never split, never indented",
+  async () => {
+    const { root, dir } = unreadableEffort("ENG-9", "styre-readers-state-o'q-\n-");
+    const refusal = await cleanImpl(
+      { ident: "ENG-9", slug: "fixture" },
+      { root, targetRepo: gitRepo() },
+    ).catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(StyreError);
+    // what the operator sees: `formatMessage` indents the detail's lines, not the recovery's
+    const shown = renderError("clean", refusal as StyreError);
+    expect(shown).toContain(`\nrm -r ${shellQuote(dir)}\n`);
+    expect(existsSync(join(dir, "run.db"))).toBe(true);
   },
   TIMEOUT_MS,
 );
@@ -2929,6 +2975,9 @@ for (const c of INCOMPATIBLE) {
       ).catch((e: unknown) => e);
       expect((refusal as { code?: number }).code).toBe(65);
       expect(String((refusal as { headline?: string }).headline)).toContain(c.reason);
+      expect(String((refusal as { recovery?: string }).recovery)).toContain(
+        "Or use the Styre that wrote it.",
+      );
       expect(treeOf(root)).toEqual(before);
     },
     TIMEOUT_MS,
@@ -2986,17 +3035,77 @@ test(
 );
 
 test(
-  "--resume refuses an ident that is not one folder name (64)",
+  "--resume refuses an ident or slug that is not one folder name (64), though a run.db waits where it leads",
   async () => {
-    const profile = parseProfile({ slug: "inspect", targetRepo: gitRepo(), components: [] });
-    for (const name of [".", "..", "../styre.db"]) {
-      const refusal = await resumeRun(
-        { resume: name, inspect: true },
-        profile,
-        DEFAULT_RUNTIME_CONFIG,
-      ).catch((e: unknown) => e);
-      expect((refusal as { code?: number }).code).toBe(64);
+    const state = makeTempDir("styre-readers-names-");
+    const styre = join(state, "styre"); // parkDir(slug, ident) is <state>/styre/<slug>/<ident>
+    const cases: [slug: string, ident: string, reached: string][] = [
+      ["inspect", ".", join(styre, "inspect")],
+      ["inspect", "..", styre],
+      ["inspect", "../styre.db", join(styre, "styre.db")],
+      ["..", "ENG-1", join(state, "ENG-1")],
+    ];
+    // without the check each case finds a real paused run there, takes its lock and inspects it
+    for (const [, , reached] of cases) {
+      mkdirSync(reached, { recursive: true });
+      copyFileSync(copyFixture("v8-main-2b05680"), join(reached, "run.db"));
     }
+    const before = treeOf(state);
+    const repo = gitRepo();
+    const prev = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = state;
+    try {
+      for (const [slug, ident] of cases) {
+        const profile = parseProfile({ slug, targetRepo: repo, components: [] });
+        const refusal = await resumeRun(
+          { resume: ident, inspect: true },
+          profile,
+          DEFAULT_RUNTIME_CONFIG,
+        ).catch((e: unknown) => e);
+        const code = (refusal as { code?: number } | undefined)?.code;
+        expect([slug, ident, code]).toEqual([slug, ident, 64]);
+      }
+    } finally {
+      if (prev === undefined) Reflect.deleteProperty(process.env, "XDG_STATE_HOME");
+      else process.env.XDG_STATE_HOME = prev;
+    }
+    expect(treeOf(state)).toEqual(before);
+  },
+  TIMEOUT_MS,
+);
+
+test(
+  "styre run checks --slug, a derived slug, the profile's slug and the ident before building a path (64)",
+  () => {
+    const config = makeTempDir("styre-readers-config-");
+    const profileJson = (slug: string) =>
+      JSON.stringify({ slug, targetRepo: gitRepo(), components: [] });
+    // the profile `--slug ..` would reach without the check: <config>/styre/../profile.json
+    writeFileSync(join(config, "profile.json"), profileJson("fixture"));
+    const named = join(makeTempDir("styre-readers-profile-"), "profile.json");
+    writeFileSync(named, profileJson(".."));
+    const prev = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = config;
+    try {
+      for (const args of [{ slug: ".." }, { slug: "a\\b" }, { profile: named }]) {
+        let code: number | undefined;
+        try {
+          loadRunProfile(args);
+        } catch (e) {
+          code = (e as { code?: number }).code;
+        }
+        expect([JSON.stringify(args), code]).toEqual([JSON.stringify(args), 64]);
+      }
+    } finally {
+      if (prev === undefined) Reflect.deleteProperty(process.env, "XDG_CONFIG_HOME");
+      else process.env.XDG_CONFIG_HOME = prev;
+    }
+    // the fresh run builds its checkpoint path from the tracker's ident through parkDir
+    for (const ident of [".", "..", "../styre.db", "a\\b"]) {
+      expect(() => parkDir("fixture", ident)).toThrow("not a valid ident");
+    }
+    expect(() => parkDir("..", "ENG-1")).toThrow("not a valid slug");
+    expect(parkDir("fixture", "ENG-1").endsWith(join("fixture", "ENG-1"))).toBe(true);
   },
   TIMEOUT_MS,
 );
@@ -3196,9 +3305,9 @@ for (const [kind, title] of unusable) {
 }
 ```
 
-`src/cli/clean.ts`: add `import { readCopyOf } from "../db/read-copy.ts";`; in `reapEffort` (lines 38-44) replace the `db`/`stale`/`try`/`finally` lines with `const stale = readCopyOf(c.dbPath, (db) => getLatestWorktreePath(db, c.ticketId));`. In `cleanImpl` replace lines 166-175 (from `const db = new Database(dbPath, { readonly: true });` through the `if (cls === null) { throw usageError(...) }` block) with the block below, and add the two helpers above `cleanImpl`. Lines 151-164 stay as they are: a folder without `run.db` still gives `no styre effort on '<ident>'` (exit `64`), and the live run gate still exits `75`, before anything is read. Imports: remove `import { Database }` (no use left); `realpathSync` beside `existsSync, rmSync`; `basename, dirname` beside `join`; `listWorktrees` beside the other `../dispatch/worktree.ts` names; `shellQuote` from `../testing/environment.ts` (a pure function of production code: POSIX single quote quoting, a `'` inside written as `'\''`); `assertCheckpointName, type CheckpointRead, incompatibleReason, listCheckpoints, readCheckpoint` from `./checkpoints.ts` (`classifyCheckpointDb` has no use left there).
+`src/cli/clean.ts`: add `import { readCopyOf } from "../db/read-copy.ts";`; in `reapEffort` (lines 38-44) replace the `db`/`stale`/`try`/`finally` lines with `const stale = readCopyOf(c.dbPath, (db) => getLatestWorktreePath(db, c.ticketId));`. In `cleanImpl` replace lines 166-175 (from `const db = new Database(dbPath, { readonly: true });` through the `if (cls === null) { throw usageError(...) }` block) with the block below, and add the two helpers above `cleanImpl`. Lines 151-164 stay as they are: a folder without `run.db` still gives `no styre effort on '<ident>'` (exit `64`), and the live run gate still exits `75`, before anything is read. Imports: remove `import { Database }` (no use left); `realpathSync` beside `existsSync, rmSync`; `basename, dirname` beside `join`; `listWorktrees` beside the other `../dispatch/worktree.ts` names; `shellQuote` from `../testing/environment.ts` (a pure function of production code: POSIX single quote quoting, a `'` inside written as `'\''`); `type CheckpointRead, incompatibleReason, listCheckpoints, readCheckpoint` from `./checkpoints.ts`; `assertCheckpointName` from `./checkpoint-name.ts` (`classifyCheckpointDb` has no use left there).
 
-What `styre clean <ident>` does with a checkpoint it cannot use (operator ruling, 2026-10-10, which replaces the earlier ones: ENG-477 adds no new way to delete anything): it refuses, exit `65`, and removes nothing. That is `EXIT.RESUME_REFUSED` (`EX_DATAERR`, `errors.ts:11`): the code the plan already uses for every checkpoint this Styre will not take (Task 2's migration refusals), and the closest existing code for input data that cannot be used; `64` would say the command was misused, which it was not. The refusal names the reason (the schema reason for an `incompatible` checkpoint; the read error or `no ticket recorded` for an `unreadable` one) and the checkpoint folder, and prints each worktree of the target repository that looks like the run's (a folder named after the ident whose parent folder's name starts with `styre-wt-`, what `run.ts:448` and `park.ts:379` make; never the main entry, never the repository's own real path) with a removal command for each, every path quoted with `shellQuote`, so the operator can remove them by hand. `--purge` makes no difference: it refuses the same way. `clean --all` skips both kinds (they are never `pr-ready` or `done`). Safe removal of such checkpoints is a follow up ticket (hand off note 19).
+What `styre clean <ident>` does with a checkpoint it cannot use (operator ruling, 2026-10-10, which replaces the earlier ones: ENG-477 adds no new way to delete anything): it refuses, exit `65`, and removes nothing. That is `EXIT.RESUME_REFUSED` (`EX_DATAERR`, `errors.ts:11`): the code the plan already uses for every checkpoint this Styre will not take (Task 2's migration refusals), and the closest existing code for input data that cannot be used; `64` would say the command was misused, which it was not. The refusal names the reason (the schema reason for an `incompatible` checkpoint; the read error or `no ticket recorded` for an `unreadable` one) and the checkpoint folder, and prints each worktree of the target repository that looks like the run's (a folder named after the ident whose parent folder's name starts with `styre-wt-`, what `run.ts:448` and `park.ts:379` make; never the main entry, never the repository's own real path) so the operator can remove them by hand. The commands go in the recovery, each on a line of its own and never indented (`formatMessage`, `output.ts:12`, indents every line of the detail, which would put two spaces inside the quotes of a path holding a newline), every path quoted with `shellQuote`: `git -C <repo> worktree remove <path>` for each candidate and `rm -r <folder>`. `git worktree remove` refuses a worktree holding uncommitted or untracked work (exit 128, "contains modified or untracked files, use --force"), so the recovery says to look in it first and prints the `--force` form only after a plain warning that it deletes that work. The recovery names `styre run <ident> --fresh` as the other way out, and "use the Styre that wrote it" only for an incompatible checkpoint; with no candidate it prints no worktree command. `--purge` makes no difference: it refuses the same way. `clean --all` skips both kinds (they are never `pr-ready` or `done`). Safe removal of such checkpoints is a follow up ticket (hand off note 19).
 
 ```ts
 /** Worktrees of `targetRepo` that look like they belonged to a Styre run of `ident`: a folder named
@@ -3215,34 +3324,47 @@ export function styreWorktreeCandidates(targetRepo: string, ident: string): stri
 }
 
 /** `styre clean <ident>` on a checkpoint it cannot use (operator ruling, 2026-10-10): refuse (exit
- *  65) and remove nothing, saying why, where the checkpoint is, and how to remove by hand the
- *  worktrees that look like the run's. */
+ *  65) and remove nothing. The detail says why and where; the recovery holds the commands, each on
+ *  a line of its own and never indented, because `formatMessage` indents every line of the detail
+ *  and would put two spaces inside the quotes of a path holding a newline. */
 function refuseUnusableCheckpoint(
   ident: string,
   dir: string,
+  kind: "unreadable" | "incompatible",
   reason: string,
   targetRepo: string,
 ): StyreError {
+  let paths: string[] = [];
   let found: string;
   try {
-    const paths = styreWorktreeCandidates(targetRepo, ident);
+    paths = styreWorktreeCandidates(targetRepo, ident);
     found =
       paths.length === 0
         ? `no worktree of ${targetRepo} looks like this run's`
-        : [
-            `worktrees of ${targetRepo} that look like this run's (remove by hand):`,
-            ...paths.map(
-              (p) => `  git -C ${shellQuote(targetRepo)} worktree remove ${shellQuote(p)}`,
-            ),
-          ].join("\n");
+        : `${paths.length} worktree(s) of ${targetRepo} look like this run's; the commands below remove them`;
   } catch (err) {
     found = `could not list the worktrees of ${targetRepo}: ${err instanceof Error ? err.message : String(err)}`;
   }
+  const repo = shellQuote(targetRepo);
+  const lines = ["Nothing was removed. To remove this run by hand:"];
+  if (paths.length > 0) {
+    lines.push(
+      "each worktree that looks like this run's (git refuses one that holds uncommitted or untracked work; look in it first):",
+      ...paths.map((p) => `git -C ${repo} worktree remove ${shellQuote(p)}`),
+      "only if you choose to throw that work away too (this deletes it for good):",
+      ...paths.map((p) => `git -C ${repo} worktree remove --force ${shellQuote(p)}`),
+    );
+  }
+  lines.push("the checkpoint folder:", `rm -r ${shellQuote(dir)}`);
+  lines.push(
+    `Or start the ticket over, which discards the checkpoint: styre run ${shellQuote(ident)} --fresh`,
+  );
+  if (kind === "incompatible") lines.push("Or use the Styre that wrote it.");
   return new StyreError({
     code: EXIT.RESUME_REFUSED,
     headline: `cannot clean '${ident}': this Styre cannot use its checkpoint (${reason})`,
     detail: `checkpoint folder: ${dir}\n${found}`,
-    recovery: `Nothing was removed. Remove the worktrees above and the folder by hand (rm -r ${shellQuote(dir)}), use the Styre that wrote it, or start the ticket over: styre run ${shellQuote(ident)} --fresh.`,
+    recovery: lines.join("\n"),
   });
 }
 ```
@@ -3256,18 +3378,24 @@ function refuseUnusableCheckpoint(
     unreadable = err instanceof Error ? err.message : String(err);
   }
   if (read?.state.kind === "refuse") {
-    throw refuseUnusableCheckpoint(ident, dir, incompatibleReason(read.state), targetRepo);
+    const reason = incompatibleReason(read.state);
+    throw refuseUnusableCheckpoint(ident, dir, "incompatible", reason, targetRepo);
   }
   const cls = read?.cls ?? null;
-  if (cls === null) throw refuseUnusableCheckpoint(ident, dir, unreadable, targetRepo);
+  if (cls === null)
+    throw refuseUnusableCheckpoint(ident, dir, "unreadable", unreadable, targetRepo);
 ```
 
-Names are checked before any file is touched (operator ruling, 2026-10-10). Add to `src/cli/checkpoints.ts`:
+Names are checked before any path is built from them (operator ruling, 2026-10-10), by one function used everywhere a checkpoint path is built. Create it:
 
 ```ts
-/** An ident or slug names one folder under the state root: refuse (exit 64) an empty one, `.`,
- *  `..`, or one holding `/`, `\` or NUL, before any file is touched, so no command can reach
- *  outside a checkpoint folder through it (operator ruling, 2026-10-10). */
+// src/cli/checkpoint-name.ts
+import { usageError } from "./errors.ts";
+
+/** An ident or slug names one folder (under the state root, and for a slug also under the config
+ *  root): refuse (exit 64) an empty one, `.`, `..`, or one holding `/`, `\` or NUL, before any
+ *  path is built from it, so no command can reach outside a checkpoint folder through it
+ *  (operator ruling, 2026-10-10). The one rule for every caller. */
 export function assertCheckpointName(what: "ident" | "slug", value: string): void {
   if (value === "" || value === "." || value === ".." || /[/\\\0]/.test(value)) {
     throw usageError(
@@ -3278,7 +3406,14 @@ export function assertCheckpointName(what: "ident" | "slug", value: string): voi
 }
 ```
 
-(import `usageError` from `./errors.ts` there). In `cleanImpl`, call `if (args.ident !== undefined) assertCheckpointName("ident", args.ident);` as its first statement, and `assertCheckpointName("slug", slug);` right after the slug is resolved (before `loadProfileByConvention(slug)`, line 93, which reads a path built from it). In `resumeRun` (`park.ts`), the plan's `--inspect` branch reads a path built from `args.resume` and `profile.slug`: call `assertCheckpointName("ident", args.resume);` and `assertCheckpointName("slug", profile.slug);` before `parkDir(...)` (line 239), so `--resume` refuses such names too (exit `64`), before the lock or any read. `run.ts`'s fresh path builds its folder from the tracker's ident and the profile's slug and is not changed by this plan.
+Where it is called:
+- `parkDir(slug, ident)` (`park.ts:98-100`), first: `assertCheckpointName("slug", slug); assertCheckpointName("ident", ident);`. Every checkpoint path `styre run` builds goes through it: the fresh run (`run.ts:370`, where the tracker's ident first becomes a path, before `--fresh` discards anything at `run.ts:381-407`), the resume (`park.ts:239`, before the lock and the `--inspect` read), the pause (`park.ts:134`) and the pause message (`run.ts:499`).
+- `loadRunProfile` (`load-profile.ts:40-56`), which `styre run` calls before anything else that uses a name (`run.ts:229`): `if (args.slug && args.slug.length > 0) assertCheckpointName("slug", args.slug);` as its first statement (the `--slug` flag builds `<config>/<slug>/profile.json`); `assertCheckpointName("slug", derived);` before `loadProfileByConvention(derived)` (a slug derived from the folder name can hold a `\`, legal on macOS and Linux: refused here, before a run is made that `--resume` and `clean` would refuse later); and `assertCheckpointName("slug", raw.slug);` after the profile is read (the slug `parkDir` receives).
+- `cleanImpl`: `if (args.ident !== undefined) assertCheckpointName("ident", args.ident);` as its first statement, and `assertCheckpointName("slug", slug);` right after the slug is resolved (before `loadProfileByConvention(slug)`, line 93), since with `--root` (`clean.ts:151`) it builds the path itself. `cleanCommand`'s `sweepOrphans`, which runs first, uses neither name.
+
+`styre ls` takes neither name. `styre setup` writes `<config>/<slug>/profile.json` from the slug it derives and is not changed by this plan; a profile it writes with such a slug is refused when `styre run` loads it.
+
+`src/cli/errors.ts` (comments only, no behaviour): line 11 becomes `RESUME_REFUSED: 65, // EX_DATAERR: a checkpoint refused (resume: HEAD moved, lock held, schema it cannot use; clean: a checkpoint it cannot use)`, and the comment above `errorKindForExit` (lines 124-126) gains the sentence `65 is reported as "resume_refused" for every refused checkpoint styre run reports (resume refusals and the migration refusals); only styre run emits cli_error, so a refusal by styre clean never reaches it, and the value, part of the telemetry export, stays.`
 
 `src/util/process/interruption.ts`:
 - imports: remove `import { getProject } from "../../db/repos/project.ts";` and `import { getTicket } from "../../db/repos/ticket.ts";`, add `import { listCheckpointRunningSteps, readCheckpointTargetRepo, readCheckpointTicket } from "../../db/repos/checkpoint-read.ts";`;
@@ -3418,12 +3553,12 @@ Expected: PASS, and the preload reports nothing left in the run's temp root.
 
 - [ ] **Step 6: Break it on purpose, see it fail, restore**
 
-In `listCheckpointRunningSteps`, add `, generation` to the selected columns (a column that only exists from v9). Run Step 5's command: every `narrow running step read` case fails with `no such column: generation`, and the `--fresh` cases report `could not read`. Restore. In `cleanImpl`, delete the `assertCheckpointName("ident", ...)` and `assertCheckpointName("slug", ...)` calls: `clean refuses an ident or slug that is not one folder name` fails: ident `..` with slug `fixture` now reaches the state root, where the test placed a damaged `run.db`, and gets the unreadable refusal (65) instead of 64 (nothing is removed either way: no path of `clean` deletes an unusable checkpoint). Restore. In `refuseUnusableCheckpoint`, replace `shellQuote(p)` with `'${p}'`: the unreadable refusal test fails on the quoted repository path holding a single quote. Restore. In `listCheckpoints`, report a refused schema as `unreadable`: the three `... is listed as such, never as damaged` cases fail. Restore. Then, in `resumeRun`, delete the new `if (args.inspect) {...}` block: after Task 4 (when the v7 and v8 fixtures are older than the current version) every `--resume --inspect` case but v6 fails on the backup and the version, and v6 fails on the refusal (exit 65 instead of a report). At this task, with v8 current, the v7 cases fail the same way. Restore.
+In `listCheckpointRunningSteps`, add `, generation` to the selected columns (a column that only exists from v9). Run Step 5's command: every `narrow running step read` case fails with `no such column: generation`, and the `--fresh` cases report `could not read`. Restore. In `cleanImpl`, delete the `assertCheckpointName("ident", ...)` and `assertCheckpointName("slug", ...)` calls: `clean refuses an ident or slug that is not one folder name` fails: ident `..` with slug `fixture` now reaches the state root, where the test placed a damaged `run.db`, and gets the unreadable refusal (65) instead of 64 (nothing is removed either way: no path of `clean` deletes an unusable checkpoint). Restore. In `refuseUnusableCheckpoint`, replace `shellQuote(p)` with `'${p}'` (both commands): `clean refuses an unreadable effort (exit 65) ...` fails, since the worktree `mine` holds a single quote. Restore. Replace `shellQuote(dir)` with `'${dir}'`: the same test fails on the `rm -r` line, since the state root holds a single quote. Restore. Move the commands from the recovery into the detail: `the printed commands survive a path holding a newline` fails (the detail's lines are indented, so two spaces land inside the quotes). Restore. In `parkDir`, delete the two `assertCheckpointName` calls: `--resume refuses an ident or slug ...` fails (each name finds the `run.db` the test placed where it leads, and the inspection returns instead of refusing; the lock it takes changes the tree), and so does the `parkDir` part of `styre run checks --slug ...`. Restore. In `loadRunProfile`, delete its three calls: `styre run checks --slug ...` fails (`--slug ..` loads `<config>/profile.json`, and the profile whose own slug is `..` loads). Restore. In `listCheckpoints`, report a refused schema as `unreadable`: the three `... is listed as such, never as damaged` cases fail. Restore. Then, in `resumeRun`, delete the new `if (args.inspect) {...}` block: after Task 4 (when the v7 and v8 fixtures are older than the current version) every `--resume --inspect` case but v6 fails on the backup and the version, and v6 fails on the refusal (exit 65 instead of a report). At this task, with v8 current, the v7 cases fail the same way. Restore.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/db/repos/checkpoint-read.ts src/cli/checkpoints.ts src/cli/clean.ts src/cli/ls.ts src/cli/park.ts src/util/process/interruption.ts test/cli/checkpoint-readers-fixtures.test.ts test/lifecycle/e2e-interrupt.test.ts test/lifecycle/interruption.test.ts test/lifecycle/terminal.test.ts test/lifecycle/signals.test.ts test/cli/run-pr-base.test.ts test/migrate.test.ts
+git add src/db/repos/checkpoint-read.ts src/cli/checkpoints.ts src/cli/checkpoint-name.ts src/cli/clean.ts src/cli/ls.ts src/cli/park.ts src/cli/load-profile.ts src/cli/errors.ts src/util/process/interruption.ts test/cli/checkpoint-readers-fixtures.test.ts test/lifecycle/e2e-interrupt.test.ts test/lifecycle/interruption.test.ts test/lifecycle/terminal.test.ts test/lifecycle/signals.test.ts test/cli/run-pr-base.test.ts test/migrate.test.ts
 git commit -m "fix(eng-477): read checkpoints for ls, clean and --fresh with queries that work since v7" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
@@ -10870,24 +11005,29 @@ it, and of its `-wal` and `-shm`, removed afterwards.
 - **A checkpoint `clean` cannot use**: one it cannot read (damaged, or no ticket recorded) or one
   whose schema this Styre refuses (written by a newer Styre, an unknown shape, older than v7).
   `clean` refuses (exit `65`) and removes nothing: no folder, no worktree, no branch. It prints the
-  reason, the checkpoint folder, and each worktree of the target repository that looks like the
+  reason, the checkpoint folder, and the worktrees of the target repository that look like the
   run's (a folder named after the ident whose parent folder's name starts with `styre-wt-`; never
-  the repository itself) with the `git -C <repo> worktree remove <path>` command that removes it, or
-  says none was found, so the operator can remove them and the folder by hand. Paths in the printed
-  commands are shell quoted. Edits an interrupted step left in a checkout are not touched (for an in
-  place run, check `git status` in the repository). With a live lock it refuses with exit `75`
-  first. `--purge` refuses the same way (exit `65`). Other ways out: use the Styre that wrote it, or
-  `styre run <ident> --fresh`. A checkpoint folder without its `run.db` is still "no styre effort"
-  (exit `64`), as before.
+  the repository itself), or says none was found. Then, each on a line of its own, the commands to
+  remove the run by hand: `git -C <repo> worktree remove <path>` for each such worktree, and
+  `rm -r <checkpoint folder>`. `git worktree remove` refuses a worktree that holds uncommitted or
+  untracked work, which an interrupted run's worktree often does: look in it first. Only if you
+  choose to throw that work away too, run the `git -C <repo> worktree remove --force <path>`
+  command printed after the warning; it deletes that work for good. Paths are shell quoted. Edits
+  an interrupted step left in the repository itself are not touched (for an in place run, check
+  `git status` there). Other ways out: `styre run <ident> --fresh`, and, for a schema this Styre
+  cannot use, the Styre that wrote it. With a live lock it refuses with exit `75` first. `--purge`
+  refuses the same way (exit `65`). A checkpoint folder without its `run.db` is still "no styre
+  effort" (exit `64`), as before.
 - `styre clean --all` skips both kinds.
 - The ident and `--slug` are checked before any path is built from them: empty, `.`, `..`, or a value
-  containing `/`, `\` or a NUL character is refused (exit `64`). The same check applies to
-  `styre run --resume <ident>`.
+  containing `/`, `\` or a NUL character is refused (exit `64`). `styre run` applies the same
+  check, fresh and `--resume`: to `--slug`, to a slug derived from the repository, to the
+  profile's own slug, and to the ticket's ident before its checkpoint folder is built.
 ```
 
 - `docs/architecture/glossary.md:169-172` (`styre ls`): "lists every effort in three sections" becomes "lists every effort in up to five sections", with `Unreadable checkpoints (...)` (the checkpoints it could not read, with the reason) and `Checkpoints this Styre cannot use (...)` (a schema it refuses, with the reason) named between the leftovers and `Running:`.
 - `docs/architecture/build-operations.md:70-72` (`styre ls`): "lists every effort in three sections: ... and currently running efforts." becomes "lists every effort in up to five sections: paused/resumable efforts (each with its `styre run --resume` hint), finished leftovers not yet cleaned (reapable via `styre clean --all`), checkpoints it could not read and checkpoints whose schema it cannot use (each with the reason), and currently running efforts."
-- In the exit code table: row `65` add `, or a database that cannot be upgraded: newer than this Styre, older than v7, or of an unknown shape (start that run over with `--fresh`); also `styre clean <ident>` refusing a checkpoint it cannot read or whose schema it cannot use (nothing removed)` to the Meaning; row `64` add `, or an ident or `--slug` that is empty, `.`, `..`, or contains `/`, `\` or NUL (`styre clean`, `styre run --resume`)` to the Meaning; row `70` add `Also: a migration that failed (the database stays at the last version that completed; the backup is kept), and a declared design table that breaks its own rules (`the declared design table breaks its own rules`, a Styre defect).`; row `75` add `, or a resume paused because this host lacks a required suite's tools` inside the `needs_you` parenthesis, and `, or the invalidate loop guard's escalation (signature `invalidate-loop:<step>`: a design step kept finding changed inputs)` after it.
+- In the exit code table: row `65` add `, or a database that cannot be upgraded: newer than this Styre, older than v7, or of an unknown shape (start that run over with `--fresh`); also `styre clean <ident>` refusing a checkpoint it cannot read or whose schema it cannot use (nothing removed)` to the Meaning, its Name `resume refused (`EX_DATAERR`)` becomes `checkpoint refused (`EX_DATAERR`)`, and its Retry column gains `. `styre clean <ident>` on a checkpoint it cannot use: not as is; remove the run by hand with the commands it prints, start over with `styre run <ident> --fresh`, or, for a schema it cannot use, use the Styre that wrote it. A database that cannot be upgraded: start over with `--fresh`.`; row `64` add `, or an ident or slug that is empty, `.`, `..`, or contains `/`, `\` or NUL (`styre clean`, and `styre run` fresh or `--resume`: the `--slug` flag, a derived slug, the profile's slug, the ticket's ident)` to the Meaning; row `70` add `Also: a migration that failed (the database stays at the last version that completed; the backup is kept), and a declared design table that breaks its own rules (`the declared design table breaks its own rules`, a Styre defect).`; row `75` add `, or a resume paused because this host lacks a required suite's tools` inside the `needs_you` parenthesis, and `, or the invalidate loop guard's escalation (signature `invalidate-loop:<step>`: a design step kept finding changed inputs)` after it.
 - New section before `## Exit codes (error codes) and their meaning`:
 
 ```
@@ -11082,5 +11222,5 @@ Not part of this plan's tasks, but required by `CLAUDE.md` before `gh pr create`
 15. **`--resume --inspect` never upgrades.** Operator ruling (2026-10-09), replacing the first revision's choice: `--inspect` decides from a read only `readDatabaseState` before any migration; a checkpoint that is not at the current version is reported through the narrow readers (Task 3), with "resume will upgrade this checkpoint from v<old> to v<new>, after writing a backup" or the reason resume would refuse it, no migration and no backup, so it also works where resume refuses. A current checkpoint takes today's path, whose existing `insertRun`/`markResumed` writes and its existing "(no changes made)" line are unchanged (they existed before this change). `CLAUDE.md:80` ("diagnostics only") stays; Task 18's docs say `--inspect` never upgrades.
 16. **The loop guard also counts from a `reused-database` note** (second review m5). Spec §6.6 named only the `resumed` event; counting from the note (written by a run on a reused `--db` whose ticket exists) is a deliberate extension, now recorded in spec §6.6 as a ruling (2026-10-09).
 17. **The scheme rule** (operator ruling, 2026-10-09, spec §5.1). A manifest recorded under an older `FINGERPRINT_SCHEME` counts as changed and the step reruns at the next design visit; the adopt pass adopts only steps with no manifest. `test/daemon/fingerprint-pin.test.ts` (Task 9) pins the digests of a fixed set of inputs per scheme, so a change to encoding, parsing, defaults, declared inputs or output digests fails until the scheme is bumped and a new pin added.
-18. **Reads through a private copy** (operator rulings, 2026-10-09; spec §7.7). Closed. The rulings cover every read of a database that must not change it, as a class, in production and in tests; `readCopyOf` (Task 1) is the one place that does such a read, and a source guard (Task 4, `test/db/read-only-guard.test.ts`) refuses `readonly: true`, `mode=ro` and `SQLITE_OPEN_READONLY` anywhere in `src/` and `test/` except the stated exceptions. Converted: `readDatabaseState` (Task 2) and `inspectWithoutUpgrading` (Task 3) for `--inspect`; `listCheckpoints` (`checkpoints.ts:117`), `reapEffort` and `cleanImpl` (`clean.ts:38,166`) and `undoBeforeDiscard` (`interruption.ts:243`) for `ls`, `clean` and `--fresh` (Task 3); `priorRunIdAt` (`park.ts:107`, Task 2), which now says on stderr, with the caller's prefix, when it cannot read the copy it is about to overwrite; and in tests `fixtureVersion`, the fixture shape tests, the migration tests' reads, `DesignHarness.read`, and the existing tests' reads of run databases (Task 3 Step 4b: `e2e-interrupt.test.ts:170,222,242,562`, `interruption.test.ts:907`, `terminal.test.ts:358`, `signals.test.ts:152,306,330,361`, `run-pr-base.test.ts:13`, `migrate.test.ts:41`). Stated exceptions in the guard: the `migrate-upgrade.test.ts` reader that holds a read snapshot while the backup runs (the scenario under test, on a private copy), and the guard itself. The remaining opens write on purpose (`openDb` in `migrate`, `run.ts:429`, `park.ts:261`; `recordInterruption`, `interruption.ts:49`; the fixture seeder and drivers; tests that set up or relocate state on their own copies). `readCopyOf` takes the copy again when the source moved while it was copied (sizes, times, the WAL header; 3 attempts, then a clear error), and `ls` lists an effort it could not read as unreadable instead of dropping it. Observed on macOS with Bun 1.4.2: a closed WAL connection leaves its `-wal` and `-shm` in place (elsewhere SQLite may remove them); nothing here relies on either behaviour. The fixture generator converts every fixture to DELETE mode (`toDeleteMode`), and a test checks the committed files' headers. What `ls` and `clean` do with a checkpoint they cannot use (operator rulings, 2026-10-10; ENG-477 adds no new way to delete anything): a schema this Styre refuses (newer, unknown shape, older than v7) is listed as `incompatible` with the reason; a checkpoint that cannot be read (damaged, or no ticket recorded) is listed as `unreadable` with the reason. `clean <ident>` refuses both (exit 65, `EX_DATAERR`, the closest existing code: the checkpoint's data is unusable, not the invocation) and removes nothing; it prints the reason, the checkpoint folder, and each worktree that looks like the run's with a shell quoted `git -C <repo> worktree remove <path>` command, so the operator can remove them by hand. `--purge` refuses the same way, and `clean --all` skips both. A checkpoint folder with no `run.db` stays "no styre effort" (exit 64) and is not listed, as before. Listing the worktree candidates needs the project's profile to find the target repository, as `clean` already did before this change. The ident and `--slug` are refused (exit 64) when empty, `.`, `..`, or containing `/`, `\` or NUL, before any path is built from them, in `clean` and in `styre run --resume` (both build a checkpoint path from them).
+18. **Reads through a private copy** (operator rulings, 2026-10-09; spec §7.7). Closed. The rulings cover every read of a database that must not change it, as a class, in production and in tests; `readCopyOf` (Task 1) is the one place that does such a read, and a source guard (Task 4, `test/db/read-only-guard.test.ts`) refuses `readonly: true`, `mode=ro` and `SQLITE_OPEN_READONLY` anywhere in `src/` and `test/` except the stated exceptions. Converted: `readDatabaseState` (Task 2) and `inspectWithoutUpgrading` (Task 3) for `--inspect`; `listCheckpoints` (`checkpoints.ts:117`), `reapEffort` and `cleanImpl` (`clean.ts:38,166`) and `undoBeforeDiscard` (`interruption.ts:243`) for `ls`, `clean` and `--fresh` (Task 3); `priorRunIdAt` (`park.ts:107`, Task 2), which now says on stderr, with the caller's prefix, when it cannot read the copy it is about to overwrite; and in tests `fixtureVersion`, the fixture shape tests, the migration tests' reads, `DesignHarness.read`, and the existing tests' reads of run databases (Task 3 Step 4b: `e2e-interrupt.test.ts:170,222,242,562`, `interruption.test.ts:907`, `terminal.test.ts:358`, `signals.test.ts:152,306,330,361`, `run-pr-base.test.ts:13`, `migrate.test.ts:41`). Stated exceptions in the guard: the `migrate-upgrade.test.ts` reader that holds a read snapshot while the backup runs (the scenario under test, on a private copy), and the guard itself. The remaining opens write on purpose (`openDb` in `migrate`, `run.ts:429`, `park.ts:261`; `recordInterruption`, `interruption.ts:49`; the fixture seeder and drivers; tests that set up or relocate state on their own copies). `readCopyOf` takes the copy again when the source moved while it was copied (sizes, times, the WAL header; 3 attempts, then a clear error), and `ls` lists an effort it could not read as unreadable instead of dropping it. Observed on macOS with Bun 1.4.2: a closed WAL connection leaves its `-wal` and `-shm` in place (elsewhere SQLite may remove them); nothing here relies on either behaviour. The fixture generator converts every fixture to DELETE mode (`toDeleteMode`), and a test checks the committed files' headers. What `ls` and `clean` do with a checkpoint they cannot use (operator rulings, 2026-10-10; ENG-477 adds no new way to delete anything): a schema this Styre refuses (newer, unknown shape, older than v7) is listed as `incompatible` with the reason; a checkpoint that cannot be read (damaged, or no ticket recorded) is listed as `unreadable` with the reason. `clean <ident>` refuses both (exit 65, `EX_DATAERR`, the closest existing code: the checkpoint's data is unusable, not the invocation) and removes nothing; it prints the reason, the checkpoint folder, and each worktree that looks like the run's with a shell quoted `git -C <repo> worktree remove <path>` command, so the operator can remove them by hand. `--purge` refuses the same way, and `clean --all` skips both. A checkpoint folder with no `run.db` stays "no styre effort" (exit 64) and is not listed, as before. Listing the worktree candidates needs the project's profile to find the target repository, as `clean` already did before this change. An ident or slug is refused (exit 64) when empty, `.`, `..`, or containing `/`, `\` or NUL, before any path is built from it, by one function (`assertCheckpointName`, `src/cli/checkpoint-name.ts`): in `clean`, and in `styre run` fresh and `--resume` (`parkDir` checks both names, `loadRunProfile` checks the `--slug` flag, a derived slug and the profile's slug). This also closes a gap outside the ruling's wording: a fresh `styre run <ident> --fresh` whose tracker returned an ident of `..` would have reached the `rmSync` of the slug folder (`run.ts:381-407`); `parkDir` now refuses it first. The printed removal commands stand each on a line of their own in the recovery (never indented), and the forced `git worktree remove --force` form, which deletes uncommitted work, is printed only after a warning.
 19. Safe removal of unreadable or incompatible checkpoints is a follow up ticket (to be filed by the controller).

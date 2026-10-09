@@ -569,12 +569,16 @@ removing the folder by hand.
 (Operator ruling, 2026-10-10, later the same day) ENG-477 adds no new way to delete anything. A
 checkpoint that cannot be read (damaged, or no ticket recorded) is listed by `ls` with the reason, and
 `styre clean <ident>` refuses it exactly as it refuses a schema it cannot use: exit 65, nothing
-removed, with the reason, the checkpoint folder, and each worktree that looks like the run's printed
-with the command that removes it, so the operator can remove them by hand. `--purge` refuses the same
-way and `clean --all` skips both kinds. A checkpoint folder without its `run.db` stays "no styre
-effort" (exit 64), as before. `clean` and `styre run --resume` refuse an ident or slug that is empty,
-`.`, `..`, or contains `/`, `\` or NUL (exit 64) before building any path from it. Safe removal of
-such checkpoints is a follow up ticket.
+removed, with the reason, the checkpoint folder and the worktrees that look like the run's, then
+the commands that remove the run by hand, each on a line of its own. `git worktree remove` refuses a
+worktree that holds uncommitted or untracked work; the forced command, which deletes that work, is
+printed only after a warning, for the operator to choose. `--purge` refuses the same way and
+`clean --all` skips both kinds. A checkpoint folder without its `run.db` stays "no styre effort"
+(exit 64), as before. `clean` and `styre run` (fresh and `--resume`) refuse an ident or slug that is
+empty, `.`, `..`, or contains `/`, `\` or NUL (exit 64) before building any path from it: one check,
+applied to the `--slug` flag, a slug derived from the repository, the profile's own slug, and the
+ticket's ident wherever a checkpoint path is built. Safe removal of such checkpoints is a follow up
+ticket.
 
 ## 8. Testing
 
