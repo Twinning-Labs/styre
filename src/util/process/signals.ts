@@ -149,7 +149,11 @@ export async function handleStopSignal(
     // Read what the recording needs now, before any await lets run code move on (R18).
     const step = inFlightStep();
     const launches = liveLaunches();
-    const agentContext = snapshot(launches.find((h) => h.record.kind === "agent")?.context);
+    // The in-flight step's open dispatch first: it holds until the dispatch row is completed, while
+    // the agent's launch leaves the live set as soon as the agent has exited (A F3).
+    const agentContext = snapshot(
+      step?.dispatch ?? launches.find((h) => h.record.kind === "agent")?.context,
+    );
 
     // 2. Send the stop signals, synchronously, before writing anything (section 2.5): each stop
     //    sends its first signal before its first await.

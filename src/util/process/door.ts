@@ -344,6 +344,10 @@ export interface InFlightStep {
   ident: string;
   headAtStart: string | null;
   headAtStop: string | null;
+  /** The agent dispatch this step has open, from just before its agent is launched until its
+   *  dispatch row is completed (section 7.3 step 6). It outlives the agent's launch, which leaves
+   *  the live set as soon as the agent has exited, so a stop in between still records it. */
+  dispatch?: LaunchContext;
 }
 let inFlight: InFlightStep | null = null;
 /** The step being run now. `headAtStop` starts as `headAtStart` and follows `noteHead`. */
@@ -355,6 +359,14 @@ export function noteHead(sha: string): void {
 }
 export function endStep(): void {
   inFlight = null;
+}
+/** Called by the dispatch path just before it launches the agent. */
+export function beginDispatch(c: LaunchContext): void {
+  if (inFlight) inFlight.dispatch = c;
+}
+/** Called once the dispatch row is completed, or the dispatch has failed before that. */
+export function endDispatch(): void {
+  if (inFlight) inFlight.dispatch = undefined;
 }
 export function inFlightStep(): InFlightStep | null {
   return inFlight ? { ...inFlight } : null;

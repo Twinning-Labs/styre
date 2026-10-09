@@ -8,7 +8,7 @@ import { completeDispatch, insertDispatch, nextSeq } from "../db/repos/dispatch.
 import { appendEvent } from "../db/repos/event-log.ts";
 import { ParkSignal } from "../engine/park-signal.ts";
 import { StepPrerequisiteError } from "../engine/step-journal.ts";
-import { noteHead, runBlocking } from "../util/process/door.ts";
+import { beginDispatch, endDispatch, noteHead, runBlocking } from "../util/process/door.ts";
 import { nowUtc } from "../util/time.ts";
 import type { CommitScope } from "./commit-scope.ts";
 import type { Profile } from "./profile.ts";
@@ -108,14 +108,30 @@ export async function runAgentDispatch(
   ctx: HandlerContext,
   deps: DispatchDeps,
   spec: DispatchSpec,
-): Promise<{
+): Promise<DispatchOutcome> {
+  try {
+    return await dispatchAndRecord(ctx, deps, spec);
+  } finally {
+    // The dispatch row is completed by now (or the dispatch failed before it): the in-flight step
+    // no longer carries this dispatch (ENG-485 section 7.3 step 6).
+    endDispatch();
+  }
+}
+
+type DispatchOutcome = {
   dispatchId: string;
   sha: string;
   changed: boolean;
   output: string;
   discarded: string[];
   discardedSources: Map<string, string>;
-}> {
+};
+
+async function dispatchAndRecord(
+  ctx: HandlerContext,
+  deps: DispatchDeps,
+  spec: DispatchSpec,
+): Promise<DispatchOutcome> {
   const rendered = renderPrompt(spec.template, spec.vars);
   if (!rendered.ok) {
     throw new Error(`CL-PROFILE: unresolved prompt vars: ${rendered.missing.join(", ")}`);
@@ -165,19 +181,23 @@ export async function runAgentDispatch(
   });
 
   const allowedTools = allowlistFor(spec.handlerKey, { runnerCommands: spec.runnerCommands ?? [] });
+  const context = {
+    ident: ctx.ticket.ident,
+    stepId: ctx.step.id,
+    worktree: deps.worktreePath,
+    untrackedBefore: [...untrackedBefore],
+    dispatchRowId: inserted.id,
+  };
+  // Held by the in-flight step until the dispatch row is completed, so a stop that lands after the
+  // agent has left the live set (its output still draining) still records this dispatch.
+  beginDispatch(context);
   const { result, fault } = await launchAgent(deps.runner, {
     prompt,
     model,
     allowedTools,
     cwd: deps.worktreePath,
     timeoutMs: deps.timeoutMs,
-    context: {
-      ident: ctx.ticket.ident,
-      stepId: ctx.step.id,
-      worktree: deps.worktreePath,
-      untrackedBefore: [...untrackedBefore],
-      dispatchRowId: inserted.id,
-    },
+    context,
   });
 
   // ENG-476: capability isolation is verified on every dispatch, never assumed — including a
