@@ -1,4 +1,5 @@
 import { type LaunchHandle, RunInterrupted, launch } from "../../util/process/door.ts";
+import type { StopReport } from "../../util/process/stop.ts";
 import { agentEnv } from "../agent-env.ts";
 import { toolNamesFor, toolSetMismatch } from "../capabilities.ts";
 import type {
@@ -231,6 +232,14 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
       });
       let timer: ReturnType<typeof setTimeout> | undefined;
       let spawned: LaunchHandle | undefined;
+      /** The startup refusal's forced stop, once the gate has refused the agent. */
+      let refusal: Promise<StopReport> | undefined;
+      /** Waits for that stop and reports what it could not end (spec 6.1 step 5), once. */
+      const settleRefusal = async (h: LaunchHandle): Promise<void> => {
+        const p = refusal;
+        refusal = undefined;
+        if (p) reportStop(h, await p);
+      };
       try {
         // The agent stays in Styre's terminal group (ENG-485 D4). Stops reach a wrapper's child
         // and the agent's own command groups through the door (section 6.1).
@@ -246,9 +255,21 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
         spawned = h;
         const kill = () => {
           // Startup refusal: no tool has run yet, so nothing is lost by a forced stop. This stop,
-          // made while the agent is alive, is what reaches its tree. Its result is not awaited here;
-          // finish() below runs once the agent has exited, and by then it can only release the record.
-          void h.stop("forced").catch(() => {});
+          // made while the agent is alive, is what reaches its tree. It is awaited, and its
+          // survivors reported, before finish() below (`settleRefusal`). If it fails (the process
+          // table could not be read), the agent's own process is killed instead and that is said:
+          // an agent the confinement check refused never goes on acting in silence.
+          refusal = h.stop("forced").catch((err: unknown) => {
+            try {
+              proc.kill("SIGKILL");
+            } catch {
+              /* already gone */
+            }
+            process.stderr.write(
+              `styre: could not stop the agent's process tree at startup (${err instanceof Error ? err.message : String(err)}), so only the agent itself was killed (pid ${h.record.pid}); anything it started may still be running\n`,
+            );
+            return emptyStop;
+          });
         };
         // ENG-476: confinement is checked the moment the CLI reports it, not after the agent has
         // worked. A wrong tool set or mode — or any agent action before the report — kills the
@@ -261,6 +282,7 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
         });
         const outcome = await Promise.race([proc.exited.then(() => "exited" as const), timeoutP]);
         if (outcome === "timeout") {
+          await settleRefusal(h);
           reportStop(h, await h.stop("graceful"));
           stdoutRead.cancel();
           stderrRead.cancel();
@@ -269,6 +291,7 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
           return transportFailure("dispatch timed out", true);
         }
         const exitCode = await proc.exited;
+        await settleRefusal(h);
         // The agent has exited and Bun has reaped it, so finish() stops only what is still linked
         // to it (nothing, after a normal exit: what it left running was reparented when it exited)
         // and releases the launch record. Such leftovers are not stopped here; the leftover check
@@ -346,6 +369,7 @@ export function claudeAgentRunner(command = "claude"): AgentRunner {
         // Anything that throws after the spawn must not leave an agent running while the attempt
         // is undone and retried in the same worktree.
         if (spawned) {
+          await settleRefusal(spawned);
           const stopped = await spawned.stop("forced").catch((stopErr) => {
             process.stderr.write(`styre: stopping the agent failed: ${String(stopErr)}\n`);
             return emptyStop;

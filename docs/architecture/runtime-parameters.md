@@ -381,6 +381,7 @@ journaled pids; Styre stops nothing for it.
 ```
 styre: could not stop <command> (pid <pid>); stop it with: kill -9 <pid>
 styre: stopping the agent failed: <why>
+styre: could not stop the agent's process tree at startup (<why>), so only the agent itself was killed (pid <pid>); anything it started may still be running
 styre: could not remove a temporary worktree: <why>
 styre: internal error: a launch was still running at exit; stopped "<command>" (pid <pid>).
 ```
