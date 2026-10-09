@@ -452,6 +452,7 @@ styre: internal error: a launch was still running at exit; stopped "<command>" (
 styre: kept the temp folder <path>: a command Styre started is still running; the next Styre command removes it once that command has stopped
 styre: could not remove the temp folder <path>: <why>; remove it with: chmod -R u+w <path> && rm -rf <path>
 styre: left the temp folder <path> for the next Styre command to remove: no time was left before the stop deadline
+styre: left the temp folder <path> for the next Styre command to remove: it could not be looked at (<why>)
 ```
 <!-- messages:end -->
 

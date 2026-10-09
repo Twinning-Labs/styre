@@ -202,6 +202,17 @@ test("shellWord leaves a plain path as it is and makes any other one a single qu
   );
   expect(shellWord("/tmp/it's/x")).toBe("'/tmp/it'\\''s/x'");
   expect(shellWord("/tmp/$(rm -rf ~)")).toBe("'/tmp/$(rm -rf ~)'");
+  // No space needed for a path to need quoting: expansion, globs, separators.
+  for (const s of [
+    "/tmp/a$(id)b",
+    "/tmp/a`id`b",
+    "/tmp/a*b",
+    "/tmp/a;b",
+    "/tmp/a&b",
+    "/tmp/~a",
+    "/tmp/a|b",
+  ])
+    expect(shellWord(s)).toBe(`'${s}'`);
   // What a shell makes of each: the one word it was.
   for (const s of ["/Users/me/work tmp/x", "/tmp/it's/x", "/tmp/$(echo hi)", "/tmp/a;b"]) {
     const r = Bun.spawnSync(["sh", "-c", `printf '%s' ${shellWord(s)}`]);

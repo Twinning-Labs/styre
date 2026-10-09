@@ -84,24 +84,44 @@ export function commandEnv(): Record<string, string> {
  *  started is still running: it may still be using it, and the sweep removes it once that command
  *  has been stopped. With a time budget (the stop handler's), a removal that runs out of time stops
  *  and is said (a budget of 0 skips it), and the note stays so the sweep finishes it. A removal that fails is said once, with
- *  how to finish it by hand, and its note goes so no later command says it again. Never throws. */
+ *  how to finish it by hand, and its note goes so no later command says it again. A folder that
+ *  cannot even be looked at is said too, and keeps its note for the sweep. One that is gone, or that
+ *  something not Styre's replaced, is left as it is. Never throws: the stop handler and the exit
+ *  check call it on their way out. */
 export function removeCommandTempDir(
   say: (s: string) => void,
   opts: { budgetMs?: number; now?: () => number } = {},
 ): void {
   if (!made) return;
   const { dir, note } = made;
-  if (!stillOurs(dir)) {
-    // Gone, or something that is not Styre's now has its name: nothing of Styre's to remove, and
-    // what is there is left alone. Its note goes, so no sweep acts on it.
-    removeTempNote(note);
-    made = null;
-    return;
-  }
+  const shown = printable(dir);
   if (liveLaunches().some((h) => h.record.kind === "group")) {
     say(
-      `styre: kept the temp folder ${dir}: a command Styre started is still running; the next Styre command removes it once that command has stopped\n`,
+      `styre: kept the temp folder ${shown}: a command Styre started is still running; the next Styre command removes it once that command has stopped\n`,
     );
+    return;
+  }
+  let ours: boolean;
+  try {
+    ours = stillOurs(dir);
+  } catch (e) {
+    // Not a failed removal: the note stays, so a later command, which may see more, removes it.
+    say(
+      `styre: left the temp folder ${shown} for the next Styre command to remove: it could not be looked at (${message(e)})\n`,
+    );
+    return;
+  }
+  // From here on it is either removed or given up (said, its note gone), except when time runs out:
+  // then it stays this process's, so a later removal in this process can still finish it.
+  if (!ours) {
+    made = null;
+    // Gone, or something that is not Styre's now has its name: nothing of Styre's to remove, and
+    // what is there is left alone. Its note goes, so no sweep acts on it.
+    try {
+      removeTempNote(note);
+    } catch {
+      /* the sweep then finds a note whose path is not a folder of Styre's, and says so */
+    }
     return;
   }
   const now = opts.now ?? Date.now;
@@ -109,15 +129,17 @@ export function removeCommandTempDir(
     const deadline = opts.budgetMs === undefined ? undefined : now() + opts.budgetMs;
     if (opts.budgetMs === 0 || !removeTree(dir, { deadline, now })) {
       say(
-        `styre: left the temp folder ${dir} for the next Styre command to remove: no time was left before the stop deadline\n`,
+        `styre: left the temp folder ${shown} for the next Styre command to remove: no time was left before the stop deadline\n`,
       );
       return;
     }
+    made = null;
     removeTempNote(note);
   } catch (e) {
-    const word = shellWord(printable(dir));
+    made = null;
+    const word = shellWord(shown);
     say(
-      `styre: could not remove the temp folder ${dir}: ${e instanceof Error ? e.message : String(e)}; remove it with: chmod -R u+w ${word} && rm -rf ${word}\n`,
+      `styre: could not remove the temp folder ${shown}: ${message(e)}; remove it with: chmod -R u+w ${word} && rm -rf ${word}\n`,
     );
     try {
       removeTempNote(note);
@@ -125,8 +147,9 @@ export function removeCommandTempDir(
       /* said above; the sweep will say it again, once */
     }
   }
-  made = null;
 }
+
+const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /** Test seam: replaces what this process made, returning what it had, so a test can work on a
  *  folder of its own and then put the run's back. */

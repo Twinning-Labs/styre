@@ -231,6 +231,12 @@ test("with a time budget, a removal that runs out of time stops, says so, and ke
   expect(existsSync(dir)).toBe(true);
   expect(readdirSync(join(dir, "many")).length).toBeLessThan(300);
   expect(readdirSync(processesDir()).length).toBe(1);
+  // Still this process's: a later removal without a budget finishes it, note and all.
+  const later = collect();
+  removeCommandTempDir(later.say);
+  expect(later.out).toEqual([]);
+  expect(existsSync(dir)).toBe(false);
+  expect(readdirSync(processesDir())).toEqual([]);
 });
 
 test("a running agent does not hold the folder back: agents keep their own temp folder", async () => {
@@ -524,4 +530,65 @@ test("the stop handler gives the removal only what is left of its deadline, shor
   // What is left (HANDLER_DEADLINE_MS - 1000), less the exit's reserve and the cleanup margin.
   expect(budget).toBeGreaterThan(0);
   expect(budget).toBeLessThanOrEqual(HANDLER_DEADLINE_MS - 1000 - 250);
+});
+
+/** After one command, the temp root becomes a file: the folder's path can no longer be looked at
+ *  (ENOTDIR), as on a temp folder whose parent went away or an unreadable network mount. */
+async function unreachableFolder(): Promise<string> {
+  await runCommand("true", { cwd, timeoutMs: 5000 });
+  const dir = commandTempDir();
+  rmSync(root, { recursive: true, force: true });
+  writeFileSync(root, "");
+  return dir;
+}
+
+test("a folder that can no longer be looked at: the removal says so and never throws", async () => {
+  const dir = await unreachableFolder();
+  const { out, say } = collect();
+  expect(() => removeCommandTempDir(say)).not.toThrow();
+  expect(out.length).toBe(1);
+  expect(out[0]).toStartWith(
+    `styre: left the temp folder ${dir} for the next Styre command to remove: it could not be looked at (`,
+  );
+  // The note stays: the next command's sweep, which may see more, removes the folder.
+  expect(readdirSync(processesDir()).length).toBe(1);
+});
+
+test("the stop handler still releases, re-raises and exits when the folder can no longer be looked at", async () => {
+  await unreachableFolder();
+  const reraised: string[] = [];
+  const exited: number[] = [];
+  try {
+    await handleStopSignal(
+      "SIGTERM",
+      { command: "run", run: null },
+      {
+        stderr: () => {},
+        emit: () => {},
+        reraise: (s) => reraised.push(s),
+        exit: (c) => exited.push(c),
+        now: () => Date.now(),
+        leftovers: () => [],
+        noCore: () => {},
+      },
+    );
+  } finally {
+    door.__resetForTests();
+    __resetSignalsForTests();
+  }
+  expect(reraised).toEqual(["SIGTERM"]);
+  expect(exited).toEqual([143]);
+});
+
+test("the exit check still returns when the folder can no longer be looked at", async () => {
+  await unreachableFolder();
+  const savedCode = process.exitCode;
+  const write = process.stderr.write.bind(process.stderr);
+  (process.stderr as { write: unknown }).write = () => true;
+  try {
+    await expect(guardWithExitCheck("test", async () => {})).resolves.toBeUndefined();
+  } finally {
+    (process.stderr as { write: unknown }).write = write;
+    process.exitCode = savedCode;
+  }
 });
