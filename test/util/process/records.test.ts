@@ -127,7 +127,9 @@ test("removing a record never touches a claimed copy of a different record", () 
 
 test("a directory, a symlink or a mismatched file with a record name is not a record", () => {
   const dir = rec.processesDir();
-  mkdirSync(dir, { recursive: true });
+  // Made as Styre makes it (0700): under a umask of 002, Ubuntu's default, a plain mkdir is
+  // writable by the group, and the hardened scan refuses the whole folder.
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
   mkdirSync(join(dir, "1-1.json"));
   writeFileSync(join(state, "target.json"), JSON.stringify(r(2)));
   symlinkSync(join(state, "target.json"), join(dir, "2-123.000456.json"));
@@ -287,7 +289,7 @@ test("an unwritable state folder fails loudly (Review Focus 4)", () => {
 });
 
 test("an unwritable record folder fails loudly and leaves nothing behind", () => {
-  mkdirSync(rec.processesDir(), { recursive: true });
+  mkdirSync(rec.processesDir(), { recursive: true, mode: 0o700 });
   chmodSync(rec.processesDir(), 0o500);
   try {
     expect(() => rec.writeRecord(r())).toThrow();

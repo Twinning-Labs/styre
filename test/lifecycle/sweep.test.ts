@@ -371,7 +371,9 @@ describe("what the sweep leaves alone", () => {
 
   test("files that are not exact record names are never touched; well named bad files are said once each and kept", async () => {
     const dir = processesDir();
-    mkdirSync(dir, { recursive: true });
+    // Made as Styre makes it (0700): under a umask of 002, Ubuntu's default, a plain mkdir is
+    // writable by the group, and the hardened scan refuses the whole folder.
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     const ignored = [
       "notes.txt",
       "123-1.000000.json.bak",
@@ -835,7 +837,7 @@ describe("cost with an empty folder", () => {
     const lists = spyOn(procTable, "listProcesses");
     try {
       await sweepOrphans({ stderr: () => {} }); // no folder at all
-      mkdirSync(processesDir(), { recursive: true });
+      mkdirSync(processesDir(), { recursive: true, mode: 0o700 });
       await sweepOrphans({ stderr: () => {} }); // an empty folder
       expect(reads).toHaveBeenCalledTimes(2);
       expect(files).toHaveBeenCalledTimes(0);

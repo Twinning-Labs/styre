@@ -1176,7 +1176,7 @@ test("what src does today is not an event loop hit", () => {
     "import { file, type Subprocess } from 'bun'; file('a');",
     "Bun.spawn(['x'], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' }); Bun.spawnSync(['x']);",
     "Bun.sleep(1); Bun.which('git'); new Bun.Glob('*'); Bun.TOML.parse('');",
-    "process.on('SIGINT', () => {}); process.once('exit', () => {}); process.kill(1, 'SIGTERM');",
+    "process.on('SIGINT', () => {}); process.once('exit', () => {}); process.exitCode = 1;",
     "const p = new Promise((resolve, reject) => resolve(1)); p.then(() => 1, () => 2);",
     "import { m } from './m.ts' with { type: 'json' };",
     "const o = { build: 1, serve: 2 }; o.build; o.serve;",
