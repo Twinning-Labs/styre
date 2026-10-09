@@ -86,11 +86,12 @@ export function commandEnv(): Record<string, string> {
  *  and is said (a budget of 0 skips it), and the note stays so the sweep finishes it. A removal that fails is said once, with
  *  how to finish it by hand, and its note goes so no later command says it again. A folder that
  *  cannot even be looked at is said too, and keeps its note for the sweep. One that is gone, or that
- *  something not Styre's replaced, is left as it is. Never throws: the stop handler and the exit
- *  check call it on their way out. */
+ *  something not Styre's replaced, is left as it is. With `announce` (the exit check), the removal
+ *  is said in one line before it starts. Never throws: the stop handler and the exit check call it
+ *  on their way out. */
 export function removeCommandTempDir(
   say: (s: string) => void,
-  opts: { budgetMs?: number; now?: () => number } = {},
+  opts: { budgetMs?: number; now?: () => number; announce?: boolean } = {},
 ): void {
   if (!made) return;
   const { dir, note } = made;
@@ -126,6 +127,10 @@ export function removeCommandTempDir(
   }
   const now = opts.now ?? Date.now;
   try {
+    // A folder a tool cache filled can take seconds to remove: said first, so the pause is not silent.
+    if (opts.announce && opts.budgetMs !== 0) {
+      say(`styre: cleaning up the temp folder this run's commands used: ${shown}\n`);
+    }
     const deadline = opts.budgetMs === undefined ? undefined : now() + opts.budgetMs;
     if (opts.budgetMs === 0 || !removeTree(dir, { deadline, now })) {
       say(

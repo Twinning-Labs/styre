@@ -592,3 +592,49 @@ test("the exit check still returns when the folder can no longer be looked at", 
     process.exitCode = savedCode;
   }
 });
+
+/** What `fn` writes to stderr, each write with whether `dir` still existed at that moment. */
+async function stderrWhile(dir: string, fn: () => Promise<unknown>) {
+  const said: { line: string; folderThere: boolean }[] = [];
+  const write = process.stderr.write.bind(process.stderr);
+  (process.stderr as { write: unknown }).write = (s: unknown) => {
+    said.push({ line: String(s), folderThere: dir !== "" && existsSync(dir) });
+    return true;
+  };
+  try {
+    await fn();
+  } finally {
+    (process.stderr as { write: unknown }).write = write;
+  }
+  return said;
+}
+
+test("the exit check says one line before it removes the run's temp folder, so a long removal is never a silent pause", async () => {
+  await runCommand("true", { cwd, timeoutMs: 5000 });
+  const dir = commandTempDir();
+  const savedCode = process.exitCode;
+  let said: { line: string; folderThere: boolean }[] = [];
+  try {
+    said = await stderrWhile(dir, () => guardWithExitCheck("test", async () => {}));
+  } finally {
+    process.exitCode = savedCode;
+  }
+  expect(said).toEqual([
+    {
+      line: `styre: cleaning up the temp folder this run's commands used: ${dir}\n`,
+      folderThere: true,
+    },
+  ]);
+  expect(existsSync(dir)).toBe(false);
+});
+
+test("the exit check says nothing when no command ran", async () => {
+  const savedCode = process.exitCode;
+  let said: { line: string; folderThere: boolean }[] = [];
+  try {
+    said = await stderrWhile("", () => guardWithExitCheck("test", async () => {}));
+  } finally {
+    process.exitCode = savedCode;
+  }
+  expect(said).toEqual([]);
+});

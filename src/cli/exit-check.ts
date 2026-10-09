@@ -48,13 +48,16 @@ export async function guardWithExitCheck(
     await guard(cmd, body);
     await assertNoLeakedLaunches();
     if (!isStopping()) {
-      removeCommandTempDir((s) => {
-        try {
-          process.stderr.write(s);
-        } catch {
-          /* a closed stderr must not fail the exit */
-        }
-      });
+      removeCommandTempDir(
+        (s) => {
+          try {
+            process.stderr.write(s);
+          } catch {
+            /* a closed stderr must not fail the exit */
+          }
+        },
+        { announce: true },
+      );
     }
   } finally {
     after?.();
