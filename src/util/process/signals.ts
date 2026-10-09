@@ -412,8 +412,8 @@ export async function suspendStopHandlers<T>(
   fn: () => T | Promise<T>,
   cores: PromptCores = PROMPT_CORES,
 ): Promise<T> {
-  const saved = installed;
-  for (const [s, h] of saved ?? []) process.removeListener(s, h);
+  // Core dumps go off while the handlers are still installed, and come back only once the handlers
+  // are back: a Ctrl-\ in between would otherwise dump core (final review A F5).
   let kept: CoreDumpState | null = null;
   try {
     kept = cores.save();
@@ -421,9 +421,12 @@ export async function suspendStopHandlers<T>(
   } catch (err) {
     cores.say(`styre: could not turn off core dumps for the prompt: ${message(err)}\n`);
   }
+  const saved = installed;
+  for (const [s, h] of saved ?? []) process.removeListener(s, h);
   try {
     return await fn();
   } finally {
+    if (saved && installed === saved) for (const [s, h] of saved) process.on(s, h);
     if (kept !== null) {
       try {
         cores.restore(kept);
@@ -431,7 +434,6 @@ export async function suspendStopHandlers<T>(
         cores.say(`styre: could not restore core dumps after the prompt: ${message(err)}\n`);
       }
     }
-    if (saved && installed === saved) for (const [s, h] of saved) process.on(s, h);
   }
 }
 
