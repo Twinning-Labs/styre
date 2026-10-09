@@ -147,6 +147,11 @@ export function launch(spec: LaunchSpec): LaunchHandle {
           abort: stopAbort,
           deps: stopDeps,
         });
+  /** Set once everything was confirmed gone and the record removed. From then on the pid stands
+   *  for nothing of Styre's (it may be handed to another program, even as a group id), so a later
+   *  stop or finish does nothing (final review A F9(b)). */
+  let released = false;
+  const nothing = (): StopReport => ({ stopped: [], survivors: [], signalled: [], failures: [] });
   const release = (rep: StopReport): StopReport => {
     // A survivor still holds this subprocess; it must not keep Bun's event loop alive and stop
     // Styre from exiting (the operator was told how to stop it).
@@ -157,6 +162,7 @@ export function launch(spec: LaunchSpec): LaunchHandle {
     if (rep.survivors.length === 0) {
       removeRecord(record); // may throw after its own deadline: a loud failure, never swallowed
       live.delete(handle);
+      released = true;
     }
     return rep;
   };
@@ -166,11 +172,11 @@ export function launch(spec: LaunchSpec): LaunchHandle {
     context,
     interrupted: false,
     leftSurvivors: false,
-    stop: async (how) => release(await doStop(how)),
+    stop: async (how) => (released ? nothing() : release(await doStop(how))),
     // Both kinds stop what is left, so a record is never released while anything the stop can still
     // reach is alive (section 5.3): for an agent, only what is still linked to it. An agent already
     // reaped, or a group already empty, returns at once.
-    finish: async () => release(await doStop("graceful")),
+    finish: async () => (released ? nothing() : release(await doStop("graceful"))),
   };
   live.add(handle);
   return handle;
