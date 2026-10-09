@@ -350,11 +350,19 @@ styre: could not check pid <pid> from <ident> (not allowed to read it); its laun
 styre: could not finish with the launch record for pid <pid> from <ident>: <why>
 styre: ignored the launch record <file>: <why>; it was left in place
 styre: could not read the launch records in <folder> (<why>), so no orphans were stopped
+styre: ignored the launch records folder <folder>: <why>, so no orphans were stopped; make it a folder only you can write (chmod 700 <folder>)
+styre: could not put back the launch record for pid <pid> from <ident>: <why>
 styre: could not read this process's own identity (<why>), so no orphans were stopped
 ```
 
 The sweep stops orphans one at a time, each with its own grace period of up to 5 s. A record whose
 stop failed is kept, so the next Styre command tries again.
+
+The sweep trusts the records folder only when it is a real folder (not a symbolic link) owned by
+you that no one else can write: anyone who could write it could make the sweep stop any of your
+processes. Otherwise it says so in one line and stops nothing. A record file is used only when it is
+a regular file of yours of at most 64 KB, read without following a symbolic link; any other file
+with a record's name is named in an `ignored the launch record` line and left in place.
 
 An orphaned command group whose leader has exited is never stopped: once the leader is gone,
 nothing confirms the group is still that command's (its pid may have been handed to another program

@@ -53,7 +53,7 @@ Styre killed with `kill -9` left running (the sweep, see
 [`runtime-parameters.md`](runtime-parameters.md#stopping-interruption-and-orphan-cleanup-eng-485)).
 
 ```
-<state>/styre-processes/                                   # created (mode 0700) by the first record
+<state>/styre-processes/                                   # created (mode 0700) by the first record if missing
   <pid>-<startedAt>.json                                   # a record (0600)
   <pid>-<startedAt>.json.claimed-<claimerPid>-<claimerStartedAt>   # a record a sweep has claimed
 ```
@@ -67,13 +67,19 @@ Styre killed with `kill -9` left running (the sweep, see
   `group`, the ticket ident, step ID and worktree when known, the first 200 characters of the
   command line, and the owner: the launching Styre's pid, start time and process group.
 - **Written** right after the spawn, to a temporary name that starts with a dot, then renamed, so a
-  reader never sees half a file. **Removed** only once the process, or for a group every member, is
+  reader never sees half a file. The temporary file is created new and never through a symbolic
+  link; a file already at that name makes the write fail. **Removed** only once the process, or for a group every member, is
   confirmed gone.
 - **A claimed record** is one a sweep has renamed while it checks the owner (the name keeps
   `.json`). A claim whose claimer is gone is taken again, so a sweep stopped midway strands nothing.
 - **Nothing else in the folder is touched.** Styre reads, renames and deletes only regular files
   whose names match one of the two patterns exactly. A file with a record's name that cannot be used
-  is reported once per command and left in place.
+  (not a regular file, not yours, over 64 KB, or not a valid record) is reported once per command and
+  left in place.
+- **The folder must be yours alone.** Styre creates it with mode 0700 but does not change a folder
+  that already exists. The sweep uses it only when it is a real folder (not a symbolic link) owned by
+  you and writable by no one else; otherwise it says so and stops nothing (anyone who could write it
+  could make the sweep stop any of your processes). Fix it with `chmod 700`.
 - Tests point `XDG_STATE_HOME` at a temporary folder (`test/preload.ts`) and fail the run if a record
   appears in the real folder.
 

@@ -80,6 +80,10 @@ messages and exit statuses are in [`runtime-parameters.md`](docs/architecture/ru
   command group whose leader has exited is reported, never stopped: without its leader nothing
   confirms the group is still that command's. On Linux, a record from before the last restart stops
   nothing (the boot ID differs). Processes Styre may not inspect are reported, never treated as gone.
+- **The records folder must be yours alone.** The sweep acts on launch records only when their
+  folder is a real folder owned by you that no one else can write, and only on record files of
+  yours of at most 64 KB, read without following a symbolic link. Otherwise it says so and stops
+  nothing: anyone who could write the folder could otherwise make it stop any of your processes.
 - **Launch records hold the command text.** Each record stores the first 200 characters of the
   launch's command line, in a file only your user can read. Styre passes the agent's prompt on stdin,
   never on the command line; keep secrets out of declared commands too.

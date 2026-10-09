@@ -19,6 +19,7 @@ import {
   type LaunchRecord,
   type Listed,
   type Unreadable,
+  UnsafeRecordsFolder,
   claim,
   processesDir,
   recordFileName,
@@ -57,6 +58,8 @@ export interface SweepDeps {
   bootId?: () => string | null;
   stopTree?: typeof stopTree;
   stopGroup?: typeof stopGroup;
+  /** Runs right after each successful claim (tests). */
+  afterClaim?: () => void;
 }
 
 /** Alive means: the same process (pid and start time) and not a zombie. A process Styre may not
@@ -153,6 +156,13 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
   try {
     scan = scanRecords();
   } catch (e) {
+    if (e instanceof UnsafeRecordsFolder) {
+      // Anyone who can write the folder could make this sweep stop any of this user's processes.
+      say(
+        `styre: ignored the launch records folder ${dir}: ${e.message}, so no orphans were stopped; make it a folder only you can write (chmod 700 ${dir})\n`,
+      );
+      return res;
+    }
     say(
       `styre: could not read the launch records in ${dir} (${errText(e)}), so no orphans were stopped\n`,
     );
@@ -178,6 +188,16 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
   const done = new Set<string>();
   /** Processes already named by this sweep, so the leftover check does not name them again. */
   const reported = new Set<number>();
+  /** Puts a claimed record back; a failure other than "it is gone" is said, never swallowed. */
+  const putBack = (l: Listed): void => {
+    try {
+      unclaim(l);
+    } catch (e) {
+      say(
+        `styre: could not put back the launch record for pid ${l.record.pid} from ${who(l.record)}: ${errText(e)}\n`,
+      );
+    }
+  };
 
   for (const l of scan.listed) {
     const base = sameBase(l);
@@ -190,6 +210,7 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
       if (l.claimedBy !== null && isAlive(l.claimedBy)) continue;
       mine = claim(l, me);
       if (mine === null) continue; // another command got there first, or the owner removed it
+      deps.afterClaim?.();
       const r = mine.record;
 
       // A record from before the last restart names nothing on this boot: its pid and start time
@@ -205,7 +226,7 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
 
       // 2. A live owner: the launch belongs to a live run (Review Focus 5). Put it back.
       if (isAlive(r.owner)) {
-        unclaim(mine);
+        putBack(mine);
         continue;
       }
 
@@ -216,7 +237,7 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
           `styre: could not check pid ${r.pid} from ${who(r)} (not allowed to read it); its launch record was kept, so the next Styre command tries again\n`,
         );
         res.failed.push(r);
-        unclaim(mine);
+        putBack(mine);
         continue;
       }
       if (id.kind === "reused") {
@@ -251,7 +272,7 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
             `styre: could not stop the orphaned ${r.kind === "agent" ? "agent" : "command"} from ${who(r)} (pid ${r.pid}): ${errText(e)}; its launch record was kept, so the next Styre command tries again\n`,
           );
           res.failed.push(r);
-          unclaim(mine);
+          putBack(mine);
           continue;
         }
         if (rep.survivors.length > 0) {
@@ -262,7 +283,7 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
             );
           }
           res.failed.push(r);
-          unclaim(mine);
+          putBack(mine);
           continue;
         }
         if (rep.signalled.length > 0) {
@@ -285,7 +306,7 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
         `styre: could not finish with the launch record for pid ${r.pid} from ${who(r)}: ${errText(e)}\n`,
       );
       if (!res.failed.includes(r)) res.failed.push(r);
-      if (mine !== null) unclaim(mine);
+      if (mine !== null) putBack(mine);
     }
   }
 
