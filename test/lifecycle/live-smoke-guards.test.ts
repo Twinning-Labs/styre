@@ -128,6 +128,26 @@ esac
 exit 0
 `,
   );
+  // GitHub's macOS runners have no `timeout` (coreutils is not in their toolset), and the script
+  // rightly refuses to run without one. The stand-in sets no time limit; like GNU timeout without
+  // --foreground, it moves itself and the command into a group of their own, so a Ctrl-C to the
+  // script's group reaches the script and not docker, and the script's own trap must stop the
+  // container (what N2 checks). perl is part of both macOS and Ubuntu.
+  script(
+    join(bin, "timeout"),
+    `#!/bin/sh
+printf 'timeout %s\\n' "$*" >>"${log}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+  -s | -k) shift 2 ;;
+  -*) shift ;;
+  *) break ;;
+  esac
+done
+shift
+exec perl -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec { $ARGV[0] } @ARGV or die "exec $ARGV[0]: $!"' "$@"
+`,
+  );
   const tmp = join(dir, "tmp");
   mkdirSync(tmp);
   const env = {
@@ -215,6 +235,8 @@ describe("N4: the container script never shows the key", () => {
       /^run --rm --init --name \S+ --user 1000:1000 --ulimit core=0 -e ANTHROPIC_API_KEY \S+ timeout 900 bun run scripts\/smoke-lifecycle\.ts --live$/m,
     );
     expect(calls).toContain("build folder files holding the key: 0");
+    // docker ran under the time bound (the rig's stand-in, so the test needs no coreutils).
+    expect(calls).toMatch(/^timeout 960 docker run --rm /m);
     // Nothing it wrote is left, and nothing left holds the key.
     expect(filesHolding(rig.tmp, SENTINEL)).toEqual([]);
     expect(readdirSync(rig.tmp)).toEqual([]);
