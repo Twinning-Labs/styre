@@ -56,6 +56,7 @@ Styre killed with `kill -9` left running (the sweep, see
 <state>/styre-processes/                                   # created (mode 0700) by the first record if missing
   <pid>-<startedAt>.json                                   # a record (0600)
   <pid>-<startedAt>.json.claimed-<claimerPid>-<claimerStartedAt>   # a record a sweep has claimed
+  tmp-<pid>-<startedAt>.json                               # a command temp folder note (0600)
 ```
 
 - **A sibling of `styre/`, never inside it.** Any folder name inside `styre/` could collide with a
@@ -70,12 +71,17 @@ Styre killed with `kill -9` left running (the sweep, see
   reader never sees half a file. The temporary file is created new and never through a symbolic
   link; a file already at that name makes the write fail. **Removed** only once the process, or for a group every member, is
   confirmed gone.
+- **A temp folder note** names the command temp folder of the Styre with that pid and start time
+  (its version, owner, boot ID and absolute path), written the same way as a record when the first
+  command starts and removed after the folder on a normal exit. The sweep removes a note's folder
+  once that Styre is gone and none of its records is left (see
+  [`runtime-parameters.md`](runtime-parameters.md#command-temp-folder)).
 - **A claimed record** is one a sweep has renamed while it checks the owner (the name keeps
   `.json`). A claim whose claimer is gone is taken again, so a sweep stopped midway strands nothing.
 - **Nothing else in the folder is touched.** Styre reads, renames and deletes only regular files
-  whose names match one of the two patterns exactly. A file with a record's name that cannot be used
-  (not a regular file, not yours, over 64 KB, or not a valid record) is reported once per command and
-  left in place.
+  whose names match one of the three patterns exactly. A file with a record's or a note's name that
+  cannot be used (not a regular file, not yours, over 64 KB, or not a valid record or note) is
+  reported once per command and left in place.
 - **The folder must be yours alone.** Styre creates it with mode 0700 but does not change a folder
   that already exists. The sweep uses it only when it is a real folder (not a symbolic link) owned by
   you and writable by no one else; otherwise it says so and stops nothing (anyone who could write it
@@ -118,6 +124,7 @@ after use:
 | `styre-baseline-wt-*` | Replay-harness baseline worktree. |
 | `styre-provcheck-*` | Provision-check script dir. |
 | `styre-codex-msg-*` | Codex adapter message dir. |
+| `styre-cmd-<pid>-<startedAt>-*` | The **command temp folder**: `TMPDIR`, `TMP` and `TEMP` of every project command one Styre process starts. Removed when that Styre exits, or by the sweep after a `kill -9` ([`runtime-parameters.md`](runtime-parameters.md#command-temp-folder)). |
 
 In `--in-place` mode the "worktree" **is** the repo root (a `checkout -B`, never removed) rather than
 a temp dir.

@@ -9,6 +9,7 @@ import { constants } from "node:os";
 import type { EventLogRow } from "../../db/repos/event-log.ts";
 import { stdoutSink } from "../../telemetry/emit.ts";
 import { runCtx, toEvent } from "../../telemetry/emitter.ts";
+import { removeCommandTempDir } from "./command-temp.ts";
 import {
   type LaunchContext,
   type LaunchHandle,
@@ -280,6 +281,9 @@ export async function handleStopSignal(
     })) {
       say(`styre: could not clean up after the run: ${why}\n`);
     }
+    // The commands' temp folder (command-temp.ts), once nothing that may use it is still running;
+    // kept and said otherwise, and the sweep removes it later.
+    removeCommandTempDir(say);
     // 8. Exit as Styre would have without a handler.
     const left = deadline - EXIT_RESERVE_MS - d.now();
     const shutdown = ctx.shutdownAnalytics;

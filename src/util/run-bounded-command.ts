@@ -1,4 +1,4 @@
-import { verifyEnv } from "../agent/agent-env.ts";
+import { commandEnv } from "./process/command-temp.ts";
 import { type LaunchHandle, RunInterrupted, launch } from "./process/door.ts";
 import { DRAIN_LIMIT_MS, readPipe } from "./process/read-pipe.ts";
 import { type CommandResult, reportSurvivors, survivorNote } from "./run-command.ts";
@@ -19,7 +19,7 @@ export async function runBoundedCommand(
     h = launch({
       argv: ["sh", "-c", command],
       cwd: opts.cwd,
-      env: verifyEnv(process.env),
+      env: commandEnv(),
       kind: "group",
       context: { ident: null, stepId: null, worktree: opts.cwd },
     });

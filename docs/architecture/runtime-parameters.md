@@ -255,7 +255,30 @@ after a Styre that was killed. The security view, with every known limit, is in
   running in the background (each bounded by 5 s), then check that no launch is still running. One
   that is, is a bug: Styre stops it, names it, and turns a success exit into `70`. It never replaces
   an exit status that already says something (`75`, `65`, `64`, `1`, or an error's own code). The
-  check also runs when the command failed.
+  check also runs when the command failed. Then the command temp folder is removed (below).
+
+### Command temp folder
+
+Every project command Styre starts (suites, probes, acceptance checks, provisioning, the setup
+probes) gets `TMPDIR`, `TMP` and `TEMP` pointed at one folder that Styre process owns,
+`os.tmpdir()/styre-cmd-<pid>-<startedAt>-XXXXXX` (mode 0700, `src/util/process/command-temp.ts`).
+It is made when the first command starts, and every later command of that process shares it, so a
+cache a tool keeps in its temp folder (jest's, Node's compile cache) still works across the commands
+of one run. What a command leaves there goes with the folder: a browser profile karma had no time to
+remove, a Python `TemporaryDirectory` that a stop ended before its cleanup ran, anything a command
+that ignores SIGTERM made before its SIGKILL.
+
+- **Removed on the way out:** by the exit check of `styre run` and `styre setup`, and by the stop
+  handler once it has stopped the commands. While a command Styre started is still running (a stop
+  that left survivors), the folder is kept and Styre says so.
+- **Noted while it exists** in the launch records folder (`tmp-<pid>-<startedAt>.json`, see
+  [`conventions.md`](conventions.md)), so after a `kill -9` the next Styre command's sweep removes
+  it. A folder that cannot be noted is never used: the command fails to start, loudly.
+- **Replaced** by a new folder, under a new name, if something removes it while Styre runs (a temp
+  cleaner) or puts something else under its name. Whatever is at the old name is left alone and its
+  note goes, so no sweep acts on it.
+- **Not covered:** tools that ignore these variables. A JVM uses `/tmp` on Linux unless told
+  otherwise (`java.io.tmpdir`). The agent keeps its own temp folder.
 
 ### Cost
 
@@ -357,6 +380,10 @@ styre: could not read the launch records in <folder> (<why>), so no orphans were
 styre: ignored the launch records folder <folder>: <why>, so no orphans were stopped; make it a folder only you can write (chmod 700 <folder>)
 styre: could not put back the launch record for pid <pid> from <ident>: <why>
 styre: could not read this process's own identity (<why>), so no orphans were stopped
+styre: ignored the temp folder note <file>: <why>; it was left in place
+styre: could not read the launch records again (<why>), so no temp folders were removed
+styre: did not remove <path>, named by the temp folder note <file>: <why>; both were left in place
+styre: could not remove the temp folder <path> of a Styre that was force quit: <why>; the next Styre command tries again
 ```
 
 The sweep stops orphans one at a time, each with its own grace period of up to 5 s. A record whose
@@ -367,6 +394,15 @@ you that no one else can write: anyone who could write it could make the sweep s
 processes. Otherwise it says so in one line and stops nothing. A record file is used only when it is
 a regular file of yours of at most 64 KB, read without following a symbolic link; any other file
 with a record's name is named in an `ignored the launch record` line and left in place.
+
+After the orphans, the sweep removes the command temp folders of force quit Styres (see
+[Command temp folder](#command-temp-folder)). A note names each one. The folder goes, silently,
+once the Styre that wrote the note is gone (or the note was written before this machine last
+started) and none of that Styre's launch records is still on disk, since a command the sweep could
+not stop may still be using it. It is removed only when it is exactly what the note says: an
+absolute path, named for that Styre, a real folder of yours (not a symbolic link). Otherwise the
+sweep says why and leaves the note and the path in place. A note file that cannot be used is named
+in an `ignored the temp folder note` line, like a record.
 
 An orphaned command group whose leader has exited is never stopped: once the leader is gone,
 nothing confirms the group is still that command's (its pid may have been handed to another program
@@ -396,6 +432,8 @@ styre: stopping the agent failed: <why>
 styre: could not stop the agent's process tree at startup (<why>), so only the agent itself was killed (pid <pid>); anything it started may still be running
 styre: could not remove a temporary worktree: <why>
 styre: internal error: a launch was still running at exit; stopped "<command>" (pid <pid>).
+styre: kept the temp folder <path>: a command Styre started is still running; the next Styre command removes it once that command has stopped
+styre: could not remove the temp folder <path>: <why>
 ```
 <!-- messages:end -->
 

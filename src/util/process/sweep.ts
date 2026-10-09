@@ -1,4 +1,5 @@
-import { join } from "node:path";
+import { lstatSync, rmSync } from "node:fs";
+import { basename, isAbsolute, join } from "node:path";
 import { GRACE_MS, describeProcess, selfIdentity } from "./door.ts";
 import {
   LEFTOVER_TIMEOUT_MS,
@@ -19,12 +20,14 @@ import {
 import {
   type LaunchRecord,
   type Listed,
+  type ListedNote,
   type Unreadable,
   UnsafeRecordsFolder,
   claim,
   processesDir,
   recordFileName,
   removeRecord,
+  removeTempNote,
   scanRecords,
   unclaim,
 } from "./records.ts";
@@ -50,6 +53,8 @@ export interface SweepResult {
   reported: LaunchRecord[];
   /** The leftover check's lines (section 9.4), already printed. */
   leftoverLines: string[];
+  /** Command temp folders of force quit Styres that this sweep removed (command-temp.ts). */
+  tempFolders: string[];
 }
 
 /** Test seams; production passes at most `stderr`. */
@@ -161,7 +166,14 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
         /* a closed stderr must not fail the command */
       }
     });
-  const res: SweepResult = { stopped: [], failed: [], stale: 0, reported: [], leftoverLines: [] };
+  const res: SweepResult = {
+    stopped: [],
+    failed: [],
+    stale: 0,
+    reported: [],
+    leftoverLines: [],
+    tempFolders: [],
+  };
   const dir = processesDir();
 
   // Normally the folder is missing or empty: this one directory read is the whole cost.
@@ -182,7 +194,12 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
     return res;
   }
   for (const u of scan.unreadable) say(unreadableLine(dir, u));
-  if (scan.listed.length === 0) return res;
+  for (const u of scan.unreadableNotes) {
+    say(
+      `styre: ignored the temp folder note ${join(dir, u.file)}: ${u.reason}; it was left in place\n`,
+    );
+  }
+  if (scan.listed.length === 0 && scan.notes.length === 0) return res;
 
   let me: { pid: number; startedAt: string; pgid: number };
   let currentBoot: string | null;
@@ -362,5 +379,80 @@ export async function sweepOrphans(deps: SweepDeps = {}): Promise<SweepResult> {
     }
   }
   for (const line of res.leftoverLines) say(line);
+  if (scan.notes.length > 0) removeTempFolders(scan.notes, currentBoot, res, say);
   return res;
+}
+
+/**
+ * The temp folders force quit Styres gave their commands (command-temp.ts). A note names one; its
+ * folder goes once the Styre that wrote the note is gone (or it was written before this machine
+ * last started) and none of that Styre's launch records is still on disk: a command the stops
+ * above could not end may still be using it. Only a folder that is exactly what the note says is
+ * removed: an absolute path, named for that Styre, a real folder (not a link) of this user's.
+ * Anything else is said, and the note and the path are left in place. Silent when it removes one.
+ */
+function removeTempFolders(
+  notes: ListedNote[],
+  currentBoot: string | null,
+  res: SweepResult,
+  say: (s: string) => void,
+): void {
+  const dir = processesDir();
+  let recorded: Set<string>;
+  try {
+    // Read again: the records this sweep removed are gone now, and those it kept are still here.
+    recorded = new Set(scanRecords().listed.map((l) => recordFileName(l.record.owner)));
+  } catch (e) {
+    say(
+      `styre: could not read the launch records again (${errText(e)}), so no temp folders were removed\n`,
+    );
+    return;
+  }
+  for (const { file, note } of notes) {
+    const owner = note.owner;
+    const earlierBoot = note.bootId !== currentBoot;
+    if (!earlierBoot && isAlive(owner)) continue;
+    if (recorded.has(recordFileName(owner))) continue;
+    const notePath = join(dir, file);
+    const leave = (why: string): void =>
+      say(
+        `styre: did not remove ${printable(note.path)}, named by the temp folder note ${notePath}: ${why}; both were left in place\n`,
+      );
+    if (!isAbsolute(note.path)) {
+      leave("its path is not absolute");
+      continue;
+    }
+    const prefix = `styre-cmd-${owner.pid}-${owner.startedAt}-`;
+    const name = basename(note.path);
+    if (!name.startsWith(prefix) || !/^[A-Za-z0-9]{6}$/.test(name.slice(prefix.length))) {
+      leave("its name is not the temp folder of the Styre the note names");
+      continue;
+    }
+    try {
+      let st: ReturnType<typeof lstatSync> | null = null;
+      try {
+        st = lstatSync(note.path);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      }
+      if (st !== null) {
+        if (!st.isDirectory()) {
+          leave("it is not a folder (a symbolic link or another kind of file)");
+          continue;
+        }
+        const me = process.geteuid?.();
+        if (me !== undefined && st.uid !== me) {
+          leave(`it is owned by uid ${st.uid}, not by you (uid ${me})`);
+          continue;
+        }
+        rmSync(note.path, { recursive: true, force: true });
+        res.tempFolders.push(note.path);
+      }
+      removeTempNote(notePath);
+    } catch (e) {
+      say(
+        `styre: could not remove the temp folder ${printable(note.path)} of a Styre that was force quit: ${errText(e)}; the next Styre command tries again\n`,
+      );
+    }
+  }
 }

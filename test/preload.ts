@@ -17,7 +17,8 @@
 import { afterAll, afterEach, beforeEach } from "bun:test";
 import { type FSWatcher, existsSync, mkdtempSync, readdirSync, rmSync, watch } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { commandTempDir, removeCommandTempDir } from "../src/util/process/command-temp.ts";
 import { ownGroupMembers, stillRunning, stopStillRunning } from "./helpers/own-processes.ts";
 import { armForBunTest, enterTest, leaveTest, removeRunScoped } from "./helpers/temp.ts";
 
@@ -48,8 +49,32 @@ const defaultState = join(home, ".local", "state");
 const originalState = process.env.XDG_STATE_HOME || defaultState;
 const testState = mkdtempSync(join(tmpdir(), "styre-test-state-"));
 process.env.XDG_STATE_HOME = testState;
+// The temp folder of the commands this test process runs (src/util/process/command-temp.ts), made
+// now so its note lands in this run's state folder, never in a test's own. It is removed the way
+// Styre removes it at exit, before the temp folder check below: if it cannot be, that check names it.
+commandTempDir();
+// A test that runs the stop handler or the exit check removes that folder, as Styre does on its way
+// out, and the next command would then make one in whatever TMPDIR and state folder that test set.
+// So each test starts with a folder in this run's temp root again, noted in this run's state folder.
+beforeEach(() => {
+  const tmp = process.env.TMPDIR;
+  const stateHome = process.env.XDG_STATE_HOME;
+  process.env.TMPDIR = runRoot;
+  process.env.XDG_STATE_HOME = testState;
+  try {
+    // One a test made under a TMPDIR of its own goes the way Styre removes it.
+    if (dirname(commandTempDir()) !== runRoot) {
+      removeCommandTempDir((line) => console.error(line));
+      commandTempDir();
+    }
+  } finally {
+    process.env.TMPDIR = tmp;
+    process.env.XDG_STATE_HOME = stateHome;
+  }
+});
 // bun test does not emit the process exit event, so the end of the run is the last afterAll.
 afterAll(() => {
+  removeCommandTempDir((s) => console.error(s));
   rmSync(testState, { recursive: true, force: true });
 });
 
@@ -94,8 +119,9 @@ afterAll(() => {
   console.error(tempLeakReport);
 });
 
-/** A launch record, a claimed copy, or the temporary file a record is written through. */
-const RECORD_NAME = /^\.?\d+-\d+(?:\.\d{6})?\.json/;
+/** A launch record, a claimed copy, a temp folder note, or the temporary file either is written
+ *  through. */
+const RECORD_NAME = /^\.?(?:tmp-)?\d+-\d+(?:\.\d{6})?\.json/;
 const realDirs = [...new Set([originalState, defaultState])].map((d) => join(d, "styre-processes"));
 const testDir = join(testState, "styre-processes");
 
