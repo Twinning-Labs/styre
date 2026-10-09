@@ -1,4 +1,4 @@
-# ENG-477 Design-Stage Input Invalidation and Database Upgrades Implementation Plan
+# ENG-477 Design Stage Input Invalidation and Database Upgrades Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -25,7 +25,7 @@
 - Canonical encoding (spec §5.1): JSON with object keys sorted, every string (keys included) normalised to Unicode NFC, `undefined` object members dropped, no database ids and no timestamps in any digest, lists in their meaningful order (work units by `seq`, sets sorted), scheme version `FINGERPRINT_SCHEME = 1`.
 - No faked state in tests: new tests reach states only through real steps (`advanceOneStep` with `FakeAgentRunner`, `runImpl`, `resumeRun`) and public functions. No new test writes `workflow_step` rows directly. Fixture relocation (pointing a restored recording at its new temporary repository) is the one stated exception, in Task 12.
 - Operator test safety rules, in every step that runs tests:
-  - time-bound every `bun test` as `perl -e 'alarm 600; exec @ARGV' bun test <file>`;
+  - put a time limit on every `bun test` as `perl -e 'alarm 600; exec @ARGV' bun test <file>`;
   - never `pkill` or `killall`; a test stops only the child it started, by its own pid;
   - never write to the real `~/.local/state`: every test and script sets `XDG_STATE_HOME` (the test preload already does; scripts and child processes get it explicitly);
   - no real `claude`: agents are `FakeAgentRunner`; the agent CLI preflight is injected as `() => ({ ok: true, version: null })`.
@@ -108,7 +108,7 @@ Modified:
 ### Task order, and where it differs from the suggested order
 
 1. Fixtures (moved first): the migration tests in Task 2 consume them, and the recorded v8 paused run must be produced by v8 code (`2b05680`), which the generator reaches through a git worktree, so the order is free; generating them first keeps Task 2's tests real from their first run.
-2. `migrate()` and v7 → v8. 3. Non-migrating readers (moved before v9): they must be in place before `WorkflowStepRow` grows, or `ls`/`clean` break on old checkpoints in between. 4. v8 → v9.
+2. `migrate()` and v7 → v8. 3. Readers that do not migrate (moved before v9): they must be in place before `WorkflowStepRow` grows, or `ls`/`clean` break on old checkpoints in between. 4. v8 → v9.
 5. Canonical encoding. 6. The table. 7. Snapshot and starting commit (and the test harnesses). 8. Resume narrowing.
 9. Manifests on success. 10. `invalidateSteps` (moved before the walk): the walk returns `invalidate`, so the interpreter must exist first. 11. Handlers safe to rerun (before the walk, so an invalidated extract can rerun atomically). 12. The adopt pass (moved before the walk): the walk refuses a succeeded step without a manifest, so every path that can bring one (resume, reused `--db`) must adopt first.
 13. The walk. 14. Loopbacks, feedback, carryover. 15. Accessors, current step slot, recording proxy, source guard. 16. The invalidate loop guard. 17. End to end tests of spec §8. 18. Docs.
@@ -5081,7 +5081,7 @@ Expected: PASS.
 
 - [ ] **Step 7: Break it on purpose, see it fail, restore**
 
-1. Remove the `UPDATE review_finding ...` statement from `CLEAR_OUTPUTS["design:extract"]`: the first test fails (the plan finding is cascade-deleted). Restore.
+1. Remove the `UPDATE review_finding ...` statement from `CLEAR_OUTPUTS["design:extract"]`: the first test fails (the plan finding is deleted by the cascade). Restore.
 2. Remove `archiveStep(db, step, event.id);`: the first test fails on the history row. Restore.
 3. Make `resetProvision` call `resetToPending` again: the third test fails (no history, generation 0). Restore.
 
@@ -6182,7 +6182,7 @@ Expected: FAIL: `redesignLoopback` takes five arguments (type error at the call 
  *  event carrying the findings, the consumer and the consumer's generation after the bump (§6.5),
  *  so the rerun sees exactly this round's findings. A code review redesign (and review-resume's
  *  retry-plan when HEAD moved) also invalidates design:extract: the units are re-created and
- *  re-implemented even when the plan comes back identical, with findings tied to a unit detached first
+ *  implemented again even when the plan comes back identical, with findings tied to a unit detached first
  *  (§6.1). Everything else in design follows from fingerprints. The later-stage resets (review,
  *  verify, merge) stay until ENG-475. */
 export function redesignLoopback(
@@ -6374,7 +6374,7 @@ Expected: PASS.
 
 1. In `designFeedback`, drop the generation condition: the feedback test fails (the old findings reach generation 2). Restore.
 2. In `run-dispatch.ts`, drop `&& deps.resumeContext.generation === ctx.step.generation`: the carryover test fails. Restore.
-3. In `applyReviewVerdict`'s plan-defect path, pass `["design:dispatch"]` only: the code-review redesign test fails (units keep their ids, unit 1 is not re-implemented). Restore.
+3. In `applyReviewVerdict`'s plan-defect path, pass `["design:dispatch"]` only: the code-review redesign test fails (units keep their ids, unit 1 is not implemented again). Restore.
 
 - [ ] **Step 9: Run the whole suite, then commit**
 
@@ -7386,7 +7386,7 @@ In §2's table, replace the `plan-review blocking, or code-review plan-defect ..
 
 ```
 | plan review blocking | `invalidate(design:dispatch)` with cause `feedback` (history, reset, generation + 1); the loopback event carries the findings, `consumer: design:dispatch` and that generation; reset+zero `review`; reset ticket verify steps; reset+zero `merge:push`/`merge:pr-ensure`; `stage='design'`. Everything else in design follows from fingerprints | `design` |
-| code review `plan-defect` with `onPlanDefect='redesign'`, or `--resume` retry-plan after HEAD moved | the same, invalidating `design:dispatch` and `design:extract` (all units deleted, reconcile units included; unit-tied findings detached first; `needs_docs` = 0), so the units are re-created and re-implemented even when the plan is identical | `design` |
+| code review `plan-defect` with `onPlanDefect='redesign'`, or `--resume` retry-plan after HEAD moved | the same, invalidating `design:dispatch` and `design:extract` (all units deleted, reconcile units included; unit-tied findings detached first; `needs_docs` = 0), so the units are re-created and implemented again even when the plan is identical | `design` |
 ```
 
 - [ ] **Step 2: `control-loop.md`**
