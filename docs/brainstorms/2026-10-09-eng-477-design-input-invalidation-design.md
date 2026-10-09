@@ -561,6 +561,11 @@ attempts, then refused with a clear error; `ls` lists such an effort as unreadab
 source guard refuses read only opens anywhere else, with stated exceptions. The committed fixtures are
 kept in rollback journal (DELETE) mode.
 
+(Operator ruling, 2026-10-10) A checkpoint that cannot be used only because of its schema (written by
+a newer Styre, an unknown shape, older than v7) is not treated as damaged: `ls` lists it with that
+reason, and `styre clean <ident>` refuses it (exit 65), pointing at the Styre that wrote it or at
+removing the folder by hand.
+
 ## 8. Testing
 
 Every test that involves design steps drives the real handlers through `advanceOneStep` with
