@@ -1,7 +1,7 @@
 # ENG-477: design-stage steps rerun when their recorded inputs change, with a real database upgrade path
 
 **Date:** 2026-10-09
-**Status:** rev 5, for the operator's review
+**Status:** rev 5, approved by the operator 2026-10-09
 **Ticket:** ENG-477 (deliverable 2 of the grounded-requirements split, parent ENG-483)
 **Umbrella design:** `docs/brainstorms/2026-09-24-grounded-requirements-design.md` §9, §14, §15 (branch
 `feat/grounded-requirements`), with the rev 2 review findings C3, M3 and M4
@@ -379,6 +379,29 @@ Findings are never fingerprinted, so "findings to no findings" cannot loop.
 **Guard, fail fast.** If the same step is invalidated with cause `inputs` more than three times since
 the last `resumed` event, the resolver escalates with signature `invalidate-loop:<step>`. This catches
 a defect such as an unstable digest.
+
+### 6.7 The general rule for feedback loops (for every stage)
+
+This ticket applies it to the design stage. ENG-475 applies the same rule to the other stages.
+
+- **Feedback is never a fingerprinted input.** Review findings, check findings and similar results routed
+  backwards ride on the loopback event, not in any step's manifest. If they were fingerprinted, a round
+  that returns no findings would change the input again, from some findings to none, and invalidate the
+  step that was just fixed: the livelock the ticket rules out.
+- **A loopback that carries feedback explicitly invalidates the step that consumes it,** with cause
+  `feedback`, through the same invalidate function. That opens a new generation, and the feedback is
+  tied to it (§6.5), so the rerun sees exactly that round's findings, and a later rerun caused by
+  changed inputs sees none.
+- **Everything downstream follows from fingerprints.** The consumer's new output (a new plan, new units,
+  new code) changes its dependants' inputs, so they rerun. No loopback carries a list of later steps
+  to reset.
+- **A clean round invalidates nothing.** No findings means no loopback, and no fingerprinted input
+  changed.
+
+Example, for ENG-475: code review returns fixes. `codeLoopback` invalidates the affected units' implement
+steps with cause `feedback`, carrying the findings. Implement's fingerprinted inputs stay the plan and its
+work unit. Verify, review and merge rerun because the code at the new head is their input, not because a
+list names them. When the next review is clean, nothing is invalidated.
 
 ## 7. Database upgrades
 
