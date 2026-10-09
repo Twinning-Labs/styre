@@ -364,6 +364,13 @@ expires, so an invalidate caused by inputs would re-send an old redesign's findi
   same step key (`run-dispatch.ts:147-149`). `transcript.json` records the step's generation, and the
   carryover is prepended only while that generation is still current, so a new generation never
   receives output written under the old inputs (`--accept-head` already drops it, `park.ts:423-425`).
+- **A parked step that was never finished** is not invalidated: the walk stops at it, so its generation
+  does not change when an upstream step reruns first. So for a table step, `transcript.json` also records
+  the step's manifest as it was when the run paused. Just before the step is dispatched again, its
+  current manifest is computed. If any input differs, the carryover is dropped and a `note` event
+  (reason `carryover-dropped`) names the step and the changed inputs. A transcript written before
+  ENG-477 has no manifest, so it is kept, as the adopt pass keeps a step finished then (§7.6).
+  (Operator ruling, 2026-10-09: partial work belongs to the inputs it was made from, like feedback.)
 - The checks steps' lookups (`latestChecksReauthorAcs`, `checksFeedback`) are unchanged (E9).
 
 ### 6.6 Livelock and the guard
@@ -535,6 +542,9 @@ Every test that involves design steps drives the real handlers through `advanceO
 6. **No livelock.** Plan review goes from findings to none; the run finishes in a fixed number of ticks.
 7. **Feedback and carryover.** After a redesign followed by a profile edit and a resume, the new
    generation of `design:dispatch` gets no stale findings and no carryover transcript.
+   And a run paused in the middle of `design:review`, resumed after an edit that changes the plan,
+   dispatches `design:review` without its carryover and records `carryover-dropped`; resumed with no
+   edit, it keeps the carryover.
 8. **Crashes.** A child process is SIGKILLed at each design step:
    - between the handler's work and the success commit;
    - right after the success commit;

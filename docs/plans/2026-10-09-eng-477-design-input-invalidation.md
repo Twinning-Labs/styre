@@ -6131,12 +6131,39 @@ test("the carryover transcript reaches only the generation it was written in (§
     agentConfig: DEFAULT_AGENT_CONFIG,
     profile: t.profile,
     worktreeRoot: t.worktreeRoot,
-    resumeContext: { stepKey: "design:dispatch", transcript: "CARRIED-PARTIAL-OUTPUT", generation: 0 },
+    // manifest null: a transcript written before ENG-477, kept as it is (spec §6.5)
+    resumeContext: { stepKey: "design:dispatch", transcript: "CARRIED-PARTIAL-OUTPUT", generation: 0, manifest: null },
   });
   await driveUntil({ ...t, registry }, atStep("checks:dispatch"));
   const dispatchPrompts = calls.prompts.filter((p) => p.step === "design:dispatch").map((p) => p.prompt);
   expect(dispatchPrompts[0]).toContain("CARRIED-PARTIAL-OUTPUT"); // generation 0
   expect(dispatchPrompts[1]).not.toContain("CARRIED-PARTIAL-OUTPUT"); // generation 1, after the redesign
+});
+
+test("a carryover recorded under other inputs is dropped, with a note naming them (spec §6.5)", async () => {
+  const t = makeDesignTicket({ script: { planFindings: () => [] } });
+  const calls = newCalls();
+  const registry = buildDispatchRegistry({
+    runner: scriptedRunner(t.script, calls),
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: t.profile,
+    worktreeRoot: t.worktreeRoot,
+    resumeContext: {
+      stepKey: "design:dispatch",
+      transcript: "CARRIED-PARTIAL-OUTPUT",
+      generation: 0,
+      manifest: { "profile.promptVars": "a digest no current input has" },
+    },
+  });
+  await driveUntil({ ...t, registry }, atStep("checks:dispatch"));
+  const dispatchPrompts = calls.prompts.filter((p) => p.step === "design:dispatch").map((p) => p.prompt);
+  expect(dispatchPrompts[0]).not.toContain("CARRIED-PARTIAL-OUTPUT");
+  const notes = listEvents(t.db, t.ticketId)
+    .filter((e) => e.reason === "carryover-dropped")
+    .map((e) => JSON.parse(e.payload_json ?? "{}") as { stepKey: string; changed: string[] });
+  expect(notes).toHaveLength(1);
+  expect(notes[0]?.stepKey).toBe("design:dispatch");
+  expect(notes[0]?.changed).toContain("profile.promptVars");
 });
 ```
 
@@ -6289,17 +6316,40 @@ export interface ResumeContext {
   stepKey: string;
   transcript: string;
   generation: number;
+  /** The step's input manifest when the run paused, for a table step; null for any other step and
+   *  for a transcript written before ENG-477 (kept as it is, like a step the adopt pass keeps). */
+  manifest: Record<string, string> | null;
+}
+
+/** Whether the carryover still belongs to this dispatch (spec §6.5): same step, same generation, and,
+ *  for a table step paused before it finished, the same inputs it was written under. A step that
+ *  was never finished is not invalidated when an upstream step reruns, so its generation alone
+ *  cannot tell. When the inputs differ, a `carryover-dropped` note names them. */
+function carryoverApplies(ctx: HandlerContext, rc: ResumeContext): boolean {
+  if (rc.stepKey !== ctx.step.step_key || rc.generation !== ctx.step.generation) return false;
+  if (rc.manifest === null) return true;
+  const row = stepRow(rc.stepKey);
+  if (row === undefined) {
+    throw new Error(`resume: a carryover manifest was recorded for ${rc.stepKey}, which is not a design table step`);
+  }
+  const changed = changedInputs(rc.manifest, currentManifest(ctx.db, ctx.ticket.id, row));
+  if (changed.length === 0) return true;
+  appendEvent(ctx.db, {
+    ticketId: ctx.ticket.id,
+    kind: "note",
+    reason: "carryover-dropped",
+    payload: { event: "carryover-dropped", stepKey: rc.stepKey, changed },
+  });
+  return false;
 }
 ```
+
+Imports in `run-dispatch.ts`: `stepRow` from `../daemon/design-graph.ts`; `changedInputs`, `currentManifest` from `../daemon/design-digests.ts` (`appendEvent` is already imported).
 
 `DispatchDeps.resumeContext?: ResumeContext;` and line 147:
 
 ```ts
-  if (
-    deps.resumeContext &&
-    deps.resumeContext.stepKey === ctx.step.step_key &&
-    deps.resumeContext.generation === ctx.step.generation
-  ) {
+  if (deps.resumeContext && carryoverApplies(ctx, deps.resumeContext)) {
 ```
 
 `src/dispatch/handlers.ts:192`: `resumeContext?: import("./run-dispatch.ts").ResumeContext;`.
@@ -6308,24 +6358,30 @@ export interface ResumeContext {
 - in `dumpPark`, before `db.exec("PRAGMA wal_checkpoint(TRUNCATE);")`:
 
 ```ts
-  // The step the park left running: its generation scopes the carryover (spec §6.5).
-  const parkedGeneration = listByStatus(db, "running").at(0)?.generation ?? null;
+  // The step the park left running: its generation, and for a table step its inputs, scope the
+  // carryover (spec §6.5).
+  const parked = listByStatus(db, "running").at(0);
+  const parkedGeneration = parked?.generation ?? null;
+  const parkedRow = parked ? stepRow(parked.step_key) : undefined;
+  const parkedManifest = parked && parkedRow ? currentManifest(db, parked.ticket_id, parkedRow) : null;
 ```
 
-and add `generation: parkedGeneration,` to the `transcript.json` object;
+and add `generation: parkedGeneration, manifest: parkedManifest,` to the `transcript.json` object (imports: `stepRow` from `../daemon/design-graph.ts`, `currentManifest` from `../daemon/design-digests.ts`);
 - `resumeContext` becomes `let resumeContext: ResumeContext | undefined;` (import the type from `../dispatch/run-dispatch.ts`), the `buildRegistry` deps type uses `ResumeContext | undefined`, and its assignment (lines 428-431):
 
 ```ts
           const tj = JSON.parse(readFileSync(join(dir, "transcript.json"), "utf8")) as {
             transcript: string;
             generation?: number | null;
+            manifest?: Record<string, string> | null;
           };
           resumeContext = {
             stepKey: parkedStep.step_key,
             transcript: tj.transcript,
-            // A transcript written before ENG-477 has no generation: it belongs to the parked step
-            // as it is now.
+            // A transcript written before ENG-477 has no generation and no manifest: it belongs to
+            // the parked step as it is now.
             generation: tj.generation ?? parkedStep.generation,
+            manifest: tj.manifest ?? null,
           };
 ```
 
@@ -6373,7 +6429,8 @@ Expected: PASS.
 - [ ] **Step 8: Break it on purpose, see it fail, restore**
 
 1. In `designFeedback`, drop the generation condition: the feedback test fails (the old findings reach generation 2). Restore.
-2. In `run-dispatch.ts`, drop `&& deps.resumeContext.generation === ctx.step.generation`: the carryover test fails. Restore.
+2. In `carryoverApplies`, drop `|| rc.generation !== ctx.step.generation`: the generation carryover test fails. Restore.
+2a. In `carryoverApplies`, replace `if (changed.length === 0) return true;` with `return true;`: the "recorded under other inputs" test fails. Restore.
 3. In `applyReviewVerdict`'s plan-defect path, pass `["design:dispatch"]` only: the code-review redesign test fails (units keep their ids, unit 1 is not implemented again). Restore.
 
 - [ ] **Step 9: Run the whole suite, then commit**
@@ -7021,6 +7078,36 @@ test("§8.7: after a redesign, a profile edit and a resume, the next generation 
   expect(prompts[3]).not.toContain("partial output written before the session limit");
 });
 
+test("§8.7: a run paused in design:review keeps its carryover when nothing changed", async () => {
+  const script = { plan: (n: number) => `Plan body, version ${n}`, parkAt: "design:review" as const, parkOnCall: 1 };
+  const h = make();
+  expect(await h.fresh({ script })).toBe(75); // budget pause in design:review, before it finished
+  expect(await h.resume({ script: { ...script, parkAt: null, parkOnCall: null } })).toBe(75);
+  const prompts = h.calls.prompts.filter((p) => p.step === "design:review").map((p) => p.prompt);
+  expect(prompts[1]).toContain("partial output written before the session limit");
+  expect(h.read((db, id) => listEvents(db, id).some((e) => e.reason === "carryover-dropped"))).toBe(false);
+});
+
+test("§8.7: a run paused in design:review drops its carryover when an edit changes the plan", async () => {
+  const script = { plan: (n: number) => `Plan body, version ${n}`, parkAt: "design:review" as const, parkOnCall: 1 };
+  const h = make();
+  expect(await h.fresh({ script })).toBe(75);
+  h.editProfile((p) => {
+    p.promptVars = { stack: "ruby", tone: "terse" }; // read by design:review, and by design:dispatch, which writes plan version 2
+  });
+  expect(await h.resume({ script: { ...script, parkAt: null, parkOnCall: null } })).toBe(75);
+  const prompts = h.calls.prompts.filter((p) => p.step === "design:review").map((p) => p.prompt);
+  expect(prompts[1]).not.toContain("partial output written before the session limit");
+  const dropped = h.read((db, id) =>
+    listEvents(db, id)
+      .filter((e) => e.reason === "carryover-dropped")
+      .map((e) => JSON.parse(e.payload_json ?? "{}") as { stepKey: string; changed: string[] }),
+  );
+  expect(dropped).toHaveLength(1);
+  expect(dropped[0]?.stepKey).toBe("design:review");
+  expect(dropped[0]?.changed).toEqual(expect.arrayContaining(["plan", "profile.promptVars"]));
+});
+
 test("§8.9: an extract invalidated by an edit clears every unit and needs_docs, keeps the plan finding detached, and leaves history", async () => {
   const h = make();
   const script = {
@@ -7316,6 +7403,7 @@ These tests exercise behaviour built in Tasks 7 to 16, so they pass on first run
 3. In `src/daemon/design-outputs.ts`, move `writeExtractOutputs` into the extract handler (write before the success commit): the `design:extract, before-commit` crash case fails with a `UNIQUE constraint failed: work_unit.ticket_id, work_unit.seq` rerun failure. Restore.
 4. In `captureSnapshot`, set `pastDesign` to `false` always: §8.2 fails on the note. Restore.
 5. In `run-dispatch.ts`, drop the generation condition of the carryover: §8.7 fails on `prompts[3]`. Restore.
+5a. In `dumpPark`, write `manifest: null` always: "drops its carryover when an edit changes the plan" fails. Restore.
 6. Make `applyReviewVerdict`'s plan review path a no-op loopback that does not invalidate design:dispatch (pass `[]`, which `redesignLoopback` refuses): the livelock test fails loudly. Restore.
 
 - [ ] **Step 5: Run the whole suite, then commit**
@@ -7338,7 +7426,8 @@ Both `schema.sql` copies and the `CLAUDE.md` table count were updated with the s
 - Modify: `docs/architecture/minimal-loop.md:27-37` (§1 design branch), `:197` (§2 redesign row)
 - Modify: `docs/architecture/control-loop.md:80-81` (start up), `:112-121` (§2.3 descriptor list), `:241-299` (§4 S1 guards), `:728-730` (§6.2), `:820-824` (§8.3 design rows), `:955` (§10)
 - Modify: `docs/architecture/build-operations.md:54,58`
-- Modify: `docs/architecture/runtime-parameters.md` (Resume flow, `styre migrate`, the exit code table rows `65`, `70`, `75`, a new section "Design inputs and invalidation")
+- Modify: `docs/architecture/runtime-parameters.md` (Resume flow, `styre migrate`, the exit code table rows `65`, `70`, `75`, a new section "Design inputs and invalidation", and line 24, the output stream of `styre migrate`)
+- Modify: `CLAUDE.md:86` (Stream contract: `styre migrate` prints to stderr)
 - Modify: `docs/architecture/conventions.md:142-152` (Checkpoints)
 - Modify: `docs/architecture/telemetry-export.md:101` (after the ENG-485 note reasons)
 - Modify: `SECURITY.md:169-176` (Limits, stated plainly)
@@ -7431,6 +7520,15 @@ Line 58: `  - **`styre migrate`** — bootstraps the SQLite SoT under `$XDG_STAT
 
 - [ ] **Step 4: `runtime-parameters.md`**
 
+- Line 24 is wrong today: `src/cli/migrate.ts` writes with `process.stderr.write`, and this plan's new `migrate: ` lines go there too (operator ruling, 2026-10-09: fix the docs, not the code). Replace lines 24 and 25 with:
+
+```
+- **`styre setup` prints human output to stdout** via `console.log` (`src/cli/setup.ts`).
+  **`styre migrate`** and **`styre notify`** print to stderr (`src/cli/migrate.ts`).
+```
+
+- In `CLAUDE.md`, the **Stream contract** line becomes: `` Stream contract: `styre run` writes **only NDJSON telemetry to stdout** and all human-readable output to **stderr**; `setup` prints human output to stdout, `migrate` and `notify` to stderr. ``
+
 - In **Resume flow**, append:
 
 ```
@@ -7475,6 +7573,8 @@ not inputs.
 Notes written to the run's events (and emitted as `event` rows):
 - `inputs-changed`: on a resume (or a reused `--db`), the inputs whose values changed. Past design,
   the note says the change takes effect the next time the run is in design; the run carries on.
+- `carryover-dropped`: a step paused before it finished is dispatched again under other inputs, so
+  its partial output from before the pause is not passed on; the note names the changed inputs.
 - `invalidated`: a design step was reset (cause `inputs`, `feedback`, `worktree-recreated` or
   `manifest-touched`), with the changed input names; its previous row is kept in
   `workflow_step_history`.
@@ -7500,12 +7600,14 @@ removes it with the checkpoint folder.
 `telemetry-export.md`, after the ENG-485 note reasons:
 
 ```
-**Three `note` reasons from ENG-477** (no new kind, no schema change), all with `payload_json.event`
+**Four `note` reasons from ENG-477** (no new kind, no schema change), all with `payload_json.event`
 equal to the reason:
 - **`inputs-changed`** — `names` (the changed inputs), `pastDesign`, `message`.
 - **`invalidated`** — `stepKeys`, `cause` (`inputs` | `feedback` | `worktree-recreated` |
   `manifest-touched`), `changed`.
 - **`adopted`** — `stepKeys`, `message`.
+- **`carryover-dropped`** — `stepKey`, `changed`: a step paused before it finished was dispatched
+  again under other inputs, so its partial output from before the pause was not passed on.
 A design `loopback` event's payload also carries `consumer` (`design:dispatch`) and `generation`.
 ```
 
@@ -7533,7 +7635,7 @@ Expected: `19`, then PASS.
 Read every paragraph written in Steps 1 to 5 once more for coined hyphenated compounds (Global Constraints); write any you find out in plain words.
 
 ```bash
-git add docs/architecture SECURITY.md
+git add docs/architecture SECURITY.md CLAUDE.md
 git commit -m "docs(eng-477): design input invalidation, database upgrades and resume narrowing" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
@@ -7593,8 +7695,8 @@ Not part of this plan's tasks, but required by `CLAUDE.md` before `gh pr create`
 3. **A succeeded step without a manifest outside the adopt pass.** Spec §5.1 says a step under another scheme is "treated as unfingerprinted and adopted"; the adopt pass runs on resume and on a reused `--db`, the only paths that can bring one. The walk refuses such a step loudly (Task 13) rather than adopting silently, per the fail fast rule.
 4. **The worktree starting commit.** `ensureWorktree` (`src/dispatch/worktree.ts:71`) runs `git worktree add -B` on every resume (ENG-488), so "first created" is not visible in git. The plan records it only from a fresh run's provision, through a registry flag (Task 7).
 5. **Exit codes for refused and failed migrations** are not specified. The plan uses `65` for refusals (with the resume refusals) and `70` for a failed migration (Task 2), documented in Task 18.
-6. **The carryover for a parked step that is not succeeded.** Such a step is never invalidated (the walk stops at it), so its generation does not change when an upstream step reruns first; its carryover from the old inputs is still prepended. The spec's rule (§6.5) is implemented literally; this case is not covered by it.
+6. **The carryover for a parked step that is not succeeded.** Such a step is never invalidated (the walk stops at it), so its generation does not change when an upstream step reruns first. Operator ruling (2026-10-09), now in spec §6.5: `transcript.json` records the parked table step's manifest, and the carryover is dropped, with a `carryover-dropped` note, when the inputs differ at dispatch (Tasks 14, 17, 18).
 7. **`readPlanFindings`.** The spec names it as an example accessor, but no design handler reads plan findings; only the resolver's gate does, outside any step. The plan builds `readWorkUnitsForDesign` only (Task 15); the gate keeps reading `review-round.ts`.
 8. **Existing tests that seeded design rows directly** (resolver, advance, design handler tests, review-resume) cannot keep doing so once the walk refuses unfingerprinted steps; Task 13 moves them onto real steps through `reachDesignStep`, and deletes the six resolver design tests in favour of real step equivalents.
-9. **`runtime-parameters.md` says `styre migrate` prints to stdout**; `src/cli/migrate.ts:15` writes to stderr. The plan does not change that; its new lines go to stderr and Task 18's text says so.
+9. **`runtime-parameters.md` and `CLAUDE.md` say `styre migrate` prints to stdout**; `src/cli/migrate.ts:15` writes to stderr. Operator ruling (2026-10-09): the code stays, and Task 18 corrects both docs.
 10. **Multiple resumes in worktree mode** are refused after the first (the recreated branch moves HEAD, ENG-488). Tests that resume more than once use in-place mode (Task 17 intro).
