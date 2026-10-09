@@ -520,7 +520,8 @@ shapes like the bridge.
 - After migration, a v7 or v8 run's finished design steps have no manifest.
 - On resume, after `recover()`, the provision reset and the snapshot (§4), and before the first resolver
   pass, an **adopt** pass records for each succeeded design-stage step with no manifest, or one under
-  another scheme:
+  another scheme (operator ruling, 2026-10-09, §5.1: only a step with no manifest; one under an older
+  scheme counts as changed and is never adopted):
   - its manifest, from the current inputs;
   - for `design:dispatch`, the plan's digest at the branch head.
 - One `note` event, reason `adopted`, lists them, and says plainly that an edit made between the pause
@@ -549,6 +550,12 @@ with `complexityGrading` on; recorded v8 fixtures of each must resume after the 
   would be silently skipped (`interruption.ts:249-253`). These paths get their own narrow queries,
   which select only columns present since v7, and a test runs `ls`, `clean` and `--fresh` against every
   fixture.
+
+(Operator ruling, 2026-10-09) Every read of a database that must not change it (`--inspect`, the
+narrow readers of `ls`, `clean` and `--fresh`, and the tests' reads of fixtures and checkpoints) goes
+through a private copy: the file, and its `-wal` and `-shm` files when present, copied into a temporary
+folder, the copy opened, the folder removed afterwards. The original is never opened, in any journal
+mode. The committed fixtures are kept in rollback journal (DELETE) mode.
 
 ## 8. Testing
 

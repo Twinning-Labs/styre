@@ -39,7 +39,7 @@
   - never write to the real `~/.local/state`: every test and script sets `XDG_STATE_HOME` (the test preload already does; scripts and child processes get it explicitly);
   - no real `claude`: agents are `FakeAgentRunner`; the agent CLI preflight is injected as `() => ({ ok: true, version: null })`.
 - Temporary folders (PR #154, on `main` and under this branch): `test/preload.ts` fails any `bun test` run that leaves something in its temp root. Every new test and helper makes its folders with `makeTempDir(prefix)` (or registers a path it creates itself with `trackTempPath(path)`) from `test/helpers/temp.ts`, never with a bare `mkdtempSync`; the helpers remove them when the test (or, for a folder made outside a test, the run) ends. A call that runs `styre run` or a resume (which keep the run's `styre-wt-*` worktree root, also in place) is wrapped in `trackTempEntriesMadeBy("styre-wt-", () => ...)`. Scripts that run outside `bun test` (`scripts/db-fixtures/`) put every temporary folder, their children's included (`TMPDIR`), under one work folder they remove at the end.
-- Fixtures: a test never opens a committed fixture in place (a read only open of a WAL database still writes `-shm` and `-wal` beside it); it opens a private copy (`copyFixture`, `copyRecordedRun`). The `.db` fixtures are tracked through a `.gitignore` negation (Task 1), proved with `git ls-files`.
+- Fixtures and reads (operator ruling, 2026-10-09): a test never opens a committed fixture in place; it works on a private copy (`copyFixture`, `copyRecordedRun`). Every read of a database that must not change it, in production (`--inspect`, the narrow readers of `ls`, `clean` and `--fresh`) and in tests (`fixtureVersion`, the fixture tests, the harness's `read`), goes through the one helper `readCopyOf` (`src/db/read-copy.ts`, Task 1): it copies the file and its `-wal`/`-shm` files into a private temporary folder, opens the copy, and removes the folder in a `finally`. The original is never opened, in any journal mode (a read only open of a WAL database without its side files fails on macOS, and with them it can write beside it). The committed fixtures are in rollback journal (DELETE) mode, checked by a test that reads their file headers. The `.db` fixtures are tracked through a `.gitignore` negation (Task 1), proved with `git ls-files`.
 - Lint: `bun run lint` is `biome check .` (formatter on, `lineWidth` 100, organized imports, the recommended rules). The whole file blocks in this plan are formatted with the repository's `biome.json`; the fragments that edit existing files are not, so before each commit run `perl -e 'alarm 300; exec @ARGV' bunx biome check --write <the files the task touched>` and then `bun run lint`.
 - New stderr messages start with `run: `, `resume: ` or `migrate: `, never `styre: ` (the `styre: ` messages are pinned by `test/lifecycle/messages-doc.test.ts`). One exemption: `styre migrate`'s closing summary line keeps its existing `<verb>: <path> (schema v<N>)` shape (`bootstrapped: ...`, `already current: ...`), and Task 2's new `upgraded from v<old>: <db> (schema v<new>)` is another verb of that same line.
 - Checks steps (`checks:dispatch`, `checks:classify`) are outside the table and keep today's rules (E9). No code in this plan changes their gating, feedback or identity rules.
@@ -53,9 +53,10 @@
 5. **A plan file renamed by the agent between design rounds.** The plan digest is over path and content, so a rename changes it and reruns the plan's readers; an unrelated `docs/plans/*.md` without this ticket's `linear:` frontmatter must not. Test: Task 9, "a renamed plan changes the digest; another ticket's plan and a nested file do not".
 6. **A v8 run whose upstream design step is not succeeded when it is upgraded** (operator ruling C1, 2026-10-09): escalated at the plan review gate (resumed with HEAD moved, and with HEAD unchanged), or paused during a redesign with `complexityGrading` on. The adopt pass must stop at the first applicable step that is not succeeded, record the succeeded steps after it with an empty manifest ("will rerun"), never throw, and each run must finish. Tests: Task 12 (the pass, in process, on copies of the recordings) and Task 14 (the plan gate and redesign recordings resumed end to end), with the three recorded v8 runs from Task 1.
 7. **A resume after a plan review redesign that did not stop at the plan review gate** (operator rulings, 2026-10-09): `retry-plan` must not fire, or the run never leaves the redesign; and a run that did stop at the gate must still be seen as stopped when another kind of escalation (the projector, the resume's toolchain pause) follows the stop, while an escalation of another kind that merely carries the `design:review` dispatch id (the invalidate loop guard) must not count. Tests: Task 14, "a budget pause in the regenerated design:dispatch after a plan review redesign resumes and dispatches it", "a gate stop resumed on a host missing a required suite's tools ...", and the `review-resume.test.ts` cases.
+8. **A structural proof that fails.** It runs inside the last migration's transaction, so the database stays at its old version with the backup in place (no later run can accept it silently). Test: Task 2, "a failed structural proof rolls back the last migration and keeps the backup".
 9. **A release that changes what a digest depends on** (operator ruling, 2026-10-09). A manifest under an older `FINGERPRINT_SCHEME` must count as changed in design, never be adopted again, and the pin test must fail until the scheme is bumped. Tests: Task 9 `fingerprint-pin.test.ts`, Task 13 "a manifest recorded under an older scheme counts as changed", Task 12 "a manifest from an older scheme is never adopted again".
 10. **`--resume --inspect` on a checkpoint resume would upgrade or refuse** (operator ruling, 2026-10-09): no migration, no backup, a report either way. Test: Task 3, `--resume --inspect reports it without upgrading it` for every fixture.
-8. **A structural proof that fails.** It runs inside the last migration's transaction, so the database stays at its old version with the backup in place (no later run can accept it silently). Test: Task 2, "a failed structural proof rolls back the last migration and keeps the backup".
+11. **Reads that must not change a database** (operator ruling, 2026-10-09). `--inspect`, the narrow readers of `ls`, `clean` and `--fresh`, and the tests' reads go through `readCopyOf`: a WAL checkpoint with no `-wal`/`-shm` beside it is read, a live `-wal` is included, and the original's bytes and folder are unchanged. Tests: Task 1 `test/db/read-copy.test.ts`, Task 3 `a WAL checkpoint without -wal or -shm beside it is read through a private copy and left as it was`.
 
 ## File Structure
 
@@ -68,6 +69,7 @@ Created:
 | `scripts/db-fixtures/drive-v8-run.ts` | Drives a real worktree mode run with the 2b05680 code to one of three stops (a budget pause in implement; an escalation at the plan review gate; a budget pause in the regenerated `design:dispatch` of a redesign with grading on) and records it. |
 | `test/fixtures/db/*.db`, `test/fixtures/db/v8-*/*` | The committed fixtures (one per known shape, plus v6 for refusal, plus the three recorded v8 runs). |
 | `test/helpers/db-fixtures.ts` | Names the fixtures and copies them, and the recorded runs, into temporary folders for a test. |
+| `src/db/read-copy.ts` | `readCopyOf`: reads a database through a private copy, never opening the original. |
 | `test/helpers/check-probes.ts` | Seed rows and one forbidden update per CHECK constraint, for the behavioural CHECK proof. |
 | `src/db/migrations/types.ts` | The `Migration` interface. |
 | `src/db/migrations/rebuild.ts` | SQLite's documented table rebuild procedure as one helper. |
@@ -119,7 +121,7 @@ Modified:
 | `src/dispatch/run-dispatch.ts`, `src/cli/park.ts` | Carryover tied to the parked step's generation; resume order; narrowing and pause. |
 | `src/dispatch/provision.ts` | `resetProvision` through `invalidateSteps`. |
 | `src/dispatch/plan-frontmatter.ts`, `src/dispatch/worktree.ts` | Frontmatter from text; plan files at a ref through git. |
-| `src/cli/run.ts`, `src/cli/preflight.ts`, `src/cli/migrate.ts`, `src/cli/checkpoints.ts`, `src/util/process/interruption.ts` | Wiring, shared toolchain decision, migration messages, narrow readers (`styre clean` reaches the narrow readers through `checkpoints.ts` and `interruption.ts`; `src/cli/clean.ts` itself is unchanged). |
+| `src/cli/run.ts`, `src/cli/preflight.ts`, `src/cli/migrate.ts`, `src/cli/checkpoints.ts`, `src/cli/clean.ts`, `src/util/process/interruption.ts` | Wiring, shared toolchain decision, migration messages, narrow readers; every read of a checkpoint that must not change it goes through `readCopyOf` (Task 3). |
 | `test/helpers/db.ts`, `test/helpers/skeleton-registry.ts`, `test/helpers/run-harness.ts` and the existing tests named per task (among them `test/migrate-cli.test.ts` and `test/cli/toolchain-gate-invariant.test.ts`) | Snapshot capture, plan digests in mocks, real steps instead of seeded rows, the new schema version and toolchain notice. |
 | `CLAUDE.md`, `docs/architecture/{minimal-loop,control-loop,build-operations,runtime-parameters,conventions,telemetry-export}.md`, `SECURITY.md`, `docs/architecture/brainstorm.md` | Spec §9. |
 
@@ -140,6 +142,7 @@ Modified:
 - Create: `scripts/db-fixtures/generate.ts`, `scripts/db-fixtures/seed-era.ts`, `scripts/db-fixtures/drive-v8-run.ts`
 - Create (generated, committed): `test/fixtures/db/v6-v0.7.0.db`, `v7-v0.9.0.db`, `v7-v0.9.0-bridged.db`, `v7-v0.10.0.db`, `v7-v0.10.0-bridged.db`, `v8-v0.13.2.db`, `v8-main-2b05680.db`; the recorded runs `test/fixtures/db/v8-paused-worktree/{run.db,transcript.json,repo.bundle,meta.json}`, `test/fixtures/db/v8-plan-gate-worktree/{run.db,repo.bundle,meta.json}` (a needs_you pause writes no transcript), `test/fixtures/db/v8-redesign-graded-worktree/{run.db,transcript.json,repo.bundle,meta.json}`
 - Modify: `.gitignore` (after the `# SQLite (local databases)` block, lines 149-152: a negation for the fixtures)
+- Create: `src/db/read-copy.ts` (`readCopyOf`: the one helper every read that must not change a database goes through) and `test/db/read-copy.test.ts`
 - Create: `test/helpers/db-fixtures.ts`
 - Test: `test/db/fixtures.test.ts`
 
@@ -162,16 +165,137 @@ The v7 and v6 fixtures are written through each release's own `migrate()` and re
 
 **Interfaces:**
 - Consumes: `makeTempDir` (`test/helpers/temp.ts`, PR #154).
-- Produces: `FIXTURES: readonly FixtureName[]` where `type FixtureName = "v6-v0.7.0" | "v7-v0.9.0" | "v7-v0.9.0-bridged" | "v7-v0.10.0" | "v7-v0.10.0-bridged" | "v8-v0.13.2" | "v8-main-2b05680"`; `MIGRATABLE_FIXTURES: readonly FixtureName[]` (all but v6); `copyFixture(name: FixtureName): string` (path of a fresh temporary copy); `fixtureVersion(path: string): number`; `RECORDED_RUNS: readonly RecordedRun[]` where `type RecordedRun = "v8-paused-worktree" | "v8-plan-gate-worktree" | "v8-redesign-graded-worktree"`; `copyRecordedRun(name: RecordedRun): string` (a temporary folder holding a copy of every file of that recording); `interface RecordedMeta { slug: string; ident: string; branch: string; scenario: string; targetRepoAtRecording: string; worktreeRootAtRecording: string }`.
+- Produces: `readCopyOf<T>(path: string, fn: (db: Database) => T): T` in `src/db/read-copy.ts`; `FIXTURES: readonly FixtureName[]` where `type FixtureName = "v6-v0.7.0" | "v7-v0.9.0" | "v7-v0.9.0-bridged" | "v7-v0.10.0" | "v7-v0.10.0-bridged" | "v8-v0.13.2" | "v8-main-2b05680"`; `MIGRATABLE_FIXTURES: readonly FixtureName[]` (all but v6); `copyFixture(name: FixtureName): string` (path of a fresh temporary copy); `fixtureVersion(path: string): number`; `RECORDED_RUNS: readonly RecordedRun[]` where `type RecordedRun = "v8-paused-worktree" | "v8-plan-gate-worktree" | "v8-redesign-graded-worktree"`; `copyRecordedRun(name: RecordedRun): string` (a temporary folder holding a copy of every file of that recording); `interface RecordedMeta { slug: string; ident: string; branch: string; scenario: string; targetRepoAtRecording: string; worktreeRootAtRecording: string }`.
+
+- [ ] **Step 0: The private copy reader (operator ruling, 2026-10-09)**
+
+Every read of a database that must not change it (`--inspect`, the narrow readers of `ls`, `clean` and `--fresh`, `fixtureVersion` and the fixture tests, the harness's reads of a checkpoint) goes through one helper: it copies the file, and its `-wal` and `-shm` files when present, into a private temporary folder, opens the copy, and removes the folder in a `finally`. The original is never opened, in any journal mode. This also matters for reading at all: a read only open of a WAL database whose `-wal`/`-shm` files are absent fails on macOS (SQLite 3.54) with `unable to open database file`.
+
+```ts
+// test/db/read-copy.test.ts
+import { Database } from "bun:sqlite";
+import { expect, test } from "bun:test";
+import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { readCopyOf } from "../../src/db/read-copy.ts";
+import { makeTempDir } from "../helpers/temp.ts";
+
+/** The private copies readCopyOf makes in the temp root (the tests' own folders use another prefix). */
+const copies = () => readdirSync(tmpdir()).filter((n) => n.startsWith("styre-readcopy-"));
+/** Every file in `dir` with its bytes, to prove a read changed nothing beside the database. */
+const filesOf = (dir: string) =>
+  readdirSync(dir)
+    .sort()
+    .map((f) => [f, readFileSync(join(dir, f)).toString("base64")]);
+
+function walDb(dir: string): string {
+  const path = join(dir, "run.db");
+  const db = new Database(path);
+  db.exec("PRAGMA journal_mode = WAL;");
+  db.exec("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('main');");
+  db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+  db.close();
+  return path;
+}
+
+test("a WAL database with no -wal or -shm beside it is read, and nothing beside it changes", () => {
+  const dir = makeTempDir("styre-rc-test-");
+  const path = walDb(dir);
+  for (const ext of ["-wal", "-shm"]) rmSync(`${path}${ext}`, { force: true });
+  const before = filesOf(dir);
+  const rows = readCopyOf(path, (db) => db.query<{ v: string }, []>("SELECT v FROM t").all());
+  expect(rows).toEqual([{ v: "main" }]);
+  expect(filesOf(dir)).toEqual(before);
+});
+
+test("a database with a live -wal file is read including the pages not yet in the main file", () => {
+  const dir = makeTempDir("styre-rc-test-");
+  const path = walDb(dir);
+  const writer = new Database(path);
+  try {
+    writer.exec("PRAGMA wal_autocheckpoint = 0;");
+    writer.exec("INSERT INTO t VALUES ('only in the wal')");
+    expect(existsSync(`${path}-wal`)).toBe(true);
+    const before = filesOf(dir);
+    const rows = readCopyOf(path, (db) =>
+      db.query<{ v: string }, []>("SELECT v FROM t ORDER BY rowid").all(),
+    );
+    expect(rows).toEqual([{ v: "main" }, { v: "only in the wal" }]);
+    expect(filesOf(dir)).toEqual(before);
+  } finally {
+    writer.close();
+  }
+});
+
+test("a missing path throws and creates nothing", () => {
+  const dir = makeTempDir("styre-rc-test-");
+  const before = copies().length;
+  expect(() => readCopyOf(join(dir, "absent.db"), () => 1)).toThrow("does not exist");
+  expect(readdirSync(dir)).toEqual([]);
+  expect(copies().length).toBe(before);
+});
+
+test("the private copy is removed afterwards, also when the reader throws", () => {
+  const dir = makeTempDir("styre-rc-test-");
+  const path = walDb(dir);
+  const before = copies().length;
+  expect(readCopyOf(path, () => copies().length)).toBe(before + 1); // it exists while reading
+  expect(copies().length).toBe(before);
+  expect(() =>
+    readCopyOf(path, () => {
+      throw new Error("the reader failed");
+    }),
+  ).toThrow("the reader failed");
+  expect(copies().length).toBe(before);
+});
+```
+
+```ts
+// src/db/read-copy.ts
+import { Database } from "bun:sqlite";
+import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
+
+/** Read a database without opening it (operator ruling, 2026-10-09; spec §7.7). The file, and its
+ *  `-wal` and `-shm` files when present, are copied into a private temporary folder; `fn` reads the
+ *  copy, opened read write there (SQLite needs that to read a WAL copy without its `-shm`); the
+ *  folder is removed in a finally, whatever happens. The original is never opened, in any journal
+ *  mode, so nothing beside it is created or changed. A missing path throws and creates nothing. A
+ *  copy taken while a writer is active can be a moment behind it; the callers are reads that
+ *  report or decide, never ones that write back. */
+export function readCopyOf<T>(path: string, fn: (db: Database) => T): T {
+  if (!existsSync(path)) throw new Error(`readCopyOf: ${path} does not exist`);
+  const dir = mkdtempSync(join(tmpdir(), "styre-readcopy-"));
+  try {
+    const copy = join(dir, basename(path));
+    copyFileSync(path, copy);
+    for (const ext of ["-wal", "-shm"]) {
+      if (existsSync(`${path}${ext}`)) copyFileSync(`${path}${ext}`, `${copy}${ext}`);
+    }
+    const db = new Database(copy);
+    try {
+      return fn(db);
+    } finally {
+      db.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+```
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/db/read-copy.test.ts` before writing `src/db/read-copy.ts` (FAIL: `Cannot find module '../../src/db/read-copy.ts'`), then after (PASS, 4 tests). Break it: open `path` itself instead of the copy (`new Database(path, { readonly: true })`): the first test fails with `unable to open database file` on macOS (or on the changed directory listing where SQLite creates the `-shm`). Restore.
 
 - [ ] **Step 1: Write the fixture sanity test (it fails: no fixtures yet)**
 
 ```ts
 // test/db/fixtures.test.ts
-import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { readCopyOf } from "../../src/db/read-copy.ts";
 import {
   FIXTURES,
   RECORDED_RUNS,
@@ -248,8 +372,7 @@ describe("historical database fixtures", () => {
       const path = copyFixture(name);
       const want = EXPECTED[name];
       expect(fixtureVersion(path)).toBe(want.version);
-      const db = new Database(path, { readonly: true });
-      try {
+      readCopyOf(path, (db) => {
         const signalCols = db
           .query<{ name: string }, []>("PRAGMA table_info('signal')")
           .all()
@@ -273,9 +396,7 @@ describe("historical database fixtures", () => {
             .get();
           expect(awaiting).not.toBeNull();
         }
-      } finally {
-        db.close();
-      }
+      });
     });
   }
 
@@ -289,8 +410,7 @@ describe("historical database fixtures", () => {
       expect(meta.scenario).toBe(want.scenario);
       const dbPath = join(dir, "run.db");
       expect(fixtureVersion(dbPath)).toBe(8);
-      const db = new Database(dbPath, { readonly: true });
-      try {
+      readCopyOf(dbPath, (db) => {
         const t = db
           .query<{ stage: string; status: string }, []>("SELECT stage, status FROM ticket")
           .get();
@@ -314,10 +434,19 @@ describe("historical database fixtures", () => {
           )
           .get();
         expect(latest?.worktree_path).not.toBe(meta.targetRepoAtRecording); // worktree mode
-      } finally {
-        db.close();
-      }
+      });
     });
+  }
+});
+
+test("every committed fixture is in rollback journal (DELETE) mode, never WAL", () => {
+  // Read from the file header, never opened as a database: bytes 18 and 19 are the file format
+  // write and read versions, 1 for a rollback journal and 2 for WAL (sqlite.org/fileformat2.html).
+  const committed = join(import.meta.dir, "..", "fixtures", "db");
+  const files = [...FIXTURES.map((f) => `${f}.db`), ...RECORDED_RUNS.map((r) => join(r, "run.db"))];
+  for (const f of files) {
+    const header = readFileSync(join(committed, f)).subarray(18, 20);
+    expect([f, header[0], header[1]]).toEqual([f, 1, 1]);
   }
 });
 ```
@@ -331,9 +460,9 @@ Expected: FAIL with `Cannot find module '../helpers/db-fixtures.ts'`.
 
 ```ts
 // test/helpers/db-fixtures.ts
-import { Database } from "bun:sqlite";
 import { copyFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { readCopyOf } from "../../src/db/read-copy.ts";
 import { makeTempDir } from "./temp.ts";
 
 /** One committed database per known released shape (spec §7.4, §7.5), plus v6 for the refusal.
@@ -388,14 +517,11 @@ export function copyRecordedRun(name: RecordedRun): string {
 }
 
 export function fixtureVersion(path: string): number {
-  const db = new Database(path, { readonly: true });
-  try {
+  return readCopyOf(path, (db) => {
     const row = db.query<{ v: number }, []>("SELECT MAX(version) AS v FROM schema_meta").get();
     if (row === null) throw new Error(`${path}: schema_meta is empty`);
     return row.v;
-  } finally {
-    db.close();
-  }
+  });
 }
 ```
 
@@ -790,6 +916,7 @@ process.exitCode = 0;
 // system temp folder: every child gets XDG folders and a TMPDIR inside one work folder, removed at
 // the end. Each child has a time limit here and bounds itself too. If this script is killed, run
 // `git worktree prune` and remove the work folder it printed.
+import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -824,9 +951,19 @@ function run(argv: string[], cwd: string, env: Record<string, string>, timeoutMs
   }
 }
 
-/** A WAL database leaves -wal and -shm beside it; they must never be committed. */
-function dropSidecars(db: string): void {
-  for (const ext of ["-wal", "-shm"]) rmSync(`${db}${ext}`, { force: true });
+/** Commit fixtures in rollback journal (DELETE) mode, never WAL (operator ruling, 2026-10-09):
+ *  fold the WAL in, switch the mode (written into the file header), then remove any -wal and -shm,
+ *  which must never be committed. A WAL file copied without its side files cannot even be opened
+ *  read only on macOS. */
+function toDeleteMode(path: string): void {
+  const db = new Database(path);
+  try {
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    db.exec("PRAGMA journal_mode = DELETE;");
+  } finally {
+    db.close();
+  }
+  for (const ext of ["-wal", "-shm"]) rmSync(`${path}${ext}`, { force: true });
 }
 
 const work = mkdtempSync(join(tmpdir(), "styre-db-fixtures-"));
@@ -851,7 +988,7 @@ try {
       const seeder = join(ROOT, "scripts/db-fixtures/seed-era.ts");
       const mode = e.bridge ? "bridge" : "plain";
       run([process.execPath, seeder, era, out, mode], era, envFor(e.name), 60_000);
-      dropSidecars(out);
+      toDeleteMode(out);
     } finally {
       run(["git", "worktree", "remove", "--force", era], ROOT, {}, GIT_MS);
     }
@@ -866,7 +1003,7 @@ try {
       mkdirSync(outDir, { recursive: true });
       const driver = join(ROOT, "scripts/db-fixtures/drive-v8-run.ts");
       run([process.execPath, driver, era, outDir, r.scenario], era, envFor(r.dir), 300_000);
-      dropSidecars(join(outDir, "run.db"));
+      toDeleteMode(join(outDir, "run.db"));
     }
   } finally {
     run(["git", "worktree", "remove", "--force", era], ROOT, {}, GIT_MS);
@@ -884,12 +1021,13 @@ Expected: the generator exits 0; seven `.db` files; `v8-paused-worktree/` and `v
 - [ ] **Step 8: Run the test and see it pass**
 
 Run: `perl -e 'alarm 600; exec @ARGV' bun test test/db/fixtures.test.ts`
-Expected: PASS (10 tests). `git status --short test/fixtures/db` shows only the new files, no `-shm` or `-wal` (the test opened copies).
+Expected: PASS (11 tests). `git status --short test/fixtures/db` shows only the new files, no `-shm` or `-wal` (every read went through `readCopyOf`, and the generator left each fixture in DELETE mode).
 
 - [ ] **Step 9: Break it on purpose, see it fail, restore**
 
 1. Change `EXPECTED["v7-v0.9.0-bridged"].run` to `false`, rerun the command in Step 8, expect `v7-v0.9.0-bridged has the shape its release wrote` to fail on `expect(hasRun).toBe(want.run)`; restore `true`.
 2. Change `RECORDED["v8-redesign-graded-worktree"].steps["design:size"]` to `"pending"`: its test fails on the step statuses. Restore.
+3. In `generate.ts`, drop the `PRAGMA journal_mode = DELETE;` line and regenerate: `every committed fixture is in rollback journal (DELETE) mode` fails on the first fixture (`2, 2`). Restore and regenerate.
 
 - [ ] **Step 10: Track the fixtures, prove it, commit**
 
@@ -902,7 +1040,7 @@ Expected: PASS (10 tests). `git status --short test/fixtures/db` shows only the 
 ```
 
 ```bash
-git add .gitignore scripts/db-fixtures test/fixtures/db test/helpers/db-fixtures.ts test/db/fixtures.test.ts
+git add .gitignore scripts/db-fixtures test/fixtures/db src/db/read-copy.ts test/db/read-copy.test.ts test/helpers/db-fixtures.ts test/db/fixtures.test.ts
 git ls-files test/fixtures/db | grep -c '\.db$'
 git ls-files test/fixtures/db | grep -c '\.db-\(wal\|shm\)$'
 ```
@@ -1140,18 +1278,16 @@ import {
 } from "../../src/db/migrations/0008-run-table.ts";
 import { CURRENT_VERSION, MIGRATIONS } from "../../src/db/migrations/index.ts";
 import { rebuildTable } from "../../src/db/migrations/rebuild.ts";
+import { readCopyOf } from "../../src/db/read-copy.ts";
 import { describeSchema, diffShapes } from "../../src/db/schema-shape.ts";
 import { CHECK_PROBES_V8, SEED_ROWS_V8, probeChecks } from "../helpers/check-probes.ts";
 import { MIGRATABLE_FIXTURES, copyFixture, fixtureVersion } from "../helpers/db-fixtures.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 function count(path: string, sql: string): number {
-  const db = new Database(path, { readonly: true });
-  try {
+  return readCopyOf(path, (db) => {
     return (db.query<{ n: number }, []>(sql).get() as { n: number }).n;
-  } finally {
-    db.close();
-  }
+  });
 }
 function refusalOf(fn: () => unknown): StyreError {
   try {
@@ -1211,8 +1347,7 @@ describe("migrate upgrades every known released shape", () => {
     const path = copyFixture("v7-v0.9.0-bridged");
     const signals = count(path, "SELECT COUNT(*) AS n FROM signal");
     migrate(path);
-    const db = new Database(path, { readonly: true });
-    try {
+    readCopyOf(path, (db) => {
       const cols = db
         .query<{ name: string }, []>("PRAGMA table_info('signal')")
         .all()
@@ -1224,9 +1359,7 @@ describe("migrate upgrades every known released shape", () => {
       expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
       // the view that reads signal was dropped and recreated around the rebuild
       expect(db.query("SELECT COUNT(*) AS n FROM v_ready_tickets").get()).toEqual({ n: 0 });
-    } finally {
-      db.close();
-    }
+    });
   });
 });
 
@@ -1807,6 +1940,7 @@ import { openDb } from "./client.ts";
 import { detectShape } from "./known-shapes.ts";
 import { CURRENT_VERSION, MIGRATIONS, OLDEST_MIGRATABLE_VERSION } from "./migrations/index.ts";
 import type { Migration } from "./migrations/types.ts";
+import { readCopyOf } from "./read-copy.ts";
 import { describeSchema, diffShapes } from "./schema-shape.ts";
 import schemaSql from "./schema.sql" with { type: "text" };
 
@@ -1961,14 +2095,12 @@ export function classifyDatabase(db: Database, path: string): DatabaseState {
   return { kind: "upgrade", version: existing };
 }
 
-/** classifyDatabase through a read only connection: no write, no backup. For `--inspect`. */
+/** classifyDatabase on a private copy (`readCopyOf`): the database itself is never opened, so
+ *  nothing beside it changes and no backup is made. For `--inspect`. */
 export function readDatabaseState(path: string): DatabaseState {
-  const db = new Database(path, { readonly: true });
-  try {
+  return readCopyOf(path, (db) => {
     return classifyDatabase(db, path);
-  } finally {
-    db.close();
-  }
+  });
 }
 
 /** Create, or upgrade, the run's database (control-loop §10, spec §7.1). Empty: create from
@@ -2100,7 +2232,8 @@ git commit -m "feat(eng-477): versioned migrations with backup, shape detection 
 **Files:**
 - Create: `src/db/repos/checkpoint-read.ts`
 - Modify: `src/cli/checkpoints.ts:6-7,45-61` (`classifyCheckpointDb`), `src/util/process/interruption.ts:7-8,113,225-274` (the `getProject` and `getTicket` imports; `findInterruption`, `olderCheckpointWarning`, `undoBeforeDiscard`). Reads only: nothing here changes who may be signalled.
-- Modify: `src/cli/park.ts:258-260` (`--inspect` decides from `readDatabaseState` before `migrate`, and reports an older or refused checkpoint through the narrow readers; operator ruling, 2026-10-09)
+- Modify: `src/cli/clean.ts:38-44,166-172` (its two direct reads go through `readCopyOf`)
+- Modify: `src/cli/park.ts:259-260` (`--inspect` decides from `readDatabaseState` before `migrate`, and reports an older or refused checkpoint through the narrow readers; operator ruling, 2026-10-09)
 - Test: `test/cli/checkpoint-readers-fixtures.test.ts`
 
 **Interfaces:**
@@ -2121,13 +2254,21 @@ git commit -m "feat(eng-477): versioned migrations with backup, shape detection 
 ```ts
 // test/cli/checkpoint-readers-fixtures.test.ts
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import { listCheckpoints } from "../../src/cli/checkpoints.ts";
 import { cleanImpl } from "../../src/cli/clean.ts";
 import { resumeRun } from "../../src/cli/park.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import { openDb } from "../../src/db/client.ts";
+import { migrate } from "../../src/db/migrate.ts";
 import { CURRENT_VERSION } from "../../src/db/migrations/index.ts";
 import { listCheckpointRunningSteps } from "../../src/db/repos/checkpoint-read.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
@@ -2274,6 +2415,23 @@ describe("checkpoints are read without migrating them (spec §7.7)", () => {
     );
   }
 });
+
+test("a WAL checkpoint without -wal or -shm beside it is read through a private copy and left as it was", () => {
+  // operator ruling, 2026-10-09: a read only open of such a file fails on macOS; a private copy reads it
+  const { root, dbPath } = checkpointOf("v8-main-2b05680", "fixture");
+  migrate(dbPath); // openDb leaves the file in WAL mode; closing removes its -wal and -shm
+  const dir = dirname(dbPath);
+  const files = () =>
+    readdirSync(dir)
+      .sort()
+      .map((f) => [f, readFileSync(join(dir, f)).toString("base64")]);
+  const before = files();
+  expect(listCheckpoints(root).map((c) => c.ident)).toEqual(["ENG-1"]);
+  const lines: string[] = [];
+  undoBeforeDiscard(dbPath, (l) => lines.push(l));
+  expect(lines.join("\n")).not.toContain("could not read");
+  expect(files()).toEqual(before);
+});
 ```
 
 - [ ] **Step 2: Run it and see it fail**
@@ -2368,34 +2526,69 @@ export function findCheckpointParkedStepKey(db: Database, ticketId: number): str
 
 - [ ] **Step 4: Use them**
 
-`src/cli/checkpoints.ts`: replace the imports on lines 6-7 with `import { listCheckpointPendingSignals, readCheckpointTicket } from "../db/repos/checkpoint-read.ts";`; in `classifyCheckpointDb` replace `const t = getTicket(db, ticketId);` with `const t = readCheckpointTicket(db, ticketId);` and `const pending = listPending(db, ticketId);` with `const pending = listCheckpointPendingSignals(db, ticketId);`.
+Every read below goes through `readCopyOf` (Task 1, operator ruling 2026-10-09): the checkpoint itself is never opened, in any journal mode, so a WAL checkpoint without its `-wal`/`-shm` files is still read (a read only open of one fails on macOS with `unable to open database file`), and nothing beside it changes.
+
+`src/cli/checkpoints.ts`: replace the imports on lines 6-7 with `import { listCheckpointPendingSignals, readCheckpointTicket } from "../db/repos/checkpoint-read.ts";` and add `import { readCopyOf } from "../db/read-copy.ts";`; in `classifyCheckpointDb` replace `const t = getTicket(db, ticketId);` with `const t = readCheckpointTicket(db, ticketId);` and `const pending = listPending(db, ticketId);` with `const pending = listCheckpointPendingSignals(db, ticketId);`; in `listCheckpoints` (lines 115-123) replace the `new Database(dbPath, { readonly: true })` block inside the `try` with `cls = readCopyOf(dbPath, (db) => classifyCheckpointDb(db, dir));` (the surrounding `catch { continue; }` stays). `Database` is then a type only import (`import type { Database } from "bun:sqlite";`).
+
+`src/cli/clean.ts` (it reaches the checkpoint directly in two places): add `import { readCopyOf } from "../db/read-copy.ts";`; in `reapEffort` (lines 38-44) replace the `db`/`stale`/`try`/`finally` lines with `const stale = readCopyOf(c.dbPath, (db) => getLatestWorktreePath(db, c.ticketId));`; in `cleanImpl` (lines 166-172) replace them with `const cls = readCopyOf(dbPath, (db) => classifyCheckpointDb(db, dir));`. `import { Database }` then has no use left: remove it.
 
 `src/util/process/interruption.ts`:
 - imports: remove `import { getProject } from "../../db/repos/project.ts";` and `import { getTicket } from "../../db/repos/ticket.ts";`, add `import { listCheckpointRunningSteps, readCheckpointTargetRepo, readCheckpointTicket } from "../../db/repos/checkpoint-read.ts";`;
 - line 113: `export function findInterruption(db: Database, step: Pick<WorkflowStepRow, "id" | "ticket_id" | "attempt" | "started_at">): InterruptionPayload | null {`;
 - `olderCheckpointWarning(step: Pick<WorkflowStepRow, "pid" | "step_key">)`;
-- in `undoBeforeDiscard`: `let running: CheckpointRunningStep[];` (import the type), `running = listCheckpointRunningSteps(db);`, and replace the ticket and project reads with:
+- add `import { readCopyOf } from "../../db/read-copy.ts";`;
+- replace `undoBeforeDiscard` and its comment (lines 232-274) with the version below: it reads everything it needs from a private copy, then undoes the edits outside it (the undo works on the checkout, not the database), so an error in the undo is not reported as an unreadable checkpoint:
 
 ```ts
-      const ticket = readCheckpointTicket(db, step.ticket_id);
-      const targetRepo = ticket ? readCheckpointTargetRepo(db, ticket.project_id) : null;
-      if (!ticket || !targetRepo) continue;
-      const inPlace = getLatestWorktreePath(db, step.ticket_id) === targetRepo;
-      const line = undoInterruptedEdits(p, {
-        inPlace,
-        repoPath: targetRepo,
-        branch: branchNameFor(ticket),
-      });
+interface DiscardStep {
+  older: string | null;
+  undo: { payload: InterruptionPayload; inPlace: boolean; repoPath: string; branch: string } | null;
+}
+
+/** Section 7.5: `--fresh` and `clean` in in-place mode undo an interrupted step's edits before they
+ *  discard the checkpoint; otherwise the next run would count the agent's new files as files that
+ *  were already there. The mode is the checkpoint's own: in place when its latest dispatch worked
+ *  in the project's repository (as resume derives it). The checkpoint is read through a private
+ *  copy and never opened (operator ruling, 2026-10-09). Call it after the live lock check. */
+export function undoBeforeDiscard(dbPath: string, warn: (line: string) => void): void {
+  if (!existsSync(dbPath)) return;
+  let found: DiscardStep[];
+  try {
+    found = readCopyOf(dbPath, (db) =>
+      listCheckpointRunningSteps(db).map((step): DiscardStep => {
+        const older = olderCheckpointWarning(step);
+        const payload = findInterruption(db, step);
+        const ticket = payload ? readCheckpointTicket(db, step.ticket_id) : null;
+        const repoPath = ticket ? readCheckpointTargetRepo(db, ticket.project_id) : null;
+        if (!payload || !ticket || !repoPath) return { older, undo: null };
+        const inPlace = getLatestWorktreePath(db, step.ticket_id) === repoPath;
+        return { older, undo: { payload, inPlace, repoPath, branch: branchNameFor(ticket) } };
+      }),
+    );
+  } catch (err) {
+    warn(`styre: could not read ${dbPath} to undo an interrupted step's edits: ${String(err)}`);
+    return;
+  }
+  for (const f of found) {
+    if (f.older) warn(f.older);
+    if (!f.undo) continue;
+    const { payload, ...where } = f.undo;
+    const line = undoInterruptedEdits(payload, where);
+    if (line) warn(line);
+  }
+}
 ```
+
+(`Database` stays imported for `recordInterruption`; the `steps` namespace import stays for it too.)
 
 Check `recover.ts` still compiles: it passes full `WorkflowStepRow` values, which satisfy the narrower `Pick` types.
 
-`src/cli/park.ts` (operator ruling, 2026-10-09: `--inspect` never migrates and writes no backup, and works on a checkpoint resume would refuse). Import `type DatabaseState, readDatabaseState` from `../db/migrate.ts`, `CURRENT_VERSION` from `../db/migrations/index.ts`, and `findCheckpointParkedStepKey, readCheckpointOnlyTicket, readCheckpointTargetRepo` from `../db/repos/checkpoint-read.ts`. Add above `resumeRun`:
+`src/cli/park.ts` (operator ruling, 2026-10-09: `--inspect` never migrates and writes no backup, and works on a checkpoint resume would refuse). Import `type DatabaseState, readDatabaseState` from `../db/migrate.ts`, `CURRENT_VERSION` from `../db/migrations/index.ts`, `readCopyOf` from `../db/read-copy.ts`, and `findCheckpointParkedStepKey, readCheckpointOnlyTicket, readCheckpointTargetRepo` from `../db/repos/checkpoint-read.ts`. Add above `resumeRun`:
 
 ```ts
 /** `--inspect` on a checkpoint this Styre would upgrade or refuse (operator ruling, 2026-10-09):
- *  read only, through the readers that work on every shape since v7 (spec §7.7). It never
- *  migrates and writes no backup, so it also works where resume would refuse. */
+ *  read through a private copy, with the readers that work on every shape since v7 (spec §7.7). It
+ *  never migrates and writes no backup, so it also works where resume would refuse. */
 export function inspectWithoutUpgrading(
   dbPath: string,
   ident: string,
@@ -2411,23 +2604,19 @@ export function inspectWithoutUpgrading(
           : `schema v${state.version}, current`;
   let details: string;
   try {
-    const db = new Database(dbPath, { readonly: true });
-    try {
+    // A private copy (operator ruling, 2026-10-09): the checkpoint itself is never opened.
+    details = readCopyOf(dbPath, (db) => {
       const ticket = readCheckpointOnlyTicket(db);
       const targetRepo = ticket ? readCheckpointTargetRepo(db, ticket.project_id) : null;
-      if (!ticket || !targetRepo) {
-        details = "  (no ticket in this checkpoint)\n";
-      } else {
-        const recorded = headBaseline(db, ticket.id);
-        const current = branchHeadSha(targetRepo, branchNameFor(ticket));
-        const moved = recorded !== null && current !== null && recorded !== current;
-        details =
-          `  recorded base: ${recorded ?? "(none)"}\n  current head:  ${current ?? "(none)"}${moved ? "  [MOVED]" : ""}\n` +
-          `  would re-dispatch step: ${findCheckpointParkedStepKey(db, ticket.id) ?? "(none)"}\n`;
-      }
-    } finally {
-      db.close();
-    }
+      if (!ticket || !targetRepo) return "  (no ticket in this checkpoint)\n";
+      const recorded = headBaseline(db, ticket.id);
+      const current = branchHeadSha(targetRepo, branchNameFor(ticket));
+      const moved = recorded !== null && current !== null && recorded !== current;
+      return (
+        `  recorded base: ${recorded ?? "(none)"}\n  current head:  ${current ?? "(none)"}${moved ? "  [MOVED]" : ""}\n` +
+        `  would re-dispatch step: ${findCheckpointParkedStepKey(db, ticket.id) ?? "(none)"}\n`
+      );
+    });
   } catch (err) {
     details = `  (the rest cannot be read on this shape: ${err instanceof Error ? err.message : String(err)})\n`;
   }
@@ -2435,7 +2624,7 @@ export function inspectWithoutUpgrading(
 }
 ```
 
-and in `resumeRun`, right after `try {` (line 258) and before the `migrate(dbPath, ...)` call (Task 2):
+and in `resumeRun`, right after `try {` (line 259) and before the `migrate(dbPath, ...)` call (Task 2):
 
 ```ts
     // --inspect is diagnostics only: a checkpoint that is not at the current version is reported
@@ -2458,7 +2647,7 @@ and in `resumeRun`, right after `try {` (line 258) and before the `migrate(dbPat
     }
 ```
 
-(`Database`, `branchHeadSha` and `branchNameFor` are already imported in `park.ts`; the early `return`s sit inside the `try` whose `finally` releases the run lock.)
+(`branchHeadSha` and `branchNameFor` are already imported in `park.ts`; the early `return`s sit inside the `try` whose `finally` releases the run lock.)
 
 - [ ] **Step 5: Run the test and see it pass**
 
@@ -2472,7 +2661,7 @@ In `listCheckpointRunningSteps`, add `, generation` to the selected columns (a c
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/db/repos/checkpoint-read.ts src/cli/checkpoints.ts src/cli/park.ts src/util/process/interruption.ts test/cli/checkpoint-readers-fixtures.test.ts
+git add src/db/repos/checkpoint-read.ts src/cli/checkpoints.ts src/cli/clean.ts src/cli/park.ts src/util/process/interruption.ts test/cli/checkpoint-readers-fixtures.test.ts
 git commit -m "fix(eng-477): read checkpoints for ls, clean and --fresh with queries that work since v7" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
@@ -2501,10 +2690,10 @@ git commit -m "fix(eng-477): read checkpoints for ls, clean and --fresh with que
 
 ```ts
 // test/db/migrate-v9.test.ts
-import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { migrate } from "../../src/db/migrate.ts";
 import { CURRENT_VERSION } from "../../src/db/migrations/index.ts";
+import { readCopyOf } from "../../src/db/read-copy.ts";
 import { insertWorkUnit, listByTicket } from "../../src/db/repos/work-unit.ts";
 import { MIGRATABLE_FIXTURES, copyFixture } from "../helpers/db-fixtures.ts";
 import { makeTestDb } from "../helpers/db.ts";
@@ -2517,8 +2706,7 @@ for (const name of MIGRATABLE_FIXTURES) {
   test(`${name}: origin is backfilled from kind = 'reconcile', manifests are empty, generation 0`, () => {
     const path = copyFixture(name);
     migrate(path);
-    const db = new Database(path, { readonly: true });
-    try {
+    readCopyOf(path, (db) => {
       const units = db
         .query<{ kind: string; origin: string }, []>(
           "SELECT kind, origin FROM work_unit ORDER BY seq",
@@ -2536,9 +2724,7 @@ for (const name of MIGRATABLE_FIXTURES) {
       expect(steps.every((s) => s.m === null && s.g === 0)).toBe(true);
       expect(db.query("SELECT COUNT(*) AS n FROM ticket_input").get()).toEqual({ n: 0 });
       expect(db.query("SELECT COUNT(*) AS n FROM workflow_step_history").get()).toEqual({ n: 0 });
-    } finally {
-      db.close();
-    }
+    });
   });
 }
 
@@ -3751,12 +3937,13 @@ export const atStep =
 
 ```ts
 // test/helpers/design-harness.ts
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { StyreError } from "../../src/cli/errors.ts";
 import { parkDir } from "../../src/cli/park.ts";
 import { type RunArgs, runImpl } from "../../src/cli/run.ts";
+import { readCopyOf } from "../../src/db/read-copy.ts";
 import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import {
@@ -3868,14 +4055,11 @@ export class DesignHarness {
   }
 
   readAt<T>(path: string, fn: (db: Database, ticketId: number) => T): T {
-    const db = new Database(path, { readonly: true });
-    try {
+    return readCopyOf(path, (db) => {
       const t = db.query<{ id: number }, []>("SELECT id FROM ticket ORDER BY id LIMIT 1").get();
       if (!t) throw new Error(`harness: no ticket in ${path}`);
       return fn(db, t.id);
-    } finally {
-      db.close();
-    }
+    });
   }
 
   async fresh(opts: HarnessRunOptions = {}): Promise<number> {
@@ -4823,12 +5007,24 @@ export interface ResumeRegistryWiring {
     // snapshot. Never exit 69: where the fresh gate would refuse, pause for the operator instead.
     // A ticket the resume transaction already left waiting (a plan review gate stop applied again)
     // gets no second pause: one human_resume and one escalation are enough (operator ruling,
-    // 2026-10-09).
+    // 2026-10-09). The tool gap is still recorded, as a note, and said as what it is.
     const toolchain = toolchainDecision(profile, deps?.probe);
     if (toolchain.kind === "refuse") {
       const reason = resumePauseReason(toolchain.blocking);
-      if (getTicket(db, ticketId)?.status !== "waiting") pauseTicket(db, ticketId, reason);
-      process.stderr.write(`resume: paused: ${reason}\n`);
+      if (getTicket(db, ticketId)?.status === "waiting") {
+        appendEvent(db, {
+          ticketId,
+          kind: "note",
+          reason: "toolchain-missing",
+          payload: { event: "toolchain-missing", detail: reason },
+        });
+        process.stderr.write(
+          `resume: paused: the run is already waiting for you; this host also lacks tools: ${reason}\n`,
+        );
+      } else {
+        pauseTicket(db, ticketId, reason);
+        process.stderr.write(`resume: paused: ${reason}\n`);
+      }
       closeDb();
       process.exitCode = exitCodeForOutcome("paused"); // 75, needs_you
       return;
@@ -5135,34 +5331,79 @@ import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import { FINGERPRINT_SCHEME, digestValue } from "../../src/daemon/canonical.ts";
 import { digestTrack, digestWorkUnits, planDigestOf } from "../../src/daemon/design-digests.ts";
 import { DESIGN_TABLE, type StepRow } from "../../src/daemon/design-graph.ts";
-import { snapshotValues } from "../../src/daemon/design-inputs.ts";
-import { setNeedsDocs, setTicketTrack } from "../../src/db/repos/ticket.ts";
+import { captureSnapshot } from "../../src/daemon/design-inputs.ts";
+import { insertProject } from "../../src/db/repos/project.ts";
+import { listInputs } from "../../src/db/repos/ticket-input.ts";
+import { insertTicket, setNeedsDocs, setTicketTrack } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { makeTestDb } from "../helpers/db.ts";
-import { harnessProfileRaw } from "../helpers/design-script.ts";
 
 /** The digests of a fixed set of inputs, per FINGERPRINT_SCHEME (operator ruling, 2026-10-09, spec
  *  §5.1). A change to the encoding, to how the profile or config is parsed (a new default included),
- *  to what a table step declares, or to how an output is digested changes one of them: paused runs
- *  would rerun their design steps although nobody edited anything. That is a scheme change. Bump
- *  FINGERPRINT_SCHEME deliberately and add its pin here; never edit an existing pin. */
+ *  to what a table step declares, or to how a snapshot row or an output is digested changes one of
+ *  them: paused runs would rerun their design steps although nobody edited anything. That is a
+ *  scheme change. Bump FINGERPRINT_SCHEME deliberately and add its pin here; never edit an existing
+ *  pin. */
 const PINNED: Record<number, Record<string, string>> = {
   1: {
-    // Task 9 Step 8a: the values this test prints on its first run, copied here once.
+    // Task 9 Step 7a: the values this test prints on its first run, copied here once.
+  },
+};
+
+/** Frozen here, never shared with other tests: an edit to a shared helper must not fail the pin. A
+ *  second component with a test policy exercises the defaults inside optional objects too. */
+const PINNED_PROFILE = {
+  slug: "pinned",
+  targetRepo: "/pinned/repo",
+  defaultBranch: "main",
+  checksSystem: "none",
+  components: [
+    {
+      name: "app",
+      kind: "ruby",
+      paths: ["app/**"],
+      commands: { build: "true", test: "true", check: "true" },
+    },
+    {
+      name: "lib",
+      kind: "ruby",
+      paths: ["lib/**"],
+      commands: { build: "true", test: "true", check: "true" },
+      testPolicy: { suite: "required" },
+    },
+  ],
+  promptVars: { stack: "ruby" },
+  runtimeContext: {
+    topology: { type: "cli" },
+    data: { presence: "absent" },
+    caching: { presence: "absent" },
+    observability: { presence: "absent" },
+    configSecrets: { presence: "absent" },
+    documentation: { presence: "absent" },
+    releasePackaging: { mechanism: "none" },
   },
 };
 
 function computed(): Record<string, string> {
-  const profile = parseProfile(harnessProfileRaw("/pinned/repo", "pinned"));
-  const values = snapshotValues(
-    { ident: "ENG-1", title: "Pinned title", description: "Pinned body" },
-    { profile, unusableComponents: [], nonPrimaryComponents: [], config: DEFAULT_RUNTIME_CONFIG },
-  );
   const out: Record<string, string> = {};
-  for (const [name, value] of Object.entries(values)) out[`snapshot ${name}`] = digestValue(value);
-  const { db, ticketId } = makeTestDb();
+  const { db } = makeTestDb({ seedTicket: false });
   try {
+    const projectId = insertProject(db, { slug: "pinned", targetRepo: "/pinned/repo" });
+    const ticketId = insertTicket(db, {
+      projectId,
+      ident: "ENG-1",
+      title: "Pinned title",
+      description: "Pinned body",
+    });
+    // The snapshot digests as captureSnapshot records them, which is what a manifest compares.
+    captureSnapshot(db, ticketId, {
+      profile: parseProfile(PINNED_PROFILE),
+      unusableComponents: [],
+      nonPrimaryComponents: [],
+      config: DEFAULT_RUNTIME_CONFIG,
+    });
+    for (const row of listInputs(db, ticketId)) out[`snapshot ${row.name}`] = row.digest;
     insertWorkUnit(db, {
       ticketId,
       seq: 1,
@@ -5199,8 +5440,9 @@ function computed(): Record<string, string> {
   ]);
   for (const row of DESIGN_TABLE.filter((r): r is StepRow => r.kind === "step")) {
     for (const complexityGrading of [false, true]) {
+      // Sorted: a manifest is a map, so the order a row lists its inputs in never reaches a digest.
       const key = `declared ${row.stepKey} grading ${complexityGrading ? "on" : "off"}`;
-      out[key] = digestValue([...row.inputs({ complexityGrading })]);
+      out[key] = digestValue([...row.inputs({ complexityGrading })].sort());
     }
   }
   return out;
@@ -5731,15 +5973,15 @@ async function readyForSize(
 
 (destructure `projectId` from `makeTestDb()`, import `STEP_TEST_TIMEOUT_MS`, `gitRepo`, `reachDesignStep` from `../helpers/design-steps.ts`, `ABSENT_RC` from `../helpers/design-script.ts`, `makeTempDir` from `../helpers/temp.ts`, and `parseProfile`, and pass `STEP_TEST_TIMEOUT_MS` as that test's timeout: it now runs git. The file's other imports keep other users at this point.)
 
+- [ ] **Step 7a: Record the scheme 1 pin, once (before Step 8, which runs `test/daemon`)**
+
+Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/fingerprint-pin.test.ts`
+Expected: FAIL, `expect(received).toEqual(expected)` with `expected` empty and `received` holding 23 digests (the 10 snapshot rows as `captureSnapshot` recorded them, 3 outputs, and the sorted declared input list of each of the 5 table steps with grading off and on). Copy the received object, exactly as printed, into `PINNED[1]` (replacing the comment), rerun: PASS. From here on the pin is never edited: a change that alters it bumps `FINGERPRINT_SCHEME` and adds `PINNED[2]`.
+
 - [ ] **Step 8: Run the tests and see them pass**
 
 Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon test/engine test/dispatch/design-extract.test.ts test/dispatch/design-extract-retry-feedback.test.ts test/dispatch/completeness-e2e.test.ts test/dispatch/design-review-e2e.test.ts test/dispatch/design-review-handler.test.ts test/dispatch/design-size-e2e.test.ts`
 Expected: PASS.
-
-- [ ] **Step 8a: Record the scheme 1 pin, once**
-
-Run: `perl -e 'alarm 600; exec @ARGV' bun test test/daemon/fingerprint-pin.test.ts`
-Expected: FAIL, `expect(received).toEqual(expected)` with `expected` empty and `received` holding 23 digests (10 snapshot inputs, 3 outputs, and the declared input list of each of the 5 table steps with grading off and on). Copy the received object, exactly as printed, into `PINNED[1]` (replacing the comment), rerun: PASS. From here on the pin is never edited: a change that alters it bumps `FINGERPRINT_SCHEME` and adds `PINNED[2]`.
 
 - [ ] **Step 9: Break it on purpose, see it fail, restore**
 
@@ -7829,6 +8071,7 @@ test(
       const events = listEvents(db, id);
       const since = events.slice(events.findLastIndex((e) => e.kind === "resumed") + 1);
       expect(since.filter((e) => e.kind === "escalated")).toHaveLength(1);
+      expect(since.some((e) => e.reason === "toolchain-missing")).toBe(true); // the gap is on record
     });
 
     // the operator installs the tools and edits the plan, then resumes with --accept-head
@@ -8334,7 +8577,7 @@ Expected: PASS.
 2a. In `carryoverMismatch`, replace the last `return changedInputs(...)` with `return [];`: the "recorded under other inputs" test fails. Restore.
 3. In `applyReviewVerdict`'s plan-defect path, pass `["design:dispatch"]` only: the existing `review-verdict.test.ts` test `blocking plan-defect, config redesign → loopback to design (units cleared, design+review steps reset)` (line 182) fails on `expect(units.length).toBe(0)`. (The code review redesign test in `loopback-invalidate.test.ts` calls `redesignLoopback` directly with both steps, so this change does not reach it.) Restore.
 4. In `planReviewResume`, drop `stoppedAtPlanReviewGate(db, ticketId)` from the plan review branch: `a budget pause in the regenerated design:dispatch after a plan review redesign resumes and dispatches it` fails (the resume reapplies the plan review verdict, escalates on the same findings, and dispatches nothing: `design:dispatch` stays at two calls), and so does `a plan review resume is retry-plan only when the run stopped at the plan review gate`. Restore.
-4a. In `stoppedAtPlanReviewGate`, look only at the latest `escalated` event (`since.findLastIndex((e) => e.kind === "escalated")`): `an unrelated escalation after a gate stop does not hide it` and `a gate stop resumed on a host missing a required suite's tools ...` fail. Restore. In `isPlanReviewEscalation`, accept a dispatch id match without the `review:` signature: `an escalation of the invalidate loop guard that carries the design:review dispatch id is not a gate stop` fails. Restore.
+4a. In `stoppedAtPlanReviewGate`, look only at the latest `escalated` event (`since.findLastIndex((e) => e.kind === "escalated")`): `an unrelated escalation after a gate stop does not hide it` fails. Only that unit case catches this break: the end to end test `a gate stop resumed on a host missing a required suite's tools ...` still passes, because the pause skip (break 4b's subject) leaves no second escalation after the verdict's. Restore. In `isPlanReviewEscalation`, accept a dispatch id match without the `review:` signature: `an escalation of the invalidate loop guard that carries the design:review dispatch id is not a gate stop` fails. Restore.
 4b. In `resumeRun` (Task 8's narrowing block), call `pauseTicket` even when the ticket is already waiting: the gate and tools end to end test fails on two pending `human_resume` signals. Restore.
 5. In `adoptUnfingerprinted`, drop the `stopped` condition again: `a v8 run stopped at the plan review gate, resumed after the operator edited the plan, finishes` and `a v8 run paused during a redesign with grading on ...` fail with exit 70 (`the plan has no recorded digest`). Restore.
 
@@ -9690,7 +9933,7 @@ In §2's table, replace the `plan-review blocking, or code-review plan-defect ..
 
 ```
 | plan review blocking | `invalidate(design:dispatch)` with cause `feedback` (history, reset, generation + 1); the loopback event carries the findings, `consumer: design:dispatch` and that generation; reset+zero `review`; reset ticket verify steps; reset+zero `merge:push`/`merge:pr-ensure`; `stage='design'`. Everything else in design follows from fingerprints | `design` |
-| code review `plan-defect` with `onPlanDefect='redesign'`, or `--resume` retry-plan after HEAD moved | the same, invalidating `design:dispatch` and `design:extract` (all units deleted, reconcile units included; unit-tied findings detached first; `needs_docs` = 0), so the units are re-created and implemented again even when the plan is identical | `design` |
+| code review `plan-defect` with `onPlanDefect='redesign'`, or a resume of a run stopped at the plan review gate after the operator moved HEAD (`retry-plan` in `review-resume.ts`: the resume's plan review action) | the same, invalidating `design:dispatch` and `design:extract` (all units deleted, reconcile units included; findings tied to a unit detached first; `needs_docs` = 0), so the units are made again and implemented again even when the plan is identical | `design` |
 ```
 
 - [ ] **Step 2: `control-loop.md`**
@@ -9725,7 +9968,7 @@ inputs changed (that request would escalate with signature `step-replay-no-progr
 | DI1 | design walk | a succeeded design step's inputs changed (an edit while paused, another host's toolchain) | invalidate that step (cause `inputs`); readers judged again after it reruns | step | escalate with signature `invalidate-loop:<step>` (the invalidate loop guard) after 3 since the run was last started (a resume or a reused `--db`) |
 ```
 
-and change DV1's "Routes to" to `→ S1a re-design with findings (invalidate design:dispatch, cause feedback)`.
+and change DV1's "Routes to" to `→ S1a redesign with findings (invalidate design:dispatch, cause feedback)`.
 - §10, line 955: `- **Self-bootstrapping schema** — `migrate()` creates the DB, or upgrades it: a `VACUUM INTO` backup next to it, each pending migration in its own transaction with a foreign key check, then a structural comparison against `schema.sql`. Checkpoints from v7 on are upgraded; newer, older or unknown shapes are refused (exit 65). No manual SQL.`
 
 - [ ] **Step 3: `build-operations.md`**
@@ -9804,6 +10047,9 @@ Notes written to the run's events (and emitted as `event` rows):
   `willRerun`: they run again once the steps before them have.
 - `reused-database`: a `styre run` on a reused `--db` whose ticket already exists; the loop guard
   below counts from it, as from a resume.
+- `toolchain-missing`: a resume found this host without a required suite's tools while the run was
+  already waiting for you (stopped again at a review); it records the missing tools instead of a
+  second pause.
 
 Escalation `invalidate-loop:<step>` (the invalidate loop guard): a design step was invalidated for
 changed inputs more than three times since the run was last started (a resume, or a run on a reused
@@ -9844,7 +10090,7 @@ removes it with the checkpoint folder.
 `telemetry-export.md`, after the ENG-485 note reasons:
 
 ```
-**Five `note` reasons from ENG-477** (no new kind, no schema change), all with `payload_json.event`
+**Six `note` reasons from ENG-477** (no new kind, no schema change), all with `payload_json.event`
 equal to the reason:
 - **`inputs-changed`** (a resume, or a run on a reused `--db`, found design inputs changed) —
   `names` (the changed inputs), `pastDesign`, `message`.
@@ -9857,6 +10103,8 @@ equal to the reason:
   manifest, run again once the steps before them have), `message`.
 - **`reused-database`** — no other field: a `styre run` on a reused `--db` whose ticket already
   exists.
+- **`toolchain-missing`** — `detail`: a resume found this host without a required suite's tools
+  while the run was already waiting for the operator, so no second pause was written.
 - **`carryover-dropped`** — `stepKey`, `changed`: a step paused before it finished was dispatched
   again under other inputs, so its partial output from before the pause was not passed on.
 A design `loopback` event's payload also carries `consumer` (`design:dispatch`) and `generation`.
@@ -9869,14 +10117,14 @@ A design `loopback` event's payload also carries `consumer` (`design:dispatch`) 
   plan's digest is recorded from the branch, and the starting commit is read right after a fresh run
   creates it. `git worktree add -B` on resume recreates the branch from the target repository's
   checked out HEAD, which drops the run's commits and moves HEAD: a second resume is refused until
-  `--accept-head`, unless a dispatch has committed on the recreated branch in between. In-place mode
+  `--accept-head`, unless a dispatch has committed on the recreated branch in between. In place mode
   is unaffected. Until ENG-488 lands this is the known limit of design input invalidation.
 ```
 
 `brainstorm.md` §11, a new first entry right under `## 11. Changelog`:
 
 ```
-- **2026-10-09 — ENG-477: design steps rerun when their recorded inputs change; Styre upgrades old databases.** Design: `docs/brainstorms/2026-10-09-eng-477-design-input-invalidation-design.md` (rev 5, decisions E1 to E9; E7 withdrawn); plan: `docs/plans/2026-10-09-eng-477-design-input-invalidation.md`. Implements umbrella D7 for the design stage and D9: a declared table (`src/daemon/design-graph.ts`) generates the design routing; each step records a manifest of input digests (snapshot rows in `ticket_input`, output rows, the plan digest) and the walk invalidates only a step whose inputs changed (early cutoff). Loopbacks invalidate the step that consumes their feedback, and feedback and the carryover belong to that step's generation. `migrate()` now upgrades: `VACUUM INTO` backup, versioned migrations (v7 → v8 replaces `ensureRunTable`, v8 → v9 adds the new columns and tables), structural proof; old paused runs are adopted on resume (operator ruling: the pass stops at the first applicable step that is not succeeded; the steps after it are recorded with an empty manifest and rerun). `retry-plan` applies only when the run stopped at the plan review gate (operator ruling). Resume narrows the profile like a fresh run and pauses rather than drop a required suite. The checks steps keep today's rules (E9, ENG-475; ENG-490). Known limit: ENG-488 in worktree mode.
+- **2026-10-09 — ENG-477: design steps rerun when their recorded inputs change; Styre upgrades old databases.** Design: `docs/brainstorms/2026-10-09-eng-477-design-input-invalidation-design.md` (rev 5, decisions E1 to E9; E7 withdrawn); plan: `docs/plans/2026-10-09-eng-477-design-input-invalidation.md`. Implements umbrella D7 for the design stage and D9: a declared table (`src/daemon/design-graph.ts`) generates the design routing; each step records a manifest of input digests (snapshot rows in `ticket_input`, output rows, the plan digest) and the walk invalidates only a step whose inputs changed (early cutoff). Loopbacks invalidate the step that consumes their feedback, and feedback and the carryover belong to that step's generation. `migrate()` now upgrades: `VACUUM INTO` backup, versioned migrations (v7 → v8 replaces `ensureRunTable`, v8 → v9 adds the new columns and tables), structural proof; old paused runs are adopted on resume (operator ruling: the pass stops at the first applicable step that is not succeeded; the steps after it are recorded with an empty manifest and rerun). A resume applies its plan review action (`retry-plan`: apply the plan review verdict again, or redesign when HEAD moved) only when the run stopped at the plan review gate (operator ruling). Resume narrows the profile like a fresh run and pauses rather than drop a required suite. The checks steps keep today's rules (E9, ENG-475; ENG-490). Known limit: ENG-488 in worktree mode.
 ```
 
 - [ ] **Step 6: Check, then commit**
@@ -9938,6 +10186,7 @@ Not part of this plan's tasks, but required by `CLAUDE.md` before `gh pr create`
 | §7.5 one fixture per shape from each release's own code; recorded databases of real paused runs | 1 (seven shapes, three recorded v8 runs; hand off note 11) |
 | §7.6 adopt pass; ruling (2026-10-09): stop at the first applicable step that is not succeeded, later steps "will rerun" | 12 (pass, unit tests), 14 (the plan gate and redesign recordings resumed end to end) |
 | §7.7 readers that do not migrate, for ls, clean, `--fresh`, test per fixture; ruling (2026-10-09): `--resume --inspect` never migrates | 3 |
+| §7.7 ruling (2026-10-09): reads that must not change a database go through a private copy; fixtures in DELETE mode | 1 (`readCopyOf`, its tests, the generator, the header test), 2 (`readDatabaseState`), 3 (ls, clean, `--fresh`, `--inspect`), 7 (the harness's reads) |
 | §8.1 to §8.15 | 17 (8.1, 8.2, 8.6, 8.7, 8.8 with a crash point right after the invalidate transaction, 8.9); 13 and 8 (8.3); 8 (8.4); 14 (8.5); 6 and 15 (8.10); 7 (8.11); 2, 3, 4 (8.12); 12 and 14 (8.13); 16 (8.14); 5 and 9 (8.15) |
 | §9 docs, both schema copies, CLAUDE.md count, brainstorm changelog | 4, 18 |
 | §10 acceptance criteria | 13, 16, 17, 10, 12, 6, 18 |
@@ -9958,7 +10207,8 @@ Not part of this plan's tasks, but required by `CLAUDE.md` before `gh pr create`
 11. **The v7 and v6 fixtures are seeded through each release's repositories, not its handlers** (spec §7.5 says "seeded through that era's real handlers where they can run"; review minor 8). The lockfile of v0.9.0 and v0.10.0 matches today's, so their handlers could be driven; but the migration and reader tests need rows that no single real run of those releases leaves together (a reconcile unit, a step waiting on a signal, an interrupted running step with its note), and every column and constraint is still the release's own (`migrate()` and the repositories of that release, Task 1). The real handler path is covered by the three recorded v8 runs, the version a paused run resumes from. For the operator to confirm.
 12. **The adopt pass's stopping rule** (operator ruling C1, 2026-10-09). Two applications of the ruling, for the operator to confirm (Task 12): a pending `provision` (reset for a recreated worktree on every worktree mode resume) does not stop the pass, because it produces nothing a later step reads (stopping there would rerun the whole design stage of every older run resumed in worktree mode, against D9); and when the plan cannot be read at the branch head (the branch is gone, or holds no plan file), `design:dispatch` and every step after it are "will rerun" (review minor 1). A succeeded step whose "applies when" is false is recorded as "will rerun" too, so it can never reach the walk without a manifest.
 13. **A profile schema field with a default changes paused runs' digests** (first review minor 11). The snapshot holds the parsed profile, so a release that adds a field with a default to a component, `runtimeContext` or `promptVars` (or changes a config default or how a field is parsed) changes the digests the steps that read them compare against. Under the scheme rule (note 17) such a release must bump the scheme, which the pin test enforces; the steps then rerun at the next design visit, a deliberate decision rather than an accident. Spec §12 now lists this risk.
-14. **Machine identifiers in kebab case.** Closed by operator ruling (2026-10-09): event reasons (`inputs-changed`, `invalidated`, `adopted`, `carryover-dropped`, `reused-database`), cause values (`worktree-recreated`, `manifest-touched`), crash point names and shape ids keep the codebase's kebab case. Docs always show them in backticks with a plain English explanation beside each, and never use them as words in sentences. Every Task 18 doc block was checked against this (the exit code row, the DI1 row, the §6.2 paragraph, the notes and causes in `runtime-parameters.md` and `telemetry-export.md`).
+14. **Machine identifiers in kebab case.** Closed by operator ruling (2026-10-09): event reasons (`inputs-changed`, `invalidated`, `adopted`, `carryover-dropped`, `reused-database`), cause values (`worktree-recreated`, `manifest-touched`), crash point names and shape ids keep the codebase's kebab case. Docs always show them in backticks with a plain English explanation beside each, and never use them as words in sentences. Every Task 18 doc block was checked against this (the §2 rows of `minimal-loop.md`, where `retry-plan` now carries its explanation and two coined hyphenated words became plain words, the exit code row, the DI1 row, the §6.2 paragraph, the notes and causes in `runtime-parameters.md` and `telemetry-export.md`, and the brainstorm changelog entry).
 15. **`--resume --inspect` never upgrades.** Operator ruling (2026-10-09), replacing the first revision's choice: `--inspect` decides from a read only `readDatabaseState` before any migration; a checkpoint that is not at the current version is reported through the narrow readers (Task 3), with "resume will upgrade this checkpoint from v<old> to v<new>, after writing a backup" or the reason resume would refuse it, no migration and no backup, so it also works where resume refuses. A current checkpoint takes today's path, whose existing `insertRun`/`markResumed` writes and its existing "(no changes made)" line are unchanged (they existed before this change). `CLAUDE.md:80` ("diagnostics only") stays; Task 18's docs say `--inspect` never upgrades.
 16. **The loop guard also counts from a `reused-database` note** (second review m5). Spec §6.6 named only the `resumed` event; counting from the note (written by a run on a reused `--db` whose ticket exists) is a deliberate extension, now recorded in spec §6.6 as a ruling (2026-10-09).
 17. **The scheme rule** (operator ruling, 2026-10-09, spec §5.1). A manifest recorded under an older `FINGERPRINT_SCHEME` counts as changed and the step reruns at the next design visit; the adopt pass adopts only steps with no manifest. `test/daemon/fingerprint-pin.test.ts` (Task 9) pins the digests of a fixed set of inputs per scheme, so a change to encoding, parsing, defaults, declared inputs or output digests fails until the scheme is bumped and a new pin added.
+18. **Reads through a private copy** (operator ruling, 2026-10-09; spec §7.7). `readCopyOf` (Task 1) is the one place that reads a database that must not change: `--inspect` (`readDatabaseState`, `inspectWithoutUpgrading`), `ls` (`listCheckpoints`), `clean` (`reapEffort`, `cleanImpl`), `--fresh` and `clean`'s undo (`undoBeforeDiscard`), and in tests `fixtureVersion`, the fixture tests, `count` in the migration tests and `DesignHarness.read`. Not converted, outside the ruling's list: `priorRunIdAt` (`park.ts:105-121`), which reads the dump it is about to overwrite and already treats an unreadable file as "no prior run". The fixture generator converts every fixture to DELETE mode (`toDeleteMode`), and a test checks the committed files' headers.
