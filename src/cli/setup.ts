@@ -36,6 +36,7 @@ import {
   suspendStopHandlers,
 } from "../util/process/signals.ts";
 import { sweepOrphans } from "../util/process/sweep.ts";
+import { assertCheckpointName } from "./checkpoint-name.ts";
 import { agentCliError, usageError } from "./errors.ts";
 import { guardWithExitCheck } from "./exit-check.ts";
 
@@ -120,6 +121,8 @@ export async function runSetup(args: {
   unresolvedCommands: string[];
   environmentEvidence: EnvironmentObservation[];
 }> {
+  // Setup never writes a slug that styre run would refuse (operator ruling, 2026-10-10).
+  if (args.slug !== undefined) assertCheckpointName("slug", args.slug);
   const repoDir = resolve(args.repo);
   if (!existsSync(repoDir)) throw new Error(`setup: repo path not found: ${repoDir}`);
   if (args.checks !== undefined && !CHECKS.has(args.checks)) {
@@ -130,6 +133,8 @@ export async function runSetup(args: {
     slug: args.slug,
     checksSystem: args.checks as "github" | "external" | "none" | undefined,
   });
+  // For callers that pass no slug: the derived one, before the agent runs and a path is built.
+  assertCheckpointName("slug", scanProfile.slug);
   // Layer 1+2: deterministic scan, then mandatory agent enrichment (throws on failure → no write).
   const enriched = await enrichRuntimeContext(repoDir, scanProfile.runtimeContext, args.deps);
   let profile: Profile = { ...scanProfile, runtimeContext: enriched };
@@ -451,6 +456,8 @@ async function setupBody(
     assertInPlaceMarker(repo); // gate BEFORE runSetup's write-capable enrichment agent
   }
   const effSlug = args.slug && args.slug.length > 0 ? args.slug : deriveSlug(resolve(repo));
+  // Before the config path <config>/<slug>/config.json is built and before the agent CLI check.
+  assertCheckpointName("slug", effSlug);
   const runtimeConfig = discoverRuntimeConfig({ explicitPath: args.config, slug: effSlug });
   const agentConfig = runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG;
   // Probe the binary before the write-capable enrichment agent runs, so a refused provider or a

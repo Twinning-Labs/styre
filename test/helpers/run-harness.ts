@@ -670,6 +670,8 @@ export async function runFreshTicket(opts?: {
   onDispatch?: () => void;
   /** Runs on the new target repo before the run starts (for example to move its checked out branch). */
   repoSetup?: (repoDir: string) => void;
+  /** The profile's slug (default `FRESH_SLUG`); it may nest, as `team/app`. */
+  slug?: string;
 }): Promise<FreshTicketRun> {
   const prevEnv = {
     state: process.env.XDG_STATE_HOME,
@@ -689,7 +691,7 @@ export async function runFreshTicket(opts?: {
   writeFileSync(
     profilePath,
     JSON.stringify({
-      slug: FRESH_SLUG,
+      slug: opts?.slug ?? FRESH_SLUG,
       targetRepo: repoDir,
       defaultBranch: opts?.defaultBranch ?? "main",
       checksSystem: "none",
@@ -756,7 +758,7 @@ export async function runFreshTicket(opts?: {
     process.exitCode = previousExitCode;
   }
 
-  const checkpointDir = parkDir(FRESH_SLUG, FRESH_IDENT); // reads the still-live XDG_STATE_HOME
+  const checkpointDir = parkDir(opts?.slug ?? FRESH_SLUG, FRESH_IDENT); // reads the still-live XDG_STATE_HOME
   return {
     checkpointDir,
     dbPath: join(checkpointDir, "run.db"),

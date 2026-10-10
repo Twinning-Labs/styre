@@ -2,10 +2,15 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { branchNameFor } from "../../agent/branch.ts";
+import { readCopyOf } from "../../db/read-copy.ts";
+import {
+  type CheckpointRunningStep,
+  listCheckpointRunningSteps,
+  readCheckpointTargetRepo,
+  readCheckpointTicket,
+} from "../../db/repos/checkpoint-read.ts";
 import { completeDispatch, getLatestWorktreePath } from "../../db/repos/dispatch.ts";
 import { type EventLogRow, appendEvent } from "../../db/repos/event-log.ts";
-import { getProject } from "../../db/repos/project.ts";
-import { getTicket } from "../../db/repos/ticket.ts";
 import * as steps from "../../db/repos/workflow-step.ts";
 import type { WorkflowStepRow } from "../../db/repos/workflow-step.ts";
 import { undoAttempt } from "../../dispatch/worktree.ts";
@@ -110,7 +115,10 @@ function dispatchIsOpen(db: Database, id: number): boolean {
 
 /** Section 7.5 (N3): the note for this step whose step ID, attempt AND `started_at` all match the
  *  step as it stands. An older note, from an earlier attempt or an earlier start, never matches. */
-export function findInterruption(db: Database, step: WorkflowStepRow): InterruptionPayload | null {
+export function findInterruption(
+  db: Database,
+  step: Pick<WorkflowStepRow, "id" | "ticket_id" | "attempt" | "started_at">,
+): InterruptionPayload | null {
   const rows = db
     .query<{ payload_json: string | null }, [number]>(
       "SELECT payload_json FROM event_log WHERE ticket_id = ? AND kind = 'note' AND reason = 'interrupted' ORDER BY seq DESC",
@@ -222,7 +230,9 @@ export function resetBranchAfterInterruption(
 /** Section 5.5: a `running` step with a pid can only come from a Styre before ENG-485. Its pid is
  *  reported when something still runs under it, and nothing is stopped: its identity cannot be
  *  confirmed. A negative pid was a process group. Returns the warning, or null. */
-export function olderCheckpointWarning(step: WorkflowStepRow): string | null {
+export function olderCheckpointWarning(
+  step: Pick<WorkflowStepRow, "pid" | "step_key">,
+): string | null {
   const pid = step.pid;
   if (pid === null) return null;
   const alive = pid < 0 ? listProcesses().some((p) => p.pgid === -pid) : probe(pid).kind !== "gone";
@@ -230,45 +240,43 @@ export function olderCheckpointWarning(step: WorkflowStepRow): string | null {
   return `styre: step '${step.step_key}' was left running by an older Styre; pid ${pid} is alive but its identity cannot be confirmed, so nothing was stopped`;
 }
 
+interface DiscardStep {
+  step: CheckpointRunningStep;
+  undo: { payload: InterruptionPayload; inPlace: boolean; repoPath: string; branch: string } | null;
+}
+
 /** Section 7.5: `--fresh` and `clean` in in-place mode undo an interrupted step's edits before they
  *  discard the checkpoint; otherwise the next run would count the agent's new files as files that
  *  were already there. The mode is the checkpoint's own: in place when its latest dispatch worked
- *  in the project's repository (as resume derives it). The checkpoint is only read. Call it after
- *  the live lock check. */
+ *  in the project's repository (as resume derives it). The checkpoint is read through a private
+ *  copy and never opened (operator ruling, 2026-10-09); only a failure to read it is reported as
+ *  "could not read". The older checkpoint warning (a read of the process table) and the undo (git
+ *  on the checkout) run after the copy is gone, and their own errors surface as they are. Call it
+ *  after the live lock check. */
 export function undoBeforeDiscard(dbPath: string, warn: (line: string) => void): void {
   if (!existsSync(dbPath)) return;
-  let db: Database;
-  let running: WorkflowStepRow[];
+  let found: DiscardStep[];
   try {
-    db = new Database(dbPath, { readonly: true });
+    found = readCopyOf(dbPath, (db) =>
+      listCheckpointRunningSteps(db).map((step): DiscardStep => {
+        const payload = findInterruption(db, step);
+        const ticket = payload ? readCheckpointTicket(db, step.ticket_id) : null;
+        const repoPath = ticket ? readCheckpointTargetRepo(db, ticket.project_id) : null;
+        if (!payload || !ticket || !repoPath) return { step, undo: null };
+        const inPlace = getLatestWorktreePath(db, step.ticket_id) === repoPath;
+        return { step, undo: { payload, inPlace, repoPath, branch: branchNameFor(ticket) } };
+      }),
+    );
   } catch (err) {
     warn(`styre: could not read ${dbPath} to undo an interrupted step's edits: ${String(err)}`);
     return;
   }
-  try {
-    try {
-      running = steps.listByStatus(db, "running");
-    } catch (err) {
-      warn(`styre: could not read ${dbPath} to undo an interrupted step's edits: ${String(err)}`);
-      return;
-    }
-    for (const step of running) {
-      const older = olderCheckpointWarning(step);
-      if (older) warn(older);
-      const p = findInterruption(db, step);
-      if (!p) continue;
-      const ticket = getTicket(db, step.ticket_id);
-      const project = ticket ? getProject(db, ticket.project_id) : null;
-      if (!ticket || !project) continue;
-      const inPlace = getLatestWorktreePath(db, step.ticket_id) === project.target_repo;
-      const line = undoInterruptedEdits(p, {
-        inPlace,
-        repoPath: project.target_repo,
-        branch: branchNameFor(ticket),
-      });
-      if (line) warn(line);
-    }
-  } finally {
-    db.close();
+  for (const f of found) {
+    const older = olderCheckpointWarning(f.step);
+    if (older) warn(older);
+    if (!f.undo) continue;
+    const { payload, ...where } = f.undo;
+    const line = undoInterruptedEdits(payload, where);
+    if (line) warn(line);
   }
 }

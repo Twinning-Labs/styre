@@ -1,7 +1,7 @@
-import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { migrate } from "../src/db/migrate.ts";
+import { readCopyOf } from "../src/db/read-copy.ts";
 import { makeTempDir } from "./helpers/temp.ts";
 
 function tmpDbPath(): string {
@@ -38,12 +38,12 @@ describe("migrate", () => {
   test("creates the core SoT tables", () => {
     const path = tmpDbPath();
     migrate(path);
-    const db = new Database(path, { readonly: true });
-    const names = db
-      .query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'")
-      .all()
-      .map((r) => r.name);
-    db.close();
+    const names = readCopyOf(path, (db) =>
+      db
+        .query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .all()
+        .map((r) => r.name),
+    );
     for (const t of CORE_TABLES) {
       expect(names).toContain(t);
     }

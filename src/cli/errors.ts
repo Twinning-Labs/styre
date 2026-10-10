@@ -8,7 +8,7 @@ export const EXIT = {
   OK: 0,
   OPERATIONAL: 1, // abandoned (reserved terminal; ran fine, no success)
   USAGE: 64, // EX_USAGE: CLI misuse
-  RESUME_REFUSED: 65, // EX_DATAERR: resume refused, HEAD moved
+  RESUME_REFUSED: 65, // EX_DATAERR: a checkpoint refused (resume: HEAD moved, lock held, schema it cannot use; clean: a checkpoint it cannot use)
   TOOLCHAIN_MISSING: 69, // EX_UNAVAILABLE: a required program is not installed
   INTERNAL: 70, // EX_SOFTWARE: unexpected crash / internal invariant
   TEMPFAIL: 75, // any paused run (budget / needs_you / interrupted); also clean-on-live
@@ -123,7 +123,10 @@ export function agentCliError(
 
 /** Coarse operator-error kind derived from the shared exit-code scheme, emitted on `cli_error`
  *  so analytics can distinguish usage vs config vs toolchain vs internal — which `error_class`
- *  can't (every StyreError shares one class). Unknown codes collapse to "other". */
+ *  can't (every StyreError shares one class). Unknown codes collapse to "other". 65 is reported as
+ *  "resume_refused" for every refused checkpoint styre run reports (resume refusals and the
+ *  migration refusals); only styre run emits cli_error, so a refusal by styre clean never reaches
+ *  it. The value is a product analytics value that dashboards may group on, so it stays. */
 export function errorKindForExit(code: number): string {
   switch (code) {
     case EXIT.USAGE:

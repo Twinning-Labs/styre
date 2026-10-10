@@ -30,8 +30,14 @@ import type { PauseReason, RunOutcome } from "../daemon/run-ticket.ts";
 import type { StepRegistry } from "../daemon/step-registry.ts";
 import { resumeVerificationRetries } from "../daemon/verification-retry.ts";
 import { openDb } from "../db/client.ts";
-import { migrate } from "../db/migrate.ts";
+import { type DatabaseState, migrate, readDatabaseState } from "../db/migrate.ts";
+import { CURRENT_VERSION } from "../db/migrations/index.ts";
 import { readCopyOf } from "../db/read-copy.ts";
+import {
+  findCheckpointParkedStepKey,
+  readCheckpointOnlyTicket,
+  readCheckpointTargetRepo,
+} from "../db/repos/checkpoint-read.ts";
 import { getLatestForTicket, getLatestWorktreePath } from "../db/repos/dispatch.ts";
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { getProject } from "../db/repos/project.ts";
@@ -49,6 +55,7 @@ import { stdoutSink } from "../telemetry/emit.ts";
 import { RunInterrupted, isStopping } from "../util/process/door.ts";
 import type { HandlerCtx } from "../util/process/signals.ts";
 import { nowUtc } from "../util/time.ts";
+import { checkpointPath } from "./checkpoint-name.ts";
 import type { NonPrimaryComponent } from "./component-roles.ts";
 import { agentCliError, usageError } from "./errors.ts";
 import { exitCodeForOutcome } from "./outcome.ts";
@@ -95,9 +102,11 @@ export function finishRunResult(
   process.exitCode = exitCodeForOutcome(out.outcome); // 0 pr-ready/done · 75 paused · 1 abandoned
 }
 
-/** The durable dump dir for a paused run: ~/.local/state/styre/<project-stub>/<ticket-ident>/ */
+/** The durable dump dir for a paused run: ~/.local/state/styre/<project-stub>/<ticket-ident>/.
+ *  Both names are checked first (operator rulings, 2026-10-10): every checkpoint path a fresh run,
+ *  a resume and a pause build goes through here. */
 export function parkDir(slug: string, ident: string): string {
-  return join(stateDir(), slug, ident);
+  return checkpointPath(stateDir(), slug, ident);
 }
 
 /** The run_id in an existing paused copy's run.db, read through a private copy (operator ruling,
@@ -219,6 +228,44 @@ export function headBaseline(db: Database, ticketId: number): string | null {
   return dispatch?.branch_head_sha ?? null;
 }
 
+/** `--inspect` on any checkpoint, whatever its version (operator rulings, 2026-10-09 and
+ *  2026-10-10): read through a private copy, with the readers that work on every shape since v7
+ *  (spec §7.7). It writes nothing to the database: no migration, no backup, no run row, and the
+ *  original is never opened; so it also works where resume would refuse. */
+export function inspectWithoutUpgrading(
+  dbPath: string,
+  ident: string,
+  state: DatabaseState,
+): string {
+  const schema =
+    state.kind === "upgrade"
+      ? `resume will upgrade this checkpoint from v${state.version} to v${CURRENT_VERSION}, after writing a backup`
+      : state.kind === "refuse"
+        ? `resume would refuse this checkpoint: ${state.error.headline}`
+        : state.kind === "empty"
+          ? "the checkpoint holds no tables"
+          : `v${state.version}, current`;
+  let details: string;
+  try {
+    // A private copy (operator ruling, 2026-10-09): the checkpoint itself is never opened.
+    details = readCopyOf(dbPath, (db) => {
+      const ticket = readCheckpointOnlyTicket(db);
+      const targetRepo = ticket ? readCheckpointTargetRepo(db, ticket.project_id) : null;
+      if (!ticket || !targetRepo) return "  (no ticket in this checkpoint)\n";
+      const recorded = headBaseline(db, ticket.id);
+      const current = branchHeadSha(targetRepo, branchNameFor(ticket));
+      const moved = recorded !== null && current !== null && recorded !== current;
+      return (
+        `  recorded base: ${recorded ?? "(none)"}\n  current head:  ${current ?? "(none)"}${moved ? "  [MOVED]" : ""}\n` +
+        `  would re-dispatch step: ${findCheckpointParkedStepKey(db, ticket.id) ?? "(none)"}\n`
+      );
+    });
+  } catch (err) {
+    details = `  (the rest cannot be read on this shape: ${err instanceof Error ? err.message : String(err)})\n`;
+  }
+  return `resume --inspect ${ident}\n  schema: ${schema}\n${details}  (no changes made)\n`;
+}
+
 export async function resumeRun(
   args: ResumeArgs,
   profile: Profile,
@@ -265,6 +312,23 @@ export async function resumeRun(
   }
   deps?.stop?.holdLock(lock);
   try {
+    // --inspect is diagnostics only, whatever the checkpoint's version (operator rulings,
+    // 2026-10-09 and 2026-10-10): it reads a private copy and writes nothing to the database (no
+    // migration, no backup, no open of the original, no insertRun or markResumed). The run lock,
+    // a file beside the database, is released by the finally below.
+    if (args.inspect) {
+      let state: DatabaseState;
+      try {
+        state = readDatabaseState(dbPath);
+      } catch (err) {
+        process.stderr.write(
+          `resume --inspect ${args.resume}\n  schema: cannot be read: ${err instanceof Error ? err.message : String(err)}\n  (no changes made)\n`,
+        );
+        return;
+      }
+      process.stderr.write(inspectWithoutUpgrading(dbPath, args.resume, state));
+      return;
+    }
     migrate(dbPath, { log: (line) => process.stderr.write(`${line}\n`) });
     const db = openDb(dbPath);
     if (getRun(db) === null) {
@@ -302,14 +366,6 @@ export async function resumeRun(
     const recorded = headBaseline(db, ticketId);
     const current = branchHeadSha(project.target_repo, branch);
     const moved = recorded !== null && current !== null && recorded !== current;
-
-    if (args.inspect) {
-      process.stderr.write(
-        `resume --inspect ${ticket.ident}\n  recorded base: ${recorded ?? "(none)"}\n  current head:  ${current ?? "(none)"}${moved ? "  [MOVED]" : ""}\n  would re-dispatch step: ${parkedStep?.step_key ?? "(none)"}\n  (no changes made)\n`,
-      );
-      closeDb();
-      return;
-    }
 
     if (moved && !args.acceptHead) {
       process.stderr.write(

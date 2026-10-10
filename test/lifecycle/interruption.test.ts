@@ -13,6 +13,7 @@ import { parkDir } from "../../src/cli/park.ts";
 import { runImpl } from "../../src/cli/run.ts";
 import { recover } from "../../src/daemon/recover.ts";
 import { openDb } from "../../src/db/client.ts";
+import { readCopyOf } from "../../src/db/read-copy.ts";
 import {
   completeDispatch,
   getLatestWorktreePath,
@@ -903,14 +904,7 @@ async function parkedThenInterrupted() {
     },
     agent: null,
   });
-  const rowAfterResume = () => {
-    const after = new Database(dbPath, { readonly: true });
-    try {
-      return dispatchRow(after, row.id);
-    } finally {
-      after.close();
-    }
-  };
+  const rowAfterResume = () => readCopyOf(dbPath, (after) => dispatchRow(after, row.id));
   return { parked, A, B, rowAfterResume };
 }
 

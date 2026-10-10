@@ -22,7 +22,7 @@
 //    column, apart from the handler's own writes (one note row, the attempt it gave back, the
 //    dispatch row it closed). This is stricter than comparing row counts: it also catches a step
 //    status, a dispatch outcome or any other column changed in place.
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -36,6 +36,7 @@ import { driveToTerminal } from "../../src/daemon/run-ticket.ts";
 import type { StepRegistry } from "../../src/daemon/step-registry.ts";
 import { openDb } from "../../src/db/client.ts";
 import { migrate } from "../../src/db/migrate.ts";
+import { readCopyOf } from "../../src/db/read-copy.ts";
 import { classifyAcCheck, insertAcCheck } from "../../src/db/repos/ac-check.ts";
 import { insertAc } from "../../src/db/repos/acceptance-criterion.ts";
 import {
@@ -164,11 +165,10 @@ function checkoutState(repo: string) {
 
 type Rows = Record<string, Record<string, Record<string, unknown>>>;
 /** Every row of every table of the run database, keyed by table and rowid, read through a
- *  connection of its own. SQLite's own tables are left out, except `sqlite_sequence`: a row run
+ *  private copy. SQLite's own tables are left out, except `sqlite_sequence`: a row run
  *  code inserted and deleted again during the stop still shows there, as a bumped sequence. */
 function dbRows(dbPath: string): Rows {
-  const c = new Database(dbPath, { readonly: true });
-  try {
+  return readCopyOf(dbPath, (c) => {
     const tables = c
       .query<{ name: string }, []>(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND (name NOT LIKE 'sqlite_%' OR name = 'sqlite_sequence')",
@@ -186,9 +186,7 @@ function dbRows(dbPath: string): Rows {
       }
     }
     return out;
-  } finally {
-    c.close();
-  }
+  });
 }
 
 /** What changed between two snapshots: rows added, removed, and each changed row's columns. */
@@ -219,8 +217,7 @@ function dbDiff(before: Rows, after: Rows) {
 }
 
 function stepRow(dbPath: string, key: string) {
-  const c = new Database(dbPath, { readonly: true });
-  try {
+  return readCopyOf(dbPath, (c) => {
     return c
       .query<
         {
@@ -233,14 +230,11 @@ function stepRow(dbPath: string, key: string) {
         [string]
       >("SELECT id, status, attempt, started_at, error_json FROM workflow_step WHERE step_key = ?")
       .get(key);
-  } finally {
-    c.close();
-  }
+  });
 }
 
 function dispatchRows(dbPath: string) {
-  const c = new Database(dbPath, { readonly: true });
-  try {
+  return readCopyOf(dbPath, (c) => {
     return c
       .query<
         {
@@ -253,9 +247,7 @@ function dispatchRows(dbPath: string) {
         []
       >("SELECT id, step_id, outcome, partial, branch_head_sha FROM dispatch ORDER BY id")
       .all();
-  } finally {
-    c.close();
-  }
+  });
 }
 
 const ok = (stdout: string): AgentRunResult => ({
@@ -559,12 +551,9 @@ async function resume(
   opts: { acceptHead?: boolean } = {},
 ): Promise<{ afterRecover: AfterRecover | null; stderr: string }> {
   // resumeRun works in place only when the checkpoint's latest dispatch worked in the checkout.
-  const c = new Database(run.dbPath, { readonly: true });
-  try {
-    expect(getLatestWorktreePath(c, run.ticketId)).toBe(run.repo);
-  } finally {
-    c.close();
-  }
+  // Read, then asserted outside the copy's callback.
+  const latest = readCopyOf(run.dbPath, (c) => getLatestWorktreePath(c, run.ticketId));
+  expect(latest).toBe(run.repo);
   let afterRecover: AfterRecover | null = null;
   const stderr: string[] = [];
   // stderr is the resume's human output; stdout carries its telemetry, which is not looked at here.
