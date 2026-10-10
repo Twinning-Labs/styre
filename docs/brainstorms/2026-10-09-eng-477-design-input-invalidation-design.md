@@ -190,6 +190,13 @@ A new table holds the inputs that are not already rows.
 drives every ready ticket it finds (`tick` advances up to two), with this run's registry and so with
 this run's inputs. The starting commit stays the run's own ticket's.
 
+(Operator ruling, 2026-10-10, later the same day) A resume does the same. A checkpoint written by a
+run on a reused `--db` holds that database's other active tickets too, and the resume's loop drives
+them with the resume's registry. So a resume records the snapshot, and runs the adopt pass, for every
+active ticket in the checkpoint, with the same notes; tickets that are waiting are left alone, as on
+a reused `--db`. The starting commit is never recorded on resume, for any ticket. The toolchain
+advisory a resume records when the unusable list changes (§4.1) stays the run's own ticket's.
+
 ### 4.1 One profile for fresh runs and resumes
 
 A fresh run applies `applyToolchainGate` and drops components whose toolchain is missing
