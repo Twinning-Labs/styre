@@ -185,6 +185,11 @@ A new table holds the inputs that are not already rows.
   ticket is past design, the note says the change takes effect the next time the run is in design
   (E6).
 
+(Operator ruling, 2026-10-10) A run on a reused `--db` records the snapshot, and runs the adopt pass
+(§7.6), for every active ticket in that database, not only its own, with the same notes: the loop
+drives every ready ticket it finds (`tick` advances up to two), with this run's registry and so with
+this run's inputs. The starting commit stays the run's own ticket's.
+
 ### 4.1 One profile for fresh runs and resumes
 
 A fresh run applies `applyToolchainGate` and drops components whose toolchain is missing
@@ -204,7 +209,7 @@ therefore see a different profile on resume than on the fresh run: a defect toda
   still runs on the profile before narrowing, as it does today.
 - Resume prints the same stderr notice of the narrowing that a fresh run prints.
 - Resume applies the same narrowing. It never exits 69, so
-  `runtime-parameters.md:450` ("never on `--resume` or `--inspect`") stays true.
+  `runtime-parameters.md:511` ("never raised on `--resume`/`--inspect`") stays true.
 - When the fresh-run gate would refuse (nothing usable, or a component whose suite is `required` is
   unusable, `preflight.ts:179-186`), resume does not narrow that component away, because that would
   silently drop the required suite's declaration and its evidence (`handlers.ts:465-495`). Instead the
@@ -245,6 +250,11 @@ parsed (defaults included), what each table step declares, and how each output i
 the digests of a fixed set of inputs (snapshot rows, units, track, plan) per scheme, so any such change
 fails until the scheme number is bumped deliberately.
 
+(Operator ruling, 2026-10-10) This amends the paragraph above for the other direction. A manifest
+recorded under a NEWER scheme than this Styre's cannot be compared. Resume refuses such a run before
+it changes anything, with exit 65 and "this run was recorded by a newer Styre; use that version",
+instead of failing later in the walk as a defect (exit 70).
+
 ### 5.2 What a step records
 
 When a table step succeeds, in any stage (provision also reruns during implement, and a missing
@@ -271,6 +281,12 @@ Anything slow (a `git` call) is computed before the transaction and passed in.
   through git, keeps the files whose frontmatter `linear:` equals the ticket ident
   (`plan-frontmatter.ts:8-28`), and hashes path and content, sorted by path. A renamed or extra plan
   file changes the digest, which is conservative. The resolver never reads the worktree.
+
+(Operator ruling, 2026-10-10) When `design:dispatch` finds no plan for the ticket committed at the
+branch head (for example because `docs/plans/` is in `.gitignore`), it fails at once, without a
+retry (a non retryable failure, so no attempt budget is spent), and escalates with a clear reason:
+the plan must be committed, so remove `docs/plans/` from `.gitignore`. The digest of nothing would
+never change, so every later plan edit would go unseen.
 
 ### 5.4 The walk
 
@@ -551,6 +567,10 @@ with `complexityGrading` on; recorded v8 fixtures of each must resume after the 
   which select only columns present since v7, and a test runs `ls`, `clean` and `--fresh` against every
   fixture.
 
+(Operator ruling, 2026-10-10) Every `--resume --inspect` is read only, whatever the checkpoint's
+version: it reads through the private copy below and writes nothing (no migration, no backup, no open
+of the original, no run row).
+
 (Operator rulings, 2026-10-09) Every read of a database that must not change it, in production and
 in tests (`--inspect`, the narrow readers of `ls`, `clean` and `--fresh`, the pause's read of the copy
 it overwrites, and every test's read of a fixture or a run database) goes through one private copy
@@ -577,7 +597,7 @@ paused work. `--purge` refuses the same way and `clean --all` skips both kinds. 
 `clean --all` reach exactly the folders they reach today (two levels under the state folder,
 symbolic links followed as today); a checkpoint folder without its `run.db` stays "no styre effort"
 (exit 64), as before. Listing nested slugs and printing removal commands are ENG-491; safe removal
-of such checkpoints is a follow up ticket.
+of such checkpoints is ENG-491 too.
 
 (Operator ruling, 2026-10-10, on names) An ident is one folder name: not empty, not `.` or `..`, and
 with no `/`, `\` or NUL. A slug may contain `/` and then nests, as `conventions.md` documents; each
