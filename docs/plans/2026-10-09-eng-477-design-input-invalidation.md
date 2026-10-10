@@ -2495,7 +2495,7 @@ git commit -m "feat(eng-477): versioned migrations with backup, shape detection 
 - Create: `src/cli/checkpoint-name.ts` (`assertCheckpointName`: the one name check)
 - Modify: `src/cli/park.ts:98-100` (`parkDir` checks both names first: every checkpoint path a fresh run, a resume and a pause build goes through it), `src/cli/load-profile.ts:40-56` (the `--slug` flag, a derived slug and the profile's own slug are checked before a path is built from them), `src/cli/errors.ts:11,124-126` (comments only: exit 65 also covers `clean` refusing a checkpoint it cannot use), `src/cli/setup.ts:106-132,453` (setup checks the slug before it writes a profile)
 - Modify: `test/helpers/run-harness.ts:664-673,692,759` (`runFreshTicket` takes an optional `slug`)
-- Modify: `src/cli/park.ts:259-260,299-305` (`--inspect` reads through `readDatabaseState` and `inspectWithoutUpgrading` before `migrate`, for every version, and writes nothing; today's inspect branch goes; operator rulings, 2026-10-09 and 2026-10-10)
+- Modify: `src/cli/park.ts:259-260,299-305` (`--inspect` reads through `readDatabaseState` and `inspectWithoutUpgrading` before `migrate`, for every version, and never opens or changes the database, only taking and releasing the run lock as every resume does; today's inspect branch goes; operator rulings, 2026-10-09 and 2026-10-10)
 - Test: `test/cli/checkpoint-readers-fixtures.test.ts`
 
 **Interfaces:**
@@ -2508,7 +2508,7 @@ git commit -m "feat(eng-477): versioned migrations with backup, shape detection 
   - `interface CheckpointRunningStep { id: number; ticket_id: number; step_key: string; attempt: number; pid: number | null; started_at: string | null }`
   - `listCheckpointRunningSteps(db: Database): CheckpointRunningStep[]`
   - `readCheckpointOnlyTicket(db: Database): CheckpointTicket | null` (the run's one ticket), `findCheckpointParkedStepKey(db: Database, ticketId: number): string | null` (the step left running, else failed, as resume picks it)
-  - in `src/cli/park.ts`: `inspectWithoutUpgrading(dbPath: string, ident: string, state: DatabaseState): string`; `--resume --inspect` never migrates, writes no backup and no run row, and never opens the original, whatever the version
+  - in `src/cli/park.ts`: `inspectWithoutUpgrading(dbPath: string, ident: string, state: DatabaseState): string`; `--resume --inspect` never opens or changes the database, whatever the version (no migration, no backup, no run row); it only takes and releases the run lock, as every resume does
   - `findInterruption(db, step: Pick<WorkflowStepRow, "id" | "ticket_id" | "attempt" | "started_at">)` and `olderCheckpointWarning(step: Pick<WorkflowStepRow, "pid" | "step_key">)` (widened parameter types; same behaviour).
   - in `src/cli/checkpoints.ts`: `interface CheckpointRead { state: DatabaseState; cls: ReturnType<typeof classifyCheckpointDb> }` (`cls` is `null` when the schema is refused or the checkpoint cannot be classified); `readCheckpoint(dbPath: string, dir: string): CheckpointRead` (one private copy for both answers); `incompatibleReason(state: DatabaseState): string` (throws on a usable schema); the `Checkpoint` kinds `unreadable` and `incompatible`
   - in `src/cli/checkpoint-name.ts`: `checkpointNameProblem(what: "ident" | "slug", value: string): string | null` (an ident is one folder name; a slug may nest with `/`, each part one folder name); `assertCheckpointName(what, value): void` (a usage error, exit 64); `assertProfileSlug(slug: string, file: string): void` (a config error, exit 78); `checkpointPath(root: string, slug: string, ident: string): string` (both names checked, and the resolved path must stay inside `root`); called by `parkDir`, `loadRunProfile`, `cleanImpl`, `setupImpl` and `runSetup`
@@ -3267,7 +3267,7 @@ test(
       // no -shm rewrite), no run row (markResumed would change resumed and attempt); run.lock was
       // made and removed again, as every resume does
       expect(folder()).toEqual(before);
-      expect(stderr.join("")).toContain(`schema v${CURRENT_VERSION}, current`);
+      expect(stderr.join("")).toContain(`schema: v${CURRENT_VERSION}, current`);
     } finally {
       run.cleanup();
     }
@@ -3276,7 +3276,7 @@ test(
 );
 
 test(
-  "styre setup checks --slug and a derived slug itself, before any config read or the agent CLI check (64)",
+  "styre setup checks --slug and a derived slug itself, before the agent CLI check, and writes nothing (64)",
   async () => {
     const config = makeTempDir("styre-readers-setup-config-");
     const repo = repoAt(join(makeTempDir("styre-readers-setup-"), "app"));
@@ -3725,7 +3725,7 @@ export function inspectWithoutUpgrading(
         ? `resume would refuse this checkpoint: ${state.error.headline}`
         : state.kind === "empty"
           ? "the checkpoint holds no tables"
-          : `schema v${state.version}, current`;
+          : `v${state.version}, current`;
   let details: string;
   try {
     // A private copy (operator ruling, 2026-10-09): the checkpoint itself is never opened.
@@ -3790,7 +3790,7 @@ Expected: PASS, and the preload reports nothing left in the run's temp root.
 
 - [ ] **Step 6: Break it on purpose, see it fail, restore**
 
-In `listCheckpointRunningSteps`, add `, generation` to the selected columns (a column that only exists from v9). Run Step 5's command: every `narrow running step read` case fails with `no such column: generation`, and the `--fresh` cases report `could not read`. Restore. In `cleanImpl`, delete the `assertCheckpointName("ident", ...)` and `assertCheckpointName("slug", ...)` calls: `clean refuses an ident or slug that is not a valid folder name` fails on its `--all` cases (`--all` builds no checkpoint path, so it returns normally instead of exiting 64); the other cases still give 64, through `checkpointPath` at `clean.ts:151`. Restore. In `refuseUnusableCheckpoint`, list every worktree `listWorktrees` reports instead of the candidates: `clean refuses an unreadable effort (exit 65) ...` fails (the repository itself and the worktrees of another shape are listed). Restore. Add a line `rm -r ${where.dir}` to the recovery: the same test fails (no shell command may be printed). Restore. In `checkpointPath`, delete the two name checks: the `parkDir` loop of `styre run checks --slug ...` fails, since `parkDir("..", "ENG-1")` now throws the second check's error (`leaves`) instead of `not a valid slug`, and `--resume refuses an ident or slug ...` fails (no case exits 64: a name either finds the `run.db` the test placed and the inspection returns, or leads outside the state root and meets the second check's plain `Error`). Restore. In `checkpointNameProblem`, treat a slug as one folder name (refuse `/` in it): `a nested slug (team/app) works ...` fails at the fresh run (78: the harness passes `--profile`, so `assertProfileSlug` refuses it). Restore. In `listCheckpoints`, follow nested folders below the slug (list `<root>/team/app/ENG-2` as slug `team/app`): `ls and clean --all reach the folders they reach today` fails (the nested checkpoint is listed, and `clean --all --slug team/app` reaps it). Restore. In `loadRunProfile`, delete its calls: `styre run checks --slug ...` fails (`--slug ..` loads `<config>/profile.json`; `team/..` and `/abs` reach no profile and throw a plain `Error` with no code; the profile whose own slug is `..` loads instead of giving 78). Restore. In `runSetup`, delete its two calls: `styre setup refuses a slug ...` fails (the setup agent runs and throws, with no 64). Restore. In `setupBody`, delete the `assertCheckpointName("slug", effSlug)` call: `styre setup checks --slug and a derived slug itself ...` fails (the stubbed agent CLI check runs and throws, with no 64; checked on an export). Restore. In `listCheckpoints`, report a refused schema as `unreadable`: the three `... is listed as such, never as damaged` cases fail. Restore. Then, in `resumeRun`'s inspect block, put the 2026-10-09 revision back: wrap `process.stderr.write(inspectWithoutUpgrading(...)); return;` in `if (state.kind !== "current") {...}` and restore today's inspect block at `park.ts:299-305`, so a current checkpoint goes through `migrate`, `openDb` and `markResumed`: `--resume --inspect on a current checkpoint made by a fresh run changes nothing in its folder` fails on the folder's digests (`run.db` and `-wal` change; checked on an export of the plan), and at this task so do the v8 fixture cases. Restore. (After Task 4 no committed fixture is current, which is why that test makes its checkpoint with a real fresh run.) (Deleting the inspect block outright is not a break to try: the resume would then go on to the agent CLI preflight with nothing injected.)
+In `listCheckpointRunningSteps`, add `, generation` to the selected columns (a column that only exists from v9). Run Step 5's command: every `narrow running step read` case fails with `no such column: generation`, and the `--fresh` cases report `could not read`. Restore. In `cleanImpl`, delete the `assertCheckpointName("ident", ...)` and `assertCheckpointName("slug", ...)` calls: `clean refuses an ident or slug that is not a valid folder name` fails on its `--all` cases (`--all` builds no checkpoint path, so it returns normally instead of exiting 64); the other cases still give 64, through `checkpointPath` at `clean.ts:151`. Restore. In `refuseUnusableCheckpoint`, list every worktree `listWorktrees` reports instead of the candidates: `clean refuses an unreadable effort (exit 65) ...` fails (the repository itself and the worktrees of another shape are listed). Restore. Add a line `rm -r ${where.dir}` to the recovery: the same test fails (no shell command may be printed). Restore. In `checkpointPath`, delete the two name checks: the `parkDir` loop of `styre run checks --slug ...` fails, since `parkDir("..", "ENG-1")` now throws the second check's error (`leaves`) instead of `not a valid slug`, and `--resume refuses an ident or slug ...` fails (no case exits 64: a name either finds the `run.db` the test placed and the inspection returns, or leads outside the state root and meets the second check's plain `Error`). Restore. In `checkpointNameProblem`, treat a slug as one folder name (refuse `/` in it): `a nested slug (team/app) works ...` fails at the fresh run (78: the harness passes `--profile`, so `assertProfileSlug` refuses it). Restore. In `listCheckpoints`, follow nested folders below the slug (list `<root>/team/app/ENG-2` as slug `team/app`): `ls and clean --all reach the folders they reach today` fails (the nested checkpoint is listed, and `clean --all --slug team/app` reaps it). Restore. In `loadRunProfile`, delete its calls: `styre run checks --slug ...` fails (`--slug ..` loads `<config>/profile.json`; `team/..` and `/abs` reach no profile and throw a plain `Error` with no code; the profile whose own slug is `..` loads instead of giving 78). Restore. In `runSetup`, delete its two calls: `styre setup refuses a slug ...` fails (the setup agent runs and throws, with no 64). Restore. In `setupBody`, delete the `assertCheckpointName("slug", effSlug)` call: `styre setup checks --slug and a derived slug itself, before the agent CLI check ...` fails (the stubbed agent CLI check runs and throws, with no 64; checked on an export). Restore. In `listCheckpoints`, report a refused schema as `unreadable`: the three `... is listed as such, never as damaged` cases fail. Restore. Then, in `resumeRun`'s inspect block, put the 2026-10-09 revision back: wrap `process.stderr.write(inspectWithoutUpgrading(...)); return;` in `if (state.kind !== "current") {...}` and restore today's inspect block at `park.ts:299-305`, so a current checkpoint goes through `migrate`, `openDb` and `markResumed`: `--resume --inspect on a current checkpoint made by a fresh run changes nothing in its folder` fails on the folder's digests (`run.db` and `-wal` change; checked on an export of the plan), and at this task so do the v8 fixture cases. Restore. (After Task 4 no committed fixture is current, which is why that test makes its checkpoint with a real fresh run.) (Deleting the inspect block outright is not a break to try: the resume would then go on to the agent CLI preflight with nothing injected.)
 
 - [ ] **Step 7: Commit**
 
@@ -8540,7 +8540,7 @@ git commit -m "feat(eng-477): adopt design steps finished under an older Styre o
 
 **Interfaces:**
 - Consumes: `DESIGN_TABLE`, `GateRow`, `ensureDesignTableChecked` (Task 6); `currentManifest`, `changedInputs` (Task 9); `FINGERPRINT_SCHEME` (Task 5); `invalidate` descriptor and its interpreter (Task 10); `captureSnapshot` (Task 7); `makeDesignTicket`, `driveUntil`, `atStep`, `DesignHarness`, `unitsOf`, `ScriptUnit` (Task 7); `reachDesignStep` (Task 9, with its `profileFor`/`rootFor` test pattern).
-- Produces: `walkDesign(db: Database, ticket: TicketRow): StepDescriptor | null` (null: past the table's last row); `newerSchemeRecorded(path: string): number | null` (the highest `fingerprint_scheme` in the database when it is newer than `FINGERPRINT_SCHEME`, read through one private copy); `newerSchemeRefusal(ident: string, scheme: number): string` (the refusal text, shared by resume and a reused `--db`); test helper `reachChecksStep(opts: { db: Database; ticketId: number; profile: Profile; worktreeRoot: string; inPlace?: boolean; unit: { kind: string; behavioral: boolean; verifyCheckTypes: string[]; filesToTouch?: string[]; testFile?: string } }): Promise<void>` in `test/helpers/design-steps.ts`.
+- Produces: `walkDesign(db: Database, ticket: TicketRow): StepDescriptor | null` (null: past the table's last row); `newerSchemeIn(db: Database): { scheme: number; idents: string[] } | null` (the tickets whose manifests are newer than `FINGERPRINT_SCHEME`, with the highest scheme); `newerSchemeRecorded(path: string)` (the same, on one private copy); `newerSchemeRefusal(ident: string, scheme: number): string` (resume's refusal) and `newerSchemeDbRefusal(found): string` (a reused `--db`'s refusal); test helper `reachChecksStep(opts: { db: Database; ticketId: number; profile: Profile; worktreeRoot: string; inPlace?: boolean; unit: { kind: string; behavioral: boolean; verifyCheckTypes: string[]; filesToTouch?: string[]; testFile?: string } }): Promise<void>` in `test/helpers/design-steps.ts`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -8873,7 +8873,12 @@ test(
     const before = runState(h, dbFile);
     const calls = JSON.stringify(h.calls.counts);
     expect(await h.fresh({ db: dbFile })).toBe(65);
-    expect(h.stderr.join("")).toContain("run refused: this run was recorded by a newer Styre");
+    const out = h.stderr.join("");
+    expect(out).toContain(
+      "run refused: this database holds a run recorded by a newer Styre; use that version, or point --db at a new database",
+    );
+    expect(out).toContain(", for: ENG-1."); // the tickets whose manifests are newer
+    expect(out).not.toContain("--fresh"); // a reused database ignores it
     expect(runState(h, dbFile)).toEqual(before);
     expect(JSON.stringify(h.calls.counts)).toBe(calls);
   },
@@ -8901,25 +8906,39 @@ import { changedInputs, currentManifest } from "./design-digests.ts";
 import { DESIGN_TABLE, type GateRow, ensureDesignTableChecked } from "./design-graph.ts";
 import type { StepDescriptor } from "./resolver.ts";
 
-/** The highest fingerprint scheme recorded in the database at `path` when it is newer than this
- *  Styre's, else null (operator rulings, 2026-10-10, spec §5.1). One private copy, so it changes
- *  nothing. A database that is not at the current version has no newer manifest: an older one has
- *  no `fingerprint_scheme` column, and a newer one is refused by `migrate` anyway. */
-export function newerSchemeRecorded(path: string): number | null {
-  const max = readCopyOf(path, (db) =>
-    classifyDatabase(db, path).kind === "current"
-      ? (db
-          .query<{ s: number | null }, []>("SELECT MAX(fingerprint_scheme) AS s FROM workflow_step")
-          .get()?.s ?? null)
-      : null,
-  );
-  return max !== null && max > FINGERPRINT_SCHEME ? max : null;
+/** The tickets whose design steps were fingerprinted under a scheme newer than this Styre's,
+ *  with the highest such scheme, or null (operator rulings, 2026-10-10, spec §5.1). Reads `db`
+ *  only: the callers pass a private copy at the current version (an older database has no
+ *  `fingerprint_scheme` column, and a newer one is refused by `migrate` anyway). */
+export function newerSchemeIn(db: Database): { scheme: number; idents: string[] } | null {
+  const rows = db
+    .query<{ ident: string; s: number }, [number]>(
+      `SELECT t.ident AS ident, MAX(w.fingerprint_scheme) AS s
+         FROM workflow_step w JOIN ticket t ON t.id = w.ticket_id
+        WHERE w.fingerprint_scheme > ? GROUP BY t.ident ORDER BY t.ident`,
+    )
+    .all(FINGERPRINT_SCHEME);
+  if (rows.length === 0) return null;
+  return { scheme: Math.max(...rows.map((r) => r.s)), idents: rows.map((r) => r.ident) };
 }
 
-/** The refusal of a run fingerprinted under a newer scheme: the same text on a resume and on a
- *  run that reuses the database (`--db`). */
+/** `newerSchemeIn` on one private copy of the database at `path`, which it never opens. */
+export function newerSchemeRecorded(path: string): { scheme: number; idents: string[] } | null {
+  return readCopyOf(path, (db) =>
+    classifyDatabase(db, path).kind === "current" ? newerSchemeIn(db) : null,
+  );
+}
+
+/** A resume of a run fingerprinted under a newer scheme (operator ruling, 2026-10-10). */
 export function newerSchemeRefusal(ident: string, scheme: number): string {
   return `this run was recorded by a newer Styre; use that version.\n  Its design steps were fingerprinted under scheme ${scheme}; this Styre knows scheme ${FINGERPRINT_SCHEME} and cannot compare them.\n  Nothing was changed. Or start the ticket over: styre run ${ident} --fresh.\n`;
+}
+
+/** A fresh run on a reused --db that holds such a run (operator rulings, 2026-10-10). It names
+ *  every ticket with a newer manifest, and does not suggest --fresh, which a reused database
+ *  ignores. */
+export function newerSchemeDbRefusal(found: { scheme: number; idents: string[] }): string {
+  return `this database holds a run recorded by a newer Styre; use that version, or point --db at a new database.\n  Design steps fingerprinted under scheme ${found.scheme} (this Styre knows scheme ${FINGERPRINT_SCHEME}), for: ${found.idents.join(", ")}.\n  Nothing was changed.\n`;
 }
 
 const GATE_FIRES: Record<GateRow["name"], (db: Database, ticketId: number) => boolean> = {
@@ -9000,41 +9019,72 @@ export function walkDesign(db: Database, ticket: TicketRow): StepDescriptor | nu
     }
 ```
 
-`src/cli/park.ts` (operator rulings, 2026-10-10, spec §5.1): import `newerSchemeRecorded, newerSchemeRefusal` from `../daemon/design-walk.ts`; in `resumeRun`, right after Task 3's `if (args.inspect) {...}` block and before `migrate(dbPath, ...)`, add:
+`src/cli/park.ts` (operator rulings, 2026-10-10, spec §5.1): import `newerSchemeIn, newerSchemeRecorded, newerSchemeRefusal` from `../daemon/design-walk.ts`; in `resumeRun`, right after Task 3's `if (args.inspect) {...}` block and before `migrate(dbPath, ...)`, add:
 
 ```ts
     // A manifest recorded under a newer FINGERPRINT_SCHEME (operator ruling, 2026-10-10): this
     // Styre cannot compare it. Refuse before anything is written, like a HEAD that moved (65).
     const newerScheme = newerSchemeRecorded(dbPath);
     if (newerScheme !== null) {
-      process.stderr.write(`resume refused: ${newerSchemeRefusal(args.resume, newerScheme)}`);
+      process.stderr.write(
+        `resume refused: ${newerSchemeRefusal(args.resume, newerScheme.scheme)}`,
+      );
       process.exitCode = 65; // EXIT.RESUME_REFUSED, inside the try whose finally releases the lock
       return;
     }
 ```
 
-and make `--inspect` say so (review n3: Review Focus 10 promises a report also where resume would refuse). Above `inspectWithoutUpgrading`, add
+and make `--inspect` say so (review n3: Review Focus 10 promises a report also where resume would refuse). The read sits inside the existing guarded read of the private copy, so a copy that fails is reported like the other read failures. Replace `inspectWithoutUpgrading` (Task 3), keeping its doc comment, with:
 
 ```ts
-/** `--inspect` says when resume would refuse a run fingerprinted under a newer scheme (Task 13). */
-function newerSchemeNote(dbPath: string): string {
-  const newer = newerSchemeRecorded(dbPath);
-  return newer === null
-    ? ""
-    : `; resume would refuse it: this run was recorded by a newer Styre (fingerprint scheme ${newer}); use that version`;
+export function inspectWithoutUpgrading(
+  dbPath: string,
+  ident: string,
+  state: DatabaseState,
+): string {
+  let details: string;
+  let newer = "";
+  try {
+    // A private copy (operator ruling, 2026-10-09): the checkpoint itself is never opened.
+    details = readCopyOf(dbPath, (db) => {
+      // Task 13: when resume would refuse a run fingerprinted under a newer scheme, say so.
+      const found = state.kind === "current" ? newerSchemeIn(db) : null;
+      if (found !== null)
+        newer = `; resume would refuse it: this run was recorded by a newer Styre (fingerprint scheme ${found.scheme}); use that version`;
+      const ticket = readCheckpointOnlyTicket(db);
+      const targetRepo = ticket ? readCheckpointTargetRepo(db, ticket.project_id) : null;
+      if (!ticket || !targetRepo) return "  (no ticket in this checkpoint)\n";
+      const recorded = headBaseline(db, ticket.id);
+      const current = branchHeadSha(targetRepo, branchNameFor(ticket));
+      const moved = recorded !== null && current !== null && recorded !== current;
+      return (
+        `  recorded base: ${recorded ?? "(none)"}\n  current head:  ${current ?? "(none)"}${moved ? "  [MOVED]" : ""}\n` +
+        `  would re-dispatch step: ${findCheckpointParkedStepKey(db, ticket.id) ?? "(none)"}\n`
+      );
+    });
+  } catch (err) {
+    details = `  (the rest cannot be read on this shape: ${err instanceof Error ? err.message : String(err)})\n`;
+  }
+  const schema =
+    state.kind === "upgrade"
+      ? `resume will upgrade this checkpoint from v${state.version} to v${CURRENT_VERSION}, after writing a backup`
+      : state.kind === "refuse"
+        ? `resume would refuse this checkpoint: ${state.error.headline}`
+        : state.kind === "empty"
+          ? "the checkpoint holds no tables"
+          : `v${state.version}, current${newer}`;
+  return `resume --inspect ${ident}\n  schema: ${schema}\n${details}  (no changes made)\n`;
 }
 ```
 
-and in `inspectWithoutUpgrading` the current case of `schema` becomes `` `schema v${state.version}, current${newerSchemeNote(dbPath)}` ``.
-
-`src/cli/run.ts` (operator ruling, 2026-10-10: a fresh run on a reused `--db` refuses the same way, with the same message): import `newerSchemeRecorded, newerSchemeRefusal` from `../daemon/design-walk.ts`, and right after `try {` (line 426), before `migrate(dbPath, ...)`, add:
+`src/cli/run.ts` (operator rulings, 2026-10-10: a fresh run on a reused `--db` refuses too, before anything is written; its message names the tickets with newer manifests and does not suggest `--fresh`, which a reused database ignores): import `newerSchemeDbRefusal, newerSchemeRecorded` from `../daemon/design-walk.ts`, and right after `try {` (line 425), before `migrate(dbPath, ...)` (line 426), add:
 
 ```ts
       // A reused --db holding manifests from a newer FINGERPRINT_SCHEME (operator ruling,
       // 2026-10-10): refused as resume refuses it (65), before anything is written.
       const newerScheme = explicitDb && existsSync(dbPath) ? newerSchemeRecorded(dbPath) : null;
       if (newerScheme !== null) {
-        process.stderr.write(`run refused: ${newerSchemeRefusal(ident, newerScheme)}`);
+        process.stderr.write(`run refused: ${newerSchemeDbRefusal(newerScheme)}`);
         process.exitCode = 65; // EXIT.RESUME_REFUSED
         return;
       }
@@ -9174,7 +9224,7 @@ Expected: PASS.
 4. In `test/dispatch/checks-handler.test.ts`, put back one `markDesignDone(...)` seed in place of its `reachChecksStep` call: that test fails with `succeeded without an input manifest`. Restore.
 5. In `resumeRun`, delete the `newerSchemeRecorded` refusal: `a manifest from a newer scheme: resume refuses (65) ...` fails (no 65: the resume marks the run resumed and goes on). Restore.
 6. In `runImpl`, make `newerScheme` always null: `a manifest from a newer scheme on a reused --db ...` fails (`Expected: 65, Received: 75`: the run goes on to its checks pause; past design the walk does not look at the manifests). Restore.
-7. In `inspectWithoutUpgrading`, drop `${newerSchemeNote(dbPath)}`: the resume test fails on its `--inspect` assertion. Restore.
+7. In `inspectWithoutUpgrading`, drop the `newerSchemeIn(db)` read: the resume test fails on its `--inspect` assertion. Restore.
 
 - [ ] **Step 7: Run the whole suite, then commit**
 
@@ -9354,8 +9404,9 @@ test(
     expect(getTicket(t.db, t.ticketId)?.stage).toBe("design");
     expect(getFinding(t.db, finding.id)?.work_unit_id).toBeNull(); // detached, kept open
     // The open finding now goes to unit 1 (findingsForUnit), and its implement must answer exactly
-    // its id (assertExactFindingIds). This script's implement answers none, so the finding is
-    // settled here as a review round settles one (review-round.ts:149); this test is about units.
+    // its id (assertExactFindingIds). This script's implement answers none. In a real run a code
+    // review settles a finding after that implement answered it; this test settles it early, only
+    // to keep the run moving, since it is about the units.
     setFindingStatus(t.db, finding.id, "fixed");
     await driveUntil(t, atStep("completeness:wu1"));
     expect(listUnits(t.db, t.ticketId).length).toBe(2);
@@ -11558,8 +11609,9 @@ this Styre's v<M>`; `migrate: <db> is schema v<N> but has a shape this Styre doe
 over with `--fresh`. A migration that fails leaves the database at the last version that completed
 (exit `70`); the backup is kept. The structural comparison runs inside the last migration's
 transaction, so a difference rolls that migration back too. `styre ls`, `styre clean`, `--fresh`
-and `--resume --inspect` read a checkpoint without upgrading it; `--inspect` writes nothing to it,
-whatever its version: no migration, no backup, no run row.
+and `--resume --inspect` read a checkpoint without upgrading it; `--inspect` never opens or changes
+the database, whatever its version (no migration, no backup, no run row), and only takes and
+releases the run lock, as every resume does.
 ```
 
 - In the `styre ls` section (lines 93-129): "Prints three sections, in order" becomes "Prints up to five sections, in order"; in its code block, between the `Finished leftovers` lines and `Running:`, add
@@ -11637,7 +11689,7 @@ it, and of its `-wal` and `-shm`, removed afterwards.
   - row `78`: append `; or a profile whose own slug is not a valid folder name (rerun styre setup with --slug)` to the meaning.
 - `docs/architecture/glossary.md:169-172` (`styre ls`): "lists every effort in three sections" becomes "lists every effort in up to five sections", with `Unreadable checkpoints (...)` (the checkpoints it could not read, with the reason) and `Checkpoints this Styre cannot use (...)` (a schema it refuses, with the reason) named between the leftovers and `Running:`.
 - `docs/architecture/build-operations.md:70-72` (`styre ls`): "lists every effort in three sections: ... and currently running efforts." becomes "lists every effort in up to five sections: paused/resumable efforts (each with its `styre run --resume` hint), finished leftovers not yet cleaned (reapable via `styre clean --all`), checkpoints it could not read and checkpoints whose schema it cannot use (each with the reason), and currently running efforts."
-- In the exit code table: row `65` add `, or a database that cannot be upgraded: newer than this Styre, older than v7, or of an unknown shape (start that run over with `--fresh`); also `styre clean <ident>` refusing a checkpoint it cannot read or whose schema it cannot use (nothing removed), and a resume, or a fresh run on a reused `--db`, of a run whose design steps were fingerprinted by a newer Styre ("this run was recorded by a newer Styre; use that version", nothing changed)` to the Meaning, its Name `resume refused (`EX_DATAERR`)` becomes `checkpoint refused (`EX_DATAERR`)`, and its Retry column gains `. A database written by a newer Styre: use that Styre, which keeps the paused work; otherwise, or for one that cannot be upgraded, start over with `--fresh`. `styre clean <ident>` on a checkpoint it cannot use: not as is; for a newer Styre's checkpoint use that Styre first; otherwise remove the run by hand (see `styre clean <ident>` above), or start over with `styre run <ident> --slug <slug> --fresh`.`; row `64` add `, or an ident or slug that is not a valid folder name (see `conventions.md`: an ident is one folder name; a slug may nest with `/`, each part one folder name), given on the command line, derived from the repository, or from the tracker (`styre run` fresh or `--resume`, `styre clean`, `styre setup`)` to the Meaning; row `78` add `, or a profile whose own `slug` is not a valid folder name (`styre run`, `styre clean --profile`; rerun `styre setup` with `--slug`)` to the Meaning; row `70` add `Also: a migration that failed (the database stays at the last version that completed; the backup is kept), and a declared design table that breaks its own rules (`the declared design table breaks its own rules`, a Styre defect).`; row `75` add `, or a resume paused because this host lacks a required suite's tools` inside the `needs_you` parenthesis, and `, or the invalidate loop guard's escalation (signature `invalidate-loop:<step>`: a design step kept finding changed inputs)` after it.
+- In the exit code table: row `65` add `, or a database that cannot be upgraded: newer than this Styre, older than v7, or of an unknown shape (start that run over with `--fresh`); also `styre clean <ident>` refusing a checkpoint it cannot read or whose schema it cannot use (nothing removed), a resume of a run whose design steps were fingerprinted by a newer Styre ("this run was recorded by a newer Styre; use that version"), and a fresh run on a reused `--db` that holds such a run ("this database holds a run recorded by a newer Styre; use that version, or point --db at a new database"; nothing changed in either)` to the Meaning, its Name `resume refused (`EX_DATAERR`)` becomes `checkpoint refused (`EX_DATAERR`)`, and its Retry column gains `. A database written by a newer Styre: use that Styre, which keeps the paused work; otherwise, or for one that cannot be upgraded, start over with `--fresh`. `styre clean <ident>` on a checkpoint it cannot use: not as is; for a newer Styre's checkpoint use that Styre first; otherwise remove the run by hand (see `styre clean <ident>` above), or start over with `styre run <ident> --slug <slug> --fresh`.`; row `64` add `, or an ident or slug that is not a valid folder name (see `conventions.md`: an ident is one folder name; a slug may nest with `/`, each part one folder name), given on the command line, derived from the repository, or from the tracker (`styre run` fresh or `--resume`, `styre clean`, `styre setup`)` to the Meaning; row `78` add `, or a profile whose own `slug` is not a valid folder name (`styre run`, `styre clean --profile`; rerun `styre setup` with `--slug`)` to the Meaning; row `70` add `Also: a migration that failed (the database stays at the last version that completed; the backup is kept), and a declared design table that breaks its own rules (`the declared design table breaks its own rules`, a Styre defect).`; row `75` add `, or a resume paused because this host lacks a required suite's tools` inside the `needs_you` parenthesis, and `, or the invalidate loop guard's escalation (signature `invalidate-loop:<step>`: a design step kept finding changed inputs)` after it.
 - New section before `## Exit codes (error codes) and their meaning`:
 
 ```
@@ -11661,8 +11713,9 @@ and, for steps an older Styre finished, the adopt pass below), not only its own:
 every ready ticket it finds.
 
 A run whose design steps were fingerprinted by a newer Styre (a newer fingerprint scheme) is
-refused before anything changes (exit `65`), on resume and on a fresh run that reuses its database
-(`--db`): use that version. `--inspect` says so.
+refused before anything changes (exit `65`): on resume (use that version, or start the ticket over
+with `--fresh`), and on a fresh run that reuses its database with `--db` (use that version, or
+point `--db` at a new database; the message names the tickets). `--inspect` says so.
 
 Notes written to the run's events (and emitted as `event` rows):
 - `inputs-changed`: on a resume (or a reused `--db`), the inputs whose values changed. Past design,
@@ -11866,4 +11919,4 @@ Not part of this plan's tasks, but required by `CLAUDE.md` before `gh pr create`
 24. **Which refusals print commands.** Closed by operator ruling (2026-10-10): the "plain text, no commands" ruling covers `clean`'s refusals only. The resume refusals, the migration refusals (Task 2) and the `ls` section titles keep today's `styre run <ident> --fresh` hints.
 25. **`styre notify --slug` stays unchecked** (operator ruling, 2026-10-10). It only reads `<config>/<slug>/config.json` and writes nothing, so the name check of the other commands is not applied to it.
 26. **`--inspect` and the run lock** (operator ruling, 2026-10-10). `--inspect` keeps taking and releasing the run lock, as every resume does today: it stops an inspect from racing a live resume. So it creates and removes `run.lock` beside the database (and, like any resume, clears a stale lock a dead run left), but it never opens or changes the database. Spec §7.7 says so.
-27. **A newer fingerprint scheme on a reused `--db`** (operator ruling, 2026-10-10). A fresh `styre run --db` on a database whose manifests a newer Styre recorded refuses with exit 65 and the resume's message before anything is written (Task 13, `run.ts`); without it such a run went on (past design) or failed in the walk (exit 70, in design).
+27. **A newer fingerprint scheme on a reused `--db`** (operator ruling, 2026-10-10). A fresh `styre run --db` on a database whose manifests a newer Styre recorded refuses with exit 65 before anything is written (Task 13, `run.ts`), saying the database holds a run recorded by a newer Styre: use that version, or point `--db` at a new database; it names the tickets with newer manifests, and does not suggest `--fresh`, which a reused database ignores; without it such a run went on (past design) or failed in the walk (exit 70, in design).

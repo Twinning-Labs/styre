@@ -254,7 +254,9 @@ fails until the scheme number is bumped deliberately.
 recorded under a NEWER scheme than this Styre's cannot be compared. Resume refuses such a run before
 it changes anything, with exit 65 and "this run was recorded by a newer Styre; use that version",
 instead of failing later in the walk as a defect (exit 70). A fresh run on a reused `--db` that
-holds such manifests refuses the same way, with the same message, before anything is written.
+holds such manifests refuses too (exit 65), before anything is written: the database holds a run
+recorded by a newer Styre; use that version, or point `--db` at a new database. That message names
+the tickets with newer manifests and does not suggest `--fresh`, which a reused database ignores.
 `--inspect` reports it.
 
 ### 5.2 What a step records
