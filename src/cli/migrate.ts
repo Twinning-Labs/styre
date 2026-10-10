@@ -10,8 +10,12 @@ export interface MigrateArgs {
 
 export async function migrateImpl({ args }: { args: MigrateArgs }): Promise<void> {
   const path = args.db && args.db.length > 0 ? args.db : defaultDbPath();
-  const result = migrate(path);
-  const verb = result.created ? "bootstrapped" : "already current";
+  const result = migrate(path, { log: (line) => process.stderr.write(`${line}\n`) });
+  const verb = result.created
+    ? "bootstrapped"
+    : result.migratedFrom !== null
+      ? `upgraded from v${result.migratedFrom}`
+      : "already current";
   process.stderr.write(`${verb}: ${path} (schema v${result.version})\n`);
 }
 

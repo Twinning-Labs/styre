@@ -70,7 +70,8 @@ function sourceState(path: string): string {
  *  including those its own open connection relies on (SQLite's documented hazard). No production
  *  caller does it (`priorRunIdAt` runs after `dumpPark` closed the run's connection). The tests
  *  that do (`signals.test.ts`, `e2e-interrupt.test.ts`, reading a run database their own writer
- *  still has open) are a stated case: one process, no other user of the file, and the copy is
+ *  still has open, and `migrate-upgrade.test.ts`, counting rows while its own writer and reader
+ *  hold the database) are a stated case: one process, no other user of the file, and the copy is
  *  only read. */
 export function readCopyOf<T>(
   path: string,

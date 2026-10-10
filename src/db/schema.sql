@@ -483,12 +483,11 @@ CREATE TABLE projection_outbox (
 CREATE INDEX idx_outbox_pending ON projection_outbox (status, created_at);
 
 -- ----------------------------------------------------------------------------
--- run — per-invocation identity (ENG-349). Exactly one row per ephemeral run DB.
+-- run — the identity of one invocation (ENG-349). Exactly one row per ephemeral run DB.
 -- The telemetry export stamps run_id/provider/started_at onto every emitted row so a
 -- consumer can correlate rows and tell two runs of the same ticket apart. ticket_id is a
--- run-local rowid and is NOT a cross-run key. NOTE: the CREATE below is mirrored verbatim
--- in src/db/repos/run.ts (ensureRunTable) as the pre-upgrade-park resume bridge — keep them
--- identical (schema.sql remains the source of truth).
+-- rowid local to this run's database and is NOT a key across runs. A v7 checkpoint gains
+-- this table through the v7 -> v8 migration (src/db/migrations/0008-run-table.ts).
 -- ----------------------------------------------------------------------------
 CREATE TABLE run (
     id          INTEGER PRIMARY KEY,

@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import {
   copyFileSync,
@@ -31,11 +31,12 @@ import type { StepRegistry } from "../daemon/step-registry.ts";
 import { resumeVerificationRetries } from "../daemon/verification-retry.ts";
 import { openDb } from "../db/client.ts";
 import { migrate } from "../db/migrate.ts";
+import { readCopyOf } from "../db/read-copy.ts";
 import { getLatestForTicket, getLatestWorktreePath } from "../db/repos/dispatch.ts";
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { getProject } from "../db/repos/project.ts";
 import { requeueFailedForge } from "../db/repos/projection-outbox.ts";
-import { ensureRunTable, getRun, insertRun, markResumed } from "../db/repos/run.ts";
+import { getRun, insertRun, markResumed } from "../db/repos/run.ts";
 import { listPending, markConsumed } from "../db/repos/signal.ts";
 import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
 import { listByStatus } from "../db/repos/workflow-step.ts";
@@ -86,7 +87,7 @@ export function finishRunResult(
   out: { outcome: RunOutcome; reason?: PauseReason; park?: ParkInfo },
 ): void {
   if (out.outcome === "paused" && out.reason === "budget" && out.park) {
-    dumpPark(db, dbPath, slug, ident, out.park); // closes db
+    dumpPark(db, dbPath, slug, ident, out.park, "run: "); // closes db
     process.exitCode = exitCodeForOutcome("paused"); // 75
     return;
   }
@@ -99,23 +100,21 @@ export function parkDir(slug: string, ident: string): string {
   return join(stateDir(), slug, ident);
 }
 
-/** Best-effort read of the run_id in an existing dump's run.db. Returns null if the file is
- *  absent or the dump predates the run table (pre-upgrade) — never throws. */
+/** The run_id in an existing paused copy's run.db, read through a private copy (operator ruling,
+ *  2026-10-09): null when the file is absent or predates the run table (from before the upgrade).
+ *  Throws when the file exists but cannot be read, so dumpPark says so instead of skipping its
+ *  warning. */
 export function priorRunIdAt(destPath: string): string | null {
   if (!existsSync(destPath)) return null;
-  try {
-    const db = new Database(destPath, { readonly: true });
-    try {
-      return (
-        db.query<{ run_id: string }, []>("SELECT run_id FROM run ORDER BY id LIMIT 1").get()
-          ?.run_id ?? null
-      );
-    } finally {
-      db.close();
-    }
-  } catch {
-    return null; // no run table / unreadable → treat as no prior id
-  }
+  return readCopyOf(destPath, (db) => {
+    const hasRun =
+      db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'run'").get() !== null;
+    if (!hasRun) return null; // a copy from before the run table: no run identity was ever minted
+    return (
+      db.query<{ run_id: string }, []>("SELECT run_id FROM run ORDER BY id LIMIT 1").get()
+        ?.run_id ?? null
+    );
+  });
 }
 
 /** Persist the paused run so `styre run --resume` can rehydrate it exactly:
@@ -130,6 +129,7 @@ export function dumpPark(
   slug: string,
   ident: string,
   park: ParkInfo,
+  prefix: "run: " | "resume: ",
 ): string {
   const dir = parkDir(slug, ident);
   mkdirSync(dir, { recursive: true });
@@ -140,7 +140,15 @@ export function dumpPark(
   // Skip the copy when resuming in-place: dbPath and destPath are the same file (re-park from
   // an existing dump — the DB is already at the correct location, no copy needed).
   if (dbPath !== destPath) {
-    const prior = priorRunIdAt(destPath);
+    let prior: string | null = null;
+    try {
+      prior = priorRunIdAt(destPath);
+    } catch (err) {
+      // Said, not skipped: the copy about to be overwritten could not be read.
+      process.stderr.write(
+        `${prefix}could not read the paused run at ${destPath} before overwriting it: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
     if (prior !== null && currentRunId !== null && prior !== currentRunId) {
       process.stderr.write(`overwriting paused run ${prior} with ${currentRunId} for ${ident}\n`);
     }
@@ -257,9 +265,8 @@ export async function resumeRun(
   }
   deps?.stop?.holdLock(lock);
   try {
-    migrate(dbPath);
+    migrate(dbPath, { log: (line) => process.stderr.write(`${line}\n`) });
     const db = openDb(dbPath);
-    ensureRunTable(db); // pre-upgrade parks (v1) have no run table; migrate() won't add it
     if (getRun(db) === null) {
       // Pre-upgrade park: no identity was ever minted — assign a fresh one for the resumed portion.
       insertRun(db, {
@@ -477,7 +484,7 @@ export async function resumeRun(
 
     if (result.outcome === "paused" && result.reason === "budget" && result.park) {
       deps?.stop?.setRun(null); // a normal exit: dumpPark closes the db
-      dumpPark(db, dbPath, profile.slug, ticket.ident, result.park); // re-dump (closes db)
+      dumpPark(db, dbPath, profile.slug, ticket.ident, result.park, "resume: "); // re-dump (closes db)
       process.stderr.write(
         `${formatMessage("run", `Paused again — out of budget: ${result.park.cause}. Checkpoint: ${dir}`)}\n`,
       );

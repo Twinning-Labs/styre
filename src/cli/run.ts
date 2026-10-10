@@ -425,7 +425,7 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
     }
     wiring.holdLock(lock);
     try {
-      migrate(dbPath);
+      migrate(dbPath, { log: (line) => process.stderr.write(`${line}\n`) });
       const db = openDb(dbPath);
       // A reused --db can be an older checkpoint: its warning goes to stderr (section 5.5).
       recover(db, { warn: (line) => process.stderr.write(`${line}\n`) });
