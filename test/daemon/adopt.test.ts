@@ -224,3 +224,32 @@ test(
   },
   STEP_TEST_TIMEOUT_MS,
 );
+
+test(
+  "the branch exists but holds no plan file for the ticket: design:dispatch and every step after it will rerun",
+  () => {
+    const { db, ticketId, repo } = restoredRun("v8-paused-worktree");
+    // a commit on the ticket branch that removes the ticket's plan
+    git(repo, ["checkout", "-q", "feat/ENG-1"]);
+    const plans = ticketPlanFilesAt(repo, "refs/heads/feat/ENG-1", "ENG-1").map((f) => f.path);
+    expect(plans.length).toBeGreaterThan(0);
+    git(repo, ["rm", "-q", ...plans]);
+    git(repo, ["-c", "user.email=t@s.dev", "-c", "user.name=T", "commit", "-q", "-m", "no plan"]);
+    expect(ticketPlanFilesAt(repo, "refs/heads/feat/ENG-1", "ENG-1")).toEqual([]);
+    const willRerun: DesignStepKey[] = [
+      "design:dispatch",
+      "design:extract",
+      "design:size",
+      "design:review",
+    ];
+    expect(adoptUnfingerprinted(db, ticketId, { repoPath: repo, branch: "feat/ENG-1" })).toEqual({
+      adopted: ["provision"],
+      willRerun,
+    });
+    for (const k of willRerun) {
+      expect(getByKey(db, ticketId, k)?.input_manifest).toBe("{}");
+      expect(getByKey(db, ticketId, k)?.output_digest).toBeNull();
+    }
+  },
+  STEP_TEST_TIMEOUT_MS,
+);

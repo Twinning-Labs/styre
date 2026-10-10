@@ -478,3 +478,25 @@ test(
   },
   HARNESS_TEST_TIMEOUT_MS,
 );
+
+test(
+  "a resume adopts the other active tickets of its checkpoint, and leaves the waiting ones alone (ruling 2026-10-10)",
+  async () => {
+    const h = make();
+    expect(await h.fresh({ script: { parkAt: "design:extract" } })).toBe(75); // a budget pause
+    // The other tickets are seeded into the paused checkpoint: it stands for a checkpoint an older
+    // Styre wrote from a run on a reused --db, now resumed under this one (seedOtherTickets is the
+    // stated exception; a fresh run of this binary would already have adopted them).
+    const other = seedOtherTickets(h.dbPath());
+    expect(await h.resume()).toBe(75); // design finishes, checks pauses (needs_you)
+    h.read((db) => {
+      expect(getByKey(db, other.active, "provision")?.input_manifest).not.toBeNull();
+      const notes = listEvents(db, other.active).filter((e) => e.reason === "adopted");
+      expect(notes).toHaveLength(1);
+      expect(JSON.parse(notes[0]?.payload_json ?? "{}").stepKeys).toEqual(["provision"]);
+      expect(getByKey(db, other.waiting, "provision")?.input_manifest).toBeNull();
+      expect(listEvents(db, other.waiting)).toEqual([]);
+    });
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);

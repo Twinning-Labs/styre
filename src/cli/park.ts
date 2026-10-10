@@ -39,6 +39,7 @@ import { readCopyOf } from "../db/read-copy.ts";
 import {
   findCheckpointParkedStepKey,
   findCheckpointTicket,
+  listCheckpointIdents,
   readCheckpointTargetRepo,
 } from "../db/repos/checkpoint-read.ts";
 import { getLatestForTicket, getLatestWorktreePath } from "../db/repos/dispatch.ts";
@@ -203,15 +204,22 @@ export const resetProvisionForResume = resetProvision;
  *  lower ids. One without that ticket is refused (exit 65), never resumed as another ticket. */
 function ownTicketId(db: Database, ident: string, dir: string): number {
   const { ticket, reason } = findCheckpointTicket(db, ident);
-  if (!ticket) throw noOwnTicket(ident, dir, reason);
+  if (!ticket) throw noOwnTicket(ident, dir, reason, listCheckpointIdents(db));
   return ticket.id;
 }
 
-function noOwnTicket(ident: string, dir: string, reason: string): StyreError {
+/** Never suggests `--fresh`: on a filesystem that ignores case (macOS by default) `--resume eng-1`
+ *  reaches the `ENG-1` folder, and a fresh run of the tracker's `ENG-1` would discard that paused
+ *  run. It names the idents the checkpoint holds instead, so the operator can resume the right one. */
+function noOwnTicket(ident: string, dir: string, reason: string, held: string[]): StyreError {
+  const holds =
+    held.length === 0
+      ? "This checkpoint holds no ticket."
+      : `This checkpoint holds: ${[...new Set(held)].join(", ")}.`;
   return new StyreError({
     code: EXIT.RESUME_REFUSED,
     headline: `resume refused: the checkpoint at ${dir} holds no run of ${ident} (${reason})`,
-    recovery: `Nothing was changed. Check the ticket ident, or start fresh: styre run ${ident} --fresh.`,
+    recovery: `Nothing was changed. Ticket idents are case sensitive. ${holds} To resume, run styre run --resume with the ident exactly as the checkpoint holds it.`,
   });
 }
 
@@ -366,10 +374,13 @@ export async function resumeRun(
     // Refused before anything is written (no migration, no backup, no run row): a checkpoint that
     // does not hold this ticket. A schema it cannot use is migrate's refusal, below.
     const before = readDatabaseState(dbPath);
-    if (before.kind === "empty") throw noOwnTicket(args.resume, dir, "it holds no tables");
+    if (before.kind === "empty") throw noOwnTicket(args.resume, dir, "it holds no tables", []);
     if (before.kind !== "refuse") {
-      const found = readCopyOf(dbPath, (db) => findCheckpointTicket(db, args.resume));
-      if (!found.ticket) throw noOwnTicket(args.resume, dir, found.reason);
+      const found = readCopyOf(dbPath, (db) => ({
+        ...findCheckpointTicket(db, args.resume),
+        held: listCheckpointIdents(db),
+      }));
+      if (!found.ticket) throw noOwnTicket(args.resume, dir, found.reason, found.held);
     }
     migrate(dbPath, { log: (line) => process.stderr.write(`${line}\n`) });
     const db = openDb(dbPath);

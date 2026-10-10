@@ -87,6 +87,15 @@ export function findCheckpointTicket(db: Database, ident: string): CheckpointTic
   };
 }
 
+/** Every ticket ident the checkpoint holds, by id: what a refusal names so the operator can resume
+ *  the right one. */
+export function listCheckpointIdents(db: Database): string[] {
+  return db
+    .query<{ ident: string }, []>("SELECT ident FROM ticket ORDER BY id")
+    .all()
+    .map((r) => r.ident);
+}
+
 /** The step a resume would dispatch again: the one left running, else the one that failed. */
 export function findCheckpointParkedStepKey(db: Database, ticketId: number): string | null {
   const pick = (status: string) =>

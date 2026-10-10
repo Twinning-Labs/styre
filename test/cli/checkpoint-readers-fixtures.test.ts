@@ -25,10 +25,13 @@ import { type ResumeArgs, parkDir, resumeRun } from "../../src/cli/park.ts";
 import { runSetup, setupImpl } from "../../src/cli/setup.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
+import { openDb } from "../../src/db/client.ts";
 import { migrate } from "../../src/db/migrate.ts";
 import { CURRENT_VERSION } from "../../src/db/migrations/index.ts";
 import { readCopyOf } from "../../src/db/read-copy.ts";
 import { listCheckpointRunningSteps } from "../../src/db/repos/checkpoint-read.ts";
+import { insertProject } from "../../src/db/repos/project.ts";
+import { insertTicket } from "../../src/db/repos/ticket.ts";
 import { type Profile, parseProfile } from "../../src/dispatch/profile.ts";
 import { undoBeforeDiscard } from "../../src/util/process/interruption.ts";
 import { FIXTURES, copyFixture, fixtureVersion } from "../helpers/db-fixtures.ts";
@@ -944,6 +947,123 @@ test(
     );
     expect(fixtureVersion(join(dir, "run.db"))).toBe(8);
     expect(treeOf(dir).filter(([f]) => f !== "run.lock")).toEqual(before);
+  },
+  TIMEOUT_MS,
+);
+
+/** `resumeRun` (not --inspect) of `ident` under the state root `state`, its refusal returned. */
+function resumeRefusal(state: string, ident: string, repo: string): Promise<unknown> {
+  const profile = parseProfile({ slug: "inspect", targetRepo: repo, components: [] });
+  return withEnv("XDG_STATE_HOME", state, () =>
+    trackTempEntriesMadeBy("styre-wt-", () =>
+      resumeRun({ resume: ident }, profile, DEFAULT_RUNTIME_CONFIG, {
+        preflight: () => ({ ok: true, version: null }),
+      }),
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    ),
+  );
+}
+
+/** Every file of `dir` with its bytes, the run lock aside (a resume takes and releases it). */
+const filesOf = (dir: string) => treeOf(dir).filter(([f]) => f !== "run.lock");
+
+test(
+  "resume refuses a checkpoint with no tables (exit 65) before anything is written",
+  async () => {
+    const state = makeTempDir("styre-readers-empty-");
+    const dir = join(state, "styre", "inspect", "ENG-1");
+    mkdirSync(dir, { recursive: true });
+    const db = new Database(join(dir, "run.db"));
+    db.exec("PRAGMA user_version = 1"); // writes the file header, creates no table
+    db.close();
+    const before = filesOf(dir);
+    const refused = (await resumeRefusal(state, "ENG-1", gitRepo())) as StyreError;
+    expect(refused?.code).toBe(65);
+    expect(refused.headline).toBe(
+      `resume refused: the checkpoint at ${dir} holds no run of ENG-1 (it holds no tables)`,
+    );
+    expect(refused.recovery).toContain("This checkpoint holds no ticket.");
+    expect(filesOf(dir)).toEqual(before); // not bootstrapped
+  },
+  TIMEOUT_MS,
+);
+
+test(
+  "a checkpoint holding its ident in two projects is refused by resume and listed unreadable by ls, never read as one of them",
+  async () => {
+    const state = makeTempDir("styre-readers-twice-");
+    const dir = join(state, "styre", "inspect", "ENG-1");
+    mkdirSync(dir, { recursive: true });
+    const dbPath = join(dir, "run.db");
+    migrate(dbPath);
+    // A stated exception (tickets only, through the public repository functions): a database
+    // reused across two projects with the same ident, which no single run of this binary writes.
+    const db = openDb(dbPath);
+    try {
+      for (const slug of ["inspect", "other"]) {
+        const projectId = insertProject(db, { slug, targetRepo: `/tmp/${slug}` });
+        insertTicket(db, { projectId, ident: "ENG-1" });
+      }
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    } finally {
+      db.close();
+    }
+    const before = filesOf(dir);
+    const refused = (await resumeRefusal(state, "ENG-1", gitRepo())) as StyreError;
+    expect(refused?.code).toBe(65);
+    expect(refused.headline).toBe(
+      `resume refused: the checkpoint at ${dir} holds no run of ENG-1 (2 tickets named ENG-1 recorded)`,
+    );
+    expect(filesOf(dir)).toEqual(before);
+    expect(
+      listCheckpoints(join(state, "styre")).map((c) => [c.ident, c.kind, c.note, c.ticketId]),
+    ).toEqual([["ENG-1", "unreadable", "2 tickets named ENG-1 recorded", 0]]);
+  },
+  TIMEOUT_MS,
+);
+
+test(
+  "a resume of an ident the checkpoint does not hold names the idents it does hold and never suggests --fresh",
+  async () => {
+    const state = makeTempDir("styre-readers-case-");
+    const dir = join(state, "styre", "inspect", "ENG-1");
+    mkdirSync(dir, { recursive: true });
+    const dbPath = join(dir, "run.db");
+    migrate(dbPath);
+    // A stated exception (a ticket row only, through the public repository functions): the
+    // checkpoint's own ticket, so the refusal can name it.
+    const db = openDb(dbPath);
+    try {
+      const projectId = insertProject(db, { slug: "inspect", targetRepo: "/tmp/inspect" });
+      insertTicket(db, { projectId, ident: "ENG-1" });
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    } finally {
+      db.close();
+    }
+    // On a filesystem that ignores case (macOS by default), `eng-1` reaches the ENG-1 folder; a
+    // fresh run of the tracker's ENG-1 would discard that paused run, so the advice must not say so.
+    // On one that does not, a second folder whose checkpoint holds ENG-1 stands in for it.
+    let asked = "eng-1";
+    let askedDir = join(state, "styre", "inspect", "eng-1");
+    if (!existsSync(join(askedDir, "run.db"))) {
+      asked = "ENG-2";
+      askedDir = join(state, "styre", "inspect", "ENG-2");
+      mkdirSync(askedDir, { recursive: true });
+      copyFileSync(dbPath, join(askedDir, "run.db"));
+    }
+    const before = filesOf(dir);
+    const refused = (await resumeRefusal(state, asked, gitRepo())) as StyreError;
+    expect(refused?.code).toBe(65);
+    expect(refused.headline).toBe(
+      `resume refused: the checkpoint at ${askedDir} holds no run of ${asked} (no ticket ${asked} recorded)`,
+    );
+    expect(refused.recovery).toBe(
+      "Nothing was changed. Ticket idents are case sensitive. This checkpoint holds: ENG-1. To resume, run styre run --resume with the ident exactly as the checkpoint holds it.",
+    );
+    expect(renderError("run", refused)).not.toContain("--fresh");
+    expect(filesOf(dir)).toEqual(before);
   },
   TIMEOUT_MS,
 );
