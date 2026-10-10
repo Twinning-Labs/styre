@@ -7,6 +7,7 @@ import {
   probe,
   sameProcess,
   tokenValue,
+  uptimeTicks,
 } from "../../../src/util/process/proc-table.ts";
 
 const spawned: Bun.Subprocess[] = [];
@@ -77,6 +78,42 @@ for (const forcePs of [false, true]) {
     }
   });
 }
+
+for (const forcePs of [false, true]) {
+  test(`nowToken read after a child started is never behind its start (ps fallback forced: ${forcePs})`, async () => {
+    // The leftover check ends its window at nowToken() and keeps starts <= it: a "now" a tick (Linux)
+    // or a few hundred microseconds (macOS) behind a process that already started drops it.
+    _forcePsFallbackForTest(forcePs);
+    const behind: string[] = [];
+    // The ps fallback launches ps for every probe: fewer rounds keep it inside the time limit.
+    for (let i = 0; i < (forcePs ? 30 : 200); i++) {
+      const child = Bun.spawn(["sleep", "5"], {
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      spawned.push(child);
+      const c = probe(child.pid);
+      const now = nowToken();
+      child.kill("SIGKILL");
+      await child.exited;
+      expect(c.kind).toBe("alive");
+      if (c.kind === "alive" && tokenValue(c.info.startedAt) > tokenValue(now))
+        behind.push(`start ${c.info.startedAt}, now ${now}`);
+    }
+    expect(behind).toEqual([]);
+  }, 20_000);
+}
+
+test("uptimeTicks reads /proc/uptime in integers, with no floating point tick lost", () => {
+  expect(uptimeTicks("1024.09 5.00\n", 100)).toBe(102409); // 1024.09 * 100 floors to 102408
+  expect(uptimeTicks("0.00 0.00\n", 100)).toBe(0);
+  expect(uptimeTicks("12.34 0.00\n", 1000)).toBe(12340);
+  for (const s of [1, 1023, 1024, 4096, 131072, 171869])
+    for (let cs = 0; cs < 100; cs++)
+      expect(uptimeTicks(`${s}.${String(cs).padStart(2, "0")} 1.00\n`, 100)).toBe(s * 100 + cs);
+  expect(() => uptimeTicks("garbage", 100)).toThrow("unexpected /proc/uptime");
+});
 
 // Linux reads /proc and never launches ps: skipped there, never passed silently.
 test.skipIf(process.platform === "linux")(
