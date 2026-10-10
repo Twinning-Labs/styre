@@ -250,10 +250,12 @@ parsed (defaults included), what each table step declares, and how each output i
 the digests of a fixed set of inputs (snapshot rows, units, track, plan) per scheme, so any such change
 fails until the scheme number is bumped deliberately.
 
-(Operator ruling, 2026-10-10) This amends the paragraph above for the other direction. A manifest
+(Operator rulings, 2026-10-10) This amends the paragraph above for the other direction. A manifest
 recorded under a NEWER scheme than this Styre's cannot be compared. Resume refuses such a run before
 it changes anything, with exit 65 and "this run was recorded by a newer Styre; use that version",
-instead of failing later in the walk as a defect (exit 70).
+instead of failing later in the walk as a defect (exit 70). A fresh run on a reused `--db` that
+holds such manifests refuses the same way, with the same message, before anything is written.
+`--inspect` reports it.
 
 ### 5.2 What a step records
 
@@ -284,8 +286,9 @@ Anything slow (a `git` call) is computed before the transaction and passed in.
 
 (Operator ruling, 2026-10-10) When `design:dispatch` finds no plan for the ticket committed at the
 branch head (for example because `docs/plans/` is in `.gitignore`), it fails at once, without a
-retry (a non retryable failure, so no attempt budget is spent), and escalates with a clear reason:
-the plan must be committed, so remove `docs/plans/` from `.gitignore`. The digest of nothing would
+retry (a non retryable failure: the step records attempt 1, its one execution, but no retries are
+spent), and escalates with a clear reason: the plan must be committed, so remove `docs/plans/` from
+`.gitignore`, commit that, and resume with `--accept-head`. The digest of nothing would
 never change, so every later plan edit would go unseen.
 
 ### 5.4 The walk
@@ -567,9 +570,10 @@ with `complexityGrading` on; recorded v8 fixtures of each must resume after the 
   which select only columns present since v7, and a test runs `ls`, `clean` and `--fresh` against every
   fixture.
 
-(Operator ruling, 2026-10-10) Every `--resume --inspect` is read only, whatever the checkpoint's
-version: it reads through the private copy below and writes nothing (no migration, no backup, no open
-of the original, no run row).
+(Operator rulings, 2026-10-10) Every `--resume --inspect` is read only, whatever the checkpoint's
+version: it reads through the private copy below and never opens or changes the database (no
+migration, no backup, no open of the original, no run row). It only takes and releases the run lock,
+as every resume does, so it cannot race a live resume.
 
 (Operator rulings, 2026-10-09) Every read of a database that must not change it, in production and
 in tests (`--inspect`, the narrow readers of `ls`, `clean` and `--fresh`, the pause's read of the copy
