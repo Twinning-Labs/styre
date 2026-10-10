@@ -162,28 +162,59 @@ export interface ToolchainGate {
   unusable: UnusableComponent[];
 }
 
+/** The one toolchain decision, for fresh runs and resumes alike (spec §4.1), so both hand the
+ *  handlers the same profile. `refuse` when nothing is usable, or when a component whose suite is
+ *  `required` is unusable (narrowing it away would drop the suite's declaration and its evidence). */
+export type ToolchainDecision =
+  | { kind: "use"; profile: Profile; unusable: UnusableComponent[] }
+  | { kind: "refuse"; partition: ToolchainPartition; blocking: UnusableComponent[] };
+
+export function toolchainDecision(
+  profile: Profile,
+  probe: (repoDir: string, command: string) => boolean = probeCommandExists,
+): ToolchainDecision {
+  const partition = partitionByToolchain(profile, probe);
+  const required = partition.unusable.filter((u) =>
+    profile.components.some((c) => c.name === u.component && suiteRequirement(c) === "required"),
+  );
+  if (partition.fatal || required.length > 0)
+    return { kind: "refuse", partition, blocking: partition.fatal ? partition.unusable : required };
+  if (partition.unusable.length === 0) return { kind: "use", profile, unusable: [] };
+  return {
+    kind: "use",
+    profile: { ...profile, components: partition.usable },
+    unusable: partition.unusable,
+  };
+}
+
 /**
- * The run-start toolchain decision (ENG-412), extracted so it is testable without driving a
- * whole run: throws `toolchainError` (exit 69) iff NOTHING is usable, else returns the narrowed
- * profile plus what it dropped.
+ * The toolchain decision at run start (ENG-412), extracted so it is testable without driving a
+ * whole run: throws `toolchainError` (exit 69) iff the decision refuses, else returns the narrowed
+ * profile plus what it dropped. Fresh runs only: `--resume` pauses instead (spec §4.1).
  *
  * The narrowing is returned as a NEW profile and never written back to disk. What is missing is a
- * property of this machine; the profile describes the repo. Conflating the two would let one
- * host's gaps be mistaken for the project's shape on the next run, on a different machine.
+ * property of this machine; the profile describes the repo.
  */
 export function applyToolchainGate(
   profile: Profile,
   probe: (repoDir: string, command: string) => boolean = probeCommandExists,
 ): ToolchainGate {
-  const partition = partitionByToolchain(profile, probe);
-  if (
-    partition.fatal ||
-    partition.unusable.some((u) =>
-      profile.components.some((c) => c.name === u.component && suiteRequirement(c) === "required"),
-    )
-  ) {
-    throw toolchainError(formatMissingTools(partition.missing));
-  }
-  if (partition.unusable.length === 0) return { profile, unusable: [] };
-  return { profile: { ...profile, components: partition.usable }, unusable: partition.unusable };
+  const d = toolchainDecision(profile, probe);
+  if (d.kind === "refuse") throw toolchainError(formatMissingTools(d.partition.missing));
+  return { profile: d.profile, unusable: d.unusable };
+}
+
+/** The stderr notice of a narrowing, the same sentence on a fresh run (`run: `) and a resume
+ *  (`resume: `). */
+export function toolchainNotice(unusable: readonly UnusableComponent[], profile: Profile): string {
+  const kept = profile.components.map((c) => c.name).join(", ");
+  return `skipping ${unusable.length} component(s) whose toolchain is absent; the run continues with ${kept}.\n${formatUnusableComponents([...unusable])}`;
+}
+
+/** Why a resume paused instead of narrowing: each blocking component and its missing tools. */
+export function resumePauseReason(blocking: readonly UnusableComponent[]): string {
+  const named = blocking
+    .map((u) => `${u.component} (missing: ${u.missing.map((m) => `\`${m.command}\``).join(", ")})`)
+    .join("; ");
+  return `this host lacks the tools for ${named}; resuming without them would drop a required suite or leave nothing to run. Install them and resume.`;
 }

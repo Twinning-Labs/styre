@@ -580,6 +580,7 @@ async function resume(
           };
           return registryFor(run, runner);
         },
+        probe: () => true,
         ports: ports(),
         preflight: () => ({ ok: true, version: null }),
       },

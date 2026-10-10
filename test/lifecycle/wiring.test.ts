@@ -1002,6 +1002,7 @@ describe("styre run --resume", () => {
         });
         await expect(
           resumeRun({ resume: "ENG-1" }, profile, DEFAULT_RUNTIME_CONFIG, {
+            probe: () => true,
             ports: { issueTracker: tracker(), forge: fakeForge() },
             preflight: okPreflight,
           }),

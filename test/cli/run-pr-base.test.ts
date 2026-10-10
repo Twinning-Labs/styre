@@ -63,6 +63,7 @@ test("a resumed run confirms the base on the forge before building its step regi
       // resumeRun mints and keeps a styre-wt-* worktree root before buildRegistry throws.
       trackTempEntriesMadeBy("styre-wt-", () =>
         resumeRun({ resume: parked.ident }, profile, DEFAULT_RUNTIME_CONFIG, {
+          probe: () => true,
           ports: {
             issueTracker: fakeIssueTracker(),
             forge: fakeForge({ defaultBranch: "main", branches: ["main"] }),
@@ -117,6 +118,7 @@ test("a forge failure on resume leaves the checkpoint as it was paused", async (
         parseProfile({ slug: parked.slug, targetRepo: before.repo, checksSystem: "none" }),
         DEFAULT_RUNTIME_CONFIG,
         {
+          probe: () => true,
           ports: { issueTracker: fakeIssueTracker(), forge },
           preflight: () => ({ ok: true, version: null }),
           buildRegistry: () => {

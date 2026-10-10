@@ -454,6 +454,7 @@ export async function resumeParkedTicket(
             });
           },
           ports: fakePorts,
+          probe: () => true,
           preflight: () => ({ ok: true, version: null }),
         },
       ),

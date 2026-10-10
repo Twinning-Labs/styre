@@ -12,6 +12,7 @@ import {
   partitionByToolchain,
   preflightToolchain,
 } from "../../src/cli/preflight.ts";
+import { resumePauseReason, toolchainDecision, toolchainNotice } from "../../src/cli/preflight.ts";
 import type { Profile } from "../../src/dispatch/profile.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { makeTempDir } from "../helpers/temp.ts";
@@ -313,4 +314,45 @@ test("missing tools cannot silently remove a required suite while another compon
   expect(
     applyToolchainGate(p, fakeProbe(["python3"])).profile.components.map((c) => c.name),
   ).toEqual(["api"]);
+});
+
+const twoComponents = (required: boolean) =>
+  parseProfile({
+    slug: "p",
+    targetRepo: "/tmp/p",
+    components: [
+      {
+        name: "app",
+        kind: "ruby",
+        paths: ["app/**"],
+        commands: { build: "true", test: "true", check: "true" },
+      },
+      {
+        name: "lib",
+        kind: "ruby",
+        paths: ["lib/**"],
+        commands: { build: "lib-build", test: "lib-test", check: "lib-check" },
+        ...(required ? { testPolicy: { suite: "required" } } : {}),
+      },
+    ],
+  });
+const libMissing = (_dir: string, cmd: string) => !cmd.startsWith("lib-");
+
+test("toolchainDecision narrows an optional component away, as the fresh gate does", () => {
+  const d = toolchainDecision(twoComponents(false), libMissing);
+  if (d.kind !== "use") throw new Error("expected use");
+  expect(d.profile.components.map((c) => c.name)).toEqual(["app"]);
+  expect(d.unusable.map((u) => u.component)).toEqual(["lib"]);
+  expect(toolchainNotice(d.unusable, d.profile)).toContain(
+    "skipping 1 component(s) whose toolchain is absent; the run continues with app.",
+  );
+});
+
+test("toolchainDecision refuses to drop a required suite and names it", () => {
+  const d = toolchainDecision(twoComponents(true), libMissing);
+  if (d.kind !== "refuse") throw new Error("expected refuse");
+  expect(d.blocking.map((u) => u.component)).toEqual(["lib"]);
+  const reason = resumePauseReason(d.blocking);
+  expect(reason).toContain("lib");
+  expect(reason).toContain("lib-build");
 });

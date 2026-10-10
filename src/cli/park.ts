@@ -18,6 +18,7 @@ import { type AgentConfig, DEFAULT_AGENT_CONFIG } from "../config/agent-config.t
 import { stateDir } from "../config/paths.ts";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { captureSnapshot } from "../daemon/design-inputs.ts";
+import { pauseTicket } from "../daemon/pause-ticket.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
 import type { ProjectorPorts } from "../daemon/projector.ts";
 import { recover } from "../daemon/recover.ts";
@@ -61,6 +62,12 @@ import type { NonPrimaryComponent } from "./component-roles.ts";
 import { agentCliError, usageError } from "./errors.ts";
 import { exitCodeForOutcome } from "./outcome.ts";
 import { formatMessage } from "./output.ts";
+import {
+  type UnusableComponent,
+  resumePauseReason,
+  toolchainDecision,
+  toolchainNotice,
+} from "./preflight.ts";
 import { confirmPrBase } from "./resolve-pr-base.ts";
 import { type RunLock, acquireRunLock, releaseRunLock } from "./run-lock.ts";
 
@@ -205,6 +212,16 @@ export interface ResumeArgs {
   inspect?: boolean;
 }
 
+/** What the resumed run's registry is built from (spec §4.1): the profile after the toolchain
+ *  narrowing, and the lists of what was narrowed away, so provision reports them (ENG-412, ENG-425). */
+export interface ResumeRegistryWiring {
+  profile: Profile;
+  unusableComponents: UnusableComponent[];
+  nonPrimaryComponents: NonPrimaryComponent[];
+  inPlace: boolean;
+  worktreeRoot: string;
+}
+
 /** The HEAD-guard baseline: the most recent of {latest `accept-head:` resumed event, latest
  *  dispatch row with a non-null branch_head_sha}, compared by `created_at` recency.
  *
@@ -274,6 +291,7 @@ export async function resumeRun(
   deps?: {
     buildRegistry?: (
       resumeContext: { stepKey: string; transcript: string } | undefined,
+      wiring: ResumeRegistryWiring,
     ) => StepRegistry;
     ports?: ProjectorPorts;
     preflight?: (config: AgentConfig) => AgentCliPreflight;
@@ -514,25 +532,59 @@ export async function resumeRun(
       acceptHead: args.acceptHead === true,
       warn: (line) => process.stderr.write(`${line}\n`),
     });
+    // spec §4.1: the same toolchain narrowing as a fresh run, here: after --inspect, after the resume
+    // transaction (a pause written before it would be consumed by it) and recover(), before the
+    // snapshot. Never exit 69: where the fresh gate would refuse, pause for the operator instead.
+    // A ticket the resume transaction already left waiting (a plan review gate stop applied again)
+    // gets no second pause: one human_resume and one escalation are enough (operator ruling,
+    // 2026-10-09). The tool gap is still recorded, as a note, and said as what it is.
+    const toolchain = toolchainDecision(profile, deps?.probe);
+    if (toolchain.kind === "refuse") {
+      const reason = resumePauseReason(toolchain.blocking);
+      if (getTicket(db, ticketId)?.status === "waiting") {
+        appendEvent(db, {
+          ticketId,
+          kind: "note",
+          reason: "toolchain-missing",
+          payload: { event: "toolchain-missing", detail: reason },
+        });
+        process.stderr.write(`resume: paused: the run is already waiting for you, and ${reason}\n`);
+      } else {
+        pauseTicket(db, ticketId, reason);
+        process.stderr.write(`resume: paused: ${reason}\n`);
+      }
+      closeDb();
+      process.exitCode = exitCodeForOutcome("paused"); // 75, needs_you
+      return;
+    }
+    const runProfile = toolchain.profile;
+    if (toolchain.unusable.length > 0) {
+      process.stderr.write(`resume: ${toolchainNotice(toolchain.unusable, runProfile)}\n`);
+    }
+
     // spec §4: after recover() and the provision reset, before the first resolver pass, the profile
     // and config rows are rewritten from what the handlers will receive now. The ticket text and the
     // starting commit never are (E2).
     captureSnapshot(db, ticketId, {
-      profile,
-      unusableComponents: [],
+      profile: runProfile,
+      unusableComponents: toolchain.unusable,
       nonPrimaryComponents,
       config: runtimeConfig,
     });
 
+    const wiring: ResumeRegistryWiring = {
+      profile: runProfile,
+      unusableComponents: toolchain.unusable,
+      nonPrimaryComponents,
+      inPlace,
+      worktreeRoot, // minted once above (in-place = repo root), shared with the reconcile
+    };
     const registry: StepRegistry = deps?.buildRegistry
-      ? deps.buildRegistry(resumeContext)
+      ? deps.buildRegistry(resumeContext, wiring)
       : buildDispatchRegistry({
           runner: deps?.runner ?? resolveAgentRunner(runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG),
           agentConfig: runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG,
-          profile,
-          nonPrimaryComponents,
-          inPlace,
-          worktreeRoot, // minted once above (in-place = repo root), shared with the reconcile
+          ...wiring,
           resumeContext,
         });
 
@@ -540,7 +592,7 @@ export async function resumeRun(
       ticketId,
       config: runtimeConfig,
       ports,
-      profile,
+      profile: runProfile,
       emit: stdoutSink,
       // ENG-485 section 7.5: where the ticket branch stands when each step starts.
       readHead: () => branchHeadSha(project.target_repo, branch),

@@ -40,7 +40,7 @@ import { EXIT, StyreError, agentCliError, errorKindForExit, usageError } from ".
 import { guardWithExitCheck } from "./exit-check.ts";
 import { loadRunProfile } from "./load-profile.ts";
 import { type StopWiring, finishRunResult, parkDir } from "./park.ts";
-import { applyToolchainGate, formatUnusableComponents } from "./preflight.ts";
+import { applyToolchainGate, toolchainNotice } from "./preflight.ts";
 import { confirmPrBase } from "./resolve-pr-base.ts";
 import { type RunLock, acquireRunLock, releaseRunLock, runLockStatus } from "./run-lock.ts";
 
@@ -355,14 +355,9 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
     const toolchain = applyToolchainGate(profile, deps?.probe);
     profile = toolchain.profile;
     if (toolchain.unusable.length > 0) {
-      // Say it out loud, twice. Here for whoever is watching the run, and again in the PR body
-      // (the `toolchain` signal emitted by `provision`) for whoever reviews it later — a
-      // narrowed scope that only ever appeared on stderr is a silent one by the time it matters.
-      process.stderr.write(
-        `run: skipping ${toolchain.unusable.length} component(s) whose toolchain is absent; ` +
-          `the run continues with ${profile.components.map((c) => c.name).join(", ")}.\n` +
-          `${formatUnusableComponents(toolchain.unusable)}\n`,
-      );
+      // Said here for whoever is watching the run, and again in the PR body (the `toolchain`
+      // signal emitted by `provision`).
+      process.stderr.write(`run: ${toolchainNotice(toolchain.unusable, profile)}\n`);
     }
 
     // Fail fast (no retry burn) if the configured agent CLI is missing or below its supported

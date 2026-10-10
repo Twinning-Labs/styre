@@ -65,6 +65,7 @@ test("resume re-queues failed forge rows for the current head only, with the pro
           }),
           DEFAULT_RUNTIME_CONFIG,
           {
+            probe: () => true,
             ports: {
               issueTracker: fakeIssueTracker(),
               forge: fakeForge({ defaultBranch: "main", branches: ["main"] }),

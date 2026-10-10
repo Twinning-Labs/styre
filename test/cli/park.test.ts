@@ -171,6 +171,7 @@ test("resumeRun wires resetProvisionForResume into the resume path (S4)", async 
       // resumeRun mints and keeps a styre-wt-* worktree root before buildRegistry throws.
       trackTempEntriesMadeBy("styre-wt-", () =>
         resumeRun({ resume: ident }, profile, DEFAULT_RUNTIME_CONFIG, {
+          probe: () => true,
           ports: {
             issueTracker: fakeIssueTracker({
               ticket: {
