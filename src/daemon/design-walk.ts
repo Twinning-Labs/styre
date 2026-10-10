@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { classifyDatabase } from "../db/migrate.ts";
 import { readCopyOf } from "../db/read-copy.ts";
+import { listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { requiredPlanFindings } from "../db/repos/review-round.ts";
 import type { TicketRow } from "../db/repos/ticket.ts";
 import { getByKey } from "../db/repos/workflow-step.ts";
@@ -42,6 +43,35 @@ export function newerSchemeRefusal(ident: string, scheme: number): string {
  *  ignores. */
 export function newerSchemeDbRefusal(found: { scheme: number; idents: string[] }): string {
   return `this database holds a run recorded by a newer Styre; use that version, or point --db at a new database.\n  Design steps fingerprinted under scheme ${found.scheme} (this Styre knows scheme ${FINGERPRINT_SCHEME}), for: ${found.idents.join(", ")}.\n  Nothing was changed.\n`;
+}
+
+/** spec §6.6: an unchanged step cannot be invalidated again after it reruns, so more than three
+ *  `inputs` invalidations of one step since the run was last started is a defect (an unstable
+ *  digest, say). Fail fast. */
+export const INVALIDATE_LOOP_LIMIT = 3;
+
+/** A start of the run on an existing database: a resume, or a `styre run` on a reused --db. */
+const startsARun = (e: { kind: string; reason: string | null }): boolean =>
+  e.kind === "resumed" || (e.kind === "note" && e.reason === "reused-database");
+
+export function inputsInvalidationsSinceResume(
+  db: Database,
+  ticketId: number,
+  stepKey: string,
+): number {
+  const events = listEvents(db, ticketId);
+  const since = events.filter(startsARun).at(-1)?.seq ?? 0;
+  return events.filter((e) => {
+    if (
+      e.seq <= since ||
+      e.kind !== "note" ||
+      e.reason !== "invalidated" ||
+      e.payload_json === null
+    )
+      return false;
+    const p = JSON.parse(e.payload_json) as { cause?: string; stepKeys?: string[] };
+    return p.cause === "inputs" && (p.stepKeys ?? []).includes(stepKey);
+  }).length;
 }
 
 const GATE_FIRES: Record<GateRow["name"], (db: Database, ticketId: number) => boolean> = {
@@ -95,6 +125,14 @@ export function walkDesign(db: Database, ticket: TicketRow): StepDescriptor | nu
         : {};
     const changed = changedInputs(recorded, currentManifest(db, ticket.id, row));
     if (changed.length > 0) {
+      if (inputsInvalidationsSinceResume(db, ticket.id, row.stepKey) >= INVALIDATE_LOOP_LIMIT) {
+        return {
+          kind: "escalate",
+          reason: `design step '${row.stepKey}' keeps finding changed inputs (${changed.join(", ")}) after rerunning; an input digest is unstable`,
+          signature: `invalidate-loop:${row.stepKey}`,
+          stepKey: row.stepKey,
+        };
+      }
       return { kind: "invalidate", stepKeys: [row.stepKey], reason: { cause: "inputs", changed } };
     }
   }

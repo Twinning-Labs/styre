@@ -2,10 +2,10 @@ import type { Database } from "bun:sqlite";
 import { outcomeSentence } from "../cli/outcome.ts";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { getLatestForTicket } from "../db/repos/dispatch.ts";
-import { type EventLogRow, listByTicket } from "../db/repos/event-log.ts";
+import { type EventLogRow, appendEvent, listByTicket } from "../db/repos/event-log.ts";
 import { insertProject } from "../db/repos/project.ts";
 import { getDeliveredPayload, hasPendingHumanResume, listPending } from "../db/repos/signal.ts";
-import { getTicket, insertTicket } from "../db/repos/ticket.ts";
+import { getByIdent, getTicket, insertTicket, listActiveTickets } from "../db/repos/ticket.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { branchPrefixFor } from "../integrations/ticket-source.ts";
@@ -260,6 +260,7 @@ export async function runTicket(deps: {
     targetRepo: deps.profile.targetRepo,
     defaultBranch: deps.profile.defaultBranch,
   });
+  const reused = getByIdent(deps.db, projectId, ingested.ident) !== null;
   const ticketId = insertTicket(deps.db, {
     projectId,
     ident: ingested.ident,
@@ -270,6 +271,16 @@ export async function runTicket(deps: {
     externalId: ingested.externalId,
   });
   deps.onTicket?.(ticketId);
+  // A `styre run` on a reused --db drives an existing ticket again: the loop guard counts from
+  // here, as it does from a resume (spec §6.6). A new database has no such ticket.
+  if (reused) {
+    appendEvent(deps.db, {
+      ticketId,
+      kind: "note",
+      reason: "reused-database",
+      payload: { event: "reused-database" },
+    });
+  }
   // A new database gets every row; a reused --db keeps its ticket text and starting commit and
   // rewrites the rest with an `inputs-changed` note (spec §4).
   captureSnapshot(deps.db, ticketId, deps.inputs);
@@ -278,7 +289,19 @@ export async function runTicket(deps: {
   // Operator ruling, 2026-10-10 (spec §4): a reused --db can hold other active tickets, which the
   // loop drives too (`tick` advances up to two ready tickets, loop.ts:22-41), with this run's
   // registry and so with this run's inputs. Each gets the same snapshot, with the same note, before
-  // any step runs. The starting commit stays this run's ticket's own.
+  // any step runs. The starting commit stays this run's ticket's own. Each is driven again on this
+  // database, its inputs rewritten, so its loop guard counts from here too: the same
+  // `reused-database` note first. Written here, not in captureOtherActiveTickets, which a resume
+  // shares (a resume writes a `resumed` event, for its own ticket only).
+  for (const other of listActiveTickets(deps.db)) {
+    if (other.id === ticketId) continue;
+    appendEvent(deps.db, {
+      ticketId: other.id,
+      kind: "note",
+      reason: "reused-database",
+      payload: { event: "reused-database" },
+    });
+  }
   captureOtherActiveTickets(deps.db, ticketId, deps.inputs);
   // A reused --db can hold steps an older Styre finished (spec §7.6); a new database has none. After
   // every snapshot, since the pass reads them. A ticket whose branch is gone records those steps as

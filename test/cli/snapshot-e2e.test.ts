@@ -272,6 +272,17 @@ test(
       expect(notesOf(other.active)).toEqual([["profile.promptVars"]]);
       expect(notesOf(other.waiting)).toEqual([]);
       expect(listInputs(db, other.waiting)).toEqual([]);
+      // Task 16: each run that drives a ticket again on this database restarts its loop guard
+      // count. This run's own ticket existed for the second run only; OTHER-1 is active, so both
+      // runs drove it again; OTHER-2 is waiting, never driven, never noted.
+      const reusedNotes = (t: number) =>
+        listEvents(db, t)
+          .filter((e) => e.reason === "reused-database")
+          .map((e) => [e.kind, JSON.parse(e.payload_json ?? "null")]);
+      const note = ["note", { event: "reused-database" }];
+      expect(reusedNotes(id)).toEqual([note]);
+      expect(reusedNotes(other.active)).toEqual([note, note]);
+      expect(reusedNotes(other.waiting)).toEqual([]);
     });
   },
   HARNESS_TEST_TIMEOUT_MS,
