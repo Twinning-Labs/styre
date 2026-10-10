@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { stripSqlComments } from "../schema-shape.ts";
 
 export interface RebuildSpec {
   table: string;
@@ -21,11 +22,21 @@ export function rebuildTable(db: Database, spec: RebuildSpec): void {
     throw new Error(`rebuildTable(${spec.table}): foreign keys must be off`);
   if (!db.inTransaction)
     throw new Error(`rebuildTable(${spec.table}): must run inside a transaction`);
+  const own = db
+    .query<{ sql: string | null }, [string]>(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+    )
+    .get(spec.table);
+  // The rebuild does not carry sqlite_sequence over: an AUTOINCREMENT table would lose its high
+  // water mark, and ids it had handed out could be handed out again.
+  if (/\bAUTOINCREMENT\b/i.test(stripSqlComments(own?.sql ?? "")))
+    throw new Error(`rebuildTable(${spec.table}): an AUTOINCREMENT table cannot be rebuilt here`);
   const head = new RegExp(`^\\s*CREATE TABLE ${spec.table}\\b`);
   if (!head.test(spec.createSql))
     throw new Error(`rebuildTable: createSql must start with CREATE TABLE ${spec.table}`);
   const tmp = `${spec.table}__rebuild`;
-  const mentions = new RegExp(`\\b${spec.table}\\b`);
+  // SQLite names are case insensitive: a view may write SIGNAL for signal.
+  const mentions = new RegExp(`\\b${spec.table}\\b`, "i");
   const dependents = db
     .query<{ type: string; name: string; sql: string }, []>(
       "SELECT type, name, sql FROM sqlite_master WHERE type IN ('view','trigger') AND sql IS NOT NULL ORDER BY type DESC, name",

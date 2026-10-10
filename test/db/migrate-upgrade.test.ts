@@ -120,6 +120,26 @@ describe("migrate upgrades every known released shape", () => {
     });
   });
 
+  for (const name of ["v7-v0.9.0-bridged", "v7-v0.10.0-bridged"] as const) {
+    test(`${name}: the run row of a bridged checkpoint is kept, every column`, () => {
+      const path = copyFixture(name);
+      const db = new Database(path);
+      // A direct write: no step of this binary can produce a v7 database with a run row; a v0.11+
+      // resume did, through ensureRunTable then insertRun.
+      db.exec(
+        "INSERT INTO run (id, run_id, started_at, provider, resumed, attempt) VALUES (1, 'bridged-run', '2026-07-21T00:00:00.000Z', 'claude', 1, 2)",
+      );
+      db.close();
+      const rows = (p: string) =>
+        readCopyOf(p, (c) => c.query("SELECT * FROM run ORDER BY id").all());
+      const before = rows(path);
+      expect(before.length).toBe(1);
+      migrate(path);
+      expect(fixtureVersion(path)).toBe(CURRENT_VERSION);
+      expect(rows(path)).toEqual(before);
+    });
+  }
+
   test("each fixture is detected as the released shape it was made from", () => {
     const expected: Record<string, KnownShape> = {
       "v7-v0.9.0": "v7-signal-budget",
@@ -445,6 +465,78 @@ describe("how migrations run", () => {
       }
       expect(onError).toContain("foreign keys must be off");
       expect(outsideError).toContain("must run inside a transaction");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("rebuildTable refuses an AUTOINCREMENT table, whose high water mark it would lose", () => {
+    const db = new Database(":memory:");
+    try {
+      db.exec("CREATE TABLE counted (id INTEGER PRIMARY KEY AUTOINCREMENT, x TEXT)");
+      db.exec("PRAGMA foreign_keys = OFF;");
+      let error = "";
+      db.transaction(() => {
+        try {
+          rebuildTable(db, {
+            table: "counted",
+            createSql: "CREATE TABLE counted (id INTEGER PRIMARY KEY AUTOINCREMENT, x TEXT)",
+            columns: ["id", "x"],
+            indexes: [],
+          });
+        } catch (err) {
+          error = String(err);
+        }
+      })();
+      expect(error).toContain("rebuildTable(counted)");
+      expect(error).toContain("AUTOINCREMENT");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("rebuildTable recreates a view and a trigger that name the table in another case", () => {
+    const db = new Database(":memory:");
+    try {
+      db.exec(`
+        CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT);
+        CREATE TABLE seen (x TEXT);
+        CREATE VIEW v AS SELECT x FROM T;
+        CREATE TRIGGER tr AFTER INSERT ON T BEGIN INSERT INTO seen (x) VALUES (new.x); END;
+        INSERT INTO t (x) VALUES ('a');
+      `);
+      db.exec("PRAGMA foreign_keys = OFF;");
+      let error = "";
+      db.transaction(() => {
+        try {
+          rebuildTable(db, {
+            table: "t",
+            createSql: "CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)",
+            columns: ["id", "x"],
+            indexes: [],
+          });
+        } catch (err) {
+          error = String(err);
+        }
+      })();
+      db.exec("INSERT INTO t (x) VALUES ('b')");
+      const after = {
+        error,
+        objects: db
+          .query<{ name: string }, []>(
+            "SELECT name FROM sqlite_master WHERE type IN ('view','trigger') ORDER BY name",
+          )
+          .all()
+          .map((o) => o.name),
+        view: db.query("SELECT x FROM v ORDER BY x").all(),
+        seen: db.query("SELECT x FROM seen ORDER BY x").all(),
+      };
+      expect(after).toEqual({
+        error: "",
+        objects: ["tr", "v"],
+        view: [{ x: "a" }, { x: "b" }],
+        seen: [{ x: "a" }, { x: "b" }],
+      });
     } finally {
       db.close();
     }

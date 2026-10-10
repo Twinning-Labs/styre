@@ -49,3 +49,73 @@ test("every CHECK in schema.sql has a probe, and the fresh schema rejects each",
   expect(CHECK_PROBES_V8.length).toBe(checks);
   expect(probeChecks(fresh(), SEED_ROWS_V8, CHECK_PROBES_V8)).toEqual([]);
 });
+
+/** The differences diffShapes reports between two databases built from `a` and `b`. */
+function diffOf(a: string, b: string): string {
+  const da = new Database(":memory:");
+  const db = new Database(":memory:");
+  try {
+    da.exec(a);
+    db.exec(b);
+    return diffShapes(describeSchema(da), describeSchema(db)).join("\n");
+  } finally {
+    da.close();
+    db.close();
+  }
+}
+
+const PARENT = "CREATE TABLE p (id INTEGER PRIMARY KEY);";
+
+test("a REFERENCES clause is compared", () => {
+  expect(
+    diffOf(
+      `${PARENT} CREATE TABLE c (id INTEGER PRIMARY KEY, pid INTEGER REFERENCES p(id))`,
+      `${PARENT} CREATE TABLE c (id INTEGER PRIMARY KEY, pid INTEGER)`,
+    ),
+  ).toContain("table c: foreignKeys differ");
+});
+
+test("a foreign key's ON DELETE is compared", () => {
+  expect(
+    diffOf(
+      `${PARENT} CREATE TABLE c (id INTEGER PRIMARY KEY, pid INTEGER REFERENCES p(id) ON DELETE CASCADE)`,
+      `${PARENT} CREATE TABLE c (id INTEGER PRIMARY KEY, pid INTEGER REFERENCES p(id))`,
+    ),
+  ).toContain("table c: foreignKeys differ");
+});
+
+test("a view's body is compared", () => {
+  expect(
+    diffOf(
+      "CREATE TABLE t (k TEXT, j TEXT); CREATE VIEW v AS SELECT k FROM t",
+      "CREATE TABLE t (k TEXT, j TEXT); CREATE VIEW v AS SELECT j FROM t",
+    ),
+  ).toContain("views v:");
+});
+
+test("a trigger's body is compared", () => {
+  expect(
+    diffOf(
+      "CREATE TABLE t (k TEXT); CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END",
+      "CREATE TABLE t (k TEXT); CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 2; END",
+    ),
+  ).toContain("triggers tr:");
+});
+
+test("a unique index differs from a plain one on the same column", () => {
+  expect(
+    diffOf(
+      "CREATE TABLE t (k TEXT); CREATE UNIQUE INDEX i ON t (k)",
+      "CREATE TABLE t (k TEXT); CREATE INDEX i ON t (k)",
+    ),
+  ).toContain("table t: indexes differ");
+});
+
+test("an index on a different column is a difference", () => {
+  expect(
+    diffOf(
+      "CREATE TABLE t (k TEXT, j TEXT); CREATE INDEX i ON t (k)",
+      "CREATE TABLE t (k TEXT, j TEXT); CREATE INDEX i ON t (j)",
+    ),
+  ).toContain("table t: indexes differ");
+});
