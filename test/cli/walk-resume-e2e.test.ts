@@ -1,5 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { FINGERPRINT_SCHEME } from "../../src/daemon/canonical.ts";
 import { openDb } from "../../src/db/client.ts";
 import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
@@ -90,6 +92,23 @@ const runState = (h: DesignHarness, path: string) =>
     status: getTicket(db, id)?.status,
   }));
 
+/** The database's folder as bytes: every file in it (the database, any `-wal`/`-shm`, a backup)
+ *  with the hash of its content. A refusal must leave it exactly as it was: no migration, no
+ *  backup, no write to any table, no journal file. */
+const folderBytes = (dbPath: string): Record<string, string> => {
+  const dir = dirname(dbPath);
+  return Object.fromEntries(
+    readdirSync(dir)
+      .sort()
+      .map((f) => [
+        f,
+        createHash("sha256")
+          .update(readFileSync(join(dir, f)))
+          .digest("hex"),
+      ]),
+  );
+};
+
 test(
   "a manifest from a newer scheme: resume refuses (65), changes nothing, and --inspect says so (ruling 2026-10-10)",
   async () => {
@@ -101,10 +120,13 @@ test(
       h.read((_db, id) => id),
     );
     const before = runState(h, h.dbPath());
+    const bytes = folderBytes(h.dbPath());
+    expect(Object.keys(bytes)).toContain("run.db");
     const calls = JSON.stringify(h.calls.counts);
     expect(await h.resume()).toBe(65);
     expect(h.stderr.join("")).toContain("this run was recorded by a newer Styre; use that version");
     expect(runState(h, h.dbPath())).toEqual(before); // no markResumed, no event, no status change
+    expect(folderBytes(h.dbPath())).toEqual(bytes); // not a byte written, no file added
     expect(JSON.stringify(h.calls.counts)).toBe(calls);
     expect(await h.resume({ inspect: true })).toBe(0);
     expect(h.stderr.join("")).toContain(
@@ -126,6 +148,8 @@ test(
       h.readAt(dbFile, (_db, id) => id),
     );
     const before = runState(h, dbFile);
+    const bytes = folderBytes(dbFile);
+    expect(Object.keys(bytes)).toContain("reuse.db");
     const calls = JSON.stringify(h.calls.counts);
     expect(await h.fresh({ db: dbFile })).toBe(65);
     const out = h.stderr.join("");
@@ -135,6 +159,7 @@ test(
     expect(out).toContain(", for: ENG-1."); // the tickets whose manifests are newer
     expect(out).not.toContain("--fresh"); // a reused database ignores it
     expect(runState(h, dbFile)).toEqual(before);
+    expect(folderBytes(dbFile)).toEqual(bytes); // not a byte written, no file added
     expect(JSON.stringify(h.calls.counts)).toBe(calls);
   },
   HARNESS_TEST_TIMEOUT_MS,

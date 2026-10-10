@@ -5,8 +5,9 @@ import { captureSnapshot } from "../../src/daemon/design-inputs.ts";
 import { invalidateSteps } from "../../src/daemon/invalidate.ts";
 import { type StepDescriptor, nextStepKey } from "../../src/daemon/resolver.ts";
 import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { requiredPlanFindings } from "../../src/db/repos/review-round.ts";
 import { listStepHistory } from "../../src/db/repos/step-history.ts";
-import { setTicketStage } from "../../src/db/repos/ticket.ts";
+import { getTicket, setTicketStage } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit, listByTicket as listUnits } from "../../src/db/repos/work-unit.ts";
 import { getByKey, recordManifest } from "../../src/db/repos/workflow-step.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
@@ -98,10 +99,11 @@ test(
 );
 
 test(
-  "early cutoff: an unchanged output leaves its readers done; a changed one invalidates them next",
+  "early cutoff: a rerun whose output is unchanged leaves the steps that read it done",
   async () => {
     // runtimeContext is read by dispatch and extract only. The plan is unchanged, so size and review
-    // (which read the plan and the units) stay done.
+    // (which read the plan and the units) stay done. The other half, a changed output invalidating
+    // its readers next, is the renamed plan file test below.
     const t = makeDesignTicket();
     await driveUntil(t, atStep("checks:dispatch"));
     recapture(t, {
@@ -210,6 +212,55 @@ test(
       signature: "review:unresolved-plan",
       stepKey: "design:review",
     });
+  },
+  STEP_TEST_TIMEOUT_MS,
+);
+
+test(
+  "the plan-review gate applies only where its step does: a resize to fast leaves the findings and goes on",
+  async () => {
+    const blocking = {
+      severity: "critical" as const,
+      category: "feasibility",
+      location: "plan:Unit 1",
+      rationale: "not feasible",
+      factors: null,
+      deferral_candidate: false,
+      work_unit_seq: 1,
+    };
+    // grading on: one unit graded 8 sizes full, the same unit graded 1 sizes fast
+    const t = makeDesignTicket({
+      config: { complexityGrading: true },
+      script: {
+        units: () => unitsOf(1, { behavioral: false }),
+        grade: (n) => (n === 1 ? 8 : 1),
+        planFindings: () => [blocking],
+      },
+    });
+    await driveUntil(t, (d) => d.kind === "escalate", 30);
+    expect(getTicket(t.db, t.ticketId)?.track).toBe("full");
+    expect(nextStepKey(t.db, t.ticketId)).toMatchObject({
+      kind: "escalate",
+      signature: "review:unresolved-plan",
+    });
+    const escalationsBefore = listEvents(t.db, t.ticketId).filter(
+      (e) => e.kind === "escalated",
+    ).length;
+    // an edited prompt variable reruns the steps that read it, design:size among them (graded 1)
+    recapture(t, { ...t.profile, promptVars: { stack: "ruby", tone: "terse" } }, true);
+    const d = await driveUntil(
+      t,
+      (next) => next.kind === "escalate" || atStep("checks:dispatch")(next),
+      20,
+    );
+    expect(d).toMatchObject({ kind: "step", stepKey: "checks:dispatch" });
+    expect(t.calls.counts["design:size"]).toBe(2);
+    expect(getTicket(t.db, t.ticketId)?.track).toBe("fast");
+    // the latest review's blocking findings remain, but neither the review nor its gate applies
+    expect(requiredPlanFindings(t.db, t.ticketId).length).toBeGreaterThan(0);
+    expect(listEvents(t.db, t.ticketId).filter((e) => e.kind === "escalated").length).toBe(
+      escalationsBefore,
+    );
   },
   STEP_TEST_TIMEOUT_MS,
 );

@@ -124,7 +124,13 @@ test("an advance descriptor sets the stage and writes a transition event", async
   // provision, design:dispatch, design:extract, design:size, checks:dispatch, checks:classify. Stop
   // when the next descriptor is the advance: the call after it collapses the advance inline and
   // runs implement:wu1:dispatch.
-  while (nextStepKey(db, ticketId).kind !== "advance") await advanceOneStep(db, ticketId, registry);
+  for (let i = 0; nextStepKey(db, ticketId).kind !== "advance"; i++) {
+    if (i >= 10)
+      throw new Error(
+        `no advance after 10 steps; the next descriptor is ${JSON.stringify(nextStepKey(db, ticketId))}`,
+      );
+    await advanceOneStep(db, ticketId, registry);
+  }
   const outcome = await advanceOneStep(db, ticketId, registry);
   const ticket = getTicket(db, ticketId);
   db.close();
