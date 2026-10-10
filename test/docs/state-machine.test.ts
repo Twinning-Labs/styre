@@ -14,6 +14,7 @@ import {
   PAGE,
   callArgs,
   checkGrounding,
+  checkSites,
   codeFacts,
   diffAgainstCode,
   expand,
@@ -43,6 +44,10 @@ describe("docs/architecture/state-machine.html", () => {
 
   test("it agrees with the code, both ways", () => {
     expect(diffAgainstCode(diagram(), codeFacts())).toEqual([]);
+  });
+
+  test("every refusal and escalation site in the code is drawn, with its exit codes", () => {
+    expect(checkSites(diagram())).toEqual([]);
   });
 
   test("the scenarios the operator asked for are present", () => {
@@ -201,12 +206,54 @@ describe("the checks fail on a difference", () => {
     expect(calls).toEqual([["db", "ticketId", '"flooded"', '"review-flood"', "id"]]);
   });
 
-  test("an escalation write site the diagram does not count", () => {
+  test("a refusal or escalation edge deleted from the diagram", () => {
     const d = clone(diagram());
-    d.escalationWrites["src/daemon/advance.ts"] = 3;
-    expect(diffAgainstCode(d, codeFacts())).toContain(
-      "escalation write sites (file=count): 'src/daemon/advance.ts=4' is in the code but not in the diagram",
+    d.transitions = d.transitions.filter(
+      (t) => t.id !== "t.start.agent-cli" && t.id !== "t.resume.retry-escalate",
     );
+    const lines = checkSites(d);
+    expect(lines).toContain(
+      "refusal site 'if (!cliPreflight.ok) throw agentCliError(cliPreflight);' lists 't.start.agent-cli', which is not a transition",
+    );
+    expect(lines.some((l) => l.includes("exits 69,78 in the code, but its drawn edges"))).toBe(
+      true,
+    );
+    expect(lines).toContain(
+      "escalation site '\"no progress: identical review findings\"' lists 't.resume.retry-escalate', which is not a transition",
+    );
+  });
+
+  test("a refusal edge drawn to the wrong exit", () => {
+    const d = clone(diagram());
+    const t = d.transitions.find((x) => x.id === "t.start.pr-base");
+    if (!t) throw new Error("t.start.pr-base missing");
+    t.to = "exit:usage";
+    expect(
+      checkSites(d).some(
+        (l) =>
+          l.includes("resolve-pr-base.ts") &&
+          l.includes("exits 78 in the code, but its drawn edges (t.start.pr-base) exit 64"),
+      ),
+    ).toBe(true);
+  });
+
+  test("a code site the diagram does not declare", () => {
+    const d = clone(diagram());
+    d.refusalSites = d.refusalSites.filter(
+      (x) => x.anchor !== '"--ticket is required when not using --resume",',
+    );
+    d.escalationSites = d.escalationSites.filter((x) => x.to !== "esc:outbox");
+    const lines = checkSites(d);
+    expect(
+      lines.some((l) => l.startsWith("refusal in the code is not drawn: src/cli/run.ts:")),
+    ).toBe(true);
+    expect(
+      lines.some((l) =>
+        l.startsWith("escalation in the code is not drawn: src/daemon/projector.ts:"),
+      ),
+    ).toBe(true);
+    expect(lines).toContain("refusal edge 't.run.no-ticket' is listed at no refusal site");
+    expect(lines).toContain("escalation edge 't.any.outbox' is listed at no escalation site");
   });
 
   test("a run cap the condition does not state", () => {

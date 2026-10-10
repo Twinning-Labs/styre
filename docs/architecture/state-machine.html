@@ -585,7 +585,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "resume.start",
    "label": "styre run --resume <ident>",
    "kind": "entry",
-   "description": "Resume a paused run from its checkpoint (`run.db` in the checkpoint folder). Everything that can refuse is checked before anything is written.",
+   "description": "Resume a paused run from its checkpoint (`run.db` in the checkpoint folder). These refusals come before any write: the shared start checks (names, profile, config, test environments, unresolved commands, the notifier), no checkpoint, the run lock, `--inspect`, an ident the checkpoint lacks, a newer fingerprint scheme, a schema migrate refuses. Every later refusal (HEAD moved, a refused review resume plan, the agent command line tool, an unsafe in place checkout, the ports, the PR base, a held worktree, HEAD changed while preparing) comes after the checkpoint was upgraded (when older, after a backup) and marked resumed (its run row's attempt counter bumped); the checkpoint stays resumable.",
    "source": {
     "file": "src/cli/park.ts",
     "symbol": "resumeRun"
@@ -1113,7 +1113,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "kind": "exit",
    "exitCode": 70,
    "exitName": "INTERNAL",
-   "description": "Anything that is not a `StyreError` reaching the error boundary: an unexpected failure or a Styre defect. Before a run starts nothing is written; during a run the checkpoint keeps what the last committed transaction left.",
+   "description": "An error that is not a `StyreError` (an unexpected failure, or a Styre defect), or a `StyreError` whose code is `EXIT.INTERNAL` (`DesignTableError`): the error boundary renders it and exits 70. A refusal before the run's database is touched writes nothing; after that, the checkpoint keeps what the last committed transaction left.",
    "source": {
     "file": "src/cli/output.ts",
     "symbol": "guard"
@@ -1258,7 +1258,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "esc:review-no-progress",
    "label": "Identical review findings",
    "kind": "escalation",
-   "description": "Plan or code review returned blocking findings with the same signature (sorted `category:location`) as the previous review loopback.",
+   "description": "Plan or code review returned blocking findings with the same signature (sorted `category:location`) as the latest loopback whose loop is `implement` or `design`, whatever wrote it: a review, the AC gate, the arbiter or reauthor, a verify or completeness failure, or an operator HEAD change on resume. A loopback of those loops with another signature in between resets this check, and identical findings then go on toward the repair limit.",
    "source": {
     "file": "src/daemon/review-verdict.ts",
     "symbol": "isRepeatedReviewLoopback"
@@ -1652,7 +1652,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:internal",
    "kind": "refuse",
    "label": "A port cannot be built",
-   "condition": "Building the tracker, forge, checks or notifier port throws (a missing `LINEAR_API_KEY`, say): a plain error.",
+   "condition": "Building the tracker, forge, checks or notifier port throws (a missing `LINEAR_API_KEY`, say): a plain error. A fresh run builds them before its database is touched; a resume, unless `--inspect`, after the checkpoint was upgraded and marked resumed.",
    "source": {
     "file": "src/daemon/ports.ts",
     "symbol": "makeProjectorPorts"
@@ -1665,7 +1665,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:toolchain",
    "kind": "refuse",
    "label": "Agent tool missing or too old",
-   "condition": "Not with `--inspect`: the agent command line tool is not on PATH, is below its supported version, or lacks the flags Styre needs to confine agents. A resume exits 69 here too.",
+   "condition": "Every fresh run checks it, `--inspect` or not; a resume checks it unless `--inspect` (which returns first), after the checkpoint was upgraded and marked resumed. The agent command line tool is not on PATH, is below its supported version, or lacks the flags Styre needs to confine agents. A resume exits 69 here too.",
    "source": {
     "file": "src/cli/errors.ts",
     "symbol": "agentCliError"
@@ -1678,7 +1678,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:config",
    "kind": "refuse",
    "label": "Provider cannot be confined",
-   "condition": "Not with `--inspect`: the configured agent provider is one Styre cannot confine yet (codex).",
+   "condition": "Every fresh run checks it, `--inspect` or not; a resume checks it unless `--inspect` (which returns first), after the checkpoint was upgraded and marked resumed. The configured agent provider is one Styre cannot confine yet (codex).",
    "source": {
     "file": "src/cli/errors.ts",
     "symbol": "agentCliError"
@@ -1691,7 +1691,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:config",
    "kind": "refuse",
    "label": "No PR base on the forge",
-   "condition": "Not with `--inspect`: neither the profile's default branch nor the forge's default branch exists on the forge. (A forge call that throws instead is a plain error, exit 70.)",
+   "condition": "Every fresh run checks it, `--inspect` or not; a resume checks it unless `--inspect` (which returns first), after the checkpoint was upgraded and marked resumed. Neither the profile's default branch nor the forge's default branch exists on the forge. (A forge call that throws instead is a plain error, exit 70.)",
    "source": {
     "file": "src/cli/resolve-pr-base.ts",
     "symbol": "resolvePrBase"
@@ -1704,7 +1704,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:internal",
    "kind": "refuse",
    "label": "Branch held by a worktree",
-   "condition": "A fresh run with `--fresh`, or a resume in worktree mode: the ticket branch is checked out by a worktree Styre cannot safely remove (a live run of another checkpoint, or a worktree outside `styre-wt-`): a plain error naming the git command to free it.",
+   "condition": "A fresh run with `--fresh` (before its database is touched), or a resume in worktree mode (unless `--inspect`; after the checkpoint was upgraded and marked resumed): the ticket branch is checked out by a worktree Styre cannot safely remove (a live run of another checkpoint, or a worktree outside `styre-wt-`): a plain error naming the git command to free it.",
    "source": {
     "file": "src/dispatch/worktree.ts",
     "symbol": "reconcileWorktree"
@@ -1795,7 +1795,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:internal",
    "kind": "refuse",
    "label": "In place: checkout not disposable",
-   "condition": "The run was in place and the repository has no `.styre-disposable` marker file, or (Python) its active environment's package is not installed from the repository: a plain error, before anything is changed.",
+   "condition": "The run was in place and the repository has no `.styre-disposable` marker file, or (Python) its active environment's package is not installed from the repository: a plain error, before the repository is touched. On a resume this refusal comes after the checkpoint was upgraded (when older, after a backup) and marked resumed (its run row's attempt counter bumped); it stays resumable.",
    "source": {
     "file": "src/cli/park.ts",
     "symbol": "resumeRun"
@@ -1808,7 +1808,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:internal",
    "kind": "refuse",
    "label": "Checkpoint inconsistent",
-   "condition": "The checkpoint's ticket or its project row vanished after the ident check: a plain error.",
+   "condition": "The checkpoint's ticket or its project row vanished after the ident check: a plain error. On a resume this refusal comes after the checkpoint was upgraded (when older, after a backup) and marked resumed (its run row's attempt counter bumped); it stays resumable.",
    "source": {
     "file": "src/cli/park.ts",
     "symbol": "resumeRun"
@@ -1995,7 +1995,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:resume-refused",
    "kind": "refuse",
    "label": "HEAD moved",
-   "condition": "The branch HEAD moved since the run paused and `--accept-head` was not given.",
+   "condition": "The branch HEAD moved since the run paused and `--accept-head` was not given. On a resume this refusal comes after the checkpoint was upgraded (when older, after a backup) and marked resumed (its run row's attempt counter bumped); it stays resumable.",
    "source": {
     "file": "src/cli/park.ts",
     "symbol": "resumeRun"
@@ -2008,7 +2008,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:resume-refused",
    "kind": "refuse",
    "label": "Review resume refused",
-   "condition": "`planReviewResume` refuses: for example the review repair limit is reached at the plan review gate or in review, a risk acceptance at a moved HEAD or for findings that cannot be accepted, or pending forge effects.",
+   "condition": "`planReviewResume` refuses: for example the review repair limit is reached at the plan review gate or in review, a risk acceptance at a moved HEAD or for findings that cannot be accepted, or pending forge effects. On a resume this refusal comes after the checkpoint was upgraded (when older, after a backup) and marked resumed (its run row's attempt counter bumped); it stays resumable.",
    "source": {
     "file": "src/cli/park.ts",
     "symbol": "resumeRun"
@@ -2021,7 +2021,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:resume-refused",
    "kind": "refuse",
    "label": "HEAD changed while preparing",
-   "condition": "A review resume plan exists and the branch HEAD changed between planning and the resume transaction.",
+   "condition": "A review resume plan exists and the branch HEAD changed between planning and the resume transaction. On a resume this refusal comes after the checkpoint was upgraded (when older, after a backup) and marked resumed (its run row's attempt counter bumped); it stays resumable.",
    "source": {
     "file": "src/cli/park.ts",
     "symbol": "resumeRun"
@@ -2060,7 +2060,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "provision",
    "kind": "loopback",
    "label": "retry-plan: redesign",
-   "condition": "Stopped at the plan review gate (a plan review escalation since the last resumed event, with no design loopback and no invalidated note for a `design:` step after it), HEAD unmoved: the plan review verdict is applied again, and redesigns (invalidate `design:dispatch`, cause `feedback`; the walk starts again at its first row) when the findings' signature differs from the previous review loopback's.",
+   "condition": "Stopped at the plan review gate (a plan review escalation since the last resumed event, with no design loopback and no invalidated note for a `design:` step after it), HEAD unmoved: the plan review verdict is applied again, and redesigns (invalidate `design:dispatch`, cause `feedback`; the walk starts again at its first row) when the findings' signature differs from that of the latest `implement` or `design` loopback, from any origin.",
    "source": {
     "file": "src/daemon/review-resume.ts",
     "symbol": "applyReviewResume"
@@ -2077,7 +2077,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:review-no-progress",
    "kind": "escalate",
    "label": "retry-plan: same findings",
-   "condition": "`retry-plan` with HEAD unmoved, and the blocking findings carry the same signature as the previous review loopback: the verdict escalates again at once.",
+   "condition": "`retry-plan` with HEAD unmoved, and the blocking findings carry the same signature as the latest `implement` or `design` loopback (from any origin): the verdict escalates again at once.",
    "source": {
     "file": "src/daemon/review-resume.ts",
     "symbol": "applyReviewResume"
@@ -2113,7 +2113,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "implement.pick",
    "kind": "loopback",
    "label": "retry: code loopback",
-   "condition": "Stage review or merge, a succeeded review with an unresolved review reason (open major or critical code findings, or a deferral whose risk acceptance names another commit, which is reopened first), HEAD unmoved, under the repair limit, no pending forge push or PR request: the code review verdict is applied again. Fewer than 3 review loopbacks, findings not the same as the previous review loopback's, and none of category `plan-defect`: code loopback.",
+   "condition": "Stage review or merge, a succeeded review with an unresolved review reason (open major or critical code findings, or a deferral whose risk acceptance names another commit, which is reopened first), HEAD unmoved, under the repair limit, no pending forge push or PR request: the code review verdict is applied again. Fewer than 3 review loopbacks, findings not the same as that of the latest `implement` or `design` loopback, from any origin, and none of category `plan-defect`: code loopback.",
    "source": {
     "file": "src/daemon/review-resume.ts",
     "symbol": "applyReviewResume"
@@ -2133,7 +2133,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:review-no-progress",
    "kind": "escalate",
    "label": "retry: same findings",
-   "condition": "retry with HEAD unmoved and the same findings signature as the previous review loopback: the verdict escalates again at once.",
+   "condition": "retry with HEAD unmoved and the same findings signature as the latest `implement` or `design` loopback (from any origin): the verdict escalates again at once.",
    "source": {
     "file": "src/daemon/review-resume.ts",
     "symbol": "applyReviewResume"
@@ -2605,7 +2605,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "provision",
    "kind": "loopback",
    "label": "Blocking findings: redesign",
-   "condition": "The latest `design:review` dispatch filed blocking plan findings (open, major or critical), fewer than 3 review loopbacks so far, not identical to the previous review loopback: invalidate `design:dispatch` (cause `feedback`; the findings ride the loopback event, tied to its new generation). `design:review` stays succeeded until the walk reruns it. The walk starts again at its first row.",
+   "condition": "The latest `design:review` dispatch filed blocking plan findings (open, major or critical), fewer than 3 review loopbacks so far, not identical to the latest `implement` or `design` loopback (from any origin): invalidate `design:dispatch` (cause `feedback`; the findings ride the loopback event, tied to its new generation). `design:review` stays succeeded until the walk reruns it. The walk starts again at its first row.",
    "source": {
     "file": "src/daemon/review-verdict.ts",
     "symbol": "applyReviewVerdict"
@@ -2624,7 +2624,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:review-no-progress",
    "kind": "escalate",
    "label": "Same findings again",
-   "condition": "Blocking plan findings with the same signature as the previous review loopback (the redesign did not resolve them).",
+   "condition": "Blocking plan findings with the same signature as the latest `implement` or `design` loopback (from any origin) (the redesign did not resolve them).",
    "source": {
     "file": "src/daemon/review-verdict.ts",
     "symbol": "applyReviewVerdict"
@@ -3407,7 +3407,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "implement.pick",
    "kind": "loopback",
    "label": "Blocking code findings: code again",
-   "condition": "Blocking code findings (major or critical, deferral suggestions included), none of category `plan-defect`, fewer than 3 review loopbacks, not identical to the previous review loopback: the blamed units (every unit when a finding names none) and their steps back to pending; review, the ticket's verify steps and the merge steps reset; stage implement.",
+   "condition": "Blocking code findings (major or critical, deferral suggestions included), none of category `plan-defect`, fewer than 3 review loopbacks, not identical to the latest `implement` or `design` loopback (from any origin): the blamed units (every unit when a finding names none) and their steps back to pending; review, the ticket's verify steps and the merge steps reset; stage implement.",
    "source": {
     "file": "src/daemon/review-verdict.ts",
     "symbol": "applyReviewVerdict"
@@ -3429,7 +3429,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:review-no-progress",
    "kind": "escalate",
    "label": "Same findings again",
-   "condition": "Blocking code findings with the same signature as the previous review loopback.",
+   "condition": "Blocking code findings with the same signature as the latest `implement` or `design` loopback (from any origin).",
    "source": {
     "file": "src/daemon/review-verdict.ts",
     "symbol": "applyReviewVerdict"
@@ -3460,7 +3460,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:plan-defect-policy",
    "kind": "escalate",
    "label": "Plan defect: escalate",
-   "condition": "After the two checks that come first (the repair limit: 3 review loopbacks already; the same findings as the previous review loopback), a blocking finding of category `plan-defect` and `onPlanDefect` is `escalate` (the default). The escalation writes no loopback.",
+   "condition": "After the two checks that come first (the repair limit: 3 review loopbacks already; the same findings as the latest `implement` or `design` loopback (from any origin)), a blocking finding of category `plan-defect` and `onPlanDefect` is `escalate` (the default). The escalation writes no loopback.",
    "constants": [
     "REVIEW_REPAIR_LIMIT"
    ],
@@ -3477,7 +3477,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "provision",
    "kind": "loopback",
    "label": "Plan defect: redesign",
-   "condition": "After the two checks that come first (the repair limit: 3 review loopbacks already; the same findings as the previous review loopback), a blocking `plan-defect` and `onPlanDefect` is `redesign`: invalidate `design:dispatch` and `design:extract` (cause `feedback`; findings detached first, the units created and implemented again); review, verify and merge steps reset; stage design. The checks steps keep today's state (E9).",
+   "condition": "After the two checks that come first (the repair limit: 3 review loopbacks already; the same findings as the latest `implement` or `design` loopback (from any origin)), a blocking `plan-defect` and `onPlanDefect` is `redesign`: invalidate `design:dispatch` and `design:extract` (cause `feedback`; findings detached first, the units created and implemented again); review, verify and merge steps reset; stage design. The checks steps keep today's state (E9).",
    "source": {
     "file": "src/daemon/review-verdict.ts",
     "symbol": "applyReviewVerdict"
@@ -4773,18 +4773,571 @@ button:disabled { opacity: 0.45; cursor: default; }
    1070
   ]
  },
- "escalationWrites": {
-  "src/daemon/advance.ts": 4,
-  "src/daemon/arbiter-verdict.ts": 2,
-  "src/daemon/checks-gate-verdict.ts": 3,
-  "src/daemon/checks-verdict.ts": 1,
-  "src/daemon/failure-policy.ts": 5,
-  "src/daemon/pause-ticket.ts": 1,
-  "src/daemon/projector.ts": 2,
-  "src/daemon/review-verdict.ts": 5,
-  "src/daemon/run-ticket.ts": 3,
-  "src/cli/park.ts": 1
- }
+ "refusalSites": [
+  {
+   "file": "src/cli/run.ts",
+   "anchor": "has an unresolved '${k}' command",
+   "edges": [
+    "t.start.unresolved"
+   ]
+  },
+  {
+   "file": "src/cli/run.ts",
+   "anchor": "\"review actions require --resume\",",
+   "edges": [
+    "t.run.review-flags"
+   ]
+  },
+  {
+   "file": "src/cli/run.ts",
+   "anchor": "Test environments need qualification",
+   "edges": [
+    "t.start.test-env"
+   ]
+  },
+  {
+   "file": "src/cli/run.ts",
+   "anchor": "cannot start in place — the HEAD of",
+   "edges": [
+    "t.run.in-place-no-head"
+   ]
+  },
+  {
+   "file": "src/cli/run.ts",
+   "anchor": "\"--ticket is required when not using --resume\",",
+   "edges": [
+    "t.run.no-ticket"
+   ]
+  },
+  {
+   "file": "src/cli/run.ts",
+   "anchor": "throw noPrimaryComponentError(",
+   "edges": [
+    "t.run.toolchain"
+   ]
+  },
+  {
+   "file": "src/cli/run.ts",
+   "anchor": "if (!cliPreflight.ok) throw agentCliError(cliPreflight);",
+   "edges": [
+    "t.start.agent-cli",
+    "t.start.agent-provider"
+   ]
+  },
+  {
+   "file": "src/cli/run.ts",
+   "anchor": "is in progress (${checkpointDir}/run.lock)",
+   "edges": [
+    "t.run.fresh-live"
+   ]
+  },
+  {
+   "file": "src/cli/run.ts",
+   "anchor": "a checkpoint already exists for ${ident} at ${checkpointDir}",
+   "edges": [
+    "t.run.checkpoint-exists"
+   ]
+  },
+  {
+   "file": "src/cli/run.ts",
+   "anchor": "is already in progress (${checkpointDir}/run.lock)",
+   "edges": [
+    "t.run.lock-held"
+   ]
+  },
+  {
+   "file": "src/cli/run.ts",
+   "anchor": "process.exitCode = 65; // EXIT.RESUME_REFUSED",
+   "edges": [
+    "t.run.newer-scheme"
+   ]
+  },
+  {
+   "file": "src/cli/park.ts",
+   "anchor": "if (!ticket) throw noOwnTicket(ident, dir, reason, listCheckpointIdents(db));",
+   "edges": [
+    "t.resume.no-ident"
+   ]
+  },
+  {
+   "file": "src/cli/park.ts",
+   "anchor": "holds no run of ${ident}",
+   "edges": [
+    "t.resume.no-ident"
+   ]
+  },
+  {
+   "file": "src/cli/park.ts",
+   "anchor": "no paused run at ${dbPath}",
+   "edges": [
+    "t.resume.no-checkpoint"
+   ]
+  },
+  {
+   "file": "src/cli/park.ts",
+   "anchor": "process.exitCode = 65; // EXIT.RESUME_REFUSED — no db opened yet",
+   "edges": [
+    "t.resume.lock-held"
+   ]
+  },
+  {
+   "file": "src/cli/park.ts",
+   "anchor": "if (before.kind === \"empty\") throw noOwnTicket(",
+   "edges": [
+    "t.resume.no-ident"
+   ]
+  },
+  {
+   "file": "src/cli/park.ts",
+   "anchor": "if (!found.ticket) throw noOwnTicket(args.resume, dir, found.reason, found.held);",
+   "edges": [
+    "t.resume.no-ident"
+   ]
+  },
+  {
+   "file": "src/cli/park.ts",
+   "anchor": "process.exitCode = 65; // EXIT.RESUME_REFUSED, inside the try",
+   "edges": [
+    "t.resume.newer-scheme"
+   ]
+  },
+  {
+   "file": "src/cli/park.ts",
+   "anchor": "if (!ticket) throw new Error(\"resume: ticket vanished\");",
+   "edges": [
+    "t.resume.internal"
+   ]
+  },
+  {
+   "file": "src/cli/park.ts",
+   "anchor": "if (!project) throw new Error(\"resume: project missing\");",
+   "edges": [
+    "t.resume.internal"
+   ]
+  },
+  {
+   "file": "src/cli/park.ts",
+   "anchor": "resume refused: branch HEAD moved since the run paused.",
+   "edges": [
+    "t.resume.head-moved"
+   ]
+  },
+  {
+   "file": "src/cli/park.ts",
+   "anchor": "`resume refused: ${error instanceof Error ? error.message : String(error)}\\n`,",
+   "edges": [
+    "t.resume.review-plan-refused"
+   ]
+  },
+  {
+   "file": "src/cli/park.ts",
+   "anchor": "throw agentCliError(cliPreflight);",
+   "edges": [
+    "t.start.agent-cli",
+    "t.start.agent-provider"
+   ]
+  },
+  {
+   "file": "src/cli/park.ts",
+   "anchor": "resume refused: branch HEAD changed while preparing review resume; inspect and retry",
+   "edges": [
+    "t.resume.head-changed-preparing"
+   ]
+  },
+  {
+   "file": "src/cli/load-profile.ts",
+   "anchor": "\"no --profile given and the current directory is not a git repo\",",
+   "edges": [
+    "t.start.no-repo"
+   ]
+  },
+  {
+   "file": "src/cli/checkpoint-name.ts",
+   "anchor": "throw usageError(`not a valid ${what}",
+   "edges": [
+    "t.run.bad-name",
+    "t.resume.bad-ident",
+    "t.start.bad-slug"
+   ]
+  },
+  {
+   "file": "src/cli/checkpoint-name.ts",
+   "anchor": "throw configError({",
+   "edges": [
+    "t.start.profile-slug"
+   ]
+  },
+  {
+   "file": "src/cli/checkpoint-name.ts",
+   "anchor": "the checkpoint path of",
+   "edges": [],
+   "notDrawn": "A second line of defence that the name checks before it make unreachable; reaching it is a Styre defect (exit 70)."
+  },
+  {
+   "file": "src/cli/resolve-pr-base.ts",
+   "anchor": "cannot start — the forge has no base branch to open a pull request against",
+   "edges": [
+    "t.start.pr-base"
+   ]
+  },
+  {
+   "file": "src/cli/preflight.ts",
+   "anchor": "if (d.kind === \"refuse\") throw toolchainError(",
+   "edges": [
+    "t.run.toolchain"
+   ]
+  },
+  {
+   "file": "src/config/discover.ts",
+   "anchor": "throw configError({",
+   "edges": [
+    "t.start.config-invalid"
+   ]
+  },
+  {
+   "file": "src/config/discover.ts",
+   "anchor": "no profile for '${slug}' at ${path}",
+   "edges": [
+    "t.start.profile-missing"
+   ]
+  },
+  {
+   "file": "src/config/discover.ts",
+   "anchor": "styre: malformed config at ${path}: ${String(err)}",
+   "edges": [
+    "t.start.config-malformed"
+   ]
+  },
+  {
+   "file": "src/config/parse-config.ts",
+   "anchor": "throw configError({ file, field, detail",
+   "edges": [
+    "t.start.profile-invalid",
+    "t.start.config-invalid"
+   ]
+  },
+  {
+   "file": "src/config/slug.ts",
+   "anchor": "--in-place: no git repo at the working directory",
+   "edges": [
+    "t.run.in-place-unsafe"
+   ]
+  },
+  {
+   "file": "src/dispatch/profile.ts",
+   "anchor": "legacy flat `commands` field (schemaVersion 1)",
+   "edges": [
+    "t.start.profile-retired"
+   ]
+  },
+  {
+   "file": "src/dispatch/profile.ts",
+   "anchor": "schemaVersion 2 profile does not carry",
+   "edges": [
+    "t.start.profile-retired"
+   ]
+  },
+  {
+   "file": "src/dispatch/profile.ts",
+   "anchor": "schemaVersion 3 carries a free-text component",
+   "edges": [
+    "t.start.profile-retired"
+   ]
+  },
+  {
+   "file": "src/dispatch/test-target.ts",
+   "anchor": "Unresolved test targets — edit the profile or re-run styre setup",
+   "edges": [
+    "t.start.unresolved"
+   ]
+  },
+  {
+   "file": "src/dispatch/in-place.ts",
+   "anchor": "--in-place refused: no .styre-disposable marker",
+   "edges": [
+    "t.run.in-place-unsafe",
+    "t.resume.in-place-unsafe"
+   ]
+  },
+  {
+   "file": "src/dispatch/in-place.ts",
+   "anchor": "has uncommitted tracked changes.",
+   "edges": [
+    "t.run.in-place-unsafe"
+   ]
+  },
+  {
+   "file": "src/dispatch/in-place.ts",
+   "anchor": "is not installed against ${componentDir}",
+   "edges": [
+    "t.run.in-place-unsafe",
+    "t.resume.in-place-unsafe"
+   ]
+  },
+  {
+   "file": "src/dispatch/worktree.ts",
+   "anchor": "if (holder !== null) {",
+   "edges": [
+    "t.start.worktree-held"
+   ]
+  },
+  {
+   "file": "src/dispatch/worktree.ts",
+   "anchor": "if (checkpointDir === undefined || !styreOwned) {",
+   "edges": [
+    "t.start.worktree-held"
+   ]
+  },
+  {
+   "file": "src/integrations/notifier.ts",
+   "anchor": "SLACK_BOT_TOKEN is missing from the environment",
+   "edges": [
+    "t.start.slack"
+   ]
+  },
+  {
+   "file": "src/integrations/notifier.ts",
+   "anchor": "slack.channel is missing from config.json",
+   "edges": [
+    "t.start.slack"
+   ]
+  },
+  {
+   "file": "src/db/migrate.ts",
+   "anchor": "migrate: schema_meta empty after bootstrap",
+   "edges": [],
+   "notDrawn": "An invariant right after the schema is created in a new database; reaching it is a Styre defect (exit 70)."
+  },
+  {
+   "file": "src/db/migrate.ts",
+   "anchor": "does not match schema v${CURRENT_VERSION} after migrating",
+   "edges": [
+    "t.start.migrate-proof"
+   ]
+  },
+  {
+   "file": "src/db/migrate.ts",
+   "anchor": "return new StyreError({ code: EXIT.RESUME_REFUSED, headline, recovery });",
+   "edges": [
+    "t.run.migrate-refused",
+    "t.resume.migrate-refused"
+   ]
+  }
+ ],
+ "refusalEdgesOutsideCensus": [
+  {
+   "edge": "t.resume.inspect",
+   "reason": "--inspect ends normally (exit 0); it refuses nothing."
+  },
+  {
+   "edge": "t.start.ports",
+   "reason": "The throw is in a tracker, forge or notifier adapter (a missing LINEAR_API_KEY, say), outside the refusal scope."
+  },
+  {
+   "edge": "t.run.tracker",
+   "reason": "The throw is in the tracker adapter's fetchTicket, outside the refusal scope."
+  }
+ ],
+ "escalationSites": [
+  {
+   "file": "src/daemon/advance.ts",
+   "anchor": "escalate(db, ticketId, d.reason, d.signature, escalateDispatchId);",
+   "edges": [
+    "t.pick.stuck",
+    "t.floor.fails",
+    "t.review.unresolved",
+    "t.gate.fires",
+    "t.guard.provision",
+    "t.guard.design:dispatch",
+    "t.guard.design:extract",
+    "t.guard.design:size",
+    "t.guard.design:review"
+   ]
+  },
+  {
+   "file": "src/daemon/advance.ts",
+   "anchor": "`step-replay-no-progress:${d.stepKey}`,",
+   "to": "esc:step-replay",
+   "edges": [
+    "t.any.replay"
+   ]
+  },
+  {
+   "file": "src/daemon/advance.ts",
+   "anchor": "pauseTicket(db, ticketId, reason);",
+   "to": "esc:contract",
+   "edges": [
+    "t.any.contract"
+   ]
+  },
+  {
+   "file": "src/daemon/advance.ts",
+   "anchor": "no next move on this plan",
+   "to": "esc:blocked",
+   "edges": [
+    "t.pick.blocked"
+   ]
+  },
+  {
+   "file": "src/daemon/arbiter-verdict.ts",
+   "anchor": "arbitrated rounds (${blames",
+   "to": "esc:gate-cap",
+   "edges": [
+    "t.arb.cap"
+   ]
+  },
+  {
+   "file": "src/daemon/arbiter-verdict.ts",
+   "anchor": "re-author of AC(s)",
+   "to": "esc:gate-cap",
+   "edges": [
+    "t.reauth.cap"
+   ]
+  },
+  {
+   "file": "src/daemon/checks-gate-verdict.ts",
+   "anchor": "still red after ${GATE_ROUND_CAP} arbitrated rounds",
+   "to": "esc:gate-cap",
+   "edges": [
+    "t.gate.cap"
+   ]
+  },
+  {
+   "file": "src/daemon/checks-gate-verdict.ts",
+   "anchor": "tampered after ${GATE_ROUND_CAP} rounds",
+   "to": "esc:gate-cap",
+   "edges": [
+    "t.gate.cap"
+   ]
+  },
+  {
+   "file": "src/daemon/checks-verdict.ts",
+   "anchor": "reason: \"no progress: repeated re-author of the same AC-check\",",
+   "to": "esc:reauthor-cap",
+   "edges": [
+    "t.checks.cap"
+   ]
+  },
+  {
+   "file": "src/daemon/failure-policy.ts",
+   "anchor": "? failureSignature(step)",
+   "edges": [
+    "t.any.exhausted",
+    "t.any.prerequisite",
+    "t.any.invariant",
+    "t.dispatch.uncommitted-plan"
+   ]
+  },
+  {
+   "file": "src/daemon/failure-policy.ts",
+   "anchor": "reason: \"provision failed for ticket\",",
+   "to": "esc:provision",
+   "edges": [
+    "t.prov.fail@provision",
+    "t.prov.fail@provision@implement"
+   ]
+  },
+  {
+   "file": "src/daemon/failure-policy.ts",
+   "anchor": "reason: \"verify:checks-gate failed (infra/invariant fault)\",",
+   "to": "esc:checks-gate-fault",
+   "edges": [
+    "t.gate.fault"
+   ]
+  },
+  {
+   "file": "src/daemon/failure-policy.ts",
+   "anchor": "failed identically twice",
+   "to": "esc:no-progress",
+   "edges": [
+    "t.verify.no-progress"
+   ]
+  },
+  {
+   "file": "src/daemon/failure-policy.ts",
+   "anchor": "under-delivered identically twice",
+   "to": "esc:no-progress",
+   "edges": [
+    "t.comp.no-progress"
+   ]
+  },
+  {
+   "file": "src/daemon/projector.ts",
+   "anchor": "escalateProjection(db, row.ticket_id, `projection failing: ${message}`);",
+   "to": "esc:outbox",
+   "edges": [
+    "t.any.outbox"
+   ]
+  },
+  {
+   "file": "src/daemon/review-verdict.ts",
+   "anchor": "review repair limit reached; unresolved finding IDs:",
+   "to": "esc:review-repair-limit",
+   "edges": [
+    "t.planreview.limit",
+    "t.review.limit"
+   ]
+  },
+  {
+   "file": "src/daemon/review-verdict.ts",
+   "anchor": "\"no progress: identical plan-review findings\"",
+   "to": "esc:review-no-progress",
+   "edges": [
+    "t.planreview.no-progress",
+    "t.resume.retry-plan-escalate"
+   ]
+  },
+  {
+   "file": "src/daemon/review-verdict.ts",
+   "anchor": "\"no progress: identical review findings\"",
+   "to": "esc:review-no-progress",
+   "edges": [
+    "t.review.no-progress",
+    "t.resume.retry-escalate"
+   ]
+  },
+  {
+   "file": "src/daemon/review-verdict.ts",
+   "anchor": "\"blocking plan-defect found in code review; operator policy is escalate\",",
+   "to": "esc:plan-defect-policy",
+   "edges": [
+    "t.review.plan-defect-escalate",
+    "t.resume.retry-plan-defect"
+   ]
+  },
+  {
+   "file": "src/daemon/run-ticket.ts",
+   "anchor": "pauseTicket(db, opts.ticketId, undelivered);",
+   "to": "esc:pr-undelivered",
+   "edges": [
+    "t.merge.undelivered"
+   ]
+  },
+  {
+   "file": "src/daemon/run-ticket.ts",
+   "anchor": "\"stalled with no progress",
+   "to": "esc:stalled",
+   "edges": [
+    "t.any.stalled"
+   ]
+  },
+  {
+   "file": "src/daemon/run-ticket.ts",
+   "anchor": "-tick iteration budget; resume to continue",
+   "to": "esc:tick-cap",
+   "edges": [
+    "t.any.tick-cap"
+   ]
+  },
+  {
+   "file": "src/cli/park.ts",
+   "anchor": "pauseTicket(db, ticketId, reason);",
+   "to": "esc:toolchain-resume",
+   "edges": [
+    "t.resume.toolchain"
+   ]
+  }
+ ]
 }
 </script>
 <script>

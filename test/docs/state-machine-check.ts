@@ -69,8 +69,23 @@ export interface Diagram {
   transitions: DiagramTransition[];
   scenarios: { id: string; label: string; summary: string; transitions: string[] }[];
   layout: Record<string, [number, number]>;
-  /** Per file, the places that write an escalation (see `escalationWrites` below). */
-  escalationWrites: Record<string, number>;
+  /** The code sites that refuse a start or resume, and that write an escalation (see SITES). */
+  refusalSites: DeclaredSite[];
+  /** Refusal edges whose code site lies outside the refusal census, with the reason. */
+  refusalEdgesOutsideCensus: { edge: string; reason: string }[];
+  escalationSites: DeclaredSite[];
+}
+
+export interface DeclaredSite {
+  file: string;
+  /** One line of the code, exactly as written, unique in the file. */
+  anchor: string;
+  /** The drawn transitions (ids as listed, before group expansion) that go through this site. */
+  edges: string[];
+  /** Escalation sites: the escalation state the site writes. */
+  to?: string;
+  /** Set when no edge is drawn for the site, saying why. */
+  notDrawn?: string;
 }
 
 const DATA_OPEN = '<script type="application/json" id="state-machine-data">';
@@ -317,7 +332,6 @@ export interface CodeFacts {
   resumePlanKinds: string[];
   constants: Record<string, number>;
   handSignatureLinesMissing: string[];
-  escalationWrites: Record<string, number>;
 }
 
 const raw = (root: string, file: string) => readFileSync(join(root, file), "utf8");
@@ -386,26 +400,6 @@ export function callArgs(text: string, name: string): string[][] {
   return out;
 }
 
-/** Every place that writes an escalation, per file: calls of `escalate(`, `pauseTicket(` and
- *  `escalateProjection(`, and each `appendEvent(` of an `escalated` event. A new one changes the
- *  count, and the diagram must draw it before its count is updated in the data. */
-export const ESCALATION_WRITERS = ["escalate", "pauseTicket", "escalateProjection"];
-/** Source text without comments (block, whole line, and trailing after code), so a comment that
- *  names `escalate()` is not counted as a call. */
-const withoutComments = (text: string) =>
-  text
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/^\s*\/\/.*$/gm, "")
-    .replace(/([;,{}()])\s*\/\/.*$/gm, "$1");
-function escalationWritesIn(source: string): number {
-  const text = withoutComments(source);
-  const calls = ESCALATION_WRITERS.reduce((n, w) => n + callArgs(text, w).length, 0);
-  const events = callArgs(text, "appendEvent").filter((a) =>
-    a.some((x) => /kind: "escalated"/.test(x)),
-  ).length;
-  return calls + events;
-}
-
 export function codeFacts(
   root: string = REPO,
   table: readonly DesignRow[] = DESIGN_TABLE,
@@ -454,11 +448,6 @@ export function codeFacts(
     .sort()
     .map((f) => join("src", "daemon", f));
   const daemonFiles = daemonNames.map((f) => raw(root, f));
-  const escalationWrites: Record<string, number> = {};
-  for (const f of [...daemonNames, "src/cli/park.ts"]) {
-    const n = escalationWritesIn(raw(root, f));
-    if (n > 0) escalationWrites[f] = n;
-  }
   // `escalate(db, ticketId, reason, signature, ...)`: a literal fourth argument is a signature.
   const positionalSignatures = daemonFiles.flatMap((t) =>
     callArgs(t, "escalate")
@@ -525,7 +514,6 @@ export function codeFacts(
       MAX_TRANSITIONS: constOf(raw(root, "src/daemon/advance.ts"), "advance.ts", "MAX_TRANSITIONS"),
     },
     handSignatureLinesMissing,
-    escalationWrites,
   };
 }
 
@@ -722,14 +710,6 @@ export function diffAgainstCode(d: Diagram, f: CodeFacts): string[] {
       d.groups["table-steps"]?.members ?? [],
     ),
   );
-  // Every place that writes an escalation is accounted for, per file.
-  out.push(
-    ...compareSets(
-      "escalation write sites (file=count)",
-      Object.entries(f.escalationWrites).map(([k, v]) => `${k}=${v}`),
-      Object.entries(d.escalationWrites ?? {}).map(([k, v]) => `${k}=${v}`),
-    ),
-  );
   return out;
 }
 
@@ -738,4 +718,279 @@ function firstWalkNode(f: CodeFacts): string | undefined {
   return f.walkPairs
     .map((p) => p.split(">")[0])
     .find((n) => !f.walkPairs.some((p) => p.split(">")[1] === n));
+}
+
+// ------------------------------------------------------------------------------------------------
+// Sites: every line of code that refuses a start or resume, and every line that writes an
+// escalation, must be declared in the data with the drawn transitions that go through it. A new
+// site, a deleted transition, or a refusal whose exit code changed fails here, by name.
+
+/** Where refusals of a start or resume live: `styre run`, the resume, and the helpers they call
+ *  before the first step (hand listed; whole files, or the named top level functions). */
+export const REFUSAL_SCOPE: { file: string; functions?: string[] }[] = [
+  { file: "src/cli/run.ts" },
+  { file: "src/cli/park.ts" },
+  { file: "src/cli/load-profile.ts" },
+  { file: "src/cli/checkpoint-name.ts" },
+  { file: "src/cli/resolve-pr-base.ts" },
+  { file: "src/cli/preflight.ts", functions: ["applyToolchainGate"] },
+  { file: "src/config/discover.ts" },
+  { file: "src/config/parse-config.ts", functions: ["parseConfigOrThrow"] },
+  { file: "src/config/slug.ts", functions: ["discoverRepoRoot"] },
+  { file: "src/dispatch/profile.ts", functions: ["parseProfile"] },
+  { file: "src/dispatch/test-target.ts", functions: ["assertTestTargets"] },
+  { file: "src/dispatch/in-place.ts" },
+  { file: "src/dispatch/worktree.ts", functions: ["reconcileWorktree"] },
+  { file: "src/integrations/notifier.ts", functions: ["assertSlackConfigured"] },
+  { file: "src/db/migrate.ts", functions: ["migrate", "refused"] },
+];
+/** Helpers that build a refusal; each one's exit codes are read from its definition. */
+const REFUSAL_HELPERS: Record<string, string> = {
+  usageError: "src/cli/errors.ts",
+  configError: "src/cli/errors.ts",
+  agentCliError: "src/cli/errors.ts",
+  toolchainError: "src/cli/errors.ts",
+  noPrimaryComponentError: "src/cli/errors.ts",
+  noOwnTicket: "src/cli/park.ts",
+};
+const ESCALATION_WRITERS = ["escalate", "pauseTicket", "escalateProjection"];
+
+/** Comments blanked to spaces, so line numbers stay and a comment naming a call is not a call. */
+const blankComments = (text: string) =>
+  text
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+    .replace(
+      /(^|[;,{}()])([ \t]*\/\/[^\n]*)/gm,
+      (_m, p: string, c: string) => p + " ".repeat(c.length),
+    );
+
+/** Line ranges [first, last] of named top level functions (to the next line that is `}`). */
+function functionRanges(lines: string[], names: string[]): [number, number][] {
+  const out: [number, number][] = [];
+  for (const name of names) {
+    const start = lines.findIndex((l) => new RegExp(`function ${name}\\b`).test(l));
+    if (start < 0) throw new Error(`function ${name} not found`);
+    let end = start;
+    while (end < lines.length && lines[end] !== "}") end++;
+    out.push([start, end]);
+  }
+  return out;
+}
+
+interface CodeSite {
+  file: string;
+  line: number;
+  what: string;
+  codes: number[];
+}
+
+const EXIT_CODES = EXIT as Record<string, number>;
+function exitCodesIn(text: string): number[] {
+  return sorted(
+    [...text.matchAll(/EXIT\.(\w+)/g)].map((m) => String(EXIT_CODES[m[1] as string])),
+  ).map(Number);
+}
+
+/** The refusal sites of the scope, each with the exit codes it can produce. */
+export function refusalSitesIn(root: string = REPO): CodeSite[] {
+  const helperCodes: Record<string, number[]> = {};
+  for (const [h, f] of Object.entries(REFUSAL_HELPERS)) {
+    const lines = raw(root, f).split("\n");
+    const [a, b] = functionRanges(lines, [h])[0] as [number, number];
+    helperCodes[h] = exitCodesIn(lines.slice(a, b + 1).join("\n"));
+  }
+  const out: CodeSite[] = [];
+  for (const scope of REFUSAL_SCOPE) {
+    const lines = blankComments(raw(root, scope.file)).split("\n");
+    const ranges = scope.functions
+      ? functionRanges(lines, scope.functions)
+      : [[0, lines.length - 1]];
+    for (const [a, b] of ranges as [number, number][]) {
+      for (let i = a; i <= b; i++) {
+        const l = lines[i] as string;
+        const next = lines.slice(i, i + 4).join("\n");
+        const helper = new RegExp(
+          `(?<!function )\\b(${Object.keys(REFUSAL_HELPERS).join("|")})\\(`,
+        ).exec(l);
+        if (helper)
+          out.push({
+            file: scope.file,
+            line: i,
+            what: helper[1] as string,
+            codes: helperCodes[helper[1] as string] ?? [],
+          });
+        if (/\bnew StyreError\(/.test(l))
+          out.push({
+            file: scope.file,
+            line: i,
+            what: "new StyreError",
+            codes: exitCodesIn(/code: EXIT\.\w+/.exec(next)?.[0] ?? ""),
+          });
+        const exit = /process\.exitCode = (\d+)/.exec(l);
+        if (exit)
+          out.push({
+            file: scope.file,
+            line: i,
+            what: "process.exitCode",
+            codes: [Number(exit[1])],
+          });
+        if (/throw new Error\(/.test(l))
+          out.push({ file: scope.file, line: i, what: "throw new Error", codes: [EXIT.INTERNAL] });
+      }
+    }
+  }
+  return out;
+}
+
+/** The escalation write sites of src/daemon and the resume: calls of escalate, pauseTicket and
+ *  escalateProjection, and appendEvent of an escalated event, outside those three definitions. */
+export function escalationSitesIn(root: string = REPO): CodeSite[] {
+  const files = [
+    ...readdirSync(join(root, "src", "daemon"))
+      .filter((f) => f.endsWith(".ts"))
+      .sort()
+      .map((f) => join("src", "daemon", f)),
+    "src/cli/park.ts",
+  ];
+  const out: CodeSite[] = [];
+  for (const file of files) {
+    const text = blankComments(raw(root, file));
+    const lines = text.split("\n");
+    const defs = ESCALATION_WRITERS.flatMap((w) =>
+      lines.some((l) => new RegExp(`function ${w}\\(`).test(l)) ? functionRanges(lines, [w]) : [],
+    );
+    const lineAt = (index: number) => text.slice(0, index).split("\n").length - 1;
+    const inDef = (line: number) => defs.some(([a, b]) => line >= a && line <= b);
+    for (const w of ESCALATION_WRITERS)
+      for (const m of text.matchAll(new RegExp(`(?<!function )\\b${w}\\(`, "g"))) {
+        const line = lineAt(m.index ?? 0);
+        if (!inDef(line)) out.push({ file, line, what: w, codes: [] });
+      }
+    for (const m of text.matchAll(/\bappendEvent\(/g)) {
+      const line = lineAt(m.index ?? 0);
+      if (inDef(line)) continue;
+      const call = callArgs(text.slice(m.index ?? 0), "appendEvent")[0] ?? [];
+      if (call.some((x) => /kind: "escalated"/.test(x)))
+        out.push({ file, line, what: "appendEvent(escalated)", codes: [] });
+    }
+  }
+  return out;
+}
+
+/** The line of `anchor` in `file`, which must hold it exactly once. */
+function anchorLine(root: string, file: string, anchor: string): number | string {
+  const lines = raw(root, file).split("\n");
+  const at = lines.flatMap((l, i) => (l.includes(anchor) ? [i] : []));
+  if (at.length === 0) return `not found in ${file}`;
+  if (at.length > 1) return `found ${at.length} times in ${file}; make it unique`;
+  return at[0] as number;
+}
+
+/** Declared sites against code sites: each code site matched by exactly one declared site (the
+ *  declared anchor at most 6 lines before or after it, nearest first), each declared site matching
+ *  one code site, and every listed edge existing. */
+function matchSites(
+  kind: string,
+  declared: DeclaredSite[],
+  code: CodeSite[],
+  root: string,
+): { lines: string[]; pairs: { site: DeclaredSite; code: CodeSite }[] } {
+  const lines: string[] = [];
+  const pairs: { site: DeclaredSite; code: CodeSite }[] = [];
+  const taken = new Set<CodeSite>();
+  for (const site of declared) {
+    const at = anchorLine(root, site.file, site.anchor);
+    if (typeof at === "string") {
+      lines.push(`${kind} site '${site.anchor}': ${at}`);
+      continue;
+    }
+    const near = code
+      .filter((c) => c.file === site.file && !taken.has(c) && Math.abs(c.line - at) <= 6)
+      .sort((x, y) => Math.abs(x.line - at) - Math.abs(y.line - at))[0];
+    if (!near) {
+      lines.push(
+        `${kind} site '${site.anchor}' (${site.file}:${at + 1}) matches no ${kind} in the code`,
+      );
+      continue;
+    }
+    taken.add(near);
+    pairs.push({ site, code: near });
+  }
+  for (const c of code)
+    if (!taken.has(c))
+      lines.push(`${kind} in the code is not drawn: ${c.file}:${c.line + 1} (${c.what})`);
+  return { lines, pairs };
+}
+
+const isStart = (t: DiagramTransition) =>
+  t.kind === "refuse" && ["run.start", "resume.start", "@starts"].includes(t.from);
+
+/** Every refusal and escalation site in the code is declared with the transitions drawn through
+ *  it; a refusal site's exit codes equal those of its transitions' targets; every refusal edge of
+ *  a start and every edge into an escalation is listed at some site. */
+export function checkSites(d: Diagram, root: string = REPO): string[] {
+  const out: string[] = [];
+  const byId = new Map(d.transitions.map((t) => [t.id, t]));
+  const stateById = new Map(d.states.map((s) => [s.id, s]));
+  const listed = (sites: DeclaredSite[]) => new Set(sites.flatMap((s) => s.edges));
+  const refusal = matchSites("refusal", d.refusalSites ?? [], refusalSitesIn(root), root);
+  out.push(...refusal.lines);
+  for (const { site, code } of refusal.pairs) {
+    if (site.edges.length === 0) {
+      if (!site.notDrawn) out.push(`refusal site '${site.anchor}' lists no edge and no reason`);
+      continue;
+    }
+    const codes = new Set<number>();
+    for (const id of site.edges) {
+      const t = byId.get(id);
+      if (!t) {
+        out.push(`refusal site '${site.anchor}' lists '${id}', which is not a transition`);
+        continue;
+      }
+      const exit = stateById.get(t.to)?.exitCode;
+      if (exit === undefined)
+        out.push(`refusal site '${site.anchor}': '${id}' does not end at an exit`);
+      else codes.add(exit);
+    }
+    const want = code.codes.join(",");
+    const have = sorted([...codes].map(String))
+      .map(Number)
+      .join(",");
+    if (want !== have)
+      out.push(
+        `refusal site ${site.file}:${code.line + 1} (${code.what}) exits ${want} in the code, but its drawn edges (${site.edges.join(", ")}) exit ${have}`,
+      );
+  }
+  const outside = new Set((d.refusalEdgesOutsideCensus ?? []).map((x) => x.edge));
+  for (const x of d.refusalEdgesOutsideCensus ?? [])
+    if (!byId.has(x.edge))
+      out.push(`refusalEdgesOutsideCensus lists '${x.edge}', which is not a transition`);
+  const refusalListed = listed(d.refusalSites ?? []);
+  for (const t of d.transitions)
+    if (isStart(t) && !refusalListed.has(t.id) && !outside.has(t.id))
+      out.push(`refusal edge '${t.id}' is listed at no refusal site`);
+  const escalation = matchSites(
+    "escalation",
+    d.escalationSites ?? [],
+    escalationSitesIn(root),
+    root,
+  );
+  out.push(...escalation.lines);
+  for (const site of d.escalationSites ?? []) {
+    if (site.edges.length === 0 && !site.notDrawn)
+      out.push(`escalation site '${site.anchor}' lists no edge and no reason`);
+    for (const id of site.edges) {
+      const t = byId.get(id);
+      if (!t) out.push(`escalation site '${site.anchor}' lists '${id}', which is not a transition`);
+      else if (site.to && t.to !== site.to)
+        out.push(
+          `escalation site '${site.anchor}' writes '${site.to}', but '${id}' ends at '${t.to}'`,
+        );
+    }
+  }
+  const escalationListed = listed(d.escalationSites ?? []);
+  for (const t of d.transitions)
+    if (t.to.startsWith("esc:") && !escalationListed.has(t.id))
+      out.push(`escalation edge '${t.id}' is listed at no escalation site`);
+  return out;
 }
