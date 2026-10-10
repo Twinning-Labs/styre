@@ -9,6 +9,7 @@ import { GATE_ROUND_CAP } from "../../src/daemon/arbiter-verdict.ts";
 import { DESIGN_TABLE, type DesignRow } from "../../src/daemon/design-graph.ts";
 import { INVALIDATE_LOOP_LIMIT } from "../../src/daemon/design-walk.ts";
 import { DEFAULT_MAX_ATTEMPTS } from "../../src/daemon/failure-policy.ts";
+import { OUTBOX_RETRY_BUDGET } from "../../src/daemon/projector.ts";
 import { REVIEW_REPAIR_LIMIT } from "../../src/db/repos/review-round.ts";
 
 export const REPO = join(import.meta.dir, "..", "..");
@@ -58,7 +59,6 @@ interface Anchored {
 }
 export interface Diagram {
   schemaVersion: number;
-  builtFrom: string;
   constants: Record<string, number>;
   entries: string[];
   stages: (Anchored & { label: string })[];
@@ -69,6 +69,8 @@ export interface Diagram {
   transitions: DiagramTransition[];
   scenarios: { id: string; label: string; summary: string; transitions: string[] }[];
   layout: Record<string, [number, number]>;
+  /** Per file, the places that write an escalation (see `escalationWrites` below). */
+  escalationWrites: Record<string, number>;
 }
 
 const DATA_OPEN = '<script type="application/json" id="state-machine-data">';
@@ -157,6 +159,8 @@ export function validateStructure(d: Diagram): string[] {
     if (!TRANSITION_KINDS.includes(t.kind))
       out.push(`transition '${t.id}' has an unknown kind '${t.kind}'`);
     if (!t.label || !t.condition) out.push(`transition '${t.id}' has no label or condition`);
+    if ((t.condition.match(/`/g) ?? []).length % 2 !== 0)
+      out.push(`transition '${t.id}': its condition has an unclosed backtick`);
     if (t.from.startsWith("@")) {
       if (!d.groups[t.from.slice(1)])
         out.push(`transition '${t.id}' starts at unknown group '${t.from}'`);
@@ -279,11 +283,6 @@ export const HAND_SIGNATURES: { signature: string; file: string; line: string }[
     line: 'return `review:${parts.join("|")}`;',
   },
   {
-    signature: "step-replay-no-progress:*",
-    file: "src/daemon/advance.ts",
-    line: "`step-replay-no-progress:${d.stepKey}`,",
-  },
-  {
     signature: "review:operator-plan-head-changed",
     file: "src/daemon/review-resume.ts",
     line: '"review:operator-plan-head-changed",',
@@ -318,6 +317,7 @@ export interface CodeFacts {
   resumePlanKinds: string[];
   constants: Record<string, number>;
   handSignatureLinesMissing: string[];
+  escalationWrites: Record<string, number>;
 }
 
 const raw = (root: string, file: string) => readFileSync(join(root, file), "utf8");
@@ -340,6 +340,71 @@ const stepKeyOf = (lit: string) =>
   lit.slice(1, -1).replace(/\$\{([^}]*)\}/g, (_, e: string) => `<${e.split(".").pop()}>`);
 /** `${...}` → `*`; quotes removed. */
 const signatureOf = (lit: string) => lit.slice(1, -1).replace(/\$\{[^}]*\}/g, "*");
+
+/** `const NAME = <number>;` in a source text (for caps a module does not export). */
+function constOf(text: string, file: string, name: string): number {
+  const m = new RegExp(`const ${name} = (\\d+);`).exec(text);
+  if (!m) throw new Error(`${file}: ${name} not found`);
+  return Number(m[1]);
+}
+
+/** The arguments of every call of `name(` in `text` (not its definition), split at top level
+ *  commas: strings, templates and nested brackets are skipped over. */
+export function callArgs(text: string, name: string): string[][] {
+  const out: string[][] = [];
+  const re = new RegExp(`(?<!function )\\b${name}\\(`, "g");
+  for (const m of text.matchAll(re)) {
+    const args: string[] = [];
+    let depth = 0;
+    let quote: string | null = null;
+    let cur = "";
+    for (let i = (m.index ?? 0) + m[0].length; i < text.length; i++) {
+      const c = text[i] as string;
+      if (quote) {
+        cur += c;
+        if (c === "\\") cur += text[++i] ?? "";
+        else if (c === quote) quote = null;
+        continue;
+      }
+      if (c === '"' || c === "'" || c === "`") quote = c;
+      else if ("([{".includes(c)) depth++;
+      else if (")]}".includes(c)) {
+        if (depth === 0) {
+          if (cur.trim()) args.push(cur.trim());
+          break;
+        }
+        depth--;
+      } else if (c === "," && depth === 0) {
+        args.push(cur.trim());
+        cur = "";
+        continue;
+      }
+      cur += c;
+    }
+    out.push(args);
+  }
+  return out;
+}
+
+/** Every place that writes an escalation, per file: calls of `escalate(`, `pauseTicket(` and
+ *  `escalateProjection(`, and each `appendEvent(` of an `escalated` event. A new one changes the
+ *  count, and the diagram must draw it before its count is updated in the data. */
+export const ESCALATION_WRITERS = ["escalate", "pauseTicket", "escalateProjection"];
+/** Source text without comments (block, whole line, and trailing after code), so a comment that
+ *  names `escalate()` is not counted as a call. */
+const withoutComments = (text: string) =>
+  text
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "")
+    .replace(/([;,{}()])\s*\/\/.*$/gm, "$1");
+function escalationWritesIn(source: string): number {
+  const text = withoutComments(source);
+  const calls = ESCALATION_WRITERS.reduce((n, w) => n + callArgs(text, w).length, 0);
+  const events = callArgs(text, "appendEvent").filter((a) =>
+    a.some((x) => /kind: "escalated"/.test(x)),
+  ).length;
+  return calls + events;
+}
 
 export function codeFacts(
   root: string = REPO,
@@ -384,10 +449,23 @@ export function codeFacts(
   if (!stageCheck) throw new Error("schema.sql: the ticket.stage CHECK was not found");
   const walk = raw(root, "src/daemon/design-walk.ts");
   const walkFn = walk.slice(walk.indexOf("export function walkDesign("));
-  const daemonFiles = readdirSync(join(root, "src", "daemon"))
+  const daemonNames = readdirSync(join(root, "src", "daemon"))
     .filter((f) => f.endsWith(".ts"))
     .sort()
-    .map((f) => raw(root, join("src", "daemon", f)));
+    .map((f) => join("src", "daemon", f));
+  const daemonFiles = daemonNames.map((f) => raw(root, f));
+  const escalationWrites: Record<string, number> = {};
+  for (const f of [...daemonNames, "src/cli/park.ts"]) {
+    const n = escalationWritesIn(raw(root, f));
+    if (n > 0) escalationWrites[f] = n;
+  }
+  // `escalate(db, ticketId, reason, signature, ...)`: a literal fourth argument is a signature.
+  const positionalSignatures = daemonFiles.flatMap((t) =>
+    callArgs(t, "escalate")
+      .map((a) => a[3])
+      .filter((a): a is string => a !== undefined && /^[`"]/.test(a))
+      .map(signatureOf),
+  );
   const loops = daemonFiles.flatMap((t) =>
     [...t.matchAll(/\bloop:\s*"([\w-]+)"/g)].map((m) => m[1] as string),
   );
@@ -426,7 +504,11 @@ export function codeFacts(
     descriptorKinds: kindsOf(resolver, "StepDescriptor"),
     invalidateCauses: unionOf(raw(root, "src/daemon/invalidate.ts"), "InvalidateCause"),
     loops: sorted(loops),
-    signatures: sorted([...propertySignatures, ...HAND_SIGNATURES.map((h) => h.signature)]),
+    signatures: sorted([
+      ...propertySignatures,
+      ...positionalSignatures,
+      ...HAND_SIGNATURES.map((h) => h.signature),
+    ]),
     runOutcomes: unionOf(runTicket, "RunOutcome"),
     pauseReasons: unionOf(runTicket, "PauseReason"),
     failureDecisions: unionOf(raw(root, "src/daemon/failure-policy.ts"), "FailureDecision"),
@@ -437,8 +519,13 @@ export function codeFacts(
       REVIEW_REPAIR_LIMIT,
       GATE_ROUND_CAP,
       REAUTHOR_ESCALATE_CAP: Number(reauthorCap[1]),
+      IDLE_CAP: constOf(runTicket, "run-ticket.ts", "IDLE_CAP"),
+      DEFAULT_CAP: constOf(runTicket, "run-ticket.ts", "DEFAULT_CAP"),
+      OUTBOX_RETRY_BUDGET,
+      MAX_TRANSITIONS: constOf(raw(root, "src/daemon/advance.ts"), "advance.ts", "MAX_TRANSITIONS"),
     },
     handSignatureLinesMissing,
+    escalationWrites,
   };
 }
 
@@ -624,6 +711,23 @@ export function diffAgainstCode(d: Diagram, f: CodeFacts): string[] {
       "member of group 'escalations'",
       escalations,
       d.groups.escalations?.members ?? [],
+    ),
+  );
+  // The interpreter checks the table and the snapshot before every table step, in any stage.
+  const tableKeys = new Set(f.tableSteps.map((t) => t.key));
+  out.push(
+    ...compareSets(
+      "member of group 'table-steps'",
+      d.states.filter((s) => s.stepKey !== undefined && tableKeys.has(s.stepKey)).map((s) => s.id),
+      d.groups["table-steps"]?.members ?? [],
+    ),
+  );
+  // Every place that writes an escalation is accounted for, per file.
+  out.push(
+    ...compareSets(
+      "escalation write sites (file=count)",
+      Object.entries(f.escalationWrites).map(([k, v]) => `${k}=${v}`),
+      Object.entries(d.escalationWrites ?? {}).map(([k, v]) => `${k}=${v}`),
     ),
   );
   return out;

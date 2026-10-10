@@ -1,8 +1,9 @@
 // Keeps docs/architecture/state-machine.html in step with the code (operator request, ENG-477
 // Task 18). The page's states and transitions are data; these tests derive what they can from the
 // code (the declared design table, the resolver's stages, step keys, advances, escalations and
-// descriptor kinds, the literal unions and literals of causes, loops, signatures, outcomes, pause
-// reasons, failure decisions and review resume plans, and the caps) and fail, naming the
+// descriptor kinds, the literal unions and literals of causes, loops, signatures (property and
+// positional), outcomes, pause reasons, failure decisions and review resume plans, the caps, and
+// the count of places that write an escalation) and fail, naming the
 // difference, when either side has something the other lacks. Every cited line must still exist.
 // The last group proves each check can fail.
 import { describe, expect, test } from "bun:test";
@@ -11,6 +12,7 @@ import { DESIGN_TABLE, type DesignRow } from "../../src/daemon/design-graph.ts";
 import {
   type Diagram,
   PAGE,
+  callArgs,
   checkGrounding,
   codeFacts,
   diffAgainstCode,
@@ -190,5 +192,31 @@ describe("the checks fail on a difference", () => {
     const n = d.groups.steps?.members.length ?? 0;
     expect(n).toBeGreaterThan(0);
     expect(expand(d).filter((t) => t.id.startsWith("t.any.stop@")).length).toBe(n);
+  });
+  test("a positional escalate signature is read", () => {
+    const calls = callArgs(
+      'x(); escalate(db, ticketId, "flooded", "review-flood", id); function escalate(a, b) {}',
+      "escalate",
+    );
+    expect(calls).toEqual([["db", "ticketId", '"flooded"', '"review-flood"', "id"]]);
+  });
+
+  test("an escalation write site the diagram does not count", () => {
+    const d = clone(diagram());
+    d.escalationWrites["src/daemon/advance.ts"] = 3;
+    expect(diffAgainstCode(d, codeFacts())).toContain(
+      "escalation write sites (file=count): 'src/daemon/advance.ts=4' is in the code but not in the diagram",
+    );
+  });
+
+  test("a run cap the condition does not state", () => {
+    const d = clone(diagram());
+    d.constants.IDLE_CAP = 4;
+    expect(validateStructure(d)).toContain(
+      "transition 't.any.stalled' cites IDLE_CAP = 4 but its condition does not say 4",
+    );
+    expect(diffAgainstCode(d, codeFacts())).toContain(
+      "cap: 'IDLE_CAP=3' is in the code but not in the diagram",
+    );
   });
 });

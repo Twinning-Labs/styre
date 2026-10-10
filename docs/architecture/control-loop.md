@@ -844,7 +844,7 @@ discarded with `--fresh` — are in execution-model.md.)*
 | D1 | design:extract | JSON shape invalid (rare; forced output) | re-run extract (cheap) | — | K_shape → escalate |
 | D2 | runner completeness check | empty *required* field — the plan lacks the info | → S1a re-design | plan | K_distinct → escalate |
 | D3 | post-design postcondition | no plan committed / zero work-units | → S1a re-design | plan | K_distinct → escalate |
-| DV1 | S1c plan review | a blocking plan finding | → S1a redesign with findings (invalidate `design:dispatch`, cause `feedback`) | plan | K_distinct → escalate |
+| DV1 | S1c plan review | a blocking plan finding | → S1a redesign with findings (invalidate `design:dispatch`, cause `feedback`) | plan | the same blocking findings as the previous review loopback (plan or code) escalate at once; at most `REVIEW_REPAIR_LIMIT = 3` review loopbacks per ticket, plan and code review together, then escalate ⁴ |
 | DV2 | S1c plan-review | reviewer death / transport | retry dispatch | — | K_retry → escalate |
 | DI1 | design walk | a succeeded design step's inputs changed (an edit while paused, another host's toolchain) | invalidate that step (cause `inputs`); the steps that read its output are judged again after it reruns | step | escalate with signature `invalidate-loop:<step>` (the invalidate loop guard) instead of a fourth such invalidate of one step since the latest resume, run on a reused `--db`, or redesign |
 | DI2 | S1a postcondition | the plan is in the worktree but not committed at the branch head (for example `docs/plans/` is in `.gitignore`) | escalate at once, no retry (a prerequisite the operator fixes: commit the plan, resume with `--accept-head`) | — | immediate |
@@ -866,6 +866,7 @@ discarded with `--fresh` — are in execution-model.md.)*
 | G5 | S3d reauthor | `code-wrong` / rejected | → implement (gate-origin reset) | unit/ticket | — |
 | G6 | resolver | stuck HEAD — blamed & gate already succeeded, nothing new committed | escalate ("stuck") | — | immediate |
 | GC | S1e `checks:classify` | unresolved checks after classify | supersede flagged checks; reset `checks:dispatch`+`checks:classify` (**no stage flip**) | — | attempt cap → escalate |
+| EF | resolver, leaving implement | the evidence floor fails: a required suite has no passing receipt at the commit about to ship, or nothing executed there came back clean and not every criterion was proven by its gating checks | escalate (signature `evidence-floor`) | — | immediate; a resume computes the same answer from the same state |
 | **Integration** ||||||
 | N1 | S4 | integration handler *throws* (genuine, not advisory-red) | insert ticket-scoped `reconcile` unit; reset the gate | ticket | attempt cap → escalate |
 | **Docs** ||||||
@@ -873,9 +874,10 @@ discarded with `--fresh` — are in execution-model.md.)*
 | **Code review** ||||||
 | V1 | S5 | blocking finding, **code** category (runner `blocks_ship`: critical or major, including suggested deferrals) | → S2b, targeted | unit | 3 review-origin loopbacks per ticket; consecutive identical findings escalate earlier |
 | V2 | S5 | reviewer judges scope expansion **unjustified** → files a `scope` finding ² | = V1 (justify or revert) | unit | 3 review-origin loopbacks per ticket; consecutive identical findings escalate earlier |
-| V3 | S5 | blocking finding, **plan-defect** category (impl correct, plan wrong) | per `onPlanDefect`: **`escalate`** (default) or **`redesign`** → S1a re-design | plan | attempt cap → escalate |
+| V3 | S5 | blocking finding, **plan-defect** category (impl correct, plan wrong) | per `onPlanDefect`: **`escalate`** (default) or **`redesign`** → S1a re-design | plan | the same blocking findings as the previous review loopback (plan or code) escalate at once; at most `REVIEW_REPAIR_LIMIT = 3` review loopbacks per ticket, plan and code review together, then escalate (both checked before the category). Under `escalate`, a plain resume applies the verdict again and escalates again at once; set `onPlanDefect` to `redesign` and resume, or change the code and resume with `--accept-head` |
 | V-def | paused S5 | operator explicitly accepts all current nominated major IDs at unchanged reviewed HEAD, with rationale | mark deferred and audit the decision; disclose in PR | ticket | critical/plan findings cannot be accepted |
 | V4 | S5 | reviewer death / transport (dispatch didn't complete) | retry dispatch | — | K_retry → escalate |
+| V5 | resolver, stage review | a succeeded review, but the ledger is unresolved: an open major or critical code finding, or a risk acceptance that names another commit | escalate (signature `review-unresolved`) | — | immediate |
 
 > ENG-164: a transport death is now classified by cause. session-limit / out-of-credits →
 > `parked` (resumable, attempt NOT consumed); crash / timeout / unknown → `transient` retry as
@@ -893,9 +895,14 @@ discarded with `--fresh` — are in execution-model.md.)*
 | **External effects & infra** ||||||
 | X1 | outbox drainer | external effect fails past retry budget (GitHub/Linear outage) | escalate (infra); ticket pauses | — | K_retry → escalate |
 | X2 | any | worktree/git corrupted (wedged index/merge, disk) | escalate (infra) | — | — |
+| X3 | `styre run`, at the merge wait | after draining the outbox (at most `OUTBOX_RETRY_BUDGET = 5` drains), the forge has not returned the PR's URL, or the push of the current head was not delivered | pause `needs_you` (exit 75) instead of reporting `pr-ready` | — | immediate |
+| **Start and resume** ||||||
+| RT | `styre run --resume` | a required suite's tools are missing on this host | pause `needs_you`, exit 75 (never 69); a ticket the resume already left waiting gets a `toolchain-missing` note instead of a second pause | — | immediate |
+| RS | `styre run --resume`, or a fresh run on a reused `--db` | design steps fingerprinted under a scheme newer than this Styre's `FINGERPRINT_SCHEME` | refuse, exit 65, before anything is written; the fresh run names the tickets and does not suggest `--fresh` | — | immediate |
 | **Cross-cutting terminators** ||||||
 | B0 | any step | `attempt >= 3` (`DEFAULT_MAX_ATTEMPTS`) | escalate (resumable wait) | — | **the implemented bound** |
 | B0′ | any loop | same failure signature vs the immediately-previous loopback | escalate fast | — | consecutive-identical guard |
+| SR | interpreter | the resolver asks for a step the journal already holds as succeeded (replaying it cannot change routing) | escalate (signature `step-replay-no-progress:<step>`) | — | immediate |
 | ~~B1/B2/B3~~ | — | ~~per-loop distinct cap / cross-loop 3-of-20 / spend-wall-clock ceiling~~ — **not implemented** (deferred; no code reads `dispatch.cost_usd` for control). The live bounds are B0/B0′, 3 review-origin loopbacks per ticket, 3 review verification requests per ticket, plus the per-gate round caps (G-rows) and the 200-tick / 3-idle run caps. | — | — |
 
 ² **Scope is reviewer-judged (A3):** the reviewer first decides if an expansion is **benign/justified**
@@ -911,6 +918,8 @@ completeness/verify failure can therefore cost up to `maxAttempts × 2` implemen
 either exhausts. The semantic **AC-completeness** layer (a dropped acceptance criterion; a file
 declared by multiple units where none did the real work) is explicitly **out of scope for CM1** — it
 is a deferred follow-up folded into S5 review, not this row.
+
+⁴ **Resuming at the plan review gate.** A run stopped by a plan review escalation (the verdict's, or the gate row's `review:unresolved-plan`) resumes with `retry-plan`. With HEAD unchanged it applies the plan review verdict again, which redesigns only when the findings' signature differs from the previous review loopback's: with unchanged findings a plain resume escalates again at once. The way forward is a committed plan change and a resume with `--accept-head`, which invalidates `design:dispatch` and `design:extract` (signature `review:operator-plan-head-changed`). One exception: after such an `--accept-head` redesign whose plan came back unchanged, the previous loopback's signature is `review:operator-plan-head-changed`, so a plain resume does redesign.
 
 ### 8.4 Loopback targets, by meaning
 **→ implement** (unit or ticket scope — the code is wrong; most failures — including CM1's

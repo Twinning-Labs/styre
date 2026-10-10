@@ -241,7 +241,7 @@ button:disabled { opacity: 0.45; cursor: default; }
 <div class="page">
 <header>
   <h1>Styre ticket lifecycle</h1>
-  <p class="lede">Every state one ticket can be in under <code>styre run</code>, every transition out of it, and the condition for each, as the code on this branch implements them. Each state and transition cites the file and function it comes from. Pick a state to see all its outgoing transitions; pick a scenario to walk its path step by step. <span id="built"></span></p>
+  <p class="lede">Every state one ticket can be in under <code>styre run</code>, every transition out of it, and the condition for each, as the code on this branch implements them. Each state and transition cites the file and function it comes from. Pick a state to see all its outgoing transitions; pick a scenario to walk its path step by step.</p>
   <div class="legend" aria-label="Transition kinds">
     <span><i class="k-forward"></i>next step</span>
     <span><i class="k-advance"></i>stage advance or outcome</span>
@@ -294,13 +294,16 @@ button:disabled { opacity: 0.45; cursor: default; }
 {
  "schemaVersion": 1,
  "title": "Styre ticket lifecycle",
- "builtFrom": "feat/eng-477-design-input-invalidation at d2432b5",
  "constants": {
   "DEFAULT_MAX_ATTEMPTS": 3,
   "INVALIDATE_LOOP_LIMIT": 3,
   "REVIEW_REPAIR_LIMIT": 3,
   "GATE_ROUND_CAP": 3,
-  "REAUTHOR_ESCALATE_CAP": 2
+  "REAUTHOR_ESCALATE_CAP": 2,
+  "IDLE_CAP": 3,
+  "DEFAULT_CAP": 200,
+  "OUTBOX_RETRY_BUDGET": 5,
+  "MAX_TRANSITIONS": 100
  },
  "entries": [
   "run.start",
@@ -356,7 +359,7 @@ button:disabled { opacity: 0.45; cursor: default; }
  "unroutedStages": [
   {
    "id": "verify",
-   "note": "The schema allows ticket.stage = verify, but no code sets it and nextStepKey has no case for it: the verify steps run while the ticket is in implement.",
+   "note": "The schema allows `ticket.stage` = verify, but no code sets it and `nextStepKey` has no case for it: the verify steps run while the ticket is in implement.",
    "source": {
     "file": "src/db/schema.sql",
     "symbol": "stage"
@@ -367,7 +370,7 @@ button:disabled { opacity: 0.45; cursor: default; }
  "unproducedOutcomes": [
   {
    "id": "abandoned",
-   "note": "RunOutcome includes abandoned (exit 1), reserved for a terminal give up; no path in the code emits it.",
+   "note": "`RunOutcome` includes abandoned (exit 1), reserved for a terminal give up; no path in the code emits it.",
    "source": {
     "file": "src/cli/outcome.ts",
     "symbol": "outcomeSentence"
@@ -479,6 +482,34 @@ button:disabled { opacity: 0.45; cursor: default; }
    },
    "anchor": "resetToPending(db, step.id); return { decision: \"retry\" }; }"
   },
+  "starts": {
+   "label": "Both starts (a fresh run and a resume)",
+   "members": [
+    "run.start",
+    "resume.start"
+   ],
+   "source": {
+    "file": "src/cli/run.ts",
+    "symbol": "runImpl"
+   },
+   "anchor": "const loaded = loadRunProfile({ profile: args.profile, slug: args.slug });"
+  },
+  "table-steps": {
+   "label": "Every state that runs a design table step",
+   "members": [
+    "provision",
+    "design:dispatch",
+    "design:extract",
+    "design:size",
+    "design:review",
+    "provision@implement"
+   ],
+   "source": {
+    "file": "src/daemon/advance.ts",
+    "symbol": "advanceOneStep"
+   },
+   "anchor": "const row = stepRow(d.stepKey);"
+  },
   "escalations": {
    "label": "Every escalation",
    "members": [
@@ -532,7 +563,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "run.start",
    "label": "styre run <ticket>",
    "kind": "entry",
-   "description": "A fresh run. Checks names, flags, the toolchain and the agent command line tool, reads the ticket once from the tracker, then creates (or, with --db, reuses) the run database.",
+   "description": "A fresh run. Checks names, flags, the toolchain and the agent command line tool, reads the ticket once from the tracker, then creates (or, with `--db`, reuses) the run database.",
    "source": {
     "file": "src/cli/run.ts",
     "symbol": "runImpl"
@@ -543,7 +574,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "run.prepare",
    "label": "Prepare the ticket",
    "kind": "pseudo",
-   "description": "runTicket: the ticket row is inserted (or found, on a reused --db, which then writes a reused-database note), the design inputs snapshot is captured, the starting commit is recorded once, every other active ticket in the database gets the same snapshot, and the adopt pass records manifests for steps an older Styre finished.",
+   "description": "`runTicket`: the ticket row is inserted (or found, on a reused `--db`, which then writes a `reused-database` note), the design inputs snapshot is captured, the starting commit is recorded once, every other active ticket in the database gets the same snapshot, and the adopt pass records manifests for steps an older Styre finished.",
    "source": {
     "file": "src/daemon/run-ticket.ts",
     "symbol": "runTicket"
@@ -554,7 +585,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "resume.start",
    "label": "styre run --resume <ident>",
    "kind": "entry",
-   "description": "Resume a paused run from its checkpoint (run.db in the checkpoint folder). Everything that can refuse is checked before anything is written.",
+   "description": "Resume a paused run from its checkpoint (`run.db` in the checkpoint folder). Everything that can refuse is checked before anything is written.",
    "source": {
     "file": "src/cli/park.ts",
     "symbol": "resumeRun"
@@ -565,7 +596,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "resume.prepare",
    "label": "Resume transaction",
    "kind": "pseudo",
-   "description": "One transaction: provision is invalidated in worktree mode (cause worktree-recreated), the pending human_resume signals are consumed, the ticket is active again, a resumed event (or accept-head:<sha>) is appended, the review resume plan is applied, and verification steps get a fresh retry window. Then recover() returns the interrupted step to pending, the toolchain is decided, the snapshot is captured again (an inputs-changed note names what changed), other active tickets are prepared, and the adopt pass runs.",
+   "description": "One transaction: provision is invalidated in worktree mode (cause `worktree-recreated`), the pending `human_resume` signals are consumed, the ticket is active again, a resumed event (or `accept-head:<sha>`) is appended, the review resume plan is applied, and verification steps get a fresh retry window. Then `recover()` returns the interrupted step to pending, the toolchain is decided, the snapshot is captured again (an `inputs-changed` note names what changed), other active tickets are prepared, and the adopt pass runs.",
    "source": {
     "file": "src/cli/park.ts",
     "symbol": "resumeRun"
@@ -576,7 +607,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "resolve.stage",
    "label": "Resolver: by stage",
    "kind": "pseudo",
-   "description": "nextStepKey switches on ticket.stage. It is pure: it returns a descriptor (step, advance, mark-verified, wait, blocked, escalate, invalidate, done) and advanceOneStep applies it.",
+   "description": "`nextStepKey` switches on `ticket.stage`. It is pure: it returns a descriptor (step, advance, `mark-verified`, wait, blocked, escalate, invalidate, done) and `advanceOneStep` applies it.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -619,7 +650,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "produces": [
     "plan"
    ],
-   "description": "Agent step (deep tier): writes the plan under docs/plans/; the runner commits it and records the plan's digest read through git at the branch head. Takes design loopback findings of its current generation as feedback (never fingerprinted). A row of the declared design table: done only while its recorded input manifest matches its current inputs. When invalidated, its outputs are cleared: nothing (the rerun revises the plan in place).",
+   "description": "Agent step (deep tier): writes the plan under `docs/plans/`; the runner commits it and records the plan's digest read through git at the branch head. Takes design loopback findings of its current generation as feedback (never fingerprinted). A row of the declared design table: done only while its recorded input manifest matches its current inputs. When invalidated, its outputs are cleared: nothing (the rerun revises the plan in place).",
    "source": {
     "file": "src/daemon/design-graph.ts",
     "symbol": "DESIGN_TABLE"
@@ -644,7 +675,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "produces": [
     "workUnits"
    ],
-   "description": "Agent step: turns the plan into work units, written in the success transaction. A row of the declared design table: done only while its recorded input manifest matches its current inputs. When invalidated, its outputs are cleared: every work unit (reconcile units included), after detaching code and plan findings; needs_docs set to 0.",
+   "description": "Agent step: turns the plan into work units, written in the success transaction. A row of the declared design table: done only while its recorded input manifest matches its current inputs. When invalidated, its outputs are cleared: every work unit (reconcile units included), after detaching code and plan findings; `needs_docs` set to 0.",
    "source": {
     "file": "src/daemon/design-graph.ts",
     "symbol": "DESIGN_TABLE"
@@ -668,7 +699,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "produces": [
     "track"
    ],
-   "description": "Sets the track (fast or full). Without complexity grading it is a runner computation from the units (sprawl); with config.complexityGrading on, a cheap agent grades complexity too (and only then does it read ticket.title, profile.slug, profile.promptVars and plan). A row of the declared design table: done only while its recorded input manifest matches its current inputs. When invalidated, its outputs are cleared: ticket.track set to NULL.",
+   "description": "Sets the track (fast or full). Without complexity grading it is a runner computation from the units (sprawl); with `config.complexityGrading` on, a cheap agent grades complexity too (and only then does it read `ticket.title`, `profile.slug`, `profile.promptVars` and plan). A row of the declared design table: done only while its recorded input manifest matches its current inputs. When invalidated, its outputs are cleared: `ticket.track` set to NULL.",
    "source": {
     "file": "src/daemon/design-graph.ts",
     "symbol": "DESIGN_TABLE"
@@ -691,7 +722,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "produces": [
     "planFindings"
    ],
-   "description": "Agent step, full track only: reviews the plan and files plan findings; its verdict is applied in the same transaction that marks it succeeded. It does not read ticket.description. A row of the declared design table: done only while its recorded input manifest matches its current inputs. When invalidated, its outputs are cleared: nothing (the gate reads only the latest dispatch's findings).",
+   "description": "Agent step, full track only: reviews the plan and files plan findings; its verdict is applied in the same transaction that marks it succeeded. It does not read `ticket.description`. A row of the declared design table: done only while its recorded input manifest matches its current inputs. When invalidated, its outputs are cleared: nothing (the gate reads only the latest dispatch's findings).",
    "source": {
     "file": "src/daemon/design-graph.ts",
     "symbol": "DESIGN_TABLE"
@@ -703,7 +734,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "label": "Plan review gate",
    "kind": "gate",
    "stage": "design",
-   "description": "The table's gate row (full track): fires while the latest design:review dispatch left blocking plan findings (open, major or critical).",
+   "description": "The table's gate row (full track): fires while the latest `design:review` dispatch left blocking plan findings (open, major or critical).",
    "source": {
     "file": "src/daemon/design-graph.ts",
     "symbol": "DESIGN_TABLE"
@@ -729,7 +760,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "kind": "step",
    "stage": "design",
    "stepKey": "checks:classify",
-   "description": "An agent triages the RED first traces. Its verdict (applyChecksVerdict) runs in the success transaction.",
+   "description": "An agent triages the RED first traces. Its verdict (`applyChecksVerdict`) runs in the success transaction.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -741,7 +772,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "label": "Resolver: implement",
    "kind": "pseudo",
    "stage": "implement",
-   "description": "The implement case of nextStepKey, in order: the first unit (by seq) that is pending or verifying with all its depends_on units verified; else, when every unit is verified, the AC gate, the integration sweep, docs and the evidence floor.",
+   "description": "The implement case of `nextStepKey`, in order: the first unit (by seq) that is pending or verifying with all its `depends_on` units verified; else, when every unit is verified, the AC gate, the integration sweep, docs and the evidence floor.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextActionableUnit"
@@ -805,7 +836,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "label": "Mark unit verified",
    "kind": "pseudo",
    "stage": "implement",
-   "description": "Descriptor mark-verified: the interpreter sets the unit verified and continues inline.",
+   "description": "Descriptor `mark-verified`: the interpreter sets the unit verified and continues inline.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -818,7 +849,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "kind": "step",
    "stage": "implement",
    "stepKey": "verify:checks-gate",
-   "description": "The AC checks gate (runner): integrity of the active acceptance criterion checks and a run of them at the branch HEAD. Its verdict (applyAcCheckGateVerdict) runs in the success transaction; its attempt is the gate round counter.",
+   "description": "The AC checks gate (runner): integrity of the active acceptance criterion checks and a run of them at the branch HEAD. Its verdict (`applyAcCheckGateVerdict`) runs in the success transaction; its attempt is the gate round counter.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -831,7 +862,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "kind": "step",
    "stage": "implement",
    "stepKey": "checks:arbitrate",
-   "description": "An agent assigns blame for each behavioral check still red: `code-wrong` or `check-wrong`. Verdict: applyArbiterVerdict.",
+   "description": "An agent assigns blame for each behavioral check still red: `code-wrong` or `check-wrong`. Verdict: `applyArbiterVerdict`.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -844,7 +875,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "kind": "step",
    "stage": "implement",
    "stepKey": "checks:reauthor",
-   "description": "An agent writes the `check-wrong` checks again. Verdict: applyReauthorVerdict.",
+   "description": "An agent writes the `check-wrong` checks again. Verdict: `applyReauthorVerdict`.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -870,7 +901,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "kind": "step",
    "stage": "implement",
    "stepKey": "docs:revise",
-   "description": "An agent revises the docs, only when design set ticket.needs_docs.",
+   "description": "An agent revises the docs, only when design set `ticket.needs_docs`.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -895,7 +926,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "kind": "step",
    "stage": "review",
    "stepKey": "review",
-   "description": "A cold, independent agent reviews the code and files findings. The verdict (applyReviewVerdict) runs in the success transaction.",
+   "description": "A cold, independent agent reviews the code and files findings. The verdict (`applyReviewVerdict`) runs in the success transaction.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -908,7 +939,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "kind": "step",
    "stage": "merge",
    "stepKey": "merge:push",
-   "description": "Runner: enqueues the push of the branch through the outbox. Refuses (StepPrerequisiteError) while review findings are unresolved.",
+   "description": "Runner: enqueues the push of the branch through the outbox. Refuses (`StepPrerequisiteError`) while review findings are unresolved.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -921,7 +952,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "kind": "step",
    "stage": "merge",
    "stepKey": "merge:pr-ensure",
-   "description": "Runner: enqueues the pull request create or update. Refuses (StepPrerequisiteError) while review findings are unresolved.",
+   "description": "Runner: enqueues the pull request create or update. Refuses (`StepPrerequisiteError`) while review findings are unresolved.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -933,7 +964,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "label": "Wait: human merge approval",
    "kind": "wait",
    "stage": "merge",
-   "description": "Descriptor wait: a pending human_merge_approval signal. The OSS run never delivers it; it exits at pr-ready.",
+   "description": "Descriptor wait: a pending `human_merge_approval` signal. The OSS run never delivers it; it exits at `pr-ready`.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -960,7 +991,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "outcome": "pr-ready",
    "exitCode": 0,
    "exitName": "OK",
-   "description": "The PR is open at the verified head, waiting on the human merge. CI is reported once (ci_handoff), never gated.",
+   "description": "The PR is open at the verified head, waiting on the human merge. CI is reported once (`ci_handoff`), never gated.",
    "source": {
     "file": "src/daemon/run-ticket.ts",
     "symbol": "driveToTerminal"
@@ -989,7 +1020,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "reason": "budget",
    "exitCode": 75,
    "exitName": "TEMPFAIL",
-   "description": "An agent dispatch died of a session limit or out of credits. The checkpoint (run.db and transcript.json, with the parked step's key, generation and manifest) stays at its live location. Resumable.",
+   "description": "An agent dispatch died of a session limit or out of credits. The checkpoint (`run.db` and `transcript.json`, with the parked step's key, generation and manifest) stays at its live location. Resumable.",
    "source": {
     "file": "src/daemon/run-ticket.ts",
     "symbol": "driveToTerminal"
@@ -1004,7 +1035,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "reason": "needs_you",
    "exitCode": 75,
    "exitName": "TEMPFAIL",
-   "description": "The ticket is waiting on a pending human_resume signal; the summary names the latest escalation's reason. Resumable (the resume consumes the signal), or discard with --fresh.",
+   "description": "The ticket is waiting on a pending `human_resume` signal; the summary names the latest escalation's reason. Resumable (the resume consumes the signal), or discard with `--fresh`.",
    "source": {
     "file": "src/daemon/run-ticket.ts",
     "symbol": "driveToTerminal"
@@ -1017,7 +1048,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "kind": "pause",
    "outcome": "paused",
    "reason": "interrupted",
-   "description": "A stop signal arrived. The stop handler records an interrupted note, gives back the attempt of the step in flight and closes its dispatch; the process then ends by the signal (128 + its number), not by exit 75. Resumable: recover() undoes the step's in place edits and returns it to pending.",
+   "description": "A stop signal arrived. The stop handler records an interrupted note, gives back the attempt of the step in flight and closes its dispatch; the process then ends by the signal (128 + its number), not by exit 75. Resumable: `recover()` undoes the step's in place edits and returns it to pending.",
    "source": {
     "file": "src/util/process/interruption.ts",
     "symbol": "recordInterruption"
@@ -1043,7 +1074,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "kind": "exit",
    "exitCode": 65,
    "exitName": "RESUME_REFUSED",
-   "description": "A checkpoint (or reused --db) this Styre will not use. Nothing was changed.",
+   "description": "A checkpoint (or reused `--db`) this Styre will not use. Nothing was changed.",
    "source": {
     "file": "src/cli/errors.ts",
     "symbol": "EXIT"
@@ -1056,7 +1087,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "kind": "exit",
    "exitCode": 69,
    "exitName": "TOOLCHAIN_MISSING",
-   "description": "A fresh run whose required tools are missing on this host. Fresh runs only: a resume pauses instead.",
+   "description": "A required program is not runnable here: on a fresh run, the tools of the repository's required suites (or no primary component left); on any start, a fresh run or a resume, the agent command line tool missing, too old, or without the flags Styre needs to confine agents. A resume never exits 69 for the repository's own toolchain: it pauses instead.",
    "source": {
     "file": "src/cli/errors.ts",
     "symbol": "EXIT"
@@ -1077,6 +1108,19 @@ button:disabled { opacity: 0.45; cursor: default; }
    "anchor": "CONFIG: 78,"
   },
   {
+   "id": "exit:internal",
+   "label": "error: internal (exit 70)",
+   "kind": "exit",
+   "exitCode": 70,
+   "exitName": "INTERNAL",
+   "description": "Anything that is not a `StyreError` reaching the error boundary: an unexpected failure or a Styre defect. Before a run starts nothing is written; during a run the checkpoint keeps what the last committed transaction left.",
+   "source": {
+    "file": "src/cli/output.ts",
+    "symbol": "guard"
+   },
+   "anchor": "process.exitCode = EXIT.INTERNAL;"
+  },
+  {
    "id": "exit:inspect",
    "label": "--inspect report (exit 0)",
    "kind": "exit",
@@ -1093,7 +1137,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "esc:attempts-exhausted",
    "label": "Attempts exhausted",
    "kind": "escalation",
-   "description": "A failed step whose attempt count reached the cap: human_resume with the reason \"step '<key>' exhausted after <n> attempts\".",
+   "description": "A failed step whose attempt count reached the cap: `human_resume` with the reason \"step '<key>' exhausted after <n> attempts\".",
    "source": {
     "file": "src/daemon/failure-policy.ts",
     "symbol": "applyFailurePolicy"
@@ -1104,7 +1148,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "esc:prerequisite",
    "label": "Prerequisite to repair",
    "kind": "escalation",
-   "description": "StepPrerequisiteError: something only an operator can repair (an uncommitted plan, unconfirmed agent confinement, no runnable acceptance check framework, unresolved review findings at merge, a review verification limit or fault). Escalated at once, never retried.",
+   "description": "`StepPrerequisiteError`: something only an operator can repair (an uncommitted plan, unconfirmed agent confinement, no runnable acceptance check framework, unresolved review findings at merge, a review verification limit or fault). Escalated at once, never retried.",
    "source": {
     "file": "src/daemon/failure-policy.ts",
     "symbol": "applyFailurePolicy"
@@ -1115,7 +1159,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "esc:invariant",
    "label": "Invariant violation",
    "kind": "escalation",
-   "description": "InvariantViolation inside a step (an undeclared read, a malformed handler result, a missing output digest, a step started while another is in flight): a Styre defect, escalated at once with its message as the reason.",
+   "description": "`InvariantViolation` inside a step (an undeclared read, a malformed handler result, a missing output digest, a step started while another is in flight): a Styre defect, escalated at once with its message as the reason.",
    "source": {
     "file": "src/daemon/failure-policy.ts",
     "symbol": "applyFailurePolicy"
@@ -1148,7 +1192,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "esc:checks-gate-fault",
    "label": "AC gate fault",
    "kind": "escalation",
-   "description": "verify:checks-gate threw (an infrastructure or invariant fault, not a still red verdict).",
+   "description": "`verify:checks-gate` threw (an infrastructure or invariant fault, not a still red verdict).",
    "source": {
     "file": "src/daemon/failure-policy.ts",
     "symbol": "applyFailurePolicy"
@@ -1203,7 +1247,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "esc:plan-review-gate",
    "label": "Plan review gate fires",
    "kind": "escalation",
-   "description": "The gate row's escalation: unresolved plan review findings (signature review:unresolved-plan).",
+   "description": "The gate row's escalation: unresolved plan review findings (signature `review:unresolved-plan`).",
    "source": {
     "file": "src/daemon/design-graph.ts",
     "symbol": "DESIGN_TABLE"
@@ -1214,7 +1258,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "esc:review-no-progress",
    "label": "Identical review findings",
    "kind": "escalation",
-   "description": "Plan or code review returned blocking findings with the same signature (sorted category:location) as the previous review loopback.",
+   "description": "Plan or code review returned blocking findings with the same signature (sorted `category:location`) as the previous review loopback.",
    "source": {
     "file": "src/daemon/review-verdict.ts",
     "symbol": "isRepeatedReviewLoopback"
@@ -1236,7 +1280,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "esc:plan-defect-policy",
    "label": "Plan defect: policy escalate",
    "kind": "escalation",
-   "description": "Code review found a blocking plan-defect and the runtime config's onPlanDefect is escalate (the default).",
+   "description": "Code review found a blocking `plan-defect` and the runtime config's `onPlanDefect` is `escalate` (the default).",
    "source": {
     "file": "src/daemon/review-verdict.ts",
     "symbol": "applyReviewVerdict"
@@ -1258,7 +1302,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "esc:invalidate-loop",
    "label": "Invalidate loop guard",
    "kind": "escalation",
-   "description": "A design step keeps finding changed inputs after rerunning: an unstable input digest. The count restarts at each resumed event, reused-database note and design loopback.",
+   "description": "A design step keeps finding changed inputs after rerunning: an unstable input digest. The count restarts at each resumed event, `reused-database` note and design loopback.",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "walkDesign"
@@ -1280,7 +1324,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "esc:blocked",
    "label": "No next move",
    "kind": "escalation",
-   "description": "Descriptor blocked: no actionable unit and not every unit verified. pauseTicket writes the escalation.",
+   "description": "Descriptor blocked: no actionable unit and not every unit verified. `pauseTicket` writes the escalation.",
    "source": {
     "file": "src/daemon/advance.ts",
     "symbol": "advanceOneStep"
@@ -1291,7 +1335,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "esc:contract",
    "label": "Verification contract",
    "kind": "escalation",
-   "description": "Before the next pass, the registry could not establish the verification contract: synchronizing the requirements threw, or, in review or merge, a required suite has no passing receipt at the head. pauseTicket writes the escalation.",
+   "description": "Before the next pass, the registry could not establish the verification contract: synchronizing the requirements threw, or, in review or merge, a required suite has no passing receipt at the head. `pauseTicket` writes the escalation.",
    "source": {
     "file": "src/daemon/advance.ts",
     "symbol": "advanceOneStep"
@@ -1302,7 +1346,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "esc:stalled",
    "label": "Stalled",
    "kind": "escalation",
-   "description": "Three ticks in a row advanced nothing.",
+   "description": "3 ticks in a row advanced nothing.",
    "source": {
     "file": "src/daemon/run-ticket.ts",
     "symbol": "driveToTerminal"
@@ -1335,7 +1379,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "esc:pr-undelivered",
    "label": "PR or push not delivered",
    "kind": "escalation",
-   "description": "At pr-ready, the forge did not return the PR's URL, or the push of the current head was not delivered.",
+   "description": "At `pr-ready`, the forge did not return the PR's URL, or the push of the current head was not delivered.",
    "source": {
     "file": "src/daemon/run-ticket.ts",
     "symbol": "undeliveredReason"
@@ -1346,7 +1390,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "id": "esc:toolchain-resume",
    "label": "Toolchain missing on resume",
    "kind": "escalation",
-   "description": "A resume on a host that lacks the tools of a required suite: pause needs_you (exit 75), never exit 69. A ticket already waiting gets a toolchain-missing note instead of a second pause.",
+   "description": "A resume on a host that lacks the tools of a required suite: pause `needs_you` (exit 75), never exit 69. A ticket already waiting gets a `toolchain-missing` note instead of a second pause.",
    "source": {
     "file": "src/cli/park.ts",
     "symbol": "resumeRun"
@@ -1360,8 +1404,8 @@ button:disabled { opacity: 0.45; cursor: default; }
    "from": "run.start",
    "to": "exit:usage",
    "kind": "refuse",
-   "label": "Ident or slug cannot name a folder",
-   "condition": "The ticket's ident, or a slug from the command line or the repository, cannot name a checkpoint folder: empty, a part \".\" or \"..\", a \"/\" in an ident, a \"\\\" or NUL.",
+   "label": "Ident cannot name a folder",
+   "condition": "The ident the tracker returned cannot name a checkpoint folder: empty, \".\" or \"..\", or holding a \"/\", a \"\\\" or NUL.",
    "source": {
     "file": "src/cli/checkpoint-name.ts",
     "symbol": "assertCheckpointName"
@@ -1369,25 +1413,12 @@ button:disabled { opacity: 0.45; cursor: default; }
    "anchor": "export function assertCheckpointName("
   },
   {
-   "id": "t.run.bad-profile-slug",
-   "from": "run.start",
-   "to": "exit:config",
-   "kind": "refuse",
-   "label": "Profile slug cannot name a folder",
-   "condition": "The slug read from a profile file cannot name a checkpoint folder: a config error that names the file.",
-   "source": {
-    "file": "src/cli/checkpoint-name.ts",
-    "symbol": "assertProfileSlug"
-   },
-   "anchor": "export function assertProfileSlug("
-  },
-  {
    "id": "t.run.review-flags",
    "from": "run.start",
    "to": "exit:usage",
    "kind": "refuse",
    "label": "Review flags without --resume",
-   "condition": "--review-action, --review-findings or --review-reason on a fresh run.",
+   "condition": "`--review-action`, `--review-findings` or `--review-reason` on a fresh run.",
    "source": {
     "file": "src/cli/run.ts",
     "symbol": "runImpl"
@@ -1400,7 +1431,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:config",
    "kind": "refuse",
    "label": "In place: HEAD unreadable",
-   "condition": "--in-place and the checkout's HEAD cannot be read (a repository with no commit), so no starting commit can be recorded.",
+   "condition": "`--in-place` and the checkout's HEAD cannot be read (a repository with no commit), so no starting commit can be recorded.",
    "source": {
     "file": "src/cli/run.ts",
     "symbol": "runImpl"
@@ -1413,7 +1444,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:toolchain",
    "kind": "refuse",
    "label": "Toolchain missing",
-   "condition": "No primary component is left, or a component with a required suite lacks its tools on this host (toolchainDecision refuses).",
+   "condition": "No primary component is left, or a component with a required suite lacks its tools on this host (`toolchainDecision` refuses).",
    "source": {
     "file": "src/cli/run.ts",
     "symbol": "runImpl"
@@ -1426,7 +1457,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:usage",
    "kind": "refuse",
    "label": "Checkpoint exists",
-   "condition": "A checkpoint already exists for this ident (no --db, no --fresh): resume it or discard it.",
+   "condition": "A checkpoint already exists for this ident (no `--db`, no `--fresh`): resume it or discard it.",
    "source": {
     "file": "src/cli/run.ts",
     "symbol": "runImpl"
@@ -1452,7 +1483,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:resume-refused",
    "kind": "refuse",
    "label": "Reused --db: newer fingerprint scheme",
-   "condition": "A reused --db holds design steps fingerprinted under a scheme newer than this Styre's. Refused before anything is written; names the tickets; does not suggest --fresh.",
+   "condition": "A reused `--db` holds design steps fingerprinted under a scheme newer than this Styre's. Refused before anything is written; names the tickets; does not suggest `--fresh`.",
    "source": {
     "file": "src/cli/run.ts",
     "symbol": "runImpl"
@@ -1465,7 +1496,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:resume-refused",
    "kind": "refuse",
    "label": "Reused --db: schema refused",
-   "condition": "A reused --db whose schema migrate refuses: newer than this Styre, older than v7, an unknown shape, or tables without schema_meta.",
+   "condition": "A reused `--db` whose schema migrate refuses: newer than this Styre, older than v7, an unknown shape, or tables without `schema_meta`.",
    "source": {
     "file": "src/db/migrate.ts",
     "symbol": "migrate"
@@ -1473,12 +1504,324 @@ button:disabled { opacity: 0.45; cursor: default; }
    "anchor": "if (state.kind === \"refuse\") throw state.error;"
   },
   {
+   "id": "t.start.bad-slug",
+   "from": "@starts",
+   "to": "exit:usage",
+   "kind": "refuse",
+   "label": "Slug cannot name a folder",
+   "condition": "The `--slug` value, or the slug derived from the repository folder, cannot name a checkpoint folder: an empty part, a part \".\" or \"..\", a \"\\\" or NUL.",
+   "source": {
+    "file": "src/cli/load-profile.ts",
+    "symbol": "loadRunProfile"
+   },
+   "anchor": "if (args.slug && args.slug.length > 0) assertCheckpointName(\"slug\", args.slug);"
+  },
+  {
+   "id": "t.start.profile-slug",
+   "from": "@starts",
+   "to": "exit:config",
+   "kind": "refuse",
+   "label": "Profile slug cannot name a folder",
+   "condition": "The slug read from the profile file cannot name a checkpoint folder: a config error that names the file.",
+   "source": {
+    "file": "src/cli/load-profile.ts",
+    "symbol": "loadRunProfile"
+   },
+   "anchor": "assertProfileSlug(raw.slug, file); // the slug parkDir receives"
+  },
+  {
+   "id": "t.start.no-repo",
+   "from": "@starts",
+   "to": "exit:usage",
+   "kind": "refuse",
+   "label": "Not in a repository",
+   "condition": "No `--profile` given and the current folder is not a git repository.",
+   "source": {
+    "file": "src/cli/load-profile.ts",
+    "symbol": "loadRunProfile"
+   },
+   "anchor": "\"no --profile given and the current directory is not a git repo\","
+  },
+  {
+   "id": "t.start.profile-missing",
+   "from": "@starts",
+   "to": "exit:internal",
+   "kind": "refuse",
+   "label": "No profile file",
+   "condition": "No profile at its conventional path for this slug (run styre setup first), or a `--profile` file that cannot be read or is not JSON: a plain error.",
+   "source": {
+    "file": "src/config/discover.ts",
+    "symbol": "loadProfileByConvention"
+   },
+   "anchor": "export function loadProfileByConvention(slug: string, configHome: string = configDir()): Profile {"
+  },
+  {
+   "id": "t.start.profile-retired",
+   "from": "@starts",
+   "to": "exit:internal",
+   "kind": "refuse",
+   "label": "Profile of a retired version",
+   "condition": "A profile with the flat commands field (`schemaVersion` 1), or `schemaVersion` 2 or 3: a plain error that says to run styre setup again.",
+   "source": {
+    "file": "src/dispatch/profile.ts",
+    "symbol": "parseProfile"
+   },
+   "anchor": "profile: legacy flat `commands` field (schemaVersion 1) is no longer supported. "
+  },
+  {
+   "id": "t.start.profile-invalid",
+   "from": "@starts",
+   "to": "exit:config",
+   "kind": "refuse",
+   "label": "Profile fails its schema",
+   "condition": "The profile does not match its schema: a config error naming the file and the field.",
+   "source": {
+    "file": "src/dispatch/profile.ts",
+    "symbol": "parseProfile"
+   },
+   "anchor": "return parseConfigOrThrow(ProfileSchema, raw, file);"
+  },
+  {
+   "id": "t.start.config-invalid",
+   "from": "@starts",
+   "to": "exit:config",
+   "kind": "refuse",
+   "label": "Config fails its schema",
+   "condition": "The runtime config (`--config`, or the global and project `config.json`) fails its schema, or names an unknown tracker, forge, notifier or agent provider.",
+   "source": {
+    "file": "src/config/discover.ts",
+    "symbol": "discoverRuntimeConfig"
+   },
+   "anchor": "validateAdapters(parsed, file);"
+  },
+  {
+   "id": "t.start.config-malformed",
+   "from": "@starts",
+   "to": "exit:internal",
+   "kind": "refuse",
+   "label": "Config is not JSON",
+   "condition": "A `config.json` that exists but is not JSON (or a `--config` file that cannot be read): a plain error naming the file.",
+   "source": {
+    "file": "src/config/discover.ts",
+    "symbol": "discoverRuntimeConfig"
+   },
+   "anchor": "styre: malformed config at ${path}: ${String(err)}"
+  },
+  {
+   "id": "t.start.test-env",
+   "from": "@starts",
+   "to": "exit:usage",
+   "kind": "refuse",
+   "label": "Test environment not qualified",
+   "condition": "Not with `--inspect`: a python, node or sveltekit component has a test command but no test environment plan (run styre setup on this host).",
+   "source": {
+    "file": "src/cli/run.ts",
+    "symbol": "runImpl"
+   },
+   "anchor": "Run styre setup to create test-environment plans on the execution host; inspection remains available."
+  },
+  {
+   "id": "t.start.unresolved",
+   "from": "@starts",
+   "to": "exit:internal",
+   "kind": "refuse",
+   "label": "Profile commands unresolved",
+   "condition": "Not with `--inspect`: a component's build, test or check command is unresolved, or a test command has no resolved target (`assertResolved`): a plain error that says to run styre setup again.",
+   "source": {
+    "file": "src/cli/run.ts",
+    "symbol": "assertResolved"
+   },
+   "anchor": "export function assertResolved(profile: Profile): void {"
+  },
+  {
+   "id": "t.start.slack",
+   "from": "@starts",
+   "to": "exit:internal",
+   "kind": "refuse",
+   "label": "Notifier misconfigured",
+   "condition": "The notifier is slack and `SLACK_BOT_TOKEN` or `slack.channel` is missing: a plain error.",
+   "source": {
+    "file": "src/integrations/notifier.ts",
+    "symbol": "assertSlackConfigured"
+   },
+   "anchor": "throw new Error(\"notifier 'slack' is set but SLACK_BOT_TOKEN is missing from the environment\");"
+  },
+  {
+   "id": "t.start.ports",
+   "from": "@starts",
+   "to": "exit:internal",
+   "kind": "refuse",
+   "label": "A port cannot be built",
+   "condition": "Building the tracker, forge, checks or notifier port throws (a missing `LINEAR_API_KEY`, say): a plain error.",
+   "source": {
+    "file": "src/daemon/ports.ts",
+    "symbol": "makeProjectorPorts"
+   },
+   "anchor": "issueTracker: selectIssueTracker(runtimeConfig, itAdapters),"
+  },
+  {
+   "id": "t.start.agent-cli",
+   "from": "@starts",
+   "to": "exit:toolchain",
+   "kind": "refuse",
+   "label": "Agent tool missing or too old",
+   "condition": "Not with `--inspect`: the agent command line tool is not on PATH, is below its supported version, or lacks the flags Styre needs to confine agents. A resume exits 69 here too.",
+   "source": {
+    "file": "src/cli/errors.ts",
+    "symbol": "agentCliError"
+   },
+   "anchor": "is not installed or not on PATH"
+  },
+  {
+   "id": "t.start.agent-provider",
+   "from": "@starts",
+   "to": "exit:config",
+   "kind": "refuse",
+   "label": "Provider cannot be confined",
+   "condition": "Not with `--inspect`: the configured agent provider is one Styre cannot confine yet (codex).",
+   "source": {
+    "file": "src/cli/errors.ts",
+    "symbol": "agentCliError"
+   },
+   "anchor": "Styre cannot confine agents run through"
+  },
+  {
+   "id": "t.start.pr-base",
+   "from": "@starts",
+   "to": "exit:config",
+   "kind": "refuse",
+   "label": "No PR base on the forge",
+   "condition": "Not with `--inspect`: neither the profile's default branch nor the forge's default branch exists on the forge. (A forge call that throws instead is a plain error, exit 70.)",
+   "source": {
+    "file": "src/cli/resolve-pr-base.ts",
+    "symbol": "resolvePrBase"
+   },
+   "anchor": "cannot start — the forge has no base branch to open a pull request against"
+  },
+  {
+   "id": "t.start.worktree-held",
+   "from": "@starts",
+   "to": "exit:internal",
+   "kind": "refuse",
+   "label": "Branch held by a worktree",
+   "condition": "A fresh run with `--fresh`, or a resume in worktree mode: the ticket branch is checked out by a worktree Styre cannot safely remove (a live run of another checkpoint, or a worktree outside `styre-wt-`): a plain error naming the git command to free it.",
+   "source": {
+    "file": "src/dispatch/worktree.ts",
+    "symbol": "reconcileWorktree"
+   },
+   "anchor": "by a worktree styre can't safely remove; "
+  },
+  {
+   "id": "t.start.migrate-proof",
+   "from": "@starts",
+   "to": "exit:internal",
+   "kind": "refuse",
+   "label": "Upgrade proof fails",
+   "condition": "Upgrading an older checkpoint (or a reused `--db`), the schema after migrating does not match the declared one: a plain error; the backup written before the first migration stays.",
+   "source": {
+    "file": "src/db/migrate.ts",
+    "symbol": "migrate"
+   },
+   "anchor": "does not match schema v${CURRENT_VERSION} after migrating"
+  },
+  {
+   "id": "t.run.no-ticket",
+   "from": "run.start",
+   "to": "exit:usage",
+   "kind": "refuse",
+   "label": "No ticket",
+   "condition": "Neither a ticket nor `--resume` was given.",
+   "source": {
+    "file": "src/cli/run.ts",
+    "symbol": "runImpl"
+   },
+   "anchor": "\"--ticket is required when not using --resume\","
+  },
+  {
+   "id": "t.run.in-place-unsafe",
+   "from": "run.start",
+   "to": "exit:internal",
+   "kind": "refuse",
+   "label": "In place: unsafe checkout",
+   "condition": "`--in-place` and the current folder is not a git repository, has no `.styre-disposable` marker file, has uncommitted tracked changes, or (Python) its active environment's package is not installed from the repository: a plain error.",
+   "source": {
+    "file": "src/dispatch/in-place.ts",
+    "symbol": "assertInPlaceSafe"
+   },
+   "anchor": "has uncommitted tracked changes."
+  },
+  {
+   "id": "t.run.tracker",
+   "from": "run.start",
+   "to": "exit:internal",
+   "kind": "refuse",
+   "label": "Tracker read fails",
+   "condition": "The one tracker read of the ticket throws: a plain error.",
+   "source": {
+    "file": "src/cli/run.ts",
+    "symbol": "runImpl"
+   },
+   "anchor": "const ingested = await ports.issueTracker.fetchTicket(args.ticket);"
+  },
+  {
+   "id": "t.run.fresh-live",
+   "from": "run.start",
+   "to": "exit:usage",
+   "kind": "refuse",
+   "label": "--fresh while another run is live",
+   "condition": "`--fresh` and another live styre run holds this checkpoint's run lock: nothing is discarded.",
+   "source": {
+    "file": "src/cli/run.ts",
+    "symbol": "runImpl"
+   },
+   "anchor": "is in progress (${checkpointDir}/run.lock)"
+  },
+  {
+   "id": "t.resume.bad-ident",
+   "from": "resume.start",
+   "to": "exit:usage",
+   "kind": "refuse",
+   "label": "Ident cannot name a folder",
+   "condition": "The `--resume` ident cannot name a checkpoint folder: empty, \".\" or \"..\", or holding a \"/\", a \"\\\" or NUL.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "parkDir"
+   },
+   "anchor": "return checkpointPath(stateDir(), slug, ident);"
+  },
+  {
+   "id": "t.resume.in-place-unsafe",
+   "from": "resume.start",
+   "to": "exit:internal",
+   "kind": "refuse",
+   "label": "In place: checkout not disposable",
+   "condition": "The run was in place and the repository has no `.styre-disposable` marker file, or (Python) its active environment's package is not installed from the repository: a plain error, before anything is changed.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "resumeRun"
+   },
+   "anchor": "assertInPlaceMarker(project.target_repo);"
+  },
+  {
+   "id": "t.resume.internal",
+   "from": "resume.start",
+   "to": "exit:internal",
+   "kind": "refuse",
+   "label": "Checkpoint inconsistent",
+   "condition": "The checkpoint's ticket or its project row vanished after the ident check: a plain error.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "resumeRun"
+   },
+   "anchor": "if (!project) throw new Error(\"resume: project missing\");"
+  },
+  {
    "id": "t.run.start",
    "from": "run.start",
    "to": "run.prepare",
    "kind": "forward",
    "label": "Start",
-   "condition": "Every check passed: the database is created or upgraded (migrate, with a backup before an upgrade), recover() warns about an older checkpoint, a run row is minted once.",
+   "condition": "Every check passed: the database is created or upgraded (migrate, with a backup before an upgrade), `recover()` warns about an older checkpoint, a run row is minted once.",
    "source": {
     "file": "src/cli/run.ts",
     "symbol": "runImpl"
@@ -1491,7 +1834,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "resolve.stage",
    "kind": "forward",
    "label": "Drive",
-   "condition": "The ticket is prepared; driveToTerminal ticks (one step per tick) until an outcome.",
+   "condition": "The ticket is prepared; `driveToTerminal` ticks (one step per tick) until an outcome.",
    "source": {
     "file": "src/daemon/run-ticket.ts",
     "symbol": "runTicket"
@@ -1504,7 +1847,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "provision",
    "kind": "forward",
    "label": "Stage design",
-   "condition": "ticket.stage is design (a new ticket starts there): the walk starts at the table's first row.",
+   "condition": "`ticket.stage` is design (a new ticket starts there): the walk starts at the table's first row.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -1518,7 +1861,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "implement.pick",
    "kind": "forward",
    "label": "Stage implement",
-   "condition": "ticket.stage is implement. (A change to a design input found here is recorded, as an inputs-changed note, and applies the next time the run is in design: E6.)",
+   "condition": "`ticket.stage` is implement. (A change to a design input found here is recorded, as an `inputs-changed` note, and applies the next time the run is in design: E6.)",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -1532,7 +1875,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "review",
    "kind": "forward",
    "label": "Stage review",
-   "condition": "ticket.stage is review: review runs unless it is succeeded.",
+   "condition": "`ticket.stage` is review: review runs unless it is succeeded.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -1546,7 +1889,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "merge:push",
    "kind": "forward",
    "label": "Stage merge",
-   "condition": "ticket.stage is merge: merge:push runs unless it is succeeded.",
+   "condition": "`ticket.stage` is merge: `merge:push` runs unless it is succeeded.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -1560,7 +1903,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "released:project",
    "kind": "forward",
    "label": "Stage released",
-   "condition": "ticket.stage is released: released:project runs unless it is succeeded.",
+   "condition": "`ticket.stage` is released: `released:project` runs unless it is succeeded.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -1574,7 +1917,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:usage",
    "kind": "refuse",
    "label": "No checkpoint",
-   "condition": "No run.db in the checkpoint folder for this ident.",
+   "condition": "No `run.db` in the checkpoint folder for this ident.",
    "source": {
     "file": "src/cli/park.ts",
     "symbol": "resumeRun"
@@ -1600,7 +1943,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:inspect",
    "kind": "refuse",
    "label": "--inspect",
-   "condition": "--inspect: reads a private copy whatever its version, prints the schema state, the recorded and current HEAD and the step resume would run again, and where resume would refuse. Writes nothing.",
+   "condition": "`--inspect`: reads a private copy whatever its version, prints the schema state, the recorded and current HEAD and the step resume would run again, and where resume would refuse. Writes nothing.",
    "source": {
     "file": "src/cli/park.ts",
     "symbol": "resumeRun"
@@ -1613,7 +1956,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:resume-refused",
    "kind": "refuse",
    "label": "No ticket with this ident",
-   "condition": "The checkpoint holds no tables, or no ticket with this ident (idents are case sensitive; an ident recorded in two projects is refused, not guessed). Names the idents it holds; never suggests --fresh.",
+   "condition": "The checkpoint holds no tables, or no ticket with this ident (idents are case sensitive; an ident recorded in two projects is refused, not guessed). Names the idents it holds; never suggests `--fresh`.",
    "source": {
     "file": "src/cli/park.ts",
     "symbol": "resumeRun"
@@ -1639,7 +1982,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:resume-refused",
    "kind": "refuse",
    "label": "Schema refused",
-   "condition": "migrate refuses the checkpoint's schema: newer than this Styre, older than v7, an unknown shape, or tables without schema_meta. (An older known version is upgraded instead, after a backup.)",
+   "condition": "migrate refuses the checkpoint's schema: newer than this Styre, older than v7, an unknown shape, or tables without `schema_meta`. (An older known version is upgraded instead, after a backup.)",
    "source": {
     "file": "src/db/migrate.ts",
     "symbol": "migrate"
@@ -1652,7 +1995,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:resume-refused",
    "kind": "refuse",
    "label": "HEAD moved",
-   "condition": "The branch HEAD moved since the run paused and --accept-head was not given.",
+   "condition": "The branch HEAD moved since the run paused and `--accept-head` was not given.",
    "source": {
     "file": "src/cli/park.ts",
     "symbol": "resumeRun"
@@ -1665,7 +2008,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "exit:resume-refused",
    "kind": "refuse",
    "label": "Review resume refused",
-   "condition": "planReviewResume refuses: for example the review repair limit is reached at the plan review gate or in review, a risk acceptance at a moved HEAD or for findings that cannot be accepted, or pending forge effects.",
+   "condition": "`planReviewResume` refuses: for example the review repair limit is reached at the plan review gate or in review, a risk acceptance at a moved HEAD or for findings that cannot be accepted, or pending forge effects.",
    "source": {
     "file": "src/cli/park.ts",
     "symbol": "resumeRun"
@@ -1704,7 +2047,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:toolchain-resume",
    "kind": "escalate",
    "label": "Toolchain missing",
-   "condition": "After the resume transaction and recover(): the same toolchain decision as a fresh run refuses (a required suite's tools are missing).",
+   "condition": "After the resume transaction and `recover()`: the same toolchain decision as a fresh run refuses (a required suite's tools are missing).",
    "source": {
     "file": "src/cli/park.ts",
     "symbol": "resumeRun"
@@ -1717,7 +2060,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "provision",
    "kind": "loopback",
    "label": "retry-plan: redesign",
-   "condition": "Stopped at the plan review gate (a plan review escalation since the last resumed event, with no design loopback and no invalidated note for a design: step after it), HEAD unmoved: the plan review verdict is applied again, and redesigns (invalidate design:dispatch, cause feedback; the walk starts again at its first row) when the findings' signature differs from the previous review loopback's.",
+   "condition": "Stopped at the plan review gate (a plan review escalation since the last resumed event, with no design loopback and no invalidated note for a `design:` step after it), HEAD unmoved: the plan review verdict is applied again, and redesigns (invalidate `design:dispatch`, cause `feedback`; the walk starts again at its first row) when the findings' signature differs from the previous review loopback's.",
    "source": {
     "file": "src/daemon/review-resume.ts",
     "symbol": "applyReviewResume"
@@ -1734,7 +2077,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:review-no-progress",
    "kind": "escalate",
    "label": "retry-plan: same findings",
-   "condition": "retry-plan with HEAD unmoved, and the blocking findings carry the same signature as the previous review loopback: the verdict escalates again at once.",
+   "condition": "`retry-plan` with HEAD unmoved, and the blocking findings carry the same signature as the previous review loopback: the verdict escalates again at once.",
    "source": {
     "file": "src/daemon/review-resume.ts",
     "symbol": "applyReviewResume"
@@ -1749,7 +2092,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "provision",
    "kind": "loopback",
    "label": "retry-plan: HEAD moved",
-   "condition": "At the plan review gate and HEAD moved (resumed with --accept-head, for example after committing a plan edit): redesignLoopback invalidates design:dispatch and design:extract (cause feedback); the walk starts again at its first row.",
+   "condition": "At the plan review gate and HEAD moved (resumed with `--accept-head`, for example after committing a plan edit): `redesignLoopback` invalidates `design:dispatch` and `design:extract` (cause `feedback`); the walk starts again at its first row.",
    "source": {
     "file": "src/daemon/review-resume.ts",
     "symbol": "applyReviewResume"
@@ -1770,7 +2113,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "implement.pick",
    "kind": "loopback",
    "label": "retry: code loopback",
-   "condition": "Stage review or merge, a succeeded review with unresolved code findings, HEAD unmoved, under the repair limit: the code review verdict is applied again (code loopback).",
+   "condition": "Stage review or merge, a succeeded review with an unresolved review reason (open major or critical code findings, or a deferral whose risk acceptance names another commit, which is reopened first), HEAD unmoved, under the repair limit, no pending forge push or PR request: the code review verdict is applied again. Fewer than 3 review loopbacks, findings not the same as the previous review loopback's, and none of category `plan-defect`: code loopback.",
    "source": {
     "file": "src/daemon/review-resume.ts",
     "symbol": "applyReviewResume"
@@ -1805,7 +2148,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "implement.pick",
    "kind": "loopback",
    "label": "retry: HEAD moved",
-   "condition": "Stage review or merge and HEAD moved (--accept-head): codeLoopback with no findings sends every unit back to be coded, so implement records the operator's new HEAD.",
+   "condition": "Stage review or merge and HEAD moved (`--accept-head`): `codeLoopback` with no findings sends every unit back to be coded, so implement records the operator's new HEAD.",
    "source": {
     "file": "src/daemon/review-resume.ts",
     "symbol": "applyReviewResume"
@@ -1820,12 +2163,48 @@ button:disabled { opacity: 0.45; cursor: default; }
    }
   },
   {
+   "id": "t.resume.retry-plan-defect",
+   "from": "resume.prepare",
+   "to": "esc:plan-defect-policy",
+   "kind": "escalate",
+   "label": "retry: plan defect again",
+   "condition": "After a plan defect escalation: retry with HEAD unmoved applies the code review verdict again; the `plan-defect` finding is still open and `onPlanDefect` is still `escalate`, so it escalates again at once (after the repair limit and same findings checks, which come first). Ways out: set `onPlanDefect` to `redesign` and resume, or change the code, commit, and resume with `--accept-head`.",
+   "source": {
+    "file": "src/daemon/review-resume.ts",
+    "symbol": "applyReviewResume"
+   },
+   "anchor": "applyReviewVerdict(db, ticketId, config, { stepKey: \"review\" });",
+   "resumePlan": "retry",
+   "signature": "review:*"
+  },
+  {
+   "id": "t.resume.retry-redesign",
+   "from": "resume.prepare",
+   "to": "provision",
+   "kind": "loopback",
+   "label": "retry: plan defect, redesign",
+   "condition": "After a plan defect escalation the operator set `onPlanDefect` to `redesign` in the runtime config, then resumed (HEAD unmoved): the code review verdict, applied again, redesigns: invalidate `design:dispatch` and `design:extract` (cause `feedback`), stage design; the walk starts again at its first row.",
+   "source": {
+    "file": "src/daemon/review-verdict.ts",
+    "symbol": "applyReviewVerdict"
+   },
+   "anchor": "redesignLoopback(db, ticketId, signature, blocking, dispatchId, [",
+   "resumePlan": "retry",
+   "loop": "design",
+   "cause": "feedback",
+   "signature": "review:*",
+   "stageChange": {
+    "from": "review",
+    "to": "design"
+   }
+  },
+  {
    "id": "t.resume.accept-risk",
    "from": "resume.prepare",
    "to": "review",
    "kind": "resume",
    "label": "accept-risk",
-   "condition": "--review-action accept-risk with exactly the open nominated major finding ids, at the unchanged reviewed HEAD, with a reason: those findings are deferred and a review-risk-accepted note is written; the PR discloses it.",
+   "condition": "`--review-action` `accept-risk` with exactly the open nominated major finding ids, at the unchanged reviewed HEAD, with a reason: those findings are deferred and a `review-risk-accepted` note is written; the PR discloses it.",
    "source": {
     "file": "src/daemon/review-resume.ts",
     "symbol": "applyReviewResume"
@@ -1839,7 +2218,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "resolve.stage",
    "kind": "resume",
    "label": "Continue",
-   "condition": "No review action applies: the run continues at the ticket's stage, rerunning the interrupted step (its carryover kept only when its step key, generation and manifest still match; otherwise a carryover-dropped note names the changed inputs). In worktree mode provision was invalidated (cause worktree-recreated) and is served again when the resolver next needs it.",
+   "condition": "No review action applies: the run continues at the ticket's stage, rerunning the interrupted step (its carryover kept only when its step key, generation and manifest still match; otherwise a `carryover-dropped` note names the changed inputs). In worktree mode provision was invalidated (cause `worktree-recreated`) and is served again when the resolver next needs it.",
    "source": {
     "file": "src/daemon/review-resume.ts",
     "symbol": "applyReviewResume"
@@ -1853,7 +2232,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "provision",
    "kind": "invalidate",
    "label": "Worktree recreated",
-   "condition": "Worktree mode (not in place), stage design, provision succeeded: the resume transaction invalidates provision (cause worktree-recreated: history row, new generation), so the walk reruns it first.",
+   "condition": "Worktree mode (not in place) and provision succeeded, at any stage: the resume transaction invalidates provision (cause `worktree-recreated`: history row, new generation). Drawn for a ticket in design, where the walk reruns it first; in implement the resolver serves it again before the next verify (Continue, then the resolver).",
    "source": {
     "file": "src/cli/park.ts",
     "symbol": "resumeRun"
@@ -1867,7 +2246,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "resume.start",
    "kind": "resume",
    "label": "Operator resumes",
-   "condition": "styre run --resume <ident> (after fixing what the reason names, if anything): the resume consumes the pending human_resume signal.",
+   "condition": "styre run `--resume` <ident> (after fixing what the reason names, if anything): the resume consumes the pending `human_resume` signal.",
    "source": {
     "file": "src/cli/park.ts",
     "symbol": "resumeRun"
@@ -1880,7 +2259,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "resume.start",
    "kind": "resume",
    "label": "Operator resumes",
-   "condition": "styre run --resume <ident> once the budget is back (no reset time gate).",
+   "condition": "styre run `--resume` <ident> once the budget is back (no reset time gate).",
    "source": {
     "file": "src/cli/run.ts",
     "symbol": "runImpl"
@@ -1893,7 +2272,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "resume.start",
    "kind": "resume",
    "label": "Operator resumes",
-   "condition": "styre run --resume <ident>: recover() matches the recorded interruption, undoes the step's in place edits, returns the branch to the step's start when safe, and resets the step to pending without using an attempt.",
+   "condition": "styre run `--resume` <ident>: `recover()` matches the recorded interruption, undoes the step's in place edits, returns the branch to the step's start when safe, and resets the step to pending without using an attempt.",
    "source": {
     "file": "src/daemon/recover.ts",
     "symbol": "recover"
@@ -1906,7 +2285,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "run.start",
    "kind": "resume",
    "label": "--fresh",
-   "condition": "styre run <ticket> --fresh: discards the whole checkpoint folder (after undoing an interrupted step's in place edits and freeing the old worktree) and starts over. Refused while another run holds the lock.",
+   "condition": "styre run <ticket> `--fresh`: discards the whole checkpoint folder (after undoing an interrupted step's in place edits and freeing the old worktree) and starts over. Refused while another run holds the lock.",
    "source": {
     "file": "src/cli/run.ts",
     "symbol": "runImpl"
@@ -1919,7 +2298,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "design:dispatch",
    "kind": "forward",
    "label": "Next row: design:dispatch",
-   "condition": "provision is succeeded and its recorded manifest matches its current inputs (any track). The walk moves on: runs design:dispatch when it is not succeeded, else compares its manifest. After an upstream rerun that produced the same output, this is the early cutoff.",
+   "condition": "provision is succeeded and its recorded manifest matches its current inputs (any track). The walk moves on: runs `design:dispatch` when it is not succeeded, else compares its manifest. After an upstream rerun that produced the same output, this is the early cutoff.",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "walkDesign"
@@ -1933,7 +2312,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "design:extract",
    "kind": "forward",
    "label": "Next row: design:extract",
-   "condition": "design:dispatch is succeeded and its recorded manifest matches its current inputs (any track). The walk moves on: runs design:extract when it is not succeeded, else compares its manifest. After an upstream rerun that produced the same output, this is the early cutoff.",
+   "condition": "`design:dispatch` is succeeded and its recorded manifest matches its current inputs (any track). The walk moves on: runs `design:extract` when it is not succeeded, else compares its manifest. After an upstream rerun that produced the same output, this is the early cutoff.",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "walkDesign"
@@ -1947,7 +2326,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "design:size",
    "kind": "forward",
    "label": "Next row: design:size",
-   "condition": "design:extract is succeeded and its recorded manifest matches its current inputs (any track). The walk moves on: runs design:size when it is not succeeded, else compares its manifest. After an upstream rerun that produced the same output, this is the early cutoff.",
+   "condition": "`design:extract` is succeeded and its recorded manifest matches its current inputs (any track). The walk moves on: runs `design:size` when it is not succeeded, else compares its manifest. After an upstream rerun that produced the same output, this is the early cutoff.",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "walkDesign"
@@ -1961,7 +2340,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "design:review",
    "kind": "forward",
    "label": "Next row: design:review",
-   "condition": "design:size is succeeded and its recorded manifest matches its current inputs (track full). The walk moves on: runs design:review when it is not succeeded, else compares its manifest. After an upstream rerun that produced the same output, this is the early cutoff.",
+   "condition": "`design:size` is succeeded and its recorded manifest matches its current inputs (track `full`). The walk moves on: runs `design:review` when it is not succeeded, else compares its manifest. After an upstream rerun that produced the same output, this is the early cutoff.",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "walkDesign"
@@ -1975,7 +2354,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "checks:dispatch",
    "kind": "forward",
    "label": "Past the table",
-   "condition": "design:size is succeeded and its recorded manifest matches its current inputs (track fast (design:review and the gate do not apply)). The walk moves on past the table's last row to today's checks routing (E9). After an upstream rerun that produced the same output, this is the early cutoff.",
+   "condition": "`design:size` is succeeded and its recorded manifest matches its current inputs (track `fast` (`design:review` and the gate do not apply)). The walk moves on past the table's last row to today's checks routing (E9). After an upstream rerun that produced the same output, this is the early cutoff.",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "walkDesign"
@@ -1989,7 +2368,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "gate:plan-review",
    "kind": "forward",
    "label": "Next row: gate:plan-review",
-   "condition": "design:review is succeeded and its recorded manifest matches its current inputs (track full). The walk moves on: runs gate:plan-review when it is not succeeded, else compares its manifest. After an upstream rerun that produced the same output, this is the early cutoff.",
+   "condition": "`design:review` is succeeded and its recorded manifest matches its current inputs (track `full`): the walk moves to the gate row and evaluates it (a gate has no status or manifest of its own; it fires or the walk goes past it).",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "walkDesign"
@@ -2003,7 +2382,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "checks:dispatch",
    "kind": "forward",
    "label": "Past the table",
-   "condition": "The gate does not fire: the latest design:review dispatch left no blocking plan findings. Past the table's last row, today's checks routing follows (E9).",
+   "condition": "The gate does not fire: the latest `design:review` dispatch left no blocking plan findings. Past the table's last row, today's checks routing follows (E9).",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "walkDesign"
@@ -2035,7 +2414,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:invalidate-loop",
    "kind": "escalate",
    "label": "Invalidate loop guard",
-   "condition": "provision's inputs changed again and it was already invalidated 3 times for changed inputs since the latest resumed event, reused-database note or design loopback.",
+   "condition": "provision's inputs changed again and it was already invalidated 3 times for changed inputs since the latest resumed event, `reused-database` note or design loopback.",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "walkDesign"
@@ -2053,7 +2432,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "design:dispatch",
    "kind": "invalidate",
    "label": "Inputs changed: invalidate",
-   "condition": "design:dispatch is succeeded but the digest of an input it records differs now (the note names them; a manifest from an older fingerprint scheme counts as changed), and fewer than 3 inputs invalidations of it since the count last restarted: invalidate design:dispatch alone (one invalidated note, a history row, a fresh round in the next generation; nothing is cleared; the rerun revises the plan in place), then rerun it. Its readers are judged afresh after it reruns.",
+   "condition": "`design:dispatch` is succeeded but the digest of an input it records differs now (the note names them; a manifest from an older fingerprint scheme counts as changed), and fewer than 3 inputs invalidations of it since the count last restarted: invalidate `design:dispatch` alone (one invalidated note, a history row, a fresh round in the next generation; nothing is cleared; the rerun revises the plan in place), then rerun it. Its readers are judged afresh after it reruns.",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "walkDesign"
@@ -2071,7 +2450,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:invalidate-loop",
    "kind": "escalate",
    "label": "Invalidate loop guard",
-   "condition": "design:dispatch's inputs changed again and it was already invalidated 3 times for changed inputs since the latest resumed event, reused-database note or design loopback.",
+   "condition": "`design:dispatch`'s inputs changed again and it was already invalidated 3 times for changed inputs since the latest resumed event, `reused-database` note or design loopback.",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "walkDesign"
@@ -2089,7 +2468,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "design:extract",
    "kind": "invalidate",
    "label": "Inputs changed: invalidate",
-   "condition": "design:extract is succeeded but the digest of an input it records differs now (the note names them; a manifest from an older fingerprint scheme counts as changed), and fewer than 3 inputs invalidations of it since the count last restarted: invalidate design:extract alone (one invalidated note, a history row, a fresh round in the next generation; every work unit is deleted (reconcile units included) after code and plan findings are detached, and needs_docs is set to 0), then rerun it. Its readers are judged afresh after it reruns.",
+   "condition": "`design:extract` is succeeded but the digest of an input it records differs now (the note names them; a manifest from an older fingerprint scheme counts as changed), and fewer than 3 inputs invalidations of it since the count last restarted: invalidate `design:extract` alone (one invalidated note, a history row, a fresh round in the next generation; every work unit is deleted (reconcile units included) after code and plan findings are detached, and `needs_docs` is set to 0), then rerun it. Its readers are judged afresh after it reruns.",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "walkDesign"
@@ -2107,7 +2486,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:invalidate-loop",
    "kind": "escalate",
    "label": "Invalidate loop guard",
-   "condition": "design:extract's inputs changed again and it was already invalidated 3 times for changed inputs since the latest resumed event, reused-database note or design loopback.",
+   "condition": "`design:extract`'s inputs changed again and it was already invalidated 3 times for changed inputs since the latest resumed event, `reused-database` note or design loopback.",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "walkDesign"
@@ -2125,7 +2504,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "design:size",
    "kind": "invalidate",
    "label": "Inputs changed: invalidate",
-   "condition": "design:size is succeeded but the digest of an input it records differs now (the note names them; a manifest from an older fingerprint scheme counts as changed), and fewer than 3 inputs invalidations of it since the count last restarted: invalidate design:size alone (one invalidated note, a history row, a fresh round in the next generation; ticket.track is set to NULL), then rerun it. Its readers are judged afresh after it reruns.",
+   "condition": "`design:size` is succeeded but the digest of an input it records differs now (the note names them; a manifest from an older fingerprint scheme counts as changed), and fewer than 3 inputs invalidations of it since the count last restarted: invalidate `design:size` alone (one invalidated note, a history row, a fresh round in the next generation; `ticket.track` is set to NULL), then rerun it. Its readers are judged afresh after it reruns.",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "walkDesign"
@@ -2143,7 +2522,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:invalidate-loop",
    "kind": "escalate",
    "label": "Invalidate loop guard",
-   "condition": "design:size's inputs changed again and it was already invalidated 3 times for changed inputs since the latest resumed event, reused-database note or design loopback.",
+   "condition": "`design:size`'s inputs changed again and it was already invalidated 3 times for changed inputs since the latest resumed event, `reused-database` note or design loopback.",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "walkDesign"
@@ -2161,7 +2540,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "design:review",
    "kind": "invalidate",
    "label": "Inputs changed: invalidate",
-   "condition": "design:review is succeeded but the digest of an input it records differs now (the note names them; a manifest from an older fingerprint scheme counts as changed), and fewer than 3 inputs invalidations of it since the count last restarted: invalidate design:review alone (one invalidated note, a history row, a fresh round in the next generation; nothing is cleared), then rerun it. Its readers are judged afresh after it reruns.",
+   "condition": "`design:review` is succeeded but the digest of an input it records differs now (the note names them; a manifest from an older fingerprint scheme counts as changed), and fewer than 3 inputs invalidations of it since the count last restarted: invalidate `design:review` alone (one invalidated note, a history row, a fresh round in the next generation; nothing is cleared), then rerun it. Its readers are judged afresh after it reruns.",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "walkDesign"
@@ -2179,7 +2558,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:invalidate-loop",
    "kind": "escalate",
    "label": "Invalidate loop guard",
-   "condition": "design:review's inputs changed again and it was already invalidated 3 times for changed inputs since the latest resumed event, reused-database note or design loopback.",
+   "condition": "`design:review`'s inputs changed again and it was already invalidated 3 times for changed inputs since the latest resumed event, `reused-database` note or design loopback.",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "walkDesign"
@@ -2197,7 +2576,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:plan-review-gate",
    "kind": "escalate",
    "label": "Gate fires",
-   "condition": "Track full; design:review is succeeded and unchanged, and its latest dispatch left blocking plan findings. Reached when nothing design:review reads changed since it left those findings, for example a redesign whose plan came back with the same digest (early cutoff all the way down).",
+   "condition": "Track full; `design:review` is succeeded and unchanged, and its latest dispatch left blocking plan findings. Reached when nothing `design:review` reads changed since it left those findings, for example a redesign whose plan came back with the same digest (early cutoff all the way down).",
    "source": {
     "file": "src/daemon/design-walk.ts",
     "symbol": "GATE_FIRES"
@@ -2212,7 +2591,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:prerequisite",
    "kind": "escalate",
    "label": "Plan not committed",
-   "condition": "The plan exists in the worktree but git has none at the branch head (docs/plans/ ignored, say): StepPrerequisiteError, escalated at once with no retry. Remove the ignore rule, commit, resume with --accept-head.",
+   "condition": "The plan exists in the worktree but git has none at the branch head (`docs/plans/` ignored, say): `StepPrerequisiteError`, escalated at once with no retry. Remove the ignore rule, commit, resume with `--accept-head`.",
    "source": {
     "file": "src/dispatch/handlers.ts",
     "symbol": "buildDispatchRegistry"
@@ -2226,7 +2605,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "provision",
    "kind": "loopback",
    "label": "Blocking findings: redesign",
-   "condition": "The latest design:review dispatch filed blocking plan findings (open, major or critical), fewer than 3 review loopbacks so far, not identical to the previous review loopback: invalidate design:dispatch (cause feedback; the findings ride the loopback event, tied to its new generation). design:review stays succeeded until the walk reruns it. The walk starts again at its first row.",
+   "condition": "The latest `design:review` dispatch filed blocking plan findings (open, major or critical), fewer than 3 review loopbacks so far, not identical to the previous review loopback: invalidate `design:dispatch` (cause `feedback`; the findings ride the loopback event, tied to its new generation). `design:review` stays succeeded until the walk reruns it. The walk starts again at its first row.",
    "source": {
     "file": "src/daemon/review-verdict.ts",
     "symbol": "applyReviewVerdict"
@@ -2276,7 +2655,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "checks:classify",
    "kind": "forward",
    "label": "Classify",
-   "condition": "checks:dispatch is succeeded; checks:classify runs unless it is succeeded.",
+   "condition": "`checks:dispatch` is succeeded; `checks:classify` runs unless it is succeeded.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -2290,7 +2669,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "implement.pick",
    "kind": "advance",
    "label": "Advance design → implement",
-   "condition": "checks:classify is succeeded (its verdict left no check flagged, or this is a later pass after a redesign): the interpreter sets the stage, appends the transition event and enqueues the tracker projection in one transaction.",
+   "condition": "`checks:classify` is succeeded (its verdict left no check flagged, or this is a later pass after a redesign): the interpreter sets the stage, appends the transition event and enqueues the tracker projection in one transaction.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -2308,7 +2687,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "checks:dispatch",
    "kind": "loopback",
    "label": "Vacuous or weak checks: author again",
-   "condition": "Active checks left unresolved by classify (vacuous or weak), each flagged criterion authored again fewer than 2 rounds: supersede the flagged checks, reset checks:dispatch and checks:classify; no stage change.",
+   "condition": "Active checks left unresolved by classify (vacuous or weak), each flagged criterion authored again fewer than 2 rounds: supersede the flagged checks, reset `checks:dispatch` and `checks:classify`; no stage change.",
    "source": {
     "file": "src/daemon/checks-verdict.ts",
     "symbol": "applyChecksVerdict"
@@ -2343,7 +2722,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "implement:wu<seq>:dispatch",
    "kind": "forward",
    "label": "Code the unit",
-   "condition": "The first unit by seq that is pending, with all its depends_on units verified.",
+   "condition": "The first unit by seq that is pending, with all its `depends_on` units verified.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -2371,7 +2750,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "completeness:wu<seq>",
    "kind": "forward",
    "label": "Completeness",
-   "condition": "That unit is verifying, provision is succeeded, and completeness:wu<seq> is not succeeded.",
+   "condition": "That unit is verifying, provision is succeeded, and `completeness:wu<seq>` is not succeeded.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -2440,7 +2819,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "checks:reauthor",
    "kind": "forward",
    "label": "Reauthor",
-   "condition": "Blame is recorded at HEAD and checks:reauthor is not succeeded this round.",
+   "condition": "Blame is recorded at HEAD and `checks:reauthor` is not succeeded this round.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -2454,7 +2833,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:gate-stuck-head",
    "kind": "escalate",
    "label": "Stuck HEAD",
-   "condition": "Blame recorded at HEAD, checks:reauthor done, and verify:checks-gate already succeeded this round: rerunning it would only replay its success.",
+   "condition": "Blame recorded at HEAD, `checks:reauthor` done, and `verify:checks-gate` already succeeded this round: rerunning it would only replay its success.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -2497,7 +2876,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "docs:revise",
    "kind": "forward",
    "label": "Docs",
-   "condition": "An integration verdict exists at HEAD, ticket.needs_docs is 1 and docs:revise is not succeeded.",
+   "condition": "An integration verdict exists at HEAD, `ticket.needs_docs` is 1 and `docs:revise` is not succeeded.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -2585,7 +2964,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "implement.pick",
    "kind": "invalidate",
    "label": "Manifest touched",
-   "condition": "The committed diff touches a dependency manifest (package.json, a lockfile, pyproject.toml, ...) while provision is succeeded: provision is invalidated (cause manifest-touched), so the resolver serves it again before this unit's checks.",
+   "condition": "The committed diff touches a dependency manifest (`package.json`, a lockfile, `pyproject.toml`, ...) while provision is succeeded: provision is invalidated (cause `manifest-touched`), so the resolver serves it again before this unit's checks.",
    "source": {
     "file": "src/dispatch/provision.ts",
     "symbol": "resetProvisionIfManifestTouched"
@@ -2769,7 +3148,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "implement.pick",
    "kind": "forward",
    "label": "Behavioral red: to the arbiter",
-   "condition": "Behavioral checks still red and the gate's attempt is under 3: the verdict defers (clean); the resolver serves checks:arbitrate.",
+   "condition": "Behavioral checks still red and the gate's attempt is under 3: the verdict defers (clean); the resolver serves `checks:arbitrate`.",
    "source": {
     "file": "src/daemon/checks-gate-verdict.ts",
     "symbol": "applyAcCheckGateVerdict"
@@ -2820,7 +3199,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:checks-gate-fault",
    "kind": "escalate",
    "label": "Gate threw",
-   "condition": "The gate step threw something other than a StepExecutionError (missing branch sha, git fault): escalate; never a reconcile unit.",
+   "condition": "The gate step threw something other than a `StepExecutionError` (missing branch sha, git fault): escalate; never a reconcile unit.",
    "source": {
     "file": "src/daemon/failure-policy.ts",
     "symbol": "applyFailurePolicy"
@@ -2864,7 +3243,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "implement.pick",
    "kind": "loopback",
    "label": "check-wrong: reauthor",
-   "condition": "Any check blamed `check-wrong`: reset checks:reauthor and checks:arbitrate; the resolver serves checks:reauthor next.",
+   "condition": "Any check blamed `check-wrong`: reset `checks:reauthor` and `checks:arbitrate`; the resolver serves `checks:reauthor` next.",
    "source": {
     "file": "src/daemon/arbiter-verdict.ts",
     "symbol": "applyArbiterVerdict"
@@ -2967,7 +3346,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "implement.pick",
    "kind": "loopback",
    "label": "Sweep threw: reconcile unit",
-   "condition": "The sweep threw something other than a StepExecutionError: add a reconcile unit that depends on every other unit, reset the sweep, the gate (its attempt zeroed), arbiter and reauthor.",
+   "condition": "The sweep threw something other than a `StepExecutionError`: add a reconcile unit that depends on every other unit, reset the sweep, the gate (its attempt zeroed), arbiter and reauthor.",
    "source": {
     "file": "src/daemon/failure-policy.ts",
     "symbol": "applyFailurePolicy"
@@ -2982,7 +3361,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "implement.pick",
    "kind": "forward",
    "label": "Docs revised",
-   "condition": "docs:revise succeeded.",
+   "condition": "`docs:revise` succeeded.",
    "source": {
     "file": "src/dispatch/handlers.ts",
     "symbol": "buildDispatchRegistry"
@@ -3028,7 +3407,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "implement.pick",
    "kind": "loopback",
    "label": "Blocking code findings: code again",
-   "condition": "Blocking code findings (major or critical, deferral suggestions included), none of category plan-defect, fewer than 3 review loopbacks, not identical to the previous review loopback: the blamed units (every unit when a finding names none) and their steps back to pending; review, the ticket's verify steps and the merge steps reset; stage implement.",
+   "condition": "Blocking code findings (major or critical, deferral suggestions included), none of category `plan-defect`, fewer than 3 review loopbacks, not identical to the previous review loopback: the blamed units (every unit when a finding names none) and their steps back to pending; review, the ticket's verify steps and the merge steps reset; stage implement.",
    "source": {
     "file": "src/daemon/review-verdict.ts",
     "symbol": "applyReviewVerdict"
@@ -3081,7 +3460,10 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:plan-defect-policy",
    "kind": "escalate",
    "label": "Plan defect: escalate",
-   "condition": "A blocking finding of category plan-defect and onPlanDefect is escalate (the default).",
+   "condition": "After the two checks that come first (the repair limit: 3 review loopbacks already; the same findings as the previous review loopback), a blocking finding of category `plan-defect` and `onPlanDefect` is `escalate` (the default). The escalation writes no loopback.",
+   "constants": [
+    "REVIEW_REPAIR_LIMIT"
+   ],
    "source": {
     "file": "src/daemon/review-verdict.ts",
     "symbol": "applyReviewVerdict"
@@ -3095,7 +3477,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "provision",
    "kind": "loopback",
    "label": "Plan defect: redesign",
-   "condition": "A blocking plan-defect and onPlanDefect is redesign: invalidate design:dispatch and design:extract (cause feedback; findings detached first, the units created and implemented again); review, verify and merge steps reset; stage design. The checks steps keep today's state (E9).",
+   "condition": "After the two checks that come first (the repair limit: 3 review loopbacks already; the same findings as the previous review loopback), a blocking `plan-defect` and `onPlanDefect` is `redesign`: invalidate `design:dispatch` and `design:extract` (cause `feedback`; findings detached first, the units created and implemented again); review, verify and merge steps reset; stage design. The checks steps keep today's state (E9).",
    "source": {
     "file": "src/daemon/review-verdict.ts",
     "symbol": "applyReviewVerdict"
@@ -3107,7 +3489,10 @@ button:disabled { opacity: 0.45; cursor: default; }
    "stageChange": {
     "from": "review",
     "to": "design"
-   }
+   },
+   "constants": [
+    "REVIEW_REPAIR_LIMIT"
+   ]
   },
   {
    "id": "t.merge.push",
@@ -3115,7 +3500,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "merge:pr-ensure",
    "kind": "forward",
    "label": "PR",
-   "condition": "merge:push is succeeded; merge:pr-ensure runs unless it is succeeded.",
+   "condition": "`merge:push` is succeeded; `merge:pr-ensure` runs unless it is succeeded.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -3129,7 +3514,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "wait:human_merge_approval",
    "kind": "forward",
    "label": "Wait for the merge",
-   "condition": "Both merge steps succeeded and human_merge_approval is not delivered: the interpreter records the wait.",
+   "condition": "Both merge steps succeeded and `human_merge_approval` is not delivered: the interpreter records the wait.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -3143,12 +3528,15 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "outcome:pr-ready",
    "kind": "outcome",
    "label": "PR ready",
-   "condition": "Stage merge with human_merge_approval pending; the outbox is drained (bounded by its retry budget); the PR's URL was delivered and the latest push was delivered at the current head: one CI read (reported, never gated), exit 0.",
+   "condition": "Stage merge with `human_merge_approval` pending; the outbox is drained (at most 5 drains); the PR's URL was delivered and the latest push was delivered at the current head: one CI read (reported, never gated), exit 0.",
    "source": {
     "file": "src/daemon/run-ticket.ts",
     "symbol": "driveToTerminal"
    },
-   "anchor": "if (t.stage === \"merge\" && pending.some((s) => s.signal_type === \"human_merge_approval\")) {"
+   "anchor": "if (t.stage === \"merge\" && pending.some((s) => s.signal_type === \"human_merge_approval\")) {",
+   "constants": [
+    "OUTBOX_RETRY_BUDGET"
+   ]
   },
   {
    "id": "t.merge.undelivered",
@@ -3169,7 +3557,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "released:project",
    "kind": "advance",
    "label": "Advance merge → released",
-   "condition": "human_merge_approval delivered. The commercial Control Plane delivers it; styre run never does (it exits at pr-ready).",
+   "condition": "`human_merge_approval` delivered. The commercial Control Plane delivers it; styre run never does (it exits at `pr-ready`).",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -3187,7 +3575,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "outcome:done",
    "kind": "outcome",
    "label": "Done",
-   "condition": "released:project succeeded: the ticket status becomes done.",
+   "condition": "`released:project` succeeded: the ticket status becomes done.",
    "source": {
     "file": "src/daemon/resolver.ts",
     "symbol": "nextStepKey"
@@ -3201,7 +3589,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "paused:needs_you",
    "kind": "pause",
    "label": "Pause: needs you",
-   "condition": "The escalation left the ticket waiting with a pending human_resume signal: the run ends paused, reason needs_you, exit 75 (driveToTerminal's next check; a resume's toolchain pause ends through the same run end directly).",
+   "condition": "The escalation left the ticket waiting with a pending `human_resume` signal: the run ends paused, reason `needs_you`, exit 75 (`driveToTerminal`'s next check; a resume's toolchain pause ends through the same run end directly).",
    "source": {
     "file": "src/daemon/run-ticket.ts",
     "symbol": "driveToTerminal"
@@ -3214,7 +3602,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "paused:budget",
    "kind": "pause",
    "label": "Out of budget",
-   "condition": "The agent dispatch died of a session limit or out of credits (ParkSignal): the attempt is given back, the ticket waits, a parked event is written; the run exits 75.",
+   "condition": "The agent dispatch died of a session limit or out of credits (`ParkSignal`): the attempt is given back, the ticket waits, a parked event is written; the run exits 75.",
    "source": {
     "file": "src/daemon/advance.ts",
     "symbol": "advanceOneStep"
@@ -3257,7 +3645,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:prerequisite",
    "kind": "escalate",
    "label": "Prerequisite error",
-   "condition": "The step threw StepPrerequisiteError: escalated at once, whatever the attempt.",
+   "condition": "The step threw `StepPrerequisiteError`: escalated at once, whatever the attempt.",
    "source": {
     "file": "src/daemon/failure-policy.ts",
     "symbol": "applyFailurePolicy"
@@ -3271,7 +3659,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:invariant",
    "kind": "escalate",
    "label": "Invariant violation",
-   "condition": "The step broke an invariant (InvariantViolation, recorded with invariant: true): escalated at once, on attempt 1.",
+   "condition": "The step broke an invariant (`InvariantViolation`, recorded with invariant: true): escalated at once, on attempt 1.",
    "source": {
     "file": "src/daemon/failure-policy.ts",
     "symbol": "applyFailurePolicy"
@@ -3299,7 +3687,7 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "@self",
    "kind": "retry",
    "label": "Execution error: retry",
-   "condition": "Failed with StepExecutionError (an operation did not complete; a test environment not ready, say) and its attempt count is under 3: the same step runs again.",
+   "condition": "Failed with `StepExecutionError` (an operation did not complete; a test environment not ready, say) and its attempt count is under 3: the same step runs again.",
    "source": {
     "file": "src/daemon/failure-policy.ts",
     "symbol": "applyFailurePolicy"
@@ -3327,11 +3715,11 @@ button:disabled { opacity: 0.45; cursor: default; }
   },
   {
    "id": "t.any.contract",
-   "from": "@steps",
+   "from": "resolve.stage",
    "to": "esc:contract",
    "kind": "escalate",
    "label": "Contract unavailable",
-   "condition": "Before the next pass, the registry's synchronize threw: the run pauses with no step to rearm.",
+   "condition": "At the start of every pass, before the resolver picks a step (drawn on the resolver, where every pass begins): the registry's synchronize throws, so the ticket pauses with no step to rearm.",
    "source": {
     "file": "src/daemon/advance.ts",
     "symbol": "advanceOneStep"
@@ -3344,7 +3732,10 @@ button:disabled { opacity: 0.45; cursor: default; }
    "to": "esc:stalled",
    "kind": "escalate",
    "label": "Stalled",
-   "condition": "Three ticks in a row advanced nothing and nothing else ended the run.",
+   "condition": "3 ticks in a row advanced nothing and nothing else ended the run.",
+   "constants": [
+    "IDLE_CAP"
+   ],
    "source": {
     "file": "src/daemon/run-ticket.ts",
     "symbol": "driveToTerminal"
@@ -3358,6 +3749,9 @@ button:disabled { opacity: 0.45; cursor: default; }
    "kind": "escalate",
    "label": "Tick budget",
    "condition": "The run used its 200 ticks.",
+   "constants": [
+    "DEFAULT_CAP"
+   ],
    "source": {
     "file": "src/daemon/run-ticket.ts",
     "symbol": "driveToTerminal"
@@ -3371,11 +3765,56 @@ button:disabled { opacity: 0.45; cursor: default; }
    "kind": "escalate",
    "label": "Projection failed",
    "condition": "After a tick, an outbox row failed past its retry budget (5 drains).",
+   "constants": [
+    "OUTBOX_RETRY_BUDGET"
+   ],
    "source": {
     "file": "src/daemon/projector.ts",
     "symbol": "drainOutbox"
    },
    "anchor": "export const OUTBOX_RETRY_BUDGET = 5;"
+  },
+  {
+   "id": "t.any.max-transitions",
+   "from": "resolve.stage",
+   "to": "exit:internal",
+   "kind": "refuse",
+   "label": "Transition budget exceeded",
+   "condition": "Within one pass, the interpreter applied 100 pure descriptors (advance, mark verified, invalidate) without running a step: it throws, and the run ends with exit 70.",
+   "source": {
+    "file": "src/daemon/advance.ts",
+    "symbol": "advanceOneStep"
+   },
+   "anchor": "exceeded ${MAX_TRANSITIONS} transitions for ticket",
+   "constants": [
+    "MAX_TRANSITIONS"
+   ]
+  },
+  {
+   "id": "t.any.internal-step",
+   "from": "@steps",
+   "to": "exit:internal",
+   "kind": "refuse",
+   "label": "Error outside the policy",
+   "condition": "The step throws and is not left failed (a step found running, `StepInFlightError`), or no handler is registered for it: propagated, not routed through the failure policy; the run ends with exit 70.",
+   "source": {
+    "file": "src/daemon/advance.ts",
+    "symbol": "advanceOneStep"
+   },
+   "anchor": "// Not a handler failure — e.g. StepInFlightError (a running step; recover() owns it). Propagate."
+  },
+  {
+   "id": "t.table.precheck",
+   "from": "@table-steps",
+   "to": "exit:internal",
+   "kind": "refuse",
+   "label": "Table or snapshot check fails",
+   "condition": "Before a design table step runs (provision included, in any stage): the declared table breaks its own rules (`DesignTableError`), or the ticket's input snapshot is missing. Thrown outside the step, so never retried; the run ends with exit 70.",
+   "source": {
+    "file": "src/daemon/advance.ts",
+    "symbol": "advanceOneStep"
+   },
+   "anchor": "requireSnapshot(db, ticketId);"
   }
  ],
  "scenarios": [
@@ -3416,7 +3855,7 @@ button:disabled { opacity: 0.45; cursor: default; }
   {
    "id": "success-full",
    "label": "Success, full track",
-   "summary": "design:size sets track full, so design:review runs and the plan review gate is passed.",
+   "summary": "`design:size` sets track `full`, so `design:review` runs and the plan review gate is passed.",
    "transitions": [
     "t.run.start",
     "t.run.prepared",
@@ -3452,7 +3891,7 @@ button:disabled { opacity: 0.45; cursor: default; }
   {
    "id": "plan-review-redesign",
    "label": "Plan review fails, redesign passes",
-   "summary": "design:review files blocking findings; design:dispatch is invalidated with cause feedback; the new plan changes extract, size and review's inputs, so each is invalidated (cause inputs) and reruns; the second review is clean.",
+   "summary": "`design:review` files blocking findings; `design:dispatch` is invalidated with cause `feedback`; the new plan changes extract, size and review's inputs, so each is invalidated (cause `inputs`) and reruns; the second review is clean.",
    "transitions": [
     "t.run.start",
     "t.run.prepared",
@@ -3496,7 +3935,7 @@ button:disabled { opacity: 0.45; cursor: default; }
   {
    "id": "plan-review-twice",
    "label": "Plan review fails twice: escalation",
-   "summary": "The redesigned plan is reviewed again and returns the same blocking findings: the verdict escalates (no progress). A plain resume applies the verdict again and escalates again; retry-plan needs a changed plan (commit it, resume with --accept-head).",
+   "summary": "The redesigned plan is reviewed again and returns the same blocking findings: the verdict escalates (no progress). A plain resume applies the verdict again and escalates again; `retry-plan` needs a changed plan (commit it, resume with `--accept-head`).",
    "transitions": [
     "t.run.start",
     "t.run.prepared",
@@ -3524,7 +3963,7 @@ button:disabled { opacity: 0.45; cursor: default; }
   {
    "id": "plan-review-gate",
    "label": "Redesign returns the same plan: the gate escalates",
-   "summary": "After a redesign the plan's digest is unchanged, so extract, size and review all pass over (early cutoff) and design:review still holds its blocking findings: the plan review gate fires. The operator commits a plan edit and resumes with --accept-head: retry-plan redesigns again.",
+   "summary": "After a redesign the plan's digest is unchanged, so extract, size and review all pass over (early cutoff) and `design:review` still holds its blocking findings: the plan review gate fires. The operator commits a plan edit and resumes with `--accept-head`: `retry-plan` redesigns again.",
    "transitions": [
     "t.run.start",
     "t.run.prepared",
@@ -3577,7 +4016,7 @@ button:disabled { opacity: 0.45; cursor: default; }
   {
    "id": "checks-reauthor",
    "label": "AC checks flagged: author again, then escalate",
-   "summary": "checks:classify leaves a criterion's checks vacuous: they are superseded and authored again; still flagged after the second round, the run escalates.",
+   "summary": "`checks:classify` leaves a criterion's checks vacuous: they are superseded and authored again; still flagged after the second round, the run escalates.",
    "transitions": [
     "t.run.start",
     "t.run.prepared",
@@ -3813,8 +4252,8 @@ button:disabled { opacity: 0.45; cursor: default; }
   },
   {
    "id": "review-plan-defect-escalate",
-   "label": "Code review: plan defect, policy escalate",
-   "summary": "A blocking plan-defect finding with onPlanDefect = escalate (the default).",
+   "label": "Code review: plan defect, policy escalate, then the way out",
+   "summary": "A blocking `plan-defect` finding with `onPlanDefect` = `escalate` (the default). A plain resume applies the verdict again and escalates again at once. The operator sets `onPlanDefect` to `redesign` and resumes: the run goes back to design (dispatch and extract invalidated, cause `feedback`) and on to a PR.",
    "transitions": [
     "t.run.start",
     "t.run.prepared",
@@ -3840,13 +4279,45 @@ button:disabled { opacity: 0.45; cursor: default; }
     "t.pick.floor",
     "t.floor.holds",
     "t.review.plan-defect-escalate",
-    "t.esc.pause@esc:plan-defect-policy"
+    "t.esc.pause@esc:plan-defect-policy",
+    "t.resume.from-needs-you",
+    "t.resume.start",
+    "t.resume.retry-plan-defect",
+    "t.esc.pause@esc:plan-defect-policy",
+    "t.resume.from-needs-you",
+    "t.resume.start",
+    "t.resume.retry-redesign",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.inv.inputs.design:size",
+    "t.walk.design:size>checks:dispatch",
+    "t.checks.dispatch",
+    "t.checks.clean-advance",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.clean-advance",
+    "t.merge.push",
+    "t.merge.ensure",
+    "t.merge.pr-ready"
    ]
   },
   {
    "id": "review-plan-defect-redesign",
    "label": "Code review: plan defect, policy redesign",
-   "summary": "With onPlanDefect = redesign the run returns to design: design:dispatch and design:extract are invalidated (cause feedback), the new units change size's inputs, the checks steps stay as they were (E9), and the units are implemented again.",
+   "summary": "With `onPlanDefect` = `redesign` the run returns to design: `design:dispatch` and `design:extract` are invalidated (cause `feedback`), the new units change size's inputs, the checks steps stay as they were (E9), and the units are implemented again.",
    "transitions": [
     "t.run.start",
     "t.run.prepared",
@@ -3902,7 +4373,7 @@ button:disabled { opacity: 0.45; cursor: default; }
   {
    "id": "input-edited-on-resume",
    "label": "An input edited on resume: invalidate, early cutoff",
-   "summary": "Full track, complexity grading off; the run pauses for budget in design:review. The operator edits the profile's prompt vars and resumes: provision reruns (worktree recreated); design:dispatch and design:extract read the prompt vars, so each is invalidated (cause inputs) and reruns; the units come back the same, so design:size, which reads only the grading flag and the units, passes over (early cutoff); design:review, still pending from the pause, runs without its carryover (its inputs changed, so a carryover-dropped note names them).",
+   "summary": "Full track, complexity grading off; the run pauses for budget in `design:review`. The operator edits the profile's prompt vars and resumes: provision reruns (worktree recreated); `design:dispatch` and `design:extract` read the prompt vars, so each is invalidated (cause `inputs`) and reruns; the units come back the same, so `design:size`, which reads only the grading flag and the units, passes over (early cutoff); `design:review`, still pending from the pause, runs without its carryover (its inputs changed, so a `carryover-dropped` note names them).",
    "transitions": [
     "t.run.start",
     "t.run.prepared",
@@ -3990,7 +4461,7 @@ button:disabled { opacity: 0.45; cursor: default; }
   {
    "id": "attempts-exhausted",
    "label": "A step retries, then exhausts its attempts",
-   "summary": "design:extract fails three times (an agent death, say): two retries, then escalation at attempt 3.",
+   "summary": "`design:extract` fails three times (an agent death, say): two retries, then escalation at attempt 3.",
    "transitions": [
     "t.run.start",
     "t.run.prepared",
@@ -4006,7 +4477,7 @@ button:disabled { opacity: 0.45; cursor: default; }
   {
    "id": "resume-toolchain-pause",
    "label": "Resume on a host without the tools",
-   "summary": "A budget pause resumed on a host that lacks a required suite's tools: pause needs_you, exit 75 (never 69).",
+   "summary": "A budget pause resumed on a host that lacks a required suite's tools: pause `needs_you`, exit 75 (never 69).",
    "transitions": [
     "t.run.start",
     "t.run.prepared",
@@ -4079,6 +4550,10 @@ button:disabled { opacity: 0.45; cursor: default; }
   ],
   "exit:inspect": [
    1000,
+   120
+  ],
+  "exit:internal": [
+   1180,
    120
   ],
   "provision": [
@@ -4297,6 +4772,18 @@ button:disabled { opacity: 0.45; cursor: default; }
    460,
    1070
   ]
+ },
+ "escalationWrites": {
+  "src/daemon/advance.ts": 4,
+  "src/daemon/arbiter-verdict.ts": 2,
+  "src/daemon/checks-gate-verdict.ts": 3,
+  "src/daemon/checks-verdict.ts": 1,
+  "src/daemon/failure-policy.ts": 5,
+  "src/daemon/pause-ticket.ts": 1,
+  "src/daemon/projector.ts": 2,
+  "src/daemon/review-verdict.ts": 5,
+  "src/daemon/run-ticket.ts": 3,
+  "src/cli/park.ts": 1
  }
 }
 </script>
@@ -4328,7 +4815,6 @@ button:disabled { opacity: 0.45; cursor: default; }
   var outgoing = {};
   all.forEach(function (t) { (outgoing[t.from] = outgoing[t.from] || []).push(t); });
 
-  document.getElementById("built").textContent = "Built from " + data.builtFrom + ".";
 
   // ------------------------------------------------------------------ SVG
   var svg = document.getElementById("diagram");
@@ -4338,6 +4824,20 @@ button:disabled { opacity: 0.45; cursor: default; }
     if (parent) parent.appendChild(e);
     return e;
   }
+  // Text with `identifiers` in backticks, as text and <code> nodes (never as HTML).
+  function rich(parent, text) {
+    String(text).split(/(`[^`]*`)/).forEach(function (part, i) {
+      if (i % 2 === 1) {
+        var c = document.createElement("code");
+        c.textContent = part.slice(1, -1);
+        parent.appendChild(c);
+      } else if (part) {
+        parent.appendChild(document.createTextNode(part));
+      }
+    });
+    return parent;
+  }
+  function plain(text) { return String(text).replace(/`/g, ""); }
   var defs = el("defs", {}, svg);
   ["forward", "advance", "loopback", "invalidate", "retry", "escalate", "pause", "resume", "refuse", "outcome"].forEach(function (k) {
     var m = el("marker", { id: "mk-" + k, viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" }, defs);
@@ -4396,14 +4896,14 @@ button:disabled { opacity: 0.45; cursor: default; }
       var lane = lanes[key] = (lanes[key] === undefined ? 0 : lanes[key] + 1);
       var p = el("path", { d: edgePath(t, lane), "class": "edge " + t.kind + " k-" + t.kind + " " + (cls(t) || ""), "marker-end": "url(#mk-" + t.kind + ")" }, layer);
       var title = el("title", {}, p);
-      title.textContent = t.label + ": " + t.condition;
+      title.textContent = t.label + ": " + plain(t.condition);
     });
   }
 
   var nodeEls = {};
   data.states.forEach(function (s) {
     var p = pos(s.id);
-    var g = el("g", { "class": "node n-" + s.kind, tabindex: "0", role: "button", "aria-label": s.label + " (" + s.kind + "). " + s.description }, nodeLayer);
+    var g = el("g", { "class": "node n-" + s.kind, tabindex: "0", role: "button", "aria-label": s.label + " (" + s.kind + "). " + plain(s.description) }, nodeLayer);
     el("rect", { x: p[0] - NODE_W / 2, y: p[1] - NODE_H / 2, width: NODE_W, height: NODE_H, rx: s.kind === "step" ? 6 : 14 }, g);
     var text = el("text", { x: p[0], y: p[1] + 4, "text-anchor": "middle" }, g);
     text.textContent = s.label;
@@ -4463,7 +4963,7 @@ button:disabled { opacity: 0.45; cursor: default; }
     go.addEventListener("click", function () { selectState(t.to, true); });
     head.appendChild(go);
     li.appendChild(head);
-    var p = document.createElement("p"); p.textContent = t.condition; li.appendChild(p);
+    li.appendChild(rich(document.createElement("p"), t.condition));
     var tg = tags(t);
     if (tg) { var d = document.createElement("div"); d.className = "tags"; d.textContent = tg; li.appendChild(d); }
     li.appendChild(srcLine(t.source, t.anchor));
@@ -4480,7 +4980,7 @@ button:disabled { opacity: 0.45; cursor: default; }
     if (s.exitCode !== undefined) bits.push("exit " + s.exitCode);
     meta.textContent = bits.join(" · ");
     frag.appendChild(meta);
-    var p = document.createElement("p"); p.textContent = s.description; frag.appendChild(p);
+    frag.appendChild(rich(document.createElement("p"), s.description));
     if (s.inputs) {
       var ip = document.createElement("p"); ip.className = "tags";
       ip.textContent = "Fingerprinted inputs: " + s.inputs.join(", ") + (s.produces.length ? ". Produces: " + s.produces.join(", ") + "." : ". Produces nothing a later step reads.");
@@ -4536,7 +5036,7 @@ button:disabled { opacity: 0.45; cursor: default; }
       nodeEls[cur.to].classList.add("current");
       panel.textContent = "";
       var h = document.createElement("h3"); h.textContent = scenario.label; panel.appendChild(h);
-      var sm = document.createElement("p"); sm.className = "meta"; sm.textContent = scenario.summary; panel.appendChild(sm);
+      var sm = rich(document.createElement("p"), scenario.summary); sm.className = "meta"; panel.appendChild(sm);
       var st = document.createElement("div"); st.className = "meta"; st.style.marginTop = "8px";
       st.textContent = "Step " + (stepIndex + 1) + " of " + ids.length + ": " + states[cur.from].label + " → " + states[cur.to].label;
       panel.appendChild(st);
@@ -4624,11 +5124,11 @@ button:disabled { opacity: 0.45; cursor: default; }
     list.appendChild(sec);
   });
   var notes = document.getElementById("notes");
-  function note(text) { var li = document.createElement("li"); li.textContent = text; notes.appendChild(li); return li; }
+  function note(text) { var li = rich(document.createElement("li"), text); notes.appendChild(li); return li; }
   data.unroutedStages.forEach(function (u) { note("Stage " + u.id + ": " + u.note).appendChild(srcLine(u.source, u.anchor)); });
   data.unproducedOutcomes.forEach(function (u) { note("Outcome " + u.id + ": " + u.note).appendChild(srcLine(u.source, u.anchor)); });
   note("Caps: " + Object.keys(data.constants).map(function (k) { return k + " = " + data.constants[k]; }).join(", ") + ".");
-  note("Group transitions (shared by every step, every agent step, every escalation, every pause) are listed under each member state; the diagram draws them only for the selected state or scenario.");
+  note("Group transitions (shared by both starts, every step, every agent step, every design table step, every escalation, every pause) are listed under each member state; the diagram draws them only for the selected state or scenario.");
   note("Maintained with the code: test/docs/state-machine.test.ts reads this page's data block and fails when a state, transition, signature, cause, loop, outcome or cap here differs from the code, or when a cited code line is gone.");
 
   render();
