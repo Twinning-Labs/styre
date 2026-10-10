@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describeSchema, diffShapes, stripSqlComments } from "../../src/db/schema-shape.ts";
-import { CHECK_PROBES_V8, SEED_ROWS_V8, probeChecks } from "../helpers/check-probes.ts";
+import { CHECK_PROBES_V9, SEED_ROWS_V9, probeChecks } from "../helpers/check-probes.ts";
 
 const SCHEMA = readFileSync(join(import.meta.dir, "../../src/db/schema.sql"), "utf8");
 const fresh = () => {
@@ -46,8 +46,8 @@ test("a partial index's WHERE text is compared", () => {
 
 test("every CHECK in schema.sql has a probe, and the fresh schema rejects each", () => {
   const checks = (stripSqlComments(SCHEMA).match(/\bCHECK\s*\(/g) ?? []).length;
-  expect(CHECK_PROBES_V8.length).toBe(checks);
-  expect(probeChecks(fresh(), SEED_ROWS_V8, CHECK_PROBES_V8)).toEqual([]);
+  expect(CHECK_PROBES_V9.length).toBe(checks);
+  expect(probeChecks(fresh(), SEED_ROWS_V9, CHECK_PROBES_V9)).toEqual([]);
 });
 
 /** The differences diffShapes reports between two databases built from `a` and `b`. */

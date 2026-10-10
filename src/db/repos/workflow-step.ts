@@ -20,11 +20,20 @@ export interface WorkflowStepRow {
   ended_at: string | null;
   created_at: string;
   updated_at: string;
+  /** JSON map from each declared input to its digest at the step's success (ENG-477). */
+  input_manifest: string | null;
+  input_fingerprint: string | null;
+  /** Digest of an output that lives outside the database (the plan). */
+  output_digest: string | null;
+  fingerprint_scheme: number | null;
+  /** Incremented by each invalidation (0 for a new step). */
+  generation: number;
 }
 
 const COLS =
   "id, ticket_id, work_unit_id, seq, step_key, step_type, status, attempt, idempotency_key, " +
-  "input_json, result_json, error_json, pid, await_signal_id, started_at, ended_at, created_at, updated_at";
+  "input_json, result_json, error_json, pid, await_signal_id, started_at, ended_at, created_at, updated_at, " +
+  "input_manifest, input_fingerprint, output_digest, fingerprint_scheme, generation";
 
 function serializeError(error: unknown): string {
   if (error instanceof Error) {

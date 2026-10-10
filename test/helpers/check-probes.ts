@@ -109,3 +109,17 @@ export function probeChecks(
   }
   return accepted;
 }
+
+export const SEED_ROWS_V9: string[] = [
+  ...SEED_ROWS_V8,
+  "INSERT INTO ticket_input (ticket_id, name, value_json, digest, captured_at) VALUES (900, 'probe', '1', 'd', 't')",
+  "INSERT INTO workflow_step_history (id, step_id, ticket_id, event_id, step_key, status, attempt, generation, archived_at) VALUES (900, 900, 900, 900, 'probe', 'succeeded', 1, 0, 't')",
+];
+
+/** Every CHECK in the v9 schema.sql (50): v8's 47 and the three 0009 adds. */
+export const CHECK_PROBES_V9: CheckProbe[] = [
+  ...CHECK_PROBES_V8,
+  { table: "workflow_step", set: "input_manifest = 'x'", where: "id = 900" },
+  { table: "work_unit", set: "origin = 'manual'", where: "id = 900" },
+  { table: "ticket_input", set: "value_json = 'x'", where: "ticket_id = 900 AND name = 'probe'" },
+];

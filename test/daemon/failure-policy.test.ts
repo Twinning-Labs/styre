@@ -539,6 +539,12 @@ test("whole-project failure spawns a reconcile unit and re-opens integration", (
   if (!reconcile) throw new Error("no reconcile unit");
   expect(reconcile.seq).toBe(2); // max(existing seq)+1; seeded one unit at seq 1
   expect(parseDependsOn(reconcile)).toEqual([1]); // depends on the single existing unit
+  // ENG-477: the integration failure path writes origin 'reconcile', so the unit stays out of
+  // design:extract's output digest; the extracted unit keeps the default.
+  expect(units.map((u) => [u.kind, u.origin])).toEqual([
+    ["backend", "extract"],
+    ["reconcile", "reconcile"],
+  ]);
 });
 
 test("a prerequisite failure (e.g. an unconfirmed agent confinement) escalates on its first attempt (ENG-476)", async () => {

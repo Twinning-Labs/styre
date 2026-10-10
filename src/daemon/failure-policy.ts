@@ -211,6 +211,7 @@ export function applyFailurePolicy(
         ticketId,
         seq: nextSeqNum,
         kind: "reconcile",
+        origin: "reconcile",
         behavioral: 0,
         verifyCheckTypes: [],
         dependsOn: units.map((u) => u.seq),

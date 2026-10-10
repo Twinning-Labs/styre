@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { migrate } from "../src/db/migrate.ts";
+import { CURRENT_VERSION } from "../src/db/migrations/index.ts";
 import { readCopyOf } from "../src/db/read-copy.ts";
 import { makeTempDir } from "./helpers/temp.ts";
 
@@ -26,13 +27,15 @@ const CORE_TABLES = [
   "projection_state",
   "projection_outbox",
   "run",
+  "ticket_input",
+  "workflow_step_history",
 ];
 
 describe("migrate", () => {
-  test("bootstraps a fresh DB at schema v8", () => {
+  test("bootstraps a fresh DB at the current schema version", () => {
     const result = migrate(tmpDbPath());
     expect(result.created).toBe(true);
-    expect(result.version).toBe(8);
+    expect(result.version).toBe(CURRENT_VERSION);
   });
 
   test("creates the core SoT tables", () => {
@@ -54,6 +57,6 @@ describe("migrate", () => {
     migrate(path);
     const second = migrate(path);
     expect(second.created).toBe(false);
-    expect(second.version).toBe(8);
+    expect(second.version).toBe(CURRENT_VERSION);
   });
 });

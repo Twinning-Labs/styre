@@ -18,11 +18,12 @@ import {
   SIGNAL_V8_INDEXES,
   migration0008,
 } from "../../src/db/migrations/0008-run-table.ts";
+import { migration0009 } from "../../src/db/migrations/0009-design-inputs.ts";
 import { CURRENT_VERSION, MIGRATIONS } from "../../src/db/migrations/index.ts";
 import { rebuildTable } from "../../src/db/migrations/rebuild.ts";
 import { readCopyOf } from "../../src/db/read-copy.ts";
 import { describeSchema, diffShapes } from "../../src/db/schema-shape.ts";
-import { CHECK_PROBES_V8, SEED_ROWS_V8, probeChecks } from "../helpers/check-probes.ts";
+import { CHECK_PROBES_V9, SEED_ROWS_V9, probeChecks } from "../helpers/check-probes.ts";
 import {
   type FixtureName,
   MIGRATABLE_FIXTURES,
@@ -85,8 +86,8 @@ describe("migrate upgrades every known released shape", () => {
       try {
         fresh.exec(readFileSync(join(import.meta.dir, "../../src/db/schema.sql"), "utf8"));
         expect(diffShapes(describeSchema(fresh), describeSchema(db))).toEqual([]);
-        expect(probeChecks(db, SEED_ROWS_V8, CHECK_PROBES_V8)).toEqual([]);
-        expect(probeChecks(fresh, SEED_ROWS_V8, CHECK_PROBES_V8)).toEqual([]);
+        expect(probeChecks(db, SEED_ROWS_V9, CHECK_PROBES_V9)).toEqual([]);
+        expect(probeChecks(fresh, SEED_ROWS_V9, CHECK_PROBES_V9)).toEqual([]);
         expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
       } finally {
         db.close();
@@ -386,7 +387,8 @@ describe("how migrations run", () => {
 
   test("a test migration that rebuilds a table with incoming foreign keys runs through migrate()", () => {
     // spec §7.2: rebuildTable through migrate()'s own transaction, foreign key check and proof.
-    // signal is referenced by workflow_step.await_signal_id.
+    // signal is referenced by workflow_step.await_signal_id. The list ends with the real 0009, so
+    // the proof (which runs in the migration that reaches the current version) checks the rebuild.
     const path = copyFixture("v7-v0.10.0");
     const signalsBefore = readCopyOf(path, (db) =>
       db.query("SELECT * FROM signal ORDER BY id").all(),
@@ -405,9 +407,10 @@ describe("how migrations run", () => {
           });
         },
       },
+      migration0009,
     ];
     const r = migrate(path, { migrations: rebuilding });
-    expect(r.version).toBe(8);
+    expect(r.version).toBe(CURRENT_VERSION);
     expect(r.migratedFrom).toBe(7);
     const after = readCopyOf(path, (db) => ({
       signals: db.query("SELECT * FROM signal ORDER BY id").all(),
@@ -575,6 +578,26 @@ describe("deciding what to do reads only", () => {
       expect(filesAt(path)).toEqual(before);
     });
   }
+
+  // No committed fixture is current once the binary is past v8, so the current case is a database
+  // migrate() itself bootstrapped.
+  test("classifyDatabase on a database at the current version says current and writes nothing", () => {
+    const path = join(makeTempDir("styre-classify-current-"), "run.db");
+    migrate(path);
+    const before = filesAt(path)[""];
+    const db = new Database(path);
+    let changes: number;
+    let state: ReturnType<typeof classifyDatabase>;
+    try {
+      state = classifyDatabase(db, path);
+      changes = (db.query("SELECT total_changes() AS n").get() as { n: number }).n;
+    } finally {
+      db.close();
+    }
+    expect(state).toEqual({ kind: "current", version: CURRENT_VERSION });
+    expect(changes).toBe(0);
+    expect(filesAt(path)[""]).toBe(before);
+  });
 
   test("readDatabaseState never opens the database: no side files, no backup, same bytes", () => {
     const path = copyFixture("v7-v0.10.0");

@@ -1,6 +1,8 @@
 import type { Database } from "bun:sqlite";
 import { nowUtc } from "../../util/time.ts";
 
+export type WorkUnitOrigin = "extract" | "reconcile";
+
 export interface WorkUnitRow {
   id: number;
   ticket_id: number;
@@ -17,10 +19,11 @@ export interface WorkUnitRow {
   base_sha: string | null;
   created_at: string;
   updated_at: string;
+  origin: WorkUnitOrigin;
 }
 
 const COLS =
-  "id, ticket_id, seq, kind, title, description, status, behavioral, files_to_touch, test_plan, verify_check_types, depends_on, base_sha, created_at, updated_at";
+  "id, ticket_id, seq, kind, title, description, status, behavioral, files_to_touch, test_plan, verify_check_types, depends_on, base_sha, created_at, updated_at, origin";
 
 export function getById(db: Database, id: number): WorkUnitRow | null {
   return (
@@ -48,14 +51,15 @@ export function insertWorkUnit(
     filesToTouch?: string[] | null;
     verifyCheckTypes?: number[] | string[] | null;
     dependsOn?: number[] | null;
+    origin?: WorkUnitOrigin;
   },
 ): WorkUnitRow {
   const now = nowUtc();
   const res = db
     .query(
       `INSERT INTO work_unit
-         (ticket_id, seq, kind, title, description, status, behavioral, files_to_touch, test_plan, verify_check_types, depends_on, created_at, updated_at)
-       VALUES ($t, $seq, $kind, $title, $desc, $status, $behavioral, $ftt, $tp, $vct, $dep, $now, $now)`,
+         (ticket_id, seq, kind, title, description, status, behavioral, files_to_touch, test_plan, verify_check_types, depends_on, origin, created_at, updated_at)
+       VALUES ($t, $seq, $kind, $title, $desc, $status, $behavioral, $ftt, $tp, $vct, $dep, $origin, $now, $now)`,
     )
     .run({
       $t: p.ticketId,
@@ -69,6 +73,7 @@ export function insertWorkUnit(
       $tp: p.testPlan ?? null,
       $vct: p.verifyCheckTypes == null ? null : JSON.stringify(p.verifyCheckTypes),
       $dep: p.dependsOn == null ? null : JSON.stringify(p.dependsOn),
+      $origin: p.origin ?? "extract",
       $now: now,
     });
   const created = getById(db, Number(res.lastInsertRowid));
