@@ -3,6 +3,8 @@ import type { AgentRunner } from "../agent/runner.ts";
 import { resolveTier } from "../agent/tiers.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
 import { modelForTier } from "../config/agent-config.ts";
+import { changedInputs, currentManifest } from "../daemon/design-digests.ts";
+import { stepRow } from "../daemon/design-graph.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../db/repos/dispatch.ts";
 import { appendEvent } from "../db/repos/event-log.ts";
@@ -35,7 +37,39 @@ export interface DispatchDeps {
   timeoutMs: number;
   /** Set only when resuming a parked run: the interrupted step's prior partial output, injected
    *  as an advisory (non-authoritative) continuity hint into THAT step's re-dispatch prompt. */
-  resumeContext?: { stepKey: string; transcript: string };
+  resumeContext?: ResumeContext;
+}
+
+/** Set only when resuming a parked run: the interrupted step's partial output, prepended to THAT
+ *  step's re-dispatch while its generation is still current (spec §6.5), so a step invalidated
+ *  since never receives output written under its old inputs. */
+export interface ResumeContext {
+  stepKey: string;
+  transcript: string;
+  generation: number;
+  /** The step's input manifest when the run paused, for a table step; null for any other step and
+   *  for a transcript written before ENG-477 (kept as it is, like a step the adopt pass keeps). */
+  manifest: Record<string, string> | null;
+}
+
+/** The carryover's fit to this dispatch (spec §6.5), computed without side effects. Null: the
+ *  carryover is not this dispatch's (another step, or a generation invalidated since). `[]`: it
+ *  applies (same step, same generation, and, for a table step paused before it finished, the same
+ *  inputs, or a transcript written before ENG-477, kept as it is). Otherwise the input names that
+ *  differ: a step that was never finished is not invalidated when an upstream step reruns, so its
+ *  generation alone cannot tell. The caller (`dispatchAndRecord`) withholds the carryover on an
+ *  answer that is not empty and records one `carryover-dropped` note per dispatch that withholds it, so a
+ *  retried attempt of the same step writes another. */
+export function carryoverMismatch(ctx: HandlerContext, rc: ResumeContext): string[] | null {
+  if (rc.stepKey !== ctx.step.step_key || rc.generation !== ctx.step.generation) return null;
+  if (rc.manifest === null) return [];
+  const row = stepRow(rc.stepKey);
+  if (row === undefined) {
+    throw new Error(
+      `resume: a carryover manifest was recorded for ${rc.stepKey}, which is not a design table step`,
+    );
+  }
+  return changedInputs(rc.manifest, currentManifest(ctx.db, ctx.ticket.id, row));
 }
 
 export interface DispatchSpec {
@@ -144,7 +178,19 @@ async function dispatchAndRecord(
   if (priorRejection !== "") {
     prompt = `${RETRY_FEEDBACK_PREFIX}\n\n${priorRejection}\n\n${RETRY_FEEDBACK_SUFFIX}\n\n${prompt}`;
   }
-  if (deps.resumeContext && deps.resumeContext.stepKey === ctx.step.step_key) {
+  // spec §6.5: the carryover reaches only the dispatch it belongs to. When it is withheld because
+  // the inputs changed, a note names them: one `carryover-dropped` note per dispatch that withholds
+  // it (a retried attempt of the same step writes another).
+  const mismatch = deps.resumeContext ? carryoverMismatch(ctx, deps.resumeContext) : null;
+  if (mismatch !== null && mismatch.length > 0) {
+    appendEvent(ctx.db, {
+      ticketId: ctx.ticket.id,
+      kind: "note",
+      reason: "carryover-dropped",
+      payload: { event: "carryover-dropped", stepKey: ctx.step.step_key, changed: mismatch },
+    });
+  }
+  if (deps.resumeContext && mismatch !== null && mismatch.length === 0) {
     // chain off `prompt` (NOT rendered.prompt) so both prepends compose (design §1, review Important)
     prompt = `${CARRYOVER_PREFIX}\n\n${deps.resumeContext.transcript}\n\n${CARRYOVER_SUFFIX}\n\n${prompt}`;
   }

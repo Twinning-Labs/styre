@@ -1,6 +1,8 @@
 import type { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
+import { invalidateSteps } from "../../src/daemon/invalidate.ts";
+import { pauseTicket } from "../../src/daemon/pause-ticket.ts";
 import { applyReviewResume, planReviewResume } from "../../src/daemon/review-resume.ts";
 import { insertDispatch } from "../../src/db/repos/dispatch.ts";
 import { listByTicket as events, appendEvent } from "../../src/db/repos/event-log.ts";
@@ -8,8 +10,9 @@ import { enqueue } from "../../src/db/repos/projection-outbox.ts";
 import { getById, insertFinding, setStatus } from "../../src/db/repos/review-finding.ts";
 import { requiredCodeFindings, unresolvedReviewReason } from "../../src/db/repos/review-round.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
-import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
+import { insertWorkUnit, listByTicket as listUnits } from "../../src/db/repos/work-unit.ts";
 import { getByKey, insertPending } from "../../src/db/repos/workflow-step.ts";
+import { resetProvision } from "../../src/dispatch/provision.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 const HEAD = "a".repeat(40);
@@ -51,6 +54,16 @@ function seed(kind: "code" | "plan" = "code") {
     step.id,
   );
   return { db, ticketId, step, findings };
+}
+
+/** The run stopped at the plan review gate: the escalation the interpreter writes for the gate row. */
+function stopAtPlanGate(db: Database, ticketId: number): void {
+  appendEvent(db, {
+    ticketId,
+    kind: "escalated",
+    reason: "unresolved plan-review findings",
+    signature: "review:unresolved-plan",
+  });
 }
 
 function options(ids: number[]) {
@@ -175,6 +188,7 @@ test("queued forge effects prevent retry before any ledger mutation", () => {
 
 test("plan review cannot accept risks or advance merely because review step succeeded", () => {
   const { db, ticketId, findings } = seed("plan");
+  stopAtPlanGate(db, ticketId);
   expect(() =>
     planReviewResume(db, ticketId, HEAD, false, options(findings.map((f) => f.id))),
   ).toThrow();
@@ -182,7 +196,11 @@ test("plan review cannot accept risks or advance merely because review step succ
   expect(retry.kind).toBe("retry-plan");
   db.transaction(() => applyReviewResume(db, ticketId, DEFAULT_RUNTIME_CONFIG, retry))();
   expect(getTicket(db, ticketId)?.stage).toBe("design");
-  expect(getByKey(db, ticketId, "design:review")?.status).toBe("pending");
+  expect(getByKey(db, ticketId, "design:review")?.status).toBe("succeeded");
+  const loopback = events(db, ticketId)
+    .filter((e) => e.kind === "loopback")
+    .at(-1);
+  expect(JSON.parse(loopback?.payload_json ?? "{}")).toMatchObject({ consumer: "design:dispatch" });
 });
 
 test("same-HEAD repeated plan findings stay paused; explicit moved HEAD re-arms design", () => {
@@ -194,13 +212,14 @@ test("same-HEAD repeated plan findings stay paused; explicit moved HEAD re-arms 
     routeTo: "review",
     signature: "review:correctness:fixture.ts:1|correctness:fixture.ts:2",
   });
+  stopAtPlanGate(db, ticketId);
   const same = planReviewResume(db, ticketId, HEAD, false, {});
   db.transaction(() => applyReviewResume(db, ticketId, DEFAULT_RUNTIME_CONFIG, same))();
   expect(getTicket(db, ticketId)?.status).toBe("waiting");
   expect(getByKey(db, ticketId, "design:review")?.status).toBe("succeeded");
   const moved = planReviewResume(db, ticketId, NEW_HEAD, true, {});
   db.transaction(() => applyReviewResume(db, ticketId, DEFAULT_RUNTIME_CONFIG, moved))();
-  expect(getByKey(db, ticketId, "design:review")?.status).toBe("pending");
+  expect(listUnits(db, ticketId)).toEqual([]); // dispatch and extract invalidated: units re-created
 });
 
 test("unchanged code retries and all plan retries respect the durable repair cap", () => {
@@ -214,6 +233,7 @@ test("unchanged code retries and all plan retries respect the durable repair cap
         routeTo: "review",
         signature: `old-${i}`,
       });
+    if (kind === "plan") stopAtPlanGate(db, ticketId);
     expect(() => planReviewResume(db, ticketId, HEAD, false, {})).toThrow("review repair limit");
     if (kind === "plan")
       expect(() => planReviewResume(db, ticketId, NEW_HEAD, true, {})).toThrow(
@@ -244,4 +264,95 @@ test("code-review redesign preserves mandatory finding identities after replacin
   expect(requiredCodeFindings(db, ticketId).map((f) => f.id)).toEqual(findings.map((f) => f.id));
   expect(findings.map((f) => getById(db, f.id)?.work_unit_id)).toEqual([null, null]);
   expect(findings.map((f) => getById(db, f.id)?.status)).toEqual(["open", "open"]);
+});
+
+test("a plan review resume is retry-plan only when the run stopped at the plan review gate (C2)", () => {
+  const { db, ticketId } = seed("plan");
+  // stage design, design:review succeeded, blocking findings: but no stop at the gate (a pause in
+  // a redesign's regenerated design:dispatch looks like this)
+  expect(planReviewResume(db, ticketId, HEAD, false, {}).kind).toBe("none");
+  // the plan review verdict's escalation (its dispatch is the latest design:review dispatch)
+  appendEvent(db, {
+    ticketId,
+    dispatchId: "review-1",
+    kind: "escalated",
+    reason: "no progress: identical plan-review findings",
+    signature: "review:x",
+  });
+  expect(planReviewResume(db, ticketId, HEAD, false, {}).kind).toBe("retry-plan");
+  // a redesign after the stop: the run moved on
+  appendEvent(db, {
+    ticketId,
+    kind: "loopback",
+    loop: "design",
+    routeTo: "review",
+    signature: "s",
+  });
+  expect(planReviewResume(db, ticketId, HEAD, false, {}).kind).toBe("none");
+  // a resume since the stop: the stop belongs to an earlier run
+  stopAtPlanGate(db, ticketId);
+  appendEvent(db, { ticketId, kind: "resumed", reason: "resume" });
+  expect(planReviewResume(db, ticketId, HEAD, false, {}).kind).toBe("none");
+});
+
+test("an unrelated escalation after a gate stop does not hide it (ruling 2026-10-09)", () => {
+  const { db, ticketId } = seed("plan");
+  stopAtPlanGate(db, ticketId);
+  // the projector giving up on a row in the run's final drain: a reason, no signature, no dispatch
+  appendEvent(db, { ticketId, kind: "escalated", reason: "projection failed after 5 attempts" });
+  expect(planReviewResume(db, ticketId, HEAD, false, {}).kind).toBe("retry-plan");
+  // the resume's toolchain pause, written by pauseTicket
+  pauseTicket(db, ticketId, "this host lacks the tools for lib (missing: `lib-build`)");
+  expect(planReviewResume(db, ticketId, HEAD, false, {}).kind).toBe("retry-plan");
+});
+
+test("an escalation of the invalidate loop guard that carries the design:review dispatch id is not a gate stop", () => {
+  const { db, ticketId } = seed("plan");
+  // the interpreter's escalations carry the ticket's latest dispatch: here the design:review one
+  appendEvent(db, {
+    ticketId,
+    dispatchId: "review-1",
+    kind: "escalated",
+    reason: "design step 'provision' keeps finding changed inputs",
+    signature: "invalidate-loop:provision",
+  });
+  expect(planReviewResume(db, ticketId, HEAD, false, {}).kind).toBe("none");
+});
+
+test("a provision invalidation after a gate stop does not move the run off the gate; a design step's does", () => {
+  const { db, ticketId } = seed("plan");
+  const provision = insertPending(db, { ticketId, stepKey: "provision", stepType: "provision" });
+  db.query("UPDATE workflow_step SET status='succeeded' WHERE id=?").run(provision.id);
+  stopAtPlanGate(db, ticketId);
+  // the note a worktree mode resume writes (cause worktree-recreated) when it recreates the worktree
+  resetProvision(db, ticketId);
+  const notes = events(db, ticketId).filter((e) => e.reason === "invalidated");
+  expect(notes.map((e) => JSON.parse(e.payload_json ?? "{}"))).toEqual([
+    { event: "invalidated", stepKeys: ["provision"], cause: "worktree-recreated", changed: [] },
+  ]);
+  expect(planReviewResume(db, ticketId, HEAD, false, {}).kind).toBe("retry-plan");
+  // an invalidated design step after the stop: the walk ran past the gate
+  invalidateSteps(db, ticketId, ["design:size"], { cause: "inputs", changed: ["workUnits"] });
+  expect(planReviewResume(db, ticketId, HEAD, false, {}).kind).toBe("none");
+});
+
+test("a review escalation that carries another dispatch (a code review's) is not a gate stop", () => {
+  const { db, ticketId } = seed("plan");
+  appendEvent(db, {
+    ticketId,
+    dispatchId: "code-review-7",
+    kind: "escalated",
+    reason: "no progress: identical review findings",
+    signature: "review:correctness:fixture.ts:1",
+  });
+  expect(planReviewResume(db, ticketId, HEAD, false, {}).kind).toBe("none");
+  // the same escalation carrying the latest design:review dispatch is plan review's
+  appendEvent(db, {
+    ticketId,
+    dispatchId: "review-1",
+    kind: "escalated",
+    reason: "no progress: identical plan-review findings",
+    signature: "review:correctness:fixture.ts:1",
+  });
+  expect(planReviewResume(db, ticketId, HEAD, false, {}).kind).toBe("retry-plan");
 });

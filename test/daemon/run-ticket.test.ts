@@ -409,7 +409,7 @@ test("both loopbacks reset the merge steps with a fresh attempt budget", () => {
       );
     }
     if (loopback === "code") codeLoopback(db, ticketId, [], "sig", null);
-    else redesignLoopback(db, ticketId, "sig", [], null);
+    else redesignLoopback(db, ticketId, "sig", [], null, ["design:dispatch"]);
     const steps = db
       .query(
         "SELECT step_key, status, attempt FROM workflow_step WHERE step_key LIKE 'merge:%' ORDER BY step_key",

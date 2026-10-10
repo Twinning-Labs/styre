@@ -18,6 +18,8 @@ import { type AgentConfig, DEFAULT_AGENT_CONFIG } from "../config/agent-config.t
 import { stateDir } from "../config/paths.ts";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { adoptActiveTickets } from "../daemon/adopt.ts";
+import { currentManifest } from "../daemon/design-digests.ts";
+import { stepRow } from "../daemon/design-graph.ts";
 import { captureOtherActiveTickets, captureSnapshot } from "../daemon/design-inputs.ts";
 import { newerSchemeIn, newerSchemeRecorded, newerSchemeRefusal } from "../daemon/design-walk.ts";
 import { pauseTicket } from "../daemon/pause-ticket.ts";
@@ -55,6 +57,7 @@ import { getByKey as getStep, listByStatus } from "../db/repos/workflow-step.ts"
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { recordUnusableComponents, resetProvision } from "../dispatch/provision.ts";
+import type { ResumeContext } from "../dispatch/run-dispatch.ts";
 import { branchHeadSha, reconcileWorktree } from "../dispatch/worktree.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
@@ -155,6 +158,15 @@ export function dumpPark(
   const dir = parkDir(slug, ident);
   mkdirSync(dir, { recursive: true });
   const currentRunId = getRun(db)?.run_id ?? null; // read before we close db
+  // The step the park left running: its generation, and for a table step its inputs, scope the
+  // carryover (spec §6.5). The run's own ticket, found by its ident (operator ruling, 2026-10-10):
+  // on a reused --db other tickets share the database.
+  const own = findCheckpointTicket(db, ident).ticket;
+  const parked = own ? listByStatus(db, "running").find((s) => s.ticket_id === own.id) : undefined;
+  const parkedGeneration = parked?.generation ?? null;
+  const parkedRow = parked ? stepRow(parked.step_key) : undefined;
+  const parkedManifest =
+    parked && parkedRow ? currentManifest(db, parked.ticket_id, parkedRow) : null;
   db.exec("PRAGMA wal_checkpoint(TRUNCATE);"); // fold WAL into the main file before copy
   db.close();
   const destPath = join(dir, "run.db");
@@ -182,6 +194,8 @@ export function dumpPark(
       cause: park.cause,
       resetAt: park.resetAt,
       transcript: park.transcript,
+      generation: parkedGeneration,
+      manifest: parkedManifest,
     }),
   );
   return dir;
@@ -318,7 +332,7 @@ export async function resumeRun(
   runtimeConfig: RuntimeConfig,
   deps?: {
     buildRegistry?: (
-      resumeContext: { stepKey: string; transcript: string } | undefined,
+      resumeContext: ResumeContext | undefined,
       wiring: ResumeRegistryWiring,
     ) => StepRegistry;
     ports?: ProjectorPorts;
@@ -537,7 +551,7 @@ export async function resumeRun(
       process.exitCode = 65;
       return;
     }
-    let resumeContext: { stepKey: string; transcript: string } | undefined;
+    let resumeContext: ResumeContext | undefined;
     db.transaction(() => {
       if (!inPlace) {
         resetProvisionForResume(db, ticketId);
@@ -559,8 +573,17 @@ export async function resumeRun(
         if (parkedStep && existsSync(join(dir, "transcript.json"))) {
           const tj = JSON.parse(readFileSync(join(dir, "transcript.json"), "utf8")) as {
             transcript: string;
+            generation?: number | null;
+            manifest?: Record<string, string> | null;
           };
-          resumeContext = { stepKey: parkedStep.step_key, transcript: tj.transcript };
+          resumeContext = {
+            stepKey: parkedStep.step_key,
+            transcript: tj.transcript,
+            // A transcript written before ENG-477 has no generation and no manifest: it belongs to
+            // the parked step as it is now.
+            generation: tj.generation ?? parkedStep.generation,
+            manifest: tj.manifest ?? null,
+          };
         }
         appendEvent(db, { ticketId, kind: "resumed", reason: "resume" });
       }

@@ -29,7 +29,7 @@ import {
   setTicketStage,
   setTicketTrack,
 } from "../../src/db/repos/ticket.ts";
-import { insertWorkUnit, listByTicket as listUnits } from "../../src/db/repos/work-unit.ts";
+import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { getByKey } from "../../src/db/repos/workflow-step.ts";
 import { pendingLeftoverChecks } from "../../src/util/process/leftovers.ts";
 import { makeTestDb } from "../helpers/db.ts";
@@ -216,7 +216,7 @@ test(
 );
 
 test(
-  "the manifest is recorded before the verdict: a redesign that deletes the units leaves the manifest of the units reviewed, and the stale plan digest is never read",
+  "the manifest is recorded before the verdict: the redesign clears the plan digest design:review read, and the manifest keeps the plan reviewed",
   async () => {
     const t = makeDesignTicket({
       script: {
@@ -234,25 +234,27 @@ test(
       },
     });
     await driveUntil(t, atStep("design:review"));
-    const reviewed = digestWorkUnits(t.db, t.ticketId);
-    expect(listUnits(t.db, t.ticketId)).toHaveLength(2);
+    const reviewedPlan = getByKey(t.db, t.ticketId, "design:dispatch")?.output_digest;
+    expect(reviewedPlan).toBe(planDigestAt(t.repo, "refs/heads/feat/ENG-1", "ENG-1"));
+    const reviewedUnits = digestWorkUnits(t.db, t.ticketId);
     const outcome = await advanceOneStep(t.db, t.ticketId, t.registry, { config: t.config });
+    // The verdict's redesign invalidated design:dispatch, which clears its recorded digest (spec
+    // §5.4): from then on the plan has no digest, so design:review's manifest can be computed only
+    // before the verdict. Recorded after it, the manifest would throw and roll the success back
+    // (a retry, not this loopback).
     expect(outcome).toEqual({ kind: "loopback", stepKey: "design:review" });
-    expect(listUnits(t.db, t.ticketId)).toEqual([]); // the verdict deleted them
-    expect(digestWorkUnits(t.db, t.ticketId)).not.toBe(reviewed);
-    const manifest = JSON.parse(
-      getByKey(t.db, t.ticketId, "design:review")?.input_manifest ?? "null",
-    ) as Record<string, string>;
-    expect(manifest.workUnits).toBe(reviewed);
-    // The redesign returned design:dispatch to pending with its old digest still on the row: that
-    // digest is no longer the plan's, so a manifest that reads the plan throws instead of using it.
+    const review = getByKey(t.db, t.ticketId, "design:review");
+    expect(review?.status).toBe("succeeded");
+    const manifest = JSON.parse(review?.input_manifest ?? "null") as Record<string, string>;
+    expect(manifest.plan).toBe(reviewedPlan ?? "a recorded plan digest");
+    expect(manifest.workUnits).toBe(reviewedUnits);
     const dispatch = getByKey(t.db, t.ticketId, "design:dispatch");
     expect(dispatch?.status).toBe("pending");
-    expect(dispatch?.output_digest).not.toBeNull();
-    const extract = stepRow("design:extract");
-    expect(extract).toBeDefined();
-    if (!extract) return;
-    expect(() => currentManifest(t.db, t.ticketId, extract)).toThrow(
+    expect(dispatch?.output_digest).toBeNull();
+    const reviewRow = stepRow("design:review");
+    expect(reviewRow).toBeDefined();
+    if (!reviewRow) return;
+    expect(() => currentManifest(t.db, t.ticketId, reviewRow)).toThrow(
       `ticket ${t.ticketId}: the plan has no recorded digest (design:dispatch is pending)`,
     );
   },

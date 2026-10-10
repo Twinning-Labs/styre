@@ -199,7 +199,7 @@ export interface RegistryDeps {
   worktreeRoot: string;
   inPlace?: boolean;
   timeoutMs?: number;
-  resumeContext?: { stepKey: string; transcript: string };
+  resumeContext?: import("./run-dispatch.ts").ResumeContext;
   /** RED-first check executor override (tests inject a scripted runner; production uses runCommand).
    *  Shared by authoring, baseline replay, delivered binding, and post-implement reruns. */
   runCheckCommand?: import("../util/run-command.ts").CmdRunner;

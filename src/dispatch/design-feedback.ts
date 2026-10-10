@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { listByTicket as listEvents } from "../db/repos/event-log.ts";
+import { getByKey } from "../db/repos/workflow-step.ts";
 
 /** The per-finding shape snapshotted into a design loopback event's payload by `redesignLoopback`. */
 interface FindingSnapshot {
@@ -16,10 +17,19 @@ interface FindingSnapshot {
  *  Empty string when there is no prior redesign — so a first design dispatch renders a blank
  *  `{{review_feedback}}` slot. Mirrors `implementFeedback` (feedback.ts). */
 export function designFeedback(db: Database, ticketId: number): string {
-  const loopbacks = listEvents(db, ticketId).filter(
-    (e) => e.kind === "loopback" && e.loop === "design" && e.payload_json !== null,
-  );
-  const latest = loopbacks[loopbacks.length - 1];
+  // spec §6.5: only the loopback addressed to design:dispatch's CURRENT generation. A rerun for
+  // changed inputs starts a new generation with no feedback, so old findings never return.
+  const current = getByKey(db, ticketId, "design:dispatch")?.generation ?? 0;
+  const ours = listEvents(db, ticketId).filter((e) => {
+    if (e.kind !== "loopback" || e.loop !== "design" || e.payload_json === null) return false;
+    const p = JSON.parse(e.payload_json) as { consumer?: string; generation?: number };
+    // A loopback written before ENG-477 names no consumer: it was for design:dispatch, and an
+    // upgraded checkpoint's steps start at generation 0.
+    return (
+      (p.consumer ?? "design:dispatch") === "design:dispatch" && (p.generation ?? 0) === current
+    );
+  });
+  const latest = ours[ours.length - 1];
   if (!latest?.payload_json) return "";
   const findings = (JSON.parse(latest.payload_json) as { findings?: FindingSnapshot[] }).findings;
   if (!findings || findings.length === 0) return "";

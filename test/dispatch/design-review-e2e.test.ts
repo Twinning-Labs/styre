@@ -203,7 +203,7 @@ test(
 // ─── Flow 2: Full-track, blocking plan finding → re-design ───────────────────
 
 test(
-  "blocking plan finding loops back to design: stage=design, work_units cleared, design:review reset to pending",
+  "blocking plan finding loops back to design: stage=design, design:dispatch invalidated for feedback, units and design:review kept until the new plan is judged",
   async () => {
     const { db, ticketId, projectId } = makeTestDb();
     const repo = gitRepo();
@@ -233,13 +233,15 @@ test(
     // 2. Stage returns to 'design'.
     expect(ticket?.stage).toBe("design");
 
-    // 3. Work units were cleared (redesignLoopback deletes them).
-    const units = listUnits(db, ticketId);
-    expect(units.length).toBe(0);
+    // 3. The redesign invalidates only its feedback's consumer, design:dispatch (spec §6.4, §6.7).
+    const dispatch = getByKey(db, ticketId, "design:dispatch");
+    expect(dispatch?.status).toBe("pending");
+    expect(dispatch?.generation).toBe(1);
 
-    // 4. The design:review step was reset to pending (so it can be re-run in the re-design round).
-    const reviewStep = getByKey(db, ticketId, "design:review");
-    expect(reviewStep?.status).toBe("pending");
+    // 4. The units and design:review stay until the regenerated plan is judged: the walk reruns
+    //    design:extract and design:review only when their inputs (the plan) change.
+    expect(listUnits(db, ticketId)).toHaveLength(2); // REVIEW_UNITS
+    expect(getByKey(db, ticketId, "design:review")?.status).toBe("succeeded");
 
     db.close();
   },

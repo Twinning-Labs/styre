@@ -7,9 +7,11 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { getTicket } from "../../src/db/repos/ticket.ts";
 import { getByKey } from "../../src/db/repos/workflow-step.ts";
 import {
   type RecordedMeta,
@@ -124,6 +126,94 @@ test(
     expect(out).toContain("would re-dispatch step: implement:wu1:dispatch");
     expect(fixtureVersion(h.dbPath())).toBe(8); // not migrated
     expect(readdirSync(h.checkpointDir()).some((f) => f.endsWith(".bak"))).toBe(false);
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+/** The operator's way out of the plan review gate: edit the plan on the ticket branch. */
+function editPlanOnBranch(h: DesignHarness, branch: string): void {
+  const wt = join(makeTempDir("styre-v8-edit-"), "wt");
+  git(h.repoDir, ["worktree", "add", wt, branch]);
+  writeFileSync(
+    join(wt, "docs", "plans", "eng-1-plan.md"),
+    "---\nlinear: ENG-1\n---\n\nRecorded plan, edited by the operator\n",
+  );
+  git(wt, ["commit", "-q", "-am", "operator edits the plan"]);
+  git(h.repoDir, ["worktree", "remove", "--force", wt]);
+}
+
+test(
+  "a v8 run stopped at the plan review gate, resumed with HEAD unchanged, stays at the gate; the operator's plan edit then finishes it",
+  async () => {
+    const { h, meta } = restoreRecordedRun("v8-plan-gate-worktree");
+    expect(await h.resume({ script: RESUME_SCRIPT })).toBe(75); // the same findings: still stopped
+    expect(fixtureVersion(h.dbPath())).toBe(9);
+    const first = adoptedNote(h);
+    expect(first).toHaveLength(1);
+    expect(first[0]?.stepKeys).toEqual([...DESIGN_AGENTS]); // every design step had succeeded
+    expect(first[0]?.willRerun).toEqual([]);
+    h.read((db, id) => {
+      expect(getTicket(db, id)?.status).toBe("waiting");
+      const events = listEvents(db, id);
+      const resumedAt = events.findLastIndex((e) => e.kind === "resumed");
+      const escalated = events.slice(resumedAt + 1).filter((e) => e.kind === "escalated");
+      expect(escalated).toHaveLength(1); // stopped again at the gate by the resume itself
+    });
+    for (const s of DESIGN_AGENTS) expect(h.calls.counts[s]).toBe(0);
+
+    editPlanOnBranch(h, meta.branch);
+    expect(await h.resume({ acceptHead: true, script: RESUME_SCRIPT })).toBe(0); // pr-ready
+    expect(h.calls.counts["design:dispatch"]).toBe(1); // the redesign
+    expect(h.calls.counts["design:extract"]).toBe(1);
+    expect(h.calls.counts["design:review"]).toBe(1); // the plan changed
+    expect(invalidations(h)).toEqual([
+      "provision:worktree-recreated",
+      "design:dispatch+design:extract:feedback",
+      "design:review:inputs",
+    ]); // design:size stays done: the same units
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+test(
+  "a v8 run stopped at the plan review gate, resumed after the operator edited the plan, finishes",
+  async () => {
+    const { h, meta } = restoreRecordedRun("v8-plan-gate-worktree");
+    editPlanOnBranch(h, meta.branch);
+    expect(await h.resume({ acceptHead: true, script: RESUME_SCRIPT })).toBe(0); // pr-ready
+    const notes = adoptedNote(h);
+    expect(notes).toHaveLength(1);
+    // the resume's redesign left design:dispatch pending: size and review are past it
+    expect(notes[0]?.stepKeys).toEqual([]);
+    expect(notes[0]?.willRerun).toEqual(["design:size", "design:review"]);
+    expect(invalidations(h)).toEqual([
+      "provision:worktree-recreated",
+      "design:dispatch+design:extract:feedback",
+      "design:size:inputs",
+      "design:review:inputs",
+    ]);
+    expect(h.calls.counts["design:review"]).toBe(1);
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+test(
+  "a v8 run paused during a redesign with grading on resumes, reruns the steps past the pause, and finishes",
+  async () => {
+    const { h } = restoreRecordedRun("v8-redesign-graded-worktree");
+    h.editConfig((c) => {
+      c.complexityGrading = true;
+    });
+    expect(await h.resume({ script: RESUME_SCRIPT })).toBe(0); // pr-ready
+    const notes = adoptedNote(h);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.stepKeys).toEqual([]);
+    expect(notes[0]?.willRerun).toEqual(["design:size"]); // succeeded under v8, past the pause
+    expect(invalidations(h)).toEqual(["provision:worktree-recreated", "design:size:inputs"]);
+    expect(h.calls.counts["design:size"]).toBe(1); // the grader, once
+    const dispatch = h.calls.prompts.find((p) => p.step === "design:dispatch")?.prompt ?? "";
+    expect(dispatch).toContain("RECORDED-BLOCKING-FINDING"); // the v8 redesign's feedback
+    expect(dispatch).toContain("partial output written before the session limit"); // the carryover
   },
   HARNESS_TEST_TIMEOUT_MS,
 );
