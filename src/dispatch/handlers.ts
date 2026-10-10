@@ -144,6 +144,7 @@ import {
 import {
   isEditablePythonPrepare,
   planProvision,
+  recordUnusableComponents,
   resetProvisionIfManifestTouched,
   resolvePythonInterpreter,
   sourceCheckCommand,
@@ -1355,27 +1356,8 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       if (problem) throw new StepExecutionError(`Test environment ${c.name}: ${problem}`);
     }
     // ENG-412: record what the run narrowed, ONCE, where a db + ticket finally exist (the
-    // toolchain decision is made in `styre run` before either does). `advisory: true` routes it
-    // into the PR's advisory block, so a reviewer sees that a component was skipped entirely
-    // rather than silently getting a PR that claims less coverage than it appears to.
-    const unusable = deps.unusableComponents ?? [];
-    if (unusable.length > 0) {
-      insertSignal(ctx.db, {
-        ticketId: ctx.ticket.id,
-        workUnitId: null,
-        signalType: "toolchain",
-        // `error`, not `fail`: the component was never MEASURED. `fail` would assert that a
-        // check ran and came back red, which is a different and untrue claim. (The column's
-        // CHECK constraint allows only pass/fail/error, and it caught an invented fourth value.)
-        result: "error",
-        detail: {
-          advisory: true,
-          reason: "component-unusable",
-          components: unusable.map((u) => u.component),
-          missing: unusable.flatMap((u) => u.missing.map((m) => m.missing)),
-        },
-      });
-    }
+    // toolchain decision is made in `styre run` before either does).
+    recordUnusableComponents(ctx.db, ctx.ticket.id, deps.unusableComponents ?? []);
     // ENG-425: the same contract, one aisle over — a component excluded for WHAT IT IS rather
     // than for what this machine lacks. Separate `signalType` on purpose: `advisorySweeps` keys
     // by signal_type and keeps only the newest per key, so reusing `toolchain` would make one

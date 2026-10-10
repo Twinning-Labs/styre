@@ -1,6 +1,8 @@
 import type { Database } from "bun:sqlite";
 import { existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
+import type { UnusableComponent } from "../cli/preflight.ts";
+import { insertSignal } from "../db/repos/ground-truth-signal.ts";
 import { getByKey, resetAttempt, resetToPending } from "../db/repos/workflow-step.ts";
 import { testCapabilities } from "../testing/capabilities.ts";
 import type { Component } from "./profile.ts";
@@ -280,4 +282,33 @@ export function resetProvisionIfManifestTouched(
   if (diffTouchesManifest(changedFiles)) {
     resetProvision(db, ticketId);
   }
+}
+
+/** ENG-412: the advisory that the run skipped components whose toolchain this host lacks. The one
+ *  writer of the `toolchain` signal: `provision` records it, and so does a resume whose narrowing
+ *  changed while `provision` will not run again (spec §4.1), so `advisorySweeps` and the PR treat
+ *  both alike. `advisory: true` routes it into the PR's advisory block, so a reviewer sees that a
+ *  component was skipped entirely rather than silently getting a PR that claims less coverage than
+ *  it appears to. Records nothing for an empty list. */
+export function recordUnusableComponents(
+  db: Database,
+  ticketId: number,
+  unusable: readonly UnusableComponent[],
+): void {
+  if (unusable.length === 0) return;
+  insertSignal(db, {
+    ticketId,
+    workUnitId: null,
+    signalType: "toolchain",
+    // `error`, not `fail`: the component was never MEASURED. `fail` would assert that a
+    // check ran and came back red, which is a different and untrue claim. (The column's
+    // CHECK constraint allows only pass/fail/error, and it caught an invented fourth value.)
+    result: "error",
+    detail: {
+      advisory: true,
+      reason: "component-unusable",
+      components: unusable.map((u) => u.component),
+      missing: unusable.flatMap((u) => u.missing.map((m) => m.missing)),
+    },
+  });
 }

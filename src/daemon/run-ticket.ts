@@ -93,6 +93,35 @@ function undeliveredReason(db: Database, ticketId: number): string | null {
   return null;
 }
 
+/** The one way a run ends: the telemetry emitter and notifier of the run, and `finish`, the
+ *  terminal sequence (the NDJSON events and summary on stdout, the notifier's sweep and terminal
+ *  message, the outbox drained). `driveToTerminal` ends every outcome through it, and so does the
+ *  resume's toolchain pause (spec §4.1), which stops before any tick; the emitter and notifier are
+ *  returned so the per tick flush and sweep share their watermarks with `finish`. */
+export function createRunEnd(
+  db: Database,
+  opts: { ticketId: number; config: RuntimeConfig; ports: ProjectorPorts; emit?: TelemetrySink },
+): {
+  emitter: ReturnType<typeof createTelemetryEmitter>;
+  notifier: ReturnType<typeof createNotifier>;
+  finish: (result: RunResult) => Promise<RunResult>;
+} {
+  const emitter = createTelemetryEmitter(opts.emit ?? noopSink, opts.config.pricing);
+  const notifier = createNotifier(opts.config);
+  const finish = async (result: RunResult): Promise<RunResult> => {
+    // The leftover checks started after agent steps write to this database; let them end first
+    // (each is bounded by its own timeout), before anything closes it.
+    await pendingLeftoverChecks();
+    emitter.flushNew(db, opts.ticketId);
+    emitter.emitSummary(db, opts.ticketId, result);
+    notifier.sweepNew(db, opts.ticketId); // backstop: the per-tick sweep already caught these; re-sweep in case a terminal enqueued late events
+    notifier.notifyTerminal(db, opts.ticketId, result.outcome);
+    await drainOutbox(db, opts.ports); // BLOCKER-1 fix: flush the terminal + tail notify rows
+    return result;
+  };
+  return { emitter, notifier, finish };
+}
+
 /** Drive ONE ticket through repeated ticks until a terminal state. `run` exits at PR-ready (the
  *  ticket parked at merge on human_merge_approval — the PR is open, awaiting the human merge gate
  *  which `run` never delivers). Emits a best-effort `ci_handoff` telemetry snapshot on the
@@ -114,19 +143,7 @@ export async function driveToTerminal(
 ): Promise<RunResult> {
   const cap = opts.cap ?? DEFAULT_CAP;
   const ciReadTimeoutMs = opts.ciReadTimeoutMs ?? CI_READ_TIMEOUT_MS;
-  const emitter = createTelemetryEmitter(opts.emit ?? noopSink, opts.config.pricing);
-  const notifier = createNotifier(opts.config);
-  const finish = async (result: RunResult): Promise<RunResult> => {
-    // The leftover checks started after agent steps write to this database; let them end first
-    // (each is bounded by its own timeout), before anything closes it.
-    await pendingLeftoverChecks();
-    emitter.flushNew(db, opts.ticketId);
-    emitter.emitSummary(db, opts.ticketId, result);
-    notifier.sweepNew(db, opts.ticketId); // backstop: the per-tick sweep already caught these; re-sweep in case a terminal enqueued late events
-    notifier.notifyTerminal(db, opts.ticketId, result.outcome);
-    await drainOutbox(db, opts.ports); // BLOCKER-1 fix: flush the terminal + tail notify rows
-    return result;
-  };
+  const { emitter, notifier, finish } = createRunEnd(db, opts);
   let idle = 0;
   let last = { iterations: 0, stage: "", status: "" };
   for (let i = 1; i <= cap; i++) {

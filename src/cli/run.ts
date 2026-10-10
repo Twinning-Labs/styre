@@ -337,8 +337,10 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
     }
 
     // Fail fast before any spend if a program the components' commands need isn't installed on
-    // this machine. Fresh-run path only — `--resume`/`--inspect` returned above (their re-running
-    // ground-truth steps are the check, and `--inspect` must stay exit-0 on a tool-less machine).
+    // this machine. Fresh-run path only — `--resume`/`--inspect` returned above: `--resume` makes
+    // the same toolchain decision itself in `resumeRun` (park.ts), after its resume transaction,
+    // and pauses needs_you rather than exit 69 (spec §4.1); `--inspect` must stay exit-0 on a
+    // tool-less machine.
     // ENG-412: a missing toolchain disqualifies its OWN component, not the whole run. Fatal only
     // when nothing usable is left — for a single-component repo that is the identical ENG-332
     // behaviour, and for a Python repo carrying an incidental `package.json` it is the

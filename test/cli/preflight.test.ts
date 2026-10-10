@@ -356,3 +356,53 @@ test("toolchainDecision refuses to drop a required suite and names it", () => {
   expect(reason).toContain("lib");
   expect(reason).toContain("lib-build");
 });
+
+test("toolchainDecision refuses when nothing is usable, naming every component", () => {
+  // all optional, every tool missing: the fatal case, where no component is required
+  const d = toolchainDecision(twoComponents(false), () => false);
+  if (d.kind !== "refuse") throw new Error("expected refuse");
+  expect(d.blocking.map((u) => u.component)).toEqual(["app", "lib"]);
+  const reason = resumePauseReason(d.blocking);
+  expect(reason).toStartWith("this host lacks the tools for app (missing: `true`");
+  expect(reason).toContain("; lib (missing: `lib-build`");
+  expect(reason).not.toContain("lacks the tools for ;");
+});
+
+test("toolchainDecision blocks on the required component only when another is still usable", () => {
+  // app usable, lib (required) and opt (optional) both missing: lib alone blocks the resume
+  const profile = parseProfile({
+    slug: "p",
+    targetRepo: "/tmp/p",
+    components: [
+      {
+        name: "app",
+        kind: "ruby",
+        paths: ["app/**"],
+        commands: { build: "true", test: "true", check: "true" },
+      },
+      {
+        name: "lib",
+        kind: "ruby",
+        paths: ["lib/**"],
+        commands: { build: "lib-build", test: "lib-test", check: "lib-check" },
+        testPolicy: { suite: "required" },
+      },
+      {
+        name: "opt",
+        kind: "ruby",
+        paths: ["opt/**"],
+        commands: { build: "opt-build", test: "opt-test", check: "opt-check" },
+      },
+    ],
+  });
+  const d = toolchainDecision(
+    profile,
+    (_dir, cmd) => !cmd.startsWith("lib-") && !cmd.startsWith("opt-"),
+  );
+  if (d.kind !== "refuse") throw new Error("expected refuse");
+  expect(d.partition.unusable.map((u) => u.component)).toEqual(["lib", "opt"]);
+  expect(d.blocking.map((u) => u.component)).toEqual(["lib"]);
+  const reason = resumePauseReason(d.blocking);
+  expect(reason).toContain("lib (missing: `lib-build`");
+  expect(reason).not.toContain("opt");
+});

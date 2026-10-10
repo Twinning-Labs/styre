@@ -27,7 +27,7 @@ import {
   applyReviewResume,
   planReviewResume,
 } from "../daemon/review-resume.ts";
-import { driveToTerminal, formatRunSummary } from "../daemon/run-ticket.ts";
+import { createRunEnd, driveToTerminal, formatRunSummary } from "../daemon/run-ticket.ts";
 import type { PauseReason, RunOutcome } from "../daemon/run-ticket.ts";
 import type { StepRegistry } from "../daemon/step-registry.ts";
 import { resumeVerificationRetries } from "../daemon/verification-retry.ts";
@@ -46,11 +46,12 @@ import { getProject } from "../db/repos/project.ts";
 import { requeueFailedForge } from "../db/repos/projection-outbox.ts";
 import { getRun, insertRun, markResumed } from "../db/repos/run.ts";
 import { listPending, markConsumed } from "../db/repos/signal.ts";
+import { getInput } from "../db/repos/ticket-input.ts";
 import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
-import { listByStatus } from "../db/repos/workflow-step.ts";
+import { getByKey as getStep, listByStatus } from "../db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
-import { resetProvision } from "../dispatch/provision.ts";
+import { recordUnusableComponents, resetProvision } from "../dispatch/provision.ts";
 import { branchHeadSha, reconcileWorktree } from "../dispatch/worktree.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
@@ -553,8 +554,26 @@ export async function resumeRun(
         pauseTicket(db, ticketId, reason);
         process.stderr.write(`resume: paused: ${reason}\n`);
       }
+      // Ends like every other needs_you pause (driveToTerminal's finish): the events and the
+      // summary on stdout, the notifier's sweep, the outbox drained. No step ran: zero ticks.
+      const now = getTicket(db, ticketId);
+      const paused = await createRunEnd(db, {
+        ticketId,
+        config: runtimeConfig,
+        ports,
+        emit: stdoutSink,
+      }).finish({
+        outcome: "paused",
+        reason: "needs_you",
+        iterations: 0,
+        stage: now?.stage ?? ticket.stage,
+        status: now?.status ?? ticket.status,
+      });
+      // A stop that began during the drain: as after driveToTerminal, nothing below may run.
+      if (isStopping()) throw new RunInterrupted();
+      process.stderr.write(`${formatRunSummary(db, ticketId, paused)}\n`);
       closeDb();
-      process.exitCode = exitCodeForOutcome("paused"); // 75, needs_you
+      process.exitCode = exitCodeForOutcome(paused.outcome); // 75, needs_you
       return;
     }
     const runProfile = toolchain.profile;
@@ -565,12 +584,22 @@ export async function resumeRun(
     // spec §4: after recover() and the provision reset, before the first resolver pass, the profile
     // and config rows are rewritten from what the handlers will receive now. The ticket text and the
     // starting commit never are (E2).
-    captureSnapshot(db, ticketId, {
+    const priorUnusable = getInput(db, ticketId, "run.unusableComponents");
+    const snapshot = captureSnapshot(db, ticketId, {
       profile: runProfile,
       unusableComponents: toolchain.unusable,
       nonPrimaryComponents,
       config: runtimeConfig,
     });
+    // ENG-412, never silent: provision records what the narrowing skipped, but it runs again only
+    // where its step is not already done (worktree mode resets it above; in place it stays done).
+    // When this host's list changed and provision will not run again, the runner records it here,
+    // through provision's own writer, so the PR's advisory block names it all the same.
+    const unusableChanged =
+      priorUnusable === null || snapshot.changed.includes("run.unusableComponents");
+    if (unusableChanged && getStep(db, ticketId, "provision")?.status === "succeeded") {
+      recordUnusableComponents(db, ticketId, toolchain.unusable);
+    }
 
     const wiring: ResumeRegistryWiring = {
       profile: runProfile,

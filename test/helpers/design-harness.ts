@@ -9,6 +9,7 @@ import { type RunArgs, runImpl } from "../../src/cli/run.ts";
 import { readCopyOf } from "../../src/db/read-copy.ts";
 import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
+import type { NotifierPort } from "../../src/integrations/notifier.ts";
 import {
   type DesignScript,
   type ScriptCalls,
@@ -35,6 +36,10 @@ export interface HarnessRunOptions {
   inspect?: boolean;
   /** What the tracker would say now; resume must never ask it (E2). */
   trackerTitle?: string;
+  /** A fake notifier port for this invocation. The config must name `slack` for the run to use
+   *  it; the harness then gives the run a placeholder SLACK_BOT_TOKEN (its startup check only asks
+   *  that one is set), which nothing sends anywhere: every port the run has is a fake. */
+  notifier?: NotifierPort;
 }
 
 /** The whole `styre run` and `styre run --resume`, through runImpl, with a scripted agent, fake
@@ -173,11 +178,16 @@ export class DesignHarness {
     this.trackerCalls = issueTracker.calls;
     this.stderr = [];
     this.stdout = [];
-    const ports = { issueTracker, forge: fakeForge() };
+    const ports = {
+      issueTracker,
+      forge: fakeForge(),
+      ...(opts.notifier ? { notifier: opts.notifier } : {}),
+    };
     const prev = {
       state: process.env.XDG_STATE_HOME,
       config: process.env.XDG_CONFIG_HOME,
       telemetry: process.env.STYRE_TELEMETRY,
+      slackToken: process.env.SLACK_BOT_TOKEN,
       exit: process.exitCode ?? 0,
       cwd: process.cwd(),
       errWrite: process.stderr.write,
@@ -190,6 +200,8 @@ export class DesignHarness {
     process.env.XDG_STATE_HOME = this.stateRoot;
     process.env.XDG_CONFIG_HOME = this.configRoot;
     process.env.STYRE_TELEMETRY = "0";
+    if (opts.notifier) process.env.SLACK_BOT_TOKEN = "placeholder-never-sent";
+    else Reflect.deleteProperty(process.env, "SLACK_BOT_TOKEN");
     const text = (chunk: unknown): string =>
       typeof chunk === "string" ? chunk : Buffer.from(chunk as Uint8Array).toString("utf8");
     // On Bun, console.error does not go through process.stderr.write: each is captured itself.
@@ -238,6 +250,7 @@ export class DesignHarness {
       restore("XDG_STATE_HOME", prev.state);
       restore("XDG_CONFIG_HOME", prev.config);
       restore("STYRE_TELEMETRY", prev.telemetry);
+      restore("SLACK_BOT_TOKEN", prev.slackToken);
     }
   }
 
