@@ -2,8 +2,9 @@ import type { Database } from "bun:sqlite";
 import { existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { UnusableComponent } from "../cli/preflight.ts";
+import { invalidateSteps } from "../daemon/invalidate.ts";
 import { insertSignal } from "../db/repos/ground-truth-signal.ts";
-import { getByKey, resetAttempt, resetToPending } from "../db/repos/workflow-step.ts";
+import { getByKey } from "../db/repos/workflow-step.ts";
 import { testCapabilities } from "../testing/capabilities.ts";
 import type { Component } from "./profile.ts";
 
@@ -257,31 +258,25 @@ export function diffTouchesManifest(changedPaths: string[]): boolean {
   });
 }
 
-/** Reset a succeeded `provision` step back to `pending` (and zero its `attempt` — a fresh install
- *  is not a retry of a prior attempt) so the resolver's `!done("provision")` gate re-fires before
- *  the next verify. A no-op if provision hasn't run yet or isn't currently `succeeded` (e.g.
- *  already pending/running/failed). Shared by the resume path (`src/cli/park.ts`) and the
- *  manifest-touch hook below. */
-export function resetProvision(db: Database, ticketId: number): void {
+/** Reset a succeeded `provision` through the invalidate function (spec §6), so it leaves history
+ *  and opens a new generation: on resume when the worktree was recreated (its installed deps are
+ *  gone), and from implement:dispatch when a diff touched a dependency manifest. A no-op unless
+ *  provision is currently `succeeded`. */
+export function resetProvision(
+  db: Database,
+  ticketId: number,
+  cause: "worktree-recreated" | "manifest-touched" = "worktree-recreated",
+): void {
   const s = getByKey(db, ticketId, "provision");
-  if (s && s.status === "succeeded") {
-    resetToPending(db, s.id);
-    resetAttempt(db, s.id);
-  }
+  if (s && s.status === "succeeded") invalidateSteps(db, ticketId, ["provision"], { cause });
 }
 
-/** The `implement:dispatch` post-commit hook (review F-2): if the dispatch's committed diff
- *  touched a dependency manifest, re-arm `provision` so it re-installs before the next verify.
- *  Only resets when provision is currently `succeeded` — a not-yet-run/already-pending provision
- *  needs no reset. */
 export function resetProvisionIfManifestTouched(
   db: Database,
   ticketId: number,
   changedFiles: string[],
 ): void {
-  if (diffTouchesManifest(changedFiles)) {
-    resetProvision(db, ticketId);
-  }
+  if (diffTouchesManifest(changedFiles)) resetProvision(db, ticketId, "manifest-touched");
 }
 
 /** ENG-412: the advisory that the run skipped components whose toolchain this host lacks. The one

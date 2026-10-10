@@ -110,6 +110,14 @@ export function setTicketTrack(db: Database, id: number, track: string): void {
   });
 }
 
+/** design:size's output cleared by an invalidation (spec §6.1). */
+export function clearTicketTrack(db: Database, id: number): void {
+  db.query("UPDATE ticket SET track = NULL, updated_at = $now WHERE id = $id").run({
+    $now: nowUtc(),
+    $id: id,
+  });
+}
+
 export function setNeedsDocs(db: Database, id: number, needsDocs: number): void {
   db.query("UPDATE ticket SET needs_docs = $nd, updated_at = $now WHERE id = $id").run({
     $nd: needsDocs,

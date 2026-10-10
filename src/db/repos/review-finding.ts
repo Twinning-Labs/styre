@@ -97,6 +97,14 @@ export function listOpenByTicket(db: Database, ticketId: number): ReviewFindingR
     .all(ticketId);
 }
 
+export function listByTicket(db: Database, ticketId: number): ReviewFindingRow[] {
+  return db
+    .query<ReviewFindingRow, [number]>(
+      `SELECT ${COLS} FROM review_finding WHERE ticket_id = ? ORDER BY id`,
+    )
+    .all(ticketId);
+}
+
 /** The dispatch_id of the most recent dispatch owned by the given step (joined via
  *  dispatch.step_id → workflow_step.step_key, highest dispatch.seq). Lets the verdict scope a
  *  review round precisely — design:review (plan) and review (code) are distinguished by step,

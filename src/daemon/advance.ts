@@ -27,6 +27,7 @@ import { planDigestFromResult, recordStepManifest } from "./design-digests.ts";
 import { ensureDesignTableChecked, stepRow } from "./design-graph.ts";
 import { requireSnapshot } from "./design-inputs.ts";
 import { applyFailurePolicy } from "./failure-policy.ts";
+import { invalidateSteps } from "./invalidate.ts";
 import { pauseTicket } from "./pause-ticket.ts";
 import { enqueueStageProjection } from "./projector.ts";
 import { nextStepKey } from "./resolver.ts";
@@ -135,6 +136,13 @@ export async function advanceOneStep(
 
     if (d.kind === "mark-verified") {
       setUnitStatus(db, d.workUnitId, "verified");
+      continue;
+    }
+
+    if (d.kind === "invalidate") {
+      // The resolver only detected the mismatch; the reset happens here, in one transaction
+      // (spec §6). The next pass runs the invalidated step.
+      invalidateSteps(db, ticketId, d.stepKeys, d.reason);
       continue;
     }
 

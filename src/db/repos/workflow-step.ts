@@ -186,6 +186,17 @@ export function resetAttempt(db: Database, id: number): void {
   });
 }
 
+/** spec §6 step 3: a fresh round in a new generation, keeping nothing the step recorded. */
+export function resetForInvalidate(db: Database, id: number): void {
+  db.query(
+    `UPDATE workflow_step
+       SET status = 'pending', attempt = 0, result_json = NULL, error_json = NULL, pid = NULL,
+           input_manifest = NULL, input_fingerprint = NULL, output_digest = NULL,
+           fingerprint_scheme = NULL, generation = generation + 1, updated_at = $now
+     WHERE id = $id`,
+  ).run({ $now: nowUtc(), $id: id });
+}
+
 export function listStepsForUnit(
   db: Database,
   ticketId: number,

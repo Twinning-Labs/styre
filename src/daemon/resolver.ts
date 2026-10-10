@@ -7,7 +7,9 @@ import { hasDelivered } from "../db/repos/signal.ts";
 import { getTicket } from "../db/repos/ticket.ts";
 import * as workUnits from "../db/repos/work-unit.ts";
 import { getByKey } from "../db/repos/workflow-step.ts";
+import type { DesignStepKey } from "./design-graph.ts";
 import { evidenceFloor } from "./evidence-floor.ts";
+import type { InvalidateReason } from "./invalidate.ts";
 
 export type StepDescriptor =
   | {
@@ -22,6 +24,7 @@ export type StepDescriptor =
   | { kind: "wait"; signalType: string }
   | { kind: "blocked"; reason: string }
   | { kind: "escalate"; reason: string; signature: string; stepKey: string }
+  | { kind: "invalidate"; stepKeys: DesignStepKey[]; reason: InvalidateReason }
   | { kind: "done" };
 
 function done(db: Database, ticketId: number, stepKey: string): boolean {
