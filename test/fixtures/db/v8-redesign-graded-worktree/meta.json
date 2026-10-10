@@ -1,0 +1,8 @@
+{
+  "slug": "fixture",
+  "ident": "ENG-1",
+  "branch": "feat/ENG-1",
+  "scenario": "redesign-budget-graded",
+  "targetRepoAtRecording": "/var/folders/qb/c1w1m9ns5wbcz3376s1zczkr0000gn/T/styre-db-fixtures-oNw7tD/tmp/styre-v8-recording-repo-PG6QJU",
+  "worktreeRootAtRecording": "/var/folders/qb/c1w1m9ns5wbcz3376s1zczkr0000gn/T/styre-db-fixtures-oNw7tD/tmp/styre-v8-recording-wt-agtN1m"
+}

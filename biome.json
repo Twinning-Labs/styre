@@ -1,6 +1,6 @@
 {
   "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
-  "files": { "ignore": ["dist/**", "**/*.sql"] },
+  "files": { "ignore": ["dist/**", "**/*.sql", "test/fixtures/db/**"] },
   "organizeImports": { "enabled": true },
   "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
   "linter": { "enabled": true, "rules": { "recommended": true } },
