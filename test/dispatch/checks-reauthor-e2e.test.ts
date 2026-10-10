@@ -9,14 +9,12 @@ import {
   reauthorRoundsForAc,
 } from "../../src/db/repos/ac-check.ts";
 import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
-import { setTicketTrack } from "../../src/db/repos/ticket.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
-import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
-import { runStep } from "../../src/engine/step-journal.ts";
 import { scriptedCheckRunner } from "../helpers/check-runner.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { reachChecksStep } from "../helpers/design-steps.ts";
 import { makeTempDir } from "../helpers/temp.ts";
 
 function gitRepo(): string {
@@ -39,16 +37,6 @@ test("green-on-HEAD check → vacuous → scoped re-author → repeated vacuous 
     "- [ ] persists a pref\n",
     ticketId,
   );
-
-  // Seed design done + one unit + fast track so the resolver serves provision→checks:dispatch→classify.
-  await runStep(db, {
-    ticketId,
-    stepKey: "design:dispatch",
-    stepType: "dispatch",
-    execute: () => ({ ok: true }),
-  });
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
 
   let file = 0;
   const runner = new FakeAgentRunner((input) => {
@@ -85,15 +73,17 @@ test("green-on-HEAD check → vacuous → scoped re-author → repeated vacuous 
     };
   });
 
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+  });
+  const worktreeRoot = makeTempDir("styre-rewt-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: repo,
-      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
-    }),
-    worktreeRoot: makeTempDir("styre-rewt-"),
+    profile,
+    worktreeRoot,
     // The authored check GREENS on clean HEAD (exit 0) → green-on-HEAD adjudication.
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 0,
@@ -105,6 +95,13 @@ test("green-on-HEAD check → vacuous → scoped re-author → repeated vacuous 
 
   // Drive the loop until the ticket escalates (status=waiting) or a bound is hit.
   let escalated = false;
+  await reachChecksStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot,
+    unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] },
+  });
   for (let i = 0; i < 20; i++) {
     const t = getTicket(db, ticketId);
     if (t?.status === "waiting") {
@@ -139,15 +136,6 @@ test("a weak classification (surface-only assertion) drives the same re-author l
     "- [ ] returns the created record\n",
     ticketId,
   );
-
-  await runStep(db, {
-    ticketId,
-    stepKey: "design:dispatch",
-    stepType: "dispatch",
-    execute: () => ({ ok: true }),
-  });
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
 
   let file = 0;
   const runner = new FakeAgentRunner((input) => {
@@ -188,15 +176,17 @@ test("a weak classification (surface-only assertion) drives the same re-author l
     };
   });
 
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+  });
+  const worktreeRoot = makeTempDir("styre-weak-wt-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: repo,
-      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
-    }),
-    worktreeRoot: makeTempDir("styre-weak-wt-"),
+    profile,
+    worktreeRoot,
     // The authored check stays RED (a `weak` verdict is only valid on a red coarse bucket, §2/Task 2).
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 1,
@@ -207,6 +197,13 @@ test("a weak classification (surface-only assertion) drives the same re-author l
   });
 
   let escalated = false;
+  await reachChecksStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot,
+    unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] },
+  });
   for (let i = 0; i < 20; i++) {
     const t = getTicket(db, ticketId);
     if (t?.status === "waiting") {
@@ -239,15 +236,6 @@ test("supersede, not delete: a healed AC (vacuous -> re-author -> already-satisf
     "- [ ] persists a pref\n",
     ticketId,
   );
-
-  await runStep(db, {
-    ticketId,
-    stepKey: "design:dispatch",
-    stepType: "dispatch",
-    execute: () => ({ ok: true }),
-  });
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
 
   // Round 1's adjudicator wrongly flags the (green-on-HEAD) check vacuous; round 2's re-authored
   // check — content-identical, GREEN on HEAD exactly like round 1 — is correctly judged
@@ -291,15 +279,17 @@ test("supersede, not delete: a healed AC (vacuous -> re-author -> already-satisf
     };
   });
 
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+  });
+  const worktreeRoot = makeTempDir("styre-heal-wt-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: repo,
-      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
-    }),
-    worktreeRoot: makeTempDir("styre-heal-wt-"),
+    profile,
+    worktreeRoot,
     // Green-on-HEAD both rounds — only the ADJUDICATOR's judgment changes between rounds.
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 0,
@@ -311,6 +301,13 @@ test("supersede, not delete: a healed AC (vacuous -> re-author -> already-satisf
 
   let advancedPastDesign = false;
   let escalated = false;
+  await reachChecksStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot,
+    unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] },
+  });
   for (let i = 0; i < 20; i++) {
     const t = getTicket(db, ticketId);
     if (t?.status === "waiting") {

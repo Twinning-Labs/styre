@@ -19,6 +19,7 @@ import { stateDir } from "../config/paths.ts";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { adoptActiveTickets } from "../daemon/adopt.ts";
 import { captureOtherActiveTickets, captureSnapshot } from "../daemon/design-inputs.ts";
+import { newerSchemeIn, newerSchemeRecorded, newerSchemeRefusal } from "../daemon/design-walk.ts";
 import { pauseTicket } from "../daemon/pause-ticket.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
 import type { ProjectorPorts } from "../daemon/projector.ts";
@@ -275,18 +276,15 @@ export function inspectWithoutUpgrading(
   ident: string,
   state: DatabaseState,
 ): string {
-  const schema =
-    state.kind === "upgrade"
-      ? `resume will upgrade this checkpoint from v${state.version} to v${CURRENT_VERSION}, after writing a backup`
-      : state.kind === "refuse"
-        ? `resume would refuse this checkpoint: ${state.error.headline}`
-        : state.kind === "empty"
-          ? "the checkpoint holds no tables"
-          : `v${state.version}, current`;
   let details: string;
+  let newer = "";
   try {
     // A private copy (operator ruling, 2026-10-09): the checkpoint itself is never opened.
     details = readCopyOf(dbPath, (db) => {
+      // When resume would refuse a run fingerprinted under a newer scheme, say so (Task 13).
+      const found = state.kind === "current" ? newerSchemeIn(db) : null;
+      if (found !== null)
+        newer = `; resume would refuse it: this run was recorded by a newer Styre (fingerprint scheme ${found.scheme}); use that version`;
       // the run's own ticket, by its ident (spec §4, operator ruling 2026-10-10)
       const { ticket, reason } = findCheckpointTicket(db, ident);
       if (!ticket) return `  resume would refuse this checkpoint: ${reason}\n`;
@@ -303,6 +301,14 @@ export function inspectWithoutUpgrading(
   } catch (err) {
     details = `  (the rest cannot be read on this shape: ${err instanceof Error ? err.message : String(err)})\n`;
   }
+  const schema =
+    state.kind === "upgrade"
+      ? `resume will upgrade this checkpoint from v${state.version} to v${CURRENT_VERSION}, after writing a backup`
+      : state.kind === "refuse"
+        ? `resume would refuse this checkpoint: ${state.error.headline}`
+        : state.kind === "empty"
+          ? "the checkpoint holds no tables"
+          : `v${state.version}, current${newer}`;
   return `resume --inspect ${ident}\n  schema: ${schema}\n${details}  (no changes made)\n`;
 }
 
@@ -381,6 +387,16 @@ export async function resumeRun(
         held: listCheckpointIdents(db),
       }));
       if (!found.ticket) throw noOwnTicket(args.resume, dir, found.reason, found.held);
+    }
+    // A manifest recorded under a newer FINGERPRINT_SCHEME (operator ruling, 2026-10-10): this
+    // Styre cannot compare it. Refuse before anything is written, like a HEAD that moved (65).
+    const newerScheme = newerSchemeRecorded(dbPath);
+    if (newerScheme !== null) {
+      process.stderr.write(
+        `resume refused: ${newerSchemeRefusal(args.resume, newerScheme.scheme)}`,
+      );
+      process.exitCode = 65; // EXIT.RESUME_REFUSED, inside the try whose finally releases the lock
+      return;
     }
     migrate(dbPath, { log: (line) => process.stderr.write(`${line}\n`) });
     const db = openDb(dbPath);

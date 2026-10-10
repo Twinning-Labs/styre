@@ -1,7 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
-import { nextStepKey } from "../../src/daemon/resolver.ts";
 import { applyReviewResume, planReviewResume } from "../../src/daemon/review-resume.ts";
 import { insertDispatch } from "../../src/db/repos/dispatch.ts";
 import { listByTicket as events, appendEvent } from "../../src/db/repos/event-log.ts";
@@ -176,11 +175,6 @@ test("queued forge effects prevent retry before any ledger mutation", () => {
 
 test("plan review cannot accept risks or advance merely because review step succeeded", () => {
   const { db, ticketId, findings } = seed("plan");
-  for (const key of ["provision", "design:dispatch"]) {
-    const step = insertPending(db, { ticketId, stepKey: key, stepType: "dispatch" });
-    db.query("UPDATE workflow_step SET status='succeeded' WHERE id=?").run(step.id);
-  }
-  expect(nextStepKey(db, ticketId)).toMatchObject({ kind: "escalate", stepKey: "design:review" });
   expect(() =>
     planReviewResume(db, ticketId, HEAD, false, options(findings.map((f) => f.id))),
   ).toThrow();

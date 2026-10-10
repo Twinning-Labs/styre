@@ -176,12 +176,15 @@ const isSnapshot = (n: string): n is SnapshotInputName =>
   (SNAPSHOT_INPUT_NAMES as readonly string[]).includes(n);
 export const isSnapshotInput = isSnapshot;
 
+const TRACKS: readonly TicketRow["track"][] = [null, "fast", "full"];
+
 const CONTEXTS: readonly InputContext[] = [
   { complexityGrading: false },
   { complexityGrading: true },
 ];
 
-/** The four rules of spec §3.1. Returns one line per violation. */
+/** The four rules of spec §3.1, and what the walk needs of a gate row. Returns one line per
+ *  violation. */
 export function checkDesignTable(table: readonly DesignRow[]): string[] {
   const out: string[] = [];
   const stepRows = table.filter((r): r is StepRow => r.kind === "step");
@@ -206,10 +209,30 @@ export function checkDesignTable(table: readonly DesignRow[]): string[] {
         out.push(`rule 3: ${r.stepKey} reads ${n}, produced later by ${p.key}`);
     }
   });
-  for (const g of table.filter((r): r is GateRow => r.kind === "gate")) {
-    for (const n of g.reads)
-      if (!producer.has(n)) out.push(`rule 1: gate ${g.name} reads ${n}, which no step produces`);
-  }
+  // The walk (design-walk.ts) evaluates a gate where it stands in the table, on the outputs before
+  // it, and returns its escalation for its step: so a gate must come after what it reads, name a step
+  // of the table, and apply only where that step applies (on another track it would fire on
+  // findings an earlier round left).
+  table.forEach((g, position) => {
+    if (g.kind !== "gate") return;
+    for (const n of g.reads) {
+      const p = producer.get(n);
+      if (!p) out.push(`rule 1: gate ${g.name} reads ${n}, which no step produces`);
+      else if (table.indexOf(stepRows[p.index] as DesignRow) > position)
+        out.push(`rule 3: gate ${g.name} reads ${n}, produced later by ${p.key}`);
+    }
+    const own = stepRows.find((r) => r.stepKey === g.stepKey);
+    if (!own) {
+      out.push(`gate ${g.name}: its step ${g.stepKey} is not a step of the table`);
+      return;
+    }
+    for (const track of TRACKS) {
+      if (g.appliesWhen({ track }) && !own.appliesWhen({ track }))
+        out.push(
+          `gate ${g.name}: applies on track ${track ?? "unset"}, where its step ${g.stepKey} does not`,
+        );
+    }
+  });
   // Rule 4: the routing is `designRouting(table)`, the step rows in table order, so order holds by
   // construction (spec §3.1); what can still go wrong is a step listed twice.
   const seen = new Set<string>();

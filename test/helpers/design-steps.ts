@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { realpathSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { DEFAULT_RUNTIME_CONFIG, type RuntimeConfig } from "../../src/config/runtime-config.ts";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
@@ -177,4 +177,49 @@ export async function reachDesignStep(opts: {
     20,
   );
   return calls;
+}
+
+/** For the checks tests that used to mark design done by hand (spec §8): run the real design
+ *  steps until `checks:dispatch` is next, with the one planned unit those tests seeded. Provision
+ *  runs here (creating the worktree), so the caller's first step is `checks:dispatch`. A behavioural
+ *  unit carries its own test file (validateExtraction requires it): `testFile`, or a `tests/` file
+ *  beside the unit's first file, which the default test file pattern matches. */
+export async function reachChecksStep(opts: {
+  db: Database;
+  ticketId: number;
+  profile: Profile;
+  worktreeRoot: string;
+  inPlace?: boolean;
+  unit: {
+    kind: string;
+    behavioral: boolean;
+    verifyCheckTypes: string[];
+    filesToTouch?: string[];
+    testFile?: string;
+  };
+}): Promise<void> {
+  const files = opts.unit.filesToTouch ?? ["src/unit1.py"];
+  const first = files[0] ?? "src/unit1.py";
+  const testFile = opts.unit.testFile ?? `${dirname(first)}/tests/test_${basename(first)}`;
+  await reachDesignStep({
+    db: opts.db,
+    ticketId: opts.ticketId,
+    profile: opts.profile,
+    worktreeRoot: opts.worktreeRoot,
+    inPlace: opts.inPlace,
+    target: "checks:dispatch",
+    units: [
+      {
+        seq: 1,
+        kind: opts.unit.kind,
+        title: "Unit 1",
+        description: "Change 1",
+        behavioral: opts.unit.behavioral,
+        test_plan: opts.unit.behavioral ? `${testFile} asserts change 1` : null,
+        files_to_touch: opts.unit.behavioral ? [...files, testFile] : files,
+        verify_check_types: opts.unit.verifyCheckTypes,
+        depends_on: [],
+      },
+    ],
+  });
 }

@@ -604,7 +604,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
       }
 
       // Written by writeExtractOutputs inside the success transaction (spec §6.2): a crash before
-      // markSucceeded leaves no partial units, so the rerun cannot hit UNIQUE (ticket_id, seq).
+      // markSucceeded leaves no partial units, and the commit replaces any an older Styre left.
       const result: ExtractResult = {
         units: parsed.value.units.length,
         extracted: parsed.value.units,

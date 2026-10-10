@@ -56,6 +56,11 @@ const ExtractResultSchema: z.ZodType<ExtractResult> = z
 
 export function writeExtractOutputs(db: Database, ticketId: number, result: unknown): void {
   const r = parseResult("design:extract", ExtractResultSchema, result);
+  // The step's outputs are replaced whole, by its clearing rule (spec §6.1). Under this Styre there
+  // is nothing to clear here (units are written only in this transaction, and an invalidation or a
+  // redesign has already cleared them); a run paused by an older one can hold the partial units a
+  // crash inside design:extract left, with the step not succeeded, and the rerun replaces them.
+  CLEAR_OUTPUTS["design:extract"](db, ticketId);
   for (const u of r.extracted) {
     insertWorkUnit(db, {
       ticketId,

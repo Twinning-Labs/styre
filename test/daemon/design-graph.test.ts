@@ -145,6 +145,44 @@ test("rule 1 refuses a gate that reads an output no step produces", () => {
   );
 });
 
+// Task 13: the walk evaluates a gate where it stands and returns its escalation for its step.
+const gateOf = (t: readonly DesignRow[]) =>
+  t.find((r): r is GateRow => r.kind === "gate") as GateRow;
+const replaceGate = (patch: Partial<GateRow>): DesignRow[] =>
+  DESIGN_TABLE.map((r) => (r.kind === "gate" ? { ...r, ...patch } : r));
+
+test("a gate placed before the step that produces what it reads is refused (rule 3)", () => {
+  const gate = gateOf(DESIGN_TABLE);
+  const early = [gate, ...DESIGN_TABLE.filter((r) => r !== gate)];
+  expect(checkDesignTable(early)).toEqual([
+    "rule 3: gate plan-review reads planFindings, produced later by design:review",
+  ]);
+  const e = (() => {
+    try {
+      assertDesignTable(early);
+    } catch (err) {
+      return err as DesignTableError;
+    }
+    throw new Error("assertDesignTable accepted a gate placed before its producer");
+  })();
+  expect(e.code).toBe(EXIT.INTERNAL); // 70
+});
+
+test("a gate whose step is not a step of the table is refused", () => {
+  expect(checkDesignTable(replaceGate({ stepKey: "checks:dispatch" as never }))).toEqual([
+    "gate plan-review: its step checks:dispatch is not a step of the table",
+  ]);
+});
+
+test("a gate that applies where its step does not is refused, on each such track", () => {
+  expect(checkDesignTable(replaceGate({ appliesWhen: () => true }))).toEqual([
+    "gate plan-review: applies on track unset, where its step design:review does not",
+    "gate plan-review: applies on track fast, where its step design:review does not",
+  ]);
+  // narrower than its step is fine: the gate fires on a subset of the step's rounds
+  expect(checkDesignTable(replaceGate({ appliesWhen: () => false }))).toEqual([]);
+});
+
 test("a snapshot input is accepted by rule 1 in any position; an output is not a snapshot input", () => {
   for (const n of SNAPSHOT_INPUT_NAMES) {
     const ok = replace("provision", { inputs: () => [n] });

@@ -25,8 +25,11 @@ export function skeletonRegistry(): StepRegistry {
       kind: "backend",
       verifyCheckTypes: ["test"],
     });
-    setTicketTrack(ctx.db, ctx.ticket.id, "fast");
     return { units: 1 };
+  });
+  r.register("design:size", (ctx: HandlerContext) => {
+    setTicketTrack(ctx.db, ctx.ticket.id, "fast");
+    return { track: "fast", graded: false };
   });
   r.register("checks:dispatch", () => ({ authored: 0 }));
   r.register("checks:classify", () => ({ classified: 0 }));

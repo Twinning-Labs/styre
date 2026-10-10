@@ -52,7 +52,6 @@ import { insertProject } from "../../src/db/repos/project.ts";
 import { insertRun } from "../../src/db/repos/run.ts";
 import { insertTicket } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
-import { insertPending, markSucceeded } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { type Profile, parseProfile } from "../../src/dispatch/profile.ts";
 import { branchHeadSha } from "../../src/dispatch/worktree.ts";
@@ -68,6 +67,7 @@ import {
   handleStopSignal,
 } from "../../src/util/process/signals.ts";
 import { nowUtc } from "../../src/util/time.ts";
+import { reachChecksStep } from "../helpers/design-steps.ts";
 import { killOwned, ownGroupMembers, ownLaunch } from "../helpers/own-processes.ts";
 import { makeTempDir } from "../helpers/temp.ts";
 
@@ -1026,23 +1026,29 @@ async function interruptChecksTestRun() {
       { name: "app", kind: "node", paths: ["src/**"], commands: { build: "true", test: "true" } },
     ],
     (db, { ticketId }) => {
-      db.query("UPDATE ticket SET stage = 'design', track = 'fast' WHERE id = ?").run(ticketId);
-      const plan = insertPending(db, {
-        ticketId,
-        stepKey: "design:dispatch",
-        stepType: "dispatch",
-      });
-      markSucceeded(db, plan.id, {});
-      insertWorkUnit(db, {
-        ticketId,
-        seq: 1,
-        kind: "backend",
-        behavioral: 0,
-        verifyCheckTypes: [],
-      });
       acId = insertAc(db, { ticketId, seq: 1, text: "it works", source: "checklist" }).id;
     },
   );
+  // design through real steps, in place, with the run's own profile (Task 9 captured the snapshot
+  // from it), so the plan's commit lands before headAtStart
+  const designDb = openDb(run.dbPath);
+  try {
+    await reachChecksStep({
+      db: designDb,
+      ticketId: run.ticketId,
+      profile: run.profile,
+      worktreeRoot: run.repo,
+      inPlace: true,
+      unit: {
+        kind: "backend",
+        behavioral: false,
+        verifyCheckTypes: [],
+        filesToTouch: ["src/unit1.js"],
+      },
+    });
+  } finally {
+    designDb.close();
+  }
   const headAtStart = git(run.repo, ["rev-parse", "HEAD"]);
   // The plan-blind author: writes the check it declares.
   const author = new FakeAgentRunner((input) => {
@@ -1063,7 +1069,7 @@ async function interruptChecksTestRun() {
   const committed = git(run.repo, ["rev-parse", "HEAD"]);
   expect(committed).not.toBe(headAtStart);
   expect(git(run.repo, ["show", "--name-only", "--format=", committed])).toBe(AUTHORED);
-  const rows = dispatchRows(run.dbPath);
+  const rows = dispatchRows(run.dbPath).filter((d) => d.step_id === i.during.id);
   expect(rows).toHaveLength(1);
   const row = rows[0] as (typeof rows)[number];
   // The authoring dispatch had already completed with its commit; the stop has nothing to close.

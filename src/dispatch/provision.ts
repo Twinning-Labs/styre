@@ -2,8 +2,9 @@ import type { Database } from "bun:sqlite";
 import { existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { UnusableComponent } from "../cli/preflight.ts";
+import { digestValue } from "../daemon/canonical.ts";
 import { invalidateSteps } from "../daemon/invalidate.ts";
-import { insertSignal } from "../db/repos/ground-truth-signal.ts";
+import { insertSignal, listByTicket as listSignals } from "../db/repos/ground-truth-signal.ts";
 import { getByKey } from "../db/repos/workflow-step.ts";
 import { testCapabilities } from "../testing/capabilities.ts";
 import type { Component } from "./profile.ts";
@@ -279,18 +280,42 @@ export function resetProvisionIfManifestTouched(
   if (diffTouchesManifest(changedFiles)) resetProvision(db, ticketId, "manifest-touched");
 }
 
+/** What makes two advisories the same list: the components and their missing tools, each sorted
+ *  (the snapshot sorts the list too), so the host's discovery order never counts as a change. */
+function advisoryKey(components: readonly string[], missing: readonly string[]): string {
+  return digestValue({ components: [...components].sort(), missing: [...missing].sort() });
+}
+
 /** ENG-412: the advisory that the run skipped components whose toolchain this host lacks. The one
  *  writer of the `toolchain` signal: `provision` records it, and so does a resume whose narrowing
- *  changed while `provision` will not run again (spec §4.1), so `advisorySweeps` and the PR treat
- *  both alike. `advisory: true` routes it into the PR's advisory block, so a reviewer sees that a
+ *  changed while `provision` was done (spec §4.1), so `advisorySweeps` and the PR treat both
+ *  alike. `advisory: true` routes it into the PR's advisory block, so a reviewer sees that a
  *  component was skipped entirely rather than silently getting a PR that claims less coverage than
- *  it appears to. Records nothing for an empty list. */
+ *  it appears to. Records nothing for an empty list, and nothing when the ticket's newest
+ *  `toolchain` signal already names the same list: a resume records it and then the walk reruns
+ *  `provision` for the same change (ENG-477), and any other path that records it twice is just as
+ *  harmless. */
 export function recordUnusableComponents(
   db: Database,
   ticketId: number,
   unusable: readonly UnusableComponent[],
 ): void {
   if (unusable.length === 0) return;
+  const components = unusable.map((u) => u.component);
+  const missing = unusable.flatMap((u) => u.missing.map((m) => m.missing));
+  const newest = listSignals(db, ticketId)
+    .filter((s) => s.signal_type === "toolchain")
+    .at(-1);
+  if (newest) {
+    const prior = JSON.parse(newest.detail_json ?? "{}") as {
+      components?: string[];
+      missing?: string[];
+    };
+    if (
+      advisoryKey(prior.components ?? [], prior.missing ?? []) === advisoryKey(components, missing)
+    )
+      return;
+  }
   insertSignal(db, {
     ticketId,
     workUnitId: null,
@@ -302,8 +327,8 @@ export function recordUnusableComponents(
     detail: {
       advisory: true,
       reason: "component-unusable",
-      components: unusable.map((u) => u.component),
-      missing: unusable.flatMap((u) => u.missing.map((m) => m.missing)),
+      components,
+      missing,
     },
   });
 }

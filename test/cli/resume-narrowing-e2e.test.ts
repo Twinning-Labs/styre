@@ -4,9 +4,11 @@ import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import { listByTicket as listSignals } from "../../src/db/repos/ground-truth-signal.ts";
 import { listPending } from "../../src/db/repos/signal.ts";
 import { getInput } from "../../src/db/repos/ticket-input.ts";
+import { getTicket } from "../../src/db/repos/ticket.ts";
 import { buildVerifyReport } from "../../src/dispatch/verify-report.ts";
 import { fakeNotifier } from "../../src/integrations/adapters/fake-notifier.ts";
 import { DesignHarness, HARNESS_TEST_TIMEOUT_MS } from "../helpers/design-harness.ts";
+import { unitsOf } from "../helpers/design-script.ts";
 
 const harnesses: DesignHarness[] = [];
 const make = (mode: "worktree" | "in-place", required: boolean): DesignHarness => {
@@ -216,7 +218,9 @@ test(
     expect(toolchainSignals(h)).toEqual([]);
     h.probe = libMissing;
     expect(await h.resume()).toBe(75);
-    // provision is done and does not run again in place: the runner records it, the same way
+    // paused in design: the runner records it as the snapshot changes (provision is done), then
+    // the walk reruns provision, whose inputs changed, and provision's own record of the same list
+    // is skipped (the writer records a list once): one advisory
     const signals = toolchainSignals(h);
     expect(signals.length).toBe(1);
     expect(signals[0]?.result).toBe("error");
@@ -236,6 +240,34 @@ test(
     ]);
     // an unchanged resume (the same list) records nothing new
     expect(await h.resume()).toBe(75);
+    expect(toolchainSignals(h).length).toBe(1);
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+test(
+  "in place, paused past design: a resume that newly narrows a component records the advisory once, through the runner",
+  async () => {
+    const h = make("in-place", false);
+    // non behavioural units pass the checks steps; the run pauses (budget) in implement
+    const script = { units: () => unitsOf(1, { behavioral: false }), parkAt: "implement" as const };
+    expect(await h.fresh({ script })).toBe(75);
+    expect(h.read((db, id) => getTicket(db, id)?.stage)).toBe("implement");
+    expect(toolchainSignals(h)).toEqual([]);
+    h.probe = libMissing;
+    expect(await h.resume({ script })).toBe(75);
+    expect(h.read((db, id) => getTicket(db, id)?.stage)).toBe("implement");
+    // past design the walk does not run (E6): provision is not invalidated, so the runner's record
+    // is the only one
+    const invalidated = h.read((db, id) =>
+      listEvents(db, id).filter((e) => e.reason === "invalidated"),
+    );
+    expect(invalidated).toEqual([]);
+    const signals = toolchainSignals(h);
+    expect(signals.length).toBe(1);
+    expect(JSON.parse(signals[0]?.detail_json ?? "{}").components).toEqual(["lib"]);
+    // an unchanged resume records nothing new
+    expect(await h.resume({ script })).toBe(75);
     expect(toolchainSignals(h).length).toBe(1);
   },
   HARNESS_TEST_TIMEOUT_MS,
@@ -349,7 +381,8 @@ test(
     expect(components(h)).toEqual(["app", "lib"]);
     expect(changedNotes(h)).toEqual([]);
     expect(toolchainSignals(h)).toEqual([]);
-    // the next resume therefore still sees the change, and records all of it
+    // the next resume therefore still sees the change, and records all of it: the runner's
+    // advisory, which the rerun provision does not repeat
     failToolchainInserts(h, false);
     expect(await h.resume()).toBe(75);
     expect(JSON.parse(unusable(h) ?? "[]").map((u: { component: string }) => u.component)).toEqual([

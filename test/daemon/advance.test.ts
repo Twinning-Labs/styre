@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
 import { EMPTY_PLAN_DIGEST } from "../../src/daemon/design-digests.ts";
+import { nextStepKey } from "../../src/daemon/resolver.ts";
 import { StepRegistry } from "../../src/daemon/step-registry.ts";
 import { completeDispatch, insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
 import { insertSignal } from "../../src/db/repos/ground-truth-signal.ts";
@@ -12,12 +13,7 @@ import {
   insertWorkUnit,
   setStatus as setUnitStatus,
 } from "../../src/db/repos/work-unit.ts";
-import {
-  getByKey,
-  insertPending,
-  markRunning,
-  markSucceeded,
-} from "../../src/db/repos/workflow-step.ts";
+import { getByKey, insertPending, markRunning } from "../../src/db/repos/workflow-step.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { StepInFlightError } from "../../src/engine/step-journal.ts";
 import * as door from "../../src/util/process/door.ts";
@@ -29,14 +25,20 @@ import { makeTempDir } from "../helpers/temp.ts";
 // A fresh design ticket now resolves `provision` first (hoisted). Tests that drive design steps
 // with a hand-built registry must seed provision as already-done, or the resolver returns it and
 // advanceOneStep throws `no handler registered for 'provision'`.
-function seedProvisionDone(db: Parameters<typeof advanceOneStep>[0], ticketId: number): void {
-  const s = insertPending(db, { ticketId, stepKey: "provision", stepType: "provision" });
-  markSucceeded(db, s.id, {});
+async function seedProvisionDone(
+  db: Parameters<typeof advanceOneStep>[0],
+  ticketId: number,
+): Promise<void> {
+  const r = new StepRegistry();
+  r.register("provision", () => ({}));
+  const outcome = await advanceOneStep(db, ticketId, r);
+  if (outcome.kind !== "stepped" || outcome.stepKey !== "provision")
+    throw new Error(`seedProvisionDone: expected provision to run, got ${JSON.stringify(outcome)}`);
 }
 
 test("a step descriptor runs the registered handler and journals success", async () => {
   const { db, ticketId } = makeTestDb();
-  seedProvisionDone(db, ticketId);
+  await seedProvisionDone(db, ticketId);
   const registry = new StepRegistry();
   let ran = false;
   registry.register("design:dispatch", () => {
@@ -98,9 +100,8 @@ test("advance + mark-verified transitions collapse, then the next real step runs
 
 test("an advance descriptor sets the stage and writes a transition event", async () => {
   const { db, ticketId } = makeTestDb();
-  // design done (dispatch succeeded) + a unit + fast track → resolver now routes through the
-  // hoisted provision + checks:dispatch before it returns advance design→implement, which
-  // collapses; then implement:wu1:dispatch runs.
+  // The design steps and the checks steps run, through real steps, before the resolver returns
+  // advance design→implement, which collapses; then implement:wu1:dispatch runs.
   const registry = new StepRegistry();
   registry.register("design:dispatch", () => ({ planDigest: EMPTY_PLAN_DIGEST }));
   registry.register("design:extract", (ctx) => {
@@ -112,23 +113,18 @@ test("an advance descriptor sets the stage and writes a transition event", async
     });
     return { units: 1 };
   });
+  registry.register("design:size", (ctx) => {
+    setTicketTrack(ctx.db, ctx.ticket.id, "fast");
+    return { track: "fast", graded: false };
+  });
   registry.register("provision", () => ({}));
   registry.register("checks:dispatch", () => ({}));
   registry.register("checks:classify", () => ({}));
   registry.register("implement:dispatch", () => ({}));
-  // run design:dispatch
-  await advanceOneStep(db, ticketId, registry);
-  // run design:extract (creates the unit)
-  await advanceOneStep(db, ticketId, registry);
-  // mark the track fast so design advances rather than asking for review
-  setTicketTrack(db, ticketId, "fast");
-  // provision, checks:dispatch, and checks:classify must actually RUN (mark-succeeded) — a
-  // registered-but-unrun step would make the next advanceOneStep call return stepped/<that step>,
-  // not the implement step below.
-  await advanceOneStep(db, ticketId, registry); // provision
-  await advanceOneStep(db, ticketId, registry); // checks:dispatch
-  await advanceOneStep(db, ticketId, registry); // checks:classify
-  // next advance: collapse design→implement, then run implement:wu1:dispatch
+  // provision, design:dispatch, design:extract, design:size, checks:dispatch, checks:classify. Stop
+  // when the next descriptor is the advance: the call after it collapses the advance inline and
+  // runs implement:wu1:dispatch.
+  while (nextStepKey(db, ticketId).kind !== "advance") await advanceOneStep(db, ticketId, registry);
   const outcome = await advanceOneStep(db, ticketId, registry);
   const ticket = getTicket(db, ticketId);
   db.close();
@@ -166,7 +162,7 @@ test("a done descriptor marks the ticket done", async () => {
 
 test("a failing handler routes through failure-policy (retry)", async () => {
   const { db, ticketId } = makeTestDb();
-  seedProvisionDone(db, ticketId);
+  await seedProvisionDone(db, ticketId);
   const registry = new StepRegistry();
   registry.register("design:dispatch", () => {
     throw new Error("agent died");
@@ -180,7 +176,7 @@ test("a failing handler routes through failure-policy (retry)", async () => {
 
 test("a running step propagates StepInFlightError instead of routing through failure-policy", async () => {
   const { db, ticketId } = makeTestDb();
-  seedProvisionDone(db, ticketId);
+  await seedProvisionDone(db, ticketId);
   // Insert the design:dispatch step as pending, then mark it running (simulates crash-interrupted run).
   const pending = insertPending(db, {
     ticketId,
@@ -332,7 +328,7 @@ test("a blocked descriptor pauses the ticket via pauseTicket (waiting + pending 
 test("advanceOneStep registers the step in flight with the ticket ident and the branch head read from opts.readHead", async () => {
   door.__resetForTests();
   const { db, ticketId } = makeTestDb();
-  seedProvisionDone(db, ticketId);
+  await seedProvisionDone(db, ticketId);
   const registry = new StepRegistry();
   let seen: ReturnType<typeof door.inFlightStep> = null;
   registry.register("design:dispatch", (ctx) => {
@@ -361,7 +357,7 @@ test("advanceOneStep registers the step in flight with the ticket ident and the 
 test("advanceOneStep without readHead gives a null headAtStart", async () => {
   door.__resetForTests();
   const { db, ticketId } = makeTestDb();
-  seedProvisionDone(db, ticketId);
+  await seedProvisionDone(db, ticketId);
   const registry = new StepRegistry();
   let seen: ReturnType<typeof door.inFlightStep> = null;
   registry.register("design:dispatch", () => {

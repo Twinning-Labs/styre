@@ -14,15 +14,13 @@ import {
 import { listByTicket as listDispatches } from "../../src/db/repos/dispatch.ts";
 import { appendEvent, listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import { listByTicket as listSignals } from "../../src/db/repos/ground-truth-signal.ts";
-import { setTicketTrack } from "../../src/db/repos/ticket.ts";
-import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { getByKey, resetToPending } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { buildVerifyReport, renderVerifyReport } from "../../src/dispatch/verify-report.ts";
-import { runStep } from "../../src/engine/step-journal.ts";
 import { scriptedCheckRunner } from "../helpers/check-runner.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { reachChecksStep } from "../helpers/design-steps.ts";
 import { makeTempDir } from "../helpers/temp.ts";
 
 function gitRepo(): string {
@@ -35,16 +33,6 @@ function gitRepo(): string {
   run(["add", "-A"]);
   run(["commit", "-m", "init"]);
   return root;
-}
-
-// Drive the loop until it steps `checks:dispatch` (design:dispatch done + a unit + fast track already set).
-async function markDesignDone(db: Parameters<typeof runStep>[0], ticketId: number) {
-  await runStep(db, {
-    ticketId,
-    stepKey: "design:dispatch",
-    stepType: "dispatch",
-    execute: () => ({ ok: true }),
-  });
 }
 
 // ENG-357 helper: run a single-AC checks:dispatch for `kind`/`testCmd`, with the injected check
@@ -65,15 +53,6 @@ async function runSingleCheckDispatch(fixture: {
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
   db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] one thing\n", ticketId);
-  await markDesignDone(db, ticketId);
-  insertWorkUnit(db, {
-    ticketId,
-    seq: 1,
-    kind: fixture.kind,
-    behavioral: fixture.behavioral,
-    verifyCheckTypes: ["test"],
-  });
-  setTicketTrack(db, ticketId, "fast");
   const runner = new FakeAgentRunner((input) => {
     const dir = join(input.cwd, "checks");
     mkdirSync(dir, { recursive: true });
@@ -90,22 +69,30 @@ async function runSingleCheckDispatch(fixture: {
       tokensOut: null,
     };
   });
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [
+      { name: "c", kind: fixture.kind, paths: ["**"], commands: { test: fixture.testCmd } },
+    ],
+  });
+  const worktreeRoot = makeTempDir("styre-chwt-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: repo,
-      components: [
-        { name: "c", kind: fixture.kind, paths: ["**"], commands: { test: fixture.testCmd } },
-      ],
-    }),
-    worktreeRoot: makeTempDir("styre-chwt-"),
+    profile,
+    worktreeRoot,
     runCheckCommand: scriptedCheckRunner(async () => fixture.run(), {
       probeFails: fixture.probeSucceeds === false,
     }),
   });
-  await advanceOneStep(db, ticketId, registry); // provision
+  await reachChecksStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot,
+    unit: { kind: fixture.kind, behavioral: fixture.behavioral !== 0, verifyCheckTypes: ["test"] },
+  }); // provision (creates the worktree) and design, through real steps
   const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
   const checks = listAcChecks(db, ticketId);
   const step = getByKey(db, ticketId, "checks:dispatch");
@@ -114,8 +101,9 @@ async function runSingleCheckDispatch(fixture: {
   const signals = listSignals(db, ticketId);
   const report = buildVerifyReport(db, ticketId);
   const markdown = renderVerifyReport(report);
+  // checks:dispatch's own dispatches: design now runs its real steps first, with dispatches of its own
   const authorDispatches = listDispatches(db, ticketId).filter(
-    (d) => d.stage === "design" && d.dispatch_id.length > 0,
+    (d) => d.step_id === step?.id && d.dispatch_id.length > 0,
   ).length;
   db.close();
   return { checks, message, outcome, stepStatus, signals, report, markdown, authorDispatches };
@@ -131,9 +119,6 @@ test.each(["TestRegression::test_x", "TestRegression::test_x[case::value]"])(
       "- [ ] one behavior\n",
       ticketId,
     );
-    await markDesignDone(db, ticketId);
-    insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-    setTicketTrack(db, ticketId, "fast");
     const worktreeRoot = makeTempDir("styre-qualified-check-");
     const testFile = "checks/ENG-1_ac1_test.py";
     let attempts = 0;
@@ -156,17 +141,16 @@ test.each(["TestRegression::test_x", "TestRegression::test_x[case::value]"])(
       };
     });
     const commands: string[] = [];
+    const profile = parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+    });
     const registry = buildDispatchRegistry({
       runner,
       agentConfig: DEFAULT_AGENT_CONFIG,
       worktreeRoot,
-      profile: parseProfile({
-        slug: "demo",
-        targetRepo: repo,
-        components: [
-          { name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } },
-        ],
-      }),
+      profile,
       runCheckCommand: scriptedCheckRunner(async (command) => {
         commands.push(command);
         if (command === `python3 -m pytest '${testFile}::test_x'`) {
@@ -181,7 +165,13 @@ test.each(["TestRegression::test_x", "TestRegression::test_x[case::value]"])(
         return { exitCode: 1, stdout: "1 failed", stderr: "", timedOut: false };
       }),
     });
-    await advanceOneStep(db, ticketId, registry); // provision
+    await reachChecksStep({
+      db,
+      ticketId,
+      profile,
+      worktreeRoot,
+      unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] },
+    }); // provision (creates the worktree) and design, through real steps
     const rejected = await advanceOneStep(db, ticketId, registry);
     expect(rejected.kind).toBe("retry");
     expect(listAcChecks(db, ticketId)).toHaveLength(0);
@@ -234,11 +224,8 @@ test("checks:dispatch authors, verifies identity, runs RED-first, and persists a
     "- [ ] returns ok\n- [ ] rejects bad input\n",
     ticketId,
   );
-  // Force the resolver to the design→(provision→checks)→implement seam:
-  //   design:dispatch done + one unit + track=fast (skips review) → provision, then checks:dispatch.
-  await markDesignDone(db, ticketId);
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
+  // The real design steps run first (one unit, so a fast track that skips review); provision, then
+  // checks:dispatch.
 
   // The agent authors one NEW test file per AC and returns the sidecar. ac_id = the AC DB ids (1,2).
   const runner = new FakeAgentRunner((input) => {
@@ -262,15 +249,17 @@ test("checks:dispatch authors, verifies identity, runs RED-first, and persists a
     };
   });
 
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+  });
+  const worktreeRoot = makeTempDir("styre-chwt-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: repo,
-      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
-    }),
-    worktreeRoot: makeTempDir("styre-chwt-"),
+    profile,
+    worktreeRoot,
     // Inject the RED-first runner: a failing (red) run for every check (decision 4).
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 1,
@@ -280,9 +269,14 @@ test("checks:dispatch authors, verifies identity, runs RED-first, and persists a
     })),
   });
 
-  // The loop collapses design→provision (no prepare → no-op) then steps checks:dispatch.
-  let outcome = await advanceOneStep(db, ticketId, registry); // provision
-  outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
+  await reachChecksStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot,
+    unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] },
+  }); // provision (creates the worktree) and design, through real steps
+  const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
   const checks = listAcChecks(db, ticketId);
   const signals = listSignals(db, ticketId).filter((s) => s.signal_type === "ac-check-red-first");
   const step = getByKey(db, ticketId, "checks:dispatch");
@@ -308,9 +302,6 @@ test("checks:dispatch rejects a MODIFIED file (identity: added-only) → postcon
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
   db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] one thing\n", ticketId);
-  await markDesignDone(db, ticketId);
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
 
   // The agent EDITS the pre-existing README.md instead of adding a new file → identity reject.
   const runner = new FakeAgentRunner((input) => {
@@ -327,15 +318,17 @@ test("checks:dispatch rejects a MODIFIED file (identity: added-only) → postcon
       tokensOut: null,
     };
   });
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+  });
+  const worktreeRoot = makeTempDir("styre-chwt2-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: repo,
-      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
-    }),
-    worktreeRoot: makeTempDir("styre-chwt2-"),
+    profile,
+    worktreeRoot,
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 1,
       stdout: "1 failed",
@@ -343,7 +336,13 @@ test("checks:dispatch rejects a MODIFIED file (identity: added-only) → postcon
       timedOut: false,
     })),
   });
-  await advanceOneStep(db, ticketId, registry); // provision
+  await reachChecksStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot,
+    unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] },
+  }); // provision (creates the worktree) and design, through real steps
   const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch → postcondition fail
   const step = getByKey(db, ticketId, "checks:dispatch");
   const checks = listAcChecks(db, ticketId);
@@ -367,9 +366,6 @@ test("checks:dispatch reverts its author commit when coverage fails — no inval
     "- [ ] first thing\n- [ ] second thing\n",
     ticketId,
   );
-  await markDesignDone(db, ticketId);
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
 
   // Author ONLY AC-1's check file (an otherwise-valid added test). AC-2 is left uncovered → the
   // handler's coverage postcondition throws AFTER the daemon commit landed the file.
@@ -390,14 +386,15 @@ test("checks:dispatch reverts its author commit when coverage fails — no inval
     };
   });
   const worktreeRoot = makeTempDir("styre-chwt-revert-");
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+  });
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: repo,
-      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
-    }),
+    profile,
     worktreeRoot,
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 1,
@@ -406,7 +403,13 @@ test("checks:dispatch reverts its author commit when coverage fails — no inval
       timedOut: false,
     })),
   });
-  await advanceOneStep(db, ticketId, registry); // provision
+  await reachChecksStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot,
+    unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] },
+  }); // provision (creates the worktree) and design, through real steps
   const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch → coverage fail
 
   const worktreePath = join(worktreeRoot, "ENG-1");
@@ -436,9 +439,6 @@ test("checks:dispatch on a checks re-author loopback re-authors ONLY the flagged
     "- [ ] first thing\n- [ ] second thing\n",
     ticketId,
   );
-  await markDesignDone(db, ticketId);
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
 
   const worktreeRoot = makeTempDir("styre-chwt-scoped-");
   const profile = parseProfile({
@@ -481,7 +481,13 @@ test("checks:dispatch on a checks re-author loopback re-authors ONLY the flagged
     worktreeRoot,
     runCheckCommand,
   });
-  await advanceOneStep(db, ticketId, registry1); // provision
+  await reachChecksStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot,
+    unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] },
+  }); // provision (creates the worktree) and design, through real steps
   await advanceOneStep(db, ticketId, registry1); // checks:dispatch (whole-ticket)
 
   const checksBefore = listAcChecks(db, ticketId);
@@ -568,9 +574,6 @@ test("checks:dispatch scoped re-author is insert-only (deleteActiveByAc): a cras
     "- [ ] first thing\n- [ ] second thing\n",
     ticketId,
   );
-  await markDesignDone(db, ticketId);
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
 
   const worktreeRoot = makeTempDir("styre-chwt-resume-");
   const profile = parseProfile({
@@ -613,7 +616,13 @@ test("checks:dispatch scoped re-author is insert-only (deleteActiveByAc): a cras
     worktreeRoot,
     runCheckCommand,
   });
-  await advanceOneStep(db, ticketId, registry1); // provision
+  await reachChecksStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot,
+    unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] },
+  }); // provision (creates the worktree) and design, through real steps
   await advanceOneStep(db, ticketId, registry1); // checks:dispatch (whole-ticket)
 
   const checksRound1 = listAcChecks(db, ticketId);
@@ -730,9 +739,6 @@ test("checks:dispatch reconciles a divergent path: written under styre_checks/, 
     "- [ ] bug no longer reproduces\n",
     ticketId,
   );
-  await markDesignDone(db, ticketId);
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
 
   const ident = (
     db.query("SELECT ident FROM ticket WHERE id = ?").get(ticketId) as { ident: string }
@@ -764,15 +770,17 @@ test("checks:dispatch reconciles a divergent path: written under styre_checks/, 
     };
   });
 
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+  });
+  const worktreeRoot = makeTempDir("styre-chwt-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: repo,
-      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
-    }),
-    worktreeRoot: makeTempDir("styre-chwt-"),
+    profile,
+    worktreeRoot,
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 1,
       stdout: "1 failed",
@@ -783,6 +791,13 @@ test("checks:dispatch reconciles a divergent path: written under styre_checks/, 
 
   // Drive until checks:dispatch resolves (correct arg order: db, ticketId, registry). Stop on its
   // status so we don't over-advance into checks:classify/implement.
+  await reachChecksStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot,
+    unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] },
+  });
   for (let i = 0; i < 12; i++) {
     await advanceOneStep(db, ticketId, registry);
     if (getByKey(db, ticketId, "checks:dispatch")?.status === "succeeded") break;
@@ -801,9 +816,6 @@ test("checks:dispatch backward-compat: non-canonical name declared correctly sti
     "- [ ] bug no longer reproduces\n",
     ticketId,
   );
-  await markDesignDone(db, ticketId);
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
 
   // ENG-296 discrepancy from the brief: same as the divergence test above — deriveAndPersistAcs runs
   // inside the checks:dispatch handler, so query acId lazily inside the runner callback.
@@ -830,21 +842,30 @@ test("checks:dispatch backward-compat: non-canonical name declared correctly sti
     };
   });
 
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+  });
+  const worktreeRoot = makeTempDir("styre-chwt-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: repo,
-      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
-    }),
-    worktreeRoot: makeTempDir("styre-chwt-"),
+    profile,
+    worktreeRoot,
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 1,
       stdout: "1 failed",
       stderr: "",
       timedOut: false,
     })),
+  });
+  await reachChecksStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot,
+    unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] },
   });
   for (let i = 0; i < 12; i++) {
     await advanceOneStep(db, ticketId, registry);
@@ -861,9 +882,6 @@ test("checks:dispatch discards an undeclared loose file instead of rejecting", a
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
   db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] one thing\n", ticketId);
-  await markDesignDone(db, ticketId);
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
 
   const ident = (
     db.query("SELECT ident FROM ticket WHERE id = ?").get(ticketId) as { ident: string }
@@ -898,14 +916,15 @@ test("checks:dispatch discards an undeclared loose file instead of rejecting", a
   });
 
   const worktreeRoot = makeTempDir("styre-chwt-discard-");
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+  });
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: repo,
-      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
-    }),
+    profile,
     worktreeRoot,
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 1,
@@ -914,7 +933,13 @@ test("checks:dispatch discards an undeclared loose file instead of rejecting", a
       timedOut: false,
     })),
   });
-  await advanceOneStep(db, ticketId, registry); // provision
+  await reachChecksStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot,
+    unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] },
+  }); // provision (creates the worktree) and design, through real steps
   const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
 
   const step = getByKey(db, ticketId, "checks:dispatch");
@@ -934,9 +959,6 @@ test("checks:dispatch names a discarded-but-needed helper in the uncovered-AC fa
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
   db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] one thing\n", ticketId);
-  await markDesignDone(db, ticketId);
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
 
   const ident = (
     db.query("SELECT ident FROM ticket WHERE id = ?").get(ticketId) as { ident: string }
@@ -974,14 +996,15 @@ test("checks:dispatch names a discarded-but-needed helper in the uncovered-AC fa
   });
 
   const worktreeRoot = makeTempDir("styre-chwt-discard-needed-");
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+  });
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: repo,
-      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
-    }),
+    profile,
     worktreeRoot,
     // Simulate pytest collection finding zero tests (exit 5) because `util` is missing — the coarse
     // classifier's `selected-none` bucket (§5.1), regardless of the fake's literal test content.
@@ -992,7 +1015,13 @@ test("checks:dispatch names a discarded-but-needed helper in the uncovered-AC fa
       timedOut: false,
     })),
   });
-  await advanceOneStep(db, ticketId, registry); // provision
+  await reachChecksStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot,
+    unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] },
+  }); // provision (creates the worktree) and design, through real steps
   const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch → uncovered → throws
 
   const step = getByKey(db, ticketId, "checks:dispatch");
@@ -1015,9 +1044,6 @@ test("checks:dispatch — a discarded __init__.py yields a legible, non-persiste
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
   db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] returns ok\n", ticketId);
-  await markDesignDone(db, ticketId);
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
 
   // Agent writes the declared canonical test AND an UNDECLARED pkg/__init__.py (→ discarded).
   const runner = new FakeAgentRunner((input) => {
@@ -1041,15 +1067,17 @@ test("checks:dispatch — a discarded __init__.py yields a legible, non-persiste
     };
   });
 
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+  });
+  const worktreeRoot = makeTempDir("styre-chwt-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: repo,
-      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
-    }),
-    worktreeRoot: makeTempDir("styre-chwt-"),
+    profile,
+    worktreeRoot,
     // RED-first run: a collection error naming the package whose __init__.py was discarded.
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: 2,
@@ -1061,7 +1089,13 @@ test("checks:dispatch — a discarded __init__.py yields a legible, non-persiste
     })),
   });
 
-  await advanceOneStep(db, ticketId, registry); // provision (no-op)
+  await reachChecksStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot,
+    unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] },
+  }); // provision (creates the worktree) and design, through real steps
   await advanceOneStep(db, ticketId, registry); // checks:dispatch → postcondition throws
   const checks = listAcChecks(db, ticketId);
   const step = getByKey(db, ticketId, "checks:dispatch");
@@ -1081,9 +1115,6 @@ test("an unresolved framework pauses behavioral work before dispatching an autho
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
   db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] one thing\n", ticketId);
-  await markDesignDone(db, ticketId);
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "ruby", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
   const runner = new FakeAgentRunner((input) => {
     const dir = join(input.cwd, "checks");
     mkdirSync(dir, { recursive: true });
@@ -1104,21 +1135,29 @@ test("an unresolved framework pauses behavioral work before dispatching an autho
   });
   // A ruby component whose `test` command is a wrapper — frameworkFor returns null → coarse error,
   // rawOutput "". runCheckCommand is never called on this path.
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "app", kind: "ruby", paths: ["**"], commands: { test: "bin/test" } }],
+  });
+  const worktreeRoot = makeTempDir("styre-chwt-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: repo,
-      components: [{ name: "app", kind: "ruby", paths: ["**"], commands: { test: "bin/test" } }],
-    }),
-    worktreeRoot: makeTempDir("styre-chwt-"),
+    profile,
+    worktreeRoot,
     runCheckCommand: scriptedCheckRunner(async () => {
       throw new Error("runCheckCommand must not be called when no framework is detected");
     }),
   });
-  let outcome = await advanceOneStep(db, ticketId, registry); // provision
-  outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
+  await reachChecksStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot,
+    unit: { kind: "ruby", behavioral: true, verifyCheckTypes: ["test"] },
+  }); // provision (creates the worktree) and design, through real steps
+  const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
   const checks = listAcChecks(db, ticketId);
   const step = getByKey(db, ticketId, "checks:dispatch");
   const message = step?.error_json != null ? (JSON.parse(step.error_json).message ?? "") : "";
@@ -1136,9 +1175,6 @@ test("a check that times out with empty output → error, empty → AC uncovered
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
   db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] one thing\n", ticketId);
-  await markDesignDone(db, ticketId);
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
   const runner = new FakeAgentRunner((input) => {
     const dir = join(input.cwd, "checks");
     mkdirSync(dir, { recursive: true });
@@ -1158,15 +1194,17 @@ test("a check that times out with empty output → error, empty → AC uncovered
   });
   // Force the timeout cause through the injected runner: null exit + timedOut + empty output →
   // interpretRunOutput returns "error", rawOutput stays "".
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
+  });
+  const worktreeRoot = makeTempDir("styre-chwt-");
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: repo,
-      components: [{ name: "api", kind: "python", paths: ["**"], commands: { test: "pytest -q" } }],
-    }),
-    worktreeRoot: makeTempDir("styre-chwt-"),
+    profile,
+    worktreeRoot,
     runCheckCommand: scriptedCheckRunner(async () => ({
       exitCode: null,
       stdout: "",
@@ -1174,8 +1212,14 @@ test("a check that times out with empty output → error, empty → AC uncovered
       timedOut: true,
     })),
   });
-  let outcome = await advanceOneStep(db, ticketId, registry); // provision
-  outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
+  await reachChecksStep({
+    db,
+    ticketId,
+    profile,
+    worktreeRoot,
+    unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] },
+  }); // provision (creates the worktree) and design, through real steps
+  const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
   const checks = listAcChecks(db, ticketId);
   const step = getByKey(db, ticketId, "checks:dispatch");
   const message = step?.error_json != null ? (JSON.parse(step.error_json).message ?? "") : "";
@@ -1360,15 +1404,6 @@ for (const requiredUnavailable of [false, true]) {
     const repo = gitRepo();
     db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
     db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] one thing\n", ticketId);
-    await markDesignDone(db, ticketId);
-    insertWorkUnit(db, {
-      ticketId,
-      seq: 1,
-      kind: "python",
-      verifyCheckTypes: ["test"],
-      filesToTouch: requiredUnavailable ? ["legacy/feature.py"] : ["api/feature.py"],
-    });
-    setTicketTrack(db, ticketId, "fast");
 
     let authorDispatches = 0;
     const runner = new FakeAgentRunner((input) => {
@@ -1388,34 +1423,36 @@ for (const requiredUnavailable of [false, true]) {
       };
     });
 
+    const profile = parseProfile({
+      slug: "demo",
+      targetRepo: repo,
+      components: [
+        // `dir` matters: the probe runs in the component's own module root, so without it BOTH
+        // components probe the same cwd and the fake below cannot tell them apart — a test that
+        // would pass for the wrong reason (a mutation of `every` to `some` survived on exactly
+        // that flaw).
+        {
+          name: "api",
+          kind: "python",
+          dir: "api",
+          paths: ["api/**"],
+          commands: { test: "pytest" },
+        },
+        {
+          name: "legacy",
+          kind: "python",
+          dir: "legacy",
+          paths: ["legacy/**"],
+          commands: { test: "pytest" },
+        },
+      ],
+    });
+    const worktreeRoot = makeTempDir("styre-chwt-");
     const registry = buildDispatchRegistry({
       runner,
       agentConfig: DEFAULT_AGENT_CONFIG,
-      profile: parseProfile({
-        slug: "demo",
-        targetRepo: repo,
-        components: [
-          // `dir` matters: the probe runs in the component's own module root, so without it BOTH
-          // components probe the same cwd and the fake below cannot tell them apart — a test that
-          // would pass for the wrong reason (a mutation of `every` to `some` survived on exactly
-          // that flaw).
-          {
-            name: "api",
-            kind: "python",
-            dir: "api",
-            paths: ["api/**"],
-            commands: { test: "pytest" },
-          },
-          {
-            name: "legacy",
-            kind: "python",
-            dir: "legacy",
-            paths: ["legacy/**"],
-            commands: { test: "pytest" },
-          },
-        ],
-      }),
-      worktreeRoot: makeTempDir("styre-chwt-"),
+      profile,
+      worktreeRoot,
       // `legacy` has no pytest; `api` does. Keyed on cwd, which is how the probe distinguishes them.
       runCheckCommand: async (command, opts) => {
         const incapable = opts.cwd.includes("legacy");
@@ -1428,7 +1465,18 @@ for (const requiredUnavailable of [false, true]) {
       },
     });
 
-    await advanceOneStep(db, ticketId, registry); // provision
+    await reachChecksStep({
+      db,
+      ticketId,
+      profile,
+      worktreeRoot,
+      unit: {
+        kind: "python",
+        behavioral: true,
+        verifyCheckTypes: ["test"],
+        filesToTouch: requiredUnavailable ? ["legacy/feature.py"] : ["api/feature.py"],
+      },
+    }); // provision (creates the worktree) and design, through real steps
     const outcome = await advanceOneStep(db, ticketId, registry); // checks:dispatch
     const checks = listAcChecks(db, ticketId);
     const report = buildVerifyReport(db, ticketId);

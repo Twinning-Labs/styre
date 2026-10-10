@@ -24,7 +24,7 @@ import type { HandlerContext } from "../../src/daemon/step-registry.ts";
 import { listByTicket as listAcChecks } from "../../src/db/repos/ac-check.ts";
 import { listByTicket as listDispatches } from "../../src/db/repos/dispatch.ts";
 import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
-import { getTicket, setTicketTrack } from "../../src/db/repos/ticket.ts";
+import { getTicket } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
 import { getByKey, insertPending } from "../../src/db/repos/workflow-step.ts";
 import {
@@ -37,9 +37,9 @@ import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { runAgentDispatch } from "../../src/dispatch/run-dispatch.ts";
 import { ensureWorktree } from "../../src/dispatch/worktree.ts";
-import { runStep } from "../../src/engine/step-journal.ts";
 import { scriptedCheckRunner } from "../helpers/check-runner.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { reachChecksStep } from "../helpers/design-steps.ts";
 import { makeTempDir, trackTempPath } from "../helpers/temp.ts";
 
 // ---------------------------------------------------------------------------------------------------
@@ -126,15 +126,6 @@ const sidecar = (obj: unknown) => `x\n\`\`\`styre-sidecar\n${JSON.stringify(obj)
 // A / G4: full-loop checks:dispatch + verify:check harness (real registry, real worktree)
 // ---------------------------------------------------------------------------------------------------
 
-async function markDesignDone(db: Parameters<typeof runStep>[0], ticketId: number) {
-  await runStep(db, {
-    ticketId,
-    stepKey: "design:dispatch",
-    stepType: "dispatch",
-    execute: () => ({ ok: true }),
-  });
-}
-
 interface ChecksHarness {
   db: ReturnType<typeof makeTestDb>["db"];
   ticketId: number;
@@ -144,15 +135,13 @@ interface ChecksHarness {
   acId: () => number;
 }
 
-/** Seed design→provision→checks:dispatch seam (mirrors checks-handler.test.ts). */
+/** The ticket and repository for the checks:dispatch seam; driveChecks runs design through real
+ *  steps (mirrors checks-handler.test.ts). */
 async function setupChecks(desc: string): Promise<ChecksHarness> {
   const { db, ticketId, projectId } = makeTestDb();
   const repo = gitRepo();
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
   db.query("UPDATE ticket SET description = ? WHERE id = ?").run(desc, ticketId);
-  await markDesignDone(db, ticketId);
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
   const worktreeRoot = makeTempDir("styre-sdswt-");
   return {
     db,
@@ -169,8 +158,9 @@ async function setupChecks(desc: string): Promise<ChecksHarness> {
   };
 }
 
-/** Drive provision then checks:dispatch. `beforeChecks` runs against the created worktree between the
- *  two steps (to inject pre-existing cruft into `untrackedBefore`). */
+/** Drive provision and the design steps, then checks:dispatch. `beforeChecks` runs against the
+ *  created worktree just before checks:dispatch (to inject pre-existing cruft into
+ *  `untrackedBefore`). */
 async function driveChecks(
   h: ChecksHarness,
   runner: FakeAgentRunner,
@@ -180,17 +170,24 @@ async function driveChecks(
     profile?: ReturnType<typeof parseProfile>;
   },
 ) {
+  const profile = opts?.profile ?? pythonProfile(h.repo);
   const registry = buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: opts?.profile ?? pythonProfile(h.repo),
+    profile,
     worktreeRoot: h.worktreeRoot,
     // ENG-426: checks:dispatch probes framework capability before authoring. A command-blind
     // fake would answer that probe with the scripted RED and make every run look like a machine
     // with no test framework at all.
     runCheckCommand: scriptedCheckRunner(opts?.runCheck ?? redRun),
   });
-  await advanceOneStep(h.db, h.ticketId, registry); // provision (creates the worktree)
+  await reachChecksStep({
+    db: h.db,
+    ticketId: h.ticketId,
+    profile,
+    worktreeRoot: h.worktreeRoot,
+    unit: { kind: "python", behavioral: true, verifyCheckTypes: ["test"] },
+  }); // provision (creates the worktree) and design, through real steps
   const wt = join(h.worktreeRoot, h.ident);
   opts?.beforeChecks?.(wt);
   const outcome = await advanceOneStep(h.db, h.ticketId, registry); // checks:dispatch
@@ -380,9 +377,6 @@ test("A7 a git-detected paired rename commits both halves (not discarded)", asyn
   const repo = gitRepo({ "tracked.py": "# tracked payload\n" });
   db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
   db.query("UPDATE ticket SET description = ? WHERE id = ?").run("- [ ] one thing\n", ticketId);
-  await markDesignDone(db, ticketId);
-  insertWorkUnit(db, { ticketId, seq: 1, kind: "python", verifyCheckTypes: ["test"] });
-  setTicketTrack(db, ticketId, "fast");
   const worktreeRoot = makeTempDir("styre-sdswt-");
   const h: ChecksHarness = {
     db,

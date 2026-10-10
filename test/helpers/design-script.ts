@@ -60,6 +60,8 @@ export interface DesignScript {
   planFile: (call: number) => string;
   /** Remove the other docs/plans/*.md files first, so a new planFile is a rename. */
   renamePlan: boolean;
+  /** Other files the n-th design:dispatch call writes, paths relative to the checkout. */
+  extraFiles: (call: number) => Array<{ path: string; content: string }>;
   units: (call: number) => ScriptUnit[];
   grade: (call: number) => number;
   planFindings: (call: number) => ScriptFinding[];
@@ -113,6 +115,7 @@ export function defaultScript(overrides: Partial<DesignScript> = {}): DesignScri
     plan: () => "Plan body, version 1",
     planFile: () => "eng-1-plan.md",
     renamePlan: false,
+    extraFiles: () => [],
     units: () => unitsOf(2, { behavioral: true }),
     grade: () => 6,
     planFindings: () => [],
@@ -186,6 +189,10 @@ export function scriptedRunner(script: DesignScript, calls: ScriptCalls): FakeAg
           join(plans, script.planFile(n)),
           `---\nlinear: ${script.ident}\n---\n\n${script.plan(n)}\n`,
         );
+        for (const f of script.extraFiles(n)) {
+          mkdirSync(dirname(join(input.cwd, f.path)), { recursive: true });
+          writeFileSync(join(input.cwd, f.path), f.content);
+        }
         return ok("Plan written.");
       }
       case "design:extract":

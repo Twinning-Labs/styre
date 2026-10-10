@@ -11,6 +11,7 @@ import type { AgentRunner } from "../agent/runner.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
 import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { discoverRuntimeConfig } from "../config/discover.ts";
+import { newerSchemeDbRefusal, newerSchemeRecorded } from "../daemon/design-walk.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
 import type { ProjectorPorts } from "../daemon/projector.ts";
 import { recover } from "../daemon/recover.ts";
@@ -439,6 +440,14 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
     }
     wiring.holdLock(lock);
     try {
+      // A reused --db holding manifests from a newer FINGERPRINT_SCHEME (operator ruling,
+      // 2026-10-10): refused as resume refuses it (65), before anything is written.
+      const newerScheme = explicitDb && existsSync(dbPath) ? newerSchemeRecorded(dbPath) : null;
+      if (newerScheme !== null) {
+        process.stderr.write(`run refused: ${newerSchemeDbRefusal(newerScheme)}`);
+        process.exitCode = 65; // EXIT.RESUME_REFUSED
+        return;
+      }
       migrate(dbPath, { log: (line) => process.stderr.write(`${line}\n`) });
       const db = openDb(dbPath);
       // A reused --db can be an older checkpoint: its warning goes to stderr (section 5.5).
