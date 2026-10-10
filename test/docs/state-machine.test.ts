@@ -2,16 +2,23 @@
 // Task 18). The page's states and transitions are data; these tests derive what they can from the
 // code (the declared design table, the resolver's stages, step keys, advances, escalations and
 // descriptor kinds, the literal unions and literals of causes, loops, signatures (property and
-// positional), outcomes, pause reasons, failure decisions and review resume plans, the caps, and
-// the count of places that write an escalation) and fail, naming the
-// difference, when either side has something the other lacks. Every cited line must still exist.
-// The last group proves each check can fail.
+// positional), outcomes, pause reasons, failure decisions and review resume plans, the caps, every
+// line that refuses a start or resume (with its exit codes and the starts that reach it), and every
+// line that writes an escalation) and fail, naming the difference, when either side has something
+// the other lacks. Every cited line must still exist. The drawing is checked too: every node has a
+// place, the escalations are drawn as the one Escalated node, no two nodes overlap, every step sits
+// in its stage lane, and every scenario names the scenario it differs from. The last group proves
+// each check can fail, on copies of the data or of the code.
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { cpSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { DESIGN_TABLE, type DesignRow } from "../../src/daemon/design-graph.ts";
+import { makeTempDir } from "../helpers/temp.ts";
 import {
   type Diagram,
   PAGE,
+  REPO,
+  blankComments,
   callArgs,
   checkGrounding,
   checkSites,
@@ -19,11 +26,27 @@ import {
   diffAgainstCode,
   expand,
   readDiagram,
+  refusalSitesIn,
   validateStructure,
 } from "./state-machine-check.ts";
 
 const diagram = (): Diagram => readDiagram(readFileSync(PAGE, "utf8"));
 const clone = (d: Diagram): Diagram => structuredClone(d);
+
+/** A private copy of src/, so a test can edit the code the census reads without touching the
+ *  repository. Each edit replaces text that must occur exactly once in the file. */
+function codeCopy(edits: { file: string; find: string; replace: string }[]): string {
+  const root = makeTempDir("state-machine-src-");
+  cpSync(join(REPO, "src"), join(root, "src"), { recursive: true });
+  for (const e of edits) {
+    const path = join(root, e.file);
+    const text = readFileSync(path, "utf8");
+    const count = text.split(e.find).length - 1;
+    if (count !== 1) throw new Error(`${e.file}: '${e.find}' occurs ${count} times, not once`);
+    writeFileSync(path, text.replace(e.find, e.replace));
+  }
+  return root;
+}
 
 describe("docs/architecture/state-machine.html", () => {
   test("its data block parses and holds states, transitions and scenarios", () => {
@@ -69,6 +92,27 @@ describe("docs/architecture/state-machine.html", () => {
       "budget-pause-resume",
     ])
       expect(ids).toContain(id);
+  });
+
+  test("escalations are drawn as the one Escalated node, every other state at its own place", () => {
+    const d = diagram();
+    const id = d.drawing.escalated.id;
+    expect(d.layout[id]).toBeDefined();
+    expect(d.groups[d.drawing.escalated.group]?.members.length).toBe(24);
+    for (const s of d.states) {
+      if (s.kind === "escalation") expect(d.layout[s.id]).toBeUndefined();
+      else expect(d.layout[s.id]).toBeDefined();
+    }
+  });
+
+  test("every scenario names the scenario it differs from, and how", () => {
+    const d = diagram();
+    const ids = new Set(d.scenarios.map((s) => s.id));
+    for (const sc of d.scenarios) {
+      expect(ids.has(sc.differsFrom.scenario)).toBe(true);
+      expect(sc.differsFrom.scenario).not.toBe(sc.id);
+      expect(sc.differsFrom.note.length).toBeGreaterThan(20);
+    }
   });
 
   test("the page loads nothing from the network", () => {
@@ -254,6 +298,148 @@ describe("the checks fail on a difference", () => {
     ).toBe(true);
     expect(lines).toContain("refusal edge 't.run.no-ticket' is listed at no refusal site");
     expect(lines).toContain("escalation edge 't.any.outbox' is listed at no escalation site");
+  });
+
+  test("a misplaced drawing: an escalation drawn alone, a state left out, overlaps, a step outside its lane", () => {
+    const d = clone(diagram());
+    const at = (id: string) => d.layout[id] as [number, number];
+    d.layout["esc:stalled"] = [at("review")[0], at("review")[1] + 400];
+    d.layout = Object.fromEntries(Object.entries(d.layout).filter(([k]) => k !== "merge:push"));
+    const extract = at("design:extract");
+    d.layout["design:size"] = [extract[0] + 30, extract[1] + 10];
+    d.layout["docs:revise"] = at("review");
+    const lines = validateStructure(d);
+    expect(lines).toContain(
+      "escalation state 'esc:stalled' has a layout position; escalations are drawn as the one Escalated node",
+    );
+    expect(lines).toContain("state 'merge:push' has no layout position");
+    expect(lines).toContain("drawn nodes 'design:extract' and 'design:size' overlap");
+    expect(lines).toContain("state 'docs:revise' (stage implement) is not inside its lane");
+    const d2 = clone(diagram());
+    const escId = d2.drawing.escalated.id;
+    d2.layout = Object.fromEntries(Object.entries(d2.layout).filter(([k]) => k !== escId));
+    expect(validateStructure(d2)).toContain(
+      "the Escalated node 'escalated' has no layout position",
+    );
+  });
+
+  test("a scenario whose differsFrom names no scenario", () => {
+    const d = clone(diagram());
+    const [a, b] = d.scenarios;
+    if (!a || !b) throw new Error("fewer than two scenarios");
+    a.differsFrom = { scenario: "no-such-scenario", note: "x" };
+    b.differsFrom = { scenario: b.id, note: "x" };
+    const lines = validateStructure(d);
+    expect(lines).toContain(
+      `scenario '${a.id}' differs from 'no-such-scenario', which is not a scenario`,
+    );
+    expect(lines).toContain(`scenario '${b.id}' differs from itself`);
+  });
+
+  // The census of refusal sites, against edits to a private copy of the code.
+
+  test("a refusal added to loadProfile is counted (F)", () => {
+    const root = codeCopy([
+      {
+        file: "src/dispatch/profile.ts",
+        find: "export function loadProfile(path: string): Profile {\n",
+        replace:
+          'export function loadProfile(path: string): Profile {\n  if (path === "") throw new Error("profile: empty path");\n',
+      },
+    ]);
+    expect(checkSites(diagram(), root)).toContain(
+      "refusal in the code is not drawn: src/dispatch/profile.ts:302 (throw new Error)",
+    );
+  });
+
+  test("an exit code set through EXIT is read (I)", () => {
+    const line = "process.exitCode = 65; // EXIT.RESUME_REFUSED";
+    const root = codeCopy([
+      { file: "src/cli/run.ts", find: line, replace: "process.exitCode = EXIT.USAGE; // usage" },
+    ]);
+    const d = clone(diagram());
+    const site = d.refusalSites.find((x) => x.anchor === line);
+    if (!site) throw new Error("the newer scheme site is missing");
+    site.anchor = "process.exitCode = EXIT.USAGE; // usage";
+    expect(
+      checkSites(d, root).some((l) =>
+        l.endsWith(
+          "(process.exitCode) exits 64 in the code, but its drawn edges (t.run.newer-scheme) exit 65",
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  test("a throw of another error class is counted with the exit its class maps to (J)", () => {
+    const root = codeCopy([
+      {
+        file: "src/cli/run.ts",
+        find: "    const slug: string = loaded.slug;\n",
+        replace:
+          '    const slug: string = loaded.slug;\n    if (slug === "") throw new DesignTableError(["x"]);\n    if (slug === " ") throw new StepPrerequisiteError("y");\n',
+      },
+    ]);
+    const sites = refusalSitesIn(root).filter((c) => c.file === "src/cli/run.ts");
+    expect(sites.find((c) => c.what === "throw new DesignTableError")?.codes).toEqual([70]);
+    expect(sites.find((c) => c.what === "throw new StepPrerequisiteError")?.codes).toEqual([70]);
+    const lines = checkSites(diagram(), root);
+    expect(lines.some((l) => l.endsWith("(throw new DesignTableError)"))).toBe(true);
+    const unknown = codeCopy([
+      {
+        file: "src/cli/run.ts",
+        find: "    const slug: string = loaded.slug;\n",
+        replace:
+          '    const slug: string = loaded.slug;\n    if (slug === "") throw new NoSuchError();\n',
+      },
+    ]);
+    expect(() => refusalSitesIn(unknown)).toThrow("NoSuchError");
+  });
+
+  test("padding near a site stays green; an anchor moved off its call goes red (G)", () => {
+    const padded = codeCopy([
+      {
+        file: "src/dispatch/worktree.ts",
+        find: "    if (holder !== null) {\n",
+        replace: `    if (holder !== null) {\n${"      // padding\n".repeat(8)}\n`,
+      },
+    ]);
+    expect(checkSites(diagram(), padded)).toEqual([]);
+    const d = clone(diagram());
+    const site = d.refusalSites.find((x) => x.anchor === "if (holder !== null) {");
+    if (!site) throw new Error("the worktree holder site is missing");
+    site.anchor = "if (foreignLive) {";
+    expect(
+      checkSites(d).some((l) =>
+        l.startsWith("refusal site 'if (foreignLive) {' (src/dispatch/worktree.ts:"),
+      ),
+    ).toBe(true);
+  });
+
+  test("a resume refusal erased from a site both starts reach (H)", () => {
+    const d = clone(diagram());
+    const gone = "t.resume.in-place-unsafe";
+    d.transitions = d.transitions.filter((t) => t.id !== gone);
+    for (const s of d.refusalSites) s.edges = s.edges.filter((e) => e !== gone);
+    expect(validateStructure(d)).toEqual([]);
+    expect(checkSites(d)).toContain(
+      "refusal site '--in-place refused: no .styre-disposable marker' (src/dispatch/in-place.ts:23) is reached from a resume, but lists no edge from resume.start or @starts",
+    );
+  });
+
+  test("comments are blanked, strings are not (blankComments)", () => {
+    const text = [
+      'const a = "/*"; throw new Error("kept"); const b = "*/";',
+      "x(); // throw new Error('line comment')",
+      "/* throw new Error('block') */ y();",
+      "const u = `//${z}`; throw new Error(`kept too`);",
+    ].join("\n");
+    const out = blankComments(text);
+    expect(out.split("\n").length).toBe(4);
+    expect(out).toContain('throw new Error("kept")');
+    expect(out).toContain("throw new Error(`kept too`)");
+    expect(out).not.toContain("line comment");
+    expect(out).not.toContain("block");
+    expect(out.length).toBe(text.length);
   });
 
   test("a run cap the condition does not state", () => {

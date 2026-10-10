@@ -67,13 +67,37 @@ export interface Diagram {
   groups: Record<string, { label: string; members: string[]; source: Source; anchor: string }>;
   states: DiagramState[];
   transitions: DiagramTransition[];
-  scenarios: { id: string; label: string; summary: string; transitions: string[] }[];
+  scenarios: {
+    id: string;
+    label: string;
+    summary: string;
+    transitions: string[];
+    /** The closest other scenario and how this one differs from it. */
+    differsFrom: { scenario: string; note: string };
+  }[];
+  /** Centre of every drawn node: every state but the escalations, and the one Escalated node. */
   layout: Record<string, [number, number]>;
+  drawing: Drawing;
   /** The code sites that refuse a start or resume, and that write an escalation (see SITES). */
   refusalSites: DeclaredSite[];
   /** Refusal edges whose code site lies outside the refusal census, with the reason. */
   refusalEdgesOutsideCensus: { edge: string; reason: string }[];
   escalationSites: DeclaredSite[];
+}
+
+/** How the page draws the data: the sizes the overlap check uses, the stage lanes and the one
+ *  node that stands for every escalation. */
+export interface Drawing {
+  /** Width and height of a node, by state kind (and `escalated` for the Escalated node). */
+  sizes: Record<string, [number, number]>;
+  /** The least space between two nodes. */
+  gap: number;
+  /** The drawing's extent: width and height. */
+  canvas: [number, number];
+  /** One lane per stage: x, y, width, height. */
+  lanes: { stage: string; label: string; box: [number, number, number, number] }[];
+  /** The node that stands for every state of the group (the escalations). */
+  escalated: { id: string; label: string; group: string };
 }
 
 export interface DeclaredSite {
@@ -151,18 +175,15 @@ export function validateStructure(d: Diagram): string[] {
     if (stateIds.has(s.id)) out.push(`state '${s.id}' is listed twice`);
     stateIds.add(s.id);
     if (!s.label || !s.description) out.push(`state '${s.id}' has no label or description`);
-    const p = d.layout[s.id];
-    if (!p || p.length !== 2 || !p.every(Number.isFinite))
-      out.push(`state '${s.id}' has no layout position`);
   }
-  for (const id of Object.keys(d.layout))
-    if (!stateIds.has(id)) out.push(`layout names '${id}', which is not a state`);
-  const positions = new Map<string, string>();
-  for (const [id, p] of Object.entries(d.layout)) {
-    const key = p.join(",");
-    const other = positions.get(key);
-    if (other) out.push(`states '${other}' and '${id}' share the layout position ${key}`);
-    positions.set(key, id);
+  out.push(...validateDrawing(d));
+  const scenarioIds = new Set(d.scenarios.map((sc) => sc.id));
+  for (const sc of d.scenarios) {
+    const df = sc.differsFrom;
+    if (!df?.scenario || !df.note) out.push(`scenario '${sc.id}' has no differsFrom note`);
+    else if (df.scenario === sc.id) out.push(`scenario '${sc.id}' differs from itself`);
+    else if (!scenarioIds.has(df.scenario))
+      out.push(`scenario '${sc.id}' differs from '${df.scenario}', which is not a scenario`);
   }
   for (const [name, g] of Object.entries(d.groups))
     for (const m of g.members)
@@ -226,6 +247,101 @@ export function validateStructure(d: Diagram): string[] {
   for (const s of d.states)
     if (!reached.has(s.id))
       out.push(`state '${s.id}' cannot be reached from ${d.entries.join(" or ")}`);
+  return out;
+}
+
+type Box = [number, number, number, number];
+/** Two boxes share some area (touching edges do not count). */
+const overlaps = (a: Box, b: Box) =>
+  a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
+const inside = (a: Box, b: Box) =>
+  a[0] >= b[0] && a[1] >= b[1] && a[0] + a[2] <= b[0] + b[2] && a[1] + a[3] <= b[1] + b[3];
+
+/** The drawing: every state but the escalations has a place, the escalations have none (they are
+ *  drawn as the one Escalated node, which has one), no two nodes come closer than the gap, every
+ *  state of a stage sits inside that stage's lane, every other state outside all lanes, and
+ *  everything inside the canvas. */
+export function validateDrawing(d: Diagram): string[] {
+  const out: string[] = [];
+  const g = d.drawing;
+  if (!g) return ["the data has no drawing section"];
+  const esc = g.escalated;
+  const stateIds = new Set(d.states.map((s) => s.id));
+  const finite = (p: unknown) =>
+    Array.isArray(p) && p.length === 2 && p.every((x) => Number.isFinite(x));
+  const nodes: { id: string; kind: string; stage?: string }[] = [];
+  for (const s of d.states) {
+    const p = d.layout[s.id];
+    if (s.kind === "escalation") {
+      if (p !== undefined)
+        out.push(
+          `escalation state '${s.id}' has a layout position; escalations are drawn as the one Escalated node`,
+        );
+      if (!d.groups[esc.group]?.members.includes(s.id))
+        out.push(
+          `escalation state '${s.id}' is not in the group '${esc.group}' the Escalated node draws`,
+        );
+      continue;
+    }
+    if (!finite(p)) out.push(`state '${s.id}' has no layout position`);
+    else nodes.push({ id: s.id, kind: s.kind, stage: s.stage });
+  }
+  if (stateIds.has(esc.id)) out.push(`the Escalated node's id '${esc.id}' is also a state`);
+  if (!finite(d.layout[esc.id])) out.push(`the Escalated node '${esc.id}' has no layout position`);
+  else nodes.push({ id: esc.id, kind: "escalated" });
+  for (const id of Object.keys(d.layout))
+    if (!stateIds.has(id) && id !== esc.id) out.push(`layout names '${id}', which is not a state`);
+  const box = (n: { id: string; kind: string }, pad: number): Box | undefined => {
+    const size = g.sizes[n.kind];
+    const p = d.layout[n.id] as [number, number];
+    if (!size) return undefined;
+    return [
+      p[0] - size[0] / 2 - pad,
+      p[1] - size[1] / 2 - pad,
+      size[0] + 2 * pad,
+      size[1] + 2 * pad,
+    ];
+  };
+  const placed: { id: string; stage?: string; box: Box; padded: Box }[] = [];
+  for (const n of nodes) {
+    const b = box(n, 0);
+    const padded = box(n, g.gap / 2);
+    if (!b || !padded) out.push(`state '${n.id}' has kind '${n.kind}', which has no drawn size`);
+    else placed.push({ id: n.id, stage: n.stage, box: b, padded });
+  }
+  for (let i = 0; i < placed.length; i++)
+    for (let j = i + 1; j < placed.length; j++) {
+      const a = placed[i] as (typeof placed)[number];
+      const b = placed[j] as (typeof placed)[number];
+      if (overlaps(a.padded, b.padded)) {
+        const [x, y] = [a.id, b.id].sort();
+        out.push(`drawn nodes '${x}' and '${y}' overlap`);
+      }
+    }
+  const laneOf = new Map(g.lanes.map((l) => [l.stage, l]));
+  const stages = new Set(d.stages.map((s) => s.id));
+  for (const s of stages) if (!laneOf.has(s)) out.push(`stage '${s}' has no lane`);
+  for (const l of g.lanes) if (!stages.has(l.stage)) out.push(`lane '${l.stage}' names no stage`);
+  for (let i = 0; i < g.lanes.length; i++)
+    for (let j = i + 1; j < g.lanes.length; j++) {
+      const a = g.lanes[i] as Drawing["lanes"][number];
+      const b = g.lanes[j] as Drawing["lanes"][number];
+      if (overlaps(a.box, b.box)) out.push(`lanes '${a.stage}' and '${b.stage}' overlap`);
+    }
+  const canvas: Box = [0, 0, g.canvas[0], g.canvas[1]];
+  for (const l of g.lanes)
+    if (!inside(l.box, canvas)) out.push(`lane '${l.stage}' lies outside the canvas`);
+  for (const p of placed) {
+    if (!inside(p.box, canvas)) out.push(`drawn node '${p.id}' lies outside the canvas`);
+    if (p.stage !== undefined) {
+      const lane = laneOf.get(p.stage);
+      if (!lane || !inside(p.box, lane.box))
+        out.push(`state '${p.id}' (stage ${p.stage}) is not inside its lane`);
+    } else
+      for (const l of g.lanes)
+        if (overlaps(p.box, l.box))
+          out.push(`state '${p.id}' has no stage but sits in the ${l.stage} lane`);
+  }
   return out;
 }
 
@@ -737,7 +853,7 @@ export const REFUSAL_SCOPE: { file: string; functions?: string[] }[] = [
   { file: "src/config/discover.ts" },
   { file: "src/config/parse-config.ts", functions: ["parseConfigOrThrow"] },
   { file: "src/config/slug.ts", functions: ["discoverRepoRoot"] },
-  { file: "src/dispatch/profile.ts", functions: ["parseProfile"] },
+  { file: "src/dispatch/profile.ts", functions: ["parseProfile", "loadProfile"] },
   { file: "src/dispatch/test-target.ts", functions: ["assertTestTargets"] },
   { file: "src/dispatch/in-place.ts" },
   { file: "src/dispatch/worktree.ts", functions: ["reconcileWorktree"] },
@@ -755,33 +871,227 @@ const REFUSAL_HELPERS: Record<string, string> = {
 };
 const ESCALATION_WRITERS = ["escalate", "pauseTicket", "escalateProjection"];
 
-/** Comments blanked to spaces, so line numbers stay and a comment naming a call is not a call. */
-const blankComments = (text: string) =>
-  text
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
-    .replace(
-      /(^|[;,{}()])([ \t]*\/\/[^\n]*)/gm,
-      (_m, p: string, c: string) => p + " ".repeat(c.length),
-    );
+/** The two starts, by the function each one runs in. */
+export type Entry = "run" | "resume";
+const RUN_ENTRY = { file: "src/cli/run.ts", fn: "runImpl" };
+const RESUME_ENTRY = { file: "src/cli/park.ts", fn: "resumeRun" };
 
-/** Line ranges [first, last] of named top level functions (to the next line that is `}`). */
-function functionRanges(lines: string[], names: string[]): [number, number][] {
-  const out: [number, number][] = [];
-  for (const name of names) {
-    const start = lines.findIndex((l) => new RegExp(`function ${name}\\b`).test(l));
-    if (start < 0) throw new Error(`function ${name} not found`);
-    let end = start;
-    while (end < lines.length && lines[end] !== "}") end++;
-    out.push([start, end]);
+// A small lexer: enough of TypeScript to tell code from strings, templates, regular expressions
+// and comments, so a "/*" or "//" inside a string is not a comment and a bracket inside a string
+// does not count.
+const CODE = 0;
+const LITERAL = 1;
+const COMMENT = 2;
+const REGEX_AFTER_WORD =
+  /^(return|typeof|case|in|of|void|throw|delete|instanceof|new|else|do|yield|await)$/;
+
+/** What each character of `text` is: code, inside a literal, or inside a comment. Template
+ *  substitutions (`${...}`) are code. */
+function lex(text: string): Uint8Array {
+  const kind = new Uint8Array(text.length);
+  const n = text.length;
+  const stack: ("tpl" | "brace")[] = [];
+  let i = 0;
+  const regexAllowed = (at: number): boolean => {
+    let j = at - 1;
+    while (j >= 0 && /\s/.test(text[j] as string)) j--;
+    if (j < 0) return true;
+    const c = text[j] as string;
+    if (/[\w$]/.test(c)) {
+      let k = j;
+      while (k >= 0 && /[\w$]/.test(text[k] as string)) k--;
+      return REGEX_AFTER_WORD.test(text.slice(k + 1, j + 1));
+    }
+    return c !== ")" && c !== "]" && c !== "}";
+  };
+  // Template text from i (after the opening backtick or a substitution's closing brace).
+  const template = (): void => {
+    while (i < n) {
+      const c = text[i];
+      kind[i++] = LITERAL;
+      if (c === "\\") kind[i++] = LITERAL;
+      else if (c === "`") return;
+      else if (c === "$" && text[i] === "{") {
+        kind[i++] = LITERAL;
+        stack.push("tpl");
+        return;
+      }
+    }
+  };
+  while (i < n) {
+    const c = text[i] as string;
+    const next = text[i + 1];
+    if (c === "/" && next === "/") {
+      while (i < n && text[i] !== "\n") kind[i++] = COMMENT;
+    } else if (c === "/" && next === "*") {
+      const end = text.indexOf("*/", i + 2);
+      const stop = end < 0 ? n : end + 2;
+      while (i < stop) kind[i++] = COMMENT;
+    } else if (c === '"' || c === "'") {
+      kind[i++] = LITERAL;
+      while (i < n && text[i] !== c && text[i] !== "\n") {
+        if (text[i] === "\\") kind[i++] = LITERAL;
+        kind[i++] = LITERAL;
+      }
+      if (i < n) kind[i++] = LITERAL;
+    } else if (c === "`") {
+      kind[i++] = LITERAL;
+      template();
+    } else if (c === "/" && regexAllowed(i)) {
+      kind[i++] = LITERAL;
+      let inClass = false;
+      while (i < n && text[i] !== "\n") {
+        const r = text[i];
+        kind[i++] = LITERAL;
+        if (r === "\\") kind[i++] = LITERAL;
+        else if (r === "[") inClass = true;
+        else if (r === "]") inClass = false;
+        else if (r === "/" && !inClass) break;
+      }
+      while (i < n && /[a-z]/i.test(text[i] as string)) kind[i++] = LITERAL;
+    } else if (c === "}" && stack[stack.length - 1] === "tpl") {
+      stack.pop();
+      kind[i++] = LITERAL;
+      template();
+    } else {
+      if (c === "{" && stack.length > 0) stack.push("brace");
+      else if (c === "}" && stack.length > 0) stack.pop();
+      kind[i++] = CODE;
+    }
+  }
+  return kind;
+}
+
+/** Comments blanked to spaces (strings, templates and regular expressions kept), so line numbers
+ *  stay and a comment naming a call is not a call. */
+export function blankComments(text: string): string {
+  const kind = lex(text);
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i] as string;
+    out += kind[i] === COMMENT && c !== "\n" ? " " : c;
   }
   return out;
 }
 
-interface CodeSite {
+/** A source file as the census reads it: comments blanked, with its lines and top level
+ *  functions. */
+interface Model {
   file: string;
+  text: string;
+  kind: Uint8Array;
+  lines: string[];
+  lineStart: number[];
+  fns: { name: string; start: number; end: number }[];
+}
+type Models = Map<string, Model>;
+
+function model(root: string, file: string, cache: Models): Model {
+  const hit = cache.get(file);
+  if (hit) return hit;
+  const text = blankComments(raw(root, file));
+  const lines = text.split("\n");
+  const lineStart: number[] = [];
+  let at = 0;
+  for (const l of lines) {
+    lineStart.push(at);
+    at += l.length + 1;
+  }
+  const fns: Model["fns"] = [];
+  lines.forEach((l, i) => {
+    const m = /^(?:export )?(?:async )?function\*?\s*(\w+)/.exec(l);
+    if (!m) return;
+    let end = i;
+    while (end < lines.length && lines[end] !== "}") end++;
+    fns.push({ name: m[1] as string, start: i, end });
+  });
+  const made = { file, text, kind: lex(text), lines, lineStart, fns };
+  cache.set(file, made);
+  return made;
+}
+
+function lineAt(m: Model, index: number): number {
+  let lo = 0;
+  let hi = m.lineStart.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if ((m.lineStart[mid] as number) <= index) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+/** The index of the bracket that closes the one at `open` (code characters only), or -1. */
+function closing(m: Model, open: number): number {
+  let depth = 0;
+  for (let i = open; i < m.text.length; i++) {
+    if (m.kind[i] !== CODE) continue;
+    const c = m.text[i] as string;
+    if ("([{".includes(c)) depth++;
+    else if (")]}".includes(c) && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/** The index of the `{` of the innermost block around `index`, or -1 at top level. */
+function enclosingBlock(m: Model, index: number): number {
+  let depth = 0;
+  for (let i = index - 1; i >= 0; i--) {
+    if (m.kind[i] !== CODE) continue;
+    if (m.text[i] === "}") depth++;
+    else if (m.text[i] === "{" && depth-- === 0) return i;
+  }
+  return -1;
+}
+
+/** Code matches of `re` in the file (a match that starts in a string or comment is not code). */
+function codeMatches(m: Model, re: RegExp): RegExpExecArray[] {
+  return [...m.text.matchAll(re)].filter((x) => m.kind[x.index ?? 0] === CODE) as RegExpExecArray[];
+}
+
+/** Top level function ranges [first line, last line] by name. */
+function functionRanges(m: Model, names: string[]): [number, number][] {
+  return names.map((name) => {
+    const f = m.fns.find((x) => x.name === name);
+    if (!f) throw new Error(`${m.file}: function ${name} not found`);
+    return [f.start, f.end];
+  });
+}
+
+export interface CodeSite {
+  file: string;
+  /** The line the call or assignment starts on (0 based). */
   line: number;
+  /** The lines a declared anchor may sit on: the call's arguments (an escalation's whole
+   *  transaction when it writes inside one; an exit code assignment's whole block), and the line
+   *  opening the block the call starts. */
+  span: [number, number];
   what: string;
   codes: number[];
+  /** The starts that reach a refusal site (refusal sites only). */
+  entries?: Entry[];
+}
+
+/** A site's span: from `start` to `end` (indexes), widened to the enclosing `transaction(` call
+ *  when `inTransaction`, then up to a block opener directly above it (blank lines between are
+ *  padding). */
+function spanOf(m: Model, start: number, end: number, inTransaction = false): [number, number] {
+  let [a, b] = [start, end];
+  if (inTransaction) {
+    let best: [number, number] | null = null;
+    for (const t of codeMatches(m, /\btransaction\(/g)) {
+      const open = (t.index ?? 0) + t[0].length - 1;
+      const close = closing(m, open);
+      if ((t.index ?? 0) < start && close > end && (!best || (t.index ?? 0) > best[0]))
+        best = [t.index ?? 0, close];
+    }
+    if (best) [a, b] = best;
+  }
+  let first = lineAt(m, a);
+  let p = first - 1;
+  while (p >= 0 && (m.lines[p] as string).trim() === "") p--;
+  if (p >= 0 && (m.lines[p] as string).trimEnd().endsWith("{")) first = p;
+  return [first, lineAt(m, b)];
 }
 
 const EXIT_CODES = EXIT as Record<string, number>;
@@ -791,52 +1101,208 @@ function exitCodesIn(text: string): number[] {
   ).map(Number);
 }
 
-/** The refusal sites of the scope, each with the exit codes it can produce. */
+/** Every error class declared in src: the exit codes a throw of it maps to. A class that extends
+ *  StyreError exits with the code its constructor gives; any other error is an internal error
+ *  (the error boundary's rule, src/cli/output.ts). */
+function errorClasses(root: string): Map<string, number[]> {
+  const decl = new Map<string, { base: string; code?: string }>();
+  const files = (readdirSync(join(root, "src"), { recursive: true }) as string[])
+    .filter((f) => f.endsWith(".ts"))
+    .sort();
+  for (const f of files) {
+    const text = blankComments(readFileSync(join(root, "src", f), "utf8"));
+    for (const m of text.matchAll(/\bclass (\w+) extends (\w+)/g)) {
+      const body = text.slice(m.index ?? 0, text.indexOf("\n}", m.index ?? 0));
+      decl.set(m[1] as string, { base: m[2] as string, code: /code: EXIT\.(\w+)/.exec(body)?.[1] });
+    }
+  }
+  const resolve = (name: string, seen: Set<string>): { styre: boolean; code?: string } | null => {
+    if (name === "Error") return { styre: false };
+    if (name === "StyreError") return { styre: true };
+    const c = decl.get(name);
+    if (!c || seen.has(name)) return null;
+    const base = resolve(c.base, new Set([...seen, name]));
+    if (!base) return null;
+    return base.styre ? { styre: true, code: c.code ?? base.code } : base;
+  };
+  const out = new Map<string, number[]>();
+  for (const name of decl.keys()) {
+    const r = resolve(name, new Set());
+    if (!r) continue;
+    if (!r.styre) out.set(name, [EXIT.INTERNAL]);
+    else out.set(name, r.code ? [EXIT_CODES[r.code] as number] : []);
+  }
+  return out;
+}
+
+/** The conditions of the `if` statements around `index` in the function starting at `from`. */
+function enclosingConditions(m: Model, from: number, index: number): string[] {
+  const out: string[] = [];
+  for (const x of codeMatches(m, /\bif\s*\(/g)) {
+    const at = x.index ?? 0;
+    if (at < from || at >= index) continue;
+    const open = at + x[0].length - 1;
+    const close = closing(m, open);
+    if (close < 0 || close >= index) continue;
+    let body = close + 1;
+    while (/\s/.test(m.text[body] as string)) body++;
+    let end: number;
+    if (m.text[body] === "{") end = closing(m, body);
+    else {
+      end = body;
+      let depth = 0;
+      for (; end < m.text.length; end++) {
+        if (m.kind[end] !== CODE) continue;
+        const c = m.text[end] as string;
+        if ("([{".includes(c)) depth++;
+        else if (")]}".includes(c)) depth--;
+        else if (c === ";" && depth === 0) break;
+      }
+    }
+    if (index > close && index <= end) out.push(m.text.slice(open + 1, close));
+  }
+  return out;
+}
+
+/** A call at `index` whose error a `try` around it swallows (its `catch` does not throw the
+ *  caught error on) cannot refuse a start. */
+function caught(m: Model, index: number): boolean {
+  const tries = codeMatches(m, /\btry\s*\{/g)
+    .map((x) => {
+      const open = (x.index ?? 0) + x[0].length - 1;
+      return { open, close: closing(m, open) };
+    })
+    .filter((t) => t.open < index && t.close > index)
+    .sort((a, b) => b.open - a.open);
+  for (const t of tries) {
+    const after = m.text.slice(t.close + 1);
+    const c = /^\s*catch\s*(?:\(\s*(\w+)[^)]*\))?\s*\{/.exec(after);
+    if (!c) continue; // try/finally: the error goes on
+    const bodyOpen = t.close + 1 + c[0].length - 1;
+    const body = m.text.slice(bodyOpen, closing(m, bodyOpen));
+    if (!c[1] || !new RegExp(`\\bthrow\\s+${c[1]}\\b`).test(body)) return true;
+  }
+  return false;
+}
+
+/** The starts that reach the code at `index` of `file`. In `resumeRun`: a resume. In `runImpl`: a
+ *  fresh run, and a resume too when the site comes before `runImpl` hands over to `resumeRun` and
+ *  no `if` around it excludes `--resume`. In any other function: whatever reaches the calls of that
+ *  function in the refusal scope's files, except calls whose error a `try` swallows. A site no start
+ *  reaches is an error of the census. */
+function entriesAt(
+  root: string,
+  cache: Models,
+  file: string,
+  index: number,
+  seen: string[] = [],
+): Set<Entry> {
+  const m = model(root, file, cache);
+  const line = lineAt(m, index);
+  const fn = m.fns.find((f) => line >= f.start && line <= f.end);
+  if (!fn) throw new Error(`refusal census: ${file}:${line + 1} is outside any top level function`);
+  if (file === RESUME_ENTRY.file && fn.name === RESUME_ENTRY.fn) return new Set(["resume"]);
+  if (file === RUN_ENTRY.file && fn.name === RUN_ENTRY.fn) {
+    const from = m.lineStart[fn.start] as number;
+    const handOver = codeMatches(m, /\bawait resumeRun\(/g).find(
+      (x) => lineAt(m, x.index ?? 0) <= fn.end && (x.index ?? 0) > from,
+    );
+    if (!handOver) throw new Error(`refusal census: ${file}: runImpl no longer calls resumeRun`);
+    if (index > (handOver.index ?? 0)) return new Set(["run"]);
+    const conditions = enclosingConditions(m, from, index);
+    if (conditions.some((c) => /!\s*\(?\s*args\.resume\b/.test(c))) return new Set(["run"]);
+    if (conditions.some((c) => /^\s*args\.resume\b/.test(c))) return new Set(["resume"]);
+    return new Set(["run", "resume"]);
+  }
+  const key = `${file}#${fn.name}`;
+  if (seen.includes(key)) return new Set();
+  const found = new Set<Entry>();
+  let calls = 0;
+  const call = new RegExp(`(?<![\\w$.])(?<!function )\\b${fn.name}\\(`, "g");
+  for (const f of sorted(REFUSAL_SCOPE.map((s) => s.file))) {
+    const caller = model(root, f, cache);
+    for (const x of codeMatches(caller, call)) {
+      calls++;
+      if (caught(caller, x.index ?? 0)) continue;
+      for (const e of entriesAt(root, cache, f, x.index ?? 0, [...seen, key])) found.add(e);
+    }
+  }
+  // A function nothing in the scope's files calls is on no start's path (ensureWorktree, say, runs
+  // inside the provision step): it adds no start.
+  return calls === 0 ? new Set() : found;
+}
+
+/** The refusal sites of the scope, each with the exit codes it can produce and the starts that
+ *  reach it. */
 export function refusalSitesIn(root: string = REPO): CodeSite[] {
+  const cache: Models = new Map();
   const helperCodes: Record<string, number[]> = {};
   for (const [h, f] of Object.entries(REFUSAL_HELPERS)) {
-    const lines = raw(root, f).split("\n");
-    const [a, b] = functionRanges(lines, [h])[0] as [number, number];
-    helperCodes[h] = exitCodesIn(lines.slice(a, b + 1).join("\n"));
+    const m = model(root, f, cache);
+    const [a, b] = functionRanges(m, [h])[0] as [number, number];
+    helperCodes[h] = exitCodesIn(m.lines.slice(a, b + 1).join("\n"));
   }
+  const classes = errorClasses(root);
   const out: CodeSite[] = [];
   for (const scope of REFUSAL_SCOPE) {
-    const lines = blankComments(raw(root, scope.file)).split("\n");
+    const m = model(root, scope.file, cache);
     const ranges = scope.functions
-      ? functionRanges(lines, scope.functions)
-      : [[0, lines.length - 1]];
-    for (const [a, b] of ranges as [number, number][]) {
-      for (let i = a; i <= b; i++) {
-        const l = lines[i] as string;
-        const next = lines.slice(i, i + 4).join("\n");
-        const helper = new RegExp(
-          `(?<!function )\\b(${Object.keys(REFUSAL_HELPERS).join("|")})\\(`,
-        ).exec(l);
-        if (helper)
-          out.push({
-            file: scope.file,
-            line: i,
-            what: helper[1] as string,
-            codes: helperCodes[helper[1] as string] ?? [],
-          });
-        if (/\bnew StyreError\(/.test(l))
-          out.push({
-            file: scope.file,
-            line: i,
-            what: "new StyreError",
-            codes: exitCodesIn(/code: EXIT\.\w+/.exec(next)?.[0] ?? ""),
-          });
-        const exit = /process\.exitCode = (\d+)/.exec(l);
-        if (exit)
-          out.push({
-            file: scope.file,
-            line: i,
-            what: "process.exitCode",
-            codes: [Number(exit[1])],
-          });
-        if (/throw new Error\(/.test(l))
-          out.push({ file: scope.file, line: i, what: "throw new Error", codes: [EXIT.INTERNAL] });
-      }
+      ? functionRanges(m, scope.functions)
+      : [[0, m.lines.length - 1] as [number, number]];
+    const add = (start: number, end: number, what: string, codes: number[]) => {
+      const line = lineAt(m, start);
+      if (!ranges.some(([a, b]) => line >= a && line <= b)) return;
+      const entries = [...entriesAt(root, cache, scope.file, start)].sort();
+      if (entries.length === 0)
+        throw new Error(
+          `refusal census: no start reaches ${scope.file}:${line + 1} (${what}); is it on a start's path?`,
+        );
+      out.push({
+        file: scope.file,
+        line,
+        span: spanOf(m, start, end),
+        what,
+        codes,
+        entries,
+      });
+    };
+    const callEnd = (x: RegExpExecArray) => closing(m, (x.index ?? 0) + x[0].length - 1);
+    const helperCall = new RegExp(
+      `(?<![\\w$.])(?<!function )(${Object.keys(REFUSAL_HELPERS).join("|")})\\(`,
+      "g",
+    );
+    for (const x of codeMatches(m, helperCall))
+      add(x.index ?? 0, callEnd(x), x[1] as string, helperCodes[x[1] as string] ?? []);
+    for (const x of codeMatches(m, /\bnew StyreError\(/g)) {
+      const end = callEnd(x);
+      const code = /code:\s*EXIT\.\w+/.exec(m.text.slice(x.index ?? 0, end))?.[0] ?? "";
+      add(x.index ?? 0, end, "new StyreError", exitCodesIn(code));
+    }
+    // An exit code assignment refuses together with the message written beside it: its span is
+    // the block that holds it.
+    for (const x of codeMatches(m, /\bprocess\.exitCode\s*=\s*(?:(\d+)|EXIT\.(\w+))/g)) {
+      const at = x.index ?? 0;
+      const block = enclosingBlock(m, at);
+      const code = x[1] !== undefined ? Number(x[1]) : (EXIT_CODES[x[2] as string] as number);
+      const before = out.length;
+      add(
+        block < 0 ? at : block,
+        block < 0 ? at + x[0].length : closing(m, block),
+        "process.exitCode",
+        [code],
+      );
+      const site = out[before];
+      if (site) site.line = lineAt(m, at);
+    }
+    for (const x of codeMatches(m, /\bthrow new (\w*Error)\(/g)) {
+      const name = x[1] as string;
+      if (name === "StyreError") continue; // counted as `new StyreError` above
+      const codes = name === "Error" ? [EXIT.INTERNAL] : classes.get(name);
+      if (!codes)
+        throw new Error(
+          `refusal census: ${scope.file}:${lineAt(m, x.index ?? 0) + 1} throws ${name}, an error class src does not declare`,
+        );
+      add(x.index ?? 0, callEnd(x), `throw new ${name}`, codes);
     }
   }
   return out;
@@ -852,26 +1318,27 @@ export function escalationSitesIn(root: string = REPO): CodeSite[] {
       .map((f) => join("src", "daemon", f)),
     "src/cli/park.ts",
   ];
+  const cache: Models = new Map();
   const out: CodeSite[] = [];
   for (const file of files) {
-    const text = blankComments(raw(root, file));
-    const lines = text.split("\n");
+    const m = model(root, file, cache);
     const defs = ESCALATION_WRITERS.flatMap((w) =>
-      lines.some((l) => new RegExp(`function ${w}\\(`).test(l)) ? functionRanges(lines, [w]) : [],
+      m.fns.some((f) => f.name === w) ? functionRanges(m, [w]) : [],
     );
-    const lineAt = (index: number) => text.slice(0, index).split("\n").length - 1;
     const inDef = (line: number) => defs.some(([a, b]) => line >= a && line <= b);
+    const site = (x: RegExpExecArray, what: string) => {
+      const start = x.index ?? 0;
+      const end = closing(m, start + x[0].length - 1);
+      return { file, line: lineAt(m, start), span: spanOf(m, start, end, true), what, codes: [] };
+    };
     for (const w of ESCALATION_WRITERS)
-      for (const m of text.matchAll(new RegExp(`(?<!function )\\b${w}\\(`, "g"))) {
-        const line = lineAt(m.index ?? 0);
-        if (!inDef(line)) out.push({ file, line, what: w, codes: [] });
-      }
-    for (const m of text.matchAll(/\bappendEvent\(/g)) {
-      const line = lineAt(m.index ?? 0);
-      if (inDef(line)) continue;
-      const call = callArgs(text.slice(m.index ?? 0), "appendEvent")[0] ?? [];
-      if (call.some((x) => /kind: "escalated"/.test(x)))
-        out.push({ file, line, what: "appendEvent(escalated)", codes: [] });
+      for (const x of codeMatches(m, new RegExp(`(?<![\\w$.])(?<!function )\\b${w}\\(`, "g")))
+        if (!inDef(lineAt(m, x.index ?? 0))) out.push(site(x, w));
+    for (const x of codeMatches(m, /\bappendEvent\(/g)) {
+      if (inDef(lineAt(m, x.index ?? 0))) continue;
+      const call = callArgs(m.text.slice(x.index ?? 0), "appendEvent")[0] ?? [];
+      if (call.some((a) => /kind: "escalated"/.test(a)))
+        out.push(site(x, "appendEvent(escalated)"));
     }
   }
   return out;
@@ -887,16 +1354,16 @@ function anchorLine(root: string, file: string, anchor: string): number | string
 }
 
 /** Declared sites against code sites: each code site matched by exactly one declared site (the
- *  declared anchor at most 6 lines before or after it, nearest first), each declared site matching
- *  one code site, and every listed edge existing. */
+ *  declared anchor inside the code site's span; the narrowest span first), each declared site
+ *  matching one code site, and every listed edge existing. */
 function matchSites(
   kind: string,
   declared: DeclaredSite[],
   code: CodeSite[],
   root: string,
-): { lines: string[]; pairs: { site: DeclaredSite; code: CodeSite }[] } {
+): { lines: string[]; pairs: { site: DeclaredSite; code: CodeSite; at: number }[] } {
   const lines: string[] = [];
-  const pairs: { site: DeclaredSite; code: CodeSite }[] = [];
+  const pairs: { site: DeclaredSite; code: CodeSite; at: number }[] = [];
   const taken = new Set<CodeSite>();
   for (const site of declared) {
     const at = anchorLine(root, site.file, site.anchor);
@@ -905,8 +1372,12 @@ function matchSites(
       continue;
     }
     const near = code
-      .filter((c) => c.file === site.file && !taken.has(c) && Math.abs(c.line - at) <= 6)
-      .sort((x, y) => Math.abs(x.line - at) - Math.abs(y.line - at))[0];
+      .filter((c) => c.file === site.file && !taken.has(c) && at >= c.span[0] && at <= c.span[1])
+      .sort(
+        (x, y) =>
+          x.span[1] - x.span[0] - (y.span[1] - y.span[0]) ||
+          Math.abs(x.line - at) - Math.abs(y.line - at),
+      )[0];
     if (!near) {
       lines.push(
         `${kind} site '${site.anchor}' (${site.file}:${at + 1}) matches no ${kind} in the code`,
@@ -914,7 +1385,7 @@ function matchSites(
       continue;
     }
     taken.add(near);
-    pairs.push({ site, code: near });
+    pairs.push({ site, code: near, at });
   }
   for (const c of code)
     if (!taken.has(c))
@@ -924,10 +1395,21 @@ function matchSites(
 
 const isStart = (t: DiagramTransition) =>
   t.kind === "refuse" && ["run.start", "resume.start", "@starts"].includes(t.from);
+/** The starts a refusal edge leaves from. */
+const startsOf = (t: DiagramTransition | undefined): Entry[] =>
+  t?.from === "run.start"
+    ? ["run"]
+    : t?.from === "resume.start"
+      ? ["resume"]
+      : t?.from === "@starts"
+        ? ["run", "resume"]
+        : [];
+const ENTRY_WORDS: Record<Entry, string> = { run: "a fresh run", resume: "a resume" };
 
 /** Every refusal and escalation site in the code is declared with the transitions drawn through
- *  it; a refusal site's exit codes equal those of its transitions' targets; every refusal edge of
- *  a start and every edge into an escalation is listed at some site. */
+ *  it; a refusal site's exit codes equal those of its transitions' targets, and it lists an edge
+ *  from every start that reaches it; every refusal edge of a start and every edge into an
+ *  escalation is listed at some site. */
 export function checkSites(d: Diagram, root: string = REPO): string[] {
   const out: string[] = [];
   const byId = new Map(d.transitions.map((t) => [t.id, t]));
@@ -935,7 +1417,8 @@ export function checkSites(d: Diagram, root: string = REPO): string[] {
   const listed = (sites: DeclaredSite[]) => new Set(sites.flatMap((s) => s.edges));
   const refusal = matchSites("refusal", d.refusalSites ?? [], refusalSitesIn(root), root);
   out.push(...refusal.lines);
-  for (const { site, code } of refusal.pairs) {
+  const reachedFrom = new Map<string, Set<Entry>>();
+  for (const { site, code, at } of refusal.pairs) {
     if (site.edges.length === 0) {
       if (!site.notDrawn) out.push(`refusal site '${site.anchor}' lists no edge and no reason`);
       continue;
@@ -960,7 +1443,32 @@ export function checkSites(d: Diagram, root: string = REPO): string[] {
       out.push(
         `refusal site ${site.file}:${code.line + 1} (${code.what}) exits ${want} in the code, but its drawn edges (${site.edges.join(", ")}) exit ${have}`,
       );
+    // Per start: every start that reaches the site has an edge here, and an edge from one start
+    // only is listed where that start reaches.
+    const where = `refusal site '${site.anchor}' (${site.file}:${at + 1})`;
+    const entries = new Set(code.entries ?? []);
+    for (const e of entries)
+      if (!site.edges.some((id) => startsOf(byId.get(id)).includes(e)))
+        out.push(
+          `${where} is reached from ${ENTRY_WORDS[e]}, but lists no edge from ${e}.start or @starts`,
+        );
+    for (const id of site.edges) {
+      const t = byId.get(id);
+      const from = startsOf(t);
+      if (from.length === 1 && !entries.has(from[0] as Entry))
+        out.push(
+          `${where} lists '${id}' from ${t?.from}, but ${ENTRY_WORDS[from[0] as Entry]} never reaches it`,
+        );
+      const r = reachedFrom.get(id) ?? new Set<Entry>();
+      for (const e of entries) r.add(e);
+      reachedFrom.set(id, r);
+    }
   }
+  for (const [id, r] of reachedFrom)
+    if (byId.get(id)?.from === "@starts" && r.size < 2)
+      out.push(
+        `refusal edge '${id}' leaves both starts, but only ${[...r].map((e) => ENTRY_WORDS[e]).join(" and ") || "no start"} reaches the sites that list it`,
+      );
   const outside = new Set((d.refusalEdgesOutsideCensus ?? []).map((x) => x.edge));
   for (const x of d.refusalEdgesOutsideCensus ?? [])
     if (!byId.has(x.edge))
