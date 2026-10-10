@@ -168,8 +168,9 @@ the checkpoint still lands under the profile's own slug.
 
 When `styre run` (or `styre migrate`) upgrades a checkpoint written by an older Styre, it first
 writes a backup next to it: `run.db.v<old version>.<UTC timestamp with milliseconds>.bak`, made with
-`VACUUM INTO` (complete even while another reader holds a snapshot). It is never deleted by Styre;
-`styre clean` and `--fresh` remove it with the checkpoint folder.
+`VACUUM INTO` (complete even while another reader holds a snapshot). Styre never deletes the backup
+on its own; `styre clean` and `--fresh` remove it with the checkpoint folder. A backup written beside
+a database given with `--db` outside the checkpoint folder is never removed by Styre.
 
 `styre ls`, `styre clean`, `--fresh` and `--resume --inspect` never open a checkpoint itself: they
 read a private copy of `run.db` and its `-wal` and `-shm` files, made in a temporary folder and

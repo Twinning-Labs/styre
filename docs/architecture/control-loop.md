@@ -844,7 +844,7 @@ discarded with `--fresh` — are in execution-model.md.)*
 | D1 | design:extract | JSON shape invalid (rare; forced output) | re-run extract (cheap) | — | K_shape → escalate |
 | D2 | runner completeness check | empty *required* field — the plan lacks the info | → S1a re-design | plan | K_distinct → escalate |
 | D3 | post-design postcondition | no plan committed / zero work-units | → S1a re-design | plan | K_distinct → escalate |
-| DV1 | S1c plan-review | blocking plan-finding | → S1a redesign with findings (invalidate `design:dispatch`, cause `feedback`) | plan | K_distinct → escalate |
+| DV1 | S1c plan review | a blocking plan finding | → S1a redesign with findings (invalidate `design:dispatch`, cause `feedback`) | plan | K_distinct → escalate |
 | DV2 | S1c plan-review | reviewer death / transport | retry dispatch | — | K_retry → escalate |
 | DI1 | design walk | a succeeded design step's inputs changed (an edit while paused, another host's toolchain) | invalidate that step (cause `inputs`); the steps that read its output are judged again after it reruns | step | escalate with signature `invalidate-loop:<step>` (the invalidate loop guard) instead of a fourth such invalidate of one step since the latest resume, run on a reused `--db`, or redesign |
 | DI2 | S1a postcondition | the plan is in the worktree but not committed at the branch head (for example `docs/plans/` is in `.gitignore`) | escalate at once, no retry (a prerequisite the operator fixes: commit the plan, resume with `--accept-head`) | — | immediate |

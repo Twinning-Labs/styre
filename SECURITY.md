@@ -222,6 +222,19 @@ Per effectful step, outside the dispatch: recording the branch head where the st
 start by about 0.7 to 0.9 ms (the check itself, about 80 to 90 ms with macOS `lsof`, runs beside the
 next step). The sweep over an empty records folder takes about 10 µs.
 
+## Checkpoint folder names (ENG-477)
+
+- **A ticket ident or slug can no longer point a folder removal outside its checkpoint.** Before
+  ENG-477 the checkpoint folder was built as `$XDG_STATE_HOME/styre/<slug>/<ident>` with no check,
+  and the ident comes from the tracker, which Styre does not control: an ident of `..` made that
+  folder `$XDG_STATE_HOME/styre` itself, and `styre run <ticket> --fresh` would then have removed it,
+  with every project's checkpoints. Now every name is checked before any path is built from it
+  (`src/cli/checkpoint-name.ts`): an ident must be one folder name (not empty, not `.` or `..`, no
+  `/`, `\` or NUL), and each part of a slug the same. `styre run` (fresh and `--resume`),
+  `styre clean` (including `--all`) and `styre setup` refuse any other name, with exit `64` (`78`
+  for a slug read from a profile file), and as a second check the resolved checkpoint path must
+  stay inside the state folder.
+
 ## Human gate
 
 **There is no auto-merge.** Styre opens a pull request and stops. The operator reviews and merges every PR personally. No agent-authored code reaches `main` without a human sign-off.

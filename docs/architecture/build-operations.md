@@ -77,7 +77,7 @@ the *service-install* edge. The same TS core compiles to per-platform binaries.
   - **`styre clean <ident>` / `--all` / `--purge`** — reaps a run's disk state. `styre clean <ident>`
     removes one effort's worktree + checkpoint (no ticket-status change; refuses a live run, exit
     `75`) and a checkpoint it cannot read or whose schema it cannot use (exit `65`, nothing removed).
-    `styre clean --all` reaps only provably-finished (`pr-ready`/`done`) efforts for the current
+    `styre clean --all` reaps only efforts proven finished (`pr-ready`/`done`) for the current
     project. `styre clean <ident> --purge` additionally deletes the local + remote branch, closing the
     PR.
   - **`styre notify --test`** — a diagnostic that sends one test notification through the configured
