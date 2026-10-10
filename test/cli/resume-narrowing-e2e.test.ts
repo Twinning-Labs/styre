@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import { listByTicket as listSignals } from "../../src/db/repos/ground-truth-signal.ts";
@@ -314,6 +315,51 @@ test(
       [...new Set(rs.map((r) => r.type))].sort();
     expect(types(pause)).toEqual(types(other));
     expect(pendingOutbox(h)).toBe(0);
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+/** Fault injection with no hook in the code under test: a trigger in the run's own database makes
+ *  the next `toolchain` signal insert fail, as a crash between two commits would leave it. */
+const failToolchainInserts = (h: DesignHarness, on: boolean): void => {
+  const db = new Database(h.dbPath());
+  try {
+    db.exec(
+      on
+        ? "CREATE TRIGGER fail_toolchain BEFORE INSERT ON ground_truth_signal WHEN NEW.signal_type = 'toolchain' BEGIN SELECT RAISE(ABORT, 'injected toolchain insert failure'); END;"
+        : "DROP TRIGGER fail_toolchain;",
+    );
+  } finally {
+    db.close();
+  }
+};
+
+test(
+  "in place: the new unusable list, its note and the toolchain advisory commit together or not at all",
+  async () => {
+    const h = make("in-place", false);
+    expect(await h.fresh()).toBe(75);
+    h.probe = libMissing;
+    failToolchainInserts(h, true);
+    await expect(h.resume()).rejects.toThrow("injected toolchain insert failure");
+    // nothing of the narrowing was committed: the list, the note and the signal all roll back
+    const unusable = (x: DesignHarness) =>
+      x.read((db, id) => getInput(db, id, "run.unusableComponents")?.value_json);
+    expect(unusable(h)).toBe("[]");
+    expect(components(h)).toEqual(["app", "lib"]);
+    expect(changedNotes(h)).toEqual([]);
+    expect(toolchainSignals(h)).toEqual([]);
+    // the next resume therefore still sees the change, and records all of it
+    failToolchainInserts(h, false);
+    expect(await h.resume()).toBe(75);
+    expect(JSON.parse(unusable(h) ?? "[]").map((u: { component: string }) => u.component)).toEqual([
+      "lib",
+    ]);
+    expect(components(h)).toEqual(["app"]);
+    expect(changedNotes(h).length).toBe(1);
+    const signals = toolchainSignals(h);
+    expect(signals.length).toBe(1);
+    expect(JSON.parse(signals[0]?.detail_json ?? "{}").components).toEqual(["lib"]);
   },
   HARNESS_TEST_TIMEOUT_MS,
 );

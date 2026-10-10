@@ -584,22 +584,28 @@ export async function resumeRun(
     // spec §4: after recover() and the provision reset, before the first resolver pass, the profile
     // and config rows are rewritten from what the handlers will receive now. The ticket text and the
     // starting commit never are (E2).
-    const priorUnusable = getInput(db, ticketId, "run.unusableComponents");
-    const snapshot = captureSnapshot(db, ticketId, {
-      profile: runProfile,
-      unusableComponents: toolchain.unusable,
-      nonPrimaryComponents,
-      config: runtimeConfig,
-    });
-    // ENG-412, never silent: provision records what the narrowing skipped, but it runs again only
-    // where its step is not already done (worktree mode resets it above; in place it stays done).
-    // When this host's list changed and provision will not run again, the runner records it here,
-    // through provision's own writer, so the PR's advisory block names it all the same.
-    const unusableChanged =
-      priorUnusable === null || snapshot.changed.includes("run.unusableComponents");
-    if (unusableChanged && getStep(db, ticketId, "provision")?.status === "succeeded") {
-      recordUnusableComponents(db, ticketId, toolchain.unusable);
-    }
+    // One transaction (captureSnapshot's own nests in it as a savepoint): the prior list read, the
+    // new snapshot rows, their `inputs-changed` note and the toolchain advisory commit together or
+    // not at all. A crash between two commits would leave the new list recorded without its
+    // advisory, and the next resume, seeing no change, would never record it.
+    db.transaction(() => {
+      const priorUnusable = getInput(db, ticketId, "run.unusableComponents");
+      const snapshot = captureSnapshot(db, ticketId, {
+        profile: runProfile,
+        unusableComponents: toolchain.unusable,
+        nonPrimaryComponents,
+        config: runtimeConfig,
+      });
+      // ENG-412, never silent: provision records what the narrowing skipped, but it runs again
+      // only where its step is not already done (worktree mode resets it above; in place it stays
+      // done). When this host's list changed and provision will not run again, the runner records
+      // it here, through provision's own writer, so the PR's advisory block names it all the same.
+      const unusableChanged =
+        priorUnusable === null || snapshot.changed.includes("run.unusableComponents");
+      if (unusableChanged && getStep(db, ticketId, "provision")?.status === "succeeded") {
+        recordUnusableComponents(db, ticketId, toolchain.unusable);
+      }
+    })();
 
     const wiring: ResumeRegistryWiring = {
       profile: runProfile,
