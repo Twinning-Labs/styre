@@ -6169,25 +6169,27 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   var caption = document.getElementById("caption");
   var narrow = window.matchMedia("(max-width: 1100px)");
 
+  /** Helpers a selection never follows past: the implement resolver fans out to every implement
+   *  step, so a way that reaches it ends at its dot (operator ruling, 2026-10-11). */
+  var ENDPOINT_HELPERS = { "implement.pick": true };
   /** Every way out of a node, followed through helper dots as far as the first real node: chains
-   *  of transitions whose last one ends at a node that is not a helper. A second hub on the way
-   *  (the implement resolver after the stage resolver, say) is an endpoint of its own: the chain
-   *  stops at its dot instead of fanning out past it. */
+   *  of transitions whose last one ends at a node that is not a helper. The implement resolver is
+   *  always an endpoint of its own: the chain stops at its dot instead of fanning out past it. */
   function followOut(id) {
     var chains = [];
-    (function walk(nodeId, prefix, seen, hubs) {
+    (function walk(nodeId, prefix, seen) {
       (outgoing[nodeId] || []).forEach(function (t) {
         var chain = prefix.concat([t]);
-        var through = isPseudo(t.to) && t.to !== nodeId && t.to !== id && !seen[t.to] && !(isHub(t.to) && hubs >= 1);
+        var through = isPseudo(t.to) && t.to !== nodeId && t.to !== id && !seen[t.to] && !ENDPOINT_HELPERS[t.to];
         if (through) {
           var next = Object.assign({}, seen);
           next[t.to] = true;
-          walk(t.to, chain, next, hubs + (isHub(t.to) ? 1 : 0));
+          walk(t.to, chain, next);
         } else {
           chains.push(chain);
         }
       });
-    })(id, [], {}, isHub(id) ? 1 : 0);
+    })(id, [], {});
     return chains;
   }
   function outsOf(id) {
