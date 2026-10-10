@@ -1,0 +1,4638 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Styre Ticket Lifecycle</title>
+<meta name="description" content="Every state and transition one Styre ticket can take through styre run, with conditions and sources, generated from the data block in this page and kept in sync with the code by test/docs/state-machine.test.ts.">
+<style>
+/*
+ * Maintained reference (docs/architecture/). The states, transitions, scenarios and layout are the
+ * JSON in the state-machine-data block below; this script only renders them. Edit the JSON when the
+ * code changes: test/docs/state-machine.test.ts compares it with the code and fails, naming the
+ * difference, when either side has a state or transition the other lacks. The page loads nothing
+ * from the network.
+ */
+:root {
+  --bg: #fbfaf7;
+  --surface: #ffffff;
+  --surface-2: #f2f0ea;
+  --text: #1d1d1b;
+  --muted: #5d5b55;
+  --line: #d9d5cb;
+  --focus: #1d5fd1;
+  --node: #ffffff;
+  --node-line: #8f8a7e;
+  --band: rgba(120, 110, 90, 0.06);
+  --band-line: rgba(120, 110, 90, 0.22);
+  --k-forward: #3d6fb5;
+  --k-advance: #1e8a4c;
+  --k-loopback: #c76a12;
+  --k-invalidate: #7b4bc4;
+  --k-retry: #6f6f6f;
+  --k-escalate: #c2362f;
+  --k-pause: #b08300;
+  --k-resume: #11817f;
+  --k-refuse: #a8326b;
+  --k-outcome: #1e8a4c;
+  --n-step: #ffffff;
+  --n-gate: #fff4e0;
+  --n-pseudo: #f1f4fa;
+  --n-entry: #e7f3ef;
+  --n-escalation: #fbeceb;
+  --n-pause: #fff6d8;
+  --n-terminal: #e5f4ea;
+  --n-exit: #f6e9f0;
+  --n-guard: #f1eefa;
+  --n-wait: #eef6f6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141412;
+    --surface: #1c1c1a;
+    --surface-2: #24241f;
+    --text: #ecebe6;
+    --muted: #a9a69c;
+    --line: #3a3933;
+    --focus: #7aa7ff;
+    --node: #1f1f1c;
+    --node-line: #77736a;
+    --band: rgba(220, 210, 180, 0.04);
+    --band-line: rgba(220, 210, 180, 0.16);
+    --k-forward: #7ea6e6;
+    --k-advance: #5cc98a;
+    --k-loopback: #f0a050;
+    --k-invalidate: #b593f0;
+    --k-retry: #a6a6a6;
+    --k-escalate: #f07a72;
+    --k-pause: #e0bb3c;
+    --k-resume: #4fc6c2;
+    --k-refuse: #e07aac;
+    --k-outcome: #5cc98a;
+    --n-step: #1f1f1c;
+    --n-gate: #33291a;
+    --n-pseudo: #1d2330;
+    --n-entry: #18302a;
+    --n-escalation: #3a1f1d;
+    --n-pause: #352d12;
+    --n-terminal: #17301f;
+    --n-exit: #331d29;
+    --n-guard: #262036;
+    --n-wait: #18302f;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141412;
+  --surface: #1c1c1a;
+  --surface-2: #24241f;
+  --text: #ecebe6;
+  --muted: #a9a69c;
+  --line: #3a3933;
+  --focus: #7aa7ff;
+  --node: #1f1f1c;
+  --node-line: #77736a;
+  --band: rgba(220, 210, 180, 0.04);
+  --band-line: rgba(220, 210, 180, 0.16);
+  --k-forward: #7ea6e6;
+  --k-advance: #5cc98a;
+  --k-loopback: #f0a050;
+  --k-invalidate: #b593f0;
+  --k-retry: #a6a6a6;
+  --k-escalate: #f07a72;
+  --k-pause: #e0bb3c;
+  --k-resume: #4fc6c2;
+  --k-refuse: #e07aac;
+  --k-outcome: #5cc98a;
+  --n-step: #1f1f1c;
+  --n-gate: #33291a;
+  --n-pseudo: #1d2330;
+  --n-entry: #18302a;
+  --n-escalation: #3a1f1d;
+  --n-pause: #352d12;
+  --n-terminal: #17301f;
+  --n-exit: #331d29;
+  --n-guard: #262036;
+  --n-wait: #18302f;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.88em; }
+.page { max-width: 1440px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 1.5rem; margin: 0.2rem 0 0.4rem; }
+h2 { font-size: 1.1rem; margin: 1.6rem 0 0.5rem; }
+h3 { font-size: 1rem; margin: 0.2rem 0 0.4rem; overflow-wrap: anywhere; }
+p { margin: 0.4rem 0; }
+.lede { color: var(--muted); max-width: 75ch; }
+.controls {
+  display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 12px; margin: 12px 0;
+}
+.controls label { font-weight: 600; }
+select, button {
+  font: inherit; color: var(--text); background: var(--surface-2);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; min-height: 36px;
+}
+select { max-width: 100%; }
+button { cursor: pointer; }
+button:disabled { opacity: 0.45; cursor: default; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.step-counter { color: var(--muted); font-variant-numeric: tabular-nums; }
+.toggle { display: inline-flex; gap: 6px; align-items: center; font-weight: 400 !important; }
+.grid { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 12px; align-items: start; }
+@media (max-width: 1000px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+.diagram-wrap {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  overflow-x: auto; overflow-y: hidden; max-width: 100%;
+}
+#diagram { display: block; width: 100%; min-width: 880px; height: auto; }
+.panel {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
+  min-width: 0; overflow-wrap: anywhere;
+}
+@media (min-width: 1001px) { .panel { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; } }
+.panel .meta { color: var(--muted); font-size: 0.9em; }
+.src { color: var(--muted); font-size: 0.85em; margin-top: 4px; }
+.src code { background: var(--surface-2); border-radius: 4px; padding: 1px 4px; }
+.tlist { list-style: none; padding: 0; margin: 8px 0 0; }
+.tlist li { border-top: 1px solid var(--line); padding: 8px 0; }
+.tlist .head { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.badge {
+  display: inline-block; font-size: 0.75em; font-weight: 600; letter-spacing: 0.02em;
+  padding: 1px 7px; border-radius: 999px; border: 1px solid currentColor;
+}
+.linkish {
+  background: none; border: none; padding: 0; min-height: 0; color: var(--focus);
+  text-decoration: underline; cursor: pointer; font: inherit; text-align: left;
+}
+.tags { color: var(--muted); font-size: 0.85em; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.85em; color: var(--muted); margin: 6px 0; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { display: inline-block; width: 22px; height: 0; border-top: 3px solid; }
+.steps { padding-left: 1.6em; margin: 0; }
+.steps li { padding: 3px 0; }
+.steps li.current { font-weight: 700; }
+.steps li button { text-align: left; }
+.state-list { columns: 3 260px; column-gap: 24px; }
+.state-list section { break-inside: avoid; margin-bottom: 10px; }
+.state-list h3 { font-size: 0.95rem; }
+.state-list ul { list-style: none; padding: 0; margin: 0; }
+.state-list li { margin: 2px 0; }
+.notes { color: var(--muted); max-width: 90ch; }
+.notes li { margin: 4px 0; }
+/* SVG */
+.band { fill: var(--band); stroke: var(--band-line); }
+.band-label { fill: var(--muted); font-size: 13px; font-weight: 600; }
+.node rect { stroke: var(--node-line); stroke-width: 1.2; }
+.node text { fill: var(--text); font-size: 11px; pointer-events: none; }
+.node { cursor: pointer; }
+.node:focus { outline: none; }
+.node:focus-visible rect { stroke: var(--focus); stroke-width: 3; }
+.node.selected rect { stroke: var(--focus); stroke-width: 3; }
+.node.on-path rect { stroke: var(--k-forward); stroke-width: 2.4; }
+.node.current rect { stroke: var(--focus); stroke-width: 3.5; }
+.node.dim { opacity: 0.35; }
+.n-step rect { fill: var(--n-step); }
+.n-gate rect { fill: var(--n-gate); }
+.n-pseudo rect { fill: var(--n-pseudo); stroke-dasharray: 4 3; }
+.n-entry rect { fill: var(--n-entry); }
+.n-escalation rect { fill: var(--n-escalation); }
+.n-pause rect { fill: var(--n-pause); }
+.n-terminal rect { fill: var(--n-terminal); }
+.n-exit rect { fill: var(--n-exit); }
+.n-guard rect { fill: var(--n-guard); stroke-dasharray: 4 3; }
+.n-wait rect { fill: var(--n-wait); }
+.edge { fill: none; stroke-width: 1.4; }
+.edge.base { opacity: 0.16; }
+.edge.hl { stroke-width: 2.4; opacity: 0.95; }
+.edge.path { stroke-width: 2.2; opacity: 0.55; }
+.edge.current { stroke-width: 4; opacity: 1; }
+.edge.retry, .edge.refuse { stroke-dasharray: 5 4; }
+.k-forward { stroke: var(--k-forward); color: var(--k-forward); }
+.k-advance { stroke: var(--k-advance); color: var(--k-advance); }
+.k-loopback { stroke: var(--k-loopback); color: var(--k-loopback); }
+.k-invalidate { stroke: var(--k-invalidate); color: var(--k-invalidate); }
+.k-retry { stroke: var(--k-retry); color: var(--k-retry); }
+.k-escalate { stroke: var(--k-escalate); color: var(--k-escalate); }
+.k-pause { stroke: var(--k-pause); color: var(--k-pause); }
+.k-resume { stroke: var(--k-resume); color: var(--k-resume); }
+.k-refuse { stroke: var(--k-refuse); color: var(--k-refuse); }
+.k-outcome { stroke: var(--k-outcome); color: var(--k-outcome); }
+.mk-forward { fill: var(--k-forward); }
+.mk-advance { fill: var(--k-advance); }
+.mk-loopback { fill: var(--k-loopback); }
+.mk-invalidate { fill: var(--k-invalidate); }
+.mk-retry { fill: var(--k-retry); }
+.mk-escalate { fill: var(--k-escalate); }
+.mk-pause { fill: var(--k-pause); }
+.mk-resume { fill: var(--k-resume); }
+.mk-refuse { fill: var(--k-refuse); }
+.mk-outcome { fill: var(--k-outcome); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+</style>
+</head>
+<body>
+<div class="page">
+<header>
+  <h1>Styre ticket lifecycle</h1>
+  <p class="lede">Every state one ticket can be in under <code>styre run</code>, every transition out of it, and the condition for each, as the code on this branch implements them. Each state and transition cites the file and function it comes from. Pick a state to see all its outgoing transitions; pick a scenario to walk its path step by step. <span id="built"></span></p>
+  <div class="legend" aria-label="Transition kinds">
+    <span><i class="k-forward"></i>next step</span>
+    <span><i class="k-advance"></i>stage advance or outcome</span>
+    <span><i class="k-loopback"></i>loopback</span>
+    <span><i class="k-invalidate"></i>invalidate (ENG-477)</span>
+    <span><i class="k-retry" style="border-top-style:dashed"></i>retry</span>
+    <span><i class="k-escalate"></i>escalate</span>
+    <span><i class="k-pause"></i>pause</span>
+    <span><i class="k-resume"></i>resume</span>
+    <span><i class="k-refuse" style="border-top-style:dashed"></i>refused (no run)</span>
+  </div>
+</header>
+
+<div class="controls" role="group" aria-label="Scenario controls">
+  <label for="scenario">Scenario</label>
+  <select id="scenario"><option value="">None: explore by state</option></select>
+  <button type="button" id="prev" aria-label="Previous step">Previous</button>
+  <button type="button" id="next" aria-label="Next step">Next</button>
+  <span class="step-counter" id="counter" aria-live="polite"></span>
+  <label class="toggle"><input type="checkbox" id="showAll"> Show every transition faintly</label>
+</div>
+
+<div class="grid">
+  <div class="diagram-wrap" role="region" aria-label="State diagram. Each state is a button; the panel and the state list below carry the same information as text.">
+    <svg id="diagram" viewBox="0 0 1280 1120" xmlns="http://www.w3.org/2000/svg" role="group" aria-labelledby="diagram-title">
+      <title id="diagram-title">Ticket lifecycle state diagram</title>
+    </svg>
+  </div>
+  <aside class="panel" id="panel" aria-live="polite" aria-label="Details"></aside>
+</div>
+
+<section aria-labelledby="steps-h" id="steps-section" hidden>
+  <h2 id="steps-h">Scenario steps</h2>
+  <ol class="steps" id="steps"></ol>
+</section>
+
+<section aria-labelledby="list-h">
+  <h2 id="list-h">All states</h2>
+  <p class="lede">The same states as the diagram, as a list. Each opens its outgoing transitions in the details panel.</p>
+  <div class="state-list" id="state-list"></div>
+</section>
+
+<section aria-labelledby="notes-h">
+  <h2 id="notes-h">Notes</h2>
+  <ul class="notes" id="notes"></ul>
+</section>
+</div>
+
+<script type="application/json" id="state-machine-data">
+{
+ "schemaVersion": 1,
+ "title": "Styre ticket lifecycle",
+ "builtFrom": "feat/eng-477-design-input-invalidation at d2432b5",
+ "constants": {
+  "DEFAULT_MAX_ATTEMPTS": 3,
+  "INVALIDATE_LOOP_LIMIT": 3,
+  "REVIEW_REPAIR_LIMIT": 3,
+  "GATE_ROUND_CAP": 3,
+  "REAUTHOR_ESCALATE_CAP": 2
+ },
+ "entries": [
+  "run.start",
+  "resume.start"
+ ],
+ "stages": [
+  {
+   "id": "design",
+   "label": "Design",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "case \"design\": {"
+  },
+  {
+   "id": "implement",
+   "label": "Implement (verify steps run here)",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "case \"implement\": {"
+  },
+  {
+   "id": "review",
+   "label": "Review",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "case \"review\": {"
+  },
+  {
+   "id": "merge",
+   "label": "Merge",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "case \"merge\": {"
+  },
+  {
+   "id": "released",
+   "label": "Released",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "case \"released\": {"
+  }
+ ],
+ "unroutedStages": [
+  {
+   "id": "verify",
+   "note": "The schema allows ticket.stage = verify, but no code sets it and nextStepKey has no case for it: the verify steps run while the ticket is in implement.",
+   "source": {
+    "file": "src/db/schema.sql",
+    "symbol": "stage"
+   },
+   "anchor": "'verify', -- ground-truth verify (build/tests/scope)"
+  }
+ ],
+ "unproducedOutcomes": [
+  {
+   "id": "abandoned",
+   "note": "RunOutcome includes abandoned (exit 1), reserved for a terminal give up; no path in the code emits it.",
+   "source": {
+    "file": "src/cli/outcome.ts",
+    "symbol": "outcomeSentence"
+   },
+   "anchor": "no path in this codebase"
+  }
+ ],
+ "groups": {
+  "steps": {
+   "label": "Every step",
+   "members": [
+    "provision",
+    "design:dispatch",
+    "design:extract",
+    "design:size",
+    "design:review",
+    "checks:dispatch",
+    "checks:classify",
+    "implement:wu<seq>:dispatch",
+    "provision@implement",
+    "completeness:wu<seq>",
+    "verify:wu<seq>:<check>",
+    "verify:checks-gate",
+    "checks:arbitrate",
+    "checks:reauthor",
+    "verify:integration",
+    "docs:revise",
+    "review",
+    "merge:push",
+    "merge:pr-ensure",
+    "released:project"
+   ],
+   "source": {
+    "file": "src/daemon/advance.ts",
+    "symbol": "advanceOneStep"
+   },
+   "anchor": "const execution = await runStep(db, {"
+  },
+  "agent-steps": {
+   "label": "Every step that dispatches an agent",
+   "members": [
+    "design:dispatch",
+    "design:extract",
+    "design:size",
+    "design:review",
+    "checks:dispatch",
+    "checks:classify",
+    "implement:wu<seq>:dispatch",
+    "checks:arbitrate",
+    "checks:reauthor",
+    "docs:revise",
+    "review"
+   ],
+   "source": {
+    "file": "src/dispatch/run-dispatch.ts",
+    "symbol": "runAgentDispatch"
+   },
+   "anchor": "throw new ParkSignal({"
+  },
+  "retryable": {
+   "label": "Every step but provision",
+   "members": [
+    "design:dispatch",
+    "design:extract",
+    "design:size",
+    "design:review",
+    "checks:dispatch",
+    "checks:classify",
+    "implement:wu<seq>:dispatch",
+    "completeness:wu<seq>",
+    "verify:wu<seq>:<check>",
+    "verify:checks-gate",
+    "checks:arbitrate",
+    "checks:reauthor",
+    "verify:integration",
+    "docs:revise",
+    "review",
+    "merge:push",
+    "merge:pr-ensure",
+    "released:project"
+   ],
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "if (step.step_type === \"provision\") {"
+  },
+  "catch-all-retry": {
+   "label": "Steps whose failure reaches the final retry",
+   "members": [
+    "design:dispatch",
+    "design:extract",
+    "design:size",
+    "design:review",
+    "checks:dispatch",
+    "checks:classify",
+    "implement:wu<seq>:dispatch",
+    "checks:arbitrate",
+    "checks:reauthor",
+    "docs:revise",
+    "review",
+    "merge:push",
+    "merge:pr-ensure",
+    "released:project"
+   ],
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "resetToPending(db, step.id); return { decision: \"retry\" }; }"
+  },
+  "escalations": {
+   "label": "Every escalation",
+   "members": [
+    "esc:attempts-exhausted",
+    "esc:prerequisite",
+    "esc:invariant",
+    "esc:provision",
+    "esc:no-progress",
+    "esc:checks-gate-fault",
+    "esc:reauthor-cap",
+    "esc:gate-cap",
+    "esc:gate-stuck-head",
+    "esc:evidence-floor",
+    "esc:plan-review-gate",
+    "esc:review-no-progress",
+    "esc:review-repair-limit",
+    "esc:plan-defect-policy",
+    "esc:review-unresolved",
+    "esc:invalidate-loop",
+    "esc:step-replay",
+    "esc:blocked",
+    "esc:contract",
+    "esc:stalled",
+    "esc:tick-cap",
+    "esc:outbox",
+    "esc:pr-undelivered",
+    "esc:toolchain-resume"
+   ],
+   "source": {
+    "file": "src/daemon/run-ticket.ts",
+    "symbol": "driveToTerminal"
+   },
+   "anchor": "if (hasPendingHumanResume(db, opts.ticketId))"
+  },
+  "pauses": {
+   "label": "Every pause",
+   "members": [
+    "paused:budget",
+    "paused:needs_you",
+    "paused:interrupted"
+   ],
+   "source": {
+    "file": "src/daemon/run-ticket.ts",
+    "symbol": "PauseReason"
+   },
+   "anchor": "export type PauseReason = \"budget\" | \"needs_you\" | \"interrupted\";"
+  }
+ },
+ "states": [
+  {
+   "id": "run.start",
+   "label": "styre run <ticket>",
+   "kind": "entry",
+   "description": "A fresh run. Checks names, flags, the toolchain and the agent command line tool, reads the ticket once from the tracker, then creates (or, with --db, reuses) the run database.",
+   "source": {
+    "file": "src/cli/run.ts",
+    "symbol": "runImpl"
+   },
+   "anchor": "export async function runImpl("
+  },
+  {
+   "id": "run.prepare",
+   "label": "Prepare the ticket",
+   "kind": "pseudo",
+   "description": "runTicket: the ticket row is inserted (or found, on a reused --db, which then writes a reused-database note), the design inputs snapshot is captured, the starting commit is recorded once, every other active ticket in the database gets the same snapshot, and the adopt pass records manifests for steps an older Styre finished.",
+   "source": {
+    "file": "src/daemon/run-ticket.ts",
+    "symbol": "runTicket"
+   },
+   "anchor": "captureSnapshot(deps.db, ticketId, deps.inputs);"
+  },
+  {
+   "id": "resume.start",
+   "label": "styre run --resume <ident>",
+   "kind": "entry",
+   "description": "Resume a paused run from its checkpoint (run.db in the checkpoint folder). Everything that can refuse is checked before anything is written.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "resumeRun"
+   },
+   "anchor": "export async function resumeRun("
+  },
+  {
+   "id": "resume.prepare",
+   "label": "Resume transaction",
+   "kind": "pseudo",
+   "description": "One transaction: provision is invalidated in worktree mode (cause worktree-recreated), the pending human_resume signals are consumed, the ticket is active again, a resumed event (or accept-head:<sha>) is appended, the review resume plan is applied, and verification steps get a fresh retry window. Then recover() returns the interrupted step to pending, the toolchain is decided, the snapshot is captured again (an inputs-changed note names what changed), other active tickets are prepared, and the adopt pass runs.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "resumeRun"
+   },
+   "anchor": "applyReviewResume(db, ticketId, runtimeConfig, reviewPlan);"
+  },
+  {
+   "id": "resolve.stage",
+   "label": "Resolver: by stage",
+   "kind": "pseudo",
+   "description": "nextStepKey switches on ticket.stage. It is pure: it returns a descriptor (step, advance, mark-verified, wait, blocked, escalate, invalidate, done) and advanceOneStep applies it.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "switch (ticket.stage) {"
+  },
+  {
+   "id": "provision",
+   "label": "provision",
+   "kind": "step",
+   "stage": "design",
+   "stepKey": "provision",
+   "inputs": [
+    "profile.components",
+    "run.unusableComponents",
+    "run.nonPrimaryComponents"
+   ],
+   "produces": [],
+   "description": "Runner step: creates the worktree and runs each component's prepare (install) command. A row of the declared design table: done only while its recorded input manifest matches its current inputs. When invalidated, its outputs are cleared: nothing (it reruns).",
+   "source": {
+    "file": "src/daemon/design-graph.ts",
+    "symbol": "DESIGN_TABLE"
+   },
+   "anchor": "stepKey: \"provision\","
+  },
+  {
+   "id": "design:dispatch",
+   "label": "design:dispatch",
+   "kind": "step",
+   "stage": "design",
+   "stepKey": "design:dispatch",
+   "inputs": [
+    "ticket.title",
+    "ticket.description",
+    "profile.slug",
+    "profile.promptVars",
+    "profile.runtimeContext",
+    "profile.components"
+   ],
+   "produces": [
+    "plan"
+   ],
+   "description": "Agent step (deep tier): writes the plan under docs/plans/; the runner commits it and records the plan's digest read through git at the branch head. Takes design loopback findings of its current generation as feedback (never fingerprinted). A row of the declared design table: done only while its recorded input manifest matches its current inputs. When invalidated, its outputs are cleared: nothing (the rerun revises the plan in place).",
+   "source": {
+    "file": "src/daemon/design-graph.ts",
+    "symbol": "DESIGN_TABLE"
+   },
+   "anchor": "stepKey: \"design:dispatch\","
+  },
+  {
+   "id": "design:extract",
+   "label": "design:extract",
+   "kind": "step",
+   "stage": "design",
+   "stepKey": "design:extract",
+   "inputs": [
+    "ticket.ident",
+    "ticket.title",
+    "profile.slug",
+    "profile.promptVars",
+    "profile.runtimeContext",
+    "profile.components",
+    "plan"
+   ],
+   "produces": [
+    "workUnits"
+   ],
+   "description": "Agent step: turns the plan into work units, written in the success transaction. A row of the declared design table: done only while its recorded input manifest matches its current inputs. When invalidated, its outputs are cleared: every work unit (reconcile units included), after detaching code and plan findings; needs_docs set to 0.",
+   "source": {
+    "file": "src/daemon/design-graph.ts",
+    "symbol": "DESIGN_TABLE"
+   },
+   "anchor": "stepKey: \"design:extract\","
+  },
+  {
+   "id": "design:size",
+   "label": "design:size",
+   "kind": "step",
+   "stage": "design",
+   "stepKey": "design:size",
+   "inputs": [
+    "config.complexityGrading",
+    "workUnits",
+    "ticket.title",
+    "profile.slug",
+    "profile.promptVars",
+    "plan"
+   ],
+   "produces": [
+    "track"
+   ],
+   "description": "Sets the track (fast or full). Without complexity grading it is a runner computation from the units (sprawl); with config.complexityGrading on, a cheap agent grades complexity too (and only then does it read ticket.title, profile.slug, profile.promptVars and plan). A row of the declared design table: done only while its recorded input manifest matches its current inputs. When invalidated, its outputs are cleared: ticket.track set to NULL.",
+   "source": {
+    "file": "src/daemon/design-graph.ts",
+    "symbol": "DESIGN_TABLE"
+   },
+   "anchor": "stepKey: \"design:size\","
+  },
+  {
+   "id": "design:review",
+   "label": "design:review",
+   "kind": "step",
+   "stage": "design",
+   "stepKey": "design:review",
+   "inputs": [
+    "ticket.title",
+    "profile.slug",
+    "profile.promptVars",
+    "plan",
+    "workUnits"
+   ],
+   "produces": [
+    "planFindings"
+   ],
+   "description": "Agent step, full track only: reviews the plan and files plan findings; its verdict is applied in the same transaction that marks it succeeded. It does not read ticket.description. A row of the declared design table: done only while its recorded input manifest matches its current inputs. When invalidated, its outputs are cleared: nothing (the gate reads only the latest dispatch's findings).",
+   "source": {
+    "file": "src/daemon/design-graph.ts",
+    "symbol": "DESIGN_TABLE"
+   },
+   "anchor": "stepKey: \"design:review\","
+  },
+  {
+   "id": "gate:plan-review",
+   "label": "Plan review gate",
+   "kind": "gate",
+   "stage": "design",
+   "description": "The table's gate row (full track): fires while the latest design:review dispatch left blocking plan findings (open, major or critical).",
+   "source": {
+    "file": "src/daemon/design-graph.ts",
+    "symbol": "DESIGN_TABLE"
+   },
+   "anchor": "name: \"plan-review\","
+  },
+  {
+   "id": "checks:dispatch",
+   "label": "checks:dispatch",
+   "kind": "step",
+   "stage": "design",
+   "stepKey": "checks:dispatch",
+   "description": "Past the table's last row (E9, unchanged by ENG-477): an agent authors RED first acceptance criterion checks. Not fingerprinted.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return step(\"checks:dispatch\", \"dispatch\", \"checks:dispatch\", null);"
+  },
+  {
+   "id": "checks:classify",
+   "label": "checks:classify",
+   "kind": "step",
+   "stage": "design",
+   "stepKey": "checks:classify",
+   "description": "An agent triages the RED first traces. Its verdict (applyChecksVerdict) runs in the success transaction.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return step(\"checks:classify\", \"dispatch\", \"checks:classify\", null);"
+  },
+  {
+   "id": "implement.pick",
+   "label": "Resolver: implement",
+   "kind": "pseudo",
+   "stage": "implement",
+   "description": "The implement case of nextStepKey, in order: the first unit (by seq) that is pending or verifying with all its depends_on units verified; else, when every unit is verified, the AC gate, the integration sweep, docs and the evidence floor.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextActionableUnit"
+   },
+   "anchor": "export function nextActionableUnit("
+  },
+  {
+   "id": "implement:wu<seq>:dispatch",
+   "label": "implement:wu<seq>:dispatch",
+   "kind": "step",
+   "stage": "implement",
+   "stepKey": "implement:wu<seq>:dispatch",
+   "description": "One per work unit (seq). An agent codes the unit in the worktree; the runner commits and sets the unit verifying.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return step(`implement:wu${u.seq}:dispatch`, \"dispatch\", \"implement:dispatch\", u.id);"
+  },
+  {
+   "id": "provision@implement",
+   "label": "provision (again)",
+   "kind": "step",
+   "stage": "implement",
+   "stepKey": "provision",
+   "description": "The same provision step, served again in implement when it is not succeeded: after a resume recreated the worktree, or after a diff touched a dependency manifest.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return step(\"provision\", \"provision\", \"provision\", null);"
+  },
+  {
+   "id": "completeness:wu<seq>",
+   "label": "completeness:wu<seq>",
+   "kind": "step",
+   "stage": "implement",
+   "stepKey": "completeness:wu<seq>",
+   "description": "Runner computation, once per unit: the unit's declared files against the cumulative diff. Under delivery is a hard gate.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return step(`completeness:wu${u.seq}`, \"completeness\", \"completeness\", u.id);"
+  },
+  {
+   "id": "verify:wu<seq>:<check>",
+   "label": "verify:wu<seq>:<check>",
+   "kind": "step",
+   "stage": "implement",
+   "stepKey": "verify:wu<seq>:<check>",
+   "description": "One per declared check type of the unit (build, test, ...). Advisory: a verdict (pass or fail) at the unit's current commit satisfies routing; only a could not run error retries.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return step(`verify:wu${u.seq}:${check}`, \"verify\", \"verify:check\", u.id);"
+  },
+  {
+   "id": "mark-verified",
+   "label": "Mark unit verified",
+   "kind": "pseudo",
+   "stage": "implement",
+   "description": "Descriptor mark-verified: the interpreter sets the unit verified and continues inline.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return { kind: \"mark-verified\", workUnitId: u.id };"
+  },
+  {
+   "id": "verify:checks-gate",
+   "label": "verify:checks-gate",
+   "kind": "step",
+   "stage": "implement",
+   "stepKey": "verify:checks-gate",
+   "description": "The AC checks gate (runner): integrity of the active acceptance criterion checks and a run of them at the branch HEAD. Its verdict (applyAcCheckGateVerdict) runs in the success transaction; its attempt is the gate round counter.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return step(\"verify:checks-gate\", \"verify\", \"verify:checks-gate\", null);"
+  },
+  {
+   "id": "checks:arbitrate",
+   "label": "checks:arbitrate",
+   "kind": "step",
+   "stage": "implement",
+   "stepKey": "checks:arbitrate",
+   "description": "An agent assigns blame for each behavioral check still red: `code-wrong` or `check-wrong`. Verdict: applyArbiterVerdict.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return step(\"checks:arbitrate\", \"dispatch\", \"checks:arbitrate\", null);"
+  },
+  {
+   "id": "checks:reauthor",
+   "label": "checks:reauthor",
+   "kind": "step",
+   "stage": "implement",
+   "stepKey": "checks:reauthor",
+   "description": "An agent writes the `check-wrong` checks again. Verdict: applyReauthorVerdict.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return step(\"checks:reauthor\", \"dispatch\", \"checks:reauthor\", null);"
+  },
+  {
+   "id": "verify:integration",
+   "label": "verify:integration",
+   "kind": "step",
+   "stage": "implement",
+   "stepKey": "verify:integration",
+   "description": "The whole project sweep at the branch HEAD (runner). Advisory: a verdict (pass or fail) at HEAD satisfies routing.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return step(\"verify:integration\", \"verify\", \"verify:integration\", null);"
+  },
+  {
+   "id": "docs:revise",
+   "label": "docs:revise",
+   "kind": "step",
+   "stage": "implement",
+   "stepKey": "docs:revise",
+   "description": "An agent revises the docs, only when design set ticket.needs_docs.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return step(\"docs:revise\", \"dispatch\", \"docs:revise\", null);"
+  },
+  {
+   "id": "floor:evidence",
+   "label": "Evidence floor",
+   "kind": "guard",
+   "stage": "implement",
+   "description": "A precondition of leaving implement, not a step: every required suite passed at the shipping commit, and something executed there came back clean, or every acceptance criterion was proven by its gating checks.",
+   "source": {
+    "file": "src/daemon/evidence-floor.ts",
+    "symbol": "evidenceFloor"
+   },
+   "anchor": "export function evidenceFloor(db: Database, ticketId: number): FloorVerdict {"
+  },
+  {
+   "id": "review",
+   "label": "review",
+   "kind": "step",
+   "stage": "review",
+   "stepKey": "review",
+   "description": "A cold, independent agent reviews the code and files findings. The verdict (applyReviewVerdict) runs in the success transaction.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return step(\"review\", \"dispatch\", \"review\", null);"
+  },
+  {
+   "id": "merge:push",
+   "label": "merge:push",
+   "kind": "step",
+   "stage": "merge",
+   "stepKey": "merge:push",
+   "description": "Runner: enqueues the push of the branch through the outbox. Refuses (StepPrerequisiteError) while review findings are unresolved.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return step(\"merge:push\", \"project\", \"merge:push\", null);"
+  },
+  {
+   "id": "merge:pr-ensure",
+   "label": "merge:pr-ensure",
+   "kind": "step",
+   "stage": "merge",
+   "stepKey": "merge:pr-ensure",
+   "description": "Runner: enqueues the pull request create or update. Refuses (StepPrerequisiteError) while review findings are unresolved.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return step(\"merge:pr-ensure\", \"project\", \"merge:pr-ensure\", null);"
+  },
+  {
+   "id": "wait:human_merge_approval",
+   "label": "Wait: human merge approval",
+   "kind": "wait",
+   "stage": "merge",
+   "description": "Descriptor wait: a pending human_merge_approval signal. The OSS run never delivers it; it exits at pr-ready.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return { kind: \"wait\", signalType: \"human_merge_approval\" };"
+  },
+  {
+   "id": "released:project",
+   "label": "released:project",
+   "kind": "step",
+   "stage": "released",
+   "stepKey": "released:project",
+   "description": "Runner: the released wrap up. The Done projection was enqueued by the merge → released transition.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return step(\"released:project\", \"project\", \"released:project\", null);"
+  },
+  {
+   "id": "outcome:pr-ready",
+   "label": "pr-ready (exit 0)",
+   "kind": "terminal",
+   "outcome": "pr-ready",
+   "exitCode": 0,
+   "exitName": "OK",
+   "description": "The PR is open at the verified head, waiting on the human merge. CI is reported once (ci_handoff), never gated.",
+   "source": {
+    "file": "src/daemon/run-ticket.ts",
+    "symbol": "driveToTerminal"
+   },
+   "anchor": "return await finish({ outcome: \"pr-ready\", ...last });"
+  },
+  {
+   "id": "outcome:done",
+   "label": "done (exit 0)",
+   "kind": "terminal",
+   "outcome": "done",
+   "exitCode": 0,
+   "exitName": "OK",
+   "description": "Merged and released: ticket status done.",
+   "source": {
+    "file": "src/daemon/run-ticket.ts",
+    "symbol": "driveToTerminal"
+   },
+   "anchor": "if (t.status === \"done\") return await finish({ outcome: \"done\", ...last });"
+  },
+  {
+   "id": "paused:budget",
+   "label": "paused: budget (exit 75)",
+   "kind": "pause",
+   "outcome": "paused",
+   "reason": "budget",
+   "exitCode": 75,
+   "exitName": "TEMPFAIL",
+   "description": "An agent dispatch died of a session limit or out of credits. The checkpoint (run.db and transcript.json, with the parked step's key, generation and manifest) stays at its live location. Resumable.",
+   "source": {
+    "file": "src/daemon/run-ticket.ts",
+    "symbol": "driveToTerminal"
+   },
+   "anchor": "return await finish({ outcome: \"paused\", reason: \"budget\", park: r.parked, ...last });"
+  },
+  {
+   "id": "paused:needs_you",
+   "label": "paused: needs_you (exit 75)",
+   "kind": "pause",
+   "outcome": "paused",
+   "reason": "needs_you",
+   "exitCode": 75,
+   "exitName": "TEMPFAIL",
+   "description": "The ticket is waiting on a pending human_resume signal; the summary names the latest escalation's reason. Resumable (the resume consumes the signal), or discard with --fresh.",
+   "source": {
+    "file": "src/daemon/run-ticket.ts",
+    "symbol": "driveToTerminal"
+   },
+   "anchor": "return await finish({ outcome: \"paused\", reason: \"needs_you\", ...last });"
+  },
+  {
+   "id": "paused:interrupted",
+   "label": "paused: interrupted",
+   "kind": "pause",
+   "outcome": "paused",
+   "reason": "interrupted",
+   "description": "A stop signal arrived. The stop handler records an interrupted note, gives back the attempt of the step in flight and closes its dispatch; the process then ends by the signal (128 + its number), not by exit 75. Resumable: recover() undoes the step's in place edits and returns it to pending.",
+   "source": {
+    "file": "src/util/process/interruption.ts",
+    "symbol": "recordInterruption"
+   },
+   "anchor": "steps.decrementAttempt(db, inFlight.stepId);"
+  },
+  {
+   "id": "exit:usage",
+   "label": "refused: usage (exit 64)",
+   "kind": "exit",
+   "exitCode": 64,
+   "exitName": "USAGE",
+   "description": "Command line misuse. Nothing was written.",
+   "source": {
+    "file": "src/cli/errors.ts",
+    "symbol": "EXIT"
+   },
+   "anchor": "USAGE: 64,"
+  },
+  {
+   "id": "exit:resume-refused",
+   "label": "refused: checkpoint (exit 65)",
+   "kind": "exit",
+   "exitCode": 65,
+   "exitName": "RESUME_REFUSED",
+   "description": "A checkpoint (or reused --db) this Styre will not use. Nothing was changed.",
+   "source": {
+    "file": "src/cli/errors.ts",
+    "symbol": "EXIT"
+   },
+   "anchor": "RESUME_REFUSED: 65,"
+  },
+  {
+   "id": "exit:toolchain",
+   "label": "refused: toolchain (exit 69)",
+   "kind": "exit",
+   "exitCode": 69,
+   "exitName": "TOOLCHAIN_MISSING",
+   "description": "A fresh run whose required tools are missing on this host. Fresh runs only: a resume pauses instead.",
+   "source": {
+    "file": "src/cli/errors.ts",
+    "symbol": "EXIT"
+   },
+   "anchor": "TOOLCHAIN_MISSING: 69,"
+  },
+  {
+   "id": "exit:config",
+   "label": "refused: config (exit 78)",
+   "kind": "exit",
+   "exitCode": 78,
+   "exitName": "CONFIG",
+   "description": "A bad config or profile value.",
+   "source": {
+    "file": "src/cli/errors.ts",
+    "symbol": "EXIT"
+   },
+   "anchor": "CONFIG: 78,"
+  },
+  {
+   "id": "exit:inspect",
+   "label": "--inspect report (exit 0)",
+   "kind": "exit",
+   "exitCode": 0,
+   "exitName": "OK",
+   "description": "Diagnostics only: read through a private copy, never migrates, never writes; says where resume would refuse.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "inspectWithoutUpgrading"
+   },
+   "anchor": "export function inspectWithoutUpgrading("
+  },
+  {
+   "id": "esc:attempts-exhausted",
+   "label": "Attempts exhausted",
+   "kind": "escalation",
+   "description": "A failed step whose attempt count reached the cap: human_resume with the reason \"step '<key>' exhausted after <n> attempts\".",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "exhausted after ${step.attempt} attempts"
+  },
+  {
+   "id": "esc:prerequisite",
+   "label": "Prerequisite to repair",
+   "kind": "escalation",
+   "description": "StepPrerequisiteError: something only an operator can repair (an uncommitted plan, unconfirmed agent confinement, no runnable acceptance check framework, unresolved review findings at merge, a review verification limit or fault). Escalated at once, never retried.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "const prerequisite = error?.name === \"StepPrerequisiteError\";"
+  },
+  {
+   "id": "esc:invariant",
+   "label": "Invariant violation",
+   "kind": "escalation",
+   "description": "InvariantViolation inside a step (an undeclared read, a malformed handler result, a missing output digest, a step started while another is in flight): a Styre defect, escalated at once with its message as the reason.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "broke an invariant (a Styre defect, not retried)"
+  },
+  {
+   "id": "esc:provision",
+   "label": "Provision failed",
+   "kind": "escalation",
+   "description": "An environment fault (install, editable source check). Escalated on the first failure: implementing again cannot reach it.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "reason: \"provision failed for ticket\","
+  },
+  {
+   "id": "esc:no-progress",
+   "label": "Identical failure twice",
+   "kind": "escalation",
+   "description": "A unit's verify or completeness step failed with the same signature as the immediately previous loopback.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "failed identically twice"
+  },
+  {
+   "id": "esc:checks-gate-fault",
+   "label": "AC gate fault",
+   "kind": "escalation",
+   "description": "verify:checks-gate threw (an infrastructure or invariant fault, not a still red verdict).",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "verify:checks-gate failed (infra/invariant fault)"
+  },
+  {
+   "id": "esc:reauthor-cap",
+   "label": "AC check reauthor cap",
+   "kind": "escalation",
+   "description": "An acceptance criterion still flagged vacuous or weak after its checks were authored again the capped number of rounds.",
+   "source": {
+    "file": "src/daemon/checks-verdict.ts",
+    "symbol": "applyChecksVerdict"
+   },
+   "anchor": "reason: \"no progress: repeated re-author of the same AC-check\","
+  },
+  {
+   "id": "esc:gate-cap",
+   "label": "AC gate round cap",
+   "kind": "escalation",
+   "description": "Checks still red after the capped number of gate rounds (the gate's attempt, or the reauthor step's own attempt).",
+   "source": {
+    "file": "src/daemon/arbiter-verdict.ts",
+    "symbol": "GATE_ROUND_CAP"
+   },
+   "anchor": "export const GATE_ROUND_CAP = 3;"
+  },
+  {
+   "id": "esc:gate-stuck-head",
+   "label": "AC gate stuck at HEAD",
+   "kind": "escalation",
+   "description": "Blame is recorded at HEAD, reauthor and the gate already succeeded this round, and nothing new was committed: nothing left can move HEAD.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "signature: \"gate-stuck-head\","
+  },
+  {
+   "id": "esc:evidence-floor",
+   "label": "Evidence floor fails",
+   "kind": "escalation",
+   "description": "Leaving implement, nothing real was measured at the commit about to ship (or a required suite has no passing receipt there). The reason names the unproven criteria.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "signature: \"evidence-floor\","
+  },
+  {
+   "id": "esc:plan-review-gate",
+   "label": "Plan review gate fires",
+   "kind": "escalation",
+   "description": "The gate row's escalation: unresolved plan review findings (signature review:unresolved-plan).",
+   "source": {
+    "file": "src/daemon/design-graph.ts",
+    "symbol": "DESIGN_TABLE"
+   },
+   "anchor": "signature: \"review:unresolved-plan\","
+  },
+  {
+   "id": "esc:review-no-progress",
+   "label": "Identical review findings",
+   "kind": "escalation",
+   "description": "Plan or code review returned blocking findings with the same signature (sorted category:location) as the previous review loopback.",
+   "source": {
+    "file": "src/daemon/review-verdict.ts",
+    "symbol": "isRepeatedReviewLoopback"
+   },
+   "anchor": "function isRepeatedReviewLoopback("
+  },
+  {
+   "id": "esc:review-repair-limit",
+   "label": "Review repair limit",
+   "kind": "escalation",
+   "description": "Blocking findings after the capped number of review loopbacks (plan and code reviews share the count: loopback events routed to review).",
+   "source": {
+    "file": "src/daemon/review-verdict.ts",
+    "symbol": "applyReviewVerdict"
+   },
+   "anchor": "review repair limit reached; unresolved finding IDs:"
+  },
+  {
+   "id": "esc:plan-defect-policy",
+   "label": "Plan defect: policy escalate",
+   "kind": "escalation",
+   "description": "Code review found a blocking plan-defect and the runtime config's onPlanDefect is escalate (the default).",
+   "source": {
+    "file": "src/daemon/review-verdict.ts",
+    "symbol": "applyReviewVerdict"
+   },
+   "anchor": "\"blocking plan-defect found in code review; operator policy is escalate\","
+  },
+  {
+   "id": "esc:review-unresolved",
+   "label": "Review ledger unresolved",
+   "kind": "escalation",
+   "description": "A succeeded review, but open major or critical code findings remain, or a risk acceptance names another commit.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "signature: \"review-unresolved\","
+  },
+  {
+   "id": "esc:invalidate-loop",
+   "label": "Invalidate loop guard",
+   "kind": "escalation",
+   "description": "A design step keeps finding changed inputs after rerunning: an unstable input digest. The count restarts at each resumed event, reused-database note and design loopback.",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "signature: `invalidate-loop:${row.stepKey}`,"
+  },
+  {
+   "id": "esc:step-replay",
+   "label": "Step replay guard",
+   "kind": "escalation",
+   "description": "The resolver asked for a step the journal already holds as succeeded; replaying it cannot change routing.",
+   "source": {
+    "file": "src/daemon/advance.ts",
+    "symbol": "advanceOneStep"
+   },
+   "anchor": "`step-replay-no-progress:${d.stepKey}`"
+  },
+  {
+   "id": "esc:blocked",
+   "label": "No next move",
+   "kind": "escalation",
+   "description": "Descriptor blocked: no actionable unit and not every unit verified. pauseTicket writes the escalation.",
+   "source": {
+    "file": "src/daemon/advance.ts",
+    "symbol": "advanceOneStep"
+   },
+   "anchor": "no next move on this plan"
+  },
+  {
+   "id": "esc:contract",
+   "label": "Verification contract",
+   "kind": "escalation",
+   "description": "Before the next pass, the registry could not establish the verification contract: synchronizing the requirements threw, or, in review or merge, a required suite has no passing receipt at the head. pauseTicket writes the escalation.",
+   "source": {
+    "file": "src/daemon/advance.ts",
+    "symbol": "advanceOneStep"
+   },
+   "anchor": "Verification contract could not be established:"
+  },
+  {
+   "id": "esc:stalled",
+   "label": "Stalled",
+   "kind": "escalation",
+   "description": "Three ticks in a row advanced nothing.",
+   "source": {
+    "file": "src/daemon/run-ticket.ts",
+    "symbol": "driveToTerminal"
+   },
+   "anchor": "\"stalled with no progress — edit the ticket and resume, or 'styre clean' to drop\","
+  },
+  {
+   "id": "esc:tick-cap",
+   "label": "Tick budget used",
+   "kind": "escalation",
+   "description": "The run used its 200 tick budget while still advancing.",
+   "source": {
+    "file": "src/daemon/run-ticket.ts",
+    "symbol": "driveToTerminal"
+   },
+   "anchor": "-tick iteration budget; resume to continue"
+  },
+  {
+   "id": "esc:outbox",
+   "label": "External service down",
+   "kind": "escalation",
+   "description": "An outbox row (tracker, forge or notifier) failed past its retry budget; the projector pauses the ticket.",
+   "source": {
+    "file": "src/daemon/projector.ts",
+    "symbol": "escalateProjection"
+   },
+   "anchor": "function escalateProjection("
+  },
+  {
+   "id": "esc:pr-undelivered",
+   "label": "PR or push not delivered",
+   "kind": "escalation",
+   "description": "At pr-ready, the forge did not return the PR's URL, or the push of the current head was not delivered.",
+   "source": {
+    "file": "src/daemon/run-ticket.ts",
+    "symbol": "undeliveredReason"
+   },
+   "anchor": "function undeliveredReason("
+  },
+  {
+   "id": "esc:toolchain-resume",
+   "label": "Toolchain missing on resume",
+   "kind": "escalation",
+   "description": "A resume on a host that lacks the tools of a required suite: pause needs_you (exit 75), never exit 69. A ticket already waiting gets a toolchain-missing note instead of a second pause.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "resumeRun"
+   },
+   "anchor": "const reason = resumePauseReason(toolchain.blocking);"
+  }
+ ],
+ "transitions": [
+  {
+   "id": "t.run.bad-name",
+   "from": "run.start",
+   "to": "exit:usage",
+   "kind": "refuse",
+   "label": "Ident or slug cannot name a folder",
+   "condition": "The ticket's ident, or a slug from the command line or the repository, cannot name a checkpoint folder: empty, a part \".\" or \"..\", a \"/\" in an ident, a \"\\\" or NUL.",
+   "source": {
+    "file": "src/cli/checkpoint-name.ts",
+    "symbol": "assertCheckpointName"
+   },
+   "anchor": "export function assertCheckpointName("
+  },
+  {
+   "id": "t.run.bad-profile-slug",
+   "from": "run.start",
+   "to": "exit:config",
+   "kind": "refuse",
+   "label": "Profile slug cannot name a folder",
+   "condition": "The slug read from a profile file cannot name a checkpoint folder: a config error that names the file.",
+   "source": {
+    "file": "src/cli/checkpoint-name.ts",
+    "symbol": "assertProfileSlug"
+   },
+   "anchor": "export function assertProfileSlug("
+  },
+  {
+   "id": "t.run.review-flags",
+   "from": "run.start",
+   "to": "exit:usage",
+   "kind": "refuse",
+   "label": "Review flags without --resume",
+   "condition": "--review-action, --review-findings or --review-reason on a fresh run.",
+   "source": {
+    "file": "src/cli/run.ts",
+    "symbol": "runImpl"
+   },
+   "anchor": "\"review actions require --resume\","
+  },
+  {
+   "id": "t.run.in-place-no-head",
+   "from": "run.start",
+   "to": "exit:config",
+   "kind": "refuse",
+   "label": "In place: HEAD unreadable",
+   "condition": "--in-place and the checkout's HEAD cannot be read (a repository with no commit), so no starting commit can be recorded.",
+   "source": {
+    "file": "src/cli/run.ts",
+    "symbol": "runImpl"
+   },
+   "anchor": "cannot start in place — the HEAD of"
+  },
+  {
+   "id": "t.run.toolchain",
+   "from": "run.start",
+   "to": "exit:toolchain",
+   "kind": "refuse",
+   "label": "Toolchain missing",
+   "condition": "No primary component is left, or a component with a required suite lacks its tools on this host (toolchainDecision refuses).",
+   "source": {
+    "file": "src/cli/run.ts",
+    "symbol": "runImpl"
+   },
+   "anchor": "const toolchain = applyToolchainGate(profile, deps?.probe);"
+  },
+  {
+   "id": "t.run.checkpoint-exists",
+   "from": "run.start",
+   "to": "exit:usage",
+   "kind": "refuse",
+   "label": "Checkpoint exists",
+   "condition": "A checkpoint already exists for this ident (no --db, no --fresh): resume it or discard it.",
+   "source": {
+    "file": "src/cli/run.ts",
+    "symbol": "runImpl"
+   },
+   "anchor": "a checkpoint already exists for ${ident} at ${checkpointDir}"
+  },
+  {
+   "id": "t.run.lock-held",
+   "from": "run.start",
+   "to": "exit:usage",
+   "kind": "refuse",
+   "label": "Run lock held",
+   "condition": "Another styre run of this ident holds the run lock.",
+   "source": {
+    "file": "src/cli/run.ts",
+    "symbol": "runImpl"
+   },
+   "anchor": "is already in progress (${checkpointDir}/run.lock)"
+  },
+  {
+   "id": "t.run.newer-scheme",
+   "from": "run.start",
+   "to": "exit:resume-refused",
+   "kind": "refuse",
+   "label": "Reused --db: newer fingerprint scheme",
+   "condition": "A reused --db holds design steps fingerprinted under a scheme newer than this Styre's. Refused before anything is written; names the tickets; does not suggest --fresh.",
+   "source": {
+    "file": "src/cli/run.ts",
+    "symbol": "runImpl"
+   },
+   "anchor": "run refused: ${newerSchemeDbRefusal(newerScheme)}"
+  },
+  {
+   "id": "t.run.migrate-refused",
+   "from": "run.start",
+   "to": "exit:resume-refused",
+   "kind": "refuse",
+   "label": "Reused --db: schema refused",
+   "condition": "A reused --db whose schema migrate refuses: newer than this Styre, older than v7, an unknown shape, or tables without schema_meta.",
+   "source": {
+    "file": "src/db/migrate.ts",
+    "symbol": "migrate"
+   },
+   "anchor": "if (state.kind === \"refuse\") throw state.error;"
+  },
+  {
+   "id": "t.run.start",
+   "from": "run.start",
+   "to": "run.prepare",
+   "kind": "forward",
+   "label": "Start",
+   "condition": "Every check passed: the database is created or upgraded (migrate, with a backup before an upgrade), recover() warns about an older checkpoint, a run row is minted once.",
+   "source": {
+    "file": "src/cli/run.ts",
+    "symbol": "runImpl"
+   },
+   "anchor": "const out = await runTicket({"
+  },
+  {
+   "id": "t.run.prepared",
+   "from": "run.prepare",
+   "to": "resolve.stage",
+   "kind": "forward",
+   "label": "Drive",
+   "condition": "The ticket is prepared; driveToTerminal ticks (one step per tick) until an outcome.",
+   "source": {
+    "file": "src/daemon/run-ticket.ts",
+    "symbol": "runTicket"
+   },
+   "anchor": "const result = await driveToTerminal(deps.db, deps.registry, {"
+  },
+  {
+   "id": "t.stage.design",
+   "from": "resolve.stage",
+   "to": "provision",
+   "kind": "forward",
+   "label": "Stage design",
+   "condition": "ticket.stage is design (a new ticket starts there): the walk starts at the table's first row.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "const designStep = walkDesign(db, ticket);",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.stage.implement",
+   "from": "resolve.stage",
+   "to": "implement.pick",
+   "kind": "forward",
+   "label": "Stage implement",
+   "condition": "ticket.stage is implement. (A change to a design input found here is recorded, as an inputs-changed note, and applies the next time the run is in design: E6.)",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "const u = nextActionableUnit(db, ticketId);",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.stage.review",
+   "from": "resolve.stage",
+   "to": "review",
+   "kind": "forward",
+   "label": "Stage review",
+   "condition": "ticket.stage is review: review runs unless it is succeeded.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "if (!done(db, ticketId, \"review\")) {",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.stage.merge",
+   "from": "resolve.stage",
+   "to": "merge:push",
+   "kind": "forward",
+   "label": "Stage merge",
+   "condition": "ticket.stage is merge: merge:push runs unless it is succeeded.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "if (!done(db, ticketId, \"merge:push\")) {",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.stage.released",
+   "from": "resolve.stage",
+   "to": "released:project",
+   "kind": "forward",
+   "label": "Stage released",
+   "condition": "ticket.stage is released: released:project runs unless it is succeeded.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "if (!done(db, ticketId, \"released:project\")) {",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.resume.no-checkpoint",
+   "from": "resume.start",
+   "to": "exit:usage",
+   "kind": "refuse",
+   "label": "No checkpoint",
+   "condition": "No run.db in the checkpoint folder for this ident.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "resumeRun"
+   },
+   "anchor": "no paused run at ${dbPath}"
+  },
+  {
+   "id": "t.resume.lock-held",
+   "from": "resume.start",
+   "to": "exit:resume-refused",
+   "kind": "refuse",
+   "label": "Run lock held",
+   "condition": "Another styre run of this ident holds the run lock; no database was opened.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "resumeRun"
+   },
+   "anchor": "resume refused: another 'styre run ${args.resume}' is already in progress"
+  },
+  {
+   "id": "t.resume.inspect",
+   "from": "resume.start",
+   "to": "exit:inspect",
+   "kind": "refuse",
+   "label": "--inspect",
+   "condition": "--inspect: reads a private copy whatever its version, prints the schema state, the recorded and current HEAD and the step resume would run again, and where resume would refuse. Writes nothing.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "resumeRun"
+   },
+   "anchor": "process.stderr.write(inspectWithoutUpgrading(dbPath, args.resume, state));"
+  },
+  {
+   "id": "t.resume.no-ident",
+   "from": "resume.start",
+   "to": "exit:resume-refused",
+   "kind": "refuse",
+   "label": "No ticket with this ident",
+   "condition": "The checkpoint holds no tables, or no ticket with this ident (idents are case sensitive; an ident recorded in two projects is refused, not guessed). Names the idents it holds; never suggests --fresh.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "resumeRun"
+   },
+   "anchor": "if (!found.ticket) throw noOwnTicket(args.resume, dir, found.reason, found.held);"
+  },
+  {
+   "id": "t.resume.newer-scheme",
+   "from": "resume.start",
+   "to": "exit:resume-refused",
+   "kind": "refuse",
+   "label": "Newer fingerprint scheme",
+   "condition": "The run's design steps were fingerprinted under a scheme newer than this Styre's. Refused before anything is written.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "resumeRun"
+   },
+   "anchor": "resume refused: ${newerSchemeRefusal(args.resume, newerScheme.scheme)}"
+  },
+  {
+   "id": "t.resume.migrate-refused",
+   "from": "resume.start",
+   "to": "exit:resume-refused",
+   "kind": "refuse",
+   "label": "Schema refused",
+   "condition": "migrate refuses the checkpoint's schema: newer than this Styre, older than v7, an unknown shape, or tables without schema_meta. (An older known version is upgraded instead, after a backup.)",
+   "source": {
+    "file": "src/db/migrate.ts",
+    "symbol": "migrate"
+   },
+   "anchor": "if (state.kind === \"refuse\") throw state.error;"
+  },
+  {
+   "id": "t.resume.head-moved",
+   "from": "resume.start",
+   "to": "exit:resume-refused",
+   "kind": "refuse",
+   "label": "HEAD moved",
+   "condition": "The branch HEAD moved since the run paused and --accept-head was not given.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "resumeRun"
+   },
+   "anchor": "if (moved && !args.acceptHead) {"
+  },
+  {
+   "id": "t.resume.review-plan-refused",
+   "from": "resume.start",
+   "to": "exit:resume-refused",
+   "kind": "refuse",
+   "label": "Review resume refused",
+   "condition": "planReviewResume refuses: for example the review repair limit is reached at the plan review gate or in review, a risk acceptance at a moved HEAD or for findings that cannot be accepted, or pending forge effects.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "resumeRun"
+   },
+   "anchor": "reviewPlan = planReviewResume(db, ticketId, current, moved, {"
+  },
+  {
+   "id": "t.resume.head-changed-preparing",
+   "from": "resume.start",
+   "to": "exit:resume-refused",
+   "kind": "refuse",
+   "label": "HEAD changed while preparing",
+   "condition": "A review resume plan exists and the branch HEAD changed between planning and the resume transaction.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "resumeRun"
+   },
+   "anchor": "resume refused: branch HEAD changed while preparing review resume; inspect and retry"
+  },
+  {
+   "id": "t.resume.start",
+   "from": "resume.start",
+   "to": "resume.prepare",
+   "kind": "forward",
+   "label": "Resume",
+   "condition": "Nothing refused: the checkpoint is migrated if older, the run is marked resumed, the agent command line tool and the PR base are confirmed, and the old worktree is reconciled.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "resumeRun"
+   },
+   "anchor": "markResumed(db);"
+  },
+  {
+   "id": "t.resume.toolchain",
+   "from": "resume.prepare",
+   "to": "esc:toolchain-resume",
+   "kind": "escalate",
+   "label": "Toolchain missing",
+   "condition": "After the resume transaction and recover(): the same toolchain decision as a fresh run refuses (a required suite's tools are missing).",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "resumeRun"
+   },
+   "anchor": "if (toolchain.kind === \"refuse\") {"
+  },
+  {
+   "id": "t.resume.retry-plan",
+   "from": "resume.prepare",
+   "to": "provision",
+   "kind": "loopback",
+   "label": "retry-plan: redesign",
+   "condition": "Stopped at the plan review gate (a plan review escalation since the last resumed event, with no design loopback and no invalidated note for a design: step after it), HEAD unmoved: the plan review verdict is applied again, and redesigns (invalidate design:dispatch, cause feedback; the walk starts again at its first row) when the findings' signature differs from the previous review loopback's.",
+   "source": {
+    "file": "src/daemon/review-resume.ts",
+    "symbol": "applyReviewResume"
+   },
+   "anchor": "else applyReviewVerdict(db, ticketId, config, { stepKey: \"design:review\" }); // design:dispatch only",
+   "resumePlan": "retry-plan",
+   "loop": "design",
+   "cause": "feedback",
+   "signature": "review:*"
+  },
+  {
+   "id": "t.resume.retry-plan-escalate",
+   "from": "resume.prepare",
+   "to": "esc:review-no-progress",
+   "kind": "escalate",
+   "label": "retry-plan: same findings",
+   "condition": "retry-plan with HEAD unmoved, and the blocking findings carry the same signature as the previous review loopback: the verdict escalates again at once.",
+   "source": {
+    "file": "src/daemon/review-resume.ts",
+    "symbol": "applyReviewResume"
+   },
+   "anchor": "else applyReviewVerdict(db, ticketId, config, { stepKey: \"design:review\" }); // design:dispatch only",
+   "resumePlan": "retry-plan",
+   "signature": "review:*"
+  },
+  {
+   "id": "t.resume.retry-plan-moved",
+   "from": "resume.prepare",
+   "to": "provision",
+   "kind": "loopback",
+   "label": "retry-plan: HEAD moved",
+   "condition": "At the plan review gate and HEAD moved (resumed with --accept-head, for example after committing a plan edit): redesignLoopback invalidates design:dispatch and design:extract (cause feedback); the walk starts again at its first row.",
+   "source": {
+    "file": "src/daemon/review-resume.ts",
+    "symbol": "applyReviewResume"
+   },
+   "anchor": "\"review:operator-plan-head-changed\",",
+   "resumePlan": "retry-plan",
+   "loop": "design",
+   "cause": "feedback",
+   "signature": "review:operator-plan-head-changed",
+   "stageChange": {
+    "from": "design",
+    "to": "design"
+   }
+  },
+  {
+   "id": "t.resume.retry",
+   "from": "resume.prepare",
+   "to": "implement.pick",
+   "kind": "loopback",
+   "label": "retry: code loopback",
+   "condition": "Stage review or merge, a succeeded review with unresolved code findings, HEAD unmoved, under the repair limit: the code review verdict is applied again (code loopback).",
+   "source": {
+    "file": "src/daemon/review-resume.ts",
+    "symbol": "applyReviewResume"
+   },
+   "anchor": "applyReviewVerdict(db, ticketId, config, { stepKey: \"review\" });",
+   "resumePlan": "retry",
+   "loop": "implement",
+   "signature": "review:*",
+   "stageChange": {
+    "from": "review",
+    "to": "implement"
+   }
+  },
+  {
+   "id": "t.resume.retry-escalate",
+   "from": "resume.prepare",
+   "to": "esc:review-no-progress",
+   "kind": "escalate",
+   "label": "retry: same findings",
+   "condition": "retry with HEAD unmoved and the same findings signature as the previous review loopback: the verdict escalates again at once.",
+   "source": {
+    "file": "src/daemon/review-resume.ts",
+    "symbol": "applyReviewResume"
+   },
+   "anchor": "applyReviewVerdict(db, ticketId, config, { stepKey: \"review\" });",
+   "resumePlan": "retry",
+   "signature": "review:*"
+  },
+  {
+   "id": "t.resume.retry-moved",
+   "from": "resume.prepare",
+   "to": "implement.pick",
+   "kind": "loopback",
+   "label": "retry: HEAD moved",
+   "condition": "Stage review or merge and HEAD moved (--accept-head): codeLoopback with no findings sends every unit back to be coded, so implement records the operator's new HEAD.",
+   "source": {
+    "file": "src/daemon/review-resume.ts",
+    "symbol": "applyReviewResume"
+   },
+   "anchor": "\"review:operator-head-changed\",",
+   "resumePlan": "retry",
+   "loop": "implement",
+   "signature": "review:operator-head-changed",
+   "stageChange": {
+    "from": "review",
+    "to": "implement"
+   }
+  },
+  {
+   "id": "t.resume.accept-risk",
+   "from": "resume.prepare",
+   "to": "review",
+   "kind": "resume",
+   "label": "accept-risk",
+   "condition": "--review-action accept-risk with exactly the open nominated major finding ids, at the unchanged reviewed HEAD, with a reason: those findings are deferred and a review-risk-accepted note is written; the PR discloses it.",
+   "source": {
+    "file": "src/daemon/review-resume.ts",
+    "symbol": "applyReviewResume"
+   },
+   "anchor": "reason: \"review-risk-accepted\",",
+   "resumePlan": "accept-risk"
+  },
+  {
+   "id": "t.resume.none",
+   "from": "resume.prepare",
+   "to": "resolve.stage",
+   "kind": "resume",
+   "label": "Continue",
+   "condition": "No review action applies: the run continues at the ticket's stage, rerunning the interrupted step (its carryover kept only when its step key, generation and manifest still match; otherwise a carryover-dropped note names the changed inputs). In worktree mode provision was invalidated (cause worktree-recreated) and is served again when the resolver next needs it.",
+   "source": {
+    "file": "src/daemon/review-resume.ts",
+    "symbol": "applyReviewResume"
+   },
+   "anchor": "if (plan.kind === \"none\") return;",
+   "resumePlan": "none"
+  },
+  {
+   "id": "t.resume.worktree-recreated",
+   "from": "resume.prepare",
+   "to": "provision",
+   "kind": "invalidate",
+   "label": "Worktree recreated",
+   "condition": "Worktree mode (not in place), stage design, provision succeeded: the resume transaction invalidates provision (cause worktree-recreated: history row, new generation), so the walk reruns it first.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "resumeRun"
+   },
+   "anchor": "resetProvisionForResume(db, ticketId);",
+   "cause": "worktree-recreated"
+  },
+  {
+   "id": "t.resume.from-needs-you",
+   "from": "paused:needs_you",
+   "to": "resume.start",
+   "kind": "resume",
+   "label": "Operator resumes",
+   "condition": "styre run --resume <ident> (after fixing what the reason names, if anything): the resume consumes the pending human_resume signal.",
+   "source": {
+    "file": "src/cli/park.ts",
+    "symbol": "resumeRun"
+   },
+   "anchor": "for (const s of listPending(db, ticketId).filter((s) => s.signal_type === \"human_resume\")) {"
+  },
+  {
+   "id": "t.resume.from-budget",
+   "from": "paused:budget",
+   "to": "resume.start",
+   "kind": "resume",
+   "label": "Operator resumes",
+   "condition": "styre run --resume <ident> once the budget is back (no reset time gate).",
+   "source": {
+    "file": "src/cli/run.ts",
+    "symbol": "runImpl"
+   },
+   "anchor": "Resume with: styre run --resume ${ident}"
+  },
+  {
+   "id": "t.resume.from-interrupted",
+   "from": "paused:interrupted",
+   "to": "resume.start",
+   "kind": "resume",
+   "label": "Operator resumes",
+   "condition": "styre run --resume <ident>: recover() matches the recorded interruption, undoes the step's in place edits, returns the branch to the step's start when safe, and resets the step to pending without using an attempt.",
+   "source": {
+    "file": "src/daemon/recover.ts",
+    "symbol": "recover"
+   },
+   "anchor": "const p = findInterruption(db, step);"
+  },
+  {
+   "id": "t.fresh",
+   "from": "@pauses",
+   "to": "run.start",
+   "kind": "resume",
+   "label": "--fresh",
+   "condition": "styre run <ticket> --fresh: discards the whole checkpoint folder (after undoing an interrupted step's in place edits and freeing the old worktree) and starts over. Refused while another run holds the lock.",
+   "source": {
+    "file": "src/cli/run.ts",
+    "symbol": "runImpl"
+   },
+   "anchor": "rmSync(checkpointDir, { recursive: true, force: true });"
+  },
+  {
+   "id": "t.walk.provision>design:dispatch",
+   "from": "provision",
+   "to": "design:dispatch",
+   "kind": "forward",
+   "label": "Next row: design:dispatch",
+   "condition": "provision is succeeded and its recorded manifest matches its current inputs (any track). The walk moves on: runs design:dispatch when it is not succeeded, else compares its manifest. After an upstream rerun that produced the same output, this is the early cutoff.",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "for (const row of DESIGN_TABLE) {",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.walk.design:dispatch>design:extract",
+   "from": "design:dispatch",
+   "to": "design:extract",
+   "kind": "forward",
+   "label": "Next row: design:extract",
+   "condition": "design:dispatch is succeeded and its recorded manifest matches its current inputs (any track). The walk moves on: runs design:extract when it is not succeeded, else compares its manifest. After an upstream rerun that produced the same output, this is the early cutoff.",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "for (const row of DESIGN_TABLE) {",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.walk.design:extract>design:size",
+   "from": "design:extract",
+   "to": "design:size",
+   "kind": "forward",
+   "label": "Next row: design:size",
+   "condition": "design:extract is succeeded and its recorded manifest matches its current inputs (any track). The walk moves on: runs design:size when it is not succeeded, else compares its manifest. After an upstream rerun that produced the same output, this is the early cutoff.",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "for (const row of DESIGN_TABLE) {",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.walk.design:size>design:review",
+   "from": "design:size",
+   "to": "design:review",
+   "kind": "forward",
+   "label": "Next row: design:review",
+   "condition": "design:size is succeeded and its recorded manifest matches its current inputs (track full). The walk moves on: runs design:review when it is not succeeded, else compares its manifest. After an upstream rerun that produced the same output, this is the early cutoff.",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "for (const row of DESIGN_TABLE) {",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.walk.design:size>checks:dispatch",
+   "from": "design:size",
+   "to": "checks:dispatch",
+   "kind": "forward",
+   "label": "Past the table",
+   "condition": "design:size is succeeded and its recorded manifest matches its current inputs (track fast (design:review and the gate do not apply)). The walk moves on past the table's last row to today's checks routing (E9). After an upstream rerun that produced the same output, this is the early cutoff.",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "if (!row.appliesWhen(ticket)) continue;",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.walk.design:review>gate:plan-review",
+   "from": "design:review",
+   "to": "gate:plan-review",
+   "kind": "forward",
+   "label": "Next row: gate:plan-review",
+   "condition": "design:review is succeeded and its recorded manifest matches its current inputs (track full). The walk moves on: runs gate:plan-review when it is not succeeded, else compares its manifest. After an upstream rerun that produced the same output, this is the early cutoff.",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "for (const row of DESIGN_TABLE) {",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.walk.gate:plan-review>checks:dispatch",
+   "from": "gate:plan-review",
+   "to": "checks:dispatch",
+   "kind": "forward",
+   "label": "Past the table",
+   "condition": "The gate does not fire: the latest design:review dispatch left no blocking plan findings. Past the table's last row, today's checks routing follows (E9).",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "continue; } const step = getByKey(db, ticket.id, row.stepKey);",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.inv.inputs.provision",
+   "from": "provision",
+   "to": "provision",
+   "kind": "invalidate",
+   "label": "Inputs changed: invalidate",
+   "condition": "provision is succeeded but the digest of an input it records differs now (the note names them; a manifest from an older fingerprint scheme counts as changed), and fewer than 3 inputs invalidations of it since the count last restarted: invalidate provision alone (one invalidated note, a history row, a fresh round in the next generation; nothing is cleared), then rerun it. Its readers are judged afresh after it reruns.",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "return { kind: \"invalidate\", stepKeys: [row.stepKey], reason: { cause: \"inputs\", changed } };",
+   "descriptor": "invalidate",
+   "cause": "inputs",
+   "constants": [
+    "INVALIDATE_LOOP_LIMIT"
+   ]
+  },
+  {
+   "id": "t.guard.provision",
+   "from": "provision",
+   "to": "esc:invalidate-loop",
+   "kind": "escalate",
+   "label": "Invalidate loop guard",
+   "condition": "provision's inputs changed again and it was already invalidated 3 times for changed inputs since the latest resumed event, reused-database note or design loopback.",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "if (inputsInvalidationsSinceResume(db, ticket.id, row.stepKey) >= INVALIDATE_LOOP_LIMIT) {",
+   "descriptor": "escalate",
+   "signature": "invalidate-loop:*",
+   "constants": [
+    "INVALIDATE_LOOP_LIMIT"
+   ]
+  },
+  {
+   "id": "t.inv.inputs.design:dispatch",
+   "from": "design:dispatch",
+   "to": "design:dispatch",
+   "kind": "invalidate",
+   "label": "Inputs changed: invalidate",
+   "condition": "design:dispatch is succeeded but the digest of an input it records differs now (the note names them; a manifest from an older fingerprint scheme counts as changed), and fewer than 3 inputs invalidations of it since the count last restarted: invalidate design:dispatch alone (one invalidated note, a history row, a fresh round in the next generation; nothing is cleared; the rerun revises the plan in place), then rerun it. Its readers are judged afresh after it reruns.",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "return { kind: \"invalidate\", stepKeys: [row.stepKey], reason: { cause: \"inputs\", changed } };",
+   "descriptor": "invalidate",
+   "cause": "inputs",
+   "constants": [
+    "INVALIDATE_LOOP_LIMIT"
+   ]
+  },
+  {
+   "id": "t.guard.design:dispatch",
+   "from": "design:dispatch",
+   "to": "esc:invalidate-loop",
+   "kind": "escalate",
+   "label": "Invalidate loop guard",
+   "condition": "design:dispatch's inputs changed again and it was already invalidated 3 times for changed inputs since the latest resumed event, reused-database note or design loopback.",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "if (inputsInvalidationsSinceResume(db, ticket.id, row.stepKey) >= INVALIDATE_LOOP_LIMIT) {",
+   "descriptor": "escalate",
+   "signature": "invalidate-loop:*",
+   "constants": [
+    "INVALIDATE_LOOP_LIMIT"
+   ]
+  },
+  {
+   "id": "t.inv.inputs.design:extract",
+   "from": "design:extract",
+   "to": "design:extract",
+   "kind": "invalidate",
+   "label": "Inputs changed: invalidate",
+   "condition": "design:extract is succeeded but the digest of an input it records differs now (the note names them; a manifest from an older fingerprint scheme counts as changed), and fewer than 3 inputs invalidations of it since the count last restarted: invalidate design:extract alone (one invalidated note, a history row, a fresh round in the next generation; every work unit is deleted (reconcile units included) after code and plan findings are detached, and needs_docs is set to 0), then rerun it. Its readers are judged afresh after it reruns.",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "return { kind: \"invalidate\", stepKeys: [row.stepKey], reason: { cause: \"inputs\", changed } };",
+   "descriptor": "invalidate",
+   "cause": "inputs",
+   "constants": [
+    "INVALIDATE_LOOP_LIMIT"
+   ]
+  },
+  {
+   "id": "t.guard.design:extract",
+   "from": "design:extract",
+   "to": "esc:invalidate-loop",
+   "kind": "escalate",
+   "label": "Invalidate loop guard",
+   "condition": "design:extract's inputs changed again and it was already invalidated 3 times for changed inputs since the latest resumed event, reused-database note or design loopback.",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "if (inputsInvalidationsSinceResume(db, ticket.id, row.stepKey) >= INVALIDATE_LOOP_LIMIT) {",
+   "descriptor": "escalate",
+   "signature": "invalidate-loop:*",
+   "constants": [
+    "INVALIDATE_LOOP_LIMIT"
+   ]
+  },
+  {
+   "id": "t.inv.inputs.design:size",
+   "from": "design:size",
+   "to": "design:size",
+   "kind": "invalidate",
+   "label": "Inputs changed: invalidate",
+   "condition": "design:size is succeeded but the digest of an input it records differs now (the note names them; a manifest from an older fingerprint scheme counts as changed), and fewer than 3 inputs invalidations of it since the count last restarted: invalidate design:size alone (one invalidated note, a history row, a fresh round in the next generation; ticket.track is set to NULL), then rerun it. Its readers are judged afresh after it reruns.",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "return { kind: \"invalidate\", stepKeys: [row.stepKey], reason: { cause: \"inputs\", changed } };",
+   "descriptor": "invalidate",
+   "cause": "inputs",
+   "constants": [
+    "INVALIDATE_LOOP_LIMIT"
+   ]
+  },
+  {
+   "id": "t.guard.design:size",
+   "from": "design:size",
+   "to": "esc:invalidate-loop",
+   "kind": "escalate",
+   "label": "Invalidate loop guard",
+   "condition": "design:size's inputs changed again and it was already invalidated 3 times for changed inputs since the latest resumed event, reused-database note or design loopback.",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "if (inputsInvalidationsSinceResume(db, ticket.id, row.stepKey) >= INVALIDATE_LOOP_LIMIT) {",
+   "descriptor": "escalate",
+   "signature": "invalidate-loop:*",
+   "constants": [
+    "INVALIDATE_LOOP_LIMIT"
+   ]
+  },
+  {
+   "id": "t.inv.inputs.design:review",
+   "from": "design:review",
+   "to": "design:review",
+   "kind": "invalidate",
+   "label": "Inputs changed: invalidate",
+   "condition": "design:review is succeeded but the digest of an input it records differs now (the note names them; a manifest from an older fingerprint scheme counts as changed), and fewer than 3 inputs invalidations of it since the count last restarted: invalidate design:review alone (one invalidated note, a history row, a fresh round in the next generation; nothing is cleared), then rerun it. Its readers are judged afresh after it reruns.",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "return { kind: \"invalidate\", stepKeys: [row.stepKey], reason: { cause: \"inputs\", changed } };",
+   "descriptor": "invalidate",
+   "cause": "inputs",
+   "constants": [
+    "INVALIDATE_LOOP_LIMIT"
+   ]
+  },
+  {
+   "id": "t.guard.design:review",
+   "from": "design:review",
+   "to": "esc:invalidate-loop",
+   "kind": "escalate",
+   "label": "Invalidate loop guard",
+   "condition": "design:review's inputs changed again and it was already invalidated 3 times for changed inputs since the latest resumed event, reused-database note or design loopback.",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "walkDesign"
+   },
+   "anchor": "if (inputsInvalidationsSinceResume(db, ticket.id, row.stepKey) >= INVALIDATE_LOOP_LIMIT) {",
+   "descriptor": "escalate",
+   "signature": "invalidate-loop:*",
+   "constants": [
+    "INVALIDATE_LOOP_LIMIT"
+   ]
+  },
+  {
+   "id": "t.gate.fires",
+   "from": "gate:plan-review",
+   "to": "esc:plan-review-gate",
+   "kind": "escalate",
+   "label": "Gate fires",
+   "condition": "Track full; design:review is succeeded and unchanged, and its latest dispatch left blocking plan findings. Reached when nothing design:review reads changed since it left those findings, for example a redesign whose plan came back with the same digest (early cutoff all the way down).",
+   "source": {
+    "file": "src/daemon/design-walk.ts",
+    "symbol": "GATE_FIRES"
+   },
+   "anchor": "\"plan-review\": (db, ticketId) => requiredPlanFindings(db, ticketId).length > 0,",
+   "descriptor": "escalate",
+   "signature": "review:unresolved-plan"
+  },
+  {
+   "id": "t.dispatch.uncommitted-plan",
+   "from": "design:dispatch",
+   "to": "esc:prerequisite",
+   "kind": "escalate",
+   "label": "Plan not committed",
+   "condition": "The plan exists in the worktree but git has none at the branch head (docs/plans/ ignored, say): StepPrerequisiteError, escalated at once with no retry. Remove the ignore rule, commit, resume with --accept-head.",
+   "source": {
+    "file": "src/dispatch/handlers.ts",
+    "symbol": "buildDispatchRegistry"
+   },
+   "anchor": "is not committed at ${branch}: Styre reads the plan from git",
+   "signature": "*:*"
+  },
+  {
+   "id": "t.planreview.redesign",
+   "from": "design:review",
+   "to": "provision",
+   "kind": "loopback",
+   "label": "Blocking findings: redesign",
+   "condition": "The latest design:review dispatch filed blocking plan findings (open, major or critical), fewer than 3 review loopbacks so far, not identical to the previous review loopback: invalidate design:dispatch (cause feedback; the findings ride the loopback event, tied to its new generation). design:review stays succeeded until the walk reruns it. The walk starts again at its first row.",
+   "source": {
+    "file": "src/daemon/review-verdict.ts",
+    "symbol": "applyReviewVerdict"
+   },
+   "anchor": "redesignLoopback(db, ticketId, signature, blocking, dispatchId, [\"design:dispatch\"]);",
+   "loop": "design",
+   "cause": "feedback",
+   "signature": "review:*",
+   "constants": [
+    "REVIEW_REPAIR_LIMIT"
+   ]
+  },
+  {
+   "id": "t.planreview.no-progress",
+   "from": "design:review",
+   "to": "esc:review-no-progress",
+   "kind": "escalate",
+   "label": "Same findings again",
+   "condition": "Blocking plan findings with the same signature as the previous review loopback (the redesign did not resolve them).",
+   "source": {
+    "file": "src/daemon/review-verdict.ts",
+    "symbol": "applyReviewVerdict"
+   },
+   "anchor": "escalate(db, ticketId, \"no progress: identical plan-review findings\", signature, dispatchId);",
+   "signature": "review:*"
+  },
+  {
+   "id": "t.planreview.limit",
+   "from": "design:review",
+   "to": "esc:review-repair-limit",
+   "kind": "escalate",
+   "label": "Repair limit",
+   "condition": "Blocking plan findings and 3 review loopbacks (plan and code together) already.",
+   "source": {
+    "file": "src/daemon/review-verdict.ts",
+    "symbol": "applyReviewVerdict"
+   },
+   "anchor": "if (blocking.length > 0 && reviewRepairCount(db, ticketId) >= REVIEW_REPAIR_LIMIT) {",
+   "signature": "review:*",
+   "constants": [
+    "REVIEW_REPAIR_LIMIT"
+   ]
+  },
+  {
+   "id": "t.checks.dispatch",
+   "from": "checks:dispatch",
+   "to": "checks:classify",
+   "kind": "forward",
+   "label": "Classify",
+   "condition": "checks:dispatch is succeeded; checks:classify runs unless it is succeeded.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "if (!done(db, ticketId, \"checks:classify\")) {",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.checks.clean-advance",
+   "from": "checks:classify",
+   "to": "implement.pick",
+   "kind": "advance",
+   "label": "Advance design → implement",
+   "condition": "checks:classify is succeeded (its verdict left no check flagged, or this is a later pass after a redesign): the interpreter sets the stage, appends the transition event and enqueues the tracker projection in one transaction.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return { kind: \"advance\", from: \"design\", to: \"implement\" };",
+   "descriptor": "advance",
+   "stageChange": {
+    "from": "design",
+    "to": "implement"
+   }
+  },
+  {
+   "id": "t.checks.reauthor",
+   "from": "checks:classify",
+   "to": "checks:dispatch",
+   "kind": "loopback",
+   "label": "Vacuous or weak checks: author again",
+   "condition": "Active checks left unresolved by classify (vacuous or weak), each flagged criterion authored again fewer than 2 rounds: supersede the flagged checks, reset checks:dispatch and checks:classify; no stage change.",
+   "source": {
+    "file": "src/daemon/checks-verdict.ts",
+    "symbol": "applyChecksVerdict"
+   },
+   "anchor": "routeTo: \"checks:classify\",",
+   "loop": "checks",
+   "signature": "checks:*",
+   "constants": [
+    "REAUTHOR_ESCALATE_CAP"
+   ]
+  },
+  {
+   "id": "t.checks.cap",
+   "from": "checks:classify",
+   "to": "esc:reauthor-cap",
+   "kind": "escalate",
+   "label": "Still flagged after 2 rounds",
+   "condition": "A flagged acceptance criterion has been authored again 2 rounds and is still flagged.",
+   "source": {
+    "file": "src/daemon/checks-verdict.ts",
+    "symbol": "applyChecksVerdict"
+   },
+   "anchor": "const exhausted = flagged.filter(",
+   "signature": "checks:*",
+   "constants": [
+    "REAUTHOR_ESCALATE_CAP"
+   ]
+  },
+  {
+   "id": "t.pick.dispatch",
+   "from": "implement.pick",
+   "to": "implement:wu<seq>:dispatch",
+   "kind": "forward",
+   "label": "Code the unit",
+   "condition": "The first unit by seq that is pending, with all its depends_on units verified.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "if (u.status === \"pending\") {",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.pick.provision",
+   "from": "implement.pick",
+   "to": "provision@implement",
+   "kind": "forward",
+   "label": "Provision again",
+   "condition": "provision is not succeeded (invalidated: worktree recreated on resume, or a manifest touched) and the next thing due is a unit's checks, the AC gate or the integration sweep.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "if (!done(db, ticketId, \"provision\")) {",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.pick.completeness",
+   "from": "implement.pick",
+   "to": "completeness:wu<seq>",
+   "kind": "forward",
+   "label": "Completeness",
+   "condition": "That unit is verifying, provision is succeeded, and completeness:wu<seq> is not succeeded.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "if (!done(db, ticketId, `completeness:wu${u.seq}`)) {",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.pick.verify",
+   "from": "implement.pick",
+   "to": "verify:wu<seq>:<check>",
+   "kind": "forward",
+   "label": "Run a check",
+   "condition": "That unit is verifying, completeness done, and one of its declared check types has no verdict (pass or fail) at the unit's current commit (an error does not count).",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "const check = nextUnrunCheck(db, u);",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.pick.mark-verified",
+   "from": "implement.pick",
+   "to": "mark-verified",
+   "kind": "forward",
+   "label": "All checks have a verdict",
+   "condition": "Every declared check type of that unit has a verdict at its current commit.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return { kind: \"mark-verified\", workUnitId: u.id };",
+   "descriptor": "mark-verified"
+  },
+  {
+   "id": "t.mark.back",
+   "from": "mark-verified",
+   "to": "implement.pick",
+   "kind": "forward",
+   "label": "Unit verified",
+   "condition": "The unit is set verified; the interpreter asks the resolver again inline.",
+   "source": {
+    "file": "src/daemon/advance.ts",
+    "symbol": "advanceOneStep"
+   },
+   "anchor": "setUnitStatus(db, d.workUnitId, \"verified\");"
+  },
+  {
+   "id": "t.pick.arbitrate",
+   "from": "implement.pick",
+   "to": "checks:arbitrate",
+   "kind": "forward",
+   "label": "Arbitrate",
+   "condition": "Every unit verified; the ticket has active AC checks; the gate has not passed at the branch HEAD; behavioral checks are still red at HEAD and no blame is recorded there.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "if (behavioral && !blamed) {",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.pick.reauthor",
+   "from": "implement.pick",
+   "to": "checks:reauthor",
+   "kind": "forward",
+   "label": "Reauthor",
+   "condition": "Blame is recorded at HEAD and checks:reauthor is not succeeded this round.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "if (blamed && !done(db, ticketId, \"checks:reauthor\")) {",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.pick.stuck",
+   "from": "implement.pick",
+   "to": "esc:gate-stuck-head",
+   "kind": "escalate",
+   "label": "Stuck HEAD",
+   "condition": "Blame recorded at HEAD, checks:reauthor done, and verify:checks-gate already succeeded this round: rerunning it would only replay its success.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "if (blamed && done(db, ticketId, \"verify:checks-gate\")) {",
+   "descriptor": "escalate",
+   "signature": "gate-stuck-head"
+  },
+  {
+   "id": "t.pick.gate",
+   "from": "implement.pick",
+   "to": "verify:checks-gate",
+   "kind": "forward",
+   "label": "AC gate",
+   "condition": "Every unit verified; active AC checks; the gate has not passed at HEAD; neither arbitrate nor reauthor is due; provision done.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return step(\"verify:checks-gate\", \"verify\", \"verify:checks-gate\", null);",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.pick.integration",
+   "from": "implement.pick",
+   "to": "verify:integration",
+   "kind": "forward",
+   "label": "Integration sweep",
+   "condition": "The gate passed at HEAD (or the ticket has no active AC checks), and no integration verdict exists at HEAD; provision done.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return step(\"verify:integration\", \"verify\", \"verify:integration\", null);",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.pick.docs",
+   "from": "implement.pick",
+   "to": "docs:revise",
+   "kind": "forward",
+   "label": "Docs",
+   "condition": "An integration verdict exists at HEAD, ticket.needs_docs is 1 and docs:revise is not succeeded.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "if (ticket.needs_docs === 1 && !done(db, ticketId, \"docs:revise\")) {",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.pick.floor",
+   "from": "implement.pick",
+   "to": "floor:evidence",
+   "kind": "forward",
+   "label": "Ready to leave implement",
+   "condition": "An integration verdict exists at HEAD and docs are done or not needed: the evidence floor is evaluated.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "const floor = evidenceFloor(db, ticketId);",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.pick.blocked",
+   "from": "implement.pick",
+   "to": "esc:blocked",
+   "kind": "escalate",
+   "label": "No next move",
+   "condition": "No actionable unit and not every unit verified (for example a unit waits on a dependency that is not verified).",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return { kind: \"blocked\", reason: \"no actionable unit and not all units verified\" };",
+   "descriptor": "blocked"
+  },
+  {
+   "id": "t.floor.fails",
+   "from": "floor:evidence",
+   "to": "esc:evidence-floor",
+   "kind": "escalate",
+   "label": "Floor fails",
+   "condition": "A required suite has no passing receipt at the shipping commit, or nothing executed there came back clean and not every criterion was proven by its gating checks.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "if (!floor.holds) {",
+   "descriptor": "escalate",
+   "signature": "evidence-floor"
+  },
+  {
+   "id": "t.floor.holds",
+   "from": "floor:evidence",
+   "to": "review",
+   "kind": "advance",
+   "label": "Advance implement → review",
+   "condition": "The evidence floor holds: advance implement → review (transition event and projection).",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return { kind: \"advance\", from: \"implement\", to: \"review\" };",
+   "descriptor": "advance",
+   "stageChange": {
+    "from": "implement",
+    "to": "review"
+   }
+  },
+  {
+   "id": "t.wu.done",
+   "from": "implement:wu<seq>:dispatch",
+   "to": "implement.pick",
+   "kind": "forward",
+   "label": "Coded",
+   "condition": "The coding dispatch succeeded and was committed: the unit is set verifying.",
+   "source": {
+    "file": "src/dispatch/handlers.ts",
+    "symbol": "buildDispatchRegistry"
+   },
+   "anchor": "setUnitStatus(ctx.db, unit.id, \"verifying\");"
+  },
+  {
+   "id": "t.wu.manifest",
+   "from": "implement:wu<seq>:dispatch",
+   "to": "implement.pick",
+   "kind": "invalidate",
+   "label": "Manifest touched",
+   "condition": "The committed diff touches a dependency manifest (package.json, a lockfile, pyproject.toml, ...) while provision is succeeded: provision is invalidated (cause manifest-touched), so the resolver serves it again before this unit's checks.",
+   "source": {
+    "file": "src/dispatch/provision.ts",
+    "symbol": "resetProvisionIfManifestTouched"
+   },
+   "anchor": "if (diffTouchesManifest(changedFiles)) resetProvision(db, ticketId, \"manifest-touched\");",
+   "cause": "manifest-touched"
+  },
+  {
+   "id": "t.prov-impl.done",
+   "from": "provision@implement",
+   "to": "implement.pick",
+   "kind": "forward",
+   "label": "Provisioned",
+   "condition": "provision succeeded.",
+   "source": {
+    "file": "src/dispatch/handlers.ts",
+    "symbol": "buildDispatchRegistry"
+   },
+   "anchor": "registry.register(\"provision\", async (ctx: HandlerContext) => {"
+  },
+  {
+   "id": "t.prov.fail@provision",
+   "from": "provision",
+   "to": "esc:provision",
+   "kind": "escalate",
+   "label": "Provision failed",
+   "condition": "provision failed (not a prerequisite or invariant error): escalated on the first failure, never retried and never looped back to implement.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "if (step.step_type === \"provision\") {",
+   "signature": "*:*"
+  },
+  {
+   "id": "t.prov.fail@provision@implement",
+   "from": "provision@implement",
+   "to": "esc:provision",
+   "kind": "escalate",
+   "label": "Provision failed",
+   "condition": "provision failed (not a prerequisite or invariant error): escalated on the first failure, never retried and never looped back to implement.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "if (step.step_type === \"provision\") {",
+   "signature": "*:*"
+  },
+  {
+   "id": "t.comp.done",
+   "from": "completeness:wu<seq>",
+   "to": "implement.pick",
+   "kind": "forward",
+   "label": "Delivered",
+   "condition": "Nothing declared is left untouched (completed by this unit, or covered by a sibling).",
+   "source": {
+    "file": "src/dispatch/handlers.ts",
+    "symbol": "buildDispatchRegistry"
+   },
+   "anchor": "registry.register(\"completeness\", async (ctx: HandlerContext) => {"
+  },
+  {
+   "id": "t.comp.retry",
+   "from": "completeness:wu<seq>",
+   "to": "completeness:wu<seq>",
+   "kind": "retry",
+   "label": "Infra fault: retry",
+   "condition": "Failed with no fail signal recorded (an infrastructure or git fault), its attempt count under 3: retry the check.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "if (latestCompletenessResult(db, workUnitId) !== \"fail\") {",
+   "constants": [
+    "DEFAULT_MAX_ATTEMPTS"
+   ]
+  },
+  {
+   "id": "t.comp.loopback",
+   "from": "completeness:wu<seq>",
+   "to": "implement.pick",
+   "kind": "loopback",
+   "label": "Under delivered: code again",
+   "condition": "Under delivered (a fail signal names declared files nobody touched), not identical to the previous loopback: the unit and all its steps back to pending; the next dispatch is told the missing files.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "if (step.step_type === \"completeness\" && step.work_unit_id !== null) {",
+   "loop": "implement",
+   "signature": "*:*"
+  },
+  {
+   "id": "t.comp.no-progress",
+   "from": "completeness:wu<seq>",
+   "to": "esc:no-progress",
+   "kind": "escalate",
+   "label": "Same under delivery twice",
+   "condition": "Under delivered with the same signature as the previous loopback.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "under-delivered identically twice",
+   "signature": "*:*"
+  },
+  {
+   "id": "t.verify.done",
+   "from": "verify:wu<seq>:<check>",
+   "to": "implement.pick",
+   "kind": "forward",
+   "label": "Verdict recorded",
+   "condition": "The check recorded a verdict, pass or fail (advisory: a red suite is carried to the AC gate and review).",
+   "source": {
+    "file": "src/dispatch/handlers.ts",
+    "symbol": "buildDispatchRegistry"
+   },
+   "anchor": "registry.register(\"verify:check\", async (ctx: HandlerContext) => {"
+  },
+  {
+   "id": "t.verify.retry",
+   "from": "verify:wu<seq>:<check>",
+   "to": "verify:wu<seq>:<check>",
+   "kind": "retry",
+   "label": "Could not run: retry",
+   "condition": "Threw after recording an error result (could not run), its attempt count under 3: retry the check, do not code again.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "if (latestVerifyResult(db, step) === \"error\") {",
+   "constants": [
+    "DEFAULT_MAX_ATTEMPTS"
+   ]
+  },
+  {
+   "id": "t.verify.loopback",
+   "from": "verify:wu<seq>:<check>",
+   "to": "implement.pick",
+   "kind": "loopback",
+   "label": "Precondition failed: code again",
+   "condition": "Threw a precondition failure (empty diff, no components, check absent), not identical to the previous loopback: the unit and all its steps back to pending.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "if (step.step_type === \"verify\" && step.work_unit_id !== null) {",
+   "loop": "implement",
+   "signature": "*:*"
+  },
+  {
+   "id": "t.verify.no-progress",
+   "from": "verify:wu<seq>:<check>",
+   "to": "esc:no-progress",
+   "kind": "escalate",
+   "label": "Same failure twice",
+   "condition": "Failed with the same signature as the previous loopback.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "failed identically twice",
+   "signature": "*:*"
+  },
+  {
+   "id": "t.gate.pass",
+   "from": "verify:checks-gate",
+   "to": "implement.pick",
+   "kind": "forward",
+   "label": "Gate passed",
+   "condition": "No AC check is still red at HEAD.",
+   "source": {
+    "file": "src/daemon/checks-gate-verdict.ts",
+    "symbol": "applyAcCheckGateVerdict"
+   },
+   "anchor": "if (stillRed.length === 0) {"
+  },
+  {
+   "id": "t.gate.defer",
+   "from": "verify:checks-gate",
+   "to": "implement.pick",
+   "kind": "forward",
+   "label": "Behavioral red: to the arbiter",
+   "condition": "Behavioral checks still red and the gate's attempt is under 3: the verdict defers (clean); the resolver serves checks:arbitrate.",
+   "source": {
+    "file": "src/daemon/checks-gate-verdict.ts",
+    "symbol": "applyAcCheckGateVerdict"
+   },
+   "anchor": "return { decision: \"clean\" }; // defer to the arbiter (resolver arm)",
+   "constants": [
+    "GATE_ROUND_CAP"
+   ]
+  },
+  {
+   "id": "t.gate.integrity-loop",
+   "from": "verify:checks-gate",
+   "to": "implement.pick",
+   "kind": "loopback",
+   "label": "Tampered checks: code again",
+   "condition": "Only integrity failures (tampered checks; never arbitrated), gate attempt under 3: every unit and its steps back to pending; gate, arbiter and reauthor reset, the gate's attempt kept as the round counter.",
+   "source": {
+    "file": "src/daemon/checks-gate-verdict.ts",
+    "symbol": "applyAcCheckGateVerdict"
+   },
+   "anchor": "gateOriginLoopback(db, ticketId, \"verify:checks-gate\", { tampered: stillRed }, dispatchId);",
+   "loop": "implement",
+   "signature": "gate:*",
+   "constants": [
+    "GATE_ROUND_CAP"
+   ]
+  },
+  {
+   "id": "t.gate.cap",
+   "from": "verify:checks-gate",
+   "to": "esc:gate-cap",
+   "kind": "escalate",
+   "label": "Round cap",
+   "condition": "Still red (behavioral or integrity) and the gate's attempt has reached 3.",
+   "source": {
+    "file": "src/daemon/checks-gate-verdict.ts",
+    "symbol": "applyAcCheckGateVerdict"
+   },
+   "anchor": "if (gateRoundExceeded(db, ticketId, GATE_ROUND_CAP)) {",
+   "signature": "gate-cap:*",
+   "constants": [
+    "GATE_ROUND_CAP"
+   ]
+  },
+  {
+   "id": "t.gate.fault",
+   "from": "verify:checks-gate",
+   "to": "esc:checks-gate-fault",
+   "kind": "escalate",
+   "label": "Gate threw",
+   "condition": "The gate step threw something other than a StepExecutionError (missing branch sha, git fault): escalate; never a reconcile unit.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "if (step.step_key === \"verify:checks-gate\") {",
+   "signature": "*:*"
+  },
+  {
+   "id": "t.arb.none",
+   "from": "checks:arbitrate",
+   "to": "implement.pick",
+   "kind": "forward",
+   "label": "No blame",
+   "condition": "No blame recorded at HEAD: nothing to route.",
+   "source": {
+    "file": "src/daemon/arbiter-verdict.ts",
+    "symbol": "applyArbiterVerdict"
+   },
+   "anchor": "if (blames.length === 0) return { decision: \"clean\" }; // nothing to route (no-op guard)"
+  },
+  {
+   "id": "t.arb.cap",
+   "from": "checks:arbitrate",
+   "to": "esc:gate-cap",
+   "kind": "escalate",
+   "label": "Round cap",
+   "condition": "Blame recorded and the gate's attempt has reached 3.",
+   "source": {
+    "file": "src/daemon/arbiter-verdict.ts",
+    "symbol": "applyArbiterVerdict"
+   },
+   "anchor": "reason: \"gate-round cap\",",
+   "signature": "gate-cap:*",
+   "constants": [
+    "GATE_ROUND_CAP"
+   ]
+  },
+  {
+   "id": "t.arb.check-wrong",
+   "from": "checks:arbitrate",
+   "to": "implement.pick",
+   "kind": "loopback",
+   "label": "check-wrong: reauthor",
+   "condition": "Any check blamed `check-wrong`: reset checks:reauthor and checks:arbitrate; the resolver serves checks:reauthor next.",
+   "source": {
+    "file": "src/daemon/arbiter-verdict.ts",
+    "symbol": "applyArbiterVerdict"
+   },
+   "anchor": "loop: \"reauthor\",",
+   "loop": "reauthor",
+   "signature": "arbiter:*"
+  },
+  {
+   "id": "t.arb.code-wrong",
+   "from": "checks:arbitrate",
+   "to": "implement.pick",
+   "kind": "loopback",
+   "label": "code-wrong: code again",
+   "condition": "Every blame is `code-wrong`: gate origin loopback, every unit and its steps back to pending.",
+   "source": {
+    "file": "src/daemon/arbiter-verdict.ts",
+    "symbol": "applyArbiterVerdict"
+   },
+   "anchor": "// Pure code-wrong (no check-wrong) → loopback implement now (no re-author needed this round).",
+   "loop": "implement",
+   "signature": "gate:*"
+  },
+  {
+   "id": "t.reauth.none",
+   "from": "checks:reauthor",
+   "to": "implement.pick",
+   "kind": "forward",
+   "label": "Nothing routed",
+   "condition": "No reauthor route recorded, or no dispositions: the resolver serves the gate again.",
+   "source": {
+    "file": "src/daemon/arbiter-verdict.ts",
+    "symbol": "applyReauthorVerdict"
+   },
+   "anchor": "if (route === null) return { decision: \"clean\" }; // nothing routed (no-op guard)"
+  },
+  {
+   "id": "t.reauth.cap",
+   "from": "checks:reauthor",
+   "to": "esc:gate-cap",
+   "kind": "escalate",
+   "label": "Round cap",
+   "condition": "The gate's attempt or the reauthor step's own attempt has reached 3.",
+   "source": {
+    "file": "src/daemon/arbiter-verdict.ts",
+    "symbol": "applyReauthorVerdict"
+   },
+   "anchor": "reauthorRoundExceeded(db, ticketId, GATE_ROUND_CAP)",
+   "signature": "gate-cap:*",
+   "constants": [
+    "GATE_ROUND_CAP"
+   ]
+  },
+  {
+   "id": "t.reauth.code",
+   "from": "checks:reauthor",
+   "to": "implement.pick",
+   "kind": "loopback",
+   "label": "code-wrong or rejected: code again",
+   "condition": "The round also blamed `code-wrong`, or a check written again was rejected: gate origin loopback (installed checks stay).",
+   "source": {
+    "file": "src/daemon/arbiter-verdict.ts",
+    "symbol": "applyReauthorVerdict"
+   },
+   "anchor": "if (anyCodeWrong || anyRejected) {",
+   "loop": "implement",
+   "signature": "gate:*"
+  },
+  {
+   "id": "t.reauth.installed",
+   "from": "checks:reauthor",
+   "to": "implement.pick",
+   "kind": "loopback",
+   "label": "Installed: gate again",
+   "condition": "Pure `check-wrong`, every check written again installed: reset the gate and the arbiter; the units stay verified; the gate reruns at the new HEAD.",
+   "source": {
+    "file": "src/daemon/arbiter-verdict.ts",
+    "symbol": "applyReauthorVerdict"
+   },
+   "anchor": "signature: \"gate:reauthored\",",
+   "loop": "checks",
+   "signature": "gate:reauthored"
+  },
+  {
+   "id": "t.int.done",
+   "from": "verify:integration",
+   "to": "implement.pick",
+   "kind": "forward",
+   "label": "Verdict recorded",
+   "condition": "The sweep recorded a verdict, pass or fail (advisory).",
+   "source": {
+    "file": "src/dispatch/handlers.ts",
+    "symbol": "buildDispatchRegistry"
+   },
+   "anchor": "registry.register(\"verify:integration\", async (ctx: HandlerContext) => {"
+  },
+  {
+   "id": "t.int.reconcile",
+   "from": "verify:integration",
+   "to": "implement.pick",
+   "kind": "loopback",
+   "label": "Sweep threw: reconcile unit",
+   "condition": "The sweep threw something other than a StepExecutionError: add a reconcile unit that depends on every other unit, reset the sweep, the gate (its attempt zeroed), arbiter and reauthor.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "kind: \"reconcile\",",
+   "loop": "integration",
+   "signature": "*:*"
+  },
+  {
+   "id": "t.docs.done",
+   "from": "docs:revise",
+   "to": "implement.pick",
+   "kind": "forward",
+   "label": "Docs revised",
+   "condition": "docs:revise succeeded.",
+   "source": {
+    "file": "src/dispatch/handlers.ts",
+    "symbol": "buildDispatchRegistry"
+   },
+   "anchor": "registry.register(\"docs:revise\", async (ctx: HandlerContext) => {"
+  },
+  {
+   "id": "t.review.clean-advance",
+   "from": "review",
+   "to": "merge:push",
+   "kind": "advance",
+   "label": "Advance review → merge",
+   "condition": "review is succeeded, its verdict was clean, and no unresolved review reason remains: advance review → merge.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return { kind: \"advance\", from: \"review\", to: \"merge\" };",
+   "descriptor": "advance",
+   "stageChange": {
+    "from": "review",
+    "to": "merge"
+   }
+  },
+  {
+   "id": "t.review.unresolved",
+   "from": "review",
+   "to": "esc:review-unresolved",
+   "kind": "escalate",
+   "label": "Ledger unresolved",
+   "condition": "review is succeeded but open major or critical code findings remain, or a deferral names another commit.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "const unresolved = unresolvedReviewReason(db, ticketId);",
+   "descriptor": "escalate",
+   "signature": "review-unresolved"
+  },
+  {
+   "id": "t.review.code-loopback",
+   "from": "review",
+   "to": "implement.pick",
+   "kind": "loopback",
+   "label": "Blocking code findings: code again",
+   "condition": "Blocking code findings (major or critical, deferral suggestions included), none of category plan-defect, fewer than 3 review loopbacks, not identical to the previous review loopback: the blamed units (every unit when a finding names none) and their steps back to pending; review, the ticket's verify steps and the merge steps reset; stage implement.",
+   "source": {
+    "file": "src/daemon/review-verdict.ts",
+    "symbol": "applyReviewVerdict"
+   },
+   "anchor": "codeLoopback(db, ticketId, blocking, signature, dispatchId);",
+   "loop": "implement",
+   "signature": "review:*",
+   "stageChange": {
+    "from": "review",
+    "to": "implement"
+   },
+   "constants": [
+    "REVIEW_REPAIR_LIMIT"
+   ]
+  },
+  {
+   "id": "t.review.no-progress",
+   "from": "review",
+   "to": "esc:review-no-progress",
+   "kind": "escalate",
+   "label": "Same findings again",
+   "condition": "Blocking code findings with the same signature as the previous review loopback.",
+   "source": {
+    "file": "src/daemon/review-verdict.ts",
+    "symbol": "applyReviewVerdict"
+   },
+   "anchor": "escalate(db, ticketId, \"no progress: identical review findings\", signature, dispatchId);",
+   "signature": "review:*"
+  },
+  {
+   "id": "t.review.limit",
+   "from": "review",
+   "to": "esc:review-repair-limit",
+   "kind": "escalate",
+   "label": "Repair limit",
+   "condition": "Blocking code findings and 3 review loopbacks (plan and code together) already.",
+   "source": {
+    "file": "src/daemon/review-verdict.ts",
+    "symbol": "applyReviewVerdict"
+   },
+   "anchor": "if (blocking.length > 0 && reviewRepairCount(db, ticketId) >= REVIEW_REPAIR_LIMIT) {",
+   "signature": "review:*",
+   "constants": [
+    "REVIEW_REPAIR_LIMIT"
+   ]
+  },
+  {
+   "id": "t.review.plan-defect-escalate",
+   "from": "review",
+   "to": "esc:plan-defect-policy",
+   "kind": "escalate",
+   "label": "Plan defect: escalate",
+   "condition": "A blocking finding of category plan-defect and onPlanDefect is escalate (the default).",
+   "source": {
+    "file": "src/daemon/review-verdict.ts",
+    "symbol": "applyReviewVerdict"
+   },
+   "anchor": "\"blocking plan-defect found in code review; operator policy is escalate\",",
+   "signature": "review:*"
+  },
+  {
+   "id": "t.review.redesign",
+   "from": "review",
+   "to": "provision",
+   "kind": "loopback",
+   "label": "Plan defect: redesign",
+   "condition": "A blocking plan-defect and onPlanDefect is redesign: invalidate design:dispatch and design:extract (cause feedback; findings detached first, the units created and implemented again); review, verify and merge steps reset; stage design. The checks steps keep today's state (E9).",
+   "source": {
+    "file": "src/daemon/review-verdict.ts",
+    "symbol": "applyReviewVerdict"
+   },
+   "anchor": "redesignLoopback(db, ticketId, signature, blocking, dispatchId, [",
+   "loop": "design",
+   "cause": "feedback",
+   "signature": "review:*",
+   "stageChange": {
+    "from": "review",
+    "to": "design"
+   }
+  },
+  {
+   "id": "t.merge.push",
+   "from": "merge:push",
+   "to": "merge:pr-ensure",
+   "kind": "forward",
+   "label": "PR",
+   "condition": "merge:push is succeeded; merge:pr-ensure runs unless it is succeeded.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "if (!done(db, ticketId, \"merge:pr-ensure\")) {",
+   "descriptor": "step"
+  },
+  {
+   "id": "t.merge.ensure",
+   "from": "merge:pr-ensure",
+   "to": "wait:human_merge_approval",
+   "kind": "forward",
+   "label": "Wait for the merge",
+   "condition": "Both merge steps succeeded and human_merge_approval is not delivered: the interpreter records the wait.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "if (!hasDelivered(db, ticketId, \"human_merge_approval\")) {",
+   "descriptor": "wait"
+  },
+  {
+   "id": "t.merge.pr-ready",
+   "from": "wait:human_merge_approval",
+   "to": "outcome:pr-ready",
+   "kind": "outcome",
+   "label": "PR ready",
+   "condition": "Stage merge with human_merge_approval pending; the outbox is drained (bounded by its retry budget); the PR's URL was delivered and the latest push was delivered at the current head: one CI read (reported, never gated), exit 0.",
+   "source": {
+    "file": "src/daemon/run-ticket.ts",
+    "symbol": "driveToTerminal"
+   },
+   "anchor": "if (t.stage === \"merge\" && pending.some((s) => s.signal_type === \"human_merge_approval\")) {"
+  },
+  {
+   "id": "t.merge.undelivered",
+   "from": "wait:human_merge_approval",
+   "to": "esc:pr-undelivered",
+   "kind": "escalate",
+   "label": "Not delivered",
+   "condition": "The PR's URL or the push of the current head was not delivered after the drain.",
+   "source": {
+    "file": "src/daemon/run-ticket.ts",
+    "symbol": "driveToTerminal"
+   },
+   "anchor": "if (undelivered) {"
+  },
+  {
+   "id": "t.merge.approved",
+   "from": "wait:human_merge_approval",
+   "to": "released:project",
+   "kind": "advance",
+   "label": "Advance merge → released",
+   "condition": "human_merge_approval delivered. The commercial Control Plane delivers it; styre run never does (it exits at pr-ready).",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return { kind: \"advance\", from: \"merge\", to: \"released\" };",
+   "descriptor": "advance",
+   "stageChange": {
+    "from": "merge",
+    "to": "released"
+   }
+  },
+  {
+   "id": "t.released.done",
+   "from": "released:project",
+   "to": "outcome:done",
+   "kind": "outcome",
+   "label": "Done",
+   "condition": "released:project succeeded: the ticket status becomes done.",
+   "source": {
+    "file": "src/daemon/resolver.ts",
+    "symbol": "nextStepKey"
+   },
+   "anchor": "return { kind: \"done\" };",
+   "descriptor": "done"
+  },
+  {
+   "id": "t.esc.pause",
+   "from": "@escalations",
+   "to": "paused:needs_you",
+   "kind": "pause",
+   "label": "Pause: needs you",
+   "condition": "The escalation left the ticket waiting with a pending human_resume signal: the run ends paused, reason needs_you, exit 75 (driveToTerminal's next check; a resume's toolchain pause ends through the same run end directly).",
+   "source": {
+    "file": "src/daemon/run-ticket.ts",
+    "symbol": "driveToTerminal"
+   },
+   "anchor": "if (hasPendingHumanResume(db, opts.ticketId))"
+  },
+  {
+   "id": "t.any.park",
+   "from": "@agent-steps",
+   "to": "paused:budget",
+   "kind": "pause",
+   "label": "Out of budget",
+   "condition": "The agent dispatch died of a session limit or out of credits (ParkSignal): the attempt is given back, the ticket waits, a parked event is written; the run exits 75.",
+   "source": {
+    "file": "src/daemon/advance.ts",
+    "symbol": "advanceOneStep"
+   },
+   "anchor": "if (err instanceof ParkSignal) {"
+  },
+  {
+   "id": "t.any.stop",
+   "from": "@steps",
+   "to": "paused:interrupted",
+   "kind": "pause",
+   "label": "Stop signal",
+   "condition": "A stop signal while the step runs: the stop handler records the interruption and gives back the attempt.",
+   "source": {
+    "file": "src/util/process/interruption.ts",
+    "symbol": "recordInterruption"
+   },
+   "anchor": "steps.decrementAttempt(db, inFlight.stepId);"
+  },
+  {
+   "id": "t.any.exhausted",
+   "from": "@steps",
+   "to": "esc:attempts-exhausted",
+   "kind": "escalate",
+   "label": "Attempts exhausted",
+   "condition": "The step failed and its attempt count has reached 3.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "if (prerequisite || invariant || step.attempt >= maxAttempts) {",
+   "signature": "*:*",
+   "constants": [
+    "DEFAULT_MAX_ATTEMPTS"
+   ]
+  },
+  {
+   "id": "t.any.prerequisite",
+   "from": "@steps",
+   "to": "esc:prerequisite",
+   "kind": "escalate",
+   "label": "Prerequisite error",
+   "condition": "The step threw StepPrerequisiteError: escalated at once, whatever the attempt.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "const prerequisite = error?.name === \"StepPrerequisiteError\";",
+   "signature": "*:*"
+  },
+  {
+   "id": "t.any.invariant",
+   "from": "@steps",
+   "to": "esc:invariant",
+   "kind": "escalate",
+   "label": "Invariant violation",
+   "condition": "The step broke an invariant (InvariantViolation, recorded with invariant: true): escalated at once, on attempt 1.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "const invariant = error?.invariant === true;",
+   "signature": "*:*"
+  },
+  {
+   "id": "t.any.replay",
+   "from": "@steps",
+   "to": "esc:step-replay",
+   "kind": "escalate",
+   "label": "Replay guard",
+   "condition": "The resolver requested this step though the journal holds it as succeeded (the run replayed it).",
+   "source": {
+    "file": "src/daemon/advance.ts",
+    "symbol": "advanceOneStep"
+   },
+   "anchor": "if (execution.replayed) {",
+   "signature": "step-replay-no-progress:*"
+  },
+  {
+   "id": "t.any.exec-retry",
+   "from": "@retryable",
+   "to": "@self",
+   "kind": "retry",
+   "label": "Execution error: retry",
+   "condition": "Failed with StepExecutionError (an operation did not complete; a test environment not ready, say) and its attempt count is under 3: the same step runs again.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "if (step.error_json !== null && JSON.parse(step.error_json).name === \"StepExecutionError\") {",
+   "constants": [
+    "DEFAULT_MAX_ATTEMPTS"
+   ]
+  },
+  {
+   "id": "t.any.retry",
+   "from": "@catch-all-retry",
+   "to": "@self",
+   "kind": "retry",
+   "label": "Failed: retry",
+   "condition": "Any other failure (an agent death or timeout, a malformed sidecar) with its attempt count under 3: back to pending, the same step runs again.",
+   "source": {
+    "file": "src/daemon/failure-policy.ts",
+    "symbol": "applyFailurePolicy"
+   },
+   "anchor": "resetToPending(db, step.id); return { decision: \"retry\" }; }",
+   "constants": [
+    "DEFAULT_MAX_ATTEMPTS"
+   ]
+  },
+  {
+   "id": "t.any.contract",
+   "from": "@steps",
+   "to": "esc:contract",
+   "kind": "escalate",
+   "label": "Contract unavailable",
+   "condition": "Before the next pass, the registry's synchronize threw: the run pauses with no step to rearm.",
+   "source": {
+    "file": "src/daemon/advance.ts",
+    "symbol": "advanceOneStep"
+   },
+   "anchor": "registry.synchronize(db, ticketId);"
+  },
+  {
+   "id": "t.any.stalled",
+   "from": "@steps",
+   "to": "esc:stalled",
+   "kind": "escalate",
+   "label": "Stalled",
+   "condition": "Three ticks in a row advanced nothing and nothing else ended the run.",
+   "source": {
+    "file": "src/daemon/run-ticket.ts",
+    "symbol": "driveToTerminal"
+   },
+   "anchor": "if (idle >= IDLE_CAP) {"
+  },
+  {
+   "id": "t.any.tick-cap",
+   "from": "@steps",
+   "to": "esc:tick-cap",
+   "kind": "escalate",
+   "label": "Tick budget",
+   "condition": "The run used its 200 ticks.",
+   "source": {
+    "file": "src/daemon/run-ticket.ts",
+    "symbol": "driveToTerminal"
+   },
+   "anchor": "hit the ${DEFAULT_CAP}-tick iteration budget"
+  },
+  {
+   "id": "t.any.outbox",
+   "from": "@steps",
+   "to": "esc:outbox",
+   "kind": "escalate",
+   "label": "Projection failed",
+   "condition": "After a tick, an outbox row failed past its retry budget (5 drains).",
+   "source": {
+    "file": "src/daemon/projector.ts",
+    "symbol": "drainOutbox"
+   },
+   "anchor": "export const OUTBOX_RETRY_BUDGET = 5;"
+  }
+ ],
+ "scenarios": [
+  {
+   "id": "success-fast",
+   "label": "Success, fast track",
+   "summary": "One work unit, no plan review: from the ticket to an open PR.",
+   "transitions": [
+    "t.run.start",
+    "t.run.prepared",
+    "t.stage.design",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.walk.design:size>checks:dispatch",
+    "t.checks.dispatch",
+    "t.checks.clean-advance",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.clean-advance",
+    "t.merge.push",
+    "t.merge.ensure",
+    "t.merge.pr-ready"
+   ]
+  },
+  {
+   "id": "success-full",
+   "label": "Success, full track",
+   "summary": "design:size sets track full, so design:review runs and the plan review gate is passed.",
+   "transitions": [
+    "t.run.start",
+    "t.run.prepared",
+    "t.stage.design",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.walk.design:size>design:review",
+    "t.walk.design:review>gate:plan-review",
+    "t.walk.gate:plan-review>checks:dispatch",
+    "t.checks.dispatch",
+    "t.checks.clean-advance",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.clean-advance",
+    "t.merge.push",
+    "t.merge.ensure",
+    "t.merge.pr-ready"
+   ]
+  },
+  {
+   "id": "plan-review-redesign",
+   "label": "Plan review fails, redesign passes",
+   "summary": "design:review files blocking findings; design:dispatch is invalidated with cause feedback; the new plan changes extract, size and review's inputs, so each is invalidated (cause inputs) and reruns; the second review is clean.",
+   "transitions": [
+    "t.run.start",
+    "t.run.prepared",
+    "t.stage.design",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.walk.design:size>design:review",
+    "t.planreview.redesign",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.inv.inputs.design:extract",
+    "t.walk.design:extract>design:size",
+    "t.inv.inputs.design:size",
+    "t.walk.design:size>design:review",
+    "t.inv.inputs.design:review",
+    "t.walk.design:review>gate:plan-review",
+    "t.walk.gate:plan-review>checks:dispatch",
+    "t.checks.dispatch",
+    "t.checks.clean-advance",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.clean-advance",
+    "t.merge.push",
+    "t.merge.ensure",
+    "t.merge.pr-ready"
+   ]
+  },
+  {
+   "id": "plan-review-twice",
+   "label": "Plan review fails twice: escalation",
+   "summary": "The redesigned plan is reviewed again and returns the same blocking findings: the verdict escalates (no progress). A plain resume applies the verdict again and escalates again; retry-plan needs a changed plan (commit it, resume with --accept-head).",
+   "transitions": [
+    "t.run.start",
+    "t.run.prepared",
+    "t.stage.design",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.walk.design:size>design:review",
+    "t.planreview.redesign",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.inv.inputs.design:extract",
+    "t.walk.design:extract>design:size",
+    "t.inv.inputs.design:size",
+    "t.walk.design:size>design:review",
+    "t.inv.inputs.design:review",
+    "t.planreview.no-progress",
+    "t.esc.pause@esc:review-no-progress",
+    "t.resume.from-needs-you",
+    "t.resume.start",
+    "t.resume.retry-plan-escalate",
+    "t.esc.pause@esc:review-no-progress"
+   ]
+  },
+  {
+   "id": "plan-review-gate",
+   "label": "Redesign returns the same plan: the gate escalates",
+   "summary": "After a redesign the plan's digest is unchanged, so extract, size and review all pass over (early cutoff) and design:review still holds its blocking findings: the plan review gate fires. The operator commits a plan edit and resumes with --accept-head: retry-plan redesigns again.",
+   "transitions": [
+    "t.run.start",
+    "t.run.prepared",
+    "t.stage.design",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.walk.design:size>design:review",
+    "t.planreview.redesign",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.walk.design:size>design:review",
+    "t.walk.design:review>gate:plan-review",
+    "t.gate.fires",
+    "t.esc.pause@esc:plan-review-gate",
+    "t.resume.from-needs-you",
+    "t.resume.start",
+    "t.resume.retry-plan-moved",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.inv.inputs.design:size",
+    "t.walk.design:size>design:review",
+    "t.inv.inputs.design:review",
+    "t.walk.design:review>gate:plan-review",
+    "t.walk.gate:plan-review>checks:dispatch",
+    "t.checks.dispatch",
+    "t.checks.clean-advance",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.clean-advance",
+    "t.merge.push",
+    "t.merge.ensure",
+    "t.merge.pr-ready"
+   ]
+  },
+  {
+   "id": "checks-reauthor",
+   "label": "AC checks flagged: author again, then escalate",
+   "summary": "checks:classify leaves a criterion's checks vacuous: they are superseded and authored again; still flagged after the second round, the run escalates.",
+   "transitions": [
+    "t.run.start",
+    "t.run.prepared",
+    "t.stage.design",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.walk.design:size>checks:dispatch",
+    "t.checks.dispatch",
+    "t.checks.reauthor",
+    "t.checks.dispatch",
+    "t.checks.cap",
+    "t.esc.pause@esc:reauthor-cap"
+   ]
+  },
+  {
+   "id": "ac-gate-cap",
+   "label": "AC gate red: arbitrate, reauthor, code again, round cap",
+   "summary": "Round 1: behavioral checks red, the arbiter blames a check, it is written again and installed. Round 2: still red, the arbiter blames the code, the unit is coded again. Round 3: still red at the gate's third attempt: escalation.",
+   "transitions": [
+    "t.run.start",
+    "t.run.prepared",
+    "t.stage.design",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.walk.design:size>checks:dispatch",
+    "t.checks.dispatch",
+    "t.checks.clean-advance",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.defer",
+    "t.pick.arbitrate",
+    "t.arb.check-wrong",
+    "t.pick.reauthor",
+    "t.reauth.installed",
+    "t.pick.gate",
+    "t.gate.defer",
+    "t.pick.arbitrate",
+    "t.arb.code-wrong",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.cap",
+    "t.esc.pause@esc:gate-cap"
+   ]
+  },
+  {
+   "id": "review-code-findings",
+   "label": "Code review: blocking findings, code again, then clean",
+   "summary": "review files blocking code findings: the blamed unit is coded and verified again; the second review is clean.",
+   "transitions": [
+    "t.run.start",
+    "t.run.prepared",
+    "t.stage.design",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.walk.design:size>checks:dispatch",
+    "t.checks.dispatch",
+    "t.checks.clean-advance",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.code-loopback",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.clean-advance",
+    "t.merge.push",
+    "t.merge.ensure",
+    "t.merge.pr-ready"
+   ]
+  },
+  {
+   "id": "review-same-findings",
+   "label": "Code review: the same findings twice",
+   "summary": "After a code loopback the review returns findings with the same signature: no progress, escalation.",
+   "transitions": [
+    "t.run.start",
+    "t.run.prepared",
+    "t.stage.design",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.walk.design:size>checks:dispatch",
+    "t.checks.dispatch",
+    "t.checks.clean-advance",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.code-loopback",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.no-progress",
+    "t.esc.pause@esc:review-no-progress"
+   ]
+  },
+  {
+   "id": "review-repair-limit",
+   "label": "Code review: repair limit",
+   "summary": "Three code loopbacks, each with new findings; the fourth review still has blocking findings: the repair limit escalates.",
+   "transitions": [
+    "t.run.start",
+    "t.run.prepared",
+    "t.stage.design",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.walk.design:size>checks:dispatch",
+    "t.checks.dispatch",
+    "t.checks.clean-advance",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.code-loopback",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.code-loopback",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.code-loopback",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.limit",
+    "t.esc.pause@esc:review-repair-limit"
+   ]
+  },
+  {
+   "id": "review-plan-defect-escalate",
+   "label": "Code review: plan defect, policy escalate",
+   "summary": "A blocking plan-defect finding with onPlanDefect = escalate (the default).",
+   "transitions": [
+    "t.run.start",
+    "t.run.prepared",
+    "t.stage.design",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.walk.design:size>checks:dispatch",
+    "t.checks.dispatch",
+    "t.checks.clean-advance",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.plan-defect-escalate",
+    "t.esc.pause@esc:plan-defect-policy"
+   ]
+  },
+  {
+   "id": "review-plan-defect-redesign",
+   "label": "Code review: plan defect, policy redesign",
+   "summary": "With onPlanDefect = redesign the run returns to design: design:dispatch and design:extract are invalidated (cause feedback), the new units change size's inputs, the checks steps stay as they were (E9), and the units are implemented again.",
+   "transitions": [
+    "t.run.start",
+    "t.run.prepared",
+    "t.stage.design",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.walk.design:size>checks:dispatch",
+    "t.checks.dispatch",
+    "t.checks.clean-advance",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.redesign",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.inv.inputs.design:size",
+    "t.walk.design:size>checks:dispatch",
+    "t.checks.dispatch",
+    "t.checks.clean-advance",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.clean-advance",
+    "t.merge.push",
+    "t.merge.ensure",
+    "t.merge.pr-ready"
+   ]
+  },
+  {
+   "id": "input-edited-on-resume",
+   "label": "An input edited on resume: invalidate, early cutoff",
+   "summary": "Full track, complexity grading off; the run pauses for budget in design:review. The operator edits the profile's prompt vars and resumes: provision reruns (worktree recreated); design:dispatch and design:extract read the prompt vars, so each is invalidated (cause inputs) and reruns; the units come back the same, so design:size, which reads only the grading flag and the units, passes over (early cutoff); design:review, still pending from the pause, runs without its carryover (its inputs changed, so a carryover-dropped note names them).",
+   "transitions": [
+    "t.run.start",
+    "t.run.prepared",
+    "t.stage.design",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.walk.design:size>design:review",
+    "t.any.park@design:review",
+    "t.resume.from-budget",
+    "t.resume.start",
+    "t.resume.worktree-recreated",
+    "t.walk.provision>design:dispatch",
+    "t.inv.inputs.design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.inv.inputs.design:extract",
+    "t.walk.design:extract>design:size",
+    "t.walk.design:size>design:review",
+    "t.walk.design:review>gate:plan-review",
+    "t.walk.gate:plan-review>checks:dispatch",
+    "t.checks.dispatch",
+    "t.checks.clean-advance",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.clean-advance",
+    "t.merge.push",
+    "t.merge.ensure",
+    "t.merge.pr-ready"
+   ]
+  },
+  {
+   "id": "budget-pause-resume",
+   "label": "Budget pause in implement, then resume",
+   "summary": "The coding dispatch dies of a session limit: paused budget, exit 75. On resume (worktree mode) provision was invalidated (worktree recreated); the unit is coded again with its carryover and provision runs again before its checks.",
+   "transitions": [
+    "t.run.start",
+    "t.run.prepared",
+    "t.stage.design",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.walk.design:size>checks:dispatch",
+    "t.checks.dispatch",
+    "t.checks.clean-advance",
+    "t.pick.dispatch",
+    "t.any.park@implement:wu<seq>:dispatch",
+    "t.resume.from-budget",
+    "t.resume.start",
+    "t.resume.none",
+    "t.stage.implement",
+    "t.pick.dispatch",
+    "t.wu.done",
+    "t.pick.provision",
+    "t.prov-impl.done",
+    "t.pick.completeness",
+    "t.comp.done",
+    "t.pick.verify",
+    "t.verify.done",
+    "t.pick.mark-verified",
+    "t.mark.back",
+    "t.pick.gate",
+    "t.gate.pass",
+    "t.pick.integration",
+    "t.int.done",
+    "t.pick.floor",
+    "t.floor.holds",
+    "t.review.clean-advance",
+    "t.merge.push",
+    "t.merge.ensure",
+    "t.merge.pr-ready"
+   ]
+  },
+  {
+   "id": "attempts-exhausted",
+   "label": "A step retries, then exhausts its attempts",
+   "summary": "design:extract fails three times (an agent death, say): two retries, then escalation at attempt 3.",
+   "transitions": [
+    "t.run.start",
+    "t.run.prepared",
+    "t.stage.design",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.any.retry@design:extract",
+    "t.any.retry@design:extract",
+    "t.any.exhausted@design:extract",
+    "t.esc.pause@esc:attempts-exhausted"
+   ]
+  },
+  {
+   "id": "resume-toolchain-pause",
+   "label": "Resume on a host without the tools",
+   "summary": "A budget pause resumed on a host that lacks a required suite's tools: pause needs_you, exit 75 (never 69).",
+   "transitions": [
+    "t.run.start",
+    "t.run.prepared",
+    "t.stage.design",
+    "t.walk.provision>design:dispatch",
+    "t.walk.design:dispatch>design:extract",
+    "t.walk.design:extract>design:size",
+    "t.walk.design:size>checks:dispatch",
+    "t.checks.dispatch",
+    "t.checks.clean-advance",
+    "t.pick.dispatch",
+    "t.any.park@implement:wu<seq>:dispatch",
+    "t.resume.from-budget",
+    "t.resume.start",
+    "t.resume.toolchain",
+    "t.esc.pause@esc:toolchain-resume"
+   ]
+  },
+  {
+   "id": "resume-newer-scheme",
+   "label": "Resume refused: newer fingerprint scheme",
+   "summary": "A checkpoint written by a newer Styre: resume refuses with exit 65 before writing anything.",
+   "transitions": [
+    "t.run.start",
+    "t.run.prepared",
+    "t.stage.design",
+    "t.walk.provision>design:dispatch",
+    "t.any.park@design:dispatch",
+    "t.resume.from-budget",
+    "t.resume.newer-scheme"
+   ]
+  }
+ ],
+ "layout": {
+  "run.start": [
+   100,
+   50
+  ],
+  "run.prepare": [
+   280,
+   50
+  ],
+  "resolve.stage": [
+   460,
+   85
+  ],
+  "resume.start": [
+   100,
+   120
+  ],
+  "resume.prepare": [
+   280,
+   120
+  ],
+  "exit:usage": [
+   820,
+   50
+  ],
+  "exit:config": [
+   1000,
+   50
+  ],
+  "exit:toolchain": [
+   1180,
+   50
+  ],
+  "exit:resume-refused": [
+   820,
+   120
+  ],
+  "exit:inspect": [
+   1000,
+   120
+  ],
+  "provision": [
+   100,
+   230
+  ],
+  "design:dispatch": [
+   280,
+   230
+  ],
+  "design:extract": [
+   460,
+   230
+  ],
+  "design:size": [
+   640,
+   230
+  ],
+  "design:review": [
+   820,
+   230
+  ],
+  "gate:plan-review": [
+   1000,
+   230
+  ],
+  "checks:dispatch": [
+   1180,
+   230
+  ],
+  "checks:classify": [
+   1180,
+   300
+  ],
+  "implement:wu<seq>:dispatch": [
+   100,
+   400
+  ],
+  "provision@implement": [
+   280,
+   400
+  ],
+  "completeness:wu<seq>": [
+   460,
+   400
+  ],
+  "verify:wu<seq>:<check>": [
+   640,
+   400
+  ],
+  "mark-verified": [
+   820,
+   400
+  ],
+  "implement.pick": [
+   460,
+   480
+  ],
+  "verify:checks-gate": [
+   100,
+   560
+  ],
+  "checks:arbitrate": [
+   280,
+   560
+  ],
+  "checks:reauthor": [
+   460,
+   560
+  ],
+  "verify:integration": [
+   640,
+   560
+  ],
+  "docs:revise": [
+   820,
+   560
+  ],
+  "floor:evidence": [
+   1000,
+   560
+  ],
+  "review": [
+   100,
+   670
+  ],
+  "merge:push": [
+   280,
+   670
+  ],
+  "merge:pr-ensure": [
+   460,
+   670
+  ],
+  "wait:human_merge_approval": [
+   640,
+   670
+  ],
+  "released:project": [
+   820,
+   670
+  ],
+  "outcome:pr-ready": [
+   100,
+   780
+  ],
+  "outcome:done": [
+   280,
+   780
+  ],
+  "paused:budget": [
+   460,
+   780
+  ],
+  "paused:needs_you": [
+   640,
+   780
+  ],
+  "paused:interrupted": [
+   820,
+   780
+  ],
+  "esc:attempts-exhausted": [
+   100,
+   890
+  ],
+  "esc:prerequisite": [
+   280,
+   890
+  ],
+  "esc:invariant": [
+   460,
+   890
+  ],
+  "esc:provision": [
+   640,
+   890
+  ],
+  "esc:no-progress": [
+   820,
+   890
+  ],
+  "esc:checks-gate-fault": [
+   1000,
+   890
+  ],
+  "esc:reauthor-cap": [
+   1180,
+   890
+  ],
+  "esc:gate-cap": [
+   100,
+   950
+  ],
+  "esc:gate-stuck-head": [
+   280,
+   950
+  ],
+  "esc:evidence-floor": [
+   460,
+   950
+  ],
+  "esc:plan-review-gate": [
+   640,
+   950
+  ],
+  "esc:review-no-progress": [
+   820,
+   950
+  ],
+  "esc:review-repair-limit": [
+   1000,
+   950
+  ],
+  "esc:plan-defect-policy": [
+   1180,
+   950
+  ],
+  "esc:review-unresolved": [
+   100,
+   1010
+  ],
+  "esc:invalidate-loop": [
+   280,
+   1010
+  ],
+  "esc:step-replay": [
+   460,
+   1010
+  ],
+  "esc:blocked": [
+   640,
+   1010
+  ],
+  "esc:contract": [
+   820,
+   1010
+  ],
+  "esc:stalled": [
+   1000,
+   1010
+  ],
+  "esc:tick-cap": [
+   1180,
+   1010
+  ],
+  "esc:outbox": [
+   100,
+   1070
+  ],
+  "esc:pr-undelivered": [
+   280,
+   1070
+  ],
+  "esc:toolchain-resume": [
+   460,
+   1070
+  ]
+ }
+}
+</script>
+<script>
+(function () {
+  "use strict";
+  var data = JSON.parse(document.getElementById("state-machine-data").textContent);
+  var SVGNS = "http://www.w3.org/2000/svg";
+  var NODE_W = 164, NODE_H = 38;
+
+  var states = {};
+  data.states.forEach(function (s) { states[s.id] = s; });
+
+  // Group transitions ("@group" as from, "@self" as to) expand into one transition per member,
+  // with the id "<transition id>@<member>".
+  var all = [];
+  data.transitions.forEach(function (t) {
+    if (t.from.charAt(0) === "@") {
+      data.groups[t.from.slice(1)].members.forEach(function (m) {
+        var c = Object.assign({}, t, { id: t.id + "@" + m, from: m, to: t.to === "@self" ? m : t.to, group: t.from.slice(1) });
+        all.push(c);
+      });
+    } else {
+      all.push(Object.assign({}, t));
+    }
+  });
+  var trById = {};
+  all.forEach(function (t) { trById[t.id] = t; });
+  var outgoing = {};
+  all.forEach(function (t) { (outgoing[t.from] = outgoing[t.from] || []).push(t); });
+
+  document.getElementById("built").textContent = "Built from " + data.builtFrom + ".";
+
+  // ------------------------------------------------------------------ SVG
+  var svg = document.getElementById("diagram");
+  function el(name, attrs, parent) {
+    var e = document.createElementNS(SVGNS, name);
+    Object.keys(attrs || {}).forEach(function (k) { e.setAttribute(k, attrs[k]); });
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  var defs = el("defs", {}, svg);
+  ["forward", "advance", "loopback", "invalidate", "retry", "escalate", "pause", "resume", "refuse", "outcome"].forEach(function (k) {
+    var m = el("marker", { id: "mk-" + k, viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" }, defs);
+    el("path", { d: "M0,0 L10,5 L0,10 z", "class": "mk-" + k }, m);
+  });
+
+  function pos(id) { return data.layout[id]; }
+  var bands = [
+    { label: "Start, resume and refusals", test: function (s) { return !s.stage && ["entry", "pseudo", "exit"].indexOf(s.kind) >= 0; } },
+    { label: "Design", test: function (s) { return s.stage === "design"; } },
+    { label: "Implement (the verify steps run in this stage)", test: function (s) { return s.stage === "implement"; } },
+    { label: "Review, merge, released", test: function (s) { return ["review", "merge", "released"].indexOf(s.stage) >= 0; } },
+    { label: "Outcomes", test: function (s) { return s.kind === "terminal" || s.kind === "pause"; } },
+    { label: "Escalations (each pauses the run: needs you)", test: function (s) { return s.kind === "escalation"; } }
+  ];
+  var bandLayer = el("g", {}, svg);
+  bands.forEach(function (b) {
+    var ys = data.states.filter(b.test).map(function (s) { return pos(s.id)[1]; });
+    if (!ys.length) return;
+    var top = Math.min.apply(null, ys) - NODE_H / 2 - 26, bottom = Math.max.apply(null, ys) + NODE_H / 2 + 10;
+    el("rect", { x: 8, y: top, width: 1264, height: bottom - top, rx: 10, "class": "band" }, bandLayer);
+    var t = el("text", { x: 18, y: top + 16, "class": "band-label" }, bandLayer);
+    t.textContent = b.label;
+  });
+
+  var baseLayer = el("g", { "aria-hidden": "true" }, svg);
+  var hlLayer = el("g", { "aria-hidden": "true" }, svg);
+  var nodeLayer = el("g", {}, svg);
+
+  function boundary(c, toward) {
+    var dx = toward[0] - c[0], dy = toward[1] - c[1];
+    if (dx === 0 && dy === 0) return c;
+    var tx = dx === 0 ? Infinity : (NODE_W / 2) / Math.abs(dx);
+    var ty = dy === 0 ? Infinity : (NODE_H / 2) / Math.abs(dy);
+    var t = Math.min(tx, ty);
+    return [c[0] + dx * t, c[1] + dy * t];
+  }
+  function edgePath(t, lane) {
+    var a = pos(t.from), b = pos(t.to);
+    if (t.from === t.to) {
+      var h = 30 + lane * 12, x = a[0], y = a[1] - NODE_H / 2;
+      return "M" + (x - 22) + "," + y + " C" + (x - 34) + "," + (y - h) + " " + (x + 34) + "," + (y - h) + " " + (x + 22) + "," + y;
+    }
+    var p1 = boundary(a, b), p2 = boundary(b, a);
+    var mx = (p1[0] + p2[0]) / 2, my = (p1[1] + p2[1]) / 2;
+    var dx = p2[0] - p1[0], dy = p2[1] - p1[1], len = Math.sqrt(dx * dx + dy * dy) || 1;
+    var bend = Math.min(80, Math.max(18, len * 0.12)) * (lane % 2 === 0 ? 1 : -1) * (1 + Math.floor(lane / 2) * 0.7);
+    var cx = mx - (dy / len) * bend, cy = my + (dx / len) * bend;
+    return "M" + p1[0] + "," + p1[1] + " Q" + cx + "," + cy + " " + p2[0] + "," + p2[1];
+  }
+  function drawEdges(layer, list, cls) {
+    while (layer.firstChild) layer.removeChild(layer.firstChild);
+    var lanes = {};
+    list.forEach(function (t) {
+      var key = t.from + ">" + t.to;
+      var lane = lanes[key] = (lanes[key] === undefined ? 0 : lanes[key] + 1);
+      var p = el("path", { d: edgePath(t, lane), "class": "edge " + t.kind + " k-" + t.kind + " " + (cls(t) || ""), "marker-end": "url(#mk-" + t.kind + ")" }, layer);
+      var title = el("title", {}, p);
+      title.textContent = t.label + ": " + t.condition;
+    });
+  }
+
+  var nodeEls = {};
+  data.states.forEach(function (s) {
+    var p = pos(s.id);
+    var g = el("g", { "class": "node n-" + s.kind, tabindex: "0", role: "button", "aria-label": s.label + " (" + s.kind + "). " + s.description }, nodeLayer);
+    el("rect", { x: p[0] - NODE_W / 2, y: p[1] - NODE_H / 2, width: NODE_W, height: NODE_H, rx: s.kind === "step" ? 6 : 14 }, g);
+    var text = el("text", { x: p[0], y: p[1] + 4, "text-anchor": "middle" }, g);
+    text.textContent = s.label;
+    if (s.label.length > 25) text.setAttribute("style", "font-size:10px");
+    g.addEventListener("click", function () { selectState(s.id, true); revealPanel(); });
+    g.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectState(s.id, true); revealPanel(); }
+    });
+    nodeEls[s.id] = g;
+  });
+
+  // ------------------------------------------------------------------ panel
+  var panel = document.getElementById("panel");
+  var narrow = window.matchMedia("(max-width: 1000px)");
+  // On a narrow screen the panel sits below the diagram: bring it into view after a pick.
+  function revealPanel() { if (narrow.matches) panel.scrollIntoView({ block: "start", behavior: "smooth" }); }
+  function srcLine(src, anchor) {
+    var d = document.createElement("div");
+    d.className = "src";
+    d.appendChild(document.createTextNode("Source: "));
+    var c1 = document.createElement("code"); c1.textContent = src.file; d.appendChild(c1);
+    d.appendChild(document.createTextNode(" · "));
+    var c2 = document.createElement("code"); c2.textContent = src.symbol; d.appendChild(c2);
+    if (anchor) {
+      d.appendChild(document.createElement("br"));
+      d.appendChild(document.createTextNode("At: "));
+      var c3 = document.createElement("code"); c3.textContent = anchor; d.appendChild(c3);
+    }
+    return d;
+  }
+  function badge(kind) {
+    var b = document.createElement("span");
+    b.className = "badge k-" + kind;
+    b.textContent = kind;
+    return b;
+  }
+  function tags(t) {
+    var parts = [];
+    if (t.descriptor) parts.push("descriptor " + t.descriptor);
+    if (t.cause) parts.push("cause " + t.cause);
+    if (t.loop) parts.push("loop " + t.loop);
+    if (t.signature) parts.push("signature " + t.signature);
+    if (t.stageChange) parts.push("stage " + t.stageChange.from + " → " + t.stageChange.to);
+    if (t.resumePlan) parts.push("resume plan " + t.resumePlan);
+    if (t.group) parts.push("applies to: " + data.groups[t.group].label.toLowerCase());
+    return parts.join(" · ");
+  }
+  function transitionItem(t, current) {
+    var li = document.createElement("li");
+    var head = document.createElement("div");
+    head.className = "head";
+    head.appendChild(badge(t.kind));
+    var strong = document.createElement("strong"); strong.textContent = t.label; head.appendChild(strong);
+    head.appendChild(document.createTextNode("→"));
+    var go = document.createElement("button");
+    go.type = "button"; go.className = "linkish"; go.textContent = states[t.to].label;
+    go.addEventListener("click", function () { selectState(t.to, true); });
+    head.appendChild(go);
+    li.appendChild(head);
+    var p = document.createElement("p"); p.textContent = t.condition; li.appendChild(p);
+    var tg = tags(t);
+    if (tg) { var d = document.createElement("div"); d.className = "tags"; d.textContent = tg; li.appendChild(d); }
+    li.appendChild(srcLine(t.source, t.anchor));
+    if (current) li.setAttribute("aria-current", "step");
+    return li;
+  }
+  function describeState(s) {
+    var frag = document.createDocumentFragment();
+    var h = document.createElement("h3"); h.textContent = s.label; frag.appendChild(h);
+    var meta = document.createElement("div"); meta.className = "meta";
+    var bits = [s.kind];
+    if (s.stage) bits.push("stage " + s.stage);
+    if (s.stepKey) bits.push("step key " + s.stepKey);
+    if (s.exitCode !== undefined) bits.push("exit " + s.exitCode);
+    meta.textContent = bits.join(" · ");
+    frag.appendChild(meta);
+    var p = document.createElement("p"); p.textContent = s.description; frag.appendChild(p);
+    if (s.inputs) {
+      var ip = document.createElement("p"); ip.className = "tags";
+      ip.textContent = "Fingerprinted inputs: " + s.inputs.join(", ") + (s.produces.length ? ". Produces: " + s.produces.join(", ") + "." : ". Produces nothing a later step reads.");
+      frag.appendChild(ip);
+    }
+    frag.appendChild(srcLine(s.source, s.anchor));
+    return frag;
+  }
+  function showState(id) {
+    var s = states[id];
+    panel.textContent = "";
+    panel.appendChild(describeState(s));
+    var out = outgoing[id] || [];
+    var own = out.filter(function (t) { return !t.group; });
+    var shared = out.filter(function (t) { return t.group; });
+    var h = document.createElement("h3");
+    h.style.marginTop = "12px";
+    h.textContent = out.length ? "Outgoing transitions (" + out.length + ")" : "No outgoing transitions: the run ends here.";
+    panel.appendChild(h);
+    [[own, null], [shared, "Shared by a group of states"]].forEach(function (pair) {
+      if (!pair[0].length) return;
+      if (pair[1]) { var sh = document.createElement("div"); sh.className = "meta"; sh.style.marginTop = "8px"; sh.textContent = pair[1]; panel.appendChild(sh); }
+      var ul = document.createElement("ul"); ul.className = "tlist";
+      pair[0].forEach(function (t) { ul.appendChild(transitionItem(t)); });
+      panel.appendChild(ul);
+    });
+  }
+
+  // ------------------------------------------------------------------ selection and scenarios
+  var selected = null, scenario = null, stepIndex = 0;
+  var showAll = document.getElementById("showAll");
+  function baseList() {
+    return all.filter(function (t) {
+      if (t.group) return false;
+      if (showAll.checked) return true;
+      return t.kind === "forward" || t.kind === "advance" || t.kind === "outcome";
+    });
+  }
+  function clearNodeClasses() {
+    Object.keys(nodeEls).forEach(function (id) { nodeEls[id].classList.remove("selected", "on-path", "current", "dim"); });
+  }
+  function render() {
+    drawEdges(baseLayer, baseList(), function () { return "base"; });
+    clearNodeClasses();
+    if (scenario) {
+      var ids = scenario.transitions;
+      var seen = {};
+      var path = ids.map(function (x) { return trById[x]; }).filter(function (t) { var k = t.from + ">" + t.to + ">" + t.kind; if (seen[k]) return false; seen[k] = true; return true; });
+      var cur = trById[ids[stepIndex]];
+      drawEdges(hlLayer, path.filter(function (t) { return t !== cur; }).concat([cur]), function (t) { return t === cur ? "current" : "path"; });
+      ids.forEach(function (x) { var t = trById[x]; nodeEls[t.from].classList.add("on-path"); nodeEls[t.to].classList.add("on-path"); });
+      nodeEls[cur.from].classList.add("current");
+      nodeEls[cur.to].classList.add("current");
+      panel.textContent = "";
+      var h = document.createElement("h3"); h.textContent = scenario.label; panel.appendChild(h);
+      var sm = document.createElement("p"); sm.className = "meta"; sm.textContent = scenario.summary; panel.appendChild(sm);
+      var st = document.createElement("div"); st.className = "meta"; st.style.marginTop = "8px";
+      st.textContent = "Step " + (stepIndex + 1) + " of " + ids.length + ": " + states[cur.from].label + " → " + states[cur.to].label;
+      panel.appendChild(st);
+      var ul = document.createElement("ul"); ul.className = "tlist";
+      ul.appendChild(transitionItem(cur, true));
+      panel.appendChild(ul);
+      document.getElementById("counter").textContent = "Step " + (stepIndex + 1) + " of " + ids.length;
+      var lis = document.getElementById("steps").children;
+      for (var i = 0; i < lis.length; i++) {
+        lis[i].classList.toggle("current", i === stepIndex);
+        if (i === stepIndex) lis[i].setAttribute("aria-current", "step"); else lis[i].removeAttribute("aria-current");
+      }
+    } else if (selected) {
+      var out = outgoing[selected] || [];
+      drawEdges(hlLayer, out, function () { return "hl"; });
+      nodeEls[selected].classList.add("selected");
+      var targets = {};
+      out.forEach(function (t) { targets[t.to] = true; });
+      Object.keys(nodeEls).forEach(function (id) { if (id !== selected && !targets[id]) nodeEls[id].classList.add("dim"); });
+      showState(selected);
+      document.getElementById("counter").textContent = "";
+    } else {
+      drawEdges(hlLayer, [], function () { return ""; });
+      panel.textContent = "";
+      var hh = document.createElement("h3"); hh.textContent = "Pick a state or a scenario"; panel.appendChild(hh);
+      var pp = document.createElement("p"); pp.className = "meta";
+      pp.textContent = "Click or focus a state (Tab, then Enter) to list every transition out of it with its condition and source. A scenario highlights its path; Previous and Next walk it one transition at a time.";
+      panel.appendChild(pp);
+      document.getElementById("counter").textContent = "";
+    }
+    document.getElementById("prev").disabled = !scenario || stepIndex === 0;
+    document.getElementById("next").disabled = !scenario || stepIndex === scenario.transitions.length - 1;
+  }
+  function selectState(id, leaveScenario) {
+    if (leaveScenario && scenario) { scenario = null; sel.value = ""; document.getElementById("steps-section").hidden = true; }
+    selected = id;
+    render();
+  }
+
+  var sel = document.getElementById("scenario");
+  data.scenarios.forEach(function (sc) {
+    var o = document.createElement("option"); o.value = sc.id; o.textContent = sc.label; sel.appendChild(o);
+  });
+  sel.addEventListener("change", function () {
+    scenario = data.scenarios.filter(function (sc) { return sc.id === sel.value; })[0] || null;
+    stepIndex = 0;
+    var stepsEl = document.getElementById("steps");
+    stepsEl.textContent = "";
+    document.getElementById("steps-section").hidden = !scenario;
+    if (scenario) {
+      scenario.transitions.forEach(function (x, i) {
+        var t = trById[x];
+        var li = document.createElement("li");
+        var b = document.createElement("button");
+        b.type = "button"; b.className = "linkish";
+        b.textContent = states[t.from].label + " → " + states[t.to].label + ": " + t.label;
+        b.addEventListener("click", function () { stepIndex = i; render(); });
+        li.appendChild(b);
+        stepsEl.appendChild(li);
+      });
+    }
+    render();
+  });
+  document.getElementById("prev").addEventListener("click", function () { if (scenario && stepIndex > 0) { stepIndex--; render(); } });
+  document.getElementById("next").addEventListener("click", function () { if (scenario && stepIndex < scenario.transitions.length - 1) { stepIndex++; render(); } });
+  showAll.addEventListener("change", render);
+
+  // ------------------------------------------------------------------ text alternative and notes
+  var list = document.getElementById("state-list");
+  bands.forEach(function (b) {
+    var members = data.states.filter(b.test);
+    if (!members.length) return;
+    var sec = document.createElement("section");
+    var h = document.createElement("h3"); h.textContent = b.label; sec.appendChild(h);
+    var ul = document.createElement("ul");
+    members.forEach(function (s) {
+      var li = document.createElement("li");
+      var btn = document.createElement("button");
+      btn.type = "button"; btn.className = "linkish";
+      btn.textContent = s.label + " (" + (outgoing[s.id] || []).length + " out)";
+      btn.addEventListener("click", function () { selectState(s.id, true); panel.scrollIntoView({ block: "nearest" }); });
+      li.appendChild(btn); ul.appendChild(li);
+    });
+    sec.appendChild(ul);
+    list.appendChild(sec);
+  });
+  var notes = document.getElementById("notes");
+  function note(text) { var li = document.createElement("li"); li.textContent = text; notes.appendChild(li); return li; }
+  data.unroutedStages.forEach(function (u) { note("Stage " + u.id + ": " + u.note).appendChild(srcLine(u.source, u.anchor)); });
+  data.unproducedOutcomes.forEach(function (u) { note("Outcome " + u.id + ": " + u.note).appendChild(srcLine(u.source, u.anchor)); });
+  note("Caps: " + Object.keys(data.constants).map(function (k) { return k + " = " + data.constants[k]; }).join(", ") + ".");
+  note("Group transitions (shared by every step, every agent step, every escalation, every pause) are listed under each member state; the diagram draws them only for the selected state or scenario.");
+  note("Maintained with the code: test/docs/state-machine.test.ts reads this page's data block and fails when a state, transition, signature, cause, loop, outcome or cap here differs from the code, or when a cited code line is gone.");
+
+  render();
+})();
+</script>
+</body>
+</html>
