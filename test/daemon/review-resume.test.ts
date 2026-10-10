@@ -11,7 +11,12 @@ import { getById, insertFinding, setStatus } from "../../src/db/repos/review-fin
 import { requiredCodeFindings, unresolvedReviewReason } from "../../src/db/repos/review-round.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit, listByTicket as listUnits } from "../../src/db/repos/work-unit.ts";
-import { getByKey, insertPending } from "../../src/db/repos/workflow-step.ts";
+import {
+  getByKey,
+  insertPending,
+  markRunning,
+  markSucceeded,
+} from "../../src/db/repos/workflow-step.ts";
 import { resetProvision } from "../../src/dispatch/provision.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
@@ -322,7 +327,8 @@ test("an escalation of the invalidate loop guard that carries the design:review 
 test("a provision invalidation after a gate stop does not move the run off the gate; a design step's does", () => {
   const { db, ticketId } = seed("plan");
   const provision = insertPending(db, { ticketId, stepKey: "provision", stepType: "provision" });
-  db.query("UPDATE workflow_step SET status='succeeded' WHERE id=?").run(provision.id);
+  markRunning(db, provision.id, {});
+  markSucceeded(db, provision.id, {});
   stopAtPlanGate(db, ticketId);
   // the note a worktree mode resume writes (cause worktree-recreated) when it recreates the worktree
   resetProvision(db, ticketId);

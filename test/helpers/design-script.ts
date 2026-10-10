@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSy
 import { dirname, join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import type { AgentRunInput, AgentRunResult } from "../../src/agent/runner.ts";
+import { beginStopping } from "../../src/util/process/door.ts";
 
 /** The agent steps a design run can reach, recognised by the first line of their prompt template. */
 export const SCRIPT_STEPS = [
@@ -69,6 +70,12 @@ export interface DesignScript {
    *  harness), or, when that is null, on the first prompt of the step that reaches this runner. */
   parkAt: ScriptStep | null;
   parkOnCall: number | null;
+  /** A stop lands while this step's `interruptOnCall`-th call (counted across the harness) runs:
+   *  the in process stop flag is set (`beginStopping`, as the stop handler does first) and the
+   *  launch fails, so the step unwinds with `RunInterrupted` and stays `running`, as after a
+   *  Ctrl-C. No signal is sent to anything. The caller resets the door afterwards (a new process). */
+  interruptAt: ScriptStep | null;
+  interruptOnCall: number | null;
 }
 
 export interface ScriptCalls {
@@ -121,6 +128,8 @@ export function defaultScript(overrides: Partial<DesignScript> = {}): DesignScri
     planFindings: () => [],
     parkAt: null,
     parkOnCall: null,
+    interruptAt: null,
+    interruptOnCall: null,
     ...overrides,
   };
 }
@@ -177,6 +186,10 @@ export function scriptedRunner(script: DesignScript, calls: ScriptCalls): FakeAg
     ) {
       parked = true;
       return sessionLimit();
+    }
+    if (script.interruptAt === step && n === script.interruptOnCall) {
+      beginStopping();
+      throw new Error("the launch was stopped");
     }
     switch (step) {
       case "design:dispatch": {

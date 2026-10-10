@@ -1,11 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { stepRow } from "../../src/daemon/design-graph.ts";
 import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import { listPending } from "../../src/db/repos/signal.ts";
 import { getInput } from "../../src/db/repos/ticket-input.ts";
 import { getByKey } from "../../src/db/repos/workflow-step.ts";
+import * as door from "../../src/util/process/door.ts";
+import { __resetSignalsForTests } from "../../src/util/process/signals.ts";
 import { DesignHarness, HARNESS_TEST_TIMEOUT_MS } from "../helpers/design-harness.ts";
 import type { ScriptFinding } from "../helpers/design-script.ts";
 import { git } from "../helpers/design-steps.ts";
@@ -13,12 +15,28 @@ import { git } from "../helpers/design-steps.ts";
 const harnesses: DesignHarness[] = [];
 afterEach(() => {
   for (const h of harnesses.splice(0)) h.cleanup();
+  if (door.isStopping()) {
+    // never leave a stop flag or the run's stop listeners to the next test
+    door.__resetForTests();
+    __resetSignalsForTests();
+  }
 });
+
+/** After a run unwound from an in process stop (the script's `interruptAt`): what the stop handler
+ *  would have done (release the run lock, R7; during a stop the run code leaves the lock and its
+ *  stop listeners in place), and a fresh door and fresh listeners, since the next resume is a new
+ *  process. Nothing is signalled: the listeners this process installed are only removed. */
+function afterStop(h: DesignHarness): void {
+  rmSync(join(h.checkpointDir(), "run.lock"), { force: true });
+  door.__resetForTests();
+  __resetSignalsForTests();
+}
 
 /** What `dumpPark` wrote beside the paused run. */
 const transcriptOf = (h: DesignHarness) =>
   JSON.parse(readFileSync(join(h.checkpointDir(), "transcript.json"), "utf8")) as {
     transcript: string;
+    stepKey: string | null;
     generation: number | null;
     manifest: Record<string, string> | null;
   };
@@ -64,6 +82,7 @@ test(
     // dumpPark recorded the parked step's generation (1: the redesign's) and its inputs
     const tj = transcriptOf(h);
     expect(tj.transcript).toContain(PARTIAL);
+    expect(tj.stepKey).toBe("design:dispatch");
     expect(tj.generation).toBe(1);
     expectDispatchManifest(h, tj.manifest);
     expect(await h.resume({ script })).toBe(75); // design finishes; the checks pause follows
@@ -157,6 +176,84 @@ test(
       expect(notes).toEqual([
         { event: "carryover-dropped", stepKey: "design:dispatch", changed: ["profile.promptVars"] },
       ]);
+    });
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+test(
+  "a transcript from an earlier generation is never carried over, even with the same step and unchanged inputs (spec §6.5)",
+  async () => {
+    const h = new DesignHarness("in-place");
+    harnesses.push(h);
+    const script = {
+      plan: (n: number) => `Plan body, version ${n}`,
+      planFindings: (n: number) => (n === 1 ? [blocking] : []),
+    };
+    // design:dispatch call 1 (generation 0) pauses: transcript.json is written for generation 0
+    expect(await h.fresh({ script: { ...script, parkAt: "design:dispatch" } })).toBe(75);
+    expect(transcriptOf(h).generation).toBe(0);
+    // the resume reruns it with the carryover (call 2), review 1 blocks, the redesign regenerates
+    // design:dispatch (generation 1), and a stop lands while that dispatch (call 3) runs
+    await expect(
+      h.resume({ script: { ...script, interruptAt: "design:dispatch", interruptOnCall: 3 } }),
+    ).rejects.toBeInstanceOf(door.RunInterrupted);
+    afterStop(h);
+    expect(h.calls.counts["design:dispatch"]).toBe(3);
+    h.read((db, id) => {
+      const step = getByKey(db, id, "design:dispatch");
+      expect(step?.status).toBe("running");
+      expect(step?.generation).toBe(1);
+    });
+    // a stop writes no transcript: the generation 0 file is still there, its inputs unchanged
+    const stale = transcriptOf(h);
+    expect(stale.generation).toBe(0);
+    expect(stale.transcript).toContain(PARTIAL);
+    expectDispatchManifest(h, stale.manifest);
+
+    expect(await h.resume({ script })).toBe(75); // design finishes; the checks pause follows
+    const prompts = h.calls.prompts
+      .filter((p) => p.step === "design:dispatch")
+      .map((p) => p.prompt);
+    expect(prompts).toHaveLength(4);
+    expect(prompts[1]).toContain(PARTIAL); // generation 0's own rerun got it
+    expect(prompts[3]).toContain("FIX-THE-PLAN"); // generation 1, run again after the stop
+    expect(prompts[3]).not.toContain(PARTIAL); // but never generation 0's partial output
+    h.read((db, id) => {
+      // not this dispatch's carryover at all (another generation): withheld without a note
+      expect(listEvents(db, id).filter((e) => e.reason === "carryover-dropped")).toEqual([]);
+    });
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+test(
+  "a transcript is never given to another step parked later: a stop during design:review after a design:dispatch pause (spec §6.5)",
+  async () => {
+    const h = new DesignHarness("in-place");
+    harnesses.push(h);
+    expect(await h.fresh({ script: { parkAt: "design:dispatch" } })).toBe(75);
+    expect(transcriptOf(h).stepKey).toBe("design:dispatch");
+    // the resume finishes design:dispatch, extract and size, and a stop lands during design:review
+    await expect(
+      h.resume({ script: { interruptAt: "design:review", interruptOnCall: 1 } }),
+    ).rejects.toBeInstanceOf(door.RunInterrupted);
+    afterStop(h);
+    h.read((db, id) => {
+      const step = getByKey(db, id, "design:review");
+      expect(step?.status).toBe("running");
+      expect(step?.generation).toBe(0); // the transcript's generation too: only its step tells
+    });
+    expect(transcriptOf(h).stepKey).toBe("design:dispatch"); // a stop writes no transcript
+
+    expect(await h.resume({ script: {} })).toBe(75); // design finishes; the checks pause follows
+    expect(h.calls.counts["design:review"]).toBe(2);
+    const review = h.calls.prompts.filter((p) => p.step === "design:review")[1]?.prompt ?? "";
+    expect(review).toContain("You are the independent plan reviewer");
+    expect(review).not.toContain(PARTIAL);
+    h.read((db, id) => {
+      // withheld as not this step's at all: no note that would name design:review's inputs as changed
+      expect(listEvents(db, id).filter((e) => e.reason === "carryover-dropped")).toEqual([]);
     });
   },
   HARNESS_TEST_TIMEOUT_MS,

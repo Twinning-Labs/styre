@@ -44,7 +44,11 @@ export interface DispatchDeps {
  *  step's re-dispatch while its generation is still current (spec §6.5), so a step invalidated
  *  since never receives output written under its old inputs. */
 export interface ResumeContext {
+  /** The step the resume found parked. */
   stepKey: string;
+  /** The step that wrote the transcript (`transcript.json` records it since ENG-477); null for an
+   *  older transcript, which belongs to the parked step as it is now. */
+  writtenBy: string | null;
   transcript: string;
   generation: number;
   /** The step's input manifest when the run paused, for a table step; null for any other step and
@@ -53,7 +57,9 @@ export interface ResumeContext {
 }
 
 /** The carryover's fit to this dispatch (spec §6.5), computed without side effects. Null: the
- *  carryover is not this dispatch's (another step, or a generation invalidated since). `[]`: it
+ *  carryover is not this dispatch's (written by another step than the one parked, another step,
+ *  or a generation invalidated since), withheld without a note, since no input of this step
+ *  changed. `[]`: it
  *  applies (same step, same generation, and, for a table step paused before it finished, the same
  *  inputs, or a transcript written before ENG-477, kept as it is). Otherwise the input names that
  *  differ: a step that was never finished is not invalidated when an upstream step reruns, so its
@@ -61,6 +67,7 @@ export interface ResumeContext {
  *  answer that is not empty and records one `carryover-dropped` note per dispatch that withholds it, so a
  *  retried attempt of the same step writes another. */
 export function carryoverMismatch(ctx: HandlerContext, rc: ResumeContext): string[] | null {
+  if (rc.writtenBy !== null && rc.writtenBy !== rc.stepKey) return null;
   if (rc.stepKey !== ctx.step.step_key || rc.generation !== ctx.step.generation) return null;
   if (rc.manifest === null) return [];
   const row = stepRow(rc.stepKey);

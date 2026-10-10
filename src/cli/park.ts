@@ -158,8 +158,8 @@ export function dumpPark(
   const dir = parkDir(slug, ident);
   mkdirSync(dir, { recursive: true });
   const currentRunId = getRun(db)?.run_id ?? null; // read before we close db
-  // The step the park left running: its generation, and for a table step its inputs, scope the
-  // carryover (spec §6.5). The run's own ticket, found by its ident (operator ruling, 2026-10-10):
+  // The step the park left running: its key, its generation, and for a table step its inputs, scope
+  // the carryover (spec §6.5). The run's own ticket, found by its ident (operator ruling, 2026-10-10):
   // on a reused --db other tickets share the database.
   const own = findCheckpointTicket(db, ident).ticket;
   const parked = own ? listByStatus(db, "running").find((s) => s.ticket_id === own.id) : undefined;
@@ -194,6 +194,7 @@ export function dumpPark(
       cause: park.cause,
       resetAt: park.resetAt,
       transcript: park.transcript,
+      stepKey: parked?.step_key ?? null,
       generation: parkedGeneration,
       manifest: parkedManifest,
     }),
@@ -573,14 +574,16 @@ export async function resumeRun(
         if (parkedStep && existsSync(join(dir, "transcript.json"))) {
           const tj = JSON.parse(readFileSync(join(dir, "transcript.json"), "utf8")) as {
             transcript: string;
+            stepKey?: string | null;
             generation?: number | null;
             manifest?: Record<string, string> | null;
           };
           resumeContext = {
             stepKey: parkedStep.step_key,
+            // A transcript written before ENG-477 records no step, generation or manifest: it
+            // belongs to the parked step as it is now.
+            writtenBy: tj.stepKey ?? null,
             transcript: tj.transcript,
-            // A transcript written before ENG-477 has no generation and no manifest: it belongs to
-            // the parked step as it is now.
             generation: tj.generation ?? parkedStep.generation,
             manifest: tj.manifest ?? null,
           };

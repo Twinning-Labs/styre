@@ -162,8 +162,8 @@ export function codeLoopback(
  *  so the rerun sees exactly this round's findings. A code review redesign (and review-resume's
  *  retry-plan when HEAD moved) also invalidates design:extract: the units are re-created and
  *  implemented again even when the plan comes back identical, with findings tied to a unit detached first
- *  (§6.1). Everything else in design follows from fingerprints. The later-stage resets (review,
- *  verify, merge) stay until ENG-475. */
+ *  (§6.1). Everything else in design follows from fingerprints. The resets of the later stages
+ *  (review, verify, merge) stay until ENG-475. */
 export function redesignLoopback(
   db: Database,
   ticketId: number,

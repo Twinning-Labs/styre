@@ -198,9 +198,10 @@ test(
       agentConfig: DEFAULT_AGENT_CONFIG,
       profile: t.profile,
       worktreeRoot: t.worktreeRoot,
-      // manifest null: a transcript written before ENG-477, kept as it is (spec §6.5)
+      // a transcript written before ENG-477 (no step, no manifest), kept as it is (spec §6.5)
       resumeContext: {
         stepKey: "design:dispatch",
+        writtenBy: null,
         transcript: "CARRIED-PARTIAL-OUTPUT",
         generation: 0,
         manifest: null,
@@ -228,6 +229,7 @@ test(
       worktreeRoot: t.worktreeRoot,
       resumeContext: {
         stepKey: "design:dispatch",
+        writtenBy: "design:dispatch",
         transcript: "CARRIED-PARTIAL-OUTPUT",
         generation: 0,
         manifest: { "profile.promptVars": "a digest no current input has" },
@@ -258,3 +260,34 @@ test("a redesign that does not invalidate design:dispatch, its feedback's consum
   expect(getTicket(db, ticketId)?.stage).toBe(stage);
   db.close();
 });
+
+test(
+  "a transcript written by another step than the one parked is withheld, without a note (spec §6.5)",
+  async () => {
+    const t = makeDesignTicket({ script: { planFindings: () => [] } });
+    const calls = newCalls();
+    const registry = buildDispatchRegistry({
+      runner: scriptedRunner(t.script, calls),
+      agentConfig: DEFAULT_AGENT_CONFIG,
+      profile: t.profile,
+      worktreeRoot: t.worktreeRoot,
+      // design:review's partial output, found while design:dispatch is the parked step; no
+      // manifest, so the inputs alone could not tell
+      resumeContext: {
+        stepKey: "design:dispatch",
+        writtenBy: "design:review",
+        transcript: "CARRIED-PARTIAL-OUTPUT",
+        generation: 0,
+        manifest: null,
+      },
+    });
+    await driveUntil({ ...t, registry }, atStep("checks:dispatch"));
+    const prompts = calls.prompts.map((p) => p.prompt);
+    expect(prompts.length).toBeGreaterThan(0);
+    for (const p of prompts) expect(p).not.toContain("CARRIED-PARTIAL-OUTPUT");
+    expect(listEvents(t.db, t.ticketId).filter((e) => e.reason === "carryover-dropped")).toEqual(
+      [],
+    );
+  },
+  STEP_TEST_TIMEOUT_MS,
+);
