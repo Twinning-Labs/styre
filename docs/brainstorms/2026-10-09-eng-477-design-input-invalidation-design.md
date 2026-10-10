@@ -566,28 +566,30 @@ a newer Styre, an unknown shape, older than v7) is not treated as damaged: `ls` 
 reason, and `styre clean <ident>` refuses it (exit 65), pointing at the Styre that wrote it or at
 removing the folder by hand.
 
-(Operator ruling, 2026-10-10, later the same day) ENG-477 adds no new way to delete anything. A
-checkpoint that cannot be read (damaged, or no ticket recorded) is listed by `ls` with the reason, and
+(Operator ruling, 2026-10-10, later the same day; cut back the same day) ENG-477 adds no new way to
+delete anything, and its additions to `clean` and `ls` are only what it needs. A checkpoint that
+cannot be read (damaged, or no ticket recorded) is listed by `ls` with the reason, and
 `styre clean <ident>` refuses it exactly as it refuses a schema it cannot use: exit 65, nothing
-removed. After the headline it prints a block that is safe to paste whole or in any part: every line
-is a shell comment (the reason, the checkpoint folder, the worktrees that look like the run's, and,
-for a schema it cannot use, first that the Styre that wrote it keeps the paused work) except the
-commands that remove the run by hand or start it over, whose arguments are shell quoted.
-`git worktree remove` refuses a worktree that holds uncommitted or untracked work; Styre never prints
-`--force`, and what to do with that work is the operator's decision. `--purge` refuses the same way
-and `clean --all` skips both kinds. A checkpoint folder without its `run.db` stays "no styre effort"
-(exit 64), as before. Safe removal of such checkpoints is a follow up ticket.
+removed. The refusal names, as plain text, the reason, the checkpoint folder and the worktrees that
+look like the run's, prints no shell command, and points at the docs, which describe the removal by
+hand; for a schema it cannot use it says first that the Styre that wrote the checkpoint keeps the
+paused work. `--purge` refuses the same way and `clean --all` skips both kinds. `ls` and
+`clean --all` reach exactly the folders they reach today (two levels under the state folder,
+symbolic links followed as today); a checkpoint folder without its `run.db` stays "no styre effort"
+(exit 64), as before. Listing nested slugs and printing removal commands are ENG-491; safe removal
+of such checkpoints is a follow up ticket.
 
 (Operator ruling, 2026-10-10, on names) An ident is one folder name: not empty, not `.` or `..`, and
 with no `/`, `\` or NUL. A slug may contain `/` and then nests, as `conventions.md` documents; each
 part between slashes must be a folder name by the same rule, so `team/app` is accepted and `team/..`,
 `/abs`, `a//b` and `a/./b` are refused. One check applies wherever a checkpoint path is built, before
 it is built: `styre run` (fresh and `--resume`: the `--slug` flag, a slug derived from the
-repository, the profile's own slug, and the ticket's ident), `styre clean`, and `styre setup`, which
-therefore never writes a profile whose slug `run` would refuse. A name given on the command line or
-derived from the repository exits 64; a slug read from a profile file exits 78. As a second line of
-defence the resolved checkpoint path must stay inside the state folder. `ls` lists checkpoints under
-nested slugs.
+repository, the profile's own slug, and the ticket's ident), `styre clean` (including `--all`), and
+`styre setup`, which therefore never writes a profile whose slug `run` would refuse. A name given on
+the command line or derived from the repository exits 64; a slug read from a profile file exits 78.
+As a second line of defence the resolved checkpoint path must stay inside the state folder. A run
+under a nested slug works (`run`, `--resume`, `clean <ident>`), but `ls` and `clean --all` do not
+list it yet (ENG-491).
 
 ## 8. Testing
 
