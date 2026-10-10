@@ -21,22 +21,22 @@ afterEach(() => {
   for (const h of harnesses.splice(0)) h.cleanup();
 });
 
-const inputInvalidations = (h: DesignHarness): string[] =>
+interface Invalidation {
+  event: string;
+  stepKeys: string[];
+  cause: string;
+  changed: string[];
+}
+const invalidations = (h: DesignHarness): Invalidation[] =>
   h.read((db, id) =>
     listEvents(db, id)
       .filter((e) => e.reason === "invalidated")
-      .map(
-        (e) =>
-          JSON.parse(e.payload_json ?? "{}") as {
-            event: string;
-            stepKeys: string[];
-            cause: string;
-            changed: string[];
-          },
-      )
-      .filter((p) => p.cause === "inputs")
-      .flatMap((p) => p.stepKeys),
+      .map((e) => JSON.parse(e.payload_json ?? "{}") as Invalidation),
   );
+const inputInvalidations = (h: DesignHarness): string[] =>
+  invalidations(h)
+    .filter((p) => p.cause === "inputs")
+    .flatMap((p) => p.stepKeys);
 const AGENT_STEPS: Record<string, ScriptStep | null> = {
   provision: null,
   "design:dispatch": "design:dispatch",
@@ -122,6 +122,9 @@ describe("§8.1: each input reruns exactly its dependants", () => {
         c.edit(h);
         expect(await h.resume()).toBe(75);
         expect(inputInvalidations(h).sort()).toEqual([...c.reruns].sort());
+        // and nothing invalidated for any other cause (feedback, a recreated worktree, a touched
+        // manifest): in place, an edit alone reruns only what reads it
+        expect(invalidations(h).filter((p) => p.cause !== "inputs")).toEqual([]);
         for (const [key, agent] of Object.entries(AGENT_STEPS)) {
           if (agent === null) continue;
           // design:size calls an agent only with grading on, which is the one case that reruns it
@@ -189,6 +192,11 @@ test(
     db.close();
     expect(await h.resume({ script })).toBe(75);
     expect(inputInvalidations(h)).toContain("design:review"); // the edit took effect in design
+    const review = invalidations(h).filter(
+      (p) => p.cause === "inputs" && p.stepKeys.includes("design:review"),
+    );
+    expect(review).toHaveLength(1);
+    expect(review[0]?.changed).toContain("profile.promptVars"); // the recorded edit, named
   },
   HARNESS_TEST_TIMEOUT_MS,
 );
@@ -247,6 +255,49 @@ test(
 );
 
 test(
+  "§8.7: a redesign's findings expire when design:dispatch reruns for its inputs on a resume",
+  async () => {
+    const script = {
+      plan: (n: number) => `Plan body, version ${n}`,
+      planFindings: (n: number): ScriptFinding[] =>
+        n === 1
+          ? [
+              {
+                severity: "critical",
+                category: "feasibility",
+                location: "plan:a",
+                rationale: "ROUND-ONE",
+                factors: null,
+                deferral_candidate: false,
+                work_unit_seq: null,
+              },
+            ]
+          : [],
+    };
+    const h = make();
+    // review 1 blocks, the redesign reruns design:dispatch with ROUND-ONE, review 2 is clean, and
+    // design finishes: paused at checks:dispatch
+    expect(await h.fresh({ script })).toBe(75);
+    expect(h.calls.counts["design:dispatch"]).toBe(2);
+    h.editProfile((p) => {
+      p.promptVars = { stack: "ruby", tone: "terse" };
+    });
+    expect(await h.resume({ script })).toBe(75);
+    expect(inputInvalidations(h)).toContain("design:dispatch");
+    const prompts = h.calls.prompts
+      .filter((p) => p.step === "design:dispatch")
+      .map((p) => p.prompt);
+    expect(prompts).toHaveLength(3);
+    // call 2: the redesign's own generation gets its findings
+    expect(prompts[1]).toContain("ROUND-ONE");
+    // call 3: a new generation for changed inputs: the old redesign's findings never return
+    expect(prompts[2]).not.toContain("ROUND-ONE");
+    expect(prompts[2]).not.toContain("Prior plan-review feedback");
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+test(
   "§8.7: a run paused in design:review keeps its carryover when nothing changed",
   async () => {
     const script = {
@@ -295,7 +346,7 @@ test(
 );
 
 test(
-  "§8.9: an extract invalidated by an edit clears every unit and needs_docs, keeps the plan finding detached, and leaves history",
+  "§8.9: an extract invalidated by an edit recreates its units once, keeps the plan finding detached, and leaves history",
   async () => {
     const h = make();
     const script = {
@@ -316,6 +367,9 @@ test(
       p.runtimeContext = { ...(p.runtimeContext as object), topology: { type: "web-service" } };
     });
     expect(await h.resume({ script })).toBe(75);
+    // That the invalidate transaction itself clears the units (and the track, for design:size) is
+    // shown at the crash points of design-crash-e2e.test.ts; clearing a set needs_docs and
+    // reconcile units, which this script never makes, by test/daemon/invalidate.test.ts.
     h.read((db, id) => {
       const units = listUnits(db, id);
       expect(units.map((u) => u.seq)).toEqual([1, 2]);

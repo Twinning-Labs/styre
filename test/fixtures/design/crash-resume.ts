@@ -6,8 +6,10 @@
 //   after-commit     the step's success committed (seen at the start of the next step)
 //   after-invalidate the step's invalidate transaction committed; the step is pending in its new
 //                    generation and has not started (seen when advance.ts resolves its handler)
-// XDG_STATE_HOME, XDG_CONFIG_HOME and TMPDIR come from the parent; no real agent runs. Bounded:
-// it exits on its own after 60 s, or as soon as its parent is gone.
+// Its environment is the minimal one the parent gives it (PATH, HOME inside the parent's temp folder,
+// the parent's temp XDG_STATE_HOME, XDG_CONFIG_HOME and TMPDIR, STYRE_TELEMETRY=0; no credentials)
+// and it runs in that temp folder; no real agent runs. Bounded: it exits on its own after 60 s, or
+// as soon as its parent is gone.
 import type { Database } from "bun:sqlite";
 import { readFileSync, writeFileSync } from "node:fs";
 import { loadRunProfile } from "../../../src/cli/load-profile.ts";
@@ -19,7 +21,12 @@ import { getByKey } from "../../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../../src/dispatch/handlers.ts";
 import { fakeForge } from "../../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../../src/integrations/adapters/fake-issue-tracker.ts";
-import { defaultScript, newCalls, scriptedRunner } from "../../helpers/design-script.ts";
+import {
+  type ScriptFinding,
+  defaultScript,
+  newCalls,
+  scriptedRunner,
+} from "../../helpers/design-script.ts";
 
 interface CrashSpec {
   profilePath: string;
@@ -28,6 +35,9 @@ interface CrashSpec {
   step: string;
   point: "before-commit" | "after-commit" | "after-invalidate";
   readyFile: string;
+  /** What every design:review call of the scripted agent files (the parent's script files the
+   *  same), so a crash in design:review shows whether its findings were written once. */
+  planFindings: ScriptFinding[];
 }
 const spec = JSON.parse(readFileSync(process.argv[2] ?? "", "utf8")) as CrashSpec;
 
@@ -111,7 +121,10 @@ await resumeRun(
     buildRegistry: (resumeContext, wiring) =>
       new CrashRegistry(
         buildDispatchRegistry({
-          runner: scriptedRunner(defaultScript({ ident: spec.ident }), newCalls()),
+          runner: scriptedRunner(
+            defaultScript({ ident: spec.ident, planFindings: () => spec.planFindings }),
+            newCalls(),
+          ),
           agentConfig: DEFAULT_AGENT_CONFIG,
           ...wiring,
           resumeContext,
