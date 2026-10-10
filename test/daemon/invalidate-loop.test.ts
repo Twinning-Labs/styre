@@ -2,13 +2,13 @@
 import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
-import { captureSnapshot } from "../../src/daemon/design-inputs.ts";
+import { captureOtherActiveTickets, captureSnapshot } from "../../src/daemon/design-inputs.ts";
 import { invalidateSteps } from "../../src/daemon/invalidate.ts";
 import { type StepDescriptor, nextStepKey } from "../../src/daemon/resolver.ts";
 import { stoppedAtPlanReviewGate } from "../../src/daemon/review-resume.ts";
 import { appendEvent, listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import { latestDispatchForStep } from "../../src/db/repos/review-finding.ts";
-import { getTicket } from "../../src/db/repos/ticket.ts";
+import { getTicket, insertTicket } from "../../src/db/repos/ticket.ts";
 import { pendingLeftoverChecks } from "../../src/util/process/leftovers.ts";
 import { DesignHarness, HARNESS_TEST_TIMEOUT_MS } from "../helpers/design-harness.ts";
 import {
@@ -238,6 +238,43 @@ test(
     });
   },
   HARNESS_TEST_TIMEOUT_MS,
+);
+
+test(
+  "another active ticket, prepared at each restart by the shared helper, restarts its count there (ruling 2026-10-10)",
+  async () => {
+    // `t` stands for another active ticket of a reused database or a checkpoint; the run's own
+    // ticket is a second one in the same project. Both a run on a reused --db and a resume prepare
+    // the other tickets through captureOtherActiveTickets, which is called here as they call it.
+    const t = makeDesignTicket();
+    const projectId = getTicket(t.db, t.ticketId)?.project_id ?? -1;
+    const own = insertTicket(t.db, { projectId, ident: "ENG-2" });
+    expect(own).not.toBe(t.ticketId);
+    await driveUntil(t, atStep("checks:dispatch"));
+    const restart = (i: number) =>
+      captureOtherActiveTickets(t.db, own, {
+        profile: { ...t.profile, promptVars: { stack: "ruby", pass: String(i) } },
+        unusableComponents: [],
+        nonPrimaryComponents: [],
+        config: t.config,
+      });
+    // four restarts, each with a changed input: each is an invalidation, never the guard
+    for (let i = 1; i <= 4; i++) {
+      restart(i);
+      expect(nextStepKey(t.db, t.ticketId)).toEqual(INVALIDATE_DISPATCH);
+      await driveUntil(t, atStep("checks:dispatch"));
+    }
+    expect(inputsInvalidations(t)).toHaveLength(4);
+    const notes = (id: number) =>
+      listEvents(t.db, id).filter((e) => e.reason === "reused-database");
+    expect(notes(t.ticketId)).toHaveLength(4);
+    expect(notes(own)).toEqual([]);
+    // the count runs from the latest restart: one so far, two more allowed, the next escalates
+    await invalidateForInputs(t, 5, 2);
+    unstable(t, 7);
+    expect(nextStepKey(t.db, t.ticketId)).toEqual(LOOP_ESCALATION);
+  },
+  STEP_TEST_TIMEOUT_MS,
 );
 
 test(

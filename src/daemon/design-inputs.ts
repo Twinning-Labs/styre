@@ -107,17 +107,34 @@ export function captureSnapshot(
   return { changed };
 }
 
+/** The mark of a run started again on an existing database without a `resumed` event of its
+ *  own: the invalidate loop guard counts from the latest one (spec §6.6, ruling 2026-10-09). */
+export function noteReusedDatabase(db: Database, ticketId: number): void {
+  appendEvent(db, {
+    ticketId,
+    kind: "note",
+    reason: "reused-database",
+    payload: { event: "reused-database" },
+  });
+}
+
 /** Operator rulings, 2026-10-10 (spec §4): a run on a reused --db, and a resume, drive every ready
  *  ticket in the database with this run's registry and so with this run's inputs. Each other active
  *  ticket gets the same snapshot, with the same note, before any step runs. Waiting tickets are left
- *  alone, and no other ticket gets a starting commit: that stays the run's own ticket's. */
+ *  alone, and no other ticket gets a starting commit: that stays the run's own ticket's.
+ *  Before its snapshot, each gets a `reused-database` note: it is driven again, its inputs
+ *  rewritten, and the `resumed` event of a resume is the run's own ticket's alone, so without the
+ *  note an input that changes at every restart would trip its loop guard on the fourth (ruling,
+ *  2026-10-10). */
 export function captureOtherActiveTickets(
   db: Database,
   ticketId: number,
   sources: SnapshotSources,
 ): void {
   for (const other of listActiveTickets(db)) {
-    if (other.id !== ticketId) captureSnapshot(db, other.id, sources);
+    if (other.id === ticketId) continue;
+    noteReusedDatabase(db, other.id);
+    captureSnapshot(db, other.id, sources);
   }
 }
 

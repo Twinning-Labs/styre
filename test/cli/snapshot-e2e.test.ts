@@ -491,6 +491,45 @@ test(
 );
 
 test(
+  "each resume notes the other active tickets reused-database, never the run's own ticket or a waiting one, and four resumes with a changed input trip no loop guard (ruling 2026-10-10)",
+  async () => {
+    const h = make();
+    expect(await h.fresh()).toBe(75); // needs_you at checks:dispatch
+    // seedOtherTickets is the stated exception (see its comment): the checkpoint stands for one a
+    // run on a reused --db wrote
+    const other = seedOtherTickets(h.dbPath());
+    for (let i = 1; i <= 4; i++) {
+      h.editProfile((p) => {
+        p.promptVars = { stack: "ruby", pass: String(i) };
+      });
+      expect(await h.resume()).toBe(75);
+    }
+    h.read((db, id) => {
+      const reused = (t: number) =>
+        listEvents(db, t)
+          .filter((e) => e.reason === "reused-database")
+          .map((e) => [e.kind, JSON.parse(e.payload_json ?? "null")]);
+      const note = ["note", { event: "reused-database" }];
+      expect(reused(other.active)).toEqual([note, note, note, note]);
+      expect(reused(id)).toEqual([]); // its restart is its `resumed` event
+      expect(listEvents(db, id).filter((e) => e.kind === "resumed")).toHaveLength(4);
+      expect(reused(other.waiting)).toEqual([]);
+      expect(listEvents(db, other.waiting)).toEqual([]);
+      // the other ticket's inputs changed at every resume after its first snapshot
+      expect(
+        listEvents(db, other.active).filter((e) => e.reason === "inputs-changed"),
+      ).toHaveLength(3);
+      for (const t of [id, other.active]) {
+        expect(
+          listEvents(db, t).filter((e) => e.signature?.startsWith("invalidate-loop:")),
+        ).toEqual([]);
+      }
+    });
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+test(
   "a resume adopts the other active tickets of its checkpoint, and leaves the waiting ones alone (ruling 2026-10-10)",
   async () => {
     const h = make();

@@ -682,8 +682,10 @@ export async function resumeRun(
     })();
     // Operator ruling, 2026-10-10 (spec §4): a checkpoint written by a run on a reused --db holds
     // that database's other active tickets, which this resume's loop drives with this registry. Each
-    // gets the same snapshot, with the same note; no starting commit and no toolchain advisory (that
-    // stays this run's own ticket's, above). Waiting tickets are left alone.
+    // gets the same snapshot, with the same note, after a `reused-database` note (the `resumed`
+    // event above is this run's own ticket's; for the others the checkpoint is a reused database);
+    // no starting commit and no toolchain advisory (that stays this run's own ticket's, above).
+    // Waiting tickets are left alone.
     captureOtherActiveTickets(db, ticketId, {
       profile: runProfile,
       unusableComponents: toolchain.unusable,
