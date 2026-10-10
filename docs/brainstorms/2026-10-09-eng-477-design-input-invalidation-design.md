@@ -449,6 +449,16 @@ a defect such as an unstable digest.
 reused `--db` writes when its ticket already exists: that path rewrites the inputs as a resume does (§4)
 but appends no `resumed` event.
 
+(Operator ruling, 2026-10-10) A resume also writes that note on every other active ticket in the
+checkpoint, whose inputs it rewrites (§4) without a `resumed` event of their own.
+
+(Operator ruling, 2026-10-10) The count also starts again at every design loopback event (a redesign).
+A redesign is a legitimate upstream change with its own bound, the review budget, and it changes the
+plan, which invalidates each reader of the plan once. Without this, a restart that changes an input of
+`design:extract`, followed by the three redesigns the review budget allows, fired the guard with a wrong
+diagnosis where the review budget's own escalation is the right stop. An unstable digest writes no
+loopback, so the guard still catches it.
+
 ### 6.7 The general rule for feedback loops (for every stage)
 
 This ticket applies it to the design stage. ENG-475 applies the same rule to the other stages.
