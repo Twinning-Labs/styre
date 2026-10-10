@@ -154,25 +154,30 @@ button:disabled { opacity: 0.4; cursor: default; }
 .grid { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 14px; align-items: start; }
 @media (max-width: 1100px) { .grid { grid-template-columns: minmax(0, 1fr); } }
 .canvas {
-  position: relative; height: clamp(480px, calc(100vh - 200px), 920px);
+  position: relative; height: clamp(480px, calc(100vh - 150px), 920px);
   background: var(--canvas); border: 1px solid var(--line); border-radius: 16px; overflow: hidden;
 }
 @media (max-width: 700px) { .canvas { height: 68vh; min-height: 420px; } }
 #diagram { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
 #diagram.panning { cursor: grabbing; }
+.stage { min-width: 0; }
+/* The legend sits above the canvas, not over it, so it never hides part of the drawing. */
 .legend {
-  position: absolute; left: 10px; top: 10px; max-width: calc(100% - 84px);
-  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
-  font-size: 12px; color: var(--muted);
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+  font-size: 12.5px; color: var(--muted); margin-bottom: 10px;
 }
-.legend summary { cursor: pointer; padding: 7px 11px; font-weight: 600; color: var(--text); list-style: none; }
+.legend summary { cursor: pointer; padding: 8px 12px; font-weight: 650; color: var(--text); list-style: none; }
 .legend summary::-webkit-details-marker { display: none; }
 .legend summary::before { content: "+"; display: inline-block; width: 1em; color: var(--faint); }
 .legend[open] summary::before { content: "\2212"; }
-.legend .rows { padding: 0 12px 10px; display: grid; gap: 4px 14px; grid-template-columns: repeat(2, max-content); }
-.legend .row { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.legend .lg-body { padding: 0 12px 10px; display: grid; gap: 8px; }
+.legend .lg-row { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.legend .lg-title { font-weight: 650; color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.85em; min-width: 6.5em; }
+.legend .fam { display: inline-flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; padding: 3px 10px; border-radius: 999px; background: var(--surface-2); }
+.legend .item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.legend .shape-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; padding: 2px 6px; }
 .legend svg { flex: none; overflow: visible; }
-.legend .hint-line { grid-column: 1 / -1; color: var(--text); font-weight: 600; padding-top: 4px; }
+.legend .hint-line { margin: 0; color: var(--text); font-weight: 600; }
 .zoom {
   position: absolute; right: 10px; top: 10px; display: flex; flex-direction: column;
   background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); overflow: hidden;
@@ -182,7 +187,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 .zoom button:hover { background: var(--surface-2); }
 .hint { position: absolute; left: 12px; bottom: 8px; margin: 0; font-size: 12px; color: var(--faint); pointer-events: none; }
 .caption {
-  position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); max-width: calc(100% - 24px);
+  position: absolute; left: 12px; right: 12px; bottom: 12px; margin: 0 auto; width: fit-content; max-width: calc(100% - 24px);
   display: flex; align-items: baseline; gap: 10px; padding: 8px 14px;
   background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
   font-size: 13.5px; line-height: 1.35;
@@ -251,6 +256,8 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
 .n-entry .pip { fill: var(--entry-text); }
 .n-entry text { fill: var(--entry-text); font-size: 14px; font-weight: 680; }
 .n-pseudo .shape { fill: var(--dot); }
+.n-hub .shape { fill: var(--surface); stroke: var(--dot); stroke-width: 2.2; }
+.n-hub text { fill: var(--muted); font-size: 12.5px; font-weight: 600; }
 .n-pseudo .hit { fill: transparent; }
 .n-pseudo text { fill: var(--muted); font-size: 12.5px; font-weight: 500; }
 .n-gate .shape, .n-guard .shape { fill: var(--surface); stroke: var(--state-line); stroke-width: 1.6; }
@@ -280,6 +287,8 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
 #diagram.focused .node.ahead { opacity: 0.55; }
 .fx .edge.out { stroke-width: 3.2; }
 .fx .edge.in { stroke-width: 1.8; opacity: 0.5; }
+.fx .edge.pick { stroke-width: 3.2; opacity: 1; }
+.fx .leader { fill: none; stroke: var(--faint); stroke-width: 1.1; stroke-dasharray: 2 3; }
 .fx .edge.sc-done { stroke-width: 3; }
 .fx .edge.sc-ahead { stroke-width: 2.2; opacity: 0.4; }
 .fx .edge.sc-current { stroke-width: 4.6; }
@@ -319,6 +328,8 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
 .fx .edge.sc-current { animation: pulse 1.5s ease-in-out infinite; }
 .fx .halo { animation: halo 1.5s ease-in-out infinite; }
 .node.current .ring { animation: ring 1.5s ease-in-out infinite; }
+/* Still: no animation at all (reduced motion, and the measurement script). */
+#diagram.still .node, #diagram.still .fx * { animation: none !important; }
 @media (prefers-reduced-motion: reduce) {
   .node.pop, .fx .edge.draw, .fx .appear, .fx .edge.sc-current, .fx .halo, .node.current .ring { animation: none !important; }
   .fx .edge.draw:not(.dash) { stroke-dasharray: none; }
@@ -352,21 +363,27 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
 </div>
 
 <div class="grid">
+  <div class="stage">
+  <details class="legend" id="legend" open>
+    <summary>Legend</summary>
+    <div class="lg-body">
+      <div class="lg-row" id="legend-edges"><span class="lg-title">Transitions</span></div>
+      <div class="lg-row" id="legend-shapes"><span class="lg-title">Shapes</span></div>
+      <p class="hint-line" id="legend-note" hidden>Bold: leaves the selected state. Light: arrives at it.</p>
+    </div>
+  </details>
   <div class="canvas" id="canvas" role="region" aria-label="State diagram. Each state is a button; the panel and the state list below carry the same information as text.">
     <svg id="diagram" xmlns="http://www.w3.org/2000/svg" role="group" aria-labelledby="diagram-title">
       <title id="diagram-title">Ticket lifecycle state diagram</title>
     </svg>
-    <details class="legend" id="legend" open>
-      <summary>Legend</summary>
-      <div class="rows" id="legend-rows"></div>
-    </details>
-    <div class="zoom" role="group" aria-label="Zoom">
+    <div class="zoom" id="zoom-box" role="group" aria-label="Zoom">
       <button type="button" id="zoom-in" aria-label="Zoom in">+</button>
       <button type="button" id="zoom-out" aria-label="Zoom out">&#8722;</button>
       <button type="button" id="fit" aria-label="Fit the whole diagram">Fit</button>
     </div>
     <p class="hint" id="hint">Drag to pan, wheel or pinch to zoom, Escape clears</p>
     <div class="caption" id="caption" aria-hidden="true" hidden></div>
+  </div>
   </div>
   <aside class="panel" id="panel" aria-live="polite" aria-label="Details"></aside>
 </div>
@@ -4848,7 +4865,7 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   ]
  },
  "drawing": {
-  "note": "How the page draws the data. Sizes are width and height by state kind; gap is the least space between two nodes; lanes are x, y, width and height. The escalation states are drawn as the one Escalated node: the edges into each are labelled with its reason.",
+  "note": "How the page draws the data. Sizes are width and height by state kind; hubs are helpers drawn as a larger circle (their own width and height), where edges meet at ports spread around the circle; gap is the least space between two nodes; lanes are x, y, width and height. The escalation states are drawn as the one Escalated node: the edges into each are labelled with its reason.",
   "canvas": [
    3000,
    1080
@@ -4894,6 +4911,16 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
    "escalated": [
     236,
     70
+   ]
+  },
+  "hubs": {
+   "resolve.stage": [
+    96,
+    96
+   ],
+   "implement.pick": [
+    116,
+    116
    ]
   },
   "lanes": [
@@ -5528,7 +5555,10 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   var SVGNS = "http://www.w3.org/2000/svg";
   var D = data.drawing;
   var ESC = D.escalated;
+  var HUBS = D.hubs || {};
   var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  var still = false; // no animation and instant camera moves (set by the measurement script)
+  function calm() { return still || reduceMotion.matches; }
 
   // ------------------------------------------------------------------ the data, indexed
   var states = {};
@@ -5564,17 +5594,15 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   // Five colour families, each with one meaning; dashes tell the kinds inside a family apart.
   var FAMILY = { forward: "flow", advance: "flow", outcome: "flow", refuse: "red", escalate: "red", loopback: "amber", retry: "amber", pause: "violet", resume: "violet", invalidate: "teal" };
   var DASHED = { refuse: true, retry: true, resume: true };
-  var FAMILY_WORDS = [
-    ["flow", false, "next step, stage advance, outcome"],
-    ["red", false, "escalate"],
-    ["red", true, "refused (the run never starts)"],
-    ["amber", false, "loopback"],
-    ["amber", true, "retry"],
-    ["violet", false, "pause"],
-    ["violet", true, "resume"],
-    ["teal", false, "invalidate (inputs changed)"]
+  var FAMILIES = [
+    ["flow", [[false, "next step, stage advance, outcome"]]],
+    ["red", [[false, "escalate"], [true, "refused (the run never starts)"]]],
+    ["amber", [[false, "loopback"], [true, "retry"]]],
+    ["violet", [[false, "pause"], [true, "resume"]]],
+    ["teal", [[false, "invalidate (inputs changed)"]]]
   ];
   function isPseudo(id) { return states[id] && states[id].kind === "pseudo"; }
+  function isHub(id) { return !!HUBS[id]; }
 
   // ------------------------------------------------------------------ small DOM helpers
   function el(name, attrs, parent) {
@@ -5601,20 +5629,25 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
 
   // ------------------------------------------------------------------ geometry
   function pos(id) { return data.layout[id]; }
-  function size(id) { return D.sizes[nodeInfo[id].kind]; }
+  function size(id) { return HUBS[id] || D.sizes[nodeInfo[id].kind]; }
+  /** The outline a node is drawn with: its kind, or `hub` for a helper drawn as a hub. */
+  function shapeKind(id) { return isHub(id) ? "hub" : nodeInfo[id].kind; }
+  function hubRadius(w, hgt) { return Math.min(w, hgt) / 2 - 4; }
+  function circle(r) { return "M" + (-r) + ",0 a" + r + "," + r + " 0 1,0 " + 2 * r + ",0 a" + r + "," + r + " 0 1,0 " + (-2 * r) + ",0 Z"; }
   /** The outline of a node kind, centred on 0,0, grown by `pad`: a path d. */
   function shapePath(kind, w, hgt, pad) {
     var x = w / 2 + pad, y = hgt / 2 + pad, c;
     if (kind === "gate") return "M0," + (-y) + " L" + x + ",0 L0," + y + " L" + (-x) + ",0 Z";
     if (kind === "guard") {
-      c = 16 + pad * 0.6;
+      c = Math.min(16, hgt / 3) + pad * 0.6;
       return "M" + (-x + c) + "," + (-y) + " L" + (x - c) + "," + (-y) + " L" + x + "," + (-y + c) + " L" + x + "," + (y - c) + " L" + (x - c) + "," + y + " L" + (-x + c) + "," + y + " L" + (-x) + "," + (y - c) + " L" + (-x) + "," + (-y + c) + " Z";
     }
     if (kind === "wait") {
-      c = 24 + pad * 0.4;
+      c = Math.min(24, w / 5) + pad * 0.4;
       return "M" + (-x + c) + "," + (-y) + " L" + (x - c) + "," + (-y) + " L" + x + ",0 L" + (x - c) + "," + y + " L" + (-x + c) + "," + y + " L" + (-x) + ",0 Z";
     }
-    if (kind === "pseudo") { var r = 7 + pad; return "M" + (-r) + ",0 a" + r + "," + r + " 0 1,0 " + 2 * r + ",0 a" + r + "," + r + " 0 1,0 " + (-2 * r) + ",0 Z"; }
+    if (kind === "pseudo") return circle(7 + pad);
+    if (kind === "hub") return circle(hubRadius(w, hgt) + pad);
     var rad = kind === "step" ? 9 + pad : y; // states and entries are pills; steps are small boxes
     return "M" + (-x + rad) + "," + (-y) + " H" + (x - rad) + " A" + rad + "," + rad + " 0 0 1 " + x + "," + (-y + rad) + " V" + (y - rad) + " A" + rad + "," + rad + " 0 0 1 " + (x - rad) + "," + y + " H" + (-x + rad) + " A" + rad + "," + rad + " 0 0 1 " + (-x) + "," + (y - rad) + " V" + (-y + rad) + " A" + rad + "," + rad + " 0 0 1 " + (-x + rad) + "," + (-y) + " Z";
   }
@@ -5622,10 +5655,11 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   function insideShape(kind, w, hgt, dx, dy) {
     var x = Math.abs(dx), y = Math.abs(dy), hw = w / 2, hh = hgt / 2;
     if (kind === "pseudo") return x * x + y * y <= 49;
+    if (kind === "hub") { var hr = hubRadius(w, hgt); return x * x + y * y <= hr * hr; }
     if (kind === "gate") return x / hw + y / hh <= 1;
     if (x > hw || y > hh) return false;
-    if (kind === "guard") return x + y <= hw + hh - 16;
-    if (kind === "wait") return x <= hw - 24 * (y / hh);
+    if (kind === "guard") return x + y <= hw + hh - Math.min(16, hgt / 3);
+    if (kind === "wait") return x <= hw - Math.min(24, w / 5) * (y / hh);
     var r = kind === "step" ? 9 : hh;
     if (x <= hw - r || y <= hh - r) return true;
     var cx = x - (hw - r), cy = y - (hh - r);
@@ -5633,7 +5667,7 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   }
   /** Where the ray from a node's centre toward `toward` leaves its outline. */
   function boundary(id, toward) {
-    var c = pos(id), sz = size(id), kind = nodeInfo[id].kind;
+    var c = pos(id), sz = size(id), kind = shapeKind(id);
     var dx = toward[0] - c[0], dy = toward[1] - c[1], len = Math.sqrt(dx * dx + dy * dy) || 1;
     var ux = dx / len, uy = dy / len, lo = 0, hi = Math.max(sz[0], sz[1]);
     for (var i = 0; i < 22; i++) {
@@ -5642,37 +5676,69 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
     }
     return [c[0] + ux * hi, c[1] + uy * hi];
   }
-  function quadAt(p0, c, p1, t) {
-    var u = 1 - t;
-    return [u * u * p0[0] + 2 * u * t * c[0] + t * t * p1[0], u * u * p0[1] + 2 * u * t * c[1] + t * t * p1[1]];
+  /** The half extents of a node's outline (a helper dot or hub by its circle). */
+  function halfExtent(id) {
+    var sz = size(id), kind = shapeKind(id);
+    if (kind === "pseudo") return [7, 7];
+    if (kind === "hub") { var r = hubRadius(sz[0], sz[1]); return [r, r]; }
+    return [sz[0] / 2, sz[1] / 2];
   }
-  /** The path of a bundle: a curve between two nodes (bent by `bend`, to the left of travel), or a
-   *  loop on the left of one node (`loop` counts loops already there). */
-  function route(from, to, bend, loop) {
+  var LOOP_SIDES = ["left", "right", "top", "bottom"];
+  /** The path of a bundle: a curve between two nodes (bent by `bend`, to the left of travel, with
+   *  fixed ends at a hub's ports), or a loop on one side of a node: the first loop on its left, the
+   *  next on its right, then above and below, so loops never stack on one side. */
+  function route(from, to, bend, loop, ports) {
     if (from === to) {
-      var c = pos(from), sz = size(from), kind = nodeInfo[from].kind;
-      var left = kind === "pseudo" ? c[0] - 7 : c[0] - sz[0] / 2 + (kind === "wait" ? 24 : kind === "gate" ? sz[0] / 2 - 12 : 0);
-      var reach = 44 + loop * 22, spread = 26 + loop * 20;
-      var p0 = [left + 1, c[1] - 8], p1 = [left + 1, c[1] + 8];
-      var k1 = [left - reach, c[1] - spread], k2 = [left - reach, c[1] + spread];
-      var top = [left - reach * 0.62, c[1] - spread * 0.62];
-      return { d: "M" + p0 + " C" + k1 + " " + k2 + " " + p1, mid: [top[0] - 6, top[1] - 2], near: [top[0] - 6, top[1] - 2], badge: top, anchor: "end" };
+      var c = pos(from), he = halfExtent(from), side = LOOP_SIDES[loop % 4], reach = 46 + Math.floor(loop / 4) * 22;
+      var p0, p1, k1, k2, out;
+      if (side === "left" || side === "right") {
+        var sx = side === "left" ? -1 : 1, ex = c[0] + sx * he[0];
+        p0 = [ex, c[1] - 8]; p1 = [ex, c[1] + 8];
+        k1 = [ex + sx * reach, c[1] - 26]; k2 = [ex + sx * reach, c[1] + 26];
+        out = [sx, 0];
+      } else {
+        var sy = side === "top" ? -1 : 1, ey = c[1] + sy * he[1];
+        p0 = [c[0] - 10, ey]; p1 = [c[0] + 10, ey];
+        k1 = [c[0] - 30, ey + sy * reach]; k2 = [c[0] + 30, ey + sy * reach];
+        out = [0, sy];
+      }
+      var tip = [0.125 * p0[0] + 0.375 * k1[0] + 0.375 * k2[0] + 0.125 * p1[0], 0.125 * p0[1] + 0.375 * k1[1] + 0.375 * k2[1] + 0.125 * p1[1]];
+      return { d: "M" + p0 + " C" + k1 + " " + k2 + " " + p1, loop: true, tip: tip, out: out };
     }
     var a = pos(from), b = pos(to);
     var dx = b[0] - a[0], dy = b[1] - a[1], len = Math.sqrt(dx * dx + dy * dy) || 1;
     var mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
     var ctrl = [mx + (dy / len) * bend, my - (dx / len) * bend];
-    var q0 = boundary(from, ctrl), q1 = boundary(to, ctrl);
-    return { d: "M" + q0 + " Q" + ctrl + " " + q1, mid: quadAt(q0, ctrl, q1, 0.5), badge: quadAt(q0, ctrl, q1, 0.5), near: quadAt(q0, ctrl, q1, 0.3) };
+    var q0 = ports && ports.from ? ports.from : boundary(from, ctrl);
+    var q1 = ports && ports.to ? ports.to : boundary(to, ctrl);
+    return { d: "M" + q0 + " Q" + ctrl + " " + q1, loop: false };
+  }
+  /** Keep the angles of the ports around a hub at least `gap` apart (radians), pushing neighbours
+   *  apart until they are. */
+  function spreadPorts(ps, gap) {
+    if (ps.length < 2) return;
+    gap = Math.min(gap, (2 * Math.PI) / ps.length);
+    var norm = function (a) { while (a < -Math.PI) a += 2 * Math.PI; while (a >= Math.PI) a -= 2 * Math.PI; return a; };
+    for (var iter = 0; iter < 200; iter++) {
+      ps.sort(function (p, q) { return p.a - q.a; });
+      var moved = false;
+      for (var i = 0; i < ps.length; i++) {
+        var p = ps[i], q = ps[(i + 1) % ps.length], d = q.a - p.a + (i === ps.length - 1 ? 2 * Math.PI : 0);
+        if (d < gap - 1e-6) { var push = (gap - d) / 2 + 1e-4; p.a = norm(p.a - push); q.a = norm(q.a + push); moved = true; }
+      }
+      if (!moved) break;
+    }
   }
 
-  /** Bundles: transitions drawn between the same two nodes, in the same family, dash and role, as one
-   *  path. Each item is {t, role, order}. */
-  function bundle(items) {
+  /** Bundles: transitions drawn between the same two nodes, in the same family and dash (and role,
+   *  unless `opts.byPath`), as one path. Each item is {t, role, order}. Edges meet a hub at ports
+   *  spread around its circle: each edge faces the node at its other end, an outgoing edge a little
+   *  to one side of that direction and an incoming one to the other, so arrowheads never pile up. */
+  function bundle(items, opts) {
     var map = {}, list = [];
     items.forEach(function (it) {
       var t = it.t, f = drawn(t.from), to = drawn(t.to);
-      var key = f + ">" + to + ">" + FAMILY[t.kind] + ">" + (DASHED[t.kind] ? 1 : 0) + ">" + (it.role || "");
+      var key = f + ">" + to + ">" + FAMILY[t.kind] + ">" + (DASHED[t.kind] ? 1 : 0) + (opts && opts.byPath ? "" : ">" + (it.role || ""));
       var b = map[key];
       if (!b) {
         b = map[key] = { key: key, from: f, to: to, family: FAMILY[t.kind], dashed: !!DASHED[t.kind], role: it.role || "", items: [] };
@@ -5680,17 +5746,37 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
       }
       b.items.push(it);
     });
+    var ports = {};
+    Object.keys(HUBS).forEach(function (hub) {
+      var touching = [];
+      list.forEach(function (b) {
+        if (b.from === b.to) return;
+        if (b.from === hub) touching.push({ b: b, end: "from", other: b.to });
+        if (b.to === hub) touching.push({ b: b, end: "to", other: b.from });
+      });
+      if (!touching.length) return;
+      var c = pos(hub), sz = size(hub), R = hubRadius(sz[0], sz[1]);
+      touching.forEach(function (p) {
+        var o = pos(p.other);
+        p.a = Math.atan2(o[1] - c[1], o[0] - c[0]) + (p.end === "from" ? -0.2 : 0.2);
+      });
+      spreadPorts(touching, 16 / R);
+      touching.forEach(function (p) {
+        (ports[p.b.key] = ports[p.b.key] || {})[p.end] = [c[0] + R * Math.cos(p.a), c[1] + R * Math.sin(p.a)];
+      });
+    });
     var pairs = {};
     list.forEach(function (b) { (pairs[b.from + ">" + b.to] = pairs[b.from + ">" + b.to] || []).push(b); });
+    var loops = {};
     list.forEach(function (b) {
+      if (b.from === b.to) { loops[b.from] = (loops[b.from] || 0) + 1; b.route = route(b.from, b.to, 0, loops[b.from] - 1); return; }
       var same = pairs[b.from + ">" + b.to], k = same.indexOf(b);
-      if (b.from === b.to) { b.route = route(b.from, b.to, 0, k); return; }
       var a = pos(b.from), c = pos(b.to);
       var len = Math.sqrt(Math.pow(c[0] - a[0], 2) + Math.pow(c[1] - a[1], 2));
       var reverse = !!pairs[b.to + ">" + b.from];
       var base = reverse ? 30 : len > 320 ? Math.min(90, len * 0.08) : 0;
       var bend = base + k * 28 * (base === 0 && k % 2 === 1 ? -1 : 1);
-      b.route = route(b.from, b.to, bend, 0);
+      b.route = route(b.from, b.to, bend, 0, ports[b.key]);
     });
     return list;
   }
@@ -5719,11 +5805,10 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   var nodeLayer = el("g", {}, world);
   var fxLabels = el("g", { "class": "fx", "aria-hidden": "true" }, world);
 
-  function drawBundle(layer, b, cls, extra) {
+  function drawBundle(layer, b, cls) {
     var p = el("path", { d: b.route.d, "class": "edge f-" + b.family + (b.dashed ? " dash" : "") + (cls ? " " + cls : ""), "marker-end": "url(#ah-" + b.family + ")" }, layer);
     var title = el("title", {}, p);
     title.textContent = b.items.map(function (it) { return it.t.label + ": " + plain(it.t.condition); }).join("\n");
-    if (extra) extra(p);
     return p;
   }
   function drawBase() {
@@ -5737,21 +5822,30 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   }
 
   // Nodes, in reading order (left to right, then top to bottom) so Tab follows the flow.
-  var nodeEls = {};
+  var nodeEls = {}, captionEls = {};
   var order = Object.keys(nodeInfo).sort(function (a, b) { return pos(a)[0] - pos(b)[0] || pos(a)[1] - pos(b)[1]; });
   order.forEach(function (id) {
-    var n = nodeInfo[id], p = pos(id), sz = size(id);
+    var n = nodeInfo[id], p = pos(id), sz = size(id), kind = shapeKind(id);
     var kindWord = n.kind === "pseudo" ? "helper" : n.kind === "escalated" ? "state, 24 reasons" : n.kind;
     var desc = n.state ? plain(n.state.description) : "The run stops and waits for you. Every escalation reason is listed in the details panel.";
-    var g = el("g", { "class": "node n-" + n.kind, tabindex: "0", role: "button", "aria-label": n.label + " (" + kindWord + "). " + desc }, nodeLayer);
+    var g = el("g", { "class": "node n-" + n.kind + (kind === "hub" ? " n-hub" : ""), tabindex: "0", role: "button", "data-id": id, "aria-label": n.label + " (" + kindWord + "). " + desc }, nodeLayer);
     var inner = el("g", { transform: "translate(" + p[0] + "," + p[1] + ")" }, g);
-    el("path", { d: shapePath(n.kind, sz[0], sz[1], 6), "class": "ring" }, inner);
+    el("path", { d: shapePath(kind, sz[0], sz[1], 6), "class": "ring" }, inner);
     if (n.kind === "pseudo") el("rect", { x: -sz[0] / 2, y: -sz[1] / 2, width: sz[0], height: sz[1], "class": "hit" }, inner);
-    el("path", { d: shapePath(n.kind, sz[0], sz[1], 0), "class": "shape" }, inner);
+    el("path", { d: shapePath(kind, sz[0], sz[1], 0), "class": "shape" }, inner);
     var maxW = sz[0] - (n.kind === "wait" ? 50 : n.kind === "gate" ? 40 : n.kind === "entry" ? 52 : 22);
     var text;
-    if (n.kind === "pseudo") {
-      text = el("text", { x: 0, y: 22, "text-anchor": "middle" }, inner);
+    if (kind === "hub") {
+      // The hub's name inside its circle, on two lines ("Resolver:" / "by stage").
+      text = el("text", { x: 0, y: -3, "text-anchor": "middle" }, inner);
+      var parts = n.label.split(": ");
+      parts.forEach(function (part, i) {
+        var s = el("tspan", { x: 0, dy: i === 0 ? 0 : 16 }, text);
+        s.textContent = parts.length > 1 && i === 0 ? part + ":" : part;
+      });
+    } else if (n.kind === "pseudo") {
+      text = el("text", { x: 0, y: 24, "text-anchor": "middle", "class": "dotcap" }, inner);
+      captionEls[id] = text;
     } else if (n.kind === "escalated") {
       text = el("text", { x: 0, y: -2, "text-anchor": "middle" }, inner);
       var sub = el("text", { x: 0, y: 16, "text-anchor": "middle", "class": "sub" }, inner);
@@ -5760,8 +5854,7 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
       text = el("text", { x: n.kind === "entry" ? 12 : 0, y: 4.5, "text-anchor": "middle" }, inner);
     }
     if (n.kind === "entry") el("circle", { cx: -sz[0] / 2 + 22, cy: 0, r: 6, "class": "pip" }, inner);
-    text.textContent = n.label;
-    text.dataset.max = maxW;
+    if (kind !== "hub") { text.textContent = n.label; text.dataset.max = maxW; }
     g.addEventListener("click", function () { if (dragMoved) return; select(id); });
     g.addEventListener("keydown", function (e) {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(id); }
@@ -5776,10 +5869,26 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
       var w = t.getComputedTextLength(), max = Number(t.dataset.max);
       if (w > max && w > 0) t.style.fontSize = (parseFloat(getComputedStyle(t).fontSize) * max / w).toFixed(2) + "px";
     });
+    captionBoxes = null;
   }
   function nodeBox(id) {
     var p = pos(id), sz = size(id);
     return { x: p[0] - sz[0] / 2, y: p[1] - sz[1] / 2, w: sz[0], h: sz[1] };
+  }
+  /** The box of a node's drawn outline (a helper dot's circle, not its click area). */
+  function shapeBox(id) {
+    var p = pos(id), he = halfExtent(id);
+    return { x: p[0] - he[0], y: p[1] - he[1], w: 2 * he[0], h: 2 * he[1] };
+  }
+  var captionBoxes = null;
+  /** The boxes of the helper dots' captions, in drawing units (measured once fonts are laid out). */
+  function captionBoxList() {
+    if (captionBoxes) return captionBoxes;
+    captionBoxes = Object.keys(captionEls).map(function (id) {
+      var bb = captionEls[id].getBBox(), p = pos(id);
+      return { id: id, box: { x: p[0] + bb.x, y: p[1] + bb.y, w: bb.width, h: bb.height } };
+    });
+    return captionBoxes;
   }
   function unionBox(boxes) {
     var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -5787,24 +5896,137 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
     return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
   }
 
+  // ------------------------------------------------------------------ label and badge placement
+  // Labels and badges never cover a node, a helper's caption or each other: each tries places along
+  // its own edge (on it and beside it), then a free place further out with a thin leader line back
+  // to its edge.
+  var placer = null;
+  function grow(b, d) { return { x: b.x - d, y: b.y - d, w: b.w + 2 * d, h: b.h + 2 * d }; }
+  function hits(a, b) { return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h; }
+  function startPlacement() {
+    var obs = Object.keys(nodeInfo).map(function (id) { return grow(shapeBox(id), isHub(id) ? 14 : 4); });
+    captionBoxList().forEach(function (c) { obs.push(grow(c.box, 3)); });
+    placer = { obs: obs, placed: [] };
+  }
+  function isFree(box) {
+    for (var i = 0; i < placer.obs.length; i++) if (hits(placer.obs[i], box)) return false;
+    for (var j = 0; j < placer.placed.length; j++) if (hits(placer.placed[j], box)) return false;
+    return true;
+  }
+  var T_MID = [0.5, 0.4, 0.6, 0.32, 0.68, 0.24, 0.76, 0.16, 0.84];
+  var T_NEAR = [0.26, 0.34, 0.18, 0.42, 0.12, 0.5, 0.58];
+  /** Places for a w by h box on the edge drawn as `p` (bundle `b`): on the line, then beside it. */
+  function candidates(p, b, w, hgt, ts, beside) {
+    var out = [];
+    if (b.route.loop) {
+      var tip = b.route.tip, o = b.route.out;
+      var d0 = o[0] !== 0 ? w / 2 + 6 : hgt / 2 + 6;
+      [0, 16, -16, 32, -32].forEach(function (sh) {
+        out.push({ c: [tip[0] + o[0] * d0 + (o[0] === 0 ? sh * 2 : 0), tip[1] + o[1] * d0 + (o[1] === 0 ? sh : 0)], at: tip });
+      });
+      return out;
+    }
+    var L = p.getTotalLength();
+    ts.forEach(function (t) {
+      var q = p.getPointAtLength(L * t), q2 = p.getPointAtLength(Math.min(L, L * t + 2));
+      var tx = q2.x - q.x, ty = q2.y - q.y, tl = Math.hypot(tx, ty) || 1, nx = -ty / tl, ny = tx / tl;
+      var off = Math.abs(nx) * w / 2 + Math.abs(ny) * hgt / 2 + 6;
+      var on = { c: [q.x, q.y], at: [q.x, q.y] };
+      var left = { c: [q.x + nx * off, q.y + ny * off], at: [q.x, q.y] };
+      var right = { c: [q.x - nx * off, q.y - ny * off], at: [q.x, q.y] };
+      if (beside) out.push(left, right, on); else out.push(on, left, right);
+    });
+    return out;
+  }
+  function findSpot(p, b, w, hgt, ts, beside) {
+    var cands = candidates(p, b, w, hgt, ts, beside);
+    for (var i = 0; i < cands.length; i++) {
+      var box = { x: cands[i].c[0] - w / 2, y: cands[i].c[1] - hgt / 2, w: w, h: hgt };
+      if (isFree(box)) { placer.placed.push(box); return cands[i]; }
+    }
+    var a = cands[0].at;
+    for (var r = 34; r <= 520; r += 20) {
+      for (var k = 0; k < 24; k++) {
+        var ang = (k / 24) * 2 * Math.PI + r / 60;
+        var c = [a[0] + r * Math.cos(ang), a[1] + r * Math.sin(ang)];
+        var bx = { x: c[0] - w / 2, y: c[1] - hgt / 2, w: w, h: hgt };
+        if (isFree(bx)) { placer.placed.push(bx); return { c: c, at: a, leader: true }; }
+      }
+    }
+    var c0 = cands[0];
+    placer.placed.push({ x: c0.c[0] - w / 2, y: c0.c[1] - hgt / 2, w: w, h: hgt });
+    return c0;
+  }
+  function leader(spot, w, hgt, delay) {
+    var x = Math.max(spot.c[0] - w / 2, Math.min(spot.at[0], spot.c[0] + w / 2));
+    var y = Math.max(spot.c[1] - hgt / 2, Math.min(spot.at[1], spot.c[1] + hgt / 2));
+    var l = el("path", { d: "M" + spot.at + " L" + x + "," + y, "class": "leader appear" }, fxLabels);
+    l.style.animationDelay = delay + "ms";
+  }
+  function edgeLabel(b, p, text, delay, ts, extraCls) {
+    var lines = Array.isArray(text) ? text : [text];
+    var t = el("text", { "text-anchor": "middle", "class": "elabel appear f-" + b.family + (extraCls ? " " + extraCls : ""), "data-from": b.from, "data-to": b.to }, fxLabels);
+    lines.forEach(function (line, i) {
+      var s = el("tspan", { x: 0, dy: i === 0 ? 0 : 15 }, t);
+      s.textContent = line;
+    });
+    var bb = t.getBBox(), w = bb.width + 8, hgt = bb.height + 2;
+    var spot = findSpot(p, b, w, hgt, ts || T_MID, true);
+    t.setAttribute("transform", "translate(" + (spot.c[0] - bb.x - bb.width / 2) + "," + (spot.c[1] - bb.y - bb.height / 2) + ")");
+    if (spot.leader) leader(spot, w, hgt, delay);
+    t.style.animationDelay = delay + "ms";
+  }
+  function badge(b, p, numbers, cls, delay) {
+    var shown = numbers.length > 4 ? numbers.slice(0, 3).join(", ") + ", +" + (numbers.length - 3) : numbers.join(", ");
+    var g = el("g", { "class": "badge appear f-" + b.family + (cls ? " " + cls : ""), "data-from": b.from, "data-to": b.to }, fxLabels);
+    var rect = el("rect", { height: 22, rx: 11 }, g);
+    var t = el("text", { "text-anchor": "middle" }, g);
+    t.textContent = shown;
+    var tw = t.getBBox().width, w = Math.max(22, tw + 14);
+    var spot = findSpot(p, b, w + 4, 26, T_MID, false);
+    rect.setAttribute("x", spot.c[0] - w / 2);
+    rect.setAttribute("y", spot.c[1] - 11);
+    rect.setAttribute("width", w);
+    t.setAttribute("x", spot.c[0]);
+    t.setAttribute("y", spot.c[1] + 4);
+    if (spot.leader) leader(spot, w, 22, delay);
+    g.style.animationDelay = delay + "ms";
+  }
+
   // ------------------------------------------------------------------ camera: pan, zoom, glide
   var vb = { x: 0, y: 0, w: D.canvas[0], h: D.canvas[1] };
   var anim = null;
-  function aspect() { return (canvasEl.clientHeight || 1) / (canvasEl.clientWidth || 1); }
-  function scale() { return (canvasEl.clientWidth || 1) / vb.w; }
+  function cw() { return canvasEl.clientWidth || 1; }
+  function ch() { return canvasEl.clientHeight || 1; }
+  function aspect() { return ch() / cw(); }
+  function scale() { return cw() / vb.w; }
   function applyVB() { svg.setAttribute("viewBox", vb.x + " " + vb.y + " " + vb.w + " " + vb.h); }
-  var MAX_SCALE = 2.2, MIN_W = function () { return (canvasEl.clientWidth || 1) / MAX_SCALE; };
+  var MAX_SCALE = 2.2, MIN_W = function () { return cw() / MAX_SCALE; };
   var MAX_W = function () { return D.canvas[0] * 3; };
-  /** The view that holds `box` with a margin, at the canvas's aspect, no closer than `maxScale`. */
+  /** The canvas edges the overlays cover, in screen pixels: the zoom buttons on the right, the
+   *  step caption (or the hint) along the bottom. The camera frames into what is left. */
+  function insets() {
+    var zoom = document.getElementById("zoom-box"), cap = document.getElementById("caption"), hint = document.getElementById("hint");
+    var bottom = !cap.hidden ? cap.offsetHeight + 14 : !hint.hidden ? hint.offsetHeight + 10 : 0;
+    return { l: 10, t: 10, r: 10 + (zoom ? zoom.offsetWidth + 10 : 0), b: 10 + bottom };
+  }
+  /** The free area (canvas pixels) the overlays leave. */
+  function freeArea() {
+    var i = insets();
+    return { x: i.l, y: i.t, w: Math.max(40, cw() - i.l - i.r), h: Math.max(40, ch() - i.t - i.b) };
+  }
+  /** The view that shows `box` inside the free area with `margin` pixels around it, no closer than
+   *  `maxScale` screen pixels per drawing unit. */
   function viewFor(box, margin, maxScale) {
-    var a = aspect(), w = Math.max(box.w + margin * 2, (box.h + margin * 2) / a, (canvasEl.clientWidth || 1) / (maxScale || 1.15));
-    var hh = w * a;
-    return { x: box.x + box.w / 2 - w / 2, y: box.y + box.h / 2 - hh / 2, w: w, h: hh };
+    var f = freeArea();
+    var s = Math.min(Math.max(20, f.w - 2 * margin) / Math.max(1, box.w), Math.max(20, f.h - 2 * margin) / Math.max(1, box.h), maxScale || 1.15);
+    var cx = box.x + box.w / 2, cy = box.y + box.h / 2;
+    return { x: cx - (f.x + f.w / 2) / s, y: cy - (f.y + f.h / 2) / s, w: cw() / s, h: ch() / s };
   }
   function glide(target, instant) {
     if (anim) cancelAnimationFrame(anim.raf);
     anim = null;
-    if (instant || reduceMotion.matches) { vb = target; applyVB(); return; }
+    if (instant || calm()) { vb = target; applyVB(); return; }
     var from = { x: vb.x, y: vb.y, w: vb.w, h: vb.h }, start = null, dur = 560;
     var me = { raf: 0 };
     anim = me;
@@ -5818,29 +6040,37 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
     }
     me.raf = requestAnimationFrame(step);
   }
+  var untouched = true; // nothing selected, panned or zoomed yet: a resize shows the first view again
   var framed = null; // the box the view last framed (null: the whole drawing), framed again on resize
-  function fitAll(instant) { framed = null; glide(viewFor({ x: 0, y: 0, w: D.canvas[0], h: D.canvas[1] }, 30, 9), instant); }
-  function frame(box, instant) { framed = box; glide(viewFor(box, 90, 1.15), instant); }
+  var framedScale = 1.15;
+  function fitAll(instant) { framed = null; glide(viewFor({ x: 0, y: 0, w: D.canvas[0], h: D.canvas[1] }, 10, 9), instant); }
+  function frame(box, instant, maxScale) { framed = box; framedScale = maxScale || 1.15; glide(viewFor(box, 30, framedScale), instant); }
   /** Frame the first box that shows at a readable size (at least 0.32 screen pixels per unit); on a
    *  small screen a whole path is too small to read, so the view frames its current part. */
   function frameReadable(boxes, instant) {
     for (var i = 0; i < boxes.length; i++) {
-      var v = viewFor(boxes[i], 90, 1.15);
-      if ((canvasEl.clientWidth || 1) / v.w >= 0.32 || i === boxes.length - 1) { frame(boxes[i], instant); return; }
+      var v = viewFor(boxes[i], 30, 1.15);
+      if (cw() / v.w >= 0.32 || i === boxes.length - 1) { frame(boxes[i], instant); return; }
     }
   }
-  /** Move the view only as far as needed to show `box`; frame it when it cannot fit. */
+  /** Move the view only as far as needed to show `box` inside the free area; frame it when it
+   *  cannot fit. */
   function keepInView(box, instant) {
-    var m = 70 / scale();
-    if (box.w + 2 * m > vb.w || box.h + 2 * m > vb.h) { frame(box, instant); return; }
-    var t = { x: vb.x, y: vb.y, w: vb.w, h: vb.h };
-    if (box.x - m < t.x) t.x = box.x - m;
-    if (box.x + box.w + m > t.x + t.w) t.x = box.x + box.w + m - t.w;
-    if (box.y - m < t.y) t.y = box.y - m;
-    if (box.y + box.h + m > t.y + t.h) t.y = box.y + box.h + m - t.h;
-    if (t.x !== vb.x || t.y !== vb.y) glide(t, instant);
+    var s = scale(), f = freeArea(), m = 24;
+    var x0 = vb.x + (f.x + m) / s, x1 = vb.x + (f.x + f.w - m) / s, y0 = vb.y + (f.y + m) / s, y1 = vb.y + (f.y + f.h - m) / s;
+    if (box.w > x1 - x0 || box.h > y1 - y0) { frame(box, instant); return; }
+    var dx = box.x < x0 ? box.x - x0 : box.x + box.w > x1 ? box.x + box.w - x1 : 0;
+    var dy = box.y < y0 ? box.y - y0 : box.y + box.h > y1 ? box.y + box.h - y1 : 0;
+    if (dx || dy) glide({ x: vb.x + dx, y: vb.y + dy, w: vb.w, h: vb.h }, instant);
+  }
+  /** The first view: the whole drawing, or on a small screen the start at a readable size (Fit
+   *  still shows everything). */
+  function firstView() {
+    if (cw() < 700) frame(unionBox([nodeBox("run.start"), nodeBox("run.prepare")]), true, 0.95);
+    else fitAll(true);
   }
   function zoomAt(clientX, clientY, factor) {
+    untouched = false;
     if (anim) { cancelAnimationFrame(anim.raf); anim = null; }
     var r = svg.getBoundingClientRect();
     var fx = (clientX - r.left) / r.width, fy = (clientY - r.top) / r.height;
@@ -5855,7 +6085,7 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   }
   document.getElementById("zoom-in").addEventListener("click", function () { zoomCentre(1.35); });
   document.getElementById("zoom-out").addEventListener("click", function () { zoomCentre(1 / 1.35); });
-  document.getElementById("fit").addEventListener("click", function () { fitAll(false); });
+  document.getElementById("fit").addEventListener("click", function () { untouched = false; fitAll(false); });
   svg.addEventListener("wheel", function (e) {
     e.preventDefault();
     var dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
@@ -5882,7 +6112,7 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
     if (ps.length === 1 && gesture.pts.length === 1) {
       var dx = ps[0].x - gesture.pts[0].x, dy = ps[0].y - gesture.pts[0].y;
       if (!dragMoved && Math.abs(dx) + Math.abs(dy) < 5) return;
-      if (!dragMoved) { dragMoved = true; svg.classList.add("panning"); try { svg.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ } }
+      if (!dragMoved) { dragMoved = true; untouched = false; svg.classList.add("panning"); try { svg.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ } }
       vb = { x: gesture.vb.x - dx * gesture.vb.w / r.width, y: gesture.vb.y - dy * gesture.vb.h / r.height, w: gesture.vb.w, h: gesture.vb.h };
       applyVB();
     } else if (ps.length === 2) {
@@ -5924,8 +6154,9 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
       if (!w || !hh || (w === lastW && hh === lastH)) return;
       var first = lastW === 0;
       lastW = w; lastH = hh;
-      if (first) { fitAll(true); fitLabels(); return; }
-      if (framed) frame(framed, true); else fitAll(true);
+      if (first) fitLabels();
+      if (first || untouched) { firstView(); return; }
+      if (framed) frame(framed, true, framedScale); else fitAll(true);
     }).observe(canvasEl);
   }
 
@@ -5938,22 +6169,25 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   var caption = document.getElementById("caption");
   var narrow = window.matchMedia("(max-width: 1100px)");
 
-  /** Every way out of a node, followed through helper dots: chains of transitions whose last one
-   *  ends at a node that is not a helper (or at a helper already on the chain). */
+  /** Every way out of a node, followed through helper dots as far as the first real node: chains
+   *  of transitions whose last one ends at a node that is not a helper. A second hub on the way
+   *  (the implement resolver after the stage resolver, say) is an endpoint of its own: the chain
+   *  stops at its dot instead of fanning out past it. */
   function followOut(id) {
     var chains = [];
-    (function walk(nodeId, prefix, seen) {
+    (function walk(nodeId, prefix, seen, hubs) {
       (outgoing[nodeId] || []).forEach(function (t) {
         var chain = prefix.concat([t]);
-        if (isPseudo(t.to) && t.to !== nodeId && t.to !== id && !seen[t.to]) {
+        var through = isPseudo(t.to) && t.to !== nodeId && t.to !== id && !seen[t.to] && !(isHub(t.to) && hubs >= 1);
+        if (through) {
           var next = Object.assign({}, seen);
           next[t.to] = true;
-          walk(t.to, chain, next);
+          walk(t.to, chain, next, hubs + (isHub(t.to) ? 1 : 0));
         } else {
           chains.push(chain);
         }
       });
-    })(id, [], {});
+    })(id, [], {}, isHub(id) ? 1 : 0);
     return chains;
   }
   function outsOf(id) {
@@ -5972,36 +6206,18 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   }
   function pop(id, delay) {
     var g = nodeEls[id];
-    if (!g) return;
+    if (!g || calm()) return;
     g.classList.remove("pop");
     void g.getBoundingClientRect();
     g.style.animationDelay = delay + "ms";
     g.classList.add("pop");
   }
   function animateEdge(p, delay) {
+    if (calm()) return;
     var len = Math.ceil(p.getTotalLength());
     p.style.setProperty("--len", len);
     p.style.animationDelay = delay + "ms";
     p.classList.add("draw");
-  }
-  function edgeLabel(b, text, delay, near) {
-    var lines = Array.isArray(text) ? text : [text];
-    var at = near && b.route.near ? b.route.near : b.route.mid;
-    var t = el("text", { x: at[0], y: at[1] - (lines.length - 1) * 7 + 4, "text-anchor": b.route.anchor || "middle", "class": "elabel appear f-" + b.family }, fxLabels);
-    lines.forEach(function (line, i) {
-      var s = el("tspan", { x: at[0], dy: i === 0 ? 0 : 15 }, t);
-      s.textContent = line;
-    });
-    t.style.animationDelay = delay + "ms";
-  }
-  function badge(b, numbers, cls, delay) {
-    var shown = numbers.length > 4 ? numbers.slice(0, 3).join(", ") + ", +" + (numbers.length - 3) : numbers.join(", ");
-    var g = el("g", { "class": "badge appear f-" + b.family + (cls ? " " + cls : "") }, fxLabels);
-    var w = Math.max(22, shown.length * 7 + 12);
-    el("rect", { x: b.route.badge[0] - w / 2, y: b.route.badge[1] - 11, width: w, height: 22, rx: 11 }, g);
-    var t = el("text", { x: b.route.badge[0], y: b.route.badge[1] + 4, "text-anchor": "middle" }, g);
-    t.textContent = shown;
-    g.style.animationDelay = delay + "ms";
   }
   function reasonNames(b) {
     var names = [];
@@ -6013,21 +6229,25 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   }
 
   function render(animate) {
+    if (mode.kind !== "none") untouched = false;
     clearFx();
     svg.classList.toggle("focused", mode.kind !== "none");
+    svg.classList.toggle("still", calm());
+    // The overlays first: the camera frames into the space they leave.
+    caption.hidden = mode.kind !== "scenario";
+    document.getElementById("hint").hidden = mode.kind === "scenario";
+    document.getElementById("legend-note").hidden = mode.kind !== "state";
+    startPlacement();
     if (mode.kind === "state") renderState(animate);
     else if (mode.kind === "scenario") renderScenario(animate);
     else renderIntro();
     document.getElementById("prev").disabled = mode.kind !== "scenario" || mode.step === 0;
     document.getElementById("next").disabled = mode.kind !== "scenario" || mode.step === mode.sc.transitions.length - 1;
-    document.getElementById("legend-note").hidden = mode.kind !== "state";
-    caption.hidden = mode.kind !== "scenario";
-    document.getElementById("hint").hidden = mode.kind === "scenario";
   }
 
   function renderState(animate) {
     var id = mode.id, chains = outsOf(id), ins = insOf(id, mode.reason);
-    var outItems = [], seen = {}, lit = {}, delays = {};
+    var outItems = [], seen = {}, lit = {};
     lit[id] = 0;
     chains.forEach(function (chain) {
       chain.forEach(function (t, depth) {
@@ -6040,23 +6260,35 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
     inItems.forEach(function (it) { var f = drawn(it.t.from); if (lit[f] === undefined) lit[f] = 1; });
     var outBundles = bundle(outItems), inBundles = bundle(inItems);
     var labelAll = outBundles.length + inBundles.length <= 18;
-    inBundles.forEach(function (b) {
-      var p = drawBundle(fxEdges, b, "in");
-      if (animate) animateEdge(p, 260);
-      // Every edge into the Escalated node is labelled with its reason (or how many it bundles).
-      if (id === ESC.id) edgeLabel(b, reasonNames(b).length > 2 ? [reasonNames(b).length + " reasons"] : reasonNames(b), animate ? 420 : 0, true);
-    });
-    outBundles.forEach(function (b) {
+    var outPaths = outBundles.map(function (b) {
       var depth = Math.min.apply(null, b.items.map(function (it) { return it.depth; }));
       var p = drawBundle(fxEdges, b, "out");
       if (animate) animateEdge(p, depth * 150);
+      return { b: b, p: p, depth: depth };
+    });
+    // A picked escalation reason's edges are the selection: drawn strong, not in the light style.
+    var inCls = mode.reason ? "pick" : "in";
+    var inPaths = inBundles.map(function (b) {
+      var p = drawBundle(fxEdges, b, inCls);
+      if (animate) animateEdge(p, 260);
+      return { b: b, p: p };
+    });
+    // Labels, the edges that leave the selected node first.
+    outPaths.forEach(function (o) {
       // Every edge that leaves the selected node is labelled; edges further along the helper dots
       // only when there are few enough to read.
-      if (labelAll || depth === 0) {
-        var names = b.items.map(function (it) { return escMember[it.t.to] ? states[it.t.to].label : it.t.label; }).filter(function (n, i, xs) { return xs.indexOf(n) === i; });
-        var many = b.family === "red" && b.dashed ? " refusals" : b.to === ESC.id ? " reasons" : " transitions";
-        var text = names.length <= 2 ? names : names.length + many;
-        edgeLabel(b, text, animate ? depth * 150 + 300 : 0);
+      if (!(labelAll || o.depth === 0)) return;
+      var b = o.b;
+      var names = b.items.map(function (it) { return escMember[it.t.to] ? states[it.t.to].label : it.t.label; }).filter(function (n, i, xs) { return xs.indexOf(n) === i; });
+      var many = b.family === "red" && b.dashed ? " refusals" : b.to === ESC.id ? " reasons" : " transitions";
+      edgeLabel(b, o.p, names.length <= 2 ? names : names.length + many, animate ? o.depth * 150 + 300 : 0);
+    });
+    inPaths.forEach(function (o) {
+      // Every edge into the Escalated node is labelled with its reason (or how many it bundles),
+      // close to the state it leaves.
+      if (id === ESC.id) {
+        var names = reasonNames(o.b);
+        edgeLabel(o.b, o.p, names.length > 2 ? [names.length + " reasons"] : names, animate ? 420 : 0, T_NEAR);
       }
     });
     Object.keys(lit).forEach(function (n) {
@@ -6068,28 +6300,40 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
     showStatePanel(id, chains, ins);
     counter.textContent = "";
     var near = Object.keys(lit).filter(function (n) { return lit[n] <= 1; });
-    if (animate) frameReadable([unionBox(Object.keys(lit).map(nodeBox)), unionBox(near.map(nodeBox)), nodeBox(id)]);
+    if (animate) frameReadable([unionBox(Object.keys(lit).map(nodeBox)), unionBox(near.map(nodeBox)), grow(nodeBox(id), 170), nodeBox(id)]);
   }
 
   function renderScenario(animate) {
     var sc = mode.sc, ids = sc.transitions, step = mode.step, cur = trById[ids[step]];
-    var items = ids.map(function (x, i) { return { t: trById[x], order: i + 1, role: i < step ? "sc-done" : i === step ? "sc-current" : "sc-ahead" }; });
-    var bundles = bundle(items.map(function (it) { return { t: it.t, role: it.role === "sc-current" ? "sc-current" : "", order: it.order, state: it.role }; }));
+    var items = ids.map(function (x, i) { return { t: trById[x], order: i + 1, state: i < step ? "sc-done" : i === step ? "sc-current" : "sc-ahead" }; });
+    // One bundle per drawn path, whatever the step, so each badge stays where it is as the steps move.
+    var bundles = bundle(items, { byPath: true });
     var visited = {}, ahead = {};
     items.forEach(function (it) {
       var f = drawn(it.t.from), to = drawn(it.t.to);
-      if (it.role !== "sc-ahead") { visited[f] = true; visited[to] = true; }
+      if (it.state !== "sc-ahead") { visited[f] = true; visited[to] = true; }
       else { if (!visited[f]) ahead[f] = true; if (!visited[to]) ahead[to] = true; }
     });
-    bundles.forEach(function (b) {
-      var states_ = b.items.map(function (it) { return it.state; });
-      var role = states_.indexOf("sc-current") >= 0 ? "sc-current" : states_.indexOf("sc-done") >= 0 ? "sc-done" : "sc-ahead";
+    // The caption first: the camera frames into the space it leaves.
+    caption.textContent = "";
+    caption.appendChild(h("span", "num", String(step + 1)));
+    var capText = h("span");
+    capText.appendChild(h("strong", null, cur.label));
+    capText.appendChild(h("span", "what", "  " + states[cur.from].label + " → " + states[cur.to].label));
+    caption.appendChild(capText);
+    var drawnB = bundles.map(function (b) {
+      var st = b.items.map(function (it) { return it.state; });
+      var role = st.indexOf("sc-current") >= 0 ? "sc-current" : st.indexOf("sc-done") >= 0 ? "sc-done" : "sc-ahead";
       var first = Math.min.apply(null, b.items.map(function (it) { return it.order; }));
       if (role === "sc-current") el("path", { d: b.route.d, "class": "halo edge f-" + b.family }, fxEdges);
       var p = drawBundle(fxEdges, b, role);
       if (animate) animateEdge(p, Math.min(1400, first * 30));
-      var nums = b.items.map(function (it) { return it.order; });
-      badge(b, nums, role === "sc-ahead" ? "ahead" : role === "sc-current" ? "current" : "", animate ? Math.min(1400, first * 30) + 200 : 0);
+      return { b: b, p: p, role: role, first: first };
+    });
+    // Badges in the scenario's order, so a badge keeps its place from one step to the next.
+    drawnB.slice().sort(function (x, y) { return x.first - y.first; }).forEach(function (o) {
+      var nums = o.b.items.map(function (it) { return it.order; });
+      badge(o.b, o.p, nums, o.role === "sc-ahead" ? "ahead" : o.role === "sc-current" ? "current" : "", animate ? Math.min(1400, o.first * 30) + 200 : 0);
     });
     Object.keys(visited).concat(Object.keys(ahead)).forEach(function (n) {
       if (!nodeEls[n]) return;
@@ -6104,19 +6348,13 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
     }
     showScenarioPanel();
     counter.textContent = "Step " + (step + 1) + " of " + ids.length;
-    caption.textContent = "";
-    caption.appendChild(h("span", "num", String(step + 1)));
-    var capText = h("span");
-    capText.appendChild(h("strong", null, cur.label));
-    capText.appendChild(h("span", "what", "  " + states[cur.from].label + " → " + states[cur.to].label));
-    caption.appendChild(capText);
     var lis = document.getElementById("steps").children;
     for (var i = 0; i < lis.length; i++) {
       lis[i].classList.toggle("current", i === step);
       lis[i].classList.toggle("done", i < step);
       if (i === step) lis[i].setAttribute("aria-current", "step"); else lis[i].removeAttribute("aria-current");
     }
-    var curBox = unionBox([nodeBox(drawn(cur.from)), nodeBox(drawn(cur.to))]);
+    var curBox = unionBox([shapeBox(drawn(cur.from)), shapeBox(drawn(cur.to))]);
     if (animate) frameReadable([unionBox(Object.keys(visited).concat(Object.keys(ahead)).map(nodeBox)), curBox]);
     else keepInView(curBox);
   }
@@ -6128,7 +6366,7 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
     p.textContent = "Click a state (or Tab to it and press Enter) to see every way out of it, followed through the helper dots, and every way into it. A scenario lights its path; Previous and Next walk it one numbered transition at a time. Escape clears the selection.";
     panel.appendChild(p);
     var p2 = h("p", "meta");
-    p2.textContent = "Large outlined shapes are states the ticket can rest in (pauses, Escalated, PR ready, done, the refusals, the merge wait). Small boxes are steps inside a stage lane. Dots are helpers the runner passes through. The diamond is the plan review gate, the octagon the evidence floor.";
+    p2.textContent = "Large outlined shapes are states the ticket can rest in (pauses, Escalated, PR ready, done, the refusals, the merge wait). Small boxes are steps inside a stage lane. Dots are helpers the runner passes through; the two resolvers are drawn as larger hubs. The diamond is the plan review gate, the octagon the evidence floor.";
     panel.appendChild(p2);
     counter.textContent = "";
   }
@@ -6346,29 +6584,44 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   });
 
   // ------------------------------------------------------------------ legend, theme, lists
-  var legendRows = document.getElementById("legend-rows");
-  function legendRow(drawSample, words) {
-    var row = h("span", "row");
-    var s = el("svg", { width: 34, height: 14, viewBox: "0 0 34 14", "aria-hidden": "true" });
-    drawSample(s);
-    row.appendChild(s);
-    row.appendChild(document.createTextNode(words));
-    legendRows.appendChild(row);
-  }
-  FAMILY_WORDS.forEach(function (f) {
-    legendRow(function (s) {
-      el("path", { d: "M2,7 H24", "class": "edge f-" + f[0] + (f[1] ? " dash" : ""), "stroke-width": 2.4 }, s);
-      el("path", { d: "M23,2.5 L32,7 L23,11.5 L25.5,7 z", "class": "ah-" + f[0] }, s);
-    }, f[2]);
+  // The legend: the transition colours grouped by family, then a sample of every shape.
+  function sampleSvg(w, hgt) { return el("svg", { width: w, height: hgt, viewBox: "0 0 " + w + " " + hgt, "aria-hidden": "true" }); }
+  var legendEdges = document.getElementById("legend-edges");
+  FAMILIES.forEach(function (fam) {
+    var group = h("span", "fam");
+    fam[1].forEach(function (k) {
+      var item = h("span", "item");
+      var s = sampleSvg(34, 14);
+      el("path", { d: "M2,7 H24", "class": "edge f-" + fam[0] + (k[0] ? " dash" : ""), "stroke-width": 2.4 }, s);
+      el("path", { d: "M23,2.5 L32,7 L23,11.5 L25.5,7 z", "class": "ah-" + fam[0] }, s);
+      item.appendChild(s);
+      item.appendChild(document.createTextNode(k[1]));
+      group.appendChild(item);
+    });
+    legendEdges.appendChild(group);
   });
-  legendRow(function (s) { el("rect", { x: 1, y: 1, width: 32, height: 12, rx: 6, "class": "shape", style: "fill:var(--surface);stroke:var(--state-line);stroke-width:2" }, s); }, "state (a ticket rests here)");
-  legendRow(function (s) { el("rect", { x: 4, y: 2, width: 26, height: 10, rx: 2.5, style: "fill:var(--step-fill);stroke:var(--step-line);stroke-width:1.2" }, s); }, "step inside a stage lane");
-  legendRow(function (s) { el("circle", { cx: 17, cy: 7, r: 4, style: "fill:var(--dot)" }, s); }, "helper the runner passes");
-  legendRow(function (s) { el("rect", { x: 1, y: 1, width: 32, height: 12, rx: 6, style: "fill:var(--entry-fill)" }, s); }, "start");
-  var note = h("span", "hint-line", "Bold: leaves the selected state. Light: arrives at it.");
-  note.id = "legend-note";
-  note.hidden = true;
-  legendRows.appendChild(note);
+  var legendShapes = document.getElementById("legend-shapes");
+  [
+    ["entry", "n-entry", [34, 16], "start"],
+    ["step", "n-step", [34, 20], "step (in a stage lane)"],
+    ["pseudo", "n-pseudo", [16, 16], "helper"],
+    ["hub", "n-pseudo n-hub", [24, 24], "resolver hub"],
+    ["gate", "n-gate", [34, 18], "gate"],
+    ["guard", "n-guard", [34, 18], "evidence floor"],
+    ["wait", "n-wait", [36, 18], "merge wait"],
+    ["pause", "n-pause", [34, 16], "pause"],
+    ["exit", "n-exit", [34, 16], "refused (exit)"],
+    ["escalated", "n-escalated", [34, 16], "Escalated"],
+    ["terminal", "n-terminal", [34, 16], "outcome"]
+  ].forEach(function (sh) {
+    var item = h("span", "shape-item");
+    var s = sampleSvg(40, 26);
+    var g = el("g", { "class": sh[1], transform: "translate(20,13)" }, s);
+    el("path", { d: shapePath(sh[0], sh[2][0], sh[2][1], 0), "class": "shape", style: "stroke-width:1.6" }, g);
+    item.appendChild(s);
+    item.appendChild(document.createTextNode(sh[3]));
+    legendShapes.appendChild(item);
+  });
   if (window.matchMedia("(max-width: 700px)").matches) document.getElementById("legend").open = false;
 
   var themeButtons = document.querySelectorAll("[data-theme-choice]");
@@ -6418,9 +6671,30 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   noteLine("The " + escStates.length + " escalation states are drawn as one Escalated node: each edge into it is labelled with its reason, and the node's panel lists every reason with its condition and source. The data keeps every escalation state and transition.");
   noteLine("Maintained with the code: test/docs/state-machine.test.ts reads this page's data block and fails when a state, transition, signature, cause, loop, outcome or cap here differs from the code, when a cited code line is gone, or when the drawing places a node badly.");
 
+
+  // ------------------------------------------------------------------ for the measurement script
+  // The page's own selection functions, so a script can drive every selection, reason and
+  // scenario step and measure what is drawn (scratch/t18c/measure.txt in the task ledger).
+  window.styreStateMachine = {
+    nodes: function () { return Object.keys(nodeInfo); },
+    reasons: function () { return escStates.map(function (s) { return s.id; }); },
+    scenarios: function () { return data.scenarios.map(function (s) { return { id: s.id, steps: s.transitions.length }; }); },
+    select: function (id, reason) { select(id, reason); },
+    scenario: function (id) { sel.value = id; startScenario(scenarioById(id)); },
+    step: function (i) { goStep(i); },
+    clear: function () { clear(); },
+    setStill: function (on) { still = !!on; svg.classList.toggle("still", calm()); },
+    freeArea: function () { return freeArea(); },
+    current: function () {
+      if (mode.kind !== "scenario") return null;
+      var t = trById[mode.sc.transitions[mode.step]];
+      return [drawn(t.from), drawn(t.to)];
+    }
+  };
+
   drawBase();
   render(false);
-  if (!window.ResizeObserver) { fitAll(true); fitLabels(); }
+  if (!window.ResizeObserver) { fitLabels(); firstView(); }
 })();
 </script>
 </body>

@@ -4,6 +4,7 @@
 // the two agree), so a failure names exactly what drifted.
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import ts from "typescript";
 import { EXIT } from "../../src/cli/errors.ts";
 import { GATE_ROUND_CAP } from "../../src/daemon/arbiter-verdict.ts";
 import { DESIGN_TABLE, type DesignRow } from "../../src/daemon/design-graph.ts";
@@ -96,6 +97,9 @@ export interface Drawing {
   canvas: [number, number];
   /** One lane per stage: x, y, width, height. */
   lanes: { stage: string; label: string; box: [number, number, number, number] }[];
+  /** Helpers drawn as hubs, with their own width and height (edges meet them at ports spread
+   *  around a circle). */
+  hubs: Record<string, [number, number]>;
   /** The node that stands for every state of the group (the escalations). */
   escalated: { id: string; label: string; group: string };
 }
@@ -292,7 +296,7 @@ export function validateDrawing(d: Diagram): string[] {
   for (const id of Object.keys(d.layout))
     if (!stateIds.has(id) && id !== esc.id) out.push(`layout names '${id}', which is not a state`);
   const box = (n: { id: string; kind: string }, pad: number): Box | undefined => {
-    const size = g.sizes[n.kind];
+    const size = g.hubs?.[n.id] ?? g.sizes[n.kind];
     const p = d.layout[n.id] as [number, number];
     if (!size) return undefined;
     return [
@@ -876,89 +880,59 @@ export type Entry = "run" | "resume";
 const RUN_ENTRY = { file: "src/cli/run.ts", fn: "runImpl" };
 const RESUME_ENTRY = { file: "src/cli/park.ts", fn: "resumeRun" };
 
-// A small lexer: enough of TypeScript to tell code from strings, templates, regular expressions
-// and comments, so a "/*" or "//" inside a string is not a comment and a bracket inside a string
-// does not count.
+// What each character of a source text is (code, inside a literal, inside a comment), read with
+// TypeScript's own parser: it tells a regular expression from a division, so a "/*" or "//" inside
+// a string, a template or a regular expression is never taken for a comment, and a bracket inside
+// one never counts.
 const CODE = 0;
 const LITERAL = 1;
 const COMMENT = 2;
-const REGEX_AFTER_WORD =
-  /^(return|typeof|case|in|of|void|throw|delete|instanceof|new|else|do|yield|await)$/;
+const LITERAL_KINDS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.StringLiteral,
+  ts.SyntaxKind.NoSubstitutionTemplateLiteral,
+  ts.SyntaxKind.TemplateHead,
+  ts.SyntaxKind.TemplateMiddle,
+  ts.SyntaxKind.TemplateTail,
+  ts.SyntaxKind.RegularExpressionLiteral,
+]);
+const isJSDoc = (n: ts.Node) =>
+  n.kind >= ts.SyntaxKind.FirstJSDocNode && n.kind <= ts.SyntaxKind.LastJSDocNode;
+const lexCache = new Map<string, Uint8Array>();
 
-/** What each character of `text` is: code, inside a literal, or inside a comment. Template
- *  substitutions (`${...}`) are code. */
+/** Code, literal or comment, per character. A template's `${` and `}` count as literal, the
+ *  substitution between them as code. */
 function lex(text: string): Uint8Array {
+  const hit = lexCache.get(text);
+  if (hit) return hit;
   const kind = new Uint8Array(text.length);
-  const n = text.length;
-  const stack: ("tpl" | "brace")[] = [];
-  let i = 0;
-  const regexAllowed = (at: number): boolean => {
-    let j = at - 1;
-    while (j >= 0 && /\s/.test(text[j] as string)) j--;
-    if (j < 0) return true;
-    const c = text[j] as string;
-    if (/[\w$]/.test(c)) {
-      let k = j;
-      while (k >= 0 && /[\w$]/.test(text[k] as string)) k--;
-      return REGEX_AFTER_WORD.test(text.slice(k + 1, j + 1));
-    }
-    return c !== ")" && c !== "]" && c !== "}";
+  const sf = ts.createSourceFile(
+    "census.ts",
+    text,
+    ts.ScriptTarget.Latest,
+    false,
+    ts.ScriptKind.TS,
+  );
+  // Returns nothing: a truthy return would stop TypeScript's comment iteration early.
+  const mark = (from: number, to: number, k: number): void => {
+    kind.fill(k, from, to);
   };
-  // Template text from i (after the opening backtick or a substitution's closing brace).
-  const template = (): void => {
-    while (i < n) {
-      const c = text[i];
-      kind[i++] = LITERAL;
-      if (c === "\\") kind[i++] = LITERAL;
-      else if (c === "`") return;
-      else if (c === "$" && text[i] === "{") {
-        kind[i++] = LITERAL;
-        stack.push("tpl");
-        return;
-      }
-    }
+  // Every comment sits in the trivia before some token (the end of file token included): on the
+  // token's own line it is a trailing comment of the token before, after a line break a leading one.
+  const comments = (pos: number) => {
+    ts.forEachLeadingCommentRange(text, pos, (from, to) => mark(from, to, COMMENT));
+    ts.forEachTrailingCommentRange(text, pos, (from, to) => mark(from, to, COMMENT));
   };
-  while (i < n) {
-    const c = text[i] as string;
-    const next = text[i + 1];
-    if (c === "/" && next === "/") {
-      while (i < n && text[i] !== "\n") kind[i++] = COMMENT;
-    } else if (c === "/" && next === "*") {
-      const end = text.indexOf("*/", i + 2);
-      const stop = end < 0 ? n : end + 2;
-      while (i < stop) kind[i++] = COMMENT;
-    } else if (c === '"' || c === "'") {
-      kind[i++] = LITERAL;
-      while (i < n && text[i] !== c && text[i] !== "\n") {
-        if (text[i] === "\\") kind[i++] = LITERAL;
-        kind[i++] = LITERAL;
-      }
-      if (i < n) kind[i++] = LITERAL;
-    } else if (c === "`") {
-      kind[i++] = LITERAL;
-      template();
-    } else if (c === "/" && regexAllowed(i)) {
-      kind[i++] = LITERAL;
-      let inClass = false;
-      while (i < n && text[i] !== "\n") {
-        const r = text[i];
-        kind[i++] = LITERAL;
-        if (r === "\\") kind[i++] = LITERAL;
-        else if (r === "[") inClass = true;
-        else if (r === "]") inClass = false;
-        else if (r === "/" && !inClass) break;
-      }
-      while (i < n && /[a-z]/i.test(text[i] as string)) kind[i++] = LITERAL;
-    } else if (c === "}" && stack[stack.length - 1] === "tpl") {
-      stack.pop();
-      kind[i++] = LITERAL;
-      template();
-    } else {
-      if (c === "{" && stack.length > 0) stack.push("brace");
-      else if (c === "}" && stack.length > 0) stack.pop();
-      kind[i++] = CODE;
+  const visit = (node: ts.Node): void => {
+    const kids = node.getChildren(sf).filter((k) => !isJSDoc(k));
+    if (kids.length === 0) {
+      comments(node.pos);
+      if (LITERAL_KINDS.has(node.kind)) mark(node.getStart(sf), node.end, LITERAL);
+      return;
     }
-  }
+    for (const k of kids) visit(k);
+  };
+  visit(sf);
+  lexCache.set(text, kind);
   return kind;
 }
 
@@ -1135,9 +1109,14 @@ function errorClasses(root: string): Map<string, number[]> {
   return out;
 }
 
-/** The conditions of the `if` statements around `index` in the function starting at `from`. */
-function enclosingConditions(m: Model, from: number, index: number): string[] {
-  const out: string[] = [];
+/** The conditions of the `if` statements around `index` in the function starting at `from`, each
+ *  with the line its `if` is on. */
+function enclosingConditions(
+  m: Model,
+  from: number,
+  index: number,
+): { text: string; line: number }[] {
+  const out: { text: string; line: number }[] = [];
   for (const x of codeMatches(m, /\bif\s*\(/g)) {
     const at = x.index ?? 0;
     if (at < from || at >= index) continue;
@@ -1159,9 +1138,53 @@ function enclosingConditions(m: Model, from: number, index: number): string[] {
         else if (c === ";" && depth === 0) break;
       }
     }
-    if (index > close && index <= end) out.push(m.text.slice(open + 1, close));
+    if (index > close && index <= end)
+      out.push({ text: m.text.slice(open + 1, close), line: lineAt(m, at) });
   }
   return out;
+}
+
+/** The conjuncts of a condition that the census can read as a guard on `--resume`. */
+const FRESH_ONLY = ["!args.resume", "!(args.resume && args.resume.length > 0)"];
+const RESUME_ONLY = ["args.resume", "args.resume.length > 0"];
+
+/** What an `if` condition says about `--resume`: nothing, fresh runs only, or resumes only. Only
+ *  a condition made of `&&` conjuncts, each either free of `args.resume` or one of the exact
+ *  shapes above, is read; any other condition that mentions `args.resume` (an `||`, a `?`, a
+ *  shape not listed) makes the census throw, naming the line, rather than guess. */
+function resumeGuard(file: string, c: { text: string; line: number }): "none" | "run" | "resume" {
+  if (!/\bargs\.resume\b/.test(c.text)) return "none";
+  const parts: string[] = [];
+  let depth = 0;
+  let cur = "";
+  let readable = true;
+  for (let i = 0; i < c.text.length; i++) {
+    const ch = c.text[i] as string;
+    const two = c.text.slice(i, i + 2);
+    if ("([{".includes(ch)) depth++;
+    else if (")]}".includes(ch)) depth--;
+    if (depth === 0 && two === "&&") {
+      parts.push(cur);
+      cur = "";
+      i++;
+      continue;
+    }
+    if (depth === 0 && (two === "||" || two === "??" || ch === "?")) readable = false;
+    cur += ch;
+  }
+  parts.push(cur);
+  const kinds = new Set<string>();
+  for (const part of parts.map((p) => p.replace(/\s+/g, " ").trim())) {
+    if (!/\bargs\.resume\b/.test(part)) continue;
+    if (FRESH_ONLY.includes(part)) kinds.add("run");
+    else if (RESUME_ONLY.includes(part)) kinds.add("resume");
+    else readable = false;
+  }
+  if (!readable || kinds.size !== 1)
+    throw new Error(
+      `refusal census: ${file}:${c.line + 1}: an if around a refusal reads args.resume in a shape the census cannot read: ${c.text.replace(/\s+/g, " ").trim()}`,
+    );
+  return kinds.has("run") ? "run" : "resume";
 }
 
 /** A call at `index` whose error a `try` around it swallows (its `catch` does not throw the
@@ -1209,9 +1232,11 @@ function entriesAt(
     );
     if (!handOver) throw new Error(`refusal census: ${file}: runImpl no longer calls resumeRun`);
     if (index > (handOver.index ?? 0)) return new Set(["run"]);
-    const conditions = enclosingConditions(m, from, index);
-    if (conditions.some((c) => /!\s*\(?\s*args\.resume\b/.test(c))) return new Set(["run"]);
-    if (conditions.some((c) => /^\s*args\.resume\b/.test(c))) return new Set(["resume"]);
+    const guards = enclosingConditions(m, from, index).map((c) => resumeGuard(file, c));
+    if (guards.includes("run") && guards.includes("resume"))
+      throw new Error(`refusal census: ${file}:${line + 1}: guarded both for and against --resume`);
+    if (guards.includes("run")) return new Set(["run"]);
+    if (guards.includes("resume")) return new Set(["resume"]);
     return new Set(["run", "resume"]);
   }
   const key = `${file}#${fn.name}`;

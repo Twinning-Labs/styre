@@ -47,6 +47,13 @@ function codeCopy(edits: { file: string; find: string; replace: string }[]): str
   }
   return root;
 }
+/** The 1 based line of `text` in `file` under `root` (which must hold it exactly once). */
+function lineIn(root: string, file: string, text: string): number {
+  const lines = readFileSync(join(root, file), "utf8").split("\n");
+  const at = lines.flatMap((l, i) => (l.includes(text) ? [i + 1] : []));
+  if (at.length !== 1) throw new Error(`${file}: '${text}' is on ${at.length} lines, not one`);
+  return at[0] as number;
+}
 
 describe("docs/architecture/state-machine.html", () => {
   test("its data block parses and holds states, transitions and scenarios", () => {
@@ -323,6 +330,39 @@ describe("the checks fail on a difference", () => {
     );
   });
 
+  test("a drawing that breaks a rule: no stage in a lane, lanes overlapping, off the canvas, an unknown key (D1 to D4)", () => {
+    const d = clone(diagram());
+    d.layout["run.prepare"] = [1260, 300]; // a free place inside the design lane
+    const review = d.drawing.lanes.find((l) => l.stage === "review");
+    if (!review) throw new Error("no review lane");
+    review.box = [2050, review.box[1], review.box[2], review.box[3]];
+    d.layout["outcome:done"] = [2990, 990];
+    d.layout.ghost = [100, 1040];
+    const lines = validateStructure(d);
+    expect(lines).toContain("state 'run.prepare' has no stage but sits in the design lane");
+    expect(lines).toContain("lanes 'implement' and 'review' overlap");
+    expect(lines).toContain("drawn node 'outcome:done' lies outside the canvas");
+    expect(lines).toContain("layout names 'ghost', which is not a state");
+  });
+
+  test("two nodes clear of each other but closer than the gap; a hub's own size", () => {
+    const d = clone(diagram());
+    const extract = d.layout["design:extract"] as [number, number];
+    const step = d.drawing.sizes.step as [number, number];
+    d.layout["design:size"] = [extract[0], extract[1] + step[1] + 10]; // 10 apart, gap 24
+    expect(validateStructure(d)).toContain(
+      "drawn nodes 'design:extract' and 'design:size' overlap",
+    );
+    const d2 = clone(diagram());
+    const hub = d2.layout["implement.pick"] as [number, number];
+    const hubSize = d2.drawing.hubs["implement.pick"] as [number, number];
+    // Clear of a plain helper's box, inside the hub's.
+    d2.layout["mark-verified"] = [hub[0], hub[1] - hubSize[1] / 2 - 20];
+    expect(validateStructure(d2)).toContain(
+      "drawn nodes 'implement.pick' and 'mark-verified' overlap",
+    );
+  });
+
   test("a scenario whose differsFrom names no scenario", () => {
     const d = clone(diagram());
     const [a, b] = d.scenarios;
@@ -347,8 +387,9 @@ describe("the checks fail on a difference", () => {
           'export function loadProfile(path: string): Profile {\n  if (path === "") throw new Error("profile: empty path");\n',
       },
     ]);
+    const line = lineIn(root, "src/dispatch/profile.ts", 'throw new Error("profile: empty path")');
     expect(checkSites(diagram(), root)).toContain(
-      "refusal in the code is not drawn: src/dispatch/profile.ts:302 (throw new Error)",
+      `refusal in the code is not drawn: src/dispatch/profile.ts:${line} (throw new Error)`,
     );
   });
 
@@ -421,9 +462,65 @@ describe("the checks fail on a difference", () => {
     d.transitions = d.transitions.filter((t) => t.id !== gone);
     for (const s of d.refusalSites) s.edges = s.edges.filter((e) => e !== gone);
     expect(validateStructure(d)).toEqual([]);
+    const anchor = "--in-place refused: no .styre-disposable marker";
+    const line = lineIn(REPO, "src/dispatch/in-place.ts", anchor);
     expect(checkSites(d)).toContain(
-      "refusal site '--in-place refused: no .styre-disposable marker' (src/dispatch/in-place.ts:23) is reached from a resume, but lists no edge from resume.start or @starts",
+      `refusal site '${anchor}' (src/dispatch/in-place.ts:${line}) is reached from a resume, but lists no edge from resume.start or @starts`,
     );
+  });
+
+  test("an edge from a start that never reaches its site (H2)", () => {
+    const d = clone(diagram());
+    const anchor = "if (!ticket) throw noOwnTicket(ident, dir, reason, listCheckpointIdents(db));";
+    const site = d.refusalSites.find((x) => x.anchor === anchor);
+    if (!site) throw new Error("the resume's own ticket site is missing");
+    site.edges.push("t.run.newer-scheme"); // a fresh run refusal that also exits 65
+    const line = lineIn(REPO, "src/cli/park.ts", anchor);
+    expect(checkSites(d)).toContain(
+      `refusal site '${anchor}' (src/cli/park.ts:${line}) lists 't.run.newer-scheme' from run.start, but a fresh run never reaches it`,
+    );
+  });
+
+  test("an edge of both starts whose sites only one start reaches (H3)", () => {
+    const d = clone(diagram());
+    const site = d.refusalSites.find((x) => x.anchor === "throw agentCliError(cliPreflight);");
+    if (!site) throw new Error("the resume's agent command line tool site is missing");
+    site.edges = site.edges.filter((e) => e !== "t.start.agent-cli");
+    expect(checkSites(d)).toContain(
+      "refusal edge 't.start.agent-cli' leaves both starts, but only a fresh run reaches the sites that list it",
+    );
+  });
+
+  test("a guard on --resume the census cannot read is refused loudly (I4)", () => {
+    for (const [find, replace] of [
+      ["      !args.resume &&\n", "      !args.resume ||\n"],
+      ["      !args.resume &&\n", "      args.resume ||\n"],
+      [
+        '    if (args["in-place"] && !(args.resume && args.resume.length > 0)) {',
+        '    if (args["in-place"] || !(args.resume && args.resume.length > 0)) {',
+      ],
+      // Every && part a known shape, but an || after them lets a resume through.
+      ["      !args.resume &&\n", "      !args.resume && args.inspect ||\n"],
+      // No ||, a known part, and beside it a part that is not one of the known shapes.
+      ["      !args.resume &&\n", '      !args.resume && args.resume !== "x" &&\n'],
+    ] as const) {
+      const root = codeCopy([{ file: "src/cli/run.ts", find, replace }]);
+      expect(() => refusalSitesIn(root)).toThrow(
+        /refusal census: src\/cli\/run\.ts:\d+: an if around a refusal reads args\.resume in a shape the census cannot read/,
+      );
+    }
+  });
+
+  test("a regular expression that spells a refusal is not a refusal (RX)", () => {
+    const root = codeCopy([
+      {
+        file: "src/dispatch/profile.ts",
+        find: "export function loadProfile(path: string): Profile {\n",
+        replace:
+          'export function loadProfile(path: string): Profile {\n  if (/throw new Error(".*")/.test(path)) return parseProfile({}, path);\n',
+      },
+    ]);
+    expect(checkSites(diagram(), root)).toEqual([]);
   });
 
   test("comments are blanked, strings are not (blankComments)", () => {
@@ -432,9 +529,26 @@ describe("the checks fail on a difference", () => {
       "x(); // throw new Error('line comment')",
       "/* throw new Error('block') */ y();",
       "const u = `//${z}`; throw new Error(`kept too`);",
+      'const t = `a ${f("/*")} b ${`//${g}`} c`; throw new Error("kept three");',
+      'const r = /\\/\\*["]/; if (x) /\\/\\/[`]/.test(s); throw new Error("kept four"); // gone',
+      "const q = (a) / 2; // division, then a comment",
+      'if (x) /"/.test(s); throw new Error("kept five"); // also gone',
+      "// first of two",
+      "// second of two",
     ].join("\n");
     const out = blankComments(text);
-    expect(out.split("\n").length).toBe(4);
+    expect(out.split("\n").length).toBe(10);
+    expect(out).not.toContain("first of two");
+    expect(out).not.toContain("second of two");
+    expect(out).toContain('if (x) /"/.test(s); throw new Error("kept five");');
+    expect(out).not.toContain("also gone");
+    expect(out).toContain('throw new Error("kept three")');
+    expect(out).toContain('throw new Error("kept four")');
+    expect(out).toContain('/\\/\\*["]/');
+    expect(out).toContain("/\\/\\/[`]/.test(s)");
+    expect(out).toContain("(a) / 2;");
+    expect(out).not.toContain("gone");
+    expect(out).not.toContain("division, then");
     expect(out).toContain('throw new Error("kept")');
     expect(out).toContain("throw new Error(`kept too`)");
     expect(out).not.toContain("line comment");
