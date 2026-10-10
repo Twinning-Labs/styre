@@ -190,6 +190,12 @@ messages and exit statuses are in [`runtime-parameters.md`](docs/architecture/ru
   its commit, is undone on resume by returning the branch to where the step started. In worktree mode
   that return depends on a separate fix to `ensureWorktree`, whose `git worktree add -B` on resume
   moves the branch again; until it lands, that commit can remain. In-place mode is unaffected.
+- **Design reruns in worktree mode depend on the ticket branch surviving a resume** (ENG-488). The
+  plan's digest is recorded from the branch, and the starting commit is read right after a fresh run
+  creates it. `git worktree add -B` on resume recreates the branch from the target repository's
+  checked out HEAD, which drops the run's commits and moves HEAD: a second resume is refused until
+  `--accept-head`, unless a dispatch has committed on the recreated branch in between. In place mode
+  is unaffected. Until ENG-488 lands this is the known limit of design input invalidation (ENG-477).
 - **Test artefacts from an interrupted checks step.** An interruption during that step's test run
   happens while no agent is running, so the untracked files the tests wrote are not undone on resume
   (in in-place mode they stay in your checkout). The commit is still returned as above.

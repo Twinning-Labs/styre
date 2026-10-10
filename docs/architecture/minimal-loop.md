@@ -27,11 +27,20 @@ next_step_key(t):        # mirrors src/daemon/resolver.ts nextStepKey
   switch t.stage:
 
   'design':
-    if not done('provision'):                          return 'provision'         # runs FIRST (env fault before any spend)
-    if not done('design:dispatch'):                    return 'design:dispatch'
-    if t.work_units == ∅:                              return 'design:extract'
-    if t.track == null:                                return 'design:size'       # sets fast/full
-    if t.track == 'full' and not done('design:review'):return 'design:review'
+    # Generated from the declared table (src/daemon/design-graph.ts, walked by walkDesign in
+    # src/daemon/design-walk.ts; ENG-477). Rows, in order:
+    #   provision → design:dispatch → design:extract → design:size → design:review → plan review gate
+    # For each row:
+    #   skip it when its "applies when" is false (design:review and its gate: t.track == 'full')
+    #   gate row: if blocking findings remain on the latest design:review dispatch:
+    #                                                  escalate('review:unresolved-plan')
+    #   not succeeded                               → return it (the walk stops at the first step not done)
+    #   succeeded, manifest = current inputs        → done; next row
+    #   succeeded, manifest ≠ current inputs:
+    #     already invalidated for changed inputs 3 times since the latest
+    #     resume, reused --db note or redesign      → escalate('invalidate-loop:<step>')
+    #     otherwise                                 → invalidate it alone (cause inputs); recurse
+    # past the table: today's checks routing, unchanged (E9)
     if not done('checks:dispatch'):                    return 'checks:dispatch'   # author RED-first AC checks
     if not done('checks:classify'):                    return 'checks:classify'
     advance('design' -> 'implement'); recurse
@@ -79,19 +88,38 @@ next_step_key(t):        # mirrors src/daemon/resolver.ts nextStepKey
     return DONE
 ```
 
-`done(key)` = a `workflow_step` row with `status='succeeded'`. The resolver never re-runs a succeeded
-step (replay; control-loop §6.2). A `failed` step is handled by `apply_failure_policy` (§8), which
-**resets state so the resolver re-picks correctly** (§2 below) — the resolver itself stays a pure
-forward function.
+`done(key)` = a `workflow_step` row with `status='succeeded'`. In the design stage, "done" also
+requires the step's recorded input manifest to equal its inputs now (below). The resolver never
+re-runs a succeeded step (replay; control-loop §6.2). A `failed` step is handled by
+`apply_failure_policy` (§8), which **resets state so the resolver re-picks correctly** (§2 below) —
+the resolver itself stays a pure forward function.
+
+**"Done" in design means done with these inputs (ENG-477).** Each step of the design table records,
+in its success transaction, a manifest of its inputs' digests: snapshot inputs from `ticket_input`
+(the ticket text, fixed for the run; the profile and config values as the handlers receive them,
+rewritten on each resume and on a reused `--db`), and the outputs of earlier steps it reads (the
+work units, the track, and the plan's digest recorded on `design:dispatch`). The walk recomputes the
+manifest from SQLite (it never reads the worktree) and invalidates a step whose inputs changed; the
+steps that read its output are judged again after it reruns, and stay done when its output comes
+back the same (early cutoff). An invalidate is one transaction: a `note` event (reason
+`invalidated`, the step was reset), the step's row copied to `workflow_step_history`, the step reset
+to a fresh round (attempt 0) in the next generation, and its outputs cleared (`design:extract`: every
+unit, reconcile units included, after detaching findings tied to a unit, and `needs_docs` = 0;
+`design:size`: the track). The walk runs only while the ticket is in design: an edit made while
+paused later is recorded and takes effect the next time the run is in design. The checks steps keep
+today's gating (E9). The inputs each step reads, and the notes, are in
+[`runtime-parameters.md`](runtime-parameters.md#design-inputs-and-invalidation-eng-477).
 
 **`provision` (S2c, control-loop §4) fires once per ticket**, not once per unit: it gates the first
 `verify:{u}:{c}` the ticket reaches *and* `verify:integration`, but a single `succeeded` row satisfies
-both guards above — installs aren't repeated per work-unit. It is **reset to `pending`** (never
-re-executed as a retry of the same attempt) in exactly two places outside the failure path: `styre run
---resume` (the worktree was wiped, so installed deps are gone) and when an `implement:{u}:dispatch`'s
-committed diff touches a dependency manifest (`package.json`, a lockfile, `pyproject.toml`, …) — so a
-loopback that adds a dependency doesn't verify against a stale environment. Both resets zero `attempt`
-too (a fresh install is not a retry of a prior failed one).
+both guards above — installs aren't repeated per work-unit. Outside the failure path it runs again
+only through an invalidate (ENG-477): on `styre run --resume` in worktree mode (cause
+`worktree-recreated`: the worktree was wiped, so installed deps are gone), when an
+`implement:{u}:dispatch`'s committed diff touches a dependency manifest (`package.json`, a lockfile,
+`pyproject.toml`, …; cause `manifest-touched`), so a loopback that adds a dependency doesn't verify
+against a stale environment, and, in design, when its own inputs changed (the components, or the
+lists of components narrowed away; cause `inputs`). Each invalidate zeroes `attempt` too (a fresh
+install is not a retry of a prior failed one) and keeps the previous row in `workflow_step_history`.
 
 **`completeness:wuN` (S2d, control-loop §4) fires once per unit**, gated after `provision` and before
 the unit's first `verify:{u}:{c}` — a deterministic, runner-computed reconciliation of the unit's
@@ -194,7 +222,8 @@ The `event_log.loop` value is one of `implement`, `design`, `integration`, `chec
 | verify/completeness fail, unit-scope | the unit → `pending` **and all its steps** → `pending` (previously-passed checks re-run at the new commit) | `implement` |
 | integration throw | insert a `kind='reconcile'` unit depending on all others; reset the integration step, `verify:checks-gate` (attempt zeroed), `checks:arbitrate`, `checks:reauthor` | `integration` |
 | code-review blocking finding (non-plan-defect) | blamed unit(s) (or all, if a finding has no unit) + their steps; the `review` step; the ticket verify/gate steps (gate attempt zeroed); `merge:push` + `merge:pr-ensure` (attempt zeroed — they exist only when the loopback leaves merge, e.g. an `--accept-head` resume, and must push the new head and re-issue the PR request); `stage='implement'` | `implement` |
-| plan-review blocking, or code-review `plan-defect` with `onPlanDefect='redesign'` | **delete all work_units**; reset+zero `design:dispatch`/`design:extract`/`design:review`/`review`; reset ticket verify steps; reset+zero `merge:push`/`merge:pr-ensure`; `stage='design'` | `design` |
+| plan review blocking, or a resume of a run stopped at the plan review gate with HEAD unchanged (`retry-plan` in `review-resume.ts`: the resume's plan review action, which applies the plan review verdict again) | invalidate `design:dispatch` with cause `feedback` (a review sent the plan back: history row, reset, generation + 1); the loopback event carries the findings, `consumer: design:dispatch` and that generation; reset+zero `review`; reset ticket verify steps; reset+zero `merge:push`/`merge:pr-ensure`; `stage='design'`. `design:review` stays succeeded, with its blocking findings, until the walk reruns it. Everything else in design follows from fingerprints (a changed plan reruns its readers) | `design` |
+| a code review finding of category `plan-defect` (one that blames the plan, not the code) with `onPlanDefect='redesign'`, or a resume of a run stopped at the plan review gate after the operator moved HEAD (`retry-plan` again) | the same, invalidating `design:dispatch` and `design:extract` (every unit deleted, reconcile units included; findings tied to a unit detached first; `needs_docs` = 0), so the units are made again and implemented again even when the plan is identical | `design` |
 | `checks:classify` leaves unresolved checks | supersede flagged `ac_check`s; reset `checks:dispatch` + `checks:classify`; **no stage flip** | `checks` |
 | AC gate integrity-only still-red | all units → `pending` + their steps; the gate/arbiter/reauthor steps → `pending` (gate **attempt preserved** — it is the round counter) | `implement` |
 | arbiter `check-wrong` | reset `checks:reauthor` + `checks:arbitrate` | `reauthor` |

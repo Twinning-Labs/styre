@@ -135,6 +135,14 @@ table's last row, the resolver continues with today's checks routing (`checks:di
   - Agents still read files with their own tools; that cannot be declared. The table claims only what
     Styre hands over, plus the plan, whose content Styre hashes.
 
+(Ruling, 2026-10-10, recorded with the reference docs) The `design:review` row above says "ticket
+title and description"; the code reads the title only (`designReviewVars`,
+`src/dispatch/prompt-vars.ts`), and by the first bullet below the table ("Exact fields come from
+the code") the code is authoritative. The table in
+`src/daemon/design-graph.ts` declares `ticket.title` and not `ticket.description` for
+`design:review`, and the recording proxy test (`test/daemon/design-reads-proxy.test.ts`) fails if
+the handler starts reading the description.
+
 ### 3.1 Rules, checked by a unit test and asserted when the table is first used
 
 1. Every input is a snapshot input or an output of an earlier step.

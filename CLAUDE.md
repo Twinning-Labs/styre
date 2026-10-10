@@ -68,7 +68,7 @@ These are the load-bearing decisions. Code that violates them is wrong even if i
 
 OSS binary — **six** subcommands (`clean, ls, migrate, notify, run, setup`) (`src/index.ts`). Full flag/exit-code/env detail in `docs/architecture/runtime-parameters.md`.
 - `styre setup <repo>` — probe the repo and write the project profile (`profile.json`).
-- `styre migrate` — bootstrap (create + migrate) the SQLite SoT.
+- `styre migrate` — bootstrap the SQLite SoT, or upgrade an older one (schema v7 on) after a `VACUUM INTO` backup next to it; refuses a newer, older or unknown schema (exit `65`).
 - `styre run <ticket>` — one-shot headless runner (the CI/cloud/fleet primitive; ephemeral per-run SQLite). Refuses if a checkpoint already exists for that ident, pointing at `--resume`/`--fresh`.
   - On a session-limit / out-of-credits dispatch death, `run` **pauses** (reason `budget`): the SoT +
     transcript are already at their live location, `$XDG_STATE_HOME/styre/<slug>/<ticket-ident>/`
@@ -79,11 +79,11 @@ OSS binary — **six** subcommands (`clean, ls, migrate, notify, run, setup`) (`
     moved since the run paused, resume refuses (exit `65`); use `--accept-head` (resume against new
     HEAD, drops carryover) or `--inspect` (diagnostics only, exit `0`). A missing repo toolchain
     aborts a fresh run with exit `69` (`EX_TOOLCHAIN_MISSING`).
-- `styre ls` — list paused/resumable efforts, finished leftovers (reapable via `styre clean --all`), and running efforts.
-- `styre clean <ident>` — reap one effort's disk artifacts (worktree + checkpoint); no ticket-status change; refuses a live run (exit `75`). `--all` reaps only provably-finished (`pr-ready`/`done`) efforts for the current project, skipping resumable pauses and live runs. `--purge` (single-ident only, rejects alongside `--all` at exit `64`) additionally deletes the local + remote branch (closes the PR).
+- `styre ls` — list paused/resumable efforts, finished leftovers (reapable via `styre clean --all`), and running efforts; also checkpoints it cannot read and checkpoints whose schema it cannot use, each with the reason.
+- `styre clean <ident>` — reap one effort's disk artifacts (worktree + checkpoint); no ticket-status change; refuses a live run (exit `75`); refuses a checkpoint it cannot read or whose schema it cannot use (exit `65`), removes nothing, and names the folder and the worktrees that look like the run's, for removal by hand; refuses an ident or slug that is not a valid folder name (exit `64`; a slug may nest with `/`, each part a folder name: see `conventions.md`). `--all` reaps only provably-finished (`pr-ready`/`done`) efforts for the current project, skipping resumable pauses and live runs and checkpoints it cannot use. `--purge` (single-ident only, rejects alongside `--all` at exit `64`) additionally deletes the local + remote branch (closes the PR).
 - `styre notify --test` — send a test notification through the configured notifier (Slack). Diagnostic; without `--test` it throws a usage error and exits `64` (`EX_USAGE`), not `2`.
 
-Stream contract: `styre run` writes **only NDJSON telemetry to stdout** and all human-readable output to **stderr**; `setup` and `migrate` print human output to stdout.
+Stream contract: `styre run` writes **only NDJSON telemetry to stdout** and all human-readable output to **stderr**; `setup` prints human output to stdout, `migrate` and `notify` to stderr.
 
 **(Commercial Control Plane only — not OSS, no subcommand ships in this binary):** persistent supervised mode, multi-ticket scheduling, K-concurrency; a management CLI (`status`/`inbox`/`config`/`pause`/`resume`/`logs`/`uninstall`); the needs-you inbox.
 

@@ -78,7 +78,7 @@ by the `project_id` FK and the per-project `project.paused` breaker.
 ```
 on_start():
   open_db(); PRAGMA foreign_keys=ON; busy_timeout=5000
-  migrate()                       # §10 self-bootstrap / apply pending schema migrations
+  migrate()                       # §10 create, or upgrade (backup, versioned migrations, structural proof)
   recover()                       # §6.1 reconcile crash-interrupted steps + drain outbox
   loop()
 
@@ -114,6 +114,11 @@ switch descriptor.kind:
                     'running' → recover() owns it; 'failed' → apply_failure_policy, §8)
   'advance'       → write the stage transition (+ enqueue its projection in the same tx), recurse
   'mark-verified' → mark the work-unit verified, recurse
+  'invalidate'    → design only (ENG-477): one transaction: a `note` event (reason `invalidated`,
+                    the step was reset; with the step keys, the cause and the changed input names;
+                    not a loopback), the step's row copied to workflow_step_history, the step reset
+                    to a fresh round in the next generation, its outputs cleared (minimal-loop §1);
+                    recurse
   'wait'          → await a signal (status='waiting'); the loop resumes on delivery (§7) — the only
                     current instance (merge approval) resolves to `pr-ready` once the PR is delivered
                     (an undelivered PR request pauses `needs_you` instead — projector.md §7)
@@ -238,15 +243,21 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 ### Design
 
 **S1a · `design:dispatch`** — fused brainstorm + plan (deep tier; default Opus 4.8)
-- **Guard:** `stage='design'`; `provision` already succeeded (it runs first, below); worktree exists;
-  no succeeded `design:dispatch` unless a re-design loopback was requested.
+- **Guard:** `stage='design'`; `provision` done with its current inputs (it runs first); worktree
+  exists. "Done" for every design step (provision, S1a, S1b, S1b2, S1c) means succeeded **and** its
+  recorded input manifest equals its inputs now (ENG-477, minimal-loop §1); a redesign reruns S1a
+  through an invalidate (cause `feedback`, a review sent the plan back).
 - **Input:** ticket identity/title/`type_label` + description **injected by the runner** (the agent
   does not read the tracker); the design prompt (compiled template, rendered by `render-prompt.ts`) +
   project-profile.
 - **Output:** a committed **plan artifact** (`docs/plans/<date>-<eng-n>-*.md`, `linear: ENG-N`
   frontmatter). The plan must *contain*, per work-unit, the facts S1b needs (kind, files, behavioral?
-  + how tested, verify check-types, dependencies) — as prose, never as JSON. Sets `needs_docs`
-  (whether the change is doc-impacting).
+  + how tested, verify check-types, dependencies) — as prose, never as JSON, and whether the change
+  affects the documentation (S1b records it as `needs_docs`). When S1a succeeds the runner records
+  the plan's digest: path and content of the `docs/plans/*.md` files whose frontmatter `linear:`
+  names this ticket, at the branch head, read through git (ENG-477). The plan must therefore be
+  committed: when none is committed there (for example because `docs/plans/` is in `.gitignore`),
+  S1a fails at once without a retry and escalates with what to change (DI2 in §8).
 - **Tools:** `Read`, `Grep`, `Glob`, `Write`, `Edit`, `WebSearch`, `WebFetch`
   (`src/dispatch/tool-allowlists.ts`). The commit is scoped to `docs/plans/` by the runner
   (`planScope`), not by the tool set. ❌ no `Bash`, no MCP servers (`--strict-mcp-config`); web access
@@ -254,13 +265,16 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 - **Failure → route:** D2/D3 in §8.
 
 **S1b · `design:extract`** — decomposition into `work_unit` rows (cheap tier; default Haiku 4.5, forced structured output)
-- **Guard:** S1a succeeded (plan committed); no `work_unit` rows yet.
+- **Guard:** S1a done with its current inputs (the plan's digest is one of S1b's inputs). Rows are
+  no longer the gate.
 - **Input:** the committed plan doc + the `work_unit` schema.
 - **Output:** validated **`work_unit` rows** (kind / files_to_touch / behavioral / test_plan /
   verify_check_types / depends_on). The runner then runs the **mechanical completeness check** (zod
   shape + required fields present + behavioral⇒`test_plan` present + `depends_on` acyclic & valid) —
   deterministic, no LLM. **Postcondition: ≥1 work_unit, completeness clean.** Track sizing is **no
-  longer done here** — it moved to its own step (`design:size`, S1b2 below).
+  longer done here** — it moved to its own step (`design:size`, S1b2 below). The units and
+  `needs_docs` are written in the success transaction, with `origin='extract'`; a crash before it
+  leaves none.
 - **Mechanism:** mechanical formalization → cheap model, forced-schema tool calls (§3a). The
   extractor fills only what the plan supports and leaves unsupported fields empty — it never
   invents; an empty *required* field means the **plan** is missing that info (→ D2).
@@ -268,7 +282,10 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   the plan didn't supply → re-design (D2); no plan / no units (D3).
 
 **S1b2 · `design:size`** — set the review track (fast / full)
-- **Guard:** `ticket.track IS NULL` (runs once, after extract).
+- **Guard:** S1b done with its current inputs; `design:size` not done with its current inputs
+  (the `ticket.track` column is no longer the gate). Its inputs are the work units and
+  `complexityGrading`, and, when grading is on, the plan, the ticket title, the profile's slug and
+  prompt variables. The track is written in the success transaction.
 - **Output:** `ticket.track ∈ {fast, full}`. `full` runs the S1c semantic plan-review gate; `fast`
   skips it. This is a **routing heuristic, never a ship-gate verdict** — the grade only chooses how
   much review ceremony, never whether to ship, and never overrides a ground-truth gate.
@@ -279,14 +296,15 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 - **Tools:** none for the deterministic path; read-only for the optional grader. ❌ no `Write`/`Edit`.
 
 **S1c · `design:review`** — semantic plan-quality gate (cold; deep tier, default Opus 4.8; **full-track only**, C2)
-- **Guard:** S1b completeness clean; `track='full'`.
-- **Input — cold (anti-anchoring):** the plan + the ticket requirements + the codebase. **NOT** the
+- **Guard:** S1b2 done with its current inputs; `track='full'`.
+- **Input — cold (anti-anchoring):** the plan + the ticket title (not its description: the
+  recording proxy test pins the fields Styre hands it, ENG-477) + the codebase. **NOT** the
   designer's reasoning. The prompt also includes the persisted work-unit decomposition (seq,
   scope, files, tests and dependencies); findings reference these canonical seqs, which can differ
   from plan task numbers after extraction combines tasks. Unmapped/plan-wide findings use null.
 - **Mechanism (§3a):** files findings via tool calls (`file_finding` / `complete_review`); the runner
   derives the verdict from the ledger — the **same machinery as code-review (S5)**, applied to the
-  plan.
+  plan. The findings are written in the success transaction, before the verdict reads them.
 - **Dimensions:** feasibility/correctness · completeness-of-substance · internal consistency · scope
   (over/under, vs the sizing rubric) · conciseness/anti-slop · testability (a *meaningful* test_plan,
   not just present) · decomposition quality.
@@ -729,6 +747,12 @@ at that point.
 The resolver never re-executes a `succeeded` step — it reads `result_json`. The journal is the memo
 table; with §5 idempotency every operation is at-least-once-attempted, exactly-once-effective.
 
+**Replay beside invalidate (ENG-477).** In the design stage a succeeded step is replayed only while
+its recorded input manifest matches its inputs now. When it does not, the resolver returns
+`invalidate` instead of the step, so the journal's replay is never asked to stand for a step whose
+inputs changed (that request would escalate with signature `step-replay-no-progress:<step>`, the
+interpreter's guard against a resolver that asks for a finished step again).
+
 ### 6.3 Dispatch crash
 An agent CLI dies mid-run, or Styre dies under it: step `running`, no `result_json` → the next Styre
 command's sweep stops any orphan from its launch record → `recover()` resets the step →
@@ -820,8 +844,11 @@ discarded with `--fresh` — are in execution-model.md.)*
 | D1 | design:extract | JSON shape invalid (rare; forced output) | re-run extract (cheap) | — | K_shape → escalate |
 | D2 | runner completeness check | empty *required* field — the plan lacks the info | → S1a re-design | plan | K_distinct → escalate |
 | D3 | post-design postcondition | no plan committed / zero work-units | → S1a re-design | plan | K_distinct → escalate |
-| DV1 | S1c plan-review | blocking plan-finding | → S1a re-design with findings | plan | K_distinct → escalate |
+| DV1 | S1c plan-review | blocking plan-finding | → S1a redesign with findings (invalidate `design:dispatch`, cause `feedback`) | plan | K_distinct → escalate |
 | DV2 | S1c plan-review | reviewer death / transport | retry dispatch | — | K_retry → escalate |
+| DI1 | design walk | a succeeded design step's inputs changed (an edit while paused, another host's toolchain) | invalidate that step (cause `inputs`); the steps that read its output are judged again after it reruns | step | escalate with signature `invalidate-loop:<step>` (the invalidate loop guard) instead of a fourth such invalidate of one step since the latest resume, run on a reused `--db`, or redesign |
+| DI2 | S1a postcondition | the plan is in the worktree but not committed at the branch head (for example `docs/plans/` is in `.gitignore`) | escalate at once, no retry (a prerequisite the operator fixes: commit the plan, resume with `--accept-head`) | — | immediate |
+| DI3 | any design step | an invariant violation: an undeclared read of an earlier step's output, a malformed handler result, a missing plan digest (`InvariantViolation`, a Styre defect) | escalate at once, the violation as the reason | — | immediate, no retry |
 | **Implement + unit verify** ||||||
 | I1 | S2b | agent death / timeout | retry fresh dispatch | unit | attempt cap → escalate |
 | I2 | ~~S2b postcondition~~ | ~~noop — empty diff~~ — **superseded by CM1**: S2b has no non-empty-diff postcondition; an empty dispatch diff for a real unit surfaces as `under ≠ ∅` at `completeness:wuN` and routes via CM1 below | — | — | — |
@@ -946,13 +973,18 @@ half is V-def). **New rows the audit surfaced:** CFG, X1, X2.
 > **persistent host-service supervision** (launchd/systemd keep-alive), the always-on multi-ticket
 > process, and the **needs-you inbox** are the **commercial Control Plane**'s outer loop — fenced
 > below, not deleted. In OSS, `styre setup` probes the repo and writes the project profile; `styre run`
-> is an ephemeral per-ticket process (no host service); `styre migrate` bootstraps the SoT.
+> is an ephemeral per-ticket process (no host service); `styre migrate` bootstraps the SoT, or
+> upgrades an older one.
 
 One command, no server setup. Implications the runner owns *(OSS-core unless marked commercial)*:
 - **Single self-contained binary** (TS compiled, node bundled) — no global installs; escapes the
   bash-3.2 curse entirely.
 - **Embedded SQLite, zero-ops** — no DB server; WAL on by default.
-- **Self-bootstrapping schema** — `migrate()` creates/upgrades the DB on start; no manual SQL.
+- **Self-bootstrapping schema** — `migrate()` creates the DB, or upgrades it: a `VACUUM INTO` backup
+  next to it, each pending migration in its own transaction with a foreign key check, then a
+  structural comparison against `schema.sql`, inside the last migration's transaction. Checkpoints
+  from v7 on are upgraded; newer, older or unknown shapes are refused (exit `65`), and a failed
+  migration leaves the last version that completed (exit `70`). No manual SQL.
 - **One idempotent `setup <target-repo>`** — seeds the `project` row, refreshes the `linear_id_cache`,
   and **discovers/asks the checks system**. *(Commercial Control Plane: setup also creates+migrates a
   shared DB and installs the host service — **launchd on macOS, systemd on Linux**, both first-class

@@ -109,6 +109,15 @@ Consequences worth knowing: the GitHub match is case-sensitive on `github.com`; 
 `org/group/repo` yields a slug containing a slash, which becomes a nested directory under the config
 and state trees. `styre setup --slug <name>` and `styre run --slug <name>` override derivation.
 
+A slug may contain `/`, and each part between slashes must be a folder name: not empty, not `.` or
+`..`, and with no `\` or NUL character; `team/app` is accepted, while `team/..`, `/abs`, `a//b` and
+`a/./b` are refused. `styre ls` and `styre clean --all` do not yet list checkpoints under a nested
+slug (ENG-491); `styre clean <ident> --slug team/app` reaches one. An ident is one folder name by
+the same rule, with no `/` either. `styre setup`, `styre run` and `styre clean` refuse any other name
+before building a path from it (`src/cli/checkpoint-name.ts`): exit `64` for a name given on the
+command line, derived from the repository (a folder name holding `\`, for example: pass `--slug`)
+or from the tracker, `78` for a slug read from a profile file (rerun `styre setup` with `--slug`).
+
 ---
 
 ## Ephemeral working directories (OS temp dir)
@@ -156,6 +165,15 @@ checkpoint. `styre run --resume <ident>` reads it back; `styre clean <ident>` /
 `--all` / `--purge` reap exactly this checkpoint dir (worktree + checkpoint). The checkpoint dir uses
 the **profile's** slug; note that `styre run --slug X` steers config/profile lookup to slug `X` but
 the checkpoint still lands under the profile's own slug.
+
+When `styre run` (or `styre migrate`) upgrades a checkpoint written by an older Styre, it first
+writes a backup next to it: `run.db.v<old version>.<UTC timestamp with milliseconds>.bak`, made with
+`VACUUM INTO` (complete even while another reader holds a snapshot). It is never deleted by Styre;
+`styre clean` and `--fresh` remove it with the checkpoint folder.
+
+`styre ls`, `styre clean`, `--fresh` and `--resume --inspect` never open a checkpoint itself: they
+read a private copy of `run.db` and its `-wal` and `-shm` files, made in a temporary folder and
+removed afterwards (`src/db/read-copy.ts`).
 
 ---
 

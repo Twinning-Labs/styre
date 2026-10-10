@@ -157,19 +157,24 @@ schema.sql)
 ### styre clean
 
 the OSS command that reaps a run's on-disk state. `styre clean <ident>` reaps ONE effort's disk
-artifacts (worktree + checkpoint) — no ticket-status change; refuses a live run (exit `75`). `styre
-clean --all` reaps only provably-finished (`pr-ready`/`done`) efforts for the current project,
-skipping resumable pauses and live runs. `styre clean <ident> --purge` additionally deletes the local
-+ remote branch (closing the PR) — opt-in, single-ident (rejects `--all --purge`, exit `64`), silent
+artifacts (worktree + checkpoint) — no ticket-status change; refuses a live run (exit `75`), and
+refuses a checkpoint it cannot read or whose schema it cannot use (exit `65`, nothing removed; it
+names the checkpoint folder and the worktrees that look like the run's). `styre clean --all` reaps
+only provably-finished (`pr-ready`/`done`) efforts for the current project, skipping resumable
+pauses, live runs and checkpoints it cannot use. `styre clean <ident> --purge` additionally deletes
+the local + remote branch (closing the PR) — opt-in, single-ident (rejects `--all --purge`, exit `64`), silent
 when there is no branch/PR; on the repo's default branch it skips the branch/PR deletion but still
 reaps disk state (stderr warning, exit `0`). (build-operations.md §3; conventions.md)
 
 ### styre ls
 
-the OSS command that lists every effort in three sections, in order: `Paused/resumable efforts:`
-(each row followed by `resume: styre run --resume <ident> --slug <slug>`), `Finished leftovers (reap
-per project with \`styre clean --all\`):` (slug-qualified rows), and `Running:`. A live effort never
-appears as reapable. (build-operations.md §3)
+the OSS command that lists every effort in up to five sections, in order: `Paused/resumable
+efforts:` (each row followed by `resume: styre run --resume <ident> --slug <slug>`), `Finished
+leftovers (reap per project with \`styre clean --all\`):` (slug-qualified rows), `Unreadable
+checkpoints (...)` (the checkpoints it could not read, with the reason), `Checkpoints this Styre
+cannot use (...)` (a schema it refuses, with the reason), and `Running:`. The two middle sections are
+omitted when empty, and their checkpoints are never resumable or reaped. A live effort never appears
+as reapable. (build-operations.md §3; runtime-parameters.md)
 
 ### track (fast / full)
 
