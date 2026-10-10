@@ -402,6 +402,10 @@ checks steps, E9.)
   its dispatch id alone). Unrelated escalations (the projector, the invalidate loop guard, the step
   replay guard, the resume's toolchain pause) are ignored, and that pause is not added to a ticket the
   resume already left waiting. v8 wrote the same events, so an upgraded checkpoint answers the same.
+  (Ruling, 2026-10-10, during implementation) The `invalidated` notes that count are those naming a
+  `design:` step. Provision's resets write `invalidated` notes too (`worktree-recreated`,
+  `manifest-touched`, and `inputs` when its inputs change), and one of them does not move the run off
+  the gate; the cause alone cannot tell them apart, since provision also uses `inputs`.
 - **The checks loop** (`applyChecksVerdict`) is unchanged (E9).
 
 ### 6.5 Feedback belongs to a generation
