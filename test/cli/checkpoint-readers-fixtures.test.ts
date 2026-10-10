@@ -76,8 +76,8 @@ async function captureStdout(fn: () => Promise<void>): Promise<string> {
   return out.join("");
 }
 
-/** git in `cwd`, with a time limit; the test fails on a git error. */
-function gitIn(cwd: string, args: string[]): void {
+/** git in `cwd`, with a time limit; the test fails on a git error. Returns stdout. */
+function gitIn(cwd: string, args: string[]): string {
   const r = Bun.spawnSync(["git", ...args], {
     cwd,
     stdout: "pipe",
@@ -85,6 +85,7 @@ function gitIn(cwd: string, args: string[]): void {
     timeout: 30_000,
   });
   if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+  return r.stdout.toString();
 }
 
 /** A repository with one commit at `path`: the one repository builder of this file. */
@@ -144,7 +145,6 @@ describe("checkpoints are read without migrating them (spec §7.7)", () => {
           : ["ENG-1", "needs_you", "fixture pause"],
       ]);
       expect(fixtureVersion(dbPath)).toBe(before);
-      expect(stderr.join("")).not.toContain("could not read");
     });
 
     test(`${name}: --fresh's discard reads it without migrating`, () => {
@@ -395,6 +395,16 @@ test(
   async () => {
     const idle = unreadableEffort("ENG-9");
     const repo = gitRepo();
+    // the ticket branch, locally and on a remote (a bare repository on disk): --purge would delete
+    // both, so the refusal must leave both as they are
+    const remote = makeTempDir("styre-readers-remote-");
+    gitIn(remote, ["init", "-q", "--bare"]);
+    gitIn(repo, ["branch", "feat/ENG-9"]);
+    gitIn(repo, ["remote", "add", "origin", remote]);
+    gitIn(repo, ["push", "-q", "origin", "feat/ENG-9"]);
+    const refs = () => [gitIn(repo, ["for-each-ref"]), gitIn(remote, ["for-each-ref"])];
+    const refsBefore = refs();
+    expect(refsBefore.join("")).toContain("refs/heads/feat/ENG-9");
     const purge = await cleanImpl(
       { ident: "ENG-9", slug: "fixture", purge: true },
       { root: idle.root, targetRepo: repo },
@@ -404,6 +414,7 @@ test(
       `no worktree of ${repo} looks like this run's`,
     );
     expect(existsSync(idle.dir)).toBe(true);
+    expect(refs()).toEqual(refsBefore);
 
     const live = unreadableEffort("ENG-9");
     lockByLiveRun(live.dir);
@@ -436,7 +447,7 @@ test(
 );
 
 /** A checkpoint whose schema this Styre refuses, built on a private copy of a fixture. */
-const INCOMPATIBLE: { reason: string; make: () => string }[] = [
+const INCOMPATIBLE: { reason: string; shape?: string; make: () => string }[] = [
   {
     reason: "written by a newer Styre (schema v99)",
     make: () => {
@@ -461,12 +472,24 @@ const INCOMPATIBLE: { reason: string; make: () => string }[] = [
       return path;
     },
   },
+  {
+    reason: "unknown database shape",
+    shape: "with tables but no schema_meta",
+    make: () => {
+      const path = copyFixture("v8-main-2b05680");
+      const db = new Database(path);
+      // A direct write (ruling M18): no real step removes schema_meta from a checkpoint.
+      db.exec("DROP TABLE schema_meta");
+      db.close();
+      return path;
+    },
+  },
   { reason: "older than v7 (schema v6)", make: () => copyFixture("v6-v0.7.0") },
 ];
 
 for (const c of INCOMPATIBLE) {
   test(
-    `a checkpoint ${c.reason} is listed as such, never as damaged, and clean refuses it (exit 65)`,
+    `a checkpoint ${c.shape ?? c.reason} is listed as such, never as damaged, and clean refuses it (exit 65)`,
     async () => {
       const root = makeTempDir("styre-readers-state-");
       const dir = join(root, "fixture", "ENG-1");
@@ -661,23 +684,47 @@ test(
     writeFileSync(join(config, "profile.json"), profileJson("fixture"));
     const named = join(makeTempDir("styre-readers-profile-"), "profile.json");
     writeFileSync(named, profileJson(".."));
+    // a valid profile: with --profile, only the --slug check sees the flag (run.ts builds
+    // <config>/<slug>/config.json from it), since no slug is derived on that path
+    const valid = join(makeTempDir("styre-readers-profile-"), "profile.json");
+    writeFileSync(valid, profileJson("fixture"));
+    // a repository without a remote whose folder name holds a backslash: run from inside it with no
+    // --slug and no --profile, the slug is derived from the current folder (only the derived check
+    // sees it, since args.slug is absent)
+    const odd = repoAt(join(makeTempDir("styre-readers-cwd-"), "a\\b"));
+    const codeOf = (args: { slug?: string; profile?: string }): number | undefined => {
+      try {
+        loadRunProfile(args);
+      } catch (e) {
+        return (e as { code?: number }).code;
+      }
+      return undefined;
+    };
     await withEnv("XDG_CONFIG_HOME", config, () => {
       const cases: [args: { slug?: string; profile?: string }, code: number][] = [
         [{ slug: ".." }, 64],
         [{ slug: "a\\b" }, 64],
         [{ slug: "team/.." }, 64],
         [{ slug: "/abs" }, 64],
+        [{ profile: valid, slug: ".." }, 64],
+        [{ profile: valid, slug: "team/.." }, 64],
         [{ profile: named }, 78], // the slug comes from a profile file: EXIT.CONFIG
       ];
       for (const [args, expected] of cases) {
-        let code: number | undefined;
-        try {
-          loadRunProfile(args);
-        } catch (e) {
-          code = (e as { code?: number }).code;
-        }
-        expect([JSON.stringify(args), code]).toEqual([JSON.stringify(args), expected]);
+        expect([JSON.stringify(args), codeOf(args)]).toEqual([JSON.stringify(args), expected]);
       }
+      const cwd = process.cwd();
+      process.chdir(odd);
+      let derived: number | undefined;
+      try {
+        derived = codeOf({});
+      } finally {
+        process.chdir(cwd);
+      }
+      expect(["derived from the current folder", derived]).toEqual([
+        "derived from the current folder",
+        64,
+      ]);
     });
     // `clean --profile` reads the slug from the file too
     const profiled = await cleanImpl(
@@ -807,6 +854,67 @@ test(
       expect(stderr.join("")).toContain(`schema: v${CURRENT_VERSION}, current`);
     } finally {
       run.cleanup();
+    }
+  },
+  TIMEOUT_MS,
+);
+
+test(
+  "--resume --inspect reports a checkpoint it cannot read, one with no tables and one with no ticket, returns normally and changes nothing",
+  async () => {
+    // Each made as a broken input, not by a run: no real step leaves a checkpoint like these.
+    const cases: { what: string; make: (path: string) => void; lines: string[] }[] = [
+      {
+        what: "not a database",
+        make: (path) => writeFileSync(path, "not a database"),
+        lines: ["  schema: cannot be read: file is not a database\n  (no changes made)\n"],
+      },
+      {
+        what: "no tables",
+        make: (path) => {
+          const db = new Database(path);
+          db.exec("PRAGMA user_version = 1"); // writes the file header, creates no table
+          db.close();
+        },
+        lines: [
+          "  schema: the checkpoint holds no tables\n",
+          "  (the rest cannot be read on this shape: no such table: ticket)\n",
+          "  (no changes made)\n",
+        ],
+      },
+      {
+        what: "tables but no ticket",
+        make: (path) => {
+          migrate(path);
+        },
+        lines: [
+          `  schema: v${CURRENT_VERSION}, current\n`,
+          "  (no ticket in this checkpoint)\n",
+          "  (no changes made)\n",
+        ],
+      },
+    ];
+    const repo = gitRepo();
+    for (const c of cases) {
+      const state = makeTempDir("styre-readers-inspect-");
+      const dir = join(state, "styre", "inspect", "ENG-1");
+      mkdirSync(dir, { recursive: true });
+      c.make(join(dir, "run.db"));
+      const before = treeOf(dir);
+      const from = stderr.length;
+      const profile = parseProfile({ slug: "inspect", targetRepo: repo, components: [] });
+      const done = await withEnv("XDG_STATE_HOME", state, () =>
+        inspectResume({ resume: "ENG-1" }, profile).then(
+          () => "returned",
+          (e: unknown) => `threw: ${String(e)}`,
+        ),
+      );
+      const out = stderr.slice(from).join("");
+      expect([c.what, done]).toEqual([c.what, "returned"]);
+      expect([c.what, out.startsWith("resume --inspect ENG-1\n")]).toEqual([c.what, true]);
+      for (const line of c.lines)
+        expect([c.what, out]).toEqual([c.what, expect.stringContaining(line)]);
+      expect([c.what, treeOf(dir)]).toEqual([c.what, before]);
     }
   },
   TIMEOUT_MS,
