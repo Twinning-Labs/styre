@@ -12,14 +12,25 @@ import {
   fixtureVersion,
 } from "../helpers/db-fixtures.ts";
 
-const EXPECTED: Record<string, { version: number; budget: boolean; run: boolean }> = {
+/** `stepPid`: a fragment of the comment on workflow_step.pid in that release's own schema text. It
+ *  differs between v0.13.2 ("spawned worker PID") and 2b05680 ("legacy (before ENG-485)"), so each
+ *  v8 fixture is proved to come from its own ref. */
+const EXPECTED: Record<
+  string,
+  { version: number; budget: boolean; run: boolean; stepPid?: string }
+> = {
   "v6-v0.7.0": { version: 6, budget: true, run: false },
   "v7-v0.9.0": { version: 7, budget: true, run: false },
   "v7-v0.9.0-bridged": { version: 7, budget: true, run: true },
   "v7-v0.10.0": { version: 7, budget: false, run: false },
   "v7-v0.10.0-bridged": { version: 7, budget: false, run: true },
-  "v8-v0.13.2": { version: 8, budget: false, run: true },
-  "v8-main-2b05680": { version: 8, budget: false, run: true },
+  "v8-v0.13.2": { version: 8, budget: false, run: true, stepPid: "spawned worker PID" },
+  "v8-main-2b05680": {
+    version: 8,
+    budget: false,
+    run: true,
+    stepPid: "legacy (before ENG-485)",
+  },
 };
 
 interface RecordedExpect {
@@ -87,6 +98,14 @@ describe("historical database fixtures", () => {
         const hasRun =
           db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='run'").get() !== null;
         expect(hasRun).toBe(want.run);
+        if (want.stepPid !== undefined) {
+          const sql = db
+            .query<{ sql: string }, []>(
+              "SELECT sql FROM sqlite_master WHERE name = 'workflow_step'",
+            )
+            .get();
+          expect(sql?.sql).toContain(want.stepPid);
+        }
         if (want.version >= 7) {
           // Seeded through that release's own repositories (seed-era.ts).
           const running = db
@@ -95,6 +114,40 @@ describe("historical database fixtures", () => {
             )
             .all();
           expect(running.map((r) => r.step_key)).toEqual(["implement:wu1:dispatch"]);
+          // The four design steps the run got through, all succeeded.
+          const succeeded = db
+            .query<{ step_key: string }, []>(
+              "SELECT step_key FROM workflow_step WHERE status = 'succeeded' ORDER BY seq",
+            )
+            .all();
+          expect(succeeded.map((r) => r.step_key)).toEqual([
+            "provision",
+            "design:dispatch",
+            "design:extract",
+            "design:size",
+          ]);
+          // The interrupted step has its dispatch row and its interruption note (what `--fresh`
+          // and `clean` read).
+          const runningId = db
+            .query<{ id: number }, []>(
+              "SELECT id FROM workflow_step WHERE step_key = 'implement:wu1:dispatch'",
+            )
+            .get()?.id;
+          expect(runningId).toBeDefined();
+          const dispatchCount = db
+            .query<{ n: number }, [number]>("SELECT COUNT(*) AS n FROM dispatch WHERE step_id = ?")
+            .get(runningId as number);
+          expect(dispatchCount?.n).toBe(1);
+          const notes = db
+            .query<{ payload_json: string }, []>(
+              "SELECT payload_json FROM event_log WHERE kind = 'note' AND reason = 'interrupted'",
+            )
+            .all();
+          expect(notes.length).toBe(1);
+          expect(JSON.parse(notes[0]?.payload_json ?? "null")).toMatchObject({
+            event: "interrupted",
+            stepId: runningId,
+          });
           const reconcile = db.query("SELECT 1 FROM work_unit WHERE kind = 'reconcile'").get();
           expect(reconcile).not.toBeNull();
           const awaiting = db

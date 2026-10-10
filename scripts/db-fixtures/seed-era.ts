@@ -38,8 +38,11 @@ const tickets = await era("src/db/repos/ticket.ts");
 
 migrate(out);
 const db: Database = openDb(out);
-const version = db.query<{ v: number }, []>("SELECT MAX(version) AS v FROM schema_meta").get()?.v;
-if (version === undefined) throw new Error(`${out}: no schema_meta row`);
+// MAX() over an empty table is one row holding NULL, never no row.
+const version = db
+  .query<{ v: number | null }, []>("SELECT MAX(version) AS v FROM schema_meta")
+  .get()?.v;
+if (version == null) throw new Error(`${out}: no schema_meta row`);
 
 const projectId = projects.insertProject(db, {
   slug: "fixture",

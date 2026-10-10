@@ -146,6 +146,7 @@ test("a WAL restart that leaves the -wal size and modification time unchanged is
     for (const f of [path, wal]) utimesSync(f, FIXED, FIXED);
     const size = statSync(wal).size;
     let mainCopies = 0;
+    let walSizeAfterRestart = -1;
     const rows = readCopyOf(
       path,
       (db) => db.query<{ v: string }, []>("SELECT v FROM t ORDER BY rowid").all(),
@@ -159,11 +160,14 @@ test("a WAL restart that leaves the -wal size and modification time unchanged is
           // and the times of both files are put back, so only the header's salts show a change.
           writer.exec("PRAGMA wal_checkpoint(RESTART)");
           writer.exec("INSERT INTO t VALUES ('after the restart')");
-          expect(statSync(wal).size).toBe(size);
+          // Only record here: readCopyOf catches whatever this callback throws, so an assertion
+          // would be swallowed as an unstable copy. It is checked after readCopyOf returns.
+          walSizeAfterRestart = statSync(wal).size;
           for (const f of [path, wal]) utimesSync(f, FIXED, FIXED);
         },
       },
     );
+    expect(walSizeAfterRestart).toBe(size); // the precondition: only the header salts differ
     expect(mainCopies).toBe(2);
     expect(rows).toEqual([{ v: "main" }, { v: "first" }, { v: "after the restart" }]);
   } finally {
