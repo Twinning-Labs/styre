@@ -20,6 +20,7 @@ import {
   writePlanFindings,
   writeSizeOutput,
 } from "../daemon/design-outputs.ts";
+import { readWorkUnitsForDesign } from "../daemon/design-reads.ts";
 import { StepRegistry } from "../daemon/step-registry.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
 import {
@@ -618,7 +619,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   registry.register(
     "design:size",
     async (ctx: HandlerContext) => {
-      const units = listUnits(ctx.db, ctx.ticket.id);
+      const units = readWorkUnitsForDesign(ctx.db, ctx.ticket.id);
       if (!ctx.config.complexityGrading) {
         const off: SizeResult = { track: sizeTrack(units), graded: false }; // sprawl only, no agent
         return off;
@@ -651,7 +652,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   registry.register(
     "design:review",
     async (ctx: HandlerContext) => {
-      const units = listUnits(ctx.db, ctx.ticket.id);
+      const units = readWorkUnitsForDesign(ctx.db, ctx.ticket.id);
       const result = await runAgentDispatch(
         ctx,
         depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),

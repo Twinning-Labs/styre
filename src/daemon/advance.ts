@@ -23,6 +23,7 @@ import {
   escalate,
 } from "./checks-gate-verdict.ts";
 import { type ChecksVerdictResult, applyChecksVerdict } from "./checks-verdict.ts";
+import { setCurrentStep } from "./current-step.ts";
 import { planDigestFromResult, recordStepManifest } from "./design-digests.ts";
 import { ensureDesignTableChecked, stepRow } from "./design-graph.ts";
 import { requireSnapshot } from "./design-inputs.ts";
@@ -212,6 +213,7 @@ export async function advanceOneStep(
       const verdictBox: {
         value: ReviewVerdictResult | ChecksVerdictResult | GateVerdictResult | null;
       } = { value: null };
+      setCurrentStep(d.stepKey);
       const execution = await runStep(db, {
         ticketId,
         workUnitId: d.workUnitId,
@@ -311,6 +313,7 @@ export async function advanceOneStep(
       const { decision } = applyFailurePolicy(db, ticketId, failed);
       return { kind: decision, stepKey: d.stepKey };
     } finally {
+      setCurrentStep(null);
       checkAgentLeftovers(db, ticketId, leftoverSince, dispatchesBefore);
     }
   }
