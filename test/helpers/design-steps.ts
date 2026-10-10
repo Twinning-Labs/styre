@@ -23,7 +23,7 @@ import {
   newCalls,
   scriptedRunner,
 } from "./design-script.ts";
-import { makeTempDir } from "./temp.ts";
+import { makeTempDir, onTempCleanup } from "./temp.ts";
 
 /** Every test that drives design steps passes this as its bun test timeout: the steps run git. */
 export const STEP_TEST_TIMEOUT_MS = 30_000;
@@ -80,6 +80,7 @@ export function makeDesignTicket(
   const dbPath = join(makeTempDir("styre-ds-db-"), "run.db");
   migrate(dbPath);
   const db = openDb(dbPath);
+  onTempCleanup(() => db.close()); // closed when the test ends, before its folder is removed
   const profile = parseProfile((opts.profile ?? harnessProfileRaw)(repo));
   const projectId = insertProject(db, {
     slug: profile.slug,

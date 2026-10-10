@@ -1,8 +1,13 @@
-import { afterEach, expect, test } from "bun:test";
+import type { Database } from "bun:sqlite";
+import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentRunResult } from "../../src/agent/runner.ts";
+import { openDb } from "../../src/db/client.ts";
+import { migrate } from "../../src/db/migrate.ts";
+import { insertProject } from "../../src/db/repos/project.ts";
 import { getInput } from "../../src/db/repos/ticket-input.ts";
+import { getTicket, insertTicket } from "../../src/db/repos/ticket.ts";
 import { DesignHarness, HARNESS_TEST_TIMEOUT_MS } from "./design-harness.ts";
 import {
   ABSENT_RC,
@@ -154,7 +159,6 @@ test(
       "design:review": 1,
     });
     expect(existsSync(join(t.worktreeRoot, "ENG-1", "docs", "plans", "eng-1-plan.md"))).toBe(true);
-    t.db.close();
   },
   STEP_TEST_TIMEOUT_MS,
 );
@@ -171,7 +175,6 @@ test(
     await expect(driveUntil(t, () => false, 1)).rejects.toThrow(
       "driveUntil: no stop after 1 steps",
     );
-    t.db.close();
   },
   STEP_TEST_TIMEOUT_MS,
 );
@@ -203,7 +206,6 @@ test(
   async () => {
     const h = make();
     expect(await h.fresh({ script: { parkAt: "design:extract" } })).toBe(75);
-    // `stderr` holds what was written through process.stderr.write; console.error bypasses it
     const park = JSON.parse(readFileSync(join(h.checkpointDir(), "transcript.json"), "utf8"));
     expect(park.cause).toBe("session-limit");
     expect(existsSync(h.dbPath())).toBe(true);
@@ -214,6 +216,7 @@ test(
     expect(h.calls.counts["design:extract"]).toBe(1);
     expect(await h.resume()).toBe(75); // extract runs again, the run pauses at checks:dispatch
     expect(h.calls.counts["design:extract"]).toBe(2);
+    expect(h.calls.counts["checks:dispatch"]).toBe(0); // the pause is the prerequisite, not an agent
   },
   HARNESS_TEST_TIMEOUT_MS,
 );
@@ -226,6 +229,7 @@ test(
     expect(h.repoDir).toBe(repo);
     expect(h.checkpointDir()).toContain("harness-two");
     expect(await h.fresh()).toBe(75);
+    expect(h.calls.counts["checks:dispatch"]).toBe(0);
     expect(existsSync(h.dbPath())).toBe(true);
     expect(h.read((db, id) => getInput(db, id, "profile.slug")?.value_json)).toBe('"harness-two"');
     h.cleanup();
@@ -234,3 +238,58 @@ test(
   },
   HARNESS_TEST_TIMEOUT_MS,
 );
+
+test(
+  "the harness captures a run's console.error and stdout, and each invocation starts empty",
+  async () => {
+    const h = make();
+    expect(await h.fresh()).toBe(75);
+    // run.ts prints its summary with console.error, which on Bun bypasses process.stderr.write
+    expect(h.stderr.join("")).toContain("Paused — needs you to unblock it, then resume.");
+    const ndjson = h.stdout.join("").trim().split("\n");
+    expect(ndjson.length).toBeGreaterThan(0);
+    expect(ndjson.map((l) => JSON.parse(l).type)).toContain("summary");
+    expect(await h.resume({ inspect: true })).toBe(0);
+    expect(h.stderr.join("")).toContain(`resume --inspect ${h.ident}`);
+    expect(h.stderr.join("")).not.toContain("Paused — needs you");
+    expect(h.stdout).toEqual([]);
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+test(
+  "the harness reads its own ticket by ident, not the lowest id in the database",
+  async () => {
+    const h = make();
+    const dbFile = join(makeTempDir("styre-dh-other-"), "reuse.db");
+    migrate(dbFile);
+    const db = openDb(dbFile);
+    const other = insertTicket(db, {
+      projectId: insertProject(db, { slug: "other", targetRepo: "/tmp/other" }),
+      ident: "OTHER-1",
+      status: "waiting",
+    });
+    db.close();
+    expect(await h.fresh({ db: dbFile })).toBe(75);
+    const id = h.readAt(dbFile, (_db, ticketId) => ticketId);
+    expect(id).not.toBe(other);
+    expect(h.readAt(dbFile, (rdb, ticketId) => getTicket(rdb, ticketId)?.ident)).toBe("ENG-1");
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+describe("makeDesignTicket's database", () => {
+  let kept: Database | null = null;
+  test(
+    "is open while the test runs",
+    () => {
+      kept = makeDesignTicket().db;
+      expect(kept.query("SELECT 1 AS one").get()).toEqual({ one: 1 });
+    },
+    STEP_TEST_TIMEOUT_MS,
+  );
+  test("is closed when the test ends", () => {
+    expect(kept).not.toBeNull();
+    expect(() => kept?.query("SELECT 1").get()).toThrow();
+  });
+});

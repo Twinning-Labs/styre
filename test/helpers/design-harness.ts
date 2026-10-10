@@ -1,7 +1,9 @@
 import type { Database } from "bun:sqlite";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { format } from "node:util";
 import { StyreError } from "../../src/cli/errors.ts";
+import { renderError } from "../../src/cli/output.ts";
 import { parkDir } from "../../src/cli/park.ts";
 import { type RunArgs, runImpl } from "../../src/cli/run.ts";
 import { readCopyOf } from "../../src/db/read-copy.ts";
@@ -55,7 +57,13 @@ export class DesignHarness {
   readonly ident = "ENG-1";
   readonly slug: string;
   probe: HostProbe = () => true;
+  /** What the last invocation wrote to stderr: `process.stderr.write`, `console.error` and
+   *  `console.warn`, and, when it ends in a StyreError, the error boundary's rendering of it
+   *  (`styre run: <headline>`). Reset at the start of each invocation, like `trackerCalls`. */
   stderr: string[] = [];
+  /** What the last invocation wrote to stdout (the NDJSON telemetry, `console.log`/`console.info`):
+   *  captured, never printed. Reset at the start of each invocation. */
+  stdout: string[] = [];
   /** The fake tracker's calls during the last invocation (E2: a resume makes no `fetchTicket`). */
   trackerCalls: Array<{ method: string; args: unknown[] }> = [];
   private profileRaw: Record<string, unknown>;
@@ -117,9 +125,13 @@ export class DesignHarness {
 
   readAt<T>(path: string, fn: (db: Database, ticketId: number) => T): T {
     return readCopyOf(path, (db) => {
-      const t = db.query<{ id: number }, []>("SELECT id FROM ticket ORDER BY id LIMIT 1").get();
-      if (!t) throw new Error(`harness: no ticket in ${path}`);
-      return fn(db, t.id);
+      // by ident: a reused --db can hold other tickets, with lower ids
+      const rows = db
+        .query<{ id: number }, [string]>("SELECT id FROM ticket WHERE ident = ?")
+        .all(this.ident);
+      if (rows.length !== 1)
+        throw new Error(`harness: ${rows.length} tickets named ${this.ident} in ${path}`);
+      return fn(db, rows[0].id);
     });
   }
 
@@ -159,6 +171,8 @@ export class DesignHarness {
       },
     });
     this.trackerCalls = issueTracker.calls;
+    this.stderr = [];
+    this.stdout = [];
     const ports = { issueTracker, forge: fakeForge() };
     const prev = {
       state: process.env.XDG_STATE_HOME,
@@ -166,15 +180,31 @@ export class DesignHarness {
       telemetry: process.env.STYRE_TELEMETRY,
       exit: process.exitCode ?? 0,
       cwd: process.cwd(),
-      write: process.stderr.write,
+      errWrite: process.stderr.write,
+      outWrite: process.stdout.write,
+      error: console.error,
+      warn: console.warn,
+      log: console.log,
+      info: console.info,
     };
     process.env.XDG_STATE_HOME = this.stateRoot;
     process.env.XDG_CONFIG_HOME = this.configRoot;
     process.env.STYRE_TELEMETRY = "0";
+    const text = (chunk: unknown): string =>
+      typeof chunk === "string" ? chunk : Buffer.from(chunk as Uint8Array).toString("utf8");
+    // On Bun, console.error does not go through process.stderr.write: each is captured itself.
     process.stderr.write = ((chunk: unknown) => {
-      this.stderr.push(String(chunk));
+      this.stderr.push(text(chunk));
       return true;
     }) as typeof process.stderr.write;
+    process.stdout.write = ((chunk: unknown) => {
+      this.stdout.push(text(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    console.error = (...a: unknown[]) => void this.stderr.push(`${format(...a)}\n`);
+    console.warn = console.error;
+    console.log = (...a: unknown[]) => void this.stdout.push(`${format(...a)}\n`);
+    console.info = console.log;
     if (args["in-place"]) process.chdir(this.repoDir); // in-place discovers the repo from the cwd
     try {
       process.exitCode = 0;
@@ -187,10 +217,18 @@ export class DesignHarness {
       );
       return Number(process.exitCode ?? 0);
     } catch (err) {
-      if (err instanceof StyreError) return err.code;
+      if (err instanceof StyreError) {
+        this.stderr.push(`${renderError("run", err)}\n`); // what the error boundary prints
+        return err.code;
+      }
       throw err;
     } finally {
-      process.stderr.write = prev.write;
+      process.stderr.write = prev.errWrite;
+      process.stdout.write = prev.outWrite;
+      console.error = prev.error;
+      console.warn = prev.warn;
+      console.log = prev.log;
+      console.info = prev.info;
       process.chdir(prev.cwd);
       process.exitCode = prev.exit;
       const restore = (k: string, v: string | undefined) => {

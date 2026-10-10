@@ -176,6 +176,19 @@ test(
       JSON.parse(getInput(t.db, t.ticketId, "run.unusableComponents")?.value_json ?? "null"),
     ).toEqual([a, b]);
     expect(capture([a, b]).changed).toEqual([]);
+    const y = { component: "y", role: "fixture" as const };
+    const x = { component: "x", role: "fixture" as const };
+    const nonPrimary = (list: Array<typeof x>) =>
+      captureSnapshot(t.db, t.ticketId, {
+        ...sources(t),
+        unusableComponents: [a, b],
+        nonPrimaryComponents: list,
+      });
+    expect(nonPrimary([y, x]).changed).toEqual(["run.nonPrimaryComponents"]);
+    expect(
+      JSON.parse(getInput(t.db, t.ticketId, "run.nonPrimaryComponents")?.value_json ?? "null"),
+    ).toEqual([x, y]);
+    expect(nonPrimary([x, y]).changed).toEqual([]);
   },
   STEP_TEST_TIMEOUT_MS,
 );

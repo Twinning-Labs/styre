@@ -273,6 +273,8 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
       );
     }
 
+    // In place, the starting commit is HEAD of the checkout at run start (spec §4.2), read below.
+    let inPlaceStartingCommit: string | null = null;
     if (args["in-place"] && !(args.resume && args.resume.length > 0)) {
       const { discoverRepoRoot, assertInPlaceSafe, assertInPlaceIdentity } = await import(
         "../dispatch/in-place.ts"
@@ -285,6 +287,18 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
         );
       }
       profile.targetRepo = discovered;
+      // Read before any other check or step: a HEAD that cannot be read (a repository with no
+      // commit) would leave the run without a starting commit, so it refuses here, loudly.
+      inPlaceStartingCommit = branchHeadSha(profile.targetRepo, "HEAD");
+      if (inPlaceStartingCommit === null) {
+        throw new StyreError({
+          code: EXIT.CONFIG,
+          headline: `cannot start in place — the HEAD of ${profile.targetRepo} cannot be read`,
+          detail:
+            "An in place run records HEAD as its starting commit before any step runs; a repository with no commit has no HEAD.",
+          recovery: "Commit to the repository (or check out a commit), then re-run.",
+        });
+      }
       assertInPlaceSafe(profile.targetRepo);
       await assertInPlaceIdentity(profile.targetRepo, profile);
     }
@@ -442,8 +456,8 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
         });
       }
       const inPlace = (args["in-place"] as boolean | undefined) ?? false;
-      // spec §4.2: in place, the starting commit is HEAD of the checkout at run start.
-      const runStartingCommit = inPlace ? branchHeadSha(profile.targetRepo, "HEAD") : null;
+      // spec §4.2: in place, the starting commit is HEAD of the checkout at run start (read above).
+      const runStartingCommit = inPlace ? inPlaceStartingCommit : null;
       const runner = deps?.runner ?? resolveAgentRunner(agentConfig);
       const registry = buildDispatchRegistry({
         runner,

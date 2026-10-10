@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { existsSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SNAPSHOT_INPUT_NAMES } from "../../src/daemon/design-graph.ts";
 import { startingCommit } from "../../src/daemon/design-inputs.ts";
@@ -28,7 +28,15 @@ const fetches = (h: DesignHarness) => h.trackerCalls.filter((c) => c.method === 
 /** A reused database that already holds another project's tickets: OTHER-1 active, with a
  *  `provision` an older Styre finished (succeeded, no manifest), and OTHER-2 waiting. Their project
  *  is paused, so the loop does not drive them in these tests (`v_ready_tickets`); the run still
- *  prepares OTHER-1, which is active. Set up through the repositories (test setup). */
+ *  prepares OTHER-1, which is active.
+ *
+ *  A stated exception to "no faked state" (Global Constraints), for two writes:
+ *  - the succeeded `provision` step with no manifest, written through the workflow_step
+ *    repository: Task 12's reused --db adopt test needs another active ticket carrying such a
+ *    step, and only an older Styre produces one, which an in process test cannot run;
+ *  - `project.paused = 1`, raw SQL: the OSS core has no writer for it (pausing a project is the
+ *    commercial plane's), and without it the loop would drive the other tickets with this run's
+ *    registry, against a repository that does not exist. */
 function seedOtherTickets(dbFile: string): { active: number; waiting: number } {
   migrate(dbFile);
   const db = openDb(dbFile);
@@ -56,6 +64,8 @@ test(
     const h = make("in-place");
     const head = git(h.repoDir, ["rev-parse", "HEAD"]);
     expect(await h.fresh()).toBe(75); // pauses needs_you at checks:dispatch
+    expect(h.calls.counts["checks:dispatch"]).toBe(0); // the pause is the prerequisite, not an agent
+    expect(h.stderr.join("")).toContain(`IN-PLACE: mutating ${h.repoDir}`);
     expect(h.read((db, id) => startingCommit(db, id))).toBe(head);
     expect(await h.resume()).toBe(75);
     expect(h.read((db, id) => startingCommit(db, id))).toBe(head);
@@ -131,13 +141,16 @@ test(
     const h = make();
     const dbFile = join(makeTempDir("styre-reuse-"), "reuse.db");
     expect(await h.fresh({ db: dbFile })).toBe(75);
-    const titleAt = h.readAt(dbFile, (db, id) => getInput(db, id, "ticket.title")?.captured_at);
+    const title = h.readAt(dbFile, (db, id) => getInput(db, id, "ticket.title"));
+    expect(JSON.parse(title?.value_json ?? "null")).toBe("Harness ticket");
     h.editProfile((p) => {
       p.promptVars = { stack: "ruby", tone: "terse" };
     });
-    expect(await h.fresh({ db: dbFile })).toBe(75);
+    // E2: the tracker now says something else; the reused database keeps the text it started with
+    expect(await h.fresh({ db: dbFile, trackerTitle: "Edited in the tracker" })).toBe(75);
+    expect(fetches(h)).toHaveLength(1); // the fresh run did read the edited title
     h.readAt(dbFile, (db, id) => {
-      expect(getInput(db, id, "ticket.title")?.captured_at).toBe(titleAt);
+      expect(getInput(db, id, "ticket.title")).toEqual(title);
       const note = listEvents(db, id).find((e) => e.reason === "inputs-changed");
       expect(JSON.parse(note?.payload_json ?? "{}").names).toEqual(["profile.promptVars"]);
     });
@@ -152,6 +165,7 @@ test(
   async () => {
     const h = make();
     expect(await h.fresh()).toBe(75);
+    expect(h.calls.counts["checks:dispatch"]).toBe(0);
     h.read((db, id) => {
       // the snapshot rows, and beside them the starting commit provision recorded
       const rows = listInputs(db, id).filter((r) => r.name !== "run.startingCommit");
@@ -203,18 +217,52 @@ test(
 );
 
 test(
-  "in place, a reused --db keeps the starting commit its first run recorded",
+  "in place, a reused --db keeps the starting commit its first run recorded, and notes the other active tickets' changed inputs",
   async () => {
     const h = make("in-place");
     const dbFile = join(makeTempDir("styre-reuse-"), "reuse.db");
+    const other = seedOtherTickets(dbFile);
     const head = git(h.repoDir, ["rev-parse", "HEAD"]);
     expect(await h.fresh({ db: dbFile })).toBe(75);
     writeFileSync(join(h.repoDir, "operator.txt"), "an operator commit\n");
     git(h.repoDir, ["add", "operator.txt"]);
     git(h.repoDir, ["commit", "-q", "-m", "operator"]);
     expect(git(h.repoDir, ["rev-parse", "HEAD"])).not.toBe(head);
+    h.editProfile((p) => {
+      p.promptVars = { stack: "ruby", tone: "terse" };
+    });
     expect(await h.fresh({ db: dbFile })).toBe(75);
-    expect(h.readAt(dbFile, (db, id) => startingCommit(db, id))).toBe(head);
+    h.readAt(dbFile, (db, id) => {
+      expect(startingCommit(db, id)).toBe(head);
+      // ruling 2026-10-10: the starting commit stays this run's own ticket's
+      expect(startingCommit(db, other.active)).toBeNull();
+      // and every other active ticket gets the same snapshot, with the same note
+      const notesOf = (t: number) =>
+        listEvents(db, t)
+          .filter((e) => e.reason === "inputs-changed")
+          .map((e) => JSON.parse(e.payload_json ?? "{}").names);
+      expect(notesOf(id)).toEqual([["profile.promptVars"]]);
+      expect(notesOf(other.active)).toEqual([["profile.promptVars"]]);
+      expect(notesOf(other.waiting)).toEqual([]);
+      expect(listInputs(db, other.waiting)).toEqual([]);
+    });
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+test(
+  "in place, a repository whose HEAD cannot be read refuses the run before anything is recorded",
+  async () => {
+    const repo = makeTempDir("styre-unborn-");
+    git(repo, ["init", "-q", "-b", "main"]); // no commit: HEAD is unborn
+    const h = new DesignHarness("in-place", { repoDir: repo });
+    harnesses.push(h);
+    expect(await h.fresh()).toBe(78);
+    expect(h.stderr.join("")).toContain(
+      `styre run: cannot start in place — the HEAD of ${realpathSync(repo)} cannot be read`,
+    );
+    expect(h.calls.prompts).toEqual([]);
+    expect(existsSync(h.dbPath())).toBe(false);
   },
   HARNESS_TEST_TIMEOUT_MS,
 );
