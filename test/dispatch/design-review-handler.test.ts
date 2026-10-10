@@ -21,7 +21,7 @@ afterEach(pendingLeftoverChecks);
 
 function gitRepo(): string {
   const root = makeTempDir("styre-dr-");
-  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
+  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root, timeout: 30_000 });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
   run(["config", "user.name", "T"]);
@@ -170,6 +170,9 @@ test(
     const open = listOpenByTicket(db, ticketId);
     db.close();
     expect(step?.status).not.toBe("succeeded");
+    expect(JSON.parse(step?.error_json ?? "{}").message).toContain(
+      "design:review sidecar absent: no ```styre-sidecar block found",
+    );
     expect(open.length).toBe(0);
   },
   STEP_TEST_TIMEOUT_MS,
@@ -207,7 +210,11 @@ test(
       ),
     }));
     await advanceOneStep(db, ticketId, registryFor(repo, runner));
-    expect(getByKey(db, ticketId, "design:review")?.status).not.toBe("succeeded");
+    const step = getByKey(db, ticketId, "design:review");
+    expect(step?.status).not.toBe("succeeded");
+    expect(JSON.parse(step?.error_json ?? "{}").message).toContain(
+      "design:review findings invalid: finding references work_unit_seq 3, which does not exist",
+    );
     expect(listOpenByTicket(db, ticketId)).toHaveLength(0);
     db.close();
   },

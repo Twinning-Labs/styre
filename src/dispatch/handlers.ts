@@ -552,7 +552,9 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     // spec §5.3: the plan's digest at the branch head, read through git before the success
     // transaction (anything slow is computed before it, §5.2).
     const { repoPath, branch } = worktreeFor(ctx, deps);
-    const planFiles = ticketPlanFilesAt(repoPath, branch, ctx.ticket.ident);
+    // Fully qualified: git resolves refs/tags/<name> before refs/heads/<name>, so a tag named like
+    // the branch would otherwise select another tree.
+    const planFiles = ticketPlanFilesAt(repoPath, `refs/heads/${branch}`, ctx.ticket.ident);
     if (planFiles.length === 0) {
       // The postcondition found the plan in the worktree, but git has none at the branch head
       // (an ignored docs/plans/, say). The digest of nothing never changes, so every later plan

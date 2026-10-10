@@ -24,7 +24,7 @@ afterEach(pendingLeftoverChecks);
 
 function gitRepo(): string {
   const root = makeTempDir("styre-dre-");
-  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
+  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root, timeout: 30_000 });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
   run(["config", "user.name", "T"]);

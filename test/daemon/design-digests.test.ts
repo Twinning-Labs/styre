@@ -3,8 +3,10 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   EMPTY_PLAN_DIGEST,
+  changedInputs,
   digestWorkUnits,
   planDigestAt,
+  planDigestOf,
   ticketPlanFilesAt,
 } from "../../src/daemon/design-digests.ts";
 import { insertTicket, setNeedsDocs } from "../../src/db/repos/ticket.ts";
@@ -149,3 +151,65 @@ test(
   },
   STEP_TEST_TIMEOUT_MS,
 );
+
+test(
+  "an extra plan file for the ticket changes the digest; every one of them is read, sorted by path",
+  () => {
+    const repo = gitRepo();
+    mkdirSync(join(repo, "docs", "plans"), { recursive: true });
+    writeFileSync(join(repo, "docs", "plans", "m.md"), plan("ENG-1", "first"));
+    commitAll(repo, "one plan");
+    const one = planDigestAt(repo, "main", "ENG-1");
+    // written in this order so that path order and write order differ
+    writeFileSync(join(repo, "docs", "plans", "z.md"), plan("ENG-1", "third"));
+    writeFileSync(join(repo, "docs", "plans", "a.md"), plan("ENG-1", "second"));
+    commitAll(repo, "two more plans");
+    const files = ticketPlanFilesAt(repo, "main", "ENG-1");
+    expect(files).toEqual([
+      { path: "docs/plans/a.md", content: plan("ENG-1", "second") },
+      { path: "docs/plans/m.md", content: plan("ENG-1", "first") },
+      { path: "docs/plans/z.md", content: plan("ENG-1", "third") },
+    ]);
+    const three = planDigestAt(repo, "main", "ENG-1");
+    expect(three).not.toBe(one);
+    expect(three).toBe(planDigestOf(files));
+  },
+  STEP_TEST_TIMEOUT_MS,
+);
+
+test(
+  "a branch read as refs/heads/<branch> is the branch, even when a tag has the same name",
+  () => {
+    const repo = gitRepo();
+    mkdirSync(join(repo, "docs", "plans"), { recursive: true });
+    writeFileSync(join(repo, "docs", "plans", "a.md"), plan("ENG-1", "tagged"));
+    commitAll(repo, "plan at the tag");
+    git(repo, ["tag", "main"]); // a tag named like the branch, on the older tree
+    writeFileSync(join(repo, "docs", "plans", "a.md"), plan("ENG-1", "branch head"));
+    commitAll(repo, "plan at the branch head");
+    expect(ticketPlanFilesAt(repo, "refs/heads/main", "ENG-1")).toEqual([
+      { path: "docs/plans/a.md", content: plan("ENG-1", "branch head") },
+    ]);
+    // the unqualified name means the tag to git: why callers with a branch name qualify it
+    expect(ticketPlanFilesAt(repo, "main", "ENG-1")).toEqual([
+      { path: "docs/plans/a.md", content: plan("ENG-1", "tagged") },
+    ]);
+  },
+  STEP_TEST_TIMEOUT_MS,
+);
+
+test("changedInputs: names whose digest differs or that one side lacks, sorted", () => {
+  const recorded = { "ticket.title": "t1", plan: "p1", "profile.slug": "s1" };
+  expect(changedInputs(recorded, { ...recorded })).toEqual([]);
+  expect(changedInputs({}, {})).toEqual([]);
+  // a changed digest, a name only recorded, a name only current; out of order on purpose
+  expect(
+    changedInputs(
+      { "ticket.title": "t1", plan: "p1", workUnits: "w1", "profile.slug": "s1" },
+      { "ticket.title": "t2", plan: "p1", "profile.slug": "s1", "config.complexityGrading": "c1" },
+    ),
+  ).toEqual(["config.complexityGrading", "ticket.title", "workUnits"]);
+  expect(changedInputs({ workUnits: "w1" }, {})).toEqual(["workUnits"]);
+  expect(changedInputs({}, { workUnits: "w1" })).toEqual(["workUnits"]);
+  expect(changedInputs({ b: "1", a: "1" }, { b: "2", a: "2" })).toEqual(["a", "b"]);
+});

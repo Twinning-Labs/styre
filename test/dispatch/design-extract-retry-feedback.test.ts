@@ -27,7 +27,7 @@ afterEach(pendingLeftoverChecks);
 
 function gitRepo(): string {
   const root = makeTempDir("styre-erf-");
-  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
+  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root, timeout: 30_000 });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
   run(["config", "user.name", "T"]);
@@ -211,6 +211,7 @@ test(
       o = await advanceOneStep(db, ticketId, registry);
     } while (o.kind === "retry");
 
+    const step = getByKey(db, ticketId, "design:extract");
     const events = listEvents(db, ticketId);
     const ticket = getTicket(db, ticketId);
     db.close();
@@ -220,6 +221,10 @@ test(
     const escalation = events.find((e) => e.kind === "escalated");
     expect(escalation).toBeDefined();
     expect(escalation?.reason).toBe("step 'design:extract' failed");
+    expect(step?.status).toBe("failed");
+    expect(JSON.parse(step?.error_json ?? "{}").message).toContain(
+      "design:extract completeness failed: unit seq 2 declares no files_to_touch",
+    );
   },
   STEP_TEST_TIMEOUT_MS,
 );

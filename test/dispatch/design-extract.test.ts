@@ -20,7 +20,7 @@ afterEach(pendingLeftoverChecks);
 
 function gitRepo(): string {
   const root = makeTempDir("styre-e-");
-  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
+  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root, timeout: 30_000 });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
   run(["config", "user.name", "T"]);
@@ -186,6 +186,9 @@ test(
     const units = listByTicket(db, ticketId);
     db.close();
     expect(step?.status).not.toBe("succeeded");
+    expect(JSON.parse(step?.error_json ?? "{}").message).toContain(
+      "design:extract sidecar absent: no ```styre-sidecar block found",
+    );
     expect(units.length).toBe(0);
   },
   STEP_TEST_TIMEOUT_MS,
@@ -231,6 +234,9 @@ test(
     const units = listByTicket(db, ticketId);
     db.close();
     expect(step?.status).not.toBe("succeeded");
+    expect(JSON.parse(step?.error_json ?? "{}").message).toContain(
+      "design:extract CDOT gate failed: cdotImpact.data must be addressed",
+    );
     expect(units.length).toBe(0); // gate runs before insert → nothing persisted
   },
   STEP_TEST_TIMEOUT_MS,
@@ -319,6 +325,9 @@ test(
     const units = listByTicket(db, ticketId);
     db.close();
     expect(step?.status).not.toBe("succeeded");
+    expect(JSON.parse(step?.error_json ?? "{}").message).toContain(
+      "design:extract completeness failed: unit seq 1 is behavioral but has no test_plan",
+    );
     expect(units.length).toBe(0);
   },
   STEP_TEST_TIMEOUT_MS,

@@ -26,7 +26,7 @@ afterEach(pendingLeftoverChecks);
 
 function gitRepo(): string {
   const root = makeTempDir("styre-ce-");
-  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
+  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root, timeout: 30_000 });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
   run(["config", "user.name", "T"]);
@@ -49,7 +49,7 @@ function untrackedNow(cwd: string): string[] {
       "-z",
       "--untracked-files=all",
     ],
-    { cwd },
+    { cwd, timeout: 30_000 },
   ).stdout.toString();
   return out
     .split("\0")
@@ -162,7 +162,7 @@ test("A2 under-delivered: a unit that touches a file it did NOT declare loops ba
   const runner = sequencedRunner([
     (cwd) => {
       // touches y.ts, never the declared x.ts
-      Bun.spawnSync(["mkdir", "-p", join(cwd, "src")]);
+      Bun.spawnSync(["mkdir", "-p", join(cwd, "src")], { timeout: 30_000 });
       writeFileSync(join(cwd, "src", "y.ts"), "export const y = 1;\n");
     },
   ]);
@@ -434,6 +434,9 @@ test(
     // design:extract itself ran (once): before the move it was never reached (provision ran instead)
     expect(step?.attempt).toBe(1);
     expect(step?.status).not.toBe("succeeded");
+    expect(JSON.parse(step?.error_json ?? "{}").message).toContain(
+      "design:extract completeness failed: unit seq 1 declares no files_to_touch",
+    );
     expect(units.length).toBe(0);
   },
   STEP_TEST_TIMEOUT_MS,

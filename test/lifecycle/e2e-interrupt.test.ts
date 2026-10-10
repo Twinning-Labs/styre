@@ -116,7 +116,7 @@ afterEach(() => {
 // ---- small helpers --------------------------------------------------------------------------------
 
 function git(cwd: string, args: string[]): string {
-  const r = Bun.spawnSync(["git", ...args], { cwd, env: { ...process.env } });
+  const r = Bun.spawnSync(["git", ...args], { cwd, env: { ...process.env }, timeout: 30_000 });
   if (!r.success) throw new Error(`git ${args.join(" ")} failed: ${r.stderr.toString()}`);
   return r.stdout.toString().trimEnd(); // a status line may start with a space
 }

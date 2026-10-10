@@ -3,8 +3,9 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
-import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
+import { DEFAULT_RUNTIME_CONFIG, type RuntimeConfig } from "../../src/config/runtime-config.ts";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
+import { captureSnapshot } from "../../src/daemon/design-inputs.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
 import { getByKey } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
@@ -23,7 +24,7 @@ afterEach(pendingLeftoverChecks);
 
 function gitRepo(): string {
   const root = makeTempDir("styre-dse-");
-  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
+  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root, timeout: 30_000 });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
   run(["config", "user.name", "T"]);
@@ -68,13 +69,23 @@ async function readyForSize(
   ticketId: number,
   repo: string,
   unitCount: number,
+  config: RuntimeConfig = DEFAULT_RUNTIME_CONFIG,
 ): Promise<void> {
+  // The snapshot says what this run hands its design steps (spec §4): the profile and config the
+  // flow runs with, not makeTestDb's defaults, so a manifest records the inputs the step read.
+  captureSnapshot(db, ticketId, {
+    profile: profileFor(repo),
+    unusableComponents: [],
+    nonPrimaryComponents: [],
+    config,
+  });
   await reachDesignStep({
     db,
     ticketId,
     profile: profileFor(repo),
     worktreeRoot: rootFor(repo),
     target: "design:size",
+    config,
     units: unitsOf(unitCount, { behavioral: false, dir: "src", ext: "ts" }).map((u) => ({
       ...u,
       verify_check_types: ["test"],
@@ -168,7 +179,7 @@ test(
     const { db, ticketId, projectId } = makeTestDb();
     const repo = gitRepo();
     db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
-    await readyForSize(db, ticketId, repo, 3);
+    await readyForSize(db, ticketId, repo, 3, ON_CONFIG.config);
 
     // design:size (grader on): returns a grade with overall=2.
     // design:review must NOT be called (fast-track skips it).
@@ -227,6 +238,9 @@ test(
 
     const ticket = getTicket(db, ticketId);
     const reviewStep = getByKey(db, ticketId, "design:review");
+    const sizeManifest = JSON.parse(
+      getByKey(db, ticketId, "design:size")?.input_manifest ?? "null",
+    ) as Record<string, string>;
     db.close();
 
     // Binding facts:
@@ -236,6 +250,15 @@ test(
     expect(ticket?.stage).toBe("implement");
     // 3. design:review step was NEVER created (fast-track skips it).
     expect(reviewStep).toBeNull();
+    // 4. design:size's manifest records the grading-on inputs it read.
+    expect(Object.keys(sizeManifest).sort()).toEqual([
+      "config.complexityGrading",
+      "plan",
+      "profile.promptVars",
+      "profile.slug",
+      "ticket.title",
+      "workUnits",
+    ]);
   },
   STEP_TEST_TIMEOUT_MS,
 );
@@ -248,7 +271,7 @@ test(
     const { db, ticketId, projectId } = makeTestDb();
     const repo = gitRepo();
     db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
-    await readyForSize(db, ticketId, repo, 1);
+    await readyForSize(db, ticketId, repo, 1, ON_CONFIG.config);
 
     // Two agent calls expected:
     //   Call 1: design:size (grader on) → grade overall=8
@@ -305,6 +328,9 @@ test(
 
     const ticket = getTicket(db, ticketId);
     const reviewStep = getByKey(db, ticketId, "design:review");
+    const sizeManifest = JSON.parse(
+      getByKey(db, ticketId, "design:size")?.input_manifest ?? "null",
+    ) as Record<string, string>;
     db.close();
 
     // Binding facts:
@@ -316,6 +342,15 @@ test(
     expect(reviewStep?.status).toBe("succeeded");
     // 4. Both the grade call and the review call fired.
     expect(callCount).toBeGreaterThanOrEqual(2);
+    // 4. design:size's manifest records the grading-on inputs it read.
+    expect(Object.keys(sizeManifest).sort()).toEqual([
+      "config.complexityGrading",
+      "plan",
+      "profile.promptVars",
+      "profile.slug",
+      "ticket.title",
+      "workUnits",
+    ]);
   },
   STEP_TEST_TIMEOUT_MS,
 );

@@ -326,7 +326,9 @@ export function fileContentAt(sha: string, file: string, worktreePath: string): 
 }
 
 /** Every `docs/plans/*.md` (not nested) at `ref`, read through git, never the working tree (spec
- *  §5.3: the resolver and the plan digest never read the worktree). A missing ref throws. */
+ *  §5.3: the resolver and the plan digest never read the worktree). A missing ref throws. `ref` is a
+ *  commit or a fully qualified ref: a caller with a branch name passes `refs/heads/<branch>`, since
+ *  git prefers a tag of the same name. */
 export function planFilesAt(repoPath: string, ref: string): { path: string; content: string }[] {
   const paths = gitPathsZ(
     ["ls-tree", "-r", "--name-only", "-z", ref, "--", "docs/plans/"],

@@ -5,6 +5,7 @@ import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
 import { digestValue } from "../../src/daemon/canonical.ts";
 import {
+  EMPTY_PLAN_DIGEST,
   currentManifest,
   digestWorkUnits,
   inputContext,
@@ -62,7 +63,7 @@ test(
       expect(step?.fingerprint_scheme).toBe(1);
       expect(manifest).toEqual(currentManifest(t.db, t.ticketId, row)); // stable on recompute
       if (row.fileOutput)
-        expect(step?.output_digest).toBe(planDigestAt(t.repo, "feat/ENG-1", "ENG-1"));
+        expect(step?.output_digest).toBe(planDigestAt(t.repo, "refs/heads/feat/ENG-1", "ENG-1"));
       else expect(step?.output_digest).toBeNull();
     }
   },
@@ -313,7 +314,7 @@ for (const complexityGrading of [false, true]) {
       const t = makeDesignTicket({ config: { complexityGrading } });
       await driveUntil(t, atStep("checks:dispatch"));
       const plan = getByKey(t.db, t.ticketId, "design:dispatch")?.output_digest;
-      expect(plan).toBe(planDigestAt(t.repo, "feat/ENG-1", "ENG-1"));
+      expect(plan).toBe(planDigestAt(t.repo, "refs/heads/feat/ENG-1", "ENG-1"));
       const outputs: Record<string, string | null | undefined> = {
         plan,
         workUnits: digestWorkUnits(t.db, t.ticketId), // unchanged since design:extract wrote them
@@ -374,6 +375,21 @@ test(
       "design:dispatch succeeded without the digest of its file output",
     );
     db.close();
+  },
+  STEP_TEST_TIMEOUT_MS,
+);
+
+test(
+  "design:dispatch reads its plan from the branch, never from a tag of the same name",
+  async () => {
+    // A tag named like the ticket branch, on a tree with no plan: read unqualified, git would pick
+    // the tag, find no plan, and escalate a healthy ticket.
+    const t = makeDesignTicket({ repoSetup: (repo) => git(repo, ["tag", "feat/ENG-1"]) });
+    await driveUntil(t, atStep("design:extract"), 4);
+    const step = getByKey(t.db, t.ticketId, "design:dispatch");
+    expect(step?.status).toBe("succeeded");
+    expect(step?.output_digest).toBe(planDigestAt(t.repo, "refs/heads/feat/ENG-1", "ENG-1"));
+    expect(step?.output_digest).not.toBe(EMPTY_PLAN_DIGEST);
   },
   STEP_TEST_TIMEOUT_MS,
 );
