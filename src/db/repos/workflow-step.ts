@@ -126,6 +126,32 @@ export function markSucceeded(db: Database, id: number, result: unknown): void {
   ).run({ $r: JSON.stringify(result === undefined ? null : result), $now: now, $id: id });
 }
 
+/** The manifest a design table step's success was computed from (ENG-477 §5.2). */
+export function recordManifest(
+  db: Database,
+  id: number,
+  m: {
+    manifest: Record<string, string>;
+    fingerprint: string;
+    outputDigest: string | null;
+    scheme: number;
+  },
+): void {
+  db.query(
+    `UPDATE workflow_step
+       SET input_manifest = $m, input_fingerprint = $f, output_digest = $o, fingerprint_scheme = $s,
+           updated_at = $now
+     WHERE id = $id`,
+  ).run({
+    $m: JSON.stringify(m.manifest),
+    $f: m.fingerprint,
+    $o: m.outputDigest,
+    $s: m.scheme,
+    $now: nowUtc(),
+    $id: id,
+  });
+}
+
 export function markFailed(db: Database, id: number, error: unknown): void {
   const now = nowUtc();
   db.query(

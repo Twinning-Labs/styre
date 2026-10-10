@@ -11,17 +11,20 @@ import { openDb } from "../../src/db/client.ts";
 import { migrate } from "../../src/db/migrate.ts";
 import { insertProject } from "../../src/db/repos/project.ts";
 import { insertRun } from "../../src/db/repos/run.ts";
-import { insertTicket } from "../../src/db/repos/ticket.ts";
+import { getTicket, insertTicket } from "../../src/db/repos/ticket.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { type Profile, parseProfile } from "../../src/dispatch/profile.ts";
+import { pendingLeftoverChecks } from "../../src/util/process/leftovers.ts";
 import { nowUtc } from "../../src/util/time.ts";
 import {
   type DesignScript,
   type ScriptCalls,
+  type ScriptUnit,
   defaultScript,
   harnessProfileRaw,
   newCalls,
   scriptedRunner,
+  unitsOf,
 } from "./design-script.ts";
 import { makeTempDir, onTempCleanup } from "./temp.ts";
 
@@ -115,7 +118,9 @@ export function makeDesignTicket(
   return { db, ticketId, repo, worktreeRoot, profile, config, script, calls, registry };
 }
 
-/** Advance until `stop` holds for the next descriptor (checked before each step). */
+/** Advance until `stop` holds for the next descriptor (checked before each step). After each step
+ *  it waits for the background leftover check the step started (ENG-485 section 9.1), as
+ *  `driveToTerminal` does: a check still running when the test ends keeps the command temp folder. */
 export async function driveUntil(
   t: Pick<DesignTicket, "db" | "ticketId" | "registry" | "config">,
   stop: (d: StepDescriptor) => boolean,
@@ -125,6 +130,7 @@ export async function driveUntil(
     const d = nextStepKey(t.db, t.ticketId);
     if (stop(d)) return d;
     await advanceOneStep(t.db, t.ticketId, t.registry, { config: t.config });
+    await pendingLeftoverChecks();
   }
   throw new Error(`driveUntil: no stop after ${maxSteps} steps`);
 }
@@ -133,3 +139,42 @@ export const atStep =
   (stepKey: string) =>
   (d: StepDescriptor): boolean =>
     d.kind === "step" && d.stepKey === stepKey;
+
+/** For the existing tests that used to seed rows (spec §8): run the real design steps, with a
+ *  scripted agent, until `target` is the next step. `target` is a design table step or
+ *  `checks:dispatch`, the first step after the table. Uses the caller's profile, worktree root and
+ *  mode (`inPlace`), so the caller's own registry then finds the same worktree or checkout. `units`
+ *  is what the scripted `design:extract` returns. */
+export async function reachDesignStep(opts: {
+  db: Database;
+  ticketId: number;
+  profile: Profile;
+  worktreeRoot: string;
+  target: string;
+  units?: ScriptUnit[];
+  config?: RuntimeConfig;
+  inPlace?: boolean;
+}): Promise<ScriptCalls> {
+  const ident = getTicket(opts.db, opts.ticketId)?.ident ?? "ENG-1";
+  const calls = newCalls();
+  const units = opts.units ?? unitsOf(2, { behavioral: false, dir: "src", ext: "ts" });
+  const script = defaultScript({ ident, units: () => units });
+  const registry = buildDispatchRegistry({
+    runner: scriptedRunner(script, calls),
+    agentConfig: DEFAULT_AGENT_CONFIG,
+    profile: opts.profile,
+    worktreeRoot: opts.worktreeRoot,
+    inPlace: opts.inPlace ?? false,
+  });
+  await driveUntil(
+    {
+      db: opts.db,
+      ticketId: opts.ticketId,
+      registry,
+      config: opts.config ?? DEFAULT_RUNTIME_CONFIG,
+    },
+    atStep(opts.target),
+    20,
+  );
+  return calls;
+}

@@ -4,6 +4,7 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
+import { EMPTY_PLAN_DIGEST } from "../../src/daemon/design-digests.ts";
 import { StepRegistry } from "../../src/daemon/step-registry.ts";
 import type { HandlerContext } from "../../src/daemon/step-registry.ts";
 import { insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
@@ -69,7 +70,7 @@ test("a process the agent step left in its worktree is reported on stderr and in
   registry.register("design:dispatch", async (ctx) => {
     dispatchIn(ctx, wt);
     await leave(wt, m); // the agent's `nohup server &`
-    return { plan: "ok" };
+    return { plan: "ok", planDigest: EMPTY_PLAN_DIGEST };
   });
   const outcome = await advanceOneStep(db, ticketId, registry);
   await until(() => isRunning(m));
@@ -100,7 +101,7 @@ test("a process that was already running when the step began is not reported", a
   const registry = new StepRegistry();
   registry.register("design:dispatch", (ctx) => {
     dispatchIn(ctx, wt);
-    return { plan: "ok" };
+    return { plan: "ok", planDigest: EMPTY_PLAN_DIGEST };
   });
   await advanceOneStep(db, ticketId, registry);
   await pendingLeftoverChecks();
@@ -124,7 +125,7 @@ test("the check is not awaited: the step returns while it is still running", asy
   const registry = new StepRegistry();
   registry.register("design:dispatch", (ctx) => {
     dispatchIn(ctx, folder("styre-wt-"));
-    return { plan: "ok" };
+    return { plan: "ok", planDigest: EMPTY_PLAN_DIGEST };
   });
   const outcome = await Promise.race([
     advanceOneStep(db, ticketId, registry),
@@ -155,7 +156,7 @@ test("a step that dispatched no agent starts no check", async () => {
     },
   });
   const registry = new StepRegistry();
-  registry.register("design:dispatch", () => ({ plan: "ok" }));
+  registry.register("design:dispatch", () => ({ plan: "ok", planDigest: EMPTY_PLAN_DIGEST }));
   await advanceOneStep(db, ticketId, registry);
   await pendingLeftoverChecks();
   expect(reads).toBe(0);
@@ -198,7 +199,7 @@ test("nothing is started once a stop has begun: the signal handler runs its own 
   registry.register("design:dispatch", (ctx) => {
     dispatchIn(ctx, folder("styre-wt-"));
     door.beginStopping();
-    return { plan: "ok" };
+    return { plan: "ok", planDigest: EMPTY_PLAN_DIGEST };
   });
   await expect(advanceOneStep(db, ticketId, registry)).rejects.toThrow(door.RunInterrupted);
   await pendingLeftoverChecks();
@@ -221,7 +222,7 @@ test("one check per worktree, however many agent dispatches the step made", asyn
   registry.register("design:dispatch", (ctx) => {
     dispatchIn(ctx, wt);
     dispatchIn(ctx, wt);
-    return { plan: "ok" };
+    return { plan: "ok", planDigest: EMPTY_PLAN_DIGEST };
   });
   await advanceOneStep(db, ticketId, registry);
   await pendingLeftoverChecks();
@@ -242,7 +243,7 @@ test("only the dispatches the step itself made count: an earlier step's dispatch
   const registry = new StepRegistry();
   registry.register("design:dispatch", (ctx) => {
     dispatchIn(ctx, folder("styre-wt-"));
-    return { plan: "ok" };
+    return { plan: "ok", planDigest: EMPTY_PLAN_DIGEST };
   });
   registry.register("design:extract", () => ({ units: 0 }));
   await advanceOneStep(db, ticketId, registry); // an agent step

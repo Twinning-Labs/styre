@@ -325,6 +325,23 @@ export function fileContentAt(sha: string, file: string, worktreePath: string): 
   return null;
 }
 
+/** Every `docs/plans/*.md` (not nested) at `ref`, read through git, never the working tree (spec
+ *  §5.3: the resolver and the plan digest never read the worktree). A missing ref throws. */
+export function planFilesAt(repoPath: string, ref: string): { path: string; content: string }[] {
+  const paths = gitPathsZ(
+    ["ls-tree", "-r", "--name-only", "-z", ref, "--", "docs/plans/"],
+    repoPath,
+  )
+    .filter((p) => /^docs\/plans\/[^/]+\.md$/.test(p))
+    .sort();
+  return paths.map((path) => {
+    const content = fileContentAt(ref, path, repoPath);
+    if (content === null)
+      throw new Error(`git show ${ref}:${path} returned nothing for a listed file`);
+    return { path, content };
+  });
+}
+
 /** Like the module-private `git`, but returns RAW stdout (NO trim). Required for `--porcelain -z`
  *  parsing: an unstaged entry's status column is `" M path"` (leading space), and the existing
  *  `git()` `.trim()` would strip that space off the FIRST entry, corrupting its path (review

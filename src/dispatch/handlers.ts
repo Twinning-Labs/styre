@@ -9,6 +9,7 @@ import type { UnusableComponent } from "../cli/preflight.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
 import { latestReauthorRoute } from "../daemon/arbiter-verdict.ts";
 import { latestChecksReauthorAcs } from "../daemon/checks-verdict.ts";
+import { planDigestOf, ticketPlanFilesAt } from "../daemon/design-digests.ts";
 import { recordStartingCommit } from "../daemon/design-inputs.ts";
 import { StepRegistry } from "../daemon/step-registry.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
@@ -531,19 +532,37 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
 
   registry.register("design:dispatch", async (ctx: HandlerContext) => {
     await environmentGate(ctx);
-    return runAgentDispatch(ctx, depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS), {
-      handlerKey: "design:dispatch",
-      template: DESIGN_TEMPLATE,
-      vars: designVars(ctx.ticket, deps.profile, designFeedback(ctx.db, ctx.ticket.id)),
-      commitScope: planScope,
-      postcondition: ({ worktreePath }) => {
-        if (!hasTicketPlan(join(worktreePath, "docs", "plans"), ctx.ticket.ident)) {
-          throw new Error(
-            "design:dispatch postcondition: no plan for this ticket under docs/plans/",
-          );
-        }
+    const outcome = await runAgentDispatch(
+      ctx,
+      depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
+      {
+        handlerKey: "design:dispatch",
+        template: DESIGN_TEMPLATE,
+        vars: designVars(ctx.ticket, deps.profile, designFeedback(ctx.db, ctx.ticket.id)),
+        commitScope: planScope,
+        postcondition: ({ worktreePath }) => {
+          if (!hasTicketPlan(join(worktreePath, "docs", "plans"), ctx.ticket.ident)) {
+            throw new Error(
+              "design:dispatch postcondition: no plan for this ticket under docs/plans/",
+            );
+          }
+        },
       },
-    });
+    );
+    // spec §5.3: the plan's digest at the branch head, read through git before the success
+    // transaction (anything slow is computed before it, §5.2).
+    const { repoPath, branch } = worktreeFor(ctx, deps);
+    const planFiles = ticketPlanFilesAt(repoPath, branch, ctx.ticket.ident);
+    if (planFiles.length === 0) {
+      // The postcondition found the plan in the worktree, but git has none at the branch head
+      // (an ignored docs/plans/, say). The digest of nothing never changes, so every later plan
+      // edit would go unseen. Operator ruling, 2026-10-10 (spec §5.3): fail at once without a
+      // retry (a retry writes the same ignored file), and escalate with what to change.
+      throw new StepPrerequisiteError(
+        `the plan for ${ctx.ticket.ident} is not committed at ${branch}: Styre reads the plan from git, so docs/plans/ must be committed. If docs/plans/ is ignored, remove docs/plans/ from .gitignore (or the rule that ignores it), commit that on the ticket branch, then resume with --accept-head (the commit moves the branch HEAD).`,
+      );
+    }
+    return { ...outcome, planDigest: planDigestOf(planFiles) };
   });
 
   registry.register("design:extract", async (ctx: HandlerContext) => {

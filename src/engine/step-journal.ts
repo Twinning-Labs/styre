@@ -51,7 +51,7 @@ export interface RunStepParams {
    *  review verdict: if it ran in a later transaction, a crash in between would leave a `succeeded`
    *  review with an un-applied verdict and the resolver would advance past blocking findings. Runs
    *  after the (effectful, non-transactional) `execute`, so it sees the persisted effect. */
-  onSucceed?: (step: steps.WorkflowStepRow) => void;
+  onSucceed?: (step: steps.WorkflowStepRow, result: unknown) => void;
 }
 
 export interface RunStepResult {
@@ -149,7 +149,7 @@ export async function runStep(db: Database, params: RunStepParams): Promise<RunS
     // onSucceed that opens its own transaction (applyReviewVerdict) composes correctly.
     db.transaction(() => {
       steps.markSucceeded(db, step.id, result);
-      params.onSucceed?.(current);
+      params.onSucceed?.(current, result);
     })();
     const finished = steps.getById(db, step.id);
     if (!finished) {

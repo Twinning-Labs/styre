@@ -1,3 +1,4 @@
+import { EMPTY_PLAN_DIGEST } from "../../src/daemon/design-digests.ts";
 import { StepRegistry } from "../../src/daemon/step-registry.ts";
 import type { HandlerContext } from "../../src/daemon/step-registry.ts";
 import {
@@ -16,7 +17,7 @@ import { insertWorkUnit, setStatus as setUnitStatus } from "../../src/db/repos/w
  *  can route a fast-track ticket design→released. No real dispatch/verify/projector. */
 export function skeletonRegistry(): StepRegistry {
   const r = new StepRegistry();
-  r.register("design:dispatch", () => ({ plan: "ok" }));
+  r.register("design:dispatch", () => ({ plan: "ok", planDigest: EMPTY_PLAN_DIGEST }));
   r.register("design:extract", (ctx: HandlerContext) => {
     insertWorkUnit(ctx.db, {
       ticketId: ctx.ticket.id,

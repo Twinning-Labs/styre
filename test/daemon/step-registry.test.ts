@@ -20,3 +20,23 @@ test("register rejects a duplicate handlerKey", () => {
   reg.register("review", () => null);
   expect(() => reg.register("review", () => null)).toThrow();
 });
+
+test("a handler's success commit is registered with it, and only with it", () => {
+  const reg = new StepRegistry();
+  const commit = () => {};
+  reg.register("design:extract", () => null, { commit });
+  reg.register("design:size", () => null);
+  expect(reg.resolveCommit("design:extract")).toBe(commit);
+  expect(reg.resolveCommit("design:size")).toBeUndefined();
+  expect(reg.resolveCommit("nope")).toBeUndefined();
+});
+
+test("a duplicate handlerKey is refused before its commit replaces the first one's", () => {
+  const reg = new StepRegistry();
+  const first = () => {};
+  reg.register("review", () => null, { commit: first });
+  expect(() => reg.register("review", () => null, { commit: () => {} })).toThrow(
+    "already registered",
+  );
+  expect(reg.resolveCommit("review")).toBe(first);
+});

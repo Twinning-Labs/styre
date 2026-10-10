@@ -8,7 +8,7 @@ import {
 import { appendEvent } from "../db/repos/event-log.ts";
 import { getTicket, setTicketStage, setTicketStatus } from "../db/repos/ticket.ts";
 import { setStatus as setUnitStatus } from "../db/repos/work-unit.ts";
-import { decrementAttempt, getByKey } from "../db/repos/workflow-step.ts";
+import { type WorkflowStepRow, decrementAttempt, getByKey } from "../db/repos/workflow-step.ts";
 import { ParkSignal } from "../engine/park-signal.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { awaitSignal } from "../engine/signals.ts";
@@ -23,6 +23,9 @@ import {
   escalate,
 } from "./checks-gate-verdict.ts";
 import { type ChecksVerdictResult, applyChecksVerdict } from "./checks-verdict.ts";
+import { planDigestFromResult, recordStepManifest } from "./design-digests.ts";
+import { ensureDesignTableChecked, stepRow } from "./design-graph.ts";
+import { requireSnapshot } from "./design-inputs.ts";
 import { applyFailurePolicy } from "./failure-policy.ts";
 import { pauseTicket } from "./pause-ticket.ts";
 import { enqueueStageProjection } from "./projector.ts";
@@ -182,6 +185,15 @@ export async function advanceOneStep(
     if (!handler) {
       throw new Error(`advanceOneStep: no handler registered for '${d.handlerKey}'`);
     }
+    // A design table step needs the table checked and the snapshot present before it may run
+    // (spec §3.1, §5.2). Thrown here, outside the step's try: a missing snapshot is a defect, not a
+    // step failure to retry.
+    const row = stepRow(d.stepKey);
+    if (row) {
+      ensureDesignTableChecked();
+      requireSnapshot(db, ticketId);
+    }
+    const commit = registry.resolveCommit(d.handlerKey);
     const leftoverSince = nowToken();
     const dispatchesBefore = latestDispatchRowId(db, ticketId);
     try {
@@ -208,21 +220,35 @@ export async function advanceOneStep(
             workUnitId: d.workUnitId,
             config: opts?.config ?? DEFAULT_RUNTIME_CONFIG,
           }),
-        onSucceed: VERDICT_BEARING_STEPS.has(d.stepKey)
-          ? () => {
-              const cfg = opts?.config ?? DEFAULT_RUNTIME_CONFIG;
-              verdictBox.value =
-                d.stepKey === "checks:classify"
-                  ? applyChecksVerdict(db, ticketId, { stepKey: d.stepKey })
-                  : d.stepKey === "verify:checks-gate"
-                    ? applyAcCheckGateVerdict(db, ticketId, { stepKey: d.stepKey })
-                    : d.stepKey === "checks:arbitrate"
-                      ? applyArbiterVerdict(db, ticketId, { stepKey: d.stepKey })
-                      : d.stepKey === "checks:reauthor"
-                        ? applyReauthorVerdict(db, ticketId, { stepKey: d.stepKey })
-                        : applyReviewVerdict(db, ticketId, cfg, { stepKey: d.stepKey });
-            }
-          : undefined,
+        onSucceed:
+          commit || row || VERDICT_BEARING_STEPS.has(d.stepKey)
+            ? (step: WorkflowStepRow, result: unknown) => {
+                // In this order (spec §6.2): the step's own rows, then its manifest, then any
+                // verdict that reads those rows.
+                commit?.(db, ticketId, result);
+                if (row) {
+                  recordStepManifest(
+                    db,
+                    ticketId,
+                    step.id,
+                    row,
+                    row.fileOutput ? planDigestFromResult(result) : null,
+                  );
+                }
+                if (!VERDICT_BEARING_STEPS.has(d.stepKey)) return;
+                const cfg = opts?.config ?? DEFAULT_RUNTIME_CONFIG;
+                verdictBox.value =
+                  d.stepKey === "checks:classify"
+                    ? applyChecksVerdict(db, ticketId, { stepKey: d.stepKey })
+                    : d.stepKey === "verify:checks-gate"
+                      ? applyAcCheckGateVerdict(db, ticketId, { stepKey: d.stepKey })
+                      : d.stepKey === "checks:arbitrate"
+                        ? applyArbiterVerdict(db, ticketId, { stepKey: d.stepKey })
+                        : d.stepKey === "checks:reauthor"
+                          ? applyReauthorVerdict(db, ticketId, { stepKey: d.stepKey })
+                          : applyReviewVerdict(db, ticketId, cfg, { stepKey: d.stepKey });
+              }
+            : undefined,
       });
       if (execution.replayed) {
         // The resolver requested work whose effects are already journaled. Replaying again

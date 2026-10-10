@@ -32,6 +32,7 @@ import type { AgentRunInput, AgentRunResult, AgentRunner } from "../../src/agent
 import { parkDir, resumeRun } from "../../src/cli/park.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
+import { captureSnapshot } from "../../src/daemon/design-inputs.ts";
 import { driveToTerminal } from "../../src/daemon/run-ticket.ts";
 import type { StepRegistry } from "../../src/daemon/step-registry.ts";
 import { openDb } from "../../src/db/client.ts";
@@ -324,9 +325,6 @@ function setUp(
   const db = openDb(dbPath);
   try {
     const projectId = insertProject(db, { slug: SLUG, targetRepo: repo, defaultBranch: "main" });
-    const ticketId = insertTicket(db, { projectId, ident: IDENT });
-    insertRun(db, { runId: "e2e-interrupt-run", startedAt: nowUtc(), provider: "claude" });
-    seed(db, { ticketId, repo, aux });
     const profile = parseProfile({
       slug: SLUG,
       targetRepo: repo,
@@ -334,6 +332,15 @@ function setUp(
       checksSystem: "none",
       components: components(aux),
     });
+    const ticketId = insertTicket(db, { projectId, ident: IDENT });
+    captureSnapshot(db, ticketId, {
+      profile: profile,
+      unusableComponents: [],
+      nonPrimaryComponents: [],
+      config: DEFAULT_RUNTIME_CONFIG,
+    });
+    insertRun(db, { runId: "e2e-interrupt-run", startedAt: nowUtc(), provider: "claude" });
+    seed(db, { ticketId, repo, aux });
     return { repo, dbPath, ticketId, profile, aux };
   } finally {
     db.close();
