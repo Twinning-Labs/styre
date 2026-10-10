@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project are documented here.
+## [0.14.3] - 2026-10-10
+
+### Bug Fixes
+
+- **Leftover process detection:** fixes a timing bug where a process could be missed by the leftover scan if it started in the same instant the scan ran, caused by rounding differences between the scan's clock and the OS's process start time on both Linux and macOS.
+
 ## [0.14.2] - 2026-10-09
 
 ### Bug Fixes
