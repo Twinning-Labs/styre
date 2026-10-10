@@ -11,6 +11,15 @@ import { latestReauthorRoute } from "../daemon/arbiter-verdict.ts";
 import { latestChecksReauthorAcs } from "../daemon/checks-verdict.ts";
 import { planDigestOf, ticketPlanFilesAt } from "../daemon/design-digests.ts";
 import { recordStartingCommit } from "../daemon/design-inputs.ts";
+import {
+  type ExtractResult,
+  type PlanFindingInput,
+  type ReviewResult,
+  type SizeResult,
+  writeExtractOutputs,
+  writePlanFindings,
+  writeSizeOutput,
+} from "../daemon/design-outputs.ts";
 import { StepRegistry } from "../daemon/step-registry.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
 import {
@@ -41,17 +50,15 @@ import {
 } from "../db/repos/ground-truth-signal.ts";
 import { getProject } from "../db/repos/project.ts";
 import { enqueue, enqueueReplacingFailed } from "../db/repos/projection-outbox.ts";
-import { insertFinding } from "../db/repos/review-finding.ts";
 import {
   assertExactFindingIds,
   findingsForUnit,
   recordResponses,
   unresolvedReviewReason,
 } from "../db/repos/review-round.ts";
-import { getTicket, setNeedsDocs, setTicketTrack } from "../db/repos/ticket.ts";
+import { getTicket } from "../db/repos/ticket.ts";
 import {
   getById as getUnit,
-  insertWorkUnit,
   listByTicket as listUnits,
   parseFilesToTouch,
   setBaseSha,
@@ -567,125 +574,125 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
     return { ...outcome, planDigest: planDigestOf(planFiles) };
   });
 
-  registry.register("design:extract", async (ctx: HandlerContext) => {
-    const { output } = await runAgentDispatch(
-      ctx,
-      depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
-      {
-        handlerKey: "design:extract",
-        template: EXTRACT_TEMPLATE,
-        vars: extractVars(ctx.ticket, deps.profile),
-        // Read-only step: no files change, so no postcondition on the diff.
-        postcondition: () => {},
-      },
-    );
+  registry.register(
+    "design:extract",
+    async (ctx: HandlerContext) => {
+      const { output } = await runAgentDispatch(
+        ctx,
+        depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
+        {
+          handlerKey: "design:extract",
+          template: EXTRACT_TEMPLATE,
+          vars: extractVars(ctx.ticket, deps.profile),
+          // Read-only step: no files change, so no postcondition on the diff.
+          postcondition: () => {},
+        },
+      );
 
-    const parsed = extractSidecar(output, ExtractOutputSchema);
-    if (!parsed.ok) {
-      // Absent/malformed sidecar = transport failure (§3a) → failure-policy re-dispatches.
-      throw new Error(`design:extract sidecar ${parsed.reason}: ${parsed.detail}`);
-    }
-    const errors = validateExtraction(parsed.value.units, deps.profile.components);
-    if (errors.length > 0) {
-      throw new Error(`design:extract completeness failed: ${errors.join("; ")}`);
-    }
-    const cdotErrors = validateCdotImpact(parsed.value, deps.profile);
-    if (cdotErrors.length > 0) {
-      throw new Error(`design:extract CDOT gate failed: ${cdotErrors.join("; ")}`);
-    }
-
-    for (const u of parsed.value.units) {
-      insertWorkUnit(ctx.db, {
-        ticketId: ctx.ticket.id,
-        seq: u.seq,
-        kind: u.kind,
-        title: u.title,
-        description: u.description,
-        behavioral: u.behavioral ? 1 : 0, // the carry: classify explicitly, never default
-        testPlan: u.test_plan,
-        filesToTouch: u.files_to_touch,
-        verifyCheckTypes: u.verify_check_types,
-        dependsOn: u.depends_on,
-      });
-    }
-    if (parsed.value.cdotImpact.documentation.applies) {
-      setNeedsDocs(ctx.db, ctx.ticket.id, 1);
-    }
-    return { units: parsed.value.units.length };
-  });
-
-  registry.register("design:size", async (ctx: HandlerContext) => {
-    const units = listUnits(ctx.db, ctx.ticket.id);
-    if (!ctx.config.complexityGrading) {
-      const track = sizeTrack(units); // off: deterministic sprawl-only, no agent
-      setTicketTrack(ctx.db, ctx.ticket.id, track);
-      return { track, graded: false };
-    }
-    // on: cold cheap-tier grader → daemon combines the grade with sprawl.
-    const result = await runAgentDispatch(
-      ctx,
-      depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
-      {
-        handlerKey: "design:size",
-        template: DESIGN_COMPLEXITY_GRADE_TEMPLATE,
-        vars: complexityGradeVars(ctx.ticket, deps.profile, units),
-        postcondition: () => {}, // read-only: nothing commits
-      },
-    );
-    const parsed = extractSidecar(result.output, ComplexityGradeSchema);
-    if (!parsed.ok) {
-      throw new Error(`design:size grade sidecar ${parsed.reason}: ${parsed.detail}`);
-    }
-    const track = combineTrack(units.length, parsed.value.overall);
-    setTicketTrack(ctx.db, ctx.ticket.id, track);
-    return { track, graded: true, overall: parsed.value.overall };
-  });
-
-  registry.register("design:review", async (ctx: HandlerContext) => {
-    const units = listUnits(ctx.db, ctx.ticket.id);
-    const result = await runAgentDispatch(
-      ctx,
-      depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
-      {
-        handlerKey: "design:review",
-        template: DESIGN_REVIEW_TEMPLATE,
-        vars: designReviewVars(ctx.ticket, deps.profile, units),
-        postcondition: () => {}, // read-only: nothing commits
-      },
-    );
-
-    const parsed = extractSidecar(result.output, ReviewOutputSchema);
-    if (!parsed.ok) {
-      throw new Error(`design:review sidecar ${parsed.reason}: ${parsed.detail}`);
-    }
-    const seqToId = new Map(units.map((u) => [u.seq, u.id]));
-    const errors = validateReviewFindings(parsed.value.findings, [...seqToId.keys()], "plan");
-    if (errors.length > 0) {
-      throw new Error(`design:review findings invalid: ${errors.join("; ")}`);
-    }
-
-    let blocking = 0;
-    for (const f of parsed.value.findings) {
-      const blocksShip = computeBlocksShip(f.severity, f.deferral_candidate);
-      if (blocksShip === 1) {
-        blocking += 1;
+      const parsed = extractSidecar(output, ExtractOutputSchema);
+      if (!parsed.ok) {
+        // Absent/malformed sidecar = transport failure (§3a) → failure-policy re-dispatches.
+        throw new Error(`design:extract sidecar ${parsed.reason}: ${parsed.detail}`);
       }
-      insertFinding(ctx.db, {
-        ticketId: ctx.ticket.id,
-        reviewKind: "plan",
-        dispatchId: result.dispatchId,
+      const errors = validateExtraction(parsed.value.units, deps.profile.components);
+      if (errors.length > 0) {
+        throw new Error(`design:extract completeness failed: ${errors.join("; ")}`);
+      }
+      const cdotErrors = validateCdotImpact(parsed.value, deps.profile);
+      if (cdotErrors.length > 0) {
+        throw new Error(`design:extract CDOT gate failed: ${cdotErrors.join("; ")}`);
+      }
+
+      // Written by writeExtractOutputs inside the success transaction (spec §6.2): a crash before
+      // markSucceeded leaves no partial units, so the rerun cannot hit UNIQUE (ticket_id, seq).
+      const result: ExtractResult = {
+        units: parsed.value.units.length,
+        extracted: parsed.value.units,
+        needsDocs: parsed.value.cdotImpact.documentation.applies,
+      };
+      return result;
+    },
+    { commit: writeExtractOutputs },
+  );
+
+  registry.register(
+    "design:size",
+    async (ctx: HandlerContext) => {
+      const units = listUnits(ctx.db, ctx.ticket.id);
+      if (!ctx.config.complexityGrading) {
+        const off: SizeResult = { track: sizeTrack(units), graded: false }; // sprawl only, no agent
+        return off;
+      }
+      // on: cold cheap-tier grader → daemon combines the grade with sprawl.
+      const result = await runAgentDispatch(
+        ctx,
+        depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
+        {
+          handlerKey: "design:size",
+          template: DESIGN_COMPLEXITY_GRADE_TEMPLATE,
+          vars: complexityGradeVars(ctx.ticket, deps.profile, units),
+          postcondition: () => {}, // read-only: nothing commits
+        },
+      );
+      const parsed = extractSidecar(result.output, ComplexityGradeSchema);
+      if (!parsed.ok) {
+        throw new Error(`design:size grade sidecar ${parsed.reason}: ${parsed.detail}`);
+      }
+      const on: SizeResult = {
+        track: combineTrack(units.length, parsed.value.overall),
+        graded: true,
+        overall: parsed.value.overall,
+      };
+      return on;
+    },
+    { commit: writeSizeOutput },
+  );
+
+  registry.register(
+    "design:review",
+    async (ctx: HandlerContext) => {
+      const units = listUnits(ctx.db, ctx.ticket.id);
+      const result = await runAgentDispatch(
+        ctx,
+        depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
+        {
+          handlerKey: "design:review",
+          template: DESIGN_REVIEW_TEMPLATE,
+          vars: designReviewVars(ctx.ticket, deps.profile, units),
+          postcondition: () => {}, // read-only: nothing commits
+        },
+      );
+
+      const parsed = extractSidecar(result.output, ReviewOutputSchema);
+      if (!parsed.ok) {
+        throw new Error(`design:review sidecar ${parsed.reason}: ${parsed.detail}`);
+      }
+      const seqToId = new Map(units.map((u) => [u.seq, u.id]));
+      const errors = validateReviewFindings(parsed.value.findings, [...seqToId.keys()], "plan");
+      if (errors.length > 0) {
+        throw new Error(`design:review findings invalid: ${errors.join("; ")}`);
+      }
+
+      const filed: PlanFindingInput[] = parsed.value.findings.map((f) => ({
         workUnitId: f.work_unit_seq === null ? null : (seqToId.get(f.work_unit_seq) ?? null),
         severity: f.severity,
         category: f.category,
         factorsJson: f.factors === null ? null : JSON.stringify(f.factors),
         deferralCandidate: f.deferral_candidate ? 1 : 0,
-        blocksShip,
+        blocksShip: computeBlocksShip(f.severity, f.deferral_candidate),
         location: f.location,
         rationale: f.rationale,
-      });
-    }
-    return { findings: parsed.value.findings.length, blocking };
-  });
+      }));
+      const review: ReviewResult = {
+        findings: filed.length,
+        blocking: filed.filter((f) => f.blocksShip === 1).length,
+        dispatchId: result.dispatchId,
+        filed,
+      };
+      return review;
+    },
+    { commit: writePlanFindings },
+  );
 
   registry.register("docs:revise", async (ctx: HandlerContext) => {
     const { sha, changed } = await runAgentDispatch(
