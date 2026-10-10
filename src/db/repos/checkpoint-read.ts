@@ -61,10 +61,30 @@ export function listCheckpointRunningSteps(db: Database): CheckpointRunningStep[
     .all();
 }
 
-/** The run's one ticket (a checkpoint holds one), or null. */
-export function readCheckpointOnlyTicket(db: Database): CheckpointTicket | null {
-  const row = db.query<{ id: number }, []>("SELECT id FROM ticket ORDER BY id LIMIT 1").get();
-  return row ? readCheckpointTicket(db, row.id) : null;
+/** The run's own ticket, or why it is not there. */
+export type CheckpointTicketLookup =
+  | { ticket: CheckpointTicket; reason: null }
+  | { ticket: null; reason: string };
+
+/** The run's own ticket, found by its ident, the checkpoint folder's name (spec §4, operator
+ *  ruling 2026-10-10). A checkpoint written by a run on a reused --db holds other tickets too, so
+ *  the lowest id is not the run's own. A checkpoint with no ticket of that ident (or, across two
+ *  projects, more than one) has none: it is never read as another ticket. */
+export function findCheckpointTicket(db: Database, ident: string): CheckpointTicketLookup {
+  const rows = db
+    .query<CheckpointTicket, [string]>(
+      "SELECT id, project_id, ident, stage, status, branch_name, branch_prefix FROM ticket WHERE ident = ? ORDER BY id",
+    )
+    .all(ident);
+  const [only] = rows;
+  if (rows.length === 1 && only) return { ticket: only, reason: null };
+  return {
+    ticket: null,
+    reason:
+      rows.length === 0
+        ? `no ticket ${ident} recorded`
+        : `${rows.length} tickets named ${ident} recorded`,
+  };
 }
 
 /** The step a resume would dispatch again: the one left running, else the one that failed. */

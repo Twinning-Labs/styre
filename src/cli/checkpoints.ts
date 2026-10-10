@@ -6,7 +6,11 @@ import { stateDir } from "../config/paths.ts";
 import { type DatabaseState, classifyDatabase } from "../db/migrate.ts";
 import { CURRENT_VERSION, OLDEST_MIGRATABLE_VERSION } from "../db/migrations/index.ts";
 import { readCopyOf } from "../db/read-copy.ts";
-import { listCheckpointPendingSignals, readCheckpointTicket } from "../db/repos/checkpoint-read.ts";
+import {
+  type CheckpointTicket,
+  findCheckpointTicket,
+  listCheckpointPendingSignals,
+} from "../db/repos/checkpoint-read.ts";
 import { runLockStatus } from "./run-lock.ts";
 
 export type CheckpointKind =
@@ -37,12 +41,6 @@ export interface Checkpoint {
   resumable: boolean; // kind ∈ {needs_you, budget, interrupted}
 }
 
-function singleTicketId(db: Database): number | null {
-  return (
-    db.query<{ id: number }, []>("SELECT id FROM ticket ORDER BY id LIMIT 1").get()?.id ?? null
-  );
-}
-
 function budgetNote(dir: string): string {
   try {
     const j = JSON.parse(readFileSync(join(dir, "transcript.json"), "utf8")) as {
@@ -54,9 +52,11 @@ function budgetNote(dir: string): string {
   }
 }
 
+/** What the run's own ticket says of its checkpoint; `t` is found by ident (`findCheckpointTicket`). */
 export function classifyCheckpointDb(
   db: Database,
   dir: string,
+  t: CheckpointTicket,
 ): {
   ticketId: number;
   status: string;
@@ -64,11 +64,8 @@ export function classifyCheckpointDb(
   branch: string;
   kind: CheckpointKind;
   note: string | null;
-} | null {
-  const ticketId = singleTicketId(db);
-  if (ticketId === null) return null;
-  const t = readCheckpointTicket(db, ticketId);
-  if (t === null) return null;
+} {
+  const ticketId = t.id;
   const branch = branchNameFor(t);
   const pending = listCheckpointPendingSignals(db, ticketId);
   const humanResume = pending.find((s) => s.signal_type === "human_resume");
@@ -103,16 +100,21 @@ export function classifyCheckpointDb(
 const RESUMABLE: ReadonlySet<CheckpointKind> = new Set(["needs_you", "budget", "interrupted"]);
 
 /** What a checkpoint's database says, read through one private copy: its state (a schema this
- *  Styre can use, or why not) and, when the schema is usable, its classification. */
+ *  Styre can use, or why not) and, when the schema is usable, the classification of the run's own
+ *  ticket (`ident`, the folder's name), or why that ticket is not there (`missing`). */
 export interface CheckpointRead {
   state: DatabaseState;
-  cls: ReturnType<typeof classifyCheckpointDb>;
+  cls: ReturnType<typeof classifyCheckpointDb> | null;
+  missing: string | null;
 }
 
-export function readCheckpoint(dbPath: string, dir: string): CheckpointRead {
+export function readCheckpoint(dbPath: string, dir: string, ident: string): CheckpointRead {
   return readCopyOf(dbPath, (db) => {
     const state = classifyDatabase(db, dbPath);
-    return { state, cls: state.kind === "refuse" ? null : classifyCheckpointDb(db, dir) };
+    if (state.kind === "refuse") return { state, cls: null, missing: null };
+    const found = findCheckpointTicket(db, ident);
+    if (found.ticket === null) return { state, cls: null, missing: found.reason };
+    return { state, cls: classifyCheckpointDb(db, dir, found.ticket), missing: null };
   });
 }
 
@@ -129,16 +131,21 @@ export function incompatibleReason(state: DatabaseState): string {
 
 /** Whether `ls` and `clean` can use a checkpoint, from one read of it: classified, or why not.
  *  A schema this Styre refuses is `incompatible`, with its reason; a checkpoint that cannot be read
- *  (`readError` prefixes the error) or holds no ticket is `unreadable`. */
+ *  (`readError` prefixes the error) or holds no ticket `ident` is `unreadable`. */
 export type CheckpointUse =
   | { kind: "usable"; cls: NonNullable<ReturnType<typeof classifyCheckpointDb>> }
   | { kind: "incompatible" | "unreadable"; reason: string };
 
-export function checkpointUse(dbPath: string, dir: string, readError: string): CheckpointUse {
+export function checkpointUse(
+  dbPath: string,
+  dir: string,
+  ident: string,
+  readError: string,
+): CheckpointUse {
   let read: CheckpointRead | null = null;
-  let reason = "no ticket recorded";
+  let reason = `no ticket ${ident} recorded`;
   try {
-    read = readCheckpoint(dbPath, dir);
+    read = readCheckpoint(dbPath, dir, ident);
   } catch (err) {
     reason = `${readError}${err instanceof Error ? err.message : String(err)}`;
   }
@@ -146,7 +153,7 @@ export function checkpointUse(dbPath: string, dir: string, readError: string): C
     return { kind: "incompatible", reason: incompatibleReason(read.state) };
   }
   const cls = read?.cls ?? null;
-  if (cls === null) return { kind: "unreadable", reason };
+  if (cls === null) return { kind: "unreadable", reason: read?.missing ?? reason };
   return { kind: "usable", cls };
 }
 
@@ -194,7 +201,7 @@ export function listCheckpoints(root: string = stateDir()): Checkpoint[] {
       const dir = join(slugDir, ident);
       const dbPath = join(dir, "run.db");
       if (!existsSync(dbPath)) continue;
-      const use = checkpointUse(dbPath, dir, "could not read it: ");
+      const use = checkpointUse(dbPath, dir, ident, "could not read it: ");
       if (use.kind !== "usable") {
         out.push(unusableCheckpoint({ slug, ident, dir, dbPath }, use.kind, use.reason));
         continue;

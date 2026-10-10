@@ -327,10 +327,10 @@ test("ls lists a checkpoint whose ticket table is empty as unreadable, and says 
   lockByLiveRun(dir);
   const found = listCheckpoints(root);
   expect(found.map((c) => [c.ident, c.kind, c.note, c.live])).toEqual([
-    ["ENG-8", "unreadable", "no ticket recorded", true],
+    ["ENG-8", "unreadable", "no ticket ENG-8 recorded", true],
   ]);
   const out = await captureStdout(() => lsImpl({ root, swept: [] }));
-  expect(out).toContain("fixture/ENG-8 (running)  no ticket recorded");
+  expect(out).toContain("fixture/ENG-8 (running)  no ticket ENG-8 recorded");
   expect(out).not.toContain("Running:");
 });
 
@@ -548,8 +548,9 @@ test(
       const db = new Database(dbPath);
       try {
         // A direct write (ruling M18): this binary's steps cannot advance a fixture of an older
-        // era to `done`, and only a finished effort is what `clean --all` reaps.
-        db.exec("UPDATE ticket SET status = 'done'");
+        // era to `done`, and only a finished effort is what `clean --all` reaps. The ident follows
+        // the folder: a reader finds the run's own ticket by the folder's name (spec §4).
+        db.query("UPDATE ticket SET status = 'done', ident = ?").run(basename(dir));
       } finally {
         db.close();
       }
@@ -889,7 +890,7 @@ test(
         },
         lines: [
           `  schema: v${CURRENT_VERSION}, current\n`,
-          "  (no ticket in this checkpoint)\n",
+          "  resume would refuse this checkpoint: no ticket ENG-1 recorded\n",
           "  (no changes made)\n",
         ],
       },
@@ -916,6 +917,33 @@ test(
         expect([c.what, out]).toEqual([c.what, expect.stringContaining(line)]);
       expect([c.what, treeOf(dir)]).toEqual([c.what, before]);
     }
+  },
+  TIMEOUT_MS,
+);
+
+test(
+  "resume refuses an older checkpoint that holds no ticket of its ident before anything is written: no upgrade, no backup",
+  async () => {
+    const state = makeTempDir("styre-readers-ident-");
+    // the fixture's one ticket is ENG-1; this folder is ENG-2's
+    const dir = join(state, "styre", "inspect", "ENG-2");
+    mkdirSync(dir, { recursive: true });
+    copyFileSync(copyFixture("v8-main-2b05680"), join(dir, "run.db"));
+    const before = treeOf(dir);
+    const profile = parseProfile({ slug: "inspect", targetRepo: gitRepo(), components: [] });
+    const refused = await withEnv("XDG_STATE_HOME", state, () =>
+      trackTempEntriesMadeBy("styre-wt-", () =>
+        resumeRun({ resume: "ENG-2" }, profile, DEFAULT_RUNTIME_CONFIG, {
+          preflight: () => ({ ok: true, version: null }),
+        }),
+      ).catch((e: unknown) => e),
+    );
+    expect((refused as StyreError).code).toBe(65);
+    expect((refused as StyreError).headline).toBe(
+      `resume refused: the checkpoint at ${dir} holds no run of ENG-2 (no ticket ENG-2 recorded)`,
+    );
+    expect(fixtureVersion(join(dir, "run.db"))).toBe(8);
+    expect(treeOf(dir).filter(([f]) => f !== "run.lock")).toEqual(before);
   },
   TIMEOUT_MS,
 );

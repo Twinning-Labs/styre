@@ -219,7 +219,7 @@ export async function cleanImpl(
 
   // A checkpoint it cannot use, by schema or by damage, is refused (exit 65) and nothing is
   // removed (operator ruling, 2026-10-10: ENG-477 adds no new way to delete anything).
-  const use = checkpointUse(dbPath, dir, "");
+  const use = checkpointUse(dbPath, dir, ident, "");
   if (use.kind !== "usable") {
     throw refuseUnusableCheckpoint({ ident, dir }, use.kind, use.reason, targetRepo);
   }

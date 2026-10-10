@@ -17,7 +17,8 @@ import type { AgentRunner } from "../agent/runner.ts";
 import { type AgentConfig, DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { stateDir } from "../config/paths.ts";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
-import { captureSnapshot } from "../daemon/design-inputs.ts";
+import { adoptActiveTickets } from "../daemon/adopt.ts";
+import { captureOtherActiveTickets, captureSnapshot } from "../daemon/design-inputs.ts";
 import { pauseTicket } from "../daemon/pause-ticket.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
 import type { ProjectorPorts } from "../daemon/projector.ts";
@@ -37,7 +38,7 @@ import { CURRENT_VERSION } from "../db/migrations/index.ts";
 import { readCopyOf } from "../db/read-copy.ts";
 import {
   findCheckpointParkedStepKey,
-  readCheckpointOnlyTicket,
+  findCheckpointTicket,
   readCheckpointTargetRepo,
 } from "../db/repos/checkpoint-read.ts";
 import { getLatestForTicket, getLatestWorktreePath } from "../db/repos/dispatch.ts";
@@ -60,7 +61,7 @@ import type { HandlerCtx } from "../util/process/signals.ts";
 import { nowUtc } from "../util/time.ts";
 import { checkpointPath } from "./checkpoint-name.ts";
 import type { NonPrimaryComponent } from "./component-roles.ts";
-import { agentCliError, usageError } from "./errors.ts";
+import { EXIT, StyreError, agentCliError, usageError } from "./errors.ts";
 import { exitCodeForOutcome } from "./outcome.ts";
 import { formatMessage } from "./output.ts";
 import {
@@ -197,11 +198,21 @@ export function dumpPark(
  *  this module are unaffected. */
 export const resetProvisionForResume = resetProvision;
 
-/** The single ticket id in a per-run SoT. */
-function onlyTicketId(db: Database): number {
-  const row = db.query<{ id: number }, []>("SELECT id FROM ticket ORDER BY id LIMIT 1").get();
-  if (!row) throw new Error("resume: the dump DB has no ticket");
-  return row.id;
+/** The resumed run's own ticket, by its ident, the checkpoint folder's name (spec §4, operator
+ *  ruling 2026-10-10): a checkpoint written by a run on a reused --db holds other tickets too, with
+ *  lower ids. One without that ticket is refused (exit 65), never resumed as another ticket. */
+function ownTicketId(db: Database, ident: string, dir: string): number {
+  const { ticket, reason } = findCheckpointTicket(db, ident);
+  if (!ticket) throw noOwnTicket(ident, dir, reason);
+  return ticket.id;
+}
+
+function noOwnTicket(ident: string, dir: string, reason: string): StyreError {
+  return new StyreError({
+    code: EXIT.RESUME_REFUSED,
+    headline: `resume refused: the checkpoint at ${dir} holds no run of ${ident} (${reason})`,
+    recovery: `Nothing was changed. Check the ticket ident, or start fresh: styre run ${ident} --fresh.`,
+  });
 }
 
 export interface ResumeArgs {
@@ -268,9 +279,11 @@ export function inspectWithoutUpgrading(
   try {
     // A private copy (operator ruling, 2026-10-09): the checkpoint itself is never opened.
     details = readCopyOf(dbPath, (db) => {
-      const ticket = readCheckpointOnlyTicket(db);
-      const targetRepo = ticket ? readCheckpointTargetRepo(db, ticket.project_id) : null;
-      if (!ticket || !targetRepo) return "  (no ticket in this checkpoint)\n";
+      // the run's own ticket, by its ident (spec §4, operator ruling 2026-10-10)
+      const { ticket, reason } = findCheckpointTicket(db, ident);
+      if (!ticket) return `  resume would refuse this checkpoint: ${reason}\n`;
+      const targetRepo = readCheckpointTargetRepo(db, ticket.project_id);
+      if (!targetRepo) return `  (no project recorded for ${ident})\n`;
       const recorded = headBaseline(db, ticket.id);
       const current = branchHeadSha(targetRepo, branchNameFor(ticket));
       const moved = recorded !== null && current !== null && recorded !== current;
@@ -350,6 +363,14 @@ export async function resumeRun(
       process.stderr.write(inspectWithoutUpgrading(dbPath, args.resume, state));
       return;
     }
+    // Refused before anything is written (no migration, no backup, no run row): a checkpoint that
+    // does not hold this ticket. A schema it cannot use is migrate's refusal, below.
+    const before = readDatabaseState(dbPath);
+    if (before.kind === "empty") throw noOwnTicket(args.resume, dir, "it holds no tables");
+    if (before.kind !== "refuse") {
+      const found = readCopyOf(dbPath, (db) => findCheckpointTicket(db, args.resume));
+      if (!found.ticket) throw noOwnTicket(args.resume, dir, found.reason);
+    }
     migrate(dbPath, { log: (line) => process.stderr.write(`${line}\n`) });
     const db = openDb(dbPath);
     if (getRun(db) === null) {
@@ -361,7 +382,7 @@ export async function resumeRun(
       });
     }
     markResumed(db); // same logical run for a v2 park; resumed=1, attempt++
-    const ticketId = onlyTicketId(db);
+    const ticketId = ownTicketId(db, args.resume, dir);
     const ticket = getTicket(db, ticketId);
     if (!ticket) throw new Error("resume: ticket vanished");
     deps?.stop?.setRun({ db, dbPath, ticketId, ident: ticket.ident });
@@ -606,6 +627,19 @@ export async function resumeRun(
         recordUnusableComponents(db, ticketId, toolchain.unusable);
       }
     })();
+    // Operator ruling, 2026-10-10 (spec §4): a checkpoint written by a run on a reused --db holds
+    // that database's other active tickets, which this resume's loop drives with this registry. Each
+    // gets the same snapshot, with the same note; no starting commit and no toolchain advisory (that
+    // stays this run's own ticket's, above). Waiting tickets are left alone.
+    captureOtherActiveTickets(db, ticketId, {
+      profile: runProfile,
+      unusableComponents: toolchain.unusable,
+      nonPrimaryComponents,
+      config: runtimeConfig,
+    });
+    // spec §7.6: after every snapshot, before the first resolver pass; this ticket and every other
+    // active one, as runTicket does on a reused --db.
+    adoptActiveTickets(db, ticketId);
 
     const wiring: ResumeRegistryWiring = {
       profile: runProfile,

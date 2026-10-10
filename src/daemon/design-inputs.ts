@@ -4,7 +4,7 @@ import type { UnusableComponent } from "../cli/preflight.ts";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
 import { appendEvent } from "../db/repos/event-log.ts";
 import { getInput, insertInputIfAbsent, upsertInput } from "../db/repos/ticket-input.ts";
-import { type TicketRow, getTicket } from "../db/repos/ticket.ts";
+import { type TicketRow, getTicket, listActiveTickets } from "../db/repos/ticket.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { nowUtc } from "../util/time.ts";
 import { canonicalJson, sha256Hex } from "./canonical.ts";
@@ -105,6 +105,20 @@ export function captureSnapshot(
     }
   })();
   return { changed };
+}
+
+/** Operator rulings, 2026-10-10 (spec §4): a run on a reused --db, and a resume, drive every ready
+ *  ticket in the database with this run's registry and so with this run's inputs. Each other active
+ *  ticket gets the same snapshot, with the same note, before any step runs. Waiting tickets are left
+ *  alone, and no other ticket gets a starting commit: that stays the run's own ticket's. */
+export function captureOtherActiveTickets(
+  db: Database,
+  ticketId: number,
+  sources: SnapshotSources,
+): void {
+  for (const other of listActiveTickets(db)) {
+    if (other.id !== ticketId) captureSnapshot(db, other.id, sources);
+  }
 }
 
 export function recordStartingCommit(db: Database, ticketId: number, sha: string): boolean {

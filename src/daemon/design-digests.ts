@@ -45,7 +45,8 @@ export function digestTrack(db: Database, ticketId: number): string {
 }
 
 /** The `docs/plans/*.md` files at `ref` whose frontmatter `linear:` is this ticket, sorted by
- *  path, read through git (spec §5.3). */
+ *  path, read through git (spec §5.3). `ref` is a commit sha or a fully qualified ref
+ *  (`refs/heads/<branch>`), never a bare branch name: git resolves a tag of that name first. */
 export function ticketPlanFilesAt(
   repoPath: string,
   ref: string,
@@ -60,6 +61,7 @@ export function planDigestOf(files: readonly { path: string; content: string }[]
   return digestValue(files.map((f) => ({ path: f.path, content: f.content })));
 }
 
+/** `ref` is a commit sha or a fully qualified ref, never a bare branch name (see above). */
 export function planDigestAt(repoPath: string, ref: string, ident: string): string {
   return planDigestOf(ticketPlanFilesAt(repoPath, ref, ident));
 }

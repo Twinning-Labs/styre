@@ -1,16 +1,34 @@
+import type { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
+import { listCheckpoints } from "../../src/cli/checkpoints.ts";
+import { cleanImpl } from "../../src/cli/clean.ts";
+import { StyreError } from "../../src/cli/errors.ts";
 import { SNAPSHOT_INPUT_NAMES } from "../../src/daemon/design-graph.ts";
 import { startingCommit } from "../../src/daemon/design-inputs.ts";
 import { openDb } from "../../src/db/client.ts";
 import { migrate } from "../../src/db/migrate.ts";
 import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
+import { listByTicket as listSignals } from "../../src/db/repos/ground-truth-signal.ts";
 import { insertProject } from "../../src/db/repos/project.ts";
 import { getInput, listInputs } from "../../src/db/repos/ticket-input.ts";
 import { getTicket, insertTicket } from "../../src/db/repos/ticket.ts";
-import { insertPending, markRunning, markSucceeded } from "../../src/db/repos/workflow-step.ts";
+import {
+  getByKey,
+  insertPending,
+  markRunning,
+  markSucceeded,
+} from "../../src/db/repos/workflow-step.ts";
 import { DesignHarness, HARNESS_TEST_TIMEOUT_MS } from "../helpers/design-harness.ts";
+import { unitsOf } from "../helpers/design-script.ts";
 import { git } from "../helpers/design-steps.ts";
 import { makeTempDir } from "../helpers/temp.ts";
 
@@ -25,15 +43,16 @@ afterEach(() => {
 });
 const fetches = (h: DesignHarness) => h.trackerCalls.filter((c) => c.method === "fetchTicket");
 
-/** A reused database that already holds another project's tickets: OTHER-1 active, with a
- *  `provision` an older Styre finished (succeeded, no manifest), and OTHER-2 waiting. Their project
+/** A reused database that already holds another project's tickets: OTHER-1 active and OTHER-2
+ *  waiting, each with a `provision` an older Styre finished (succeeded, no manifest). Their project
  *  is paused, so the loop does not drive them in these tests (`v_ready_tickets`); the run still
  *  prepares OTHER-1, which is active.
  *
  *  A stated exception to "no faked state" (Global Constraints), for two writes:
- *  - the succeeded `provision` step with no manifest, written through the workflow_step
- *    repository: Task 12's reused --db adopt test needs another active ticket carrying such a
- *    step, and only an older Styre produces one, which an in process test cannot run;
+ *  - the succeeded `provision` steps with no manifest, written through the workflow_step
+ *    repository: Task 12's reused --db adopt tests need another active ticket carrying such a
+ *    step (and a waiting one, which must be left alone), and only an older Styre produces one,
+ *    which an in process test cannot run;
  *  - `project.paused = 1`, raw SQL: the OSS core has no writer for it (pausing a project is the
  *    commercial plane's), and without it the loop would drive the other tickets with this run's
  *    registry, against a repository that does not exist. */
@@ -52,6 +71,14 @@ function seedOtherTickets(dbFile: string): { active: number; waiting: number } {
     markRunning(db, step.id, {});
     markSucceeded(db, step.id, {});
     const waiting = insertTicket(db, { projectId, ident: "OTHER-2", status: "waiting" });
+    // the same older Styre's provision on the waiting ticket: a run must leave it as it is
+    const waitingStep = insertPending(db, {
+      ticketId: waiting,
+      stepKey: "provision",
+      stepType: "provision",
+    });
+    markRunning(db, waitingStep.id, {});
+    markSucceeded(db, waitingStep.id, {});
     return { active, waiting };
   } finally {
     db.close();
@@ -263,6 +290,191 @@ test(
     );
     expect(h.calls.prompts).toEqual([]);
     expect(existsSync(h.dbPath())).toBe(false);
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+test(
+  "a reused --db runs the adopt pass for every active ticket in it, with the same note (ruling 2026-10-10)",
+  async () => {
+    const h = make();
+    const dbFile = join(makeTempDir("styre-reuse-"), "reuse.db");
+    const other = seedOtherTickets(dbFile);
+    expect(await h.fresh({ db: dbFile })).toBe(75);
+    h.readAt(dbFile, (db) => {
+      expect(getByKey(db, other.active, "provision")?.input_manifest).not.toBeNull();
+      const note = listEvents(db, other.active).find((e) => e.reason === "adopted");
+      expect(JSON.parse(note?.payload_json ?? "{}").stepKeys).toEqual(["provision"]);
+      expect(listEvents(db, other.waiting).some((e) => e.reason === "adopted")).toBe(false);
+      expect(getByKey(db, other.waiting, "provision")?.input_manifest).toBeNull();
+    });
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+/** What a test can see of one ticket: its events, snapshot rows, steps and toolchain signals. */
+const ticketState = (db: Database, ticketId: number) => ({
+  events: listEvents(db, ticketId).map((e) => `${e.kind}:${e.reason ?? ""}`),
+  inputs: listInputs(db, ticketId).map((r) => `${r.name}=${r.digest}`),
+  steps: db
+    .query<{ s: string }, [number]>(
+      "SELECT step_key || ':' || status || ':' || coalesce(input_manifest, 'null') AS s FROM workflow_step WHERE ticket_id = ? ORDER BY id",
+    )
+    .all(ticketId)
+    .map((r) => r.s),
+  toolchain: listSignals(db, ticketId).filter((s) => s.signal_type === "toolchain").length,
+});
+
+test(
+  "a resume prepares every active ticket in its checkpoint, as a reused --db does (ruling 2026-10-10)",
+  async () => {
+    const h = make();
+    // an optional component whose tools the resume's host lacks: the resume narrows it away and
+    // the run's own ticket gets the toolchain advisory, which no other ticket may get
+    h.editProfile((p) => {
+      (p.components as unknown[]).push({
+        name: "lib",
+        kind: "ruby",
+        paths: ["vendor-lib/**"],
+        commands: { build: "lib-build", test: "lib-test", check: "lib-check" },
+      });
+    });
+    const dbFile = join(makeTempDir("styre-reuse-"), "reuse.db");
+    const other = seedOtherTickets(dbFile);
+    // a budget pause writes the reused database, other tickets and all, to the checkpoint
+    expect(await h.fresh({ db: dbFile, script: { parkAt: "design:extract" } })).toBe(75);
+    expect(existsSync(h.dbPath())).toBe(true);
+    const before = h.read((db) => ({
+      active: ticketState(db, other.active),
+      waiting: ticketState(db, other.waiting),
+    }));
+    // the fresh run prepared OTHER-1 already: its snapshot, and its provision adopted
+    expect(before.active.inputs.length).toBe(SNAPSHOT_INPUT_NAMES.length);
+    expect(before.active.events.filter((e) => e === "note:adopted")).toHaveLength(1);
+    h.editProfile((p) => {
+      p.promptVars = { stack: "ruby", tone: "terse" };
+    });
+    h.probe = (_dir, cmd) => !cmd.startsWith("lib-");
+    expect(await h.resume()).toBe(75); // design finishes, checks pauses (needs_you)
+    expect(h.calls.counts["design:extract"]).toBe(2); // the parked call and the resumed one
+    h.read((db, id) => {
+      // the run's own ticket: the advisory is its own
+      expect(ticketState(db, id).toolchain).toBe(1);
+      const active = ticketState(db, other.active);
+      // the snapshot was taken again, with the resume's profile, and the same note
+      const changed = listEvents(db, other.active).filter((e) => e.reason === "inputs-changed");
+      expect(changed.length).toBe(
+        before.active.events.filter((e) => e === "note:inputs-changed").length + 1,
+      );
+      expect(JSON.parse(changed.at(-1)?.payload_json ?? "{}").names).toEqual([
+        "profile.promptVars",
+        "profile.components",
+        "run.unusableComponents",
+      ]);
+      expect(
+        JSON.parse(getInput(db, other.active, "profile.promptVars")?.value_json ?? "{}"),
+      ).toEqual({ stack: "ruby", tone: "terse" });
+      // adopted once (by the fresh run); the resume's pass found nothing left to adopt
+      expect(active.events.filter((e) => e === "note:adopted")).toHaveLength(1);
+      expect(getByKey(db, other.active, "provision")?.input_manifest).not.toBeNull();
+      // no starting commit and no toolchain advisory for another ticket
+      expect(getInput(db, other.active, "run.startingCommit")).toBeNull();
+      expect(active.toolchain).toBe(0);
+      // the resume was ENG-1's own, never the lowest id ticket's (spec §4, ruling 2026-10-10)
+      expect(listEvents(db, id).some((e) => e.kind === "resumed")).toBe(true);
+      expect(active.events.some((e) => e.startsWith("resumed:"))).toBe(false);
+      // the waiting ticket is left alone
+      expect(ticketState(db, other.waiting)).toEqual(before.waiting);
+      expect(before.waiting.events).toEqual([]);
+      expect(before.waiting.inputs).toEqual([]);
+    });
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+/** Every file under `dir` with its bytes, the run lock aside (a resume takes and releases it). */
+const filesOf = (dir: string) =>
+  readdirSync(dir)
+    .filter((f) => f !== "run.lock")
+    .sort()
+    .map((f) => [f, readFileSync(join(dir, f)).toString("base64")]);
+
+async function captureStdout(fn: () => Promise<void>): Promise<string> {
+  const out: string[] = [];
+  const prev = process.stdout.write;
+  process.stdout.write = ((chunk: unknown) => {
+    out.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    await fn();
+  } finally {
+    process.stdout.write = prev;
+  }
+  return out.join("");
+}
+
+test(
+  "ls and clean --all read a checkpoint written by a run on a reused --db as the run's own ticket",
+  async () => {
+    const h = make();
+    const dbFile = join(makeTempDir("styre-reuse-"), "reuse.db");
+    seedOtherTickets(dbFile); // OTHER-1 (active) and OTHER-2 (waiting) have the lower ids
+    const script = { units: () => unitsOf(2, { behavioral: false }), planFindings: () => [] };
+    expect(await h.fresh({ db: dbFile, script: { ...script, parkAt: "design:extract" } })).toBe(75);
+    const root = join(h.stateRoot, "styre");
+    const own = h.read((_db, id) => id);
+    const paused = listCheckpoints(root).find((c) => c.ident === "ENG-1");
+    expect(paused).toMatchObject({
+      ticketId: own,
+      status: "waiting",
+      branch: "feat/ENG-1",
+      kind: "budget",
+    });
+    expect(await h.resume({ script })).toBe(0); // pr-ready
+    expect(listCheckpoints(root).find((c) => c.ident === "ENG-1")).toMatchObject({
+      ticketId: own,
+      kind: "pr-ready",
+    });
+    const out = await captureStdout(() =>
+      cleanImpl({ all: true, slug: h.slug }, { root, targetRepo: h.repoDir }),
+    );
+    expect(out).toContain("styre clean: reaped 1 finished leftover(s)");
+    expect(existsSync(h.checkpointDir())).toBe(false);
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+test(
+  "a checkpoint that holds no ticket of its ident is refused by resume, reported by --inspect and ls, refused by clean, and never changed",
+  async () => {
+    const h = make();
+    mkdirSync(h.checkpointDir(), { recursive: true });
+    // a reused --db's tickets, none of them ENG-1: the lowest id would be OTHER-1
+    seedOtherTickets(h.dbPath());
+    const before = filesOf(h.checkpointDir());
+    expect(await h.resume()).toBe(65);
+    expect(h.stderr.join("")).toContain(
+      `resume refused: the checkpoint at ${h.checkpointDir()} holds no run of ENG-1 (no ticket ENG-1 recorded)`,
+    );
+    expect(filesOf(h.checkpointDir())).toEqual(before);
+    expect(await h.resume({ inspect: true })).toBe(0);
+    expect(h.stderr.join("")).toContain(
+      "resume would refuse this checkpoint: no ticket ENG-1 recorded",
+    );
+    expect(filesOf(h.checkpointDir())).toEqual(before);
+    const root = join(h.stateRoot, "styre");
+    expect(listCheckpoints(root).map((c) => [c.ident, c.kind, c.note, c.resumable])).toEqual([
+      ["ENG-1", "unreadable", "no ticket ENG-1 recorded", false],
+    ]);
+    const refused = await cleanImpl(
+      { ident: "ENG-1", slug: h.slug },
+      { root, targetRepo: h.repoDir },
+    ).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(StyreError);
+    expect((refused as StyreError).code).toBe(65);
+    expect((refused as StyreError).headline).toContain("no ticket ENG-1 recorded");
+    expect(filesOf(h.checkpointDir())).toEqual(before);
   },
   HARNESS_TEST_TIMEOUT_MS,
 );

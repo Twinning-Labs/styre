@@ -5,7 +5,7 @@ import { getLatestForTicket } from "../db/repos/dispatch.ts";
 import { type EventLogRow, listByTicket } from "../db/repos/event-log.ts";
 import { insertProject } from "../db/repos/project.ts";
 import { getDeliveredPayload, hasPendingHumanResume, listPending } from "../db/repos/signal.ts";
-import { getTicket, insertTicket, listActiveTickets } from "../db/repos/ticket.ts";
+import { getTicket, insertTicket } from "../db/repos/ticket.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { branchPrefixFor } from "../integrations/ticket-source.ts";
@@ -13,7 +13,13 @@ import type { IngestedTicket } from "../integrations/ticket-source.ts";
 import { type TelemetrySink, noopSink } from "../telemetry/emit.ts";
 import { createTelemetryEmitter } from "../telemetry/emitter.ts";
 import { pendingLeftoverChecks } from "../util/process/leftovers.ts";
-import { type RunInputs, captureSnapshot, recordStartingCommit } from "./design-inputs.ts";
+import { adoptActiveTickets } from "./adopt.ts";
+import {
+  type RunInputs,
+  captureOtherActiveTickets,
+  captureSnapshot,
+  recordStartingCommit,
+} from "./design-inputs.ts";
 import { tick } from "./loop.ts";
 import { createNotifier } from "./notify.ts";
 import { pauseTicket } from "./pause-ticket.ts";
@@ -273,9 +279,11 @@ export async function runTicket(deps: {
   // loop drives too (`tick` advances up to two ready tickets, loop.ts:22-41), with this run's
   // registry and so with this run's inputs. Each gets the same snapshot, with the same note, before
   // any step runs. The starting commit stays this run's ticket's own.
-  for (const other of listActiveTickets(deps.db)) {
-    if (other.id !== ticketId) captureSnapshot(deps.db, other.id, deps.inputs);
-  }
+  captureOtherActiveTickets(deps.db, ticketId, deps.inputs);
+  // A reused --db can hold steps an older Styre finished (spec §7.6); a new database has none. After
+  // every snapshot, since the pass reads them. A ticket whose branch is gone records those steps as
+  // "will rerun" (never throws).
+  adoptActiveTickets(deps.db, ticketId);
   const result = await driveToTerminal(deps.db, deps.registry, {
     ticketId,
     config: deps.runtimeConfig,
