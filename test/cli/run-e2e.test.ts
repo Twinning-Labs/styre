@@ -44,6 +44,13 @@ test("runTicket ingests a Linear ticket and drives it to pr-ready", async () => 
     ports,
     registry: skeletonRegistry(),
     ticketRef: "ENG-42",
+    inputs: {
+      profile,
+      unusableComponents: [],
+      nonPrimaryComponents: [],
+      config: DEFAULT_RUNTIME_CONFIG,
+      startingCommit: null,
+    },
   });
 
   expect(out.outcome).toBe("pr-ready");
@@ -93,6 +100,13 @@ test("runTicket emits a telemetry stream (events + summary) to the sink", async 
     registry: skeletonRegistry(),
     ticketRef: "ENG-9",
     emit: (e) => events.push(e),
+    inputs: {
+      profile,
+      unusableComponents: [],
+      nonPrimaryComponents: [],
+      config: DEFAULT_RUNTIME_CONFIG,
+      startingCommit: null,
+    },
   });
   expect(out.outcome).toBe("pr-ready");
   // The stream carries at least one transition event and exactly one terminal summary.

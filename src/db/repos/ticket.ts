@@ -79,6 +79,13 @@ export function getByIdent(db: Database, projectId: number, ident: string): Tick
   );
 }
 
+/** Every ticket whose status is `active`, by id: the ones a run on a reused --db may drive. */
+export function listActiveTickets(db: Database): TicketRow[] {
+  return db
+    .query<TicketRow, []>(`SELECT ${COLS} FROM ticket WHERE status = 'active' ORDER BY id`)
+    .all();
+}
+
 export function setTicketStatus(db: Database, id: number, status: string): void {
   db.query("UPDATE ticket SET status = $status, updated_at = $now WHERE id = $id").run({
     $status: status,

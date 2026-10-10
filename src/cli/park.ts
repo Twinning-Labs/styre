@@ -17,6 +17,7 @@ import type { AgentRunner } from "../agent/runner.ts";
 import { type AgentConfig, DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { stateDir } from "../config/paths.ts";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
+import { captureSnapshot } from "../daemon/design-inputs.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
 import type { ProjectorPorts } from "../daemon/projector.ts";
 import { recover } from "../daemon/recover.ts";
@@ -280,6 +281,7 @@ export async function resumeRun(
     runner?: AgentRunner;
     /** The stop handler `styre run` installed (section 7.1). */
     stop?: StopWiring;
+    probe?: (repoDir: string, command: string) => boolean;
   },
   /** ENG-435: components role-classification removed from `profile`, so a RESUMED run reports
    *  the narrowing in its PR the same way a fresh one does. `profile` arrives already narrowed
@@ -511,6 +513,15 @@ export async function resumeRun(
       branch,
       acceptHead: args.acceptHead === true,
       warn: (line) => process.stderr.write(`${line}\n`),
+    });
+    // spec §4: after recover() and the provision reset, before the first resolver pass, the profile
+    // and config rows are rewritten from what the handlers will receive now. The ticket text and the
+    // starting commit never are (E2).
+    captureSnapshot(db, ticketId, {
+      profile,
+      unusableComponents: [],
+      nonPrimaryComponents,
+      config: runtimeConfig,
     });
 
     const registry: StepRegistry = deps?.buildRegistry

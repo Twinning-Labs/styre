@@ -174,6 +174,8 @@ export interface RunDeps {
    *  (R27). Without it, `runImpl` removes them itself when it returns. The removal does nothing
    *  while a stop is in progress. */
   keepStopHandlers?: (remove: () => void) => void;
+  /** The toolchain probe (tests); the real `probeCommandExists` otherwise. */
+  probe?: (repoDir: string, command: string) => boolean;
 }
 
 export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Promise<void> {
@@ -294,6 +296,7 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
         preflight: deps?.preflight,
         runner: deps?.runner,
         stop: wiring,
+        probe: deps?.probe,
       };
       await resumeRun(
         {
@@ -335,7 +338,7 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
       throw noPrimaryComponentError(formatNonPrimaryComponents(loaded.nonPrimary));
     }
 
-    const toolchain = applyToolchainGate(profile);
+    const toolchain = applyToolchainGate(profile, deps?.probe);
     profile = toolchain.profile;
     if (toolchain.unusable.length > 0) {
       // Say it out loud, twice. Here for whoever is watching the run, and again in the PR body
@@ -438,6 +441,9 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
           provider: agentConfig.provider,
         });
       }
+      const inPlace = (args["in-place"] as boolean | undefined) ?? false;
+      // spec §4.2: in place, the starting commit is HEAD of the checkout at run start.
+      const runStartingCommit = inPlace ? branchHeadSha(profile.targetRepo, "HEAD") : null;
       const runner = deps?.runner ?? resolveAgentRunner(agentConfig);
       const registry = buildDispatchRegistry({
         runner,
@@ -446,7 +452,8 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
         unusableComponents: toolchain.unusable,
         nonPrimaryComponents: loaded.nonPrimary,
         worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-")),
-        inPlace: (args["in-place"] as boolean | undefined) ?? false,
+        inPlace,
+        recordStartingCommit: true,
       });
 
       a.runStarted({
@@ -474,6 +481,13 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
         readHead: () => branchHeadSha(profile.targetRepo, runBranch),
         // The handler can record an interruption from the moment the ticket row exists.
         onTicket: (ticketId) => stop.setRun({ db, dbPath, ticketId, ident }),
+        inputs: {
+          profile,
+          unusableComponents: toolchain.unusable,
+          nonPrimaryComponents: loaded.nonPrimary,
+          config: runtimeConfig,
+          startingCommit: runStartingCommit,
+        },
       });
       // A step that finished during a stop is not recorded (section 7.5): nothing below may run.
       if (isStopping()) throw new RunInterrupted();

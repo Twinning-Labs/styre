@@ -9,6 +9,7 @@ import type { UnusableComponent } from "../cli/preflight.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
 import { latestReauthorRoute } from "../daemon/arbiter-verdict.ts";
 import { latestChecksReauthorAcs } from "../daemon/checks-verdict.ts";
+import { recordStartingCommit } from "../daemon/design-inputs.ts";
 import { StepRegistry } from "../daemon/step-registry.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
 import {
@@ -193,6 +194,10 @@ export interface RegistryDeps {
   /** RED-first check executor override (tests inject a scripted runner; production uses runCommand).
    *  Shared by authoring, baseline replay, delivered binding, and post-implement reruns. */
   runCheckCommand?: import("../util/run-command.ts").CmdRunner;
+  /** A fresh run records, in worktree mode, the commit the ticket branch is created from, right
+   *  after provision first creates it (spec §4.2). Resume never sets it: there `worktree add -B`
+   *  recreates the branch (ENG-488), which is not its first creation. */
+  recordStartingCommit?: boolean;
 }
 
 const DESIGN_TIMEOUT_MS = 60 * 60 * 1000;
@@ -1341,6 +1346,9 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   registry.register("provision", async (ctx: HandlerContext) => {
     const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
     ensureWorktree(repoPath, branch, worktreePath);
+    if (deps.recordStartingCommit === true && !deps.inPlace) {
+      recordStartingCommit(ctx.db, ctx.ticket.id, worktreeHead(worktreePath));
+    }
     for (const c of deps.profile.components) {
       if (!c.testEnvironment) continue;
       const problem = testEnvironmentProblem(worktreePath, c);

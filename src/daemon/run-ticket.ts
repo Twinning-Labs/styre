@@ -5,7 +5,7 @@ import { getLatestForTicket } from "../db/repos/dispatch.ts";
 import { type EventLogRow, listByTicket } from "../db/repos/event-log.ts";
 import { insertProject } from "../db/repos/project.ts";
 import { getDeliveredPayload, hasPendingHumanResume, listPending } from "../db/repos/signal.ts";
-import { getTicket, insertTicket } from "../db/repos/ticket.ts";
+import { getTicket, insertTicket, listActiveTickets } from "../db/repos/ticket.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { branchPrefixFor } from "../integrations/ticket-source.ts";
@@ -13,6 +13,7 @@ import type { IngestedTicket } from "../integrations/ticket-source.ts";
 import { type TelemetrySink, noopSink } from "../telemetry/emit.ts";
 import { createTelemetryEmitter } from "../telemetry/emitter.ts";
 import { pendingLeftoverChecks } from "../util/process/leftovers.ts";
+import { type RunInputs, captureSnapshot, recordStartingCommit } from "./design-inputs.ts";
 import { tick } from "./loop.ts";
 import { createNotifier } from "./notify.ts";
 import { pauseTicket } from "./pause-ticket.ts";
@@ -227,6 +228,8 @@ export async function runTicket(deps: {
   /** Called with the ticket row's id as soon as it exists, before any step runs (ENG-485: the
    *  stop handler needs it to record an interruption). */
   onTicket?: (ticketId: number) => void;
+  /** The design inputs exactly as the handlers receive them (spec §4); captured before any step. */
+  inputs: RunInputs;
 }): Promise<RunResult & { ticketId: number; summary: string }> {
   const ingested = deps.ingested ?? (await deps.ports.issueTracker.fetchTicket(deps.ticketRef));
   const projectId = insertProject(deps.db, {
@@ -244,6 +247,18 @@ export async function runTicket(deps: {
     externalId: ingested.externalId,
   });
   deps.onTicket?.(ticketId);
+  // A new database gets every row; a reused --db keeps its ticket text and starting commit and
+  // rewrites the rest with an `inputs-changed` note (spec §4).
+  captureSnapshot(deps.db, ticketId, deps.inputs);
+  if (deps.inputs.startingCommit !== null)
+    recordStartingCommit(deps.db, ticketId, deps.inputs.startingCommit);
+  // Operator ruling, 2026-10-10 (spec §4): a reused --db can hold other active tickets, which the
+  // loop drives too (`tick` advances up to two ready tickets, loop.ts:22-41), with this run's
+  // registry and so with this run's inputs. Each gets the same snapshot, with the same note, before
+  // any step runs. The starting commit stays this run's ticket's own.
+  for (const other of listActiveTickets(deps.db)) {
+    if (other.id !== ticketId) captureSnapshot(deps.db, other.id, deps.inputs);
+  }
   const result = await driveToTerminal(deps.db, deps.registry, {
     ticketId,
     config: deps.runtimeConfig,

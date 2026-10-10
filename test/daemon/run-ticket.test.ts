@@ -462,14 +462,15 @@ test("runTicket passes readHead to every step it runs", async () => {
   const { db } = makeTestDb({ seedTicket: false });
   insertRun(db, { runId: "test-run-head", startedAt: nowUtc(), provider: "claude" });
   const seen: Array<ReturnType<typeof door.inFlightStep>> = [];
+  const profile = parseProfile({
+    slug: "demo",
+    targetRepo: "/tmp/x",
+    defaultBranch: "main",
+    checksSystem: "none",
+  });
   await runTicket({
     db,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: "/tmp/x",
-      defaultBranch: "main",
-      checksSystem: "none",
-    }),
+    profile,
     runtimeConfig: DEFAULT_RUNTIME_CONFIG,
     ports: {
       issueTracker: fakeIssueTracker({
@@ -488,6 +489,13 @@ test("runTicket passes readHead to every step it runs", async () => {
     registry: recordingRegistry(seen),
     ticketRef: "ENG-42",
     readHead: () => "runTicketHead",
+    inputs: {
+      profile,
+      unusableComponents: [],
+      nonPrimaryComponents: [],
+      config: DEFAULT_RUNTIME_CONFIG,
+      startingCommit: null,
+    },
   });
   db.close();
   expect(seen.length).toBeGreaterThan(0);
