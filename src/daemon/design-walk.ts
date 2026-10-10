@@ -46,13 +46,19 @@ export function newerSchemeDbRefusal(found: { scheme: number; idents: string[] }
 }
 
 /** spec §6.6: an unchanged step cannot be invalidated again after it reruns, so more than three
- *  `inputs` invalidations of one step since the run was last started is a defect (an unstable
- *  digest, say). Fail fast. */
+ *  `inputs` invalidations of one step since the run was last started, or last redesigned, is a
+ *  defect (an unstable digest, say). Fail fast. */
 export const INVALIDATE_LOOP_LIMIT = 3;
 
-/** A start of the run on an existing database: a resume, or a `styre run` on a reused --db. */
-const startsARun = (e: { kind: string; reason: string | null }): boolean =>
-  e.kind === "resumed" || (e.kind === "note" && e.reason === "reused-database");
+/** Where the count starts again (spec §6.6): a start of the run on an existing database (a resume,
+ *  or a `styre run` on a reused --db, which notes every ticket it drives again), or a redesign (a
+ *  design loopback: a legitimate upstream change bounded by the review budget, which invalidates
+ *  each reader of the new plan once; operator ruling, 2026-10-10). An unstable digest writes none
+ *  of these, so the guard still catches it. */
+const restartsTheCount = (e: { kind: string; reason: string | null; loop: string | null }) =>
+  e.kind === "resumed" ||
+  (e.kind === "note" && e.reason === "reused-database") ||
+  (e.kind === "loopback" && e.loop === "design");
 
 export function inputsInvalidationsSinceResume(
   db: Database,
@@ -60,7 +66,7 @@ export function inputsInvalidationsSinceResume(
   stepKey: string,
 ): number {
   const events = listEvents(db, ticketId);
-  const since = events.filter(startsARun).at(-1)?.seq ?? 0;
+  const since = events.filter(restartsTheCount).at(-1)?.seq ?? 0;
   return events.filter((e) => {
     if (
       e.seq <= since ||

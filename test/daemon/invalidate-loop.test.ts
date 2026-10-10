@@ -11,6 +11,7 @@ import { latestDispatchForStep } from "../../src/db/repos/review-finding.ts";
 import { getTicket, insertTicket } from "../../src/db/repos/ticket.ts";
 import { pendingLeftoverChecks } from "../../src/util/process/leftovers.ts";
 import { DesignHarness, HARNESS_TEST_TIMEOUT_MS } from "../helpers/design-harness.ts";
+import type { ScriptFinding } from "../helpers/design-script.ts";
 import {
   type DesignTicket,
   STEP_TEST_TIMEOUT_MS,
@@ -105,10 +106,19 @@ test(
         await driveUntil(t, atStep("checks:dispatch"));
       }
     }
-    // four invalidations of design:dispatch, none for inputs: the next one is still allowed
-    expect(
-      listEvents(t.db, t.ticketId).filter((e) => e.reason === "invalidated").length,
-    ).toBeGreaterThanOrEqual(4);
+    // exactly these four invalidations of design:dispatch, none for inputs: the next one is
+    // still allowed
+    const causes = listEvents(t.db, t.ticketId)
+      .filter((e) => e.reason === "invalidated")
+      .map((e) => JSON.parse(e.payload_json ?? "{}") as { cause?: string; stepKeys?: string[] })
+      .filter((p) => (p.stepKeys ?? []).includes("design:dispatch"))
+      .map((p) => p.cause);
+    expect(causes).toEqual([
+      "worktree-recreated",
+      "worktree-recreated",
+      "manifest-touched",
+      "manifest-touched",
+    ]);
     unstable(t, 1);
     expect(nextStepKey(t.db, t.ticketId)).toEqual(INVALIDATE_DISPATCH);
   },
@@ -273,6 +283,110 @@ test(
     await invalidateForInputs(t, 5, 2);
     unstable(t, 7);
     expect(nextStepKey(t.db, t.ticketId)).toEqual(LOOP_ESCALATION);
+  },
+  STEP_TEST_TIMEOUT_MS,
+);
+
+test(
+  "another ticket's restart does not restart this ticket's count",
+  async () => {
+    const t = makeDesignTicket();
+    const projectId = getTicket(t.db, t.ticketId)?.project_id ?? -1;
+    const other = insertTicket(t.db, { projectId, ident: "ENG-2" });
+    expect(other).not.toBe(t.ticketId);
+    await driveUntil(t, atStep("checks:dispatch"));
+    await invalidateForInputs(t, 1, 3);
+    // stated exception (by ruling): restart marks appended for the OTHER ticket only, a
+    // `reused-database` note and a design loopback, which no real step writes on a ticket that
+    // is never driven
+    appendEvent(t.db, {
+      ticketId: other,
+      kind: "note",
+      reason: "reused-database",
+      payload: { event: "reused-database" },
+    });
+    appendEvent(t.db, { ticketId: other, kind: "loopback", loop: "design", routeTo: "review" });
+    unstable(t, 4);
+    expect(nextStepKey(t.db, t.ticketId)).toEqual(LOOP_ESCALATION);
+  },
+  STEP_TEST_TIMEOUT_MS,
+);
+
+const planFinding = (n: number): ScriptFinding => ({
+  severity: "major",
+  category: "plan-defect",
+  location: `docs/plans/x.md:${n}`,
+  rationale: `issue ${n}`,
+  factors: null,
+  deferral_candidate: false,
+  work_unit_seq: null,
+});
+
+/** The review's false fire (Task 16 fix round 1): run until design:review is next, resume with an
+ *  edited promptVars (as park.ts does: the `resumed` event, then the snapshot), then drive with a
+ *  plan review that blocks with a new finding on the calls `blocking` names and a new plan on every
+ *  design:dispatch. Stops at checks:dispatch or at the first escalation. */
+async function restartThenRedesigns(blocking: (call: number) => boolean) {
+  const t = makeDesignTicket({
+    script: {
+      plan: (c) => `Plan body, version ${c}`,
+      planFindings: (c) => (blocking(c) ? [planFinding(c)] : []),
+    },
+  });
+  await driveUntil(t, atStep("design:review"));
+  appendEvent(t.db, { ticketId: t.ticketId, kind: "resumed", reason: "resume" });
+  captureSnapshot(t.db, t.ticketId, {
+    profile: { ...t.profile, promptVars: { stack: "ruby", edited: "yes" } },
+    unusableComponents: [],
+    nonPrimaryComponents: [],
+    config: t.config,
+  });
+  let escalated = false;
+  let reachedChecks = false;
+  for (let i = 0; i < 80 && !escalated && !reachedChecks; i++) {
+    const d = nextStepKey(t.db, t.ticketId);
+    if (d.kind === "step" && d.stepKey === "checks:dispatch") reachedChecks = true;
+    else {
+      const o = await advanceOneStep(t.db, t.ticketId, t.registry, { config: t.config });
+      await pendingLeftoverChecks();
+      escalated = o.kind === "escalated";
+    }
+  }
+  const events = listEvents(t.db, t.ticketId);
+  return {
+    t,
+    reachedChecks,
+    escalations: events.filter((e) => e.kind === "escalated"),
+    redesigns: events.filter((e) => e.kind === "loopback" && e.loop === "design").length,
+    extractInputs: inputsInvalidations(t, "design:extract").length,
+  };
+}
+
+test(
+  "a restart and then three redesigns do not trip the guard: each redesign restarts the count (ruling 2026-10-10)",
+  async () => {
+    const r = await restartThenRedesigns((c) => c >= 1 && c <= 3);
+    // the scenario really reached the old false fire: design:extract was invalidated for inputs
+    // four times since the restart (the restart once, each redesign's new plan once)
+    expect(r.extractInputs).toBe(4);
+    expect(r.redesigns).toBe(3);
+    expect(r.escalations).toEqual([]);
+    // the third redesign was reviewed, and passed: three blocking reviews, then the fourth
+    expect(r.t.calls.counts["design:review"]).toBe(4);
+    expect(r.reachedChecks).toBe(true);
+  },
+  STEP_TEST_TIMEOUT_MS,
+);
+
+test(
+  "when the findings remain, the review budget's own escalation is the stop, not invalidate-loop",
+  async () => {
+    const r = await restartThenRedesigns(() => true);
+    expect(r.redesigns).toBe(3);
+    expect(r.escalations).toHaveLength(1);
+    expect(r.escalations[0]?.reason).toStartWith("review repair limit reached");
+    expect(r.escalations[0]?.signature).toStartWith("review:");
+    expect(r.reachedChecks).toBe(false);
   },
   STEP_TEST_TIMEOUT_MS,
 );

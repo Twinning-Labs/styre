@@ -491,7 +491,7 @@ test(
 );
 
 test(
-  "each resume notes the other active tickets reused-database, never the run's own ticket or a waiting one, and four resumes with a changed input trip no loop guard (ruling 2026-10-10)",
+  "each resume notes the other active tickets reused-database, never the run's own ticket or a waiting one (ruling 2026-10-10)",
   async () => {
     const h = make();
     expect(await h.fresh()).toBe(75); // needs_you at checks:dispatch
@@ -519,11 +519,12 @@ test(
       expect(
         listEvents(db, other.active).filter((e) => e.reason === "inputs-changed"),
       ).toHaveLength(3);
-      for (const t of [id, other.active]) {
-        expect(
-          listEvents(db, t).filter((e) => e.signature?.startsWith("invalidate-loop:")),
-        ).toEqual([]);
-      }
+      // the run's own ticket is driven at each resume and trips no guard; OTHER-1 is never driven
+      // (its project is paused), so the guard's behaviour for it is the helper test's, in
+      // invalidate-loop.test.ts
+      expect(listEvents(db, id).filter((e) => e.signature?.startsWith("invalidate-loop:"))).toEqual(
+        [],
+      );
     });
   },
   HARNESS_TEST_TIMEOUT_MS,
