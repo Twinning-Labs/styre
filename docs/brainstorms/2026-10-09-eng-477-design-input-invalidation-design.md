@@ -197,6 +197,12 @@ active ticket in the checkpoint, with the same notes; tickets that are waiting a
 a reused `--db`. The starting commit is never recorded on resume, for any ticket. The toolchain
 advisory a resume records when the unusable list changes (§4.1) stays the run's own ticket's.
 
+(Operator ruling, 2026-10-10, the same day) Every reader of a checkpoint finds the run's own ticket by
+its ident, the checkpoint folder's name: `--resume` (and `--inspect`), `ls`, `clean` and the narrow
+readers of §7.7. Before this, each took the ticket with the lowest id, so a checkpoint written by a
+run on a reused `--db` was resumed, reported and checked as the wrong ticket. A checkpoint that holds
+no ticket with that ident is refused loudly, never read as another ticket.
+
 ### 4.1 One profile for fresh runs and resumes
 
 A fresh run applies `applyToolchainGate` and drops components whose toolchain is missing
