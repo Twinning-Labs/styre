@@ -523,6 +523,33 @@ describe("the checks fail on a difference", () => {
     expect(checkSites(diagram(), root)).toEqual([]);
   });
 
+  test("calls and brackets inside strings and templates are not code to the census (SL, TL)", () => {
+    const loadProfile = "export function loadProfile(path: string): Profile {\n";
+    const legacy = '    throw new Error(\n      "profile: legacy flat';
+    const v2 = '    throw new Error(\n      "profile: schemaVersion 2 profile';
+    for (const edit of [
+      // A refusal spelled inside a string, and inside a template with a substitution.
+      {
+        find: loadProfile,
+        replace: `${loadProfile}  if (path === "throw new Error(") return parseProfile({}, path);\n`,
+      },
+      {
+        find: loadProfile,
+        replace: `${loadProfile}  const shown = \`usageError(\${path})\`;\n  if (shown === "") return parseProfile({}, path);\n`,
+      },
+      // A closing bracket inside a string, and inside a template, among a call's arguments, before
+      // the declared anchor's line: the call's span must run past it.
+      { find: legacy, replace: '    throw new Error(\n      ")" +\n      "profile: legacy flat' },
+      {
+        find: v2,
+        replace: '    throw new Error(\n      `)${""}` +\n      "profile: schemaVersion 2 profile',
+      },
+    ]) {
+      const root = codeCopy([{ file: "src/dispatch/profile.ts", ...edit }]);
+      expect(checkSites(diagram(), root)).toEqual([]);
+    }
+  });
+
   test("comments are blanked, strings are not (blankComments)", () => {
     const text = [
       'const a = "/*"; throw new Error("kept"); const b = "*/";',

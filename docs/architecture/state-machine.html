@@ -161,11 +161,14 @@ button:disabled { opacity: 0.4; cursor: default; }
 #diagram { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
 #diagram.panning { cursor: grabbing; }
 .stage { min-width: 0; }
-/* The legend sits above the canvas, not over it, so it never hides part of the drawing. */
+/* The legend floats over the canvas's top left, collapsed by default; the camera frames below it.
+   Open, it takes at most a little over half the canvas (it scrolls), so a selection always has room. */
 .legend {
-  background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
-  font-size: 12.5px; color: var(--muted); margin-bottom: 10px;
+  position: absolute; left: 10px; top: 10px; z-index: 2; max-width: calc(100% - 84px); max-height: 55%; overflow: auto;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow);
+  font-size: 12.5px; color: var(--muted);
 }
+.legend .note { font-weight: 500; color: var(--muted); margin-left: 6px; }
 .legend summary { cursor: pointer; padding: 8px 12px; font-weight: 650; color: var(--text); list-style: none; }
 .legend summary::-webkit-details-marker { display: none; }
 .legend summary::before { content: "+"; display: inline-block; width: 1em; color: var(--faint); }
@@ -177,7 +180,6 @@ button:disabled { opacity: 0.4; cursor: default; }
 .legend .item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .legend .shape-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; padding: 2px 6px; }
 .legend svg { flex: none; overflow: visible; }
-.legend .hint-line { margin: 0; color: var(--text); font-weight: 600; }
 .zoom {
   position: absolute; right: 10px; top: 10px; display: flex; flex-direction: column;
   background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); overflow: hidden;
@@ -263,11 +265,14 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
 .n-gate .shape, .n-guard .shape { fill: var(--surface); stroke: var(--state-line); stroke-width: 1.6; }
 .n-wait .shape { fill: var(--surface); stroke: var(--state-line); stroke-width: 2.6; }
 .n-terminal .shape { fill: var(--flow-tint); stroke: var(--flow); stroke-width: 2.6; }
-.n-exit .shape { fill: var(--red-tint); stroke: var(--red); stroke-width: 2.2; }
+/* A refusal exit is a square cornered box with a dashed outline (the run never started); Escalated is
+   a solid red pill (the run stopped and waits). */
+.n-exit .shape { fill: var(--red-tint); stroke: var(--red); stroke-width: 2; stroke-dasharray: 7 4; }
 .n-pause .shape { fill: var(--violet-tint); stroke: var(--violet); stroke-width: 2.6; }
-.n-escalated .shape { fill: var(--red-tint); stroke: var(--red); stroke-width: 3.4; }
+.n-escalated .shape { fill: var(--red); stroke: var(--red); stroke-width: 3; }
 .n-gate text, .n-guard text, .n-wait text, .n-terminal text, .n-exit text, .n-pause text, .n-escalated text { fill: var(--text); font-size: 14.5px; font-weight: 640; }
-.n-escalated text.sub { font-size: 11.5px; font-weight: 500; fill: var(--muted); }
+.n-escalated text, .n-escalated text.sub { fill: var(--canvas); }
+.n-escalated text.sub { font-size: 11.5px; font-weight: 500; }
 .edge { fill: none; stroke-linecap: round; stroke-linejoin: round; }
 .edge.f-flow { stroke: var(--flow); }
 .edge.f-red { stroke: var(--red); }
@@ -364,18 +369,17 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
 
 <div class="grid">
   <div class="stage">
-  <details class="legend" id="legend" open>
-    <summary>Legend</summary>
-    <div class="lg-body">
-      <div class="lg-row" id="legend-edges"><span class="lg-title">Transitions</span></div>
-      <div class="lg-row" id="legend-shapes"><span class="lg-title">Shapes</span></div>
-      <p class="hint-line" id="legend-note" hidden>Bold: leaves the selected state. Light: arrives at it.</p>
-    </div>
-  </details>
   <div class="canvas" id="canvas" role="region" aria-label="State diagram. Each state is a button; the panel and the state list below carry the same information as text.">
     <svg id="diagram" xmlns="http://www.w3.org/2000/svg" role="group" aria-labelledby="diagram-title">
       <title id="diagram-title">Ticket lifecycle state diagram</title>
     </svg>
+    <details class="legend" id="legend">
+      <summary>Legend<span class="note" id="legend-note" hidden title="Bold edges leave the selected state; light edges arrive at it.">bold: leaves, light: arrives</span></summary>
+      <div class="lg-body">
+        <div class="lg-row" id="legend-edges"><span class="lg-title">Transitions</span></div>
+        <div class="lg-row" id="legend-shapes"><span class="lg-title">Shapes</span></div>
+      </div>
+    </details>
     <div class="zoom" id="zoom-box" role="group" aria-label="Zoom">
       <button type="button" id="zoom-in" aria-label="Zoom in">+</button>
       <button type="button" id="zoom-out" aria-label="Zoom out">&#8722;</button>
@@ -5648,7 +5652,7 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
     }
     if (kind === "pseudo") return circle(7 + pad);
     if (kind === "hub") return circle(hubRadius(w, hgt) + pad);
-    var rad = kind === "step" ? 9 + pad : y; // states and entries are pills; steps are small boxes
+    var rad = kind === "step" ? 9 + pad : kind === "exit" ? 6 + pad : y; // pills, but steps and exits are boxes
     return "M" + (-x + rad) + "," + (-y) + " H" + (x - rad) + " A" + rad + "," + rad + " 0 0 1 " + x + "," + (-y + rad) + " V" + (y - rad) + " A" + rad + "," + rad + " 0 0 1 " + (x - rad) + "," + y + " H" + (-x + rad) + " A" + rad + "," + rad + " 0 0 1 " + (-x) + "," + (y - rad) + " V" + (-y + rad) + " A" + rad + "," + rad + " 0 0 1 " + (-x + rad) + "," + (-y) + " Z";
   }
   /** Whether the point dx,dy (relative to the centre) lies inside a node's outline. */
@@ -5660,7 +5664,7 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
     if (x > hw || y > hh) return false;
     if (kind === "guard") return x + y <= hw + hh - Math.min(16, hgt / 3);
     if (kind === "wait") return x <= hw - Math.min(24, w / 5) * (y / hh);
-    var r = kind === "step" ? 9 : hh;
+    var r = kind === "step" ? 9 : kind === "exit" ? 6 : hh;
     if (x <= hw - r || y <= hh - r) return true;
     var cx = x - (hw - r), cy = y - (hh - r);
     return cx * cx + cy * cy <= r * r;
@@ -6003,12 +6007,14 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   function applyVB() { svg.setAttribute("viewBox", vb.x + " " + vb.y + " " + vb.w + " " + vb.h); }
   var MAX_SCALE = 2.2, MIN_W = function () { return cw() / MAX_SCALE; };
   var MAX_W = function () { return D.canvas[0] * 3; };
-  /** The canvas edges the overlays cover, in screen pixels: the zoom buttons on the right, the
-   *  step caption (or the hint) along the bottom. The camera frames into what is left. */
+  /** The canvas edges the overlays cover, in screen pixels: the legend along the top, the zoom
+   *  buttons on the right, the step caption (or the hint) along the bottom. The camera frames into
+   *  what is left. */
   function insets() {
     var zoom = document.getElementById("zoom-box"), cap = document.getElementById("caption"), hint = document.getElementById("hint");
+    var legend = document.getElementById("legend");
     var bottom = !cap.hidden ? cap.offsetHeight + 14 : !hint.hidden ? hint.offsetHeight + 10 : 0;
-    return { l: 10, t: 10, r: 10 + (zoom ? zoom.offsetWidth + 10 : 0), b: 10 + bottom };
+    return { l: 10, t: 10 + legend.offsetHeight + 8, r: 10 + (zoom ? zoom.offsetWidth + 10 : 0), b: 10 + bottom };
   }
   /** The free area (canvas pixels) the overlays leave. */
   function freeArea() {
@@ -6301,8 +6307,9 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
     nodeEls[id].classList.add("selected");
     showStatePanel(id, chains, ins);
     counter.textContent = "";
-    var near = Object.keys(lit).filter(function (n) { return lit[n] <= 1; });
-    if (animate) frameReadable([unionBox(Object.keys(lit).map(nodeBox)), unionBox(near.map(nodeBox)), grow(nodeBox(id), 170), nodeBox(id)]);
+    // The whole selection, always, inside the free area (operator ruling, 2026-10-11): on a small
+    // screen the labels get small and the reader zooms in to read them.
+    if (animate) frame(unionBox(Object.keys(lit).map(nodeBox)));
   }
 
   function renderScenario(animate) {
@@ -6624,7 +6631,10 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
     item.appendChild(document.createTextNode(sh[3]));
     legendShapes.appendChild(item);
   });
-  if (window.matchMedia("(max-width: 700px)").matches) document.getElementById("legend").open = false;
+  // Opening or closing the legend changes the free area: frame the same selection again.
+  document.getElementById("legend").addEventListener("toggle", function () {
+    if (framed) frame(framed, false, framedScale); else if (!untouched) fitAll(false);
+  });
 
   var themeButtons = document.querySelectorAll("[data-theme-choice]");
   function setTheme(choice) {
