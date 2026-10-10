@@ -205,6 +205,9 @@ export async function advanceOneStep(
     const commit = registry.resolveCommit(d.handlerKey);
     const leftoverSince = nowToken();
     const dispatchesBefore = latestDispatchRowId(db, ticketId);
+    // Set outside the try: a refusal (another step already in flight) must not reach the finally,
+    // which would clear the slot of the step that holds it.
+    setCurrentStep(d.stepKey);
     try {
       // The review verdict is applied in the SAME transaction that marks the step succeeded
       // (onSucceed). Otherwise a crash between the two would leave a `succeeded` review with an
@@ -213,7 +216,6 @@ export async function advanceOneStep(
       const verdictBox: {
         value: ReviewVerdictResult | ChecksVerdictResult | GateVerdictResult | null;
       } = { value: null };
-      setCurrentStep(d.stepKey);
       const execution = await runStep(db, {
         ticketId,
         workUnitId: d.workUnitId,

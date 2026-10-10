@@ -1,7 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import { setCurrentStep } from "../../src/daemon/current-step.ts";
+import { currentStepKey, setCurrentStep } from "../../src/daemon/current-step.ts";
 import { DESIGN_TABLE, type StepRow } from "../../src/daemon/design-graph.ts";
 import { UndeclaredReadError, readWorkUnitsForDesign } from "../../src/daemon/design-reads.ts";
+import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
+import { InvariantViolation } from "../../src/engine/step-journal.ts";
 import { makeTestDb } from "../helpers/db.ts";
 import {
   STEP_TEST_TIMEOUT_MS,
@@ -17,6 +19,7 @@ test("an accessor answers the step that declares the read", () => {
   for (const key of ["design:size", "design:review"]) {
     setCurrentStep(key);
     expect(readWorkUnitsForDesign(db, ticketId)).toEqual([]);
+    setCurrentStep(null);
   }
   db.close();
 });
@@ -44,6 +47,7 @@ test("an accessor called while another step is current throws (§8.10)", () => {
   expect(() => readWorkUnitsForDesign(db, ticketId)).toThrow(
     "design:dispatch reads workUnits, which the design table does not declare for it",
   );
+  setCurrentStep(null);
   setCurrentStep("checks:dispatch"); // outside the table: reads the repositories directly instead
   expect(() => readWorkUnitsForDesign(db, ticketId)).toThrow(UndeclaredReadError);
   expect(() => readWorkUnitsForDesign(db, ticketId)).toThrow("checks:dispatch reads workUnits");
@@ -67,4 +71,37 @@ test("each step declares workUnits under both grading values or under neither", 
       [false, true].map((g) => r.inputs({ complexityGrading: g }).includes("workUnits")),
     ).toEqual([true, true]);
   }
+});
+
+// The units digest (digestWorkUnits) covers only origin `extract` units, so a design step that saw a
+// reconcile unit would read something its manifest never records. No path puts one in front of a
+// design step today; the accessor makes that hold by construction.
+test(
+  "the accessor refuses when a unit is not design:extract's, naming the step and the unit",
+  async () => {
+    const t = makeDesignTicket();
+    await driveUntil(t, atStep("design:size"));
+    // Stated exception (no faked state): only the integration failure path in verify writes a
+    // reconcile unit, which no design step can reach, so it is inserted through the public
+    // insertWorkUnit, as that path does.
+    insertWorkUnit(t.db, { ticketId: t.ticketId, seq: 3, kind: "reconcile", origin: "reconcile" });
+    setCurrentStep("design:size");
+    expect(() => readWorkUnitsForDesign(t.db, t.ticketId)).toThrow(InvariantViolation);
+    expect(() => readWorkUnitsForDesign(t.db, t.ticketId)).toThrow(
+      "design:size reads workUnits, but unit 3 has origin reconcile",
+    );
+  },
+  STEP_TEST_TIMEOUT_MS,
+);
+
+test("the slot refuses a second step while one is in flight, and names both", () => {
+  setCurrentStep("design:size");
+  expect(() => setCurrentStep("design:review")).toThrow(InvariantViolation);
+  expect(() => setCurrentStep("design:review")).toThrow(
+    "design:review cannot start while design:size is in flight",
+  );
+  expect(currentStepKey()).toBe("design:size"); // the step in flight keeps the slot
+  setCurrentStep(null);
+  setCurrentStep("design:review");
+  expect(currentStepKey()).toBe("design:review");
 });

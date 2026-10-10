@@ -26,7 +26,11 @@ import {
 
 /** A ticket whose design ran for real: two behavioural units, full track, one minor plan finding
  *  tied to unit 1, a reconcile unit, needs_docs set. */
-async function designedTicket() {
+/** A ticket designed to checks:dispatch. By default it also gets a reconcile unit and needs_docs, so
+ *  the clearing rules have every kind of row to clear; `withReconcile: false` leaves design's own
+ *  rows only, for a test that runs design steps again afterwards: a design step refuses to read a
+ *  reconcile unit (design-reads.ts), and no live path puts one in front of it. */
+async function designedTicket(opts: { withReconcile?: boolean } = {}) {
   const t = makeDesignTicket({
     script: {
       planFindings: () => [
@@ -43,6 +47,7 @@ async function designedTicket() {
     },
   });
   await driveUntil(t, atStep("checks:dispatch"));
+  if (opts.withReconcile === false) return t;
   insertWorkUnit(t.db, {
     ticketId: t.ticketId,
     seq: 3,
@@ -125,7 +130,7 @@ test(
 test(
   "resetProvision and the manifest touch hook go through the same function, with their causes",
   async () => {
-    const t = await designedTicket();
+    const t = await designedTicket({ withReconcile: false });
     resetProvision(t.db, t.ticketId);
     await driveUntil(t, atStep("checks:dispatch")); // provision reruns and succeeds again
     resetProvisionIfManifestTouched(t.db, t.ticketId, ["Gemfile.lock"]);
@@ -192,8 +197,17 @@ test(
       "design:dispatch",
       "design:review",
     ]);
+  },
+  STEP_TEST_TIMEOUT_MS,
+);
 
-    // And design:extract's rule leaves the track alone (it was set again by a rerun of size).
+test(
+  "design:extract's rule leaves the track alone, after a rerun of design:size set it again",
+  async () => {
+    // No reconcile unit: design:size runs again here, and it refuses to read one.
+    const t = await designedTicket({ withReconcile: false });
+    invalidateSteps(t.db, t.ticketId, ["design:size"], { cause: "inputs", changed: ["workUnits"] });
+    expect(getTicket(t.db, t.ticketId)?.track).toBeNull();
     await driveUntil(t, atStep("checks:dispatch"));
     const rerunTrack = getTicket(t.db, t.ticketId)?.track;
     expect(rerunTrack).not.toBeNull();

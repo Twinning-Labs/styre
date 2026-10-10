@@ -201,7 +201,8 @@ test(
       stepKey: "provision",
     });
     const outcome = await advanceOneStep(db, ticketId, registry);
-    expect(outcome).toEqual({ kind: "retry", stepKey: "design:dispatch" });
+    // a malformed result is a Styre defect: escalated on attempt 1, never retried
+    expect(outcome).toEqual({ kind: "escalated", stepKey: "design:dispatch" });
     const step = getByKey(db, ticketId, "design:dispatch");
     expect(JSON.parse(step?.error_json ?? "{}").message).toBe(
       "design:dispatch succeeded without a plan digest",

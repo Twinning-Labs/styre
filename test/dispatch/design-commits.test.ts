@@ -411,7 +411,7 @@ test(
 );
 
 test(
-  "a design:extract result of the wrong shape is refused by its commit: the step fails, naming the step, and writes nothing",
+  "a design:extract result of the wrong shape is refused by its commit: the step escalates at once, naming the step, and writes nothing",
   async () => {
     const t = makeDesignTicket();
     // the pre-ENG-477 result shape: a count, no rows
@@ -422,7 +422,12 @@ test(
       () => ({ units: 2 }),
     );
     await driveUntil({ ...t, registry }, atStep("design:extract"));
-    expect((await step(t, registry)).kind).toBe("retry");
+    // a malformed result is a Styre defect: escalated on attempt 1, never retried
+    expect((await step(t, registry)).kind).toBe("escalated");
+    expect(getByKey(t.db, t.ticketId, "design:extract")).toMatchObject({
+      status: "failed",
+      attempt: 1,
+    });
     expect(errorOf(t, "design:extract")).toStartWith(
       "design:extract: the step's result is malformed:",
     );

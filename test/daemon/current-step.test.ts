@@ -121,3 +121,18 @@ test(
   },
   STEP_TEST_TIMEOUT_MS,
 );
+
+test(
+  "a step cannot start while another holds the slot, and the refusal leaves that step's slot alone",
+  async () => {
+    const t = ticketWith();
+    setCurrentStep("design:review"); // a step in flight elsewhere in this process
+    await expect(step(t)).rejects.toThrow(
+      "provision cannot start while design:review is in flight",
+    );
+    expect(currentStepKey()).toBe("design:review");
+    expect(t.slots.seen).toEqual([]); // the provision handler never ran
+    expect(getByKey(t.db, t.ticketId, "provision")).toBeNull(); // nor did the journal start it
+  },
+  STEP_TEST_TIMEOUT_MS,
+);

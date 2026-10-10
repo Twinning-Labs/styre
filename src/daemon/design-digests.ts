@@ -9,6 +9,7 @@ import {
 import { getByKey, recordManifest } from "../db/repos/workflow-step.ts";
 import { linearFromFrontmatter } from "../dispatch/plan-frontmatter.ts";
 import { planFilesAt } from "../dispatch/worktree.ts";
+import { MalformedStepResultError } from "../engine/step-journal.ts";
 import { FINGERPRINT_SCHEME, digestValue } from "./canonical.ts";
 import {
   type InputContext,
@@ -128,7 +129,9 @@ export function recordStepManifest(
   outputDigest: string | null,
 ): void {
   if (row.fileOutput && outputDigest === null)
-    throw new Error(`${row.stepKey} succeeded without the digest of its file output`);
+    throw new MalformedStepResultError(
+      `${row.stepKey} succeeded without the digest of its file output`,
+    );
   const manifest = currentManifest(db, ticketId, row);
   recordManifest(db, stepId, {
     manifest,
@@ -140,6 +143,7 @@ export function recordStepManifest(
 
 export function planDigestFromResult(result: unknown): string {
   const d = (result as { planDigest?: unknown } | null)?.planDigest;
-  if (typeof d !== "string") throw new Error("design:dispatch succeeded without a plan digest");
+  if (typeof d !== "string")
+    throw new MalformedStepResultError("design:dispatch succeeded without a plan digest");
   return d;
 }

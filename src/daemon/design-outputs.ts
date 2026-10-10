@@ -4,6 +4,7 @@ import { insertFinding } from "../db/repos/review-finding.ts";
 import { clearTicketTrack, setNeedsDocs, setTicketTrack } from "../db/repos/ticket.ts";
 import { deleteByTicket as deleteUnits, insertWorkUnit } from "../db/repos/work-unit.ts";
 import { type ExtractedWorkUnit, ExtractedWorkUnitSchema } from "../dispatch/extract-schema.ts";
+import { MalformedStepResultError } from "../engine/step-journal.ts";
 import type { DesignStepKey } from "./design-graph.ts";
 
 /** What an invalidation clears, per step (spec §6.1). */
@@ -30,11 +31,13 @@ export const CLEAR_OUTPUTS: Record<DesignStepKey, (db: Database, ticketId: numbe
 
 /** A commit receives its handler's result typed `unknown`; a result of the wrong shape is a defect
  *  in the handler, refused loudly with the step named, so the success transaction rolls back and
- *  nothing is written. */
+ *  nothing is written, and the failure policy escalates it at once (an invariant violation). */
 function parseResult<T>(stepKey: string, schema: z.ZodType<T>, result: unknown): T {
   const parsed = schema.safeParse(result);
   if (!parsed.success) {
-    throw new Error(`${stepKey}: the step's result is malformed: ${parsed.error.message}`);
+    throw new MalformedStepResultError(
+      `${stepKey}: the step's result is malformed: ${parsed.error.message}`,
+    );
   }
   return parsed.data;
 }

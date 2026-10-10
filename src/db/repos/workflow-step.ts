@@ -35,9 +35,16 @@ const COLS =
   "input_json, result_json, error_json, pid, await_signal_id, started_at, ended_at, created_at, updated_at, " +
   "input_manifest, input_fingerprint, output_digest, fingerprint_scheme, generation";
 
+/** `invariant: true` marks an invariant violation (engine/step-journal.ts `InvariantViolation`),
+ *  which the failure policy escalates at once; it is read from the error, since a repository does
+ *  not import the engine. */
 function serializeError(error: unknown): string {
   if (error instanceof Error) {
-    return JSON.stringify({ name: error.name, message: error.message });
+    return JSON.stringify(
+      (error as { invariant?: unknown }).invariant === true
+        ? { name: error.name, message: error.message, invariant: true }
+        : { name: error.name, message: error.message },
+    );
   }
   return JSON.stringify({ name: "Error", message: String(error) });
 }

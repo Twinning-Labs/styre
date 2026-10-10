@@ -4,9 +4,14 @@ import { join } from "node:path";
 
 // spec §3 (E8): design handlers read upstream rows only through the named accessors in
 // src/daemon/design-reads.ts, which check the current step at run time. This guard keeps the
-// design handler blocks in handlers.ts from calling the upstream repositories directly.
+// design handler blocks in handlers.ts from calling the upstream repositories directly, or naming
+// their tables in raw SQL. It reads only the block text: a helper called from a block, a namespace
+// import or a query built elsewhere is not seen; the run time accessor check and the recording
+// proxy test cover those reads.
 const SOURCE = readFileSync(join(import.meta.dir, "../../src/dispatch/handlers.ts"), "utf8");
 const GUARDED = ["work-unit", "review-finding", "review-round", "ticket"];
+/** Upstream tables a design block must not query as raw SQL either (the accessor reads them). */
+const GUARDED_TABLES = ["work_unit", "review_finding"];
 
 function importedNames(source: string): string[] {
   const names: string[] = [];
@@ -54,6 +59,10 @@ test("design handlers do not call the upstream repositories directly", () => {
   for (const [key, text] of blocks) {
     for (const name of names) {
       if (new RegExp(`\\b${name}\\s*\\(`).test(text)) offences.push(`${key} calls ${name}`);
+    }
+    // \b on both sides: `work_unit_seq` (a sidecar field design:review reads) is not the table.
+    for (const table of GUARDED_TABLES) {
+      if (new RegExp(`\\b${table}\\b`).test(text)) offences.push(`${key} names table ${table}`);
     }
   }
   expect(offences).toEqual([]);
