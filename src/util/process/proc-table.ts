@@ -35,19 +35,35 @@ export function tokenValue(t: string): number {
   return Number.parseFloat(t);
 }
 let clkTck: number | null = null;
+/**
+ * "Now" on the clock process start times are read on, never behind a process that already started:
+ * the leftover check ends its window here, and a process that started in the same tick must be in
+ * it.
+ */
 export function nowToken(): string {
   if (process.platform === "linux") {
     if (clkTck === null) {
       const r = Bun.spawnSync(["getconf", "CLK_TCK"], { timeout: 5_000 }); // allowed: proc-table spawns
       clkTck = r.success ? Number(r.stdout.toString().trim()) : 100;
     }
-    const uptime = Number(readFileSync("/proc/uptime", "utf8").split(" ")[0]);
-    return String(Math.floor(uptime * clkTck));
+    return String(uptimeTicks(readFileSync("/proc/uptime", "utf8"), clkTck));
   }
-  const ms = Date.now();
   // The ps fallback reports whole seconds, so "now" must be floored the same way to stay on its clock.
-  if (loadSysctl() === null) return `${Math.floor(ms / 1000)}.000000`;
-  return `${Math.floor(ms / 1000)}.${String((ms % 1000) * 1000).padStart(6, "0")}`;
+  if (loadSysctl() === null) return `${Math.floor(Date.now() / 1000)}.000000`;
+  // Start times are in microseconds: Date.now() is whole milliseconds, up to 999 µs behind them.
+  const { sec, usec } = timeOfDay();
+  return `${sec}.${String(usec).padStart(6, "0")}`;
+}
+
+/**
+ * /proc/uptime (seconds with two decimals) as whole clock ticks, in integers. Through floating point
+ * `1024.09 * 100` is 102408.99999999999, whose floor is a tick behind a process that started in
+ * that tick.
+ */
+export function uptimeTicks(text: string, tck: number): number {
+  const m = /^(\d+)\.(\d\d)\s/.exec(text);
+  if (!m) throw new Error(`unexpected /proc/uptime: ${JSON.stringify(text)}`);
+  return Math.floor(((Number(m[1]) * 100 + Number(m[2])) * tck) / 100);
 }
 
 // ---- Linux: /proc, no process launched ----
@@ -105,6 +121,7 @@ let sysctlFn:
   | ((mib: Int32Array, n: number, buf: Uint8Array | null, len: BigUint64Array) => number)
   | null
   | undefined;
+let timeOfDayFn: ((tv: Uint8Array) => number) | undefined;
 function loadSysctl() {
   if (forcePsFallback) return null;
   if (sysctlFn !== undefined) return sysctlFn;
@@ -115,13 +132,23 @@ function loadSysctl() {
         args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.u64],
         returns: FFIType.i32,
       },
+      gettimeofday: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
     });
     sysctlFn = (mib, n, buf, len) =>
       lib.symbols.sysctl(ptr(mib), n, buf ? ptr(buf) : null, ptr(len), null, 0n) as number;
+    timeOfDayFn = (tv) => lib.symbols.gettimeofday(ptr(tv), null) as number;
   } catch {
     sysctlFn = null;
   }
   return sysctlFn;
+}
+/** The wall clock in microseconds, the clock and unit of `p_starttime`. Only after `loadSysctl()`
+ *  succeeded. struct timeval is a 64-bit tv_sec then a 32-bit tv_usec on every macOS target. */
+function timeOfDay(): { sec: bigint; usec: number } {
+  const tv = new Uint8Array(16);
+  if (timeOfDayFn === undefined || timeOfDayFn(tv) !== 0) throw new Error("gettimeofday failed");
+  const v = new DataView(tv.buffer);
+  return { sec: v.getBigInt64(0, true), usec: v.getInt32(8, true) };
 }
 function decode(v: DataView, at: number): ProcInfo {
   const sec = v.getBigInt64(at + OFF_START_SEC, true);
