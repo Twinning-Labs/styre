@@ -1,14 +1,19 @@
 import { isStopping } from "../util/process/door.ts";
 import { EXIT, StyreError } from "./errors.ts";
 
-/** The one place operator text is shaped: `styre <cmd>: <headline>`, indented detail, recovery. */
+/** The one place operator text is shaped: `styre <cmd>: <headline>`, indented detail, recovery.
+ *  A headline that already names its subsystem (`migrate: ...`, from src/db/migrate.ts) keeps that
+ *  name under another command (`styre run: migrate: ...`) and is not repeated under its own
+ *  (`styre migrate: ...`, never `styre migrate: migrate: ...`). */
 export function formatMessage(
   cmd: string,
   headline: string,
   detail?: string,
   recovery?: string,
 ): string {
-  const lines = [`styre ${cmd}: ${headline}`];
+  const own = `${cmd}: `;
+  const said = headline.startsWith(own) ? headline.slice(own.length) : headline;
+  const lines = [`styre ${cmd}: ${said}`];
   if (detail) for (const l of detail.split("\n")) lines.push(`  ${l}`);
   if (recovery) lines.push(recovery);
   return lines.join("\n");

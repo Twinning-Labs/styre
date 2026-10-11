@@ -317,8 +317,8 @@ lines. Refusals (exit `65`; the database is left as it is):
 
 Each says to start that run over with `styre run <ticket> --fresh`, and, for a database given to
 `styre migrate` that is no run's checkpoint, to remove it so `styre migrate` creates a new one. The
-command's error prefix comes first, so `styre migrate` prints `styre migrate: migrate: …` and
-`styre run` prints `styre run: migrate: …`. A migration that fails leaves the database at the last
+command's error prefix comes first and is said once: `styre migrate` prints `styre migrate: …`,
+and `styre run` (fresh, on a reused `--db`, and `--resume`) prints `styre run: migrate: …`. A migration that fails leaves the database at the last
 version that completed (exit `70`); the backup is kept. The structural comparison runs inside the
 last migration's transaction, so a difference rolls that migration back too. `styre ls`,
 `styre clean`, `--fresh` and `--resume --inspect` read a checkpoint without upgrading it;
