@@ -204,10 +204,13 @@ export interface RegistryDeps {
   /** RED-first check executor override (tests inject a scripted runner; production uses runCommand).
    *  Shared by authoring, baseline replay, delivered binding, and post-implement reruns. */
   runCheckCommand?: import("../util/run-command.ts").CmdRunner;
-  /** A fresh run records, in worktree mode, the commit the ticket branch is created from, right
-   *  after provision first creates it (spec §4.2). Resume never sets it: there `worktree add -B`
-   *  recreates the branch (ENG-488), which is not its first creation. */
-  recordStartingCommit?: boolean;
+  /** The run's own ticket, once it exists, when this fresh run created it; null otherwise. In
+   *  worktree mode provision records the commit the ticket branch is created from, right after it
+   *  first creates it, for that ticket only (spec §4.2 and its ruling: never for another ticket the
+   *  loop drives on a reused --db, and never for a ticket the database already held, whose branch
+   *  this run did not first create). Resume never sets it: there `worktree add -B` recreates the
+   *  branch (ENG-488), which is not its first creation. */
+  startingCommitTicketId?: () => number | null;
 }
 
 const DESIGN_TIMEOUT_MS = 60 * 60 * 1000;
@@ -1376,7 +1379,7 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   registry.register("provision", async (ctx: HandlerContext) => {
     const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
     ensureWorktree(repoPath, branch, worktreePath);
-    if (deps.recordStartingCommit === true && !deps.inPlace) {
+    if (!deps.inPlace && deps.startingCommitTicketId?.() === ctx.ticket.id) {
       recordStartingCommit(ctx.db, ctx.ticket.id, worktreeHead(worktreePath));
     }
     for (const c of deps.profile.components) {

@@ -245,6 +245,15 @@ therefore see a different profile on resume than on the fresh run: a defect toda
 - **In-place mode:** `HEAD` of the checkout at run start.
 - **Worktree mode:** the commit the ticket branch is created from. It is read right after the branch
   is first created, and recorded once.
+
+  (Ruling, 2026-10-11, the final review's I1) "First created" means by the run that created the
+  ticket. `provision` records the starting commit only for the run's own ticket, and only when that
+  run inserted the ticket into the database (`runTicket`'s `reused` is false). On a reused `--db`,
+  another ticket whose `provision` runs in this run records none, and so does the run's own ticket
+  when the database already held it (one an older Styre started, or one whose worktree run stopped
+  before its first `provision`): this run's `provision` would read the repository's current HEAD,
+  not the commit that ticket's branch was created from. Such a ticket has no starting commit. A
+  resume never records one, for any ticket.
 - It is never rewritten: not on resume, not after `--accept-head` (umbrella §4.1).
 - It is not a fingerprinted input of any step in this ticket. It is the input ENG-478 needs. The umbrella's design-rules version is not needed: under the revised
   D9, an old run is adopted (§7.6) rather than finished under old rules.

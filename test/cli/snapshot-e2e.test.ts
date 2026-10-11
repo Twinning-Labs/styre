@@ -27,6 +27,7 @@ import {
   markRunning,
   markSucceeded,
 } from "../../src/db/repos/workflow-step.ts";
+import { branchPrefixFor } from "../../src/integrations/ticket-source.ts";
 import { DesignHarness, HARNESS_TEST_TIMEOUT_MS } from "../helpers/design-harness.ts";
 import { unitsOf } from "../helpers/design-script.ts";
 import { git } from "../helpers/design-steps.ts";
@@ -120,6 +121,68 @@ test(
     // move (ENG-488, hand off note 10), which is when an operator passes it
     expect(await h.resume({ acceptHead: true })).toBe(75);
     expect(h.read((db, id) => startingCommit(db, id))).toBe(main);
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+/** A reused database holding a ticket of the harness's OWN project, which the loop drives (the
+ *  project is not paused): its `provision` runs in the run under test, with that run's registry.
+ *  The ticket row is written through the ticket repository and nothing else (no step rows): it is
+ *  what an older Styre, or a worktree run that stopped before its first `provision`, leaves. */
+function seedHarnessTicket(dbFile: string, h: DesignHarness, ident: string): number {
+  migrate(dbFile);
+  const db = openDb(dbFile);
+  try {
+    const projectId = insertProject(db, {
+      slug: h.slug,
+      targetRepo: h.repoDir,
+      defaultBranch: "main",
+    });
+    return insertTicket(db, {
+      projectId,
+      ident,
+      title: "Harness ticket",
+      description: "Harness body",
+      typeLabel: "Feature",
+      branchPrefix: branchPrefixFor("Feature"),
+      externalId: `uuid-${ident}`,
+    });
+  } finally {
+    db.close();
+  }
+}
+
+test(
+  "worktree mode, a reused --db: another ticket's provision runs and records no starting commit; the run's own does (spec §4 ruling)",
+  async () => {
+    const h = make("worktree");
+    const main = git(h.repoDir, ["rev-parse", "main"]);
+    const dbFile = join(makeTempDir("styre-reuse-"), "reuse.db");
+    const other = seedHarnessTicket(dbFile, h, "OTHER-1");
+    expect(await h.fresh({ db: dbFile })).toBe(75);
+    h.readAt(dbFile, (db, id) => {
+      // the other ticket was driven: its provision ran in this run, with this run's registry
+      expect(getByKey(db, other, "provision")?.status).toBe("succeeded");
+      expect(startingCommit(db, other)).toBeNull();
+      // this run inserted its own ticket, so its first provision records the branch's start
+      expect(startingCommit(db, id)).toBe(main);
+    });
+  },
+  HARNESS_TEST_TIMEOUT_MS,
+);
+
+test(
+  "worktree mode, a reused --db that already holds the run's own ticket with no starting commit: its provision records none (spec §4.2, recorded only when the branch is first created)",
+  async () => {
+    const h = make("worktree");
+    const dbFile = join(makeTempDir("styre-reuse-"), "reuse.db");
+    const own = seedHarnessTicket(dbFile, h, h.ident);
+    expect(await h.fresh({ db: dbFile })).toBe(75);
+    h.readAt(dbFile, (db, id) => {
+      expect(id).toBe(own); // the run drove the ticket the database already held
+      expect(getByKey(db, id, "provision")?.status).toBe("succeeded");
+      expect(startingCommit(db, id)).toBeNull();
+    });
   },
   HARNESS_TEST_TIMEOUT_MS,
 );
@@ -261,7 +324,10 @@ test(
     expect(await h.fresh({ db: dbFile })).toBe(75);
     h.readAt(dbFile, (db, id) => {
       expect(startingCommit(db, id)).toBe(head);
-      // ruling 2026-10-10: the starting commit stays this run's own ticket's
+      // ruling 2026-10-10: the starting commit stays this run's own ticket's. This proves only
+      // that the run start (in place) writes none for OTHER-1: its project is paused, so its
+      // provision never runs here and this line cannot catch provision recording for another
+      // ticket. The test "worktree mode, a reused --db: another ticket's provision runs ..." does.
       expect(startingCommit(db, other.active)).toBeNull();
       // and every other active ticket gets the same snapshot, with the same note
       const notesOf = (t: number) =>
@@ -388,7 +454,10 @@ test(
       // adopted once (by the fresh run); the resume's pass found nothing left to adopt
       expect(active.events.filter((e) => e === "note:adopted")).toHaveLength(1);
       expect(getByKey(db, other.active, "provision")?.input_manifest).not.toBeNull();
-      // no starting commit and no toolchain advisory for another ticket
+      // no starting commit and no toolchain advisory for another ticket. OTHER-1's project is
+      // paused, so its provision never runs: this proves the resume's preparation writes none, not
+      // that provision would refuse to (see "worktree mode, a reused --db: another ticket's
+      // provision runs ...", where it does run).
       expect(getInput(db, other.active, "run.startingCommit")).toBeNull();
       expect(active.toolchain).toBe(0);
       // the resume was ENG-1's own, never the lowest id ticket's (spec §4, ruling 2026-10-10)

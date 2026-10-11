@@ -649,10 +649,16 @@ never reads the tracker, so start over with `--fresh` to pick up an edited ticke
 lists of components narrowed away, and `complexityGrading` are rewritten from what the handlers
 will receive now on each resume and on a reused `--db`. Model choices and `onPlanDefect` are not
 inputs. The same table also holds the commit the run started from (`run.startingCommit`; not an
-input of any step): in place, the checkout's HEAD at run start (an in place run whose HEAD cannot be
-read refuses before any step, exit `78`); in worktree mode, the branch head right after a fresh
-run's `provision` first creates it (a worktree run that stopped before its first `provision` has
-none). It is recorded once and never rewritten, not on resume and not after `--accept-head`.
+input of any step). It is recorded once and never rewritten, not on resume and not after
+`--accept-head`, and only ever for the run's own ticket, never for another ticket the loop drives on
+a reused `--db`:
+- in place, the checkout's HEAD at run start (an in place run whose HEAD cannot be read refuses
+  before any step, exit `78`); on a reused `--db`, the run's own ticket keeps the value it already
+  has, and one that has none gets this run's HEAD;
+- in worktree mode, the branch head right after the ticket's first `provision`, recorded by the run
+  that created the ticket. A ticket the database already held when the run started (one an older
+  Styre started, or one whose worktree run stopped before its first `provision`) has none, and a
+  later run on a reused `--db` does not add one.
 
 The plan is read from git at the branch head, never from the worktree, so it must be committed.
 When `design:dispatch` finds no plan for the ticket committed there (for example because
@@ -670,8 +676,9 @@ violation as the reason (exit `75`).
 
 A run on a reused `--db`, and a resume, prepare every active ticket in that database the same way
 (the snapshot and, for steps an older Styre finished, the adopt pass below), not only their own:
-the loop drives every ready ticket it finds. Waiting tickets are left alone, and the starting commit
-and the toolchain advisory stay the run's own ticket's.
+the loop drives every ready ticket it finds. Waiting tickets are left alone. The toolchain advisory
+stays the run's own ticket's, and so does the starting commit: another ticket's `provision` records
+none, even when it runs in this run (see above).
 
 A run whose design steps were fingerprinted by a newer Styre (a newer fingerprint scheme) is
 refused before anything changes (exit `65`): on resume (`this run was recorded by a newer Styre;

@@ -465,6 +465,10 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
       // spec §4.2: in place, the starting commit is HEAD of the checkout at run start (read above).
       const runStartingCommit = inPlace ? inPlaceStartingCommit : null;
       const runner = deps?.runner ?? resolveAgentRunner(agentConfig);
+      // spec §4.2: the run's own ticket, set by onTicket only when this run inserts it. On a
+      // reused --db another ticket the loop drives, or an own ticket the database already held,
+      // gets no starting commit from this run.
+      let ownNewTicketId: number | null = null;
       const registry = buildDispatchRegistry({
         runner,
         agentConfig,
@@ -473,7 +477,7 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
         nonPrimaryComponents: loaded.nonPrimary,
         worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-")),
         inPlace,
-        recordStartingCommit: true,
+        startingCommitTicketId: () => ownNewTicketId,
       });
 
       a.runStarted({
@@ -500,7 +504,10 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
         // ENG-485 section 7.5: where the ticket branch stands when each step starts.
         readHead: () => branchHeadSha(profile.targetRepo, runBranch),
         // The handler can record an interruption from the moment the ticket row exists.
-        onTicket: (ticketId) => stop.setRun({ db, dbPath, ticketId, ident }),
+        onTicket: (ticketId, reused) => {
+          if (!reused) ownNewTicketId = ticketId;
+          stop.setRun({ db, dbPath, ticketId, ident });
+        },
         inputs: {
           profile,
           unusableComponents: toolchain.unusable,

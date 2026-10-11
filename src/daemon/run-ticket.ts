@@ -250,8 +250,10 @@ export async function runTicket(deps: {
   /** The ticket branch's HEAD, for the step in flight (ENG-485 section 7.5). */
   readHead?: () => string | null;
   /** Called with the ticket row's id as soon as it exists, before any step runs (ENG-485: the
-   *  stop handler needs it to record an interruption). */
-  onTicket?: (ticketId: number) => void;
+   *  stop handler needs it to record an interruption). `reused` is true when the database already
+   *  held the ticket, so this run did not create it (spec §4.2: the starting commit is recorded
+   *  only when the branch is first created). */
+  onTicket?: (ticketId: number, reused: boolean) => void;
   /** The design inputs exactly as the handlers receive them (spec §4); captured before any step. */
   inputs: RunInputs;
 }): Promise<RunResult & { ticketId: number; summary: string }> {
@@ -271,7 +273,7 @@ export async function runTicket(deps: {
     branchPrefix: branchPrefixFor(ingested.typeLabel),
     externalId: ingested.externalId,
   });
-  deps.onTicket?.(ticketId);
+  deps.onTicket?.(ticketId, reused);
   // A `styre run` on a reused --db drives an existing ticket again: the loop guard counts from
   // here, as it does from a resume (spec §6.6). A new database has no such ticket.
   if (reused) noteReusedDatabase(deps.db, ticketId);
