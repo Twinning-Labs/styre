@@ -67,7 +67,9 @@ test(
 );
 
 /** What a newer Styre would leave: design:dispatch's manifest stamped with a later scheme.
- *  Written through the repository on this test's own database (test setup). */
+ *  Written through the repository on this test's own database (test setup). A stated exception to
+ *  "no faked state", the same kind as the older scheme restamps: only a newer release writes a newer
+ *  scheme, which an in process test cannot run. */
 function stampNewerScheme(path: string, ticketId: number): void {
   const db = openDb(path);
   try {

@@ -7,7 +7,7 @@ import { type StepDescriptor, nextStepKey } from "../../src/daemon/resolver.ts";
 import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import { requiredPlanFindings } from "../../src/db/repos/review-round.ts";
 import { listStepHistory } from "../../src/db/repos/step-history.ts";
-import { getTicket, setTicketStage } from "../../src/db/repos/ticket.ts";
+import { getTicket } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit, listByTicket as listUnits } from "../../src/db/repos/work-unit.ts";
 import { getByKey, recordManifest } from "../../src/db/repos/workflow-step.ts";
 import { runStep } from "../../src/engine/step-journal.ts";
@@ -140,11 +140,16 @@ test(
 test(
   "the walk runs only in design: past design an edit is not compared (E6)",
   async () => {
-    const t = makeDesignTicket();
-    await driveUntil(t, atStep("checks:dispatch"));
-    setTicketStage(t.db, t.ticketId, "implement");
+    // units with nothing to verify: the checks steps need no agent, so the real steps reach
+    // implement
+    const t = makeDesignTicket({ script: { units: () => unitsOf(2, { behavioral: false }) } });
+    await driveUntil(t, atStep("completeness:wu1"));
+    expect(getTicket(t.db, t.ticketId)?.stage).toBe("implement");
     recapture(t, { ...t.profile, promptVars: { stack: "other" } });
-    expect(nextStepKey(t.db, t.ticketId).kind).not.toBe("invalidate");
+    expect(nextStepKey(t.db, t.ticketId)).toMatchObject({
+      kind: "step",
+      stepKey: "completeness:wu1",
+    });
   },
   STEP_TEST_TIMEOUT_MS,
 );
@@ -183,9 +188,31 @@ test(
       stepKeys: ["design:dispatch"],
       reason: { cause: "inputs" },
     });
-    // past design the walk does not run: the change waits for the next design visit
-    setTicketStage(t.db, t.ticketId, "implement");
-    expect(nextStepKey(t.db, t.ticketId).kind).not.toBe("invalidate");
+  },
+  STEP_TEST_TIMEOUT_MS,
+);
+
+test(
+  "past design the walk does not run: a manifest from an older scheme waits for the next design visit",
+  async () => {
+    // units with nothing to verify: the checks steps need no agent, so the real steps reach
+    // implement
+    const t = makeDesignTicket({ script: { units: () => unitsOf(2, { behavioral: false }) } });
+    await driveUntil(t, atStep("completeness:wu1"));
+    expect(getTicket(t.db, t.ticketId)?.stage).toBe("implement");
+    const step = getByKey(t.db, t.ticketId, "design:dispatch");
+    if (!step?.input_manifest) throw new Error("design:dispatch recorded no manifest");
+    // the same stated exception as the test above: only an older release writes an older scheme
+    recordManifest(t.db, step.id, {
+      manifest: JSON.parse(step.input_manifest) as Record<string, string>,
+      fingerprint: step.input_fingerprint ?? "",
+      outputDigest: step.output_digest,
+      scheme: FINGERPRINT_SCHEME - 1,
+    });
+    expect(nextStepKey(t.db, t.ticketId)).toMatchObject({
+      kind: "step",
+      stepKey: "completeness:wu1",
+    });
   },
   STEP_TEST_TIMEOUT_MS,
 );
