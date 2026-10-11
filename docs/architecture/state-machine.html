@@ -168,7 +168,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow);
   font-size: 12.5px; color: var(--muted);
 }
-.legend .note { font-weight: 500; color: var(--muted); margin-left: 6px; }
+.legend .note { margin: 0; font-weight: 600; color: var(--text); }
 .legend summary { cursor: pointer; padding: 8px 12px; font-weight: 650; color: var(--text); list-style: none; }
 .legend summary::-webkit-details-marker { display: none; }
 .legend summary::before { content: "+"; display: inline-block; width: 1em; color: var(--faint); }
@@ -177,8 +177,8 @@ button:disabled { opacity: 0.4; cursor: default; }
 .legend .lg-row { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
 .legend .lg-title { font-weight: 650; color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.85em; min-width: 6.5em; }
 .legend .fam { display: inline-flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; padding: 3px 10px; border-radius: 999px; background: var(--surface-2); }
-.legend .item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
-.legend .shape-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; padding: 2px 6px; }
+.legend .item { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.legend .shape-item { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 2px 6px; }
 .legend svg { flex: none; overflow: visible; }
 .zoom {
   position: absolute; right: 10px; top: 10px; display: flex; flex-direction: column;
@@ -374,8 +374,9 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
       <title id="diagram-title">Ticket lifecycle state diagram</title>
     </svg>
     <details class="legend" id="legend">
-      <summary>Legend<span class="note" id="legend-note" hidden title="Bold edges leave the selected state; light edges arrive at it.">bold: leaves, light: arrives</span></summary>
+      <summary>Legend</summary>
       <div class="lg-body">
+        <p class="note" id="legend-note" hidden>Bold: the selected state's own transitions. Light: those that arrive at it, and those it shares with a group of states.</p>
         <div class="lg-row" id="legend-edges"><span class="lg-title">Transitions</span></div>
         <div class="lg-row" id="legend-shapes"><span class="lg-title">Shapes</span></div>
       </div>
@@ -6000,6 +6001,9 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   // ------------------------------------------------------------------ camera: pan, zoom, glide
   var vb = { x: 0, y: 0, w: D.canvas[0], h: D.canvas[1] };
   var anim = null;
+  var glideTarget = null; // where a moving glide will come to rest
+  /** The view the camera will be at once any glide in progress comes to rest. */
+  function restView() { return anim && glideTarget ? glideTarget : vb; }
   function cw() { return canvasEl.clientWidth || 1; }
   function ch() { return canvasEl.clientHeight || 1; }
   function aspect() { return ch() / cw(); }
@@ -6032,7 +6036,9 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   function glide(target, instant) {
     if (anim) cancelAnimationFrame(anim.raf);
     anim = null;
+    glideTarget = null;
     if (instant || calm()) { vb = target; applyVB(); return; }
+    glideTarget = target;
     var from = { x: vb.x, y: vb.y, w: vb.w, h: vb.h }, start = null, dur = 560;
     var me = { raf: 0 };
     anim = me;
@@ -6042,15 +6048,22 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
       var k = Math.min(1, (now - start) / dur), e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
       vb = { x: from.x + (target.x - from.x) * e, y: from.y + (target.y - from.y) * e, w: from.w + (target.w - from.w) * e, h: from.h + (target.h - from.h) * e };
       applyVB();
-      if (k < 1) me.raf = requestAnimationFrame(step); else anim = null;
+      if (k < 1) me.raf = requestAnimationFrame(step); else { anim = null; glideTarget = null; }
     }
     me.raf = requestAnimationFrame(step);
   }
   var untouched = true; // nothing selected, panned or zoomed yet: a resize shows the first view again
-  var framed = null; // the box the view last framed (null: the whole drawing), framed again on resize
-  var framedScale = 1.15;
-  function fitAll(instant) { framed = null; glide(viewFor({ x: 0, y: 0, w: D.canvas[0], h: D.canvas[1] }, 10, 9), instant); }
-  function frame(box, instant, maxScale) { framed = box; framedScale = maxScale || 1.15; glide(viewFor(box, 30, framedScale), instant); }
+  // The camera's last deliberate move, made again when the free area changes (a resize, the legend
+  // opened or closed): null (the whole drawing), a box it framed, or a box it kept in view (a
+  // scenario step). Every camera move updates it.
+  var remembered = null;
+  function fitAll(instant) { remembered = null; glide(viewFor({ x: 0, y: 0, w: D.canvas[0], h: D.canvas[1] }, 10, 9), instant); }
+  function frame(box, instant, maxScale) { remembered = { kind: "frame", box: box, scale: maxScale || 1.15 }; glide(viewFor(box, 30, maxScale || 1.15), instant); }
+  function reframe(instant) {
+    if (!remembered) fitAll(instant);
+    else if (remembered.kind === "keep") keepInView(remembered.box, instant);
+    else frame(remembered.box, instant, remembered.scale);
+  }
   /** Frame the first box that shows at a readable size (at least 0.32 screen pixels per unit); on a
    *  small screen a whole path is too small to read, so the view frames its current part. */
   function frameReadable(boxes, instant) {
@@ -6060,14 +6073,17 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
     }
   }
   /** Move the view only as far as needed to show `box` inside the free area; frame it when it
-   *  cannot fit. */
+   *  cannot fit. It reasons about where the view will rest, not where a glide in progress happens
+   *  to be (a step that arrives mid glide otherwise sees its box "in view" and the glide then ends
+   *  at its old target), and it is remembered, so a resize or the legend keeps the same box. */
   function keepInView(box, instant) {
-    var s = scale(), f = freeArea(), m = 24;
-    var x0 = vb.x + (f.x + m) / s, x1 = vb.x + (f.x + f.w - m) / s, y0 = vb.y + (f.y + m) / s, y1 = vb.y + (f.y + f.h - m) / s;
-    if (box.w > x1 - x0 || box.h > y1 - y0) { frame(box, instant); return; }
+    var v = restView(), s = cw() / v.w, f = freeArea(), m = 24;
+    var x0 = v.x + (f.x + m) / s, x1 = v.x + (f.x + f.w - m) / s, y0 = v.y + (f.y + m) / s, y1 = v.y + (f.y + f.h - m) / s;
+    if (box.w > x1 - x0 || box.h > y1 - y0) { frame(box, instant); remembered = { kind: "keep", box: box }; return; }
+    remembered = { kind: "keep", box: box };
     var dx = box.x < x0 ? box.x - x0 : box.x + box.w > x1 ? box.x + box.w - x1 : 0;
     var dy = box.y < y0 ? box.y - y0 : box.y + box.h > y1 ? box.y + box.h - y1 : 0;
-    if (dx || dy) glide({ x: vb.x + dx, y: vb.y + dy, w: vb.w, h: vb.h }, instant);
+    if (dx || dy || v.h !== ch() / s) glide({ x: v.x + dx, y: v.y + dy, w: cw() / s, h: ch() / s }, instant);
   }
   /** The first view: the whole drawing, or on a small screen the start at a readable size (Fit
    *  still shows everything). */
@@ -6077,7 +6093,7 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   }
   function zoomAt(clientX, clientY, factor) {
     untouched = false;
-    if (anim) { cancelAnimationFrame(anim.raf); anim = null; }
+    if (anim) { cancelAnimationFrame(anim.raf); anim = null; glideTarget = null; }
     var r = svg.getBoundingClientRect();
     var fx = (clientX - r.left) / r.width, fy = (clientY - r.top) / r.height;
     var w = Math.min(MAX_W(), Math.max(MIN_W(), vb.w / factor)), hh = w * aspect();
@@ -6107,7 +6123,7 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
     pointers[e.pointerId] = { x: e.clientX, y: e.clientY };
     pointerDown = true;
     dragMoved = false;
-    if (anim) { cancelAnimationFrame(anim.raf); anim = null; }
+    if (anim) { cancelAnimationFrame(anim.raf); anim = null; glideTarget = null; }
     var ps = pointerList();
     gesture = { vb: { x: vb.x, y: vb.y, w: vb.w, h: vb.h }, pts: ps.map(function (p) { return { x: p.x, y: p.y }; }), id: e.pointerId };
   });
@@ -6162,7 +6178,7 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
       lastW = w; lastH = hh;
       if (first) fitLabels();
       if (first || untouched) { firstView(); return; }
-      if (framed) frame(framed, true, framedScale); else fitAll(true);
+      reframe(true);
     }).observe(canvasEl);
   }
 
@@ -6256,21 +6272,32 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   function renderState(animate) {
     var id = mode.id, chains = outsOf(id), ins = insOf(id, mode.reason);
     var outItems = [], seen = {}, lit = {};
+    // The state's own transitions (named by it, not shared through a group such as every step)
+    // are drawn strong and framed; shared ones are drawn light and their far ends lit but not
+    // framed. The Escalated node's reasons and its pause all count as its own.
+    var allOwn = id === ESC.id, own = {};
+    own[id] = true;
     lit[id] = 0;
     chains.forEach(function (chain) {
+      var mine = allOwn || !chain[0].group;
       chain.forEach(function (t, depth) {
-        if (!seen[t.id]) { seen[t.id] = true; outItems.push({ t: t, role: "out", depth: depth }); }
+        if (!seen[t.id]) { seen[t.id] = true; outItems.push({ t: t, role: mine ? "out" : "shared", depth: depth }); }
+        if (mine) own[drawn(t.to)] = true;
         var to = drawn(t.to);
         if (lit[to] === undefined || lit[to] > depth + 1) lit[to] = depth + 1;
       });
     });
     var inItems = ins.filter(function (t) { return !seen[t.id] && drawn(t.from) !== id; }).map(function (t) { return { t: t, role: "in" }; });
-    inItems.forEach(function (it) { var f = drawn(it.t.from); if (lit[f] === undefined) lit[f] = 1; });
+    inItems.forEach(function (it) {
+      var f = drawn(it.t.from);
+      if (lit[f] === undefined) lit[f] = 1;
+      if (allOwn || !it.t.group) own[f] = true;
+    });
     var outBundles = bundle(outItems), inBundles = bundle(inItems);
     var labelAll = outBundles.length + inBundles.length <= 18;
     var outPaths = outBundles.map(function (b) {
       var depth = Math.min.apply(null, b.items.map(function (it) { return it.depth; }));
-      var p = drawBundle(fxEdges, b, "out");
+      var p = drawBundle(fxEdges, b, b.role === "shared" ? "in" : "out");
       if (animate) animateEdge(p, depth * 150);
       return { b: b, p: p, depth: depth };
     });
@@ -6309,7 +6336,7 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
     counter.textContent = "";
     // The whole selection, always, inside the free area (operator ruling, 2026-10-11): on a small
     // screen the labels get small and the reader zooms in to read them.
-    if (animate) frame(unionBox(Object.keys(lit).map(nodeBox)));
+    if (animate) frame(unionBox(Object.keys(own).map(nodeBox)));
   }
 
   function renderScenario(animate) {
@@ -6633,7 +6660,7 @@ details.more > summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
   });
   // Opening or closing the legend changes the free area: frame the same selection again.
   document.getElementById("legend").addEventListener("toggle", function () {
-    if (framed) frame(framed, false, framedScale); else if (!untouched) fitAll(false);
+    if (remembered || !untouched) reframe(false);
   });
 
   var themeButtons = document.querySelectorAll("[data-theme-choice]");
