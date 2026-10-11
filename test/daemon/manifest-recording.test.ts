@@ -74,6 +74,12 @@ test(
   "provision run while the ticket is in implement records its manifest too (§5.2)",
   async () => {
     const t = makeDesignTicket();
+    // Stated exception (no faked state): the stage and the work unit are written directly. The
+    // real path to a provision run in implement is an implement dispatch whose committed diff
+    // touches a dependency manifest (resetProvisionIfManifestTouched re-arms provision), which needs
+    // the whole design stage, a component with a manifest and a scripted implement that edits it.
+    // This test is about the manifest provision records, not about how it was re-armed; the
+    // re-arming has its own tests.
     setTicketStage(t.db, t.ticketId, "implement");
     insertWorkUnit(t.db, { ticketId: t.ticketId, seq: 1, kind: "backend", status: "verifying" });
     const outcome = await advanceOneStep(t.db, t.ticketId, t.registry, { config: t.config });

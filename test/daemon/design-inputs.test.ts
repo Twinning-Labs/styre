@@ -17,9 +17,15 @@ import {
   listInputs,
   upsertInput,
 } from "../../src/db/repos/ticket-input.ts";
-import { insertTicket, setTicketStage } from "../../src/db/repos/ticket.ts";
+import { getTicket, insertTicket } from "../../src/db/repos/ticket.ts";
 import { TEST_PROFILE, makeTestDb } from "../helpers/db.ts";
-import { STEP_TEST_TIMEOUT_MS, makeDesignTicket } from "../helpers/design-steps.ts";
+import { unitsOf } from "../helpers/design-script.ts";
+import {
+  STEP_TEST_TIMEOUT_MS,
+  atStep,
+  driveUntil,
+  makeDesignTicket,
+} from "../helpers/design-steps.ts";
 
 const sources = (t: ReturnType<typeof makeDesignTicket>, promptVars = t.profile.promptVars) => ({
   profile: { ...t.profile, promptVars },
@@ -79,9 +85,13 @@ test(
 
 test(
   "past design, the note says the change takes effect the next time the run is in design (E6)",
-  () => {
-    const t = makeDesignTicket();
-    setTicketStage(t.db, t.ticketId, "implement");
+  async () => {
+    // units with nothing to verify: the checks steps need no agent, so the real steps reach
+    // implement
+    const t = makeDesignTicket({ script: { units: () => unitsOf(2, { behavioral: false }) } });
+    await driveUntil(t, atStep("completeness:wu1"));
+    expect(getTicket(t.db, t.ticketId)?.stage).toBe("implement");
+    expect(notes(t)).toEqual([]);
     captureSnapshot(t.db, t.ticketId, sources(t, { stack: "other" }));
     const payload = JSON.parse(notes(t)[0].payload_json ?? "{}");
     expect(payload.pastDesign).toBe(true);
