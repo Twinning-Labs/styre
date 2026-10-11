@@ -446,6 +446,15 @@ expires, so an invalidate caused by inputs would re-send an old redesign's findi
   (reason `carryover-dropped`) names the step and the changed inputs. A transcript written before
   ENG-477 has no manifest, so it is kept, as the adopt pass keeps a step finished then (§7.6).
   (Operator ruling, 2026-10-09: partial work belongs to the inputs it was made from, like feedback.)
+  (Ruling, 2026-10-11, the final review's M1) The carryover also belongs to its ticket. A checkpoint
+  written by a run on a reused `--db` holds other active tickets, and the resume's registry
+  dispatches for all of them, so the step key and generation alone cannot tell whose partial output
+  it is. `transcript.json` records the ticket, the step and the generation of the dispatch that
+  parked, found through that dispatch rather than through the run's own ticket, and the carryover
+  reaches only that ticket's dispatch of that step. For another ticket it is withheld without a note,
+  as for another step. A `transcript.json` that names no ticket was written before this ruling and
+  keeps the earlier behaviour (the run's own parked step); a missing step key still means "written
+  before ENG-477".
 - The checks steps' lookups (`latestChecksReauthorAcs`, `checksFeedback`) are unchanged (E9).
 
 ### 6.6 Livelock and the guard

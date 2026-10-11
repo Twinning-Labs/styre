@@ -6,10 +6,15 @@ import { StyreError } from "../../src/cli/errors.ts";
 import { renderError } from "../../src/cli/output.ts";
 import { parkDir } from "../../src/cli/park.ts";
 import { type RunArgs, runImpl } from "../../src/cli/run.ts";
+import { openDb } from "../../src/db/client.ts";
+import { migrate } from "../../src/db/migrate.ts";
 import { readCopyOf } from "../../src/db/read-copy.ts";
+import { insertProject } from "../../src/db/repos/project.ts";
+import { insertTicket } from "../../src/db/repos/ticket.ts";
 import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
 import type { NotifierPort } from "../../src/integrations/notifier.ts";
+import { branchPrefixFor } from "../../src/integrations/ticket-source.ts";
 import {
   type DesignScript,
   type ScriptCalls,
@@ -258,5 +263,34 @@ export class DesignHarness {
   cleanup(): void {
     for (const d of [this.stateRoot, this.configRoot, this.filesRoot, this.repoDir])
       rmSync(d, { recursive: true, force: true });
+  }
+}
+
+/** A database for `--db` holding a ticket of the harness's OWN project, which the loop drives (the
+ *  project is not paused): its steps run in the run under test, with that run's registry. The
+ *  ticket has the harness ticket's title and description, so the design inputs it shares with the
+ *  run's own ticket digest the same. Only the project and ticket rows are written, through their
+ *  repositories, and no step rows: it is what an older Styre, or a worktree run that stopped before
+ *  its first `provision`, leaves. Returns the ticket's id. */
+export function seedHarnessTicket(dbFile: string, h: DesignHarness, ident: string): number {
+  migrate(dbFile);
+  const db = openDb(dbFile);
+  try {
+    const projectId = insertProject(db, {
+      slug: h.slug,
+      targetRepo: h.repoDir,
+      defaultBranch: "main",
+    });
+    return insertTicket(db, {
+      projectId,
+      ident,
+      title: "Harness ticket",
+      description: "Harness body",
+      typeLabel: "Feature",
+      branchPrefix: branchPrefixFor("Feature"),
+      externalId: `uuid-${ident}`,
+    });
+  } finally {
+    db.close();
   }
 }

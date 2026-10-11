@@ -121,12 +121,15 @@ changes (exit `65`): `resume refused: this run was recorded by a newer Styre; us
 A checkpoint written by a run on a reused `--db` holds that database's other active tickets; the
 resume prepares each of them too, as that run did.
 
-The partial output carried forward goes only to the step it was written by, in the same generation
-(the step was not invalidated since), and, for a design step paused before it finished, only while
-its inputs are the ones recorded at the pause (`transcript.json` records the step key, its
-generation and its input manifest). When the inputs differ, the carryover is dropped and a
-`carryover-dropped` note (the partial output was withheld) names the changed inputs; for another step
-or generation it is dropped without a note. `transcript.json` stays in the checkpoint after a
+The partial output carried forward goes only to the step it was written by, on the ticket whose
+dispatch wrote it, in the same generation (the step was not invalidated since), and, for a design
+step paused before it finished, only while its inputs are the ones recorded at the pause
+(`transcript.json` records the ticket, the step key, its generation and its input manifest). When
+the inputs differ, the carryover is dropped and a `carryover-dropped` note (the partial output was
+withheld) names the changed inputs; for another ticket, step or generation it is dropped without a
+note. A checkpoint written by a run on a reused `--db` can hold a pause from another ticket: its
+partial output never reaches the run's own ticket. A `transcript.json` that names no ticket was
+written by an older Styre and goes to the run's own parked step, as before. `transcript.json` stays in the checkpoint after a
 resume (ENG-497).
 
 ---

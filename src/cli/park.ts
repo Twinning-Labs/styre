@@ -45,7 +45,11 @@ import {
   listCheckpointIdents,
   readCheckpointTargetRepo,
 } from "../db/repos/checkpoint-read.ts";
-import { getLatestForTicket, getLatestWorktreePath } from "../db/repos/dispatch.ts";
+import {
+  getLatestForTicket,
+  getLatestWorktreePath,
+  listByDispatchId,
+} from "../db/repos/dispatch.ts";
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { getProject } from "../db/repos/project.ts";
 import { requeueFailedForge } from "../db/repos/projection-outbox.ts";
@@ -53,7 +57,12 @@ import { getRun, insertRun, markResumed } from "../db/repos/run.ts";
 import { listPending, markConsumed } from "../db/repos/signal.ts";
 import { getInput } from "../db/repos/ticket-input.ts";
 import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
-import { getByKey as getStep, listByStatus } from "../db/repos/workflow-step.ts";
+import {
+  type WorkflowStepRow,
+  getByKey as getStep,
+  getById as getStepById,
+  listByStatus,
+} from "../db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { recordUnusableComponents, resetProvision } from "../dispatch/provision.ts";
@@ -158,12 +167,11 @@ export function dumpPark(
   const dir = parkDir(slug, ident);
   mkdirSync(dir, { recursive: true });
   const currentRunId = getRun(db)?.run_id ?? null; // read before we close db
-  // The step the park left running: its key, its generation, and for a table step its inputs, scope
-  // the carryover (spec §6.5). The run's own ticket, found by its ident (operator ruling, 2026-10-10):
-  // on a reused --db other tickets share the database.
-  const own = findCheckpointTicket(db, ident).ticket;
-  const parked = own ? listByStatus(db, "running").find((s) => s.ticket_id === own.id) : undefined;
-  const parkedGeneration = parked?.generation ?? null;
+  // The step whose dispatch parked: its ticket, its key, its generation, and for a table step its
+  // inputs, scope the carryover (spec §6.5). Found through the dispatch, not through the run's own
+  // ticket (final review M1): on a reused --db the loop drives other tickets too, and the park can
+  // be theirs, while the run's own ticket has no running step.
+  const parked = parkedStepOf(db, park.dispatchId);
   const parkedRow = parked ? stepRow(parked.step_key) : undefined;
   const parkedManifest =
     parked && parkedRow ? currentManifest(db, parked.ticket_id, parkedRow) : null;
@@ -194,12 +202,30 @@ export function dumpPark(
       cause: park.cause,
       resetAt: park.resetAt,
       transcript: park.transcript,
-      stepKey: parked?.step_key ?? null,
-      generation: parkedGeneration,
-      manifest: parkedManifest,
+      // `ticketId` marks a transcript that names its ticket and step. A missing `stepKey` keeps
+      // meaning "written before ENG-477" (no `ticketId` key either). When no step can be named, the
+      // ticket is null and no step is written: the carryover then reaches no dispatch.
+      ...(parked
+        ? {
+            ticketId: parked.ticket_id,
+            stepKey: parked.step_key,
+            generation: parked.generation,
+            manifest: parkedManifest,
+          }
+        : { ticketId: null }),
     }),
   );
   return dir;
+}
+
+/** The step left running by the dispatch that parked, on whichever ticket it was. Null when no
+ *  single running step carries that dispatch: the dispatch row is written before the agent starts
+ *  and the step stays running after a park, so every real park has exactly one. */
+function parkedStepOf(db: Database, dispatchId: string): WorkflowStepRow | null {
+  const steps = listByDispatchId(db, dispatchId)
+    .map((d) => (d.step_id === null ? null : getStepById(db, d.step_id)))
+    .filter((s): s is WorkflowStepRow => s !== null && s.status === "running");
+  return steps.length === 1 ? steps[0] : null;
 }
 
 /** On resume, a fresh `worktreeRoot` is minted and the paused run's worktree is wiped (see the
@@ -574,19 +600,27 @@ export async function resumeRun(
         if (parkedStep && existsSync(join(dir, "transcript.json"))) {
           const tj = JSON.parse(readFileSync(join(dir, "transcript.json"), "utf8")) as {
             transcript: string;
+            ticketId?: number | null;
             stepKey?: string | null;
             generation?: number | null;
             manifest?: Record<string, string> | null;
           };
-          resumeContext = {
-            stepKey: parkedStep.step_key,
-            // A transcript written before ENG-477 records no step, generation or manifest: it
-            // belongs to the parked step as it is now.
-            writtenBy: tj.stepKey ?? null,
-            transcript: tj.transcript,
-            generation: tj.generation ?? parkedStep.generation,
-            manifest: tj.manifest ?? null,
-          };
+          // Since the final review's M1 the transcript names the ticket whose dispatch wrote it
+          // (null when no step could be named: it then reaches no dispatch). One that names no
+          // ticket was written before: it is the run's own, as before.
+          const writer = "ticketId" in tj ? tj.ticketId : ticketId;
+          if (typeof writer === "number") {
+            resumeContext = {
+              ticketId: writer,
+              stepKey: parkedStep.step_key,
+              // A transcript written before ENG-477 records no step, generation or manifest: it
+              // belongs to the parked step as it is now.
+              writtenBy: tj.stepKey ?? null,
+              transcript: tj.transcript,
+              generation: tj.generation ?? parkedStep.generation,
+              manifest: tj.manifest ?? null,
+            };
+          }
         }
         appendEvent(db, { ticketId, kind: "resumed", reason: "resume" });
       }

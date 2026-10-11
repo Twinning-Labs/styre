@@ -27,8 +27,11 @@ import {
   markRunning,
   markSucceeded,
 } from "../../src/db/repos/workflow-step.ts";
-import { branchPrefixFor } from "../../src/integrations/ticket-source.ts";
-import { DesignHarness, HARNESS_TEST_TIMEOUT_MS } from "../helpers/design-harness.ts";
+import {
+  DesignHarness,
+  HARNESS_TEST_TIMEOUT_MS,
+  seedHarnessTicket,
+} from "../helpers/design-harness.ts";
 import { unitsOf } from "../helpers/design-script.ts";
 import { git } from "../helpers/design-steps.ts";
 import { makeTempDir } from "../helpers/temp.ts";
@@ -124,33 +127,6 @@ test(
   },
   HARNESS_TEST_TIMEOUT_MS,
 );
-
-/** A reused database holding a ticket of the harness's OWN project, which the loop drives (the
- *  project is not paused): its `provision` runs in the run under test, with that run's registry.
- *  The ticket row is written through the ticket repository and nothing else (no step rows): it is
- *  what an older Styre, or a worktree run that stopped before its first `provision`, leaves. */
-function seedHarnessTicket(dbFile: string, h: DesignHarness, ident: string): number {
-  migrate(dbFile);
-  const db = openDb(dbFile);
-  try {
-    const projectId = insertProject(db, {
-      slug: h.slug,
-      targetRepo: h.repoDir,
-      defaultBranch: "main",
-    });
-    return insertTicket(db, {
-      projectId,
-      ident,
-      title: "Harness ticket",
-      description: "Harness body",
-      typeLabel: "Feature",
-      branchPrefix: branchPrefixFor("Feature"),
-      externalId: `uuid-${ident}`,
-    });
-  } finally {
-    db.close();
-  }
-}
 
 test(
   "worktree mode, a reused --db: another ticket's provision runs and records no starting commit; the run's own does (spec §4 ruling)",

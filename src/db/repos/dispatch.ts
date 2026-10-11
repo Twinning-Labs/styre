@@ -56,6 +56,14 @@ export function getByDispatchId(
   );
 }
 
+/** Every dispatch row with this dispatch id, on any ticket. A dispatch id is unique per ticket
+ *  only (`UNIQUE (ticket_id, dispatch_id)`): two projects can each have a ticket of one ident. */
+export function listByDispatchId(db: Database, dispatchId: string): DispatchRow[] {
+  return db
+    .query<DispatchRow, [string]>(`SELECT ${COLS} FROM dispatch WHERE dispatch_id = ? ORDER BY id`)
+    .all(dispatchId);
+}
+
 export function listByTicket(db: Database, ticketId: number): DispatchRow[] {
   return db
     .query<DispatchRow, [number]>(`SELECT ${COLS} FROM dispatch WHERE ticket_id = ? ORDER BY seq`)

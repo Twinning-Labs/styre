@@ -200,6 +200,7 @@ test(
       worktreeRoot: t.worktreeRoot,
       // a transcript written before ENG-477 (no step, no manifest), kept as it is (spec §6.5)
       resumeContext: {
+        ticketId: t.ticketId,
         stepKey: "design:dispatch",
         writtenBy: null,
         transcript: "CARRIED-PARTIAL-OUTPUT",
@@ -228,6 +229,7 @@ test(
       profile: t.profile,
       worktreeRoot: t.worktreeRoot,
       resumeContext: {
+        ticketId: t.ticketId,
         stepKey: "design:dispatch",
         writtenBy: "design:dispatch",
         transcript: "CARRIED-PARTIAL-OUTPUT",
@@ -274,6 +276,7 @@ test(
       // design:review's partial output, found while design:dispatch is the parked step; no
       // manifest, so the inputs alone could not tell
       resumeContext: {
+        ticketId: t.ticketId,
         stepKey: "design:dispatch",
         writtenBy: "design:review",
         transcript: "CARRIED-PARTIAL-OUTPUT",

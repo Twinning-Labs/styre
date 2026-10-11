@@ -44,6 +44,10 @@ export interface DispatchDeps {
  *  step's re-dispatch while its generation is still current (spec §6.5), so a step invalidated
  *  since never receives output written under its old inputs. */
 export interface ResumeContext {
+  /** The ticket whose dispatch wrote the transcript (`transcript.json` records it since the final
+   *  review's M1); for an older transcript, the resumed run's own ticket. A checkpoint written by a
+   *  run on a reused --db holds other tickets, and the resume's registry dispatches for all of them. */
+  ticketId: number;
   /** The step the resume found parked. */
   stepKey: string;
   /** The step that wrote the transcript (`transcript.json` records it since ENG-477); null for an
@@ -57,9 +61,9 @@ export interface ResumeContext {
 }
 
 /** The carryover's fit to this dispatch (spec §6.5), computed without side effects. Null: the
- *  carryover is not this dispatch's (written by another step than the one parked, another step,
- *  or a generation invalidated since), withheld without a note, since no input of this step
- *  changed. `[]`: it
+ *  carryover is not this dispatch's (another ticket's, written by another step than the one parked,
+ *  another step, or a generation invalidated since), withheld without a note, since no input of
+ *  this step changed. `[]`: it
  *  applies (same step, same generation, and, for a table step paused before it finished, the same
  *  inputs, or a transcript written before ENG-477, kept as it is). Otherwise the input names that
  *  differ: a step that was never finished is not invalidated when an upstream step reruns, so its
@@ -67,6 +71,7 @@ export interface ResumeContext {
  *  answer that is not empty and records one `carryover-dropped` note per dispatch that withholds it, so a
  *  retried attempt of the same step writes another. */
 export function carryoverMismatch(ctx: HandlerContext, rc: ResumeContext): string[] | null {
+  if (rc.ticketId !== ctx.ticket.id) return null;
   if (rc.writtenBy !== null && rc.writtenBy !== rc.stepKey) return null;
   if (rc.stepKey !== ctx.step.step_key || rc.generation !== ctx.step.generation) return null;
   if (rc.manifest === null) return [];
