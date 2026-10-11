@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { resumeRun } from "../../src/cli/park.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
+import { readCopyOf } from "../../src/db/read-copy.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
 import { fakeForge } from "../../src/integrations/adapters/fake-forge.ts";
 import { fakeIssueTracker } from "../../src/integrations/adapters/fake-issue-tracker.ts";
@@ -10,13 +11,12 @@ import { cleanupParkedRun, runFreshTicket, runParkedTicket } from "../helpers/ru
 import { trackTempEntriesMadeBy } from "../helpers/temp.ts";
 
 function recordedDefaultBranch(dbPath: string): string {
-  const db = new Database(dbPath, { readonly: true });
-  try {
-    return (db.query("SELECT default_branch FROM project").get() as { default_branch: string })
-      .default_branch;
-  } finally {
-    db.close();
-  }
+  return readCopyOf(
+    dbPath,
+    (db) =>
+      (db.query("SELECT default_branch FROM project").get() as { default_branch: string })
+        .default_branch,
+  );
 }
 
 test("a fresh run targets the forge's default branch when the profile names a missing one", async () => {
@@ -63,6 +63,7 @@ test("a resumed run confirms the base on the forge before building its step regi
       // resumeRun mints and keeps a styre-wt-* worktree root before buildRegistry throws.
       trackTempEntriesMadeBy("styre-wt-", () =>
         resumeRun({ resume: parked.ident }, profile, DEFAULT_RUNTIME_CONFIG, {
+          probe: () => true,
           ports: {
             issueTracker: fakeIssueTracker(),
             forge: fakeForge({ defaultBranch: "main", branches: ["main"] }),
@@ -117,6 +118,7 @@ test("a forge failure on resume leaves the checkpoint as it was paused", async (
         parseProfile({ slug: parked.slug, targetRepo: before.repo, checksSystem: "none" }),
         DEFAULT_RUNTIME_CONFIG,
         {
+          probe: () => true,
           ports: { issueTracker: fakeIssueTracker(), forge },
           preflight: () => ({ ok: true, version: null }),
           buildRegistry: () => {

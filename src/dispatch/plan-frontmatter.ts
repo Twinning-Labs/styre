@@ -2,20 +2,24 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-/** The `linear:` value from a plan markdown file's leading `---`-fenced frontmatter, or null.
- *  A tiny reader (no YAML dep): only the leading frontmatter block is scanned, so a `linear:`
- *  mention in the plan BODY does not count. */
+/** The `linear:` value from a plan's leading `---`-fenced frontmatter, or null. Only the leading
+ *  frontmatter block is scanned, so a `linear:` mention in the plan BODY does not count. */
+export function linearFromFrontmatter(text: string): string | null {
+  const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (fm === null) return null;
+  const line = fm[1].match(/^linear:\s*(\S+)\s*$/m);
+  return line ? line[1] : null;
+}
+
+/** `linearFromFrontmatter` of a file on disk; null when it is missing or unreadable. */
 export function planFrontmatterLinear(path: string): string | null {
   let text: string;
   try {
     text = readFileSync(path, "utf8");
   } catch {
-    return null; // missing/unreadable
+    return null;
   }
-  const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (fm === null) return null;
-  const line = fm[1].match(/^linear:\s*(\S+)\s*$/m);
-  return line ? line[1] : null;
+  return linearFromFrontmatter(text);
 }
 
 /** True iff the given `docs/plans/` dir holds a `.md` whose frontmatter `linear:` equals `ident`

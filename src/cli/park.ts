@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import {
   copyFileSync,
@@ -17,6 +17,12 @@ import type { AgentRunner } from "../agent/runner.ts";
 import { type AgentConfig, DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { stateDir } from "../config/paths.ts";
 import type { RuntimeConfig } from "../config/runtime-config.ts";
+import { adoptActiveTickets } from "../daemon/adopt.ts";
+import { currentManifest } from "../daemon/design-digests.ts";
+import { stepRow } from "../daemon/design-graph.ts";
+import { captureOtherActiveTickets, captureSnapshot } from "../daemon/design-inputs.ts";
+import { newerSchemeIn, newerSchemeRecorded, newerSchemeRefusal } from "../daemon/design-walk.ts";
+import { pauseTicket } from "../daemon/pause-ticket.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
 import type { ProjectorPorts } from "../daemon/projector.ts";
 import { recover } from "../daemon/recover.ts";
@@ -25,33 +31,59 @@ import {
   applyReviewResume,
   planReviewResume,
 } from "../daemon/review-resume.ts";
-import { driveToTerminal, formatRunSummary } from "../daemon/run-ticket.ts";
+import { createRunEnd, driveToTerminal, formatRunSummary } from "../daemon/run-ticket.ts";
 import type { PauseReason, RunOutcome } from "../daemon/run-ticket.ts";
 import type { StepRegistry } from "../daemon/step-registry.ts";
 import { resumeVerificationRetries } from "../daemon/verification-retry.ts";
 import { openDb } from "../db/client.ts";
-import { migrate } from "../db/migrate.ts";
-import { getLatestForTicket, getLatestWorktreePath } from "../db/repos/dispatch.ts";
+import { type DatabaseState, migrate, readDatabaseState } from "../db/migrate.ts";
+import { CURRENT_VERSION } from "../db/migrations/index.ts";
+import { readCopyOf } from "../db/read-copy.ts";
+import {
+  findCheckpointParkedStepKey,
+  findCheckpointTicket,
+  listCheckpointIdents,
+  readCheckpointTargetRepo,
+} from "../db/repos/checkpoint-read.ts";
+import {
+  getLatestForTicket,
+  getLatestWorktreePath,
+  listByDispatchId,
+} from "../db/repos/dispatch.ts";
 import { appendEvent, listByTicket as listEvents } from "../db/repos/event-log.ts";
 import { getProject } from "../db/repos/project.ts";
 import { requeueFailedForge } from "../db/repos/projection-outbox.ts";
-import { ensureRunTable, getRun, insertRun, markResumed } from "../db/repos/run.ts";
+import { getRun, insertRun, markResumed } from "../db/repos/run.ts";
 import { listPending, markConsumed } from "../db/repos/signal.ts";
+import { getInput } from "../db/repos/ticket-input.ts";
 import { getTicket, setTicketStatus } from "../db/repos/ticket.ts";
-import { listByStatus } from "../db/repos/workflow-step.ts";
+import {
+  type WorkflowStepRow,
+  getByKey as getStep,
+  getById as getStepById,
+  listByStatus,
+} from "../db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../dispatch/handlers.ts";
 import type { Profile } from "../dispatch/profile.ts";
-import { resetProvision } from "../dispatch/provision.ts";
+import { recordUnusableComponents, resetProvision } from "../dispatch/provision.ts";
+import type { ResumeContext } from "../dispatch/run-dispatch.ts";
 import { branchHeadSha, reconcileWorktree } from "../dispatch/worktree.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { stdoutSink } from "../telemetry/emit.ts";
 import { RunInterrupted, isStopping } from "../util/process/door.ts";
 import type { HandlerCtx } from "../util/process/signals.ts";
 import { nowUtc } from "../util/time.ts";
+import { checkpointPath } from "./checkpoint-name.ts";
 import type { NonPrimaryComponent } from "./component-roles.ts";
-import { agentCliError, usageError } from "./errors.ts";
+import { EXIT, StyreError, agentCliError, usageError } from "./errors.ts";
 import { exitCodeForOutcome } from "./outcome.ts";
 import { formatMessage } from "./output.ts";
+import {
+  type UnusableComponent,
+  resumePauseReason,
+  toolchainDecision,
+  toolchainNotice,
+} from "./preflight.ts";
 import { confirmPrBase } from "./resolve-pr-base.ts";
 import { type RunLock, acquireRunLock, releaseRunLock } from "./run-lock.ts";
 
@@ -86,7 +118,7 @@ export function finishRunResult(
   out: { outcome: RunOutcome; reason?: PauseReason; park?: ParkInfo },
 ): void {
   if (out.outcome === "paused" && out.reason === "budget" && out.park) {
-    dumpPark(db, dbPath, slug, ident, out.park); // closes db
+    dumpPark(db, dbPath, slug, ident, out.park, "run: "); // closes db
     process.exitCode = exitCodeForOutcome("paused"); // 75
     return;
   }
@@ -94,28 +126,28 @@ export function finishRunResult(
   process.exitCode = exitCodeForOutcome(out.outcome); // 0 pr-ready/done · 75 paused · 1 abandoned
 }
 
-/** The durable dump dir for a paused run: ~/.local/state/styre/<project-stub>/<ticket-ident>/ */
+/** The durable dump dir for a paused run: ~/.local/state/styre/<project-stub>/<ticket-ident>/.
+ *  Both names are checked first (operator rulings, 2026-10-10): every checkpoint path a fresh run,
+ *  a resume and a pause build goes through here. */
 export function parkDir(slug: string, ident: string): string {
-  return join(stateDir(), slug, ident);
+  return checkpointPath(stateDir(), slug, ident);
 }
 
-/** Best-effort read of the run_id in an existing dump's run.db. Returns null if the file is
- *  absent or the dump predates the run table (pre-upgrade) — never throws. */
+/** The run_id in an existing paused copy's run.db, read through a private copy (operator ruling,
+ *  2026-10-09): null when the file is absent or predates the run table (from before the upgrade).
+ *  Throws when the file exists but cannot be read, so dumpPark says so instead of skipping its
+ *  warning. */
 export function priorRunIdAt(destPath: string): string | null {
   if (!existsSync(destPath)) return null;
-  try {
-    const db = new Database(destPath, { readonly: true });
-    try {
-      return (
-        db.query<{ run_id: string }, []>("SELECT run_id FROM run ORDER BY id LIMIT 1").get()
-          ?.run_id ?? null
-      );
-    } finally {
-      db.close();
-    }
-  } catch {
-    return null; // no run table / unreadable → treat as no prior id
-  }
+  return readCopyOf(destPath, (db) => {
+    const hasRun =
+      db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'run'").get() !== null;
+    if (!hasRun) return null; // a copy from before the run table: no run identity was ever minted
+    return (
+      db.query<{ run_id: string }, []>("SELECT run_id FROM run ORDER BY id LIMIT 1").get()
+        ?.run_id ?? null
+    );
+  });
 }
 
 /** Persist the paused run so `styre run --resume` can rehydrate it exactly:
@@ -130,17 +162,34 @@ export function dumpPark(
   slug: string,
   ident: string,
   park: ParkInfo,
+  prefix: "run: " | "resume: ",
 ): string {
   const dir = parkDir(slug, ident);
   mkdirSync(dir, { recursive: true });
   const currentRunId = getRun(db)?.run_id ?? null; // read before we close db
+  // The step whose dispatch parked: its ticket, its key, its generation, and for a table step its
+  // inputs, scope the carryover (spec §6.5). Found through the dispatch, not through the run's own
+  // ticket (final review M1): on a reused --db the loop drives other tickets too, and the park can
+  // be theirs, while the run's own ticket has no running step.
+  const parked = parkedStepOf(db, park.dispatchId);
+  const parkedRow = parked ? stepRow(parked.step_key) : undefined;
+  const parkedManifest =
+    parked && parkedRow ? currentManifest(db, parked.ticket_id, parkedRow) : null;
   db.exec("PRAGMA wal_checkpoint(TRUNCATE);"); // fold WAL into the main file before copy
   db.close();
   const destPath = join(dir, "run.db");
   // Skip the copy when resuming in-place: dbPath and destPath are the same file (re-park from
   // an existing dump — the DB is already at the correct location, no copy needed).
   if (dbPath !== destPath) {
-    const prior = priorRunIdAt(destPath);
+    let prior: string | null = null;
+    try {
+      prior = priorRunIdAt(destPath);
+    } catch (err) {
+      // Said, not skipped: the copy about to be overwritten could not be read.
+      process.stderr.write(
+        `${prefix}could not read the paused run at ${destPath} before overwriting it: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
     if (prior !== null && currentRunId !== null && prior !== currentRunId) {
       process.stderr.write(`overwriting paused run ${prior} with ${currentRunId} for ${ident}\n`);
     }
@@ -153,9 +202,30 @@ export function dumpPark(
       cause: park.cause,
       resetAt: park.resetAt,
       transcript: park.transcript,
+      // `ticketId` marks a transcript that names its ticket and step. A missing `stepKey` keeps
+      // meaning "written before ENG-477" (no `ticketId` key either). When no step can be named, the
+      // ticket is null and no step is written: the carryover then reaches no dispatch.
+      ...(parked
+        ? {
+            ticketId: parked.ticket_id,
+            stepKey: parked.step_key,
+            generation: parked.generation,
+            manifest: parkedManifest,
+          }
+        : { ticketId: null }),
     }),
   );
   return dir;
+}
+
+/** The step left running by the dispatch that parked, on whichever ticket it was. Null when no
+ *  single running step carries that dispatch: the dispatch row is written before the agent starts
+ *  and the step stays running after a park, so every real park has exactly one. */
+function parkedStepOf(db: Database, dispatchId: string): WorkflowStepRow | null {
+  const steps = listByDispatchId(db, dispatchId)
+    .map((d) => (d.step_id === null ? null : getStepById(db, d.step_id)))
+    .filter((s): s is WorkflowStepRow => s !== null && s.status === "running");
+  return steps.length === 1 ? steps[0] : null;
 }
 
 /** On resume, a fresh `worktreeRoot` is minted and the paused run's worktree is wiped (see the
@@ -171,11 +241,28 @@ export function dumpPark(
  *  this module are unaffected. */
 export const resetProvisionForResume = resetProvision;
 
-/** The single ticket id in a per-run SoT. */
-function onlyTicketId(db: Database): number {
-  const row = db.query<{ id: number }, []>("SELECT id FROM ticket ORDER BY id LIMIT 1").get();
-  if (!row) throw new Error("resume: the dump DB has no ticket");
-  return row.id;
+/** The resumed run's own ticket, by its ident, the checkpoint folder's name (spec §4, operator
+ *  ruling 2026-10-10): a checkpoint written by a run on a reused --db holds other tickets too, with
+ *  lower ids. One without that ticket is refused (exit 65), never resumed as another ticket. */
+function ownTicketId(db: Database, ident: string, dir: string): number {
+  const { ticket, reason } = findCheckpointTicket(db, ident);
+  if (!ticket) throw noOwnTicket(ident, dir, reason, listCheckpointIdents(db));
+  return ticket.id;
+}
+
+/** Never suggests `--fresh`: on a filesystem that ignores case (macOS by default) `--resume eng-1`
+ *  reaches the `ENG-1` folder, and a fresh run of the tracker's `ENG-1` would discard that paused
+ *  run. It names the idents the checkpoint holds instead, so the operator can resume the right one. */
+function noOwnTicket(ident: string, dir: string, reason: string, held: string[]): StyreError {
+  const holds =
+    held.length === 0
+      ? "This checkpoint holds no ticket."
+      : `This checkpoint holds: ${[...new Set(held)].join(", ")}.`;
+  return new StyreError({
+    code: EXIT.RESUME_REFUSED,
+    headline: `resume refused: the checkpoint at ${dir} holds no run of ${ident} (${reason})`,
+    recovery: `Nothing was changed. Ticket idents are case sensitive. ${holds} To resume, run styre run --resume with the ident exactly as the checkpoint holds it.`,
+  });
 }
 
 export interface ResumeArgs {
@@ -185,6 +272,16 @@ export interface ResumeArgs {
   reviewFindings?: string;
   reviewReason?: string;
   inspect?: boolean;
+}
+
+/** What the resumed run's registry is built from (spec §4.1): the profile after the toolchain
+ *  narrowing, and the lists of what was narrowed away, so provision reports them (ENG-412, ENG-425). */
+export interface ResumeRegistryWiring {
+  profile: Profile;
+  unusableComponents: UnusableComponent[];
+  nonPrimaryComponents: NonPrimaryComponent[];
+  inPlace: boolean;
+  worktreeRoot: string;
 }
 
 /** The HEAD-guard baseline: the most recent of {latest `accept-head:` resumed event, latest
@@ -211,13 +308,59 @@ export function headBaseline(db: Database, ticketId: number): string | null {
   return dispatch?.branch_head_sha ?? null;
 }
 
+/** `--inspect` on any checkpoint, whatever its version (operator rulings, 2026-10-09 and
+ *  2026-10-10): read through a private copy, with the readers that work on every shape since v7
+ *  (spec §7.7). It writes nothing to the database: no migration, no backup, no run row, and the
+ *  original is never opened; so it also works where resume would refuse. */
+export function inspectWithoutUpgrading(
+  dbPath: string,
+  ident: string,
+  state: DatabaseState,
+): string {
+  let details: string;
+  let newer = "";
+  try {
+    // A private copy (operator ruling, 2026-10-09): the checkpoint itself is never opened.
+    details = readCopyOf(dbPath, (db) => {
+      // When resume would refuse a run fingerprinted under a newer scheme, say so (Task 13).
+      const found = state.kind === "current" ? newerSchemeIn(db) : null;
+      if (found !== null)
+        newer = `; resume would refuse it: this run was recorded by a newer Styre (fingerprint scheme ${found.scheme}); use that version`;
+      // the run's own ticket, by its ident (spec §4, operator ruling 2026-10-10)
+      const { ticket, reason } = findCheckpointTicket(db, ident);
+      if (!ticket) return `  resume would refuse this checkpoint: ${reason}\n`;
+      const targetRepo = readCheckpointTargetRepo(db, ticket.project_id);
+      if (!targetRepo) return `  (no project recorded for ${ident})\n`;
+      const recorded = headBaseline(db, ticket.id);
+      const current = branchHeadSha(targetRepo, branchNameFor(ticket));
+      const moved = recorded !== null && current !== null && recorded !== current;
+      return (
+        `  recorded base: ${recorded ?? "(none)"}\n  current head:  ${current ?? "(none)"}${moved ? "  [MOVED]" : ""}\n` +
+        `  would re-dispatch step: ${findCheckpointParkedStepKey(db, ticket.id) ?? "(none)"}\n`
+      );
+    });
+  } catch (err) {
+    details = `  (the rest cannot be read on this shape: ${err instanceof Error ? err.message : String(err)})\n`;
+  }
+  const schema =
+    state.kind === "upgrade"
+      ? `resume will upgrade this checkpoint from v${state.version} to v${CURRENT_VERSION}, after writing a backup`
+      : state.kind === "refuse"
+        ? `resume would refuse this checkpoint: ${state.error.headline}`
+        : state.kind === "empty"
+          ? "the checkpoint holds no tables"
+          : `v${state.version}, current${newer}`;
+  return `resume --inspect ${ident}\n  schema: ${schema}\n${details}  (no changes made)\n`;
+}
+
 export async function resumeRun(
   args: ResumeArgs,
   profile: Profile,
   runtimeConfig: RuntimeConfig,
   deps?: {
     buildRegistry?: (
-      resumeContext: { stepKey: string; transcript: string } | undefined,
+      resumeContext: ResumeContext | undefined,
+      wiring: ResumeRegistryWiring,
     ) => StepRegistry;
     ports?: ProjectorPorts;
     preflight?: (config: AgentConfig) => AgentCliPreflight;
@@ -225,6 +368,7 @@ export async function resumeRun(
     runner?: AgentRunner;
     /** The stop handler `styre run` installed (section 7.1). */
     stop?: StopWiring;
+    probe?: (repoDir: string, command: string) => boolean;
   },
   /** ENG-435: components role-classification removed from `profile`, so a RESUMED run reports
    *  the narrowing in its PR the same way a fresh one does. `profile` arrives already narrowed
@@ -257,9 +401,46 @@ export async function resumeRun(
   }
   deps?.stop?.holdLock(lock);
   try {
-    migrate(dbPath);
+    // --inspect is diagnostics only, whatever the checkpoint's version (operator rulings,
+    // 2026-10-09 and 2026-10-10): it reads a private copy and writes nothing to the database (no
+    // migration, no backup, no open of the original, no insertRun or markResumed). The run lock,
+    // a file beside the database, is released by the finally below.
+    if (args.inspect) {
+      let state: DatabaseState;
+      try {
+        state = readDatabaseState(dbPath);
+      } catch (err) {
+        process.stderr.write(
+          `resume --inspect ${args.resume}\n  schema: cannot be read: ${err instanceof Error ? err.message : String(err)}\n  (no changes made)\n`,
+        );
+        return;
+      }
+      process.stderr.write(inspectWithoutUpgrading(dbPath, args.resume, state));
+      return;
+    }
+    // Refused before anything is written (no migration, no backup, no run row): a checkpoint that
+    // does not hold this ticket. A schema it cannot use is migrate's refusal, below.
+    const before = readDatabaseState(dbPath);
+    if (before.kind === "empty") throw noOwnTicket(args.resume, dir, "it holds no tables", []);
+    if (before.kind !== "refuse") {
+      const found = readCopyOf(dbPath, (db) => ({
+        ...findCheckpointTicket(db, args.resume),
+        held: listCheckpointIdents(db),
+      }));
+      if (!found.ticket) throw noOwnTicket(args.resume, dir, found.reason, found.held);
+    }
+    // A manifest recorded under a newer FINGERPRINT_SCHEME (operator ruling, 2026-10-10): this
+    // Styre cannot compare it. Refuse before anything is written, like a HEAD that moved (65).
+    const newerScheme = newerSchemeRecorded(dbPath);
+    if (newerScheme !== null) {
+      process.stderr.write(
+        `resume refused: ${newerSchemeRefusal(args.resume, newerScheme.scheme)}`,
+      );
+      process.exitCode = 65; // EXIT.RESUME_REFUSED, inside the try whose finally releases the lock
+      return;
+    }
+    migrate(dbPath, { log: (line) => process.stderr.write(`${line}\n`) });
     const db = openDb(dbPath);
-    ensureRunTable(db); // pre-upgrade parks (v1) have no run table; migrate() won't add it
     if (getRun(db) === null) {
       // Pre-upgrade park: no identity was ever minted — assign a fresh one for the resumed portion.
       insertRun(db, {
@@ -269,7 +450,7 @@ export async function resumeRun(
       });
     }
     markResumed(db); // same logical run for a v2 park; resumed=1, attempt++
-    const ticketId = onlyTicketId(db);
+    const ticketId = ownTicketId(db, args.resume, dir);
     const ticket = getTicket(db, ticketId);
     if (!ticket) throw new Error("resume: ticket vanished");
     deps?.stop?.setRun({ db, dbPath, ticketId, ident: ticket.ident });
@@ -295,14 +476,6 @@ export async function resumeRun(
     const recorded = headBaseline(db, ticketId);
     const current = branchHeadSha(project.target_repo, branch);
     const moved = recorded !== null && current !== null && recorded !== current;
-
-    if (args.inspect) {
-      process.stderr.write(
-        `resume --inspect ${ticket.ident}\n  recorded base: ${recorded ?? "(none)"}\n  current head:  ${current ?? "(none)"}${moved ? "  [MOVED]" : ""}\n  would re-dispatch step: ${parkedStep?.step_key ?? "(none)"}\n  (no changes made)\n`,
-      );
-      closeDb();
-      return;
-    }
 
     if (moved && !args.acceptHead) {
       process.stderr.write(
@@ -405,7 +578,7 @@ export async function resumeRun(
       process.exitCode = 65;
       return;
     }
-    let resumeContext: { stepKey: string; transcript: string } | undefined;
+    let resumeContext: ResumeContext | undefined;
     db.transaction(() => {
       if (!inPlace) {
         resetProvisionForResume(db, ticketId);
@@ -427,8 +600,27 @@ export async function resumeRun(
         if (parkedStep && existsSync(join(dir, "transcript.json"))) {
           const tj = JSON.parse(readFileSync(join(dir, "transcript.json"), "utf8")) as {
             transcript: string;
+            ticketId?: number | null;
+            stepKey?: string | null;
+            generation?: number | null;
+            manifest?: Record<string, string> | null;
           };
-          resumeContext = { stepKey: parkedStep.step_key, transcript: tj.transcript };
+          // Since the final review's M1 the transcript names the ticket whose dispatch wrote it
+          // (null when no step could be named: it then reaches no dispatch). One that names no
+          // ticket was written before: it is the run's own, as before.
+          const writer = "ticketId" in tj ? tj.ticketId : ticketId;
+          if (typeof writer === "number") {
+            resumeContext = {
+              ticketId: writer,
+              stepKey: parkedStep.step_key,
+              // A transcript written before ENG-477 records no step, generation or manifest: it
+              // belongs to the parked step as it is now.
+              writtenBy: tj.stepKey ?? null,
+              transcript: tj.transcript,
+              generation: tj.generation ?? parkedStep.generation,
+              manifest: tj.manifest ?? null,
+            };
+          }
         }
         appendEvent(db, { ticketId, kind: "resumed", reason: "resume" });
       }
@@ -449,16 +641,108 @@ export async function resumeRun(
       acceptHead: args.acceptHead === true,
       warn: (line) => process.stderr.write(`${line}\n`),
     });
+    // spec §4.1: the same toolchain narrowing as a fresh run, here: after --inspect, after the resume
+    // transaction (a pause written before it would be consumed by it) and recover(), before the
+    // snapshot. Never exit 69: where the fresh gate would refuse, pause for the operator instead.
+    // A ticket the resume transaction already left waiting (a plan review gate stop applied again)
+    // gets no second pause: one human_resume and one escalation are enough (operator ruling,
+    // 2026-10-09). The tool gap is still recorded, as a note, and said as what it is.
+    const toolchain = toolchainDecision(profile, deps?.probe);
+    if (toolchain.kind === "refuse") {
+      const reason = resumePauseReason(toolchain.blocking);
+      if (getTicket(db, ticketId)?.status === "waiting") {
+        appendEvent(db, {
+          ticketId,
+          kind: "note",
+          reason: "toolchain-missing",
+          payload: { event: "toolchain-missing", detail: reason },
+        });
+        process.stderr.write(`resume: paused: the run is already waiting for you, and ${reason}\n`);
+      } else {
+        pauseTicket(db, ticketId, reason);
+        process.stderr.write(`resume: paused: ${reason}\n`);
+      }
+      // Ends like every other needs_you pause (driveToTerminal's finish): the events and the
+      // summary on stdout, the notifier's sweep, the outbox drained. No step ran: zero ticks.
+      const now = getTicket(db, ticketId);
+      const paused = await createRunEnd(db, {
+        ticketId,
+        config: runtimeConfig,
+        ports,
+        emit: stdoutSink,
+      }).finish({
+        outcome: "paused",
+        reason: "needs_you",
+        iterations: 0,
+        stage: now?.stage ?? ticket.stage,
+        status: now?.status ?? ticket.status,
+      });
+      // A stop that began during the drain: as after driveToTerminal, nothing below may run.
+      if (isStopping()) throw new RunInterrupted();
+      process.stderr.write(`${formatRunSummary(db, ticketId, paused)}\n`);
+      closeDb();
+      process.exitCode = exitCodeForOutcome(paused.outcome); // 75, needs_you
+      return;
+    }
+    const runProfile = toolchain.profile;
+    if (toolchain.unusable.length > 0) {
+      process.stderr.write(`resume: ${toolchainNotice(toolchain.unusable, runProfile)}\n`);
+    }
 
+    // spec §4: after recover() and the provision reset, before the first resolver pass, the profile
+    // and config rows are rewritten from what the handlers will receive now. The ticket text and the
+    // starting commit never are (E2).
+    // One transaction (captureSnapshot's own nests in it as a savepoint): the prior list read, the
+    // new snapshot rows, their `inputs-changed` note and the toolchain advisory commit together or
+    // not at all. A crash between two commits would leave the new list recorded without its
+    // advisory, and the next resume, seeing no change, would never record it.
+    db.transaction(() => {
+      const priorUnusable = getInput(db, ticketId, "run.unusableComponents");
+      const snapshot = captureSnapshot(db, ticketId, {
+        profile: runProfile,
+        unusableComponents: toolchain.unusable,
+        nonPrimaryComponents,
+        config: runtimeConfig,
+      });
+      // ENG-412, never silent: provision records what the narrowing skipped, but it runs again
+      // only where its step is not already done (worktree mode resets it above; in place it stays
+      // done). When this host's list changed and provision will not run again, the runner records
+      // it here, through provision's own writer, so the PR's advisory block names it all the same.
+      const unusableChanged =
+        priorUnusable === null || snapshot.changed.includes("run.unusableComponents");
+      if (unusableChanged && getStep(db, ticketId, "provision")?.status === "succeeded") {
+        recordUnusableComponents(db, ticketId, toolchain.unusable);
+      }
+    })();
+    // Operator ruling, 2026-10-10 (spec §4): a checkpoint written by a run on a reused --db holds
+    // that database's other active tickets, which this resume's loop drives with this registry. Each
+    // gets the same snapshot, with the same note, after a `reused-database` note (the `resumed`
+    // event above is this run's own ticket's; for the others the checkpoint is a reused database);
+    // no starting commit and no toolchain advisory (that stays this run's own ticket's, above).
+    // Waiting tickets are left alone.
+    captureOtherActiveTickets(db, ticketId, {
+      profile: runProfile,
+      unusableComponents: toolchain.unusable,
+      nonPrimaryComponents,
+      config: runtimeConfig,
+    });
+    // spec §7.6: after every snapshot, before the first resolver pass; this ticket and every other
+    // active one, as runTicket does on a reused --db.
+    adoptActiveTickets(db, ticketId);
+
+    const wiring: ResumeRegistryWiring = {
+      profile: runProfile,
+      unusableComponents: toolchain.unusable,
+      nonPrimaryComponents,
+      inPlace,
+      worktreeRoot, // minted once above (in-place = repo root), shared with the reconcile
+    };
     const registry: StepRegistry = deps?.buildRegistry
-      ? deps.buildRegistry(resumeContext)
+      ? deps.buildRegistry(resumeContext, wiring)
       : buildDispatchRegistry({
           runner: deps?.runner ?? resolveAgentRunner(runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG),
           agentConfig: runtimeConfig.agent ?? DEFAULT_AGENT_CONFIG,
-          profile,
-          nonPrimaryComponents,
-          inPlace,
-          worktreeRoot, // minted once above (in-place = repo root), shared with the reconcile
+          ...wiring,
           resumeContext,
         });
 
@@ -466,7 +750,7 @@ export async function resumeRun(
       ticketId,
       config: runtimeConfig,
       ports,
-      profile,
+      profile: runProfile,
       emit: stdoutSink,
       // ENG-485 section 7.5: where the ticket branch stands when each step starts.
       readHead: () => branchHeadSha(project.target_repo, branch),
@@ -477,7 +761,7 @@ export async function resumeRun(
 
     if (result.outcome === "paused" && result.reason === "budget" && result.park) {
       deps?.stop?.setRun(null); // a normal exit: dumpPark closes the db
-      dumpPark(db, dbPath, profile.slug, ticket.ident, result.park); // re-dump (closes db)
+      dumpPark(db, dbPath, profile.slug, ticket.ident, result.park, "resume: "); // re-dump (closes db)
       process.stderr.write(
         `${formatMessage("run", `Paused again — out of budget: ${result.park.cause}. Checkpoint: ${dir}`)}\n`,
       );

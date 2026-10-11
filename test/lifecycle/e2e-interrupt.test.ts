@@ -22,7 +22,7 @@
 //    column, apart from the handler's own writes (one note row, the attempt it gave back, the
 //    dispatch row it closed). This is stricter than comparing row counts: it also catches a step
 //    status, a dispatch outcome or any other column changed in place.
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -32,10 +32,12 @@ import type { AgentRunInput, AgentRunResult, AgentRunner } from "../../src/agent
 import { parkDir, resumeRun } from "../../src/cli/park.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
 import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
+import { captureSnapshot } from "../../src/daemon/design-inputs.ts";
 import { driveToTerminal } from "../../src/daemon/run-ticket.ts";
 import type { StepRegistry } from "../../src/daemon/step-registry.ts";
 import { openDb } from "../../src/db/client.ts";
 import { migrate } from "../../src/db/migrate.ts";
+import { readCopyOf } from "../../src/db/read-copy.ts";
 import { classifyAcCheck, insertAcCheck } from "../../src/db/repos/ac-check.ts";
 import { insertAc } from "../../src/db/repos/acceptance-criterion.ts";
 import {
@@ -50,7 +52,6 @@ import { insertProject } from "../../src/db/repos/project.ts";
 import { insertRun } from "../../src/db/repos/run.ts";
 import { insertTicket } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
-import { insertPending, markSucceeded } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { type Profile, parseProfile } from "../../src/dispatch/profile.ts";
 import { branchHeadSha } from "../../src/dispatch/worktree.ts";
@@ -66,6 +67,7 @@ import {
   handleStopSignal,
 } from "../../src/util/process/signals.ts";
 import { nowUtc } from "../../src/util/time.ts";
+import { reachChecksStep } from "../helpers/design-steps.ts";
 import { killOwned, ownGroupMembers, ownLaunch } from "../helpers/own-processes.ts";
 import { makeTempDir } from "../helpers/temp.ts";
 
@@ -114,7 +116,7 @@ afterEach(() => {
 // ---- small helpers --------------------------------------------------------------------------------
 
 function git(cwd: string, args: string[]): string {
-  const r = Bun.spawnSync(["git", ...args], { cwd, env: { ...process.env } });
+  const r = Bun.spawnSync(["git", ...args], { cwd, env: { ...process.env }, timeout: 30_000 });
   if (!r.success) throw new Error(`git ${args.join(" ")} failed: ${r.stderr.toString()}`);
   return r.stdout.toString().trimEnd(); // a status line may start with a space
 }
@@ -164,11 +166,10 @@ function checkoutState(repo: string) {
 
 type Rows = Record<string, Record<string, Record<string, unknown>>>;
 /** Every row of every table of the run database, keyed by table and rowid, read through a
- *  connection of its own. SQLite's own tables are left out, except `sqlite_sequence`: a row run
+ *  private copy. SQLite's own tables are left out, except `sqlite_sequence`: a row run
  *  code inserted and deleted again during the stop still shows there, as a bumped sequence. */
 function dbRows(dbPath: string): Rows {
-  const c = new Database(dbPath, { readonly: true });
-  try {
+  return readCopyOf(dbPath, (c) => {
     const tables = c
       .query<{ name: string }, []>(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND (name NOT LIKE 'sqlite_%' OR name = 'sqlite_sequence')",
@@ -186,9 +187,7 @@ function dbRows(dbPath: string): Rows {
       }
     }
     return out;
-  } finally {
-    c.close();
-  }
+  });
 }
 
 /** What changed between two snapshots: rows added, removed, and each changed row's columns. */
@@ -219,8 +218,7 @@ function dbDiff(before: Rows, after: Rows) {
 }
 
 function stepRow(dbPath: string, key: string) {
-  const c = new Database(dbPath, { readonly: true });
-  try {
+  return readCopyOf(dbPath, (c) => {
     return c
       .query<
         {
@@ -233,14 +231,11 @@ function stepRow(dbPath: string, key: string) {
         [string]
       >("SELECT id, status, attempt, started_at, error_json FROM workflow_step WHERE step_key = ?")
       .get(key);
-  } finally {
-    c.close();
-  }
+  });
 }
 
 function dispatchRows(dbPath: string) {
-  const c = new Database(dbPath, { readonly: true });
-  try {
+  return readCopyOf(dbPath, (c) => {
     return c
       .query<
         {
@@ -253,9 +248,7 @@ function dispatchRows(dbPath: string) {
         []
       >("SELECT id, step_id, outcome, partial, branch_head_sha FROM dispatch ORDER BY id")
       .all();
-  } finally {
-    c.close();
-  }
+  });
 }
 
 const ok = (stdout: string): AgentRunResult => ({
@@ -332,9 +325,6 @@ function setUp(
   const db = openDb(dbPath);
   try {
     const projectId = insertProject(db, { slug: SLUG, targetRepo: repo, defaultBranch: "main" });
-    const ticketId = insertTicket(db, { projectId, ident: IDENT });
-    insertRun(db, { runId: "e2e-interrupt-run", startedAt: nowUtc(), provider: "claude" });
-    seed(db, { ticketId, repo, aux });
     const profile = parseProfile({
       slug: SLUG,
       targetRepo: repo,
@@ -342,6 +332,15 @@ function setUp(
       checksSystem: "none",
       components: components(aux),
     });
+    const ticketId = insertTicket(db, { projectId, ident: IDENT });
+    captureSnapshot(db, ticketId, {
+      profile: profile,
+      unusableComponents: [],
+      nonPrimaryComponents: [],
+      config: DEFAULT_RUNTIME_CONFIG,
+    });
+    insertRun(db, { runId: "e2e-interrupt-run", startedAt: nowUtc(), provider: "claude" });
+    seed(db, { ticketId, repo, aux });
     return { repo, dbPath, ticketId, profile, aux };
   } finally {
     db.close();
@@ -559,12 +558,9 @@ async function resume(
   opts: { acceptHead?: boolean } = {},
 ): Promise<{ afterRecover: AfterRecover | null; stderr: string }> {
   // resumeRun works in place only when the checkpoint's latest dispatch worked in the checkout.
-  const c = new Database(run.dbPath, { readonly: true });
-  try {
-    expect(getLatestWorktreePath(c, run.ticketId)).toBe(run.repo);
-  } finally {
-    c.close();
-  }
+  // Read, then asserted outside the copy's callback.
+  const latest = readCopyOf(run.dbPath, (c) => getLatestWorktreePath(c, run.ticketId));
+  expect(latest).toBe(run.repo);
   let afterRecover: AfterRecover | null = null;
   const stderr: string[] = [];
   // stderr is the resume's human output; stdout carries its telemetry, which is not looked at here.
@@ -591,6 +587,7 @@ async function resume(
           };
           return registryFor(run, runner);
         },
+        probe: () => true,
         ports: ports(),
         preflight: () => ({ ok: true, version: null }),
       },
@@ -1029,23 +1026,29 @@ async function interruptChecksTestRun() {
       { name: "app", kind: "node", paths: ["src/**"], commands: { build: "true", test: "true" } },
     ],
     (db, { ticketId }) => {
-      db.query("UPDATE ticket SET stage = 'design', track = 'fast' WHERE id = ?").run(ticketId);
-      const plan = insertPending(db, {
-        ticketId,
-        stepKey: "design:dispatch",
-        stepType: "dispatch",
-      });
-      markSucceeded(db, plan.id, {});
-      insertWorkUnit(db, {
-        ticketId,
-        seq: 1,
-        kind: "backend",
-        behavioral: 0,
-        verifyCheckTypes: [],
-      });
       acId = insertAc(db, { ticketId, seq: 1, text: "it works", source: "checklist" }).id;
     },
   );
+  // design through real steps, in place, with the run's own profile (Task 9 captured the snapshot
+  // from it), so the plan's commit lands before headAtStart
+  const designDb = openDb(run.dbPath);
+  try {
+    await reachChecksStep({
+      db: designDb,
+      ticketId: run.ticketId,
+      profile: run.profile,
+      worktreeRoot: run.repo,
+      inPlace: true,
+      unit: {
+        kind: "backend",
+        behavioral: false,
+        verifyCheckTypes: [],
+        filesToTouch: ["src/unit1.js"],
+      },
+    });
+  } finally {
+    designDb.close();
+  }
   const headAtStart = git(run.repo, ["rev-parse", "HEAD"]);
   // The plan-blind author: writes the check it declares.
   const author = new FakeAgentRunner((input) => {
@@ -1066,7 +1069,7 @@ async function interruptChecksTestRun() {
   const committed = git(run.repo, ["rev-parse", "HEAD"]);
   expect(committed).not.toBe(headAtStart);
   expect(git(run.repo, ["show", "--name-only", "--format=", committed])).toBe(AUTHORED);
-  const rows = dispatchRows(run.dbPath);
+  const rows = dispatchRows(run.dbPath).filter((d) => d.step_id === i.during.id);
   expect(rows).toHaveLength(1);
   const row = rows[0] as (typeof rows)[number];
   // The authoring dispatch had already completed with its commit; the stop has nothing to close.

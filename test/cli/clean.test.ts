@@ -8,6 +8,7 @@ import { insertPending } from "../../src/db/repos/signal.ts";
 import { setBranch, setTicketStage, setTicketStatus } from "../../src/db/repos/ticket.ts";
 import { listWorktrees } from "../../src/dispatch/worktree.ts";
 import { seedCheckpoint } from "../helpers/checkpoint.ts";
+import { ownChild } from "../helpers/own-processes.ts";
 import { makeTempDir } from "../helpers/temp.ts";
 
 /** A real temp git repo with one commit, mirroring run-live-location.test.ts's harness. */
@@ -440,3 +441,22 @@ describe("cleanImpl", () => {
     }
   });
 });
+
+test("`styre clean` with no ident and no --all says its prefix once, exit 64", async () => {
+  const proc = Bun.spawn(["bun", "run", "src/index.ts", "clean"], {
+    // the test state and config folders the preload sets, so the command's sweep reads the test's
+    // launch records, never the operator's
+    env: { ...process.env },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  ownChild(proc);
+  const timer = setTimeout(() => proc.kill("SIGKILL"), 60_000);
+  const out = await new Response(proc.stdout).text();
+  const err = await new Response(proc.stderr).text();
+  const code = await proc.exited;
+  clearTimeout(timer);
+  expect(code).toBe(64);
+  expect(out).toBe("");
+  expect(err).toBe("styre clean: name an effort's ident, or pass --all\n");
+}, 60_000);

@@ -17,6 +17,8 @@ import { join } from "node:path";
  */
 const testScoped: string[] = [];
 const runScoped: string[] = [];
+const testScopedClosers: Array<() => void> = [];
+const runScopedClosers: Array<() => void> = [];
 const couldNotRemove: RemovalFailure[] = [];
 
 export interface RemovalFailure {
@@ -38,6 +40,14 @@ export function trackTempPath(path: string): string {
   assertArmed();
   (inTest ? testScoped : runScoped).push(path);
   return path;
+}
+
+/** Register `close` (closing a database kept in a tracked folder, say) to run in the same scope as
+ *  the folders: when this test ends, or when the run ends for one registered outside a test. The
+ *  closers run before the folders are removed, so nothing still holds a file being deleted. */
+export function onTempCleanup(close: () => void): void {
+  assertArmed();
+  (inTest ? testScopedClosers : runScopedClosers).push(close);
 }
 
 /** Without the preload's hooks nothing would remove a tracked folder, so refuse rather than leak. */
@@ -77,6 +87,17 @@ export async function trackTempEntriesMadeBy<T>(prefix: string, fn: () => Promis
   }
 }
 
+/** Run every closer even when one throws; a failure goes to the leak guard's report. */
+function closeAll(closers: Array<() => void>): void {
+  for (const close of closers.splice(0)) {
+    try {
+      close();
+    } catch (error) {
+      couldNotRemove.push({ path: "(cleanup callback)", reason: (error as Error).message });
+    }
+  }
+}
+
 /** Try every path even when one fails; the failures go to the leak guard's report. */
 function removeAll(paths: string[]): void {
   for (const path of paths.splice(0)) {
@@ -96,12 +117,15 @@ export function enterTest(): void {
 /** Global afterEach (test/preload.ts only). */
 export function leaveTest(): void {
   inTest = false;
+  closeAll(testScopedClosers);
   removeAll(testScoped);
 }
 
 /** Global afterAll (test/preload.ts only), before the leak guard looks at the temp root. Returns
  *  every tracked path that could not be removed during the run, with the reason. */
 export function removeRunScoped(): RemovalFailure[] {
+  closeAll(testScopedClosers);
+  closeAll(runScopedClosers);
   removeAll(testScoped);
   removeAll(runScoped);
   return couldNotRemove.splice(0);

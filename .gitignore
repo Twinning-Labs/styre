@@ -150,6 +150,9 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+# ...except the committed historical database fixtures (ENG-477, scripts/db-fixtures/generate.ts).
+# Their -wal and -shm files stay ignored.
+!test/fixtures/db/**/*.db
 
 # subagent-driven-development scratch (ledger, briefs, reports, review packages)
 .superpowers/

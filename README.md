@@ -96,7 +96,7 @@ styre setup <repo>
 # Run one ticket end-to-end, exit when a PR is ready
 styre run <TICKET-ID>
 
-# Create or migrate the SQLite state-of-truth (idempotent)
+# Create the SQLite state-of-truth, or upgrade an older one after a backup (idempotent)
 styre migrate
 ```
 
@@ -132,12 +132,12 @@ The process exit code is the machine-readable error code (codes `64` and above f
 |---|---|---|
 | `0` | success — `done` / `pr-ready` | — |
 | `1` | `abandoned` — a reserved terminal outcome; not currently emitted by any run | no — a human should look |
-| `64` | usage — CLI misuse, e.g. `styre notify` without `--test`, or `styre clean --all --purge` | no |
-| `65` | resume refused — either the branch HEAD moved since the run paused (without `--accept-head`), or concurrent-resume lock contention | yes — `--accept-head`, or retry once the other resume releases the lock |
+| `64` | usage — CLI misuse, e.g. `styre notify` without `--test`, or `styre clean --all --purge`; or an ident or slug that is not a valid folder name (see docs/architecture/conventions.md) | no |
+| `65` | checkpoint refused — `run --resume` refused because the branch HEAD moved since the run paused (without `--accept-head`), another resume holds the lock, or the checkpoint holds no ticket with that ident; a database that cannot be upgraded (written by a newer Styre, older than v7, or of an unknown shape) or whose design steps a newer Styre recorded; or `styre clean <ident>` refusing a checkpoint it cannot read or whose schema it cannot use (nothing removed) | HEAD moved: `--accept-head`; lock held: retry once the other resume releases it; no ticket with that ident: resume with the ident exactly as the checkpoint holds it (idents are case sensitive; the refusal names the idents it holds; never `--fresh` here, since on a filesystem that ignores case a fresh run could discard another paused run); a newer Styre's checkpoint: use that Styre; otherwise remove by hand (see `styre clean` in docs/architecture/runtime-parameters.md) or start over with `--fresh` |
 | `69` | a required repo toolchain program isn't installed on this machine | yes — install it, re-run |
-| `70` | internal error (an unexpected crash) | no — please report |
-| `75` | **any** `paused` run (reason `budget` / `needs_you` / `interrupted` — all resumable); also `styre clean <ident>` on a currently-live run (refuses rather than reaping) | paused: yes — `styre run --resume <ident>`. clean-on-live: wait for the run to finish or pause, then clean |
-| `78` | bad config / profile — an invalid value or unknown adapter | no — fix the config |
+| `70` | internal error (an unexpected crash), including a database migration that failed (the backup is kept) | no — please report |
+| `75` | **any** `paused` run (reason `budget` / `needs_you` / `interrupted` — all resumable; `needs_you` includes a resume on a host that lacks a required suite's tools); also `styre clean <ident>` on a run that is live right now (refuses rather than reaping) | paused: yes — `styre run --resume <ident>`. clean-on-live: wait for the run to finish or pause, then clean |
+| `78` | bad config / profile — an invalid value or unknown adapter; or a profile whose own slug is not a valid folder name (rerun styre setup with --slug); or an `--in-place` run whose HEAD cannot be read (a repository with no commit), refused before any step | no — fix the config, or commit to the repository |
 
 Full meanings, `sysexits` names, and caller guidance: [runtime-parameters.md → Exit codes](docs/architecture/runtime-parameters.md#exit-codes-error-codes-and-their-meaning).
 

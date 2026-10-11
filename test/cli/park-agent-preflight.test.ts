@@ -78,6 +78,7 @@ test("resumeRun: a missing agent CLI throws (exit 69 error) before re-dispatch",
     let dispatched = false;
     await expect(
       resumeRun({ resume: ident }, profile, runtimeConfig, {
+        probe: () => true,
         ports: {
           issueTracker: fakeIssueTracker({
             ticket: {

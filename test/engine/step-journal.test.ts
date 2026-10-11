@@ -178,3 +178,24 @@ test("onSucceed throwing rolls back markSucceeded (no succeeded-without-verdict 
   expect(steps.getByKey(db, ticketId, "review")?.status).toBe("failed");
   db.close();
 });
+
+test("onSucceed receives the result execute returned (ENG-477: a step's own commit and manifest read it)", async () => {
+  const { db, ticketId } = makeTestDb();
+  // Recorded, then asserted after: runStep would turn an expect thrown inside onSucceed into a
+  // failed step.
+  const seen: unknown[] = [];
+  const returned = { planDigest: "d1", nested: { n: 1 } };
+  await runStep(db, {
+    ticketId,
+    stepKey: "design:dispatch",
+    stepType: "dispatch",
+    effectful: true,
+    execute: () => returned,
+    onSucceed: (_step, result) => {
+      seen.push(result);
+    },
+  });
+  db.close();
+  expect(seen).toHaveLength(1);
+  expect(seen[0]).toBe(returned); // the very object, not a copy read back from result_json
+});

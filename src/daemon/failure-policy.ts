@@ -69,9 +69,15 @@ export function applyFailurePolicy(
   const maxAttempts = opts?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   const dispatchId = latestDispatchForStep(db, ticketId, step.step_key) ?? undefined;
 
-  const prerequisite =
-    step.error_json !== null && JSON.parse(step.error_json).name === "StepPrerequisiteError";
-  if (prerequisite || step.attempt >= maxAttempts) {
+  const error =
+    step.error_json === null
+      ? null
+      : (JSON.parse(step.error_json) as { name?: string; message?: string; invariant?: boolean });
+  const prerequisite = error?.name === "StepPrerequisiteError";
+  // An invariant violation (engine/step-journal.ts) is a Styre defect: escalated at once, with its
+  // message as the reason, before any retry or loopback rule below.
+  const invariant = error?.invariant === true;
+  if (prerequisite || invariant || step.attempt >= maxAttempts) {
     db.transaction(() => {
       setTicketStatus(db, ticketId, "waiting");
       insertSignal(db, {
@@ -79,7 +85,9 @@ export function applyFailurePolicy(
         signalType: "human_resume",
         reason: prerequisite
           ? failureSignature(step)
-          : `step '${step.step_key}' exhausted after ${step.attempt} attempts`,
+          : invariant
+            ? `step '${step.step_key}' broke an invariant (a Styre defect, not retried): ${error?.message ?? ""}`
+            : `step '${step.step_key}' exhausted after ${step.attempt} attempts`,
       });
       appendEvent(db, {
         ticketId,
@@ -211,6 +219,7 @@ export function applyFailurePolicy(
         ticketId,
         seq: nextSeqNum,
         kind: "reconcile",
+        origin: "reconcile",
         behavioral: 0,
         verifyCheckTypes: [],
         dependsOn: units.map((u) => u.seq),

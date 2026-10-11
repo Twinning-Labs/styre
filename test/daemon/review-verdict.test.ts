@@ -8,7 +8,7 @@ import { insertFinding } from "../../src/db/repos/review-finding.ts";
 import { listPending } from "../../src/db/repos/signal.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
 import { insertWorkUnit, listByTicket as listUnits } from "../../src/db/repos/work-unit.ts";
-import { getByKey, markRunning } from "../../src/db/repos/workflow-step.ts";
+import { getByKey, markRunning, markSucceeded } from "../../src/db/repos/workflow-step.ts";
 import { insertPending } from "../../src/db/repos/workflow-step.ts";
 import { designFeedback } from "../../src/dispatch/design-feedback.ts";
 import { makeTestDb } from "../helpers/db.ts";
@@ -367,7 +367,7 @@ test("plan-review redesign preserves a per-unit blocking finding for the redesig
   db.close();
 
   expect(r.decision).toBe("loopback");
-  expect(units.length).toBe(0); // redesign still clears the decomposition
+  expect(units.length).toBe(1); // the units stay; design:extract reruns only if the new plan changes
   expect(feedback).toContain("PER-UNIT-DECOMP-ISSUE"); // survives the cascade now
   expect(feedback).toContain("PLAN-WIDE-ISSUE"); // still there
 });
@@ -456,11 +456,14 @@ test("plan review: a blocking plan finding loops back to re-design", () => {
   const ticket = getTicket(db, ticketId);
   const units = listUnits(db, ticketId);
   const drAfter = getByKey(db, ticketId, "design:review");
+  const dispatchAfter = getByKey(db, ticketId, "design:dispatch");
   db.close();
   expect(r.decision).toBe("loopback");
   expect(ticket?.stage).toBe("design");
-  expect(units.length).toBe(0); // deleteByTicket cleared units for a fresh re-extract
-  expect(drAfter?.status).toBe("pending"); // design:review reset so the NEW plan is re-reviewed
+  expect(units.length).toBe(1); // kept: design:extract is judged again once the new plan exists
+  expect(drAfter?.status).toBe("succeeded"); // reruns when its input, the plan, changes
+  expect(dispatchAfter?.status).toBe("pending");
+  expect(dispatchAfter?.generation).toBe(1);
 });
 
 test("plan review: a clean round advances (no blocking findings)", () => {
@@ -512,12 +515,17 @@ test("redesign loopback gives the design steps their attempt budget back (STYRE-
   insertWorkUnit(db, { ticketId, seq: 1, kind: "backend", filesToTouch: ["a.ts"] });
   const did = insertDesignReviewDispatch(db, ticketId);
 
-  // design:extract stumbled twice in cycle 1 before the retry-feedback loop fixed it — the
-  // spent budget must not carry into cycle 2.
-  const extract = insertPending(db, { ticketId, stepKey: "design:extract", stepType: "dispatch" });
-  markRunning(db, extract.id, {});
-  markRunning(db, extract.id, {});
-  expect(getByKey(db, ticketId, "design:extract")?.attempt).toBe(2);
+  // design:dispatch, the redesign's consumer, stumbled once in cycle 1 before the retry-feedback
+  // loop fixed it: the spent budget must not carry into cycle 2.
+  const dispatch = insertPending(db, {
+    ticketId,
+    stepKey: "design:dispatch",
+    stepType: "dispatch",
+  });
+  markRunning(db, dispatch.id, {});
+  markRunning(db, dispatch.id, {});
+  markSucceeded(db, dispatch.id, {});
+  expect(getByKey(db, ticketId, "design:dispatch")?.attempt).toBe(2);
 
   insertFinding(db, {
     ticketId,
@@ -531,7 +539,7 @@ test("redesign loopback gives the design steps their attempt budget back (STYRE-
   });
 
   const r = applyReviewVerdict(db, ticketId, DEFAULT_RUNTIME_CONFIG, { stepKey: "design:review" });
-  const after = getByKey(db, ticketId, "design:extract");
+  const after = getByKey(db, ticketId, "design:dispatch");
   db.close();
   expect(r.decision).toBe("loopback");
   expect(after?.status).toBe("pending");

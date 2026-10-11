@@ -4,11 +4,11 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
+import { EMPTY_PLAN_DIGEST } from "../../src/daemon/design-digests.ts";
 import { StepRegistry } from "../../src/daemon/step-registry.ts";
 import type { HandlerContext } from "../../src/daemon/step-registry.ts";
 import { insertDispatch, nextSeq } from "../../src/db/repos/dispatch.ts";
 import { listByTicket } from "../../src/db/repos/event-log.ts";
-import { insertPending, markSucceeded } from "../../src/db/repos/workflow-step.ts";
 import * as door from "../../src/util/process/door.ts";
 import {
   __setCwdReadersForTests,
@@ -27,9 +27,15 @@ import {
   until,
 } from "../helpers/leftover-fixtures.ts";
 
-function seedProvisionDone(db: ReturnType<typeof makeTestDb>["db"], ticketId: number): void {
-  const s = insertPending(db, { ticketId, stepKey: "provision", stepType: "provision" });
-  markSucceeded(db, s.id, {});
+async function seedProvisionDone(
+  db: Parameters<typeof advanceOneStep>[0],
+  ticketId: number,
+): Promise<void> {
+  const r = new StepRegistry();
+  r.register("provision", () => ({}));
+  const outcome = await advanceOneStep(db, ticketId, r);
+  if (outcome.kind !== "stepped" || outcome.stepKey !== "provision")
+    throw new Error(`seedProvisionDone: expected provision to run, got ${JSON.stringify(outcome)}`);
 }
 
 /** What an agent step's handler does to the database: one dispatch row naming the worktree. */
@@ -62,14 +68,14 @@ afterEach(async () => {
 
 test("a process the agent step left in its worktree is reported on stderr and in the run's events, and the step is unaffected", async () => {
   const { db, ticketId } = makeTestDb();
-  seedProvisionDone(db, ticketId);
+  await seedProvisionDone(db, ticketId);
   const wt = folder("styre wt ");
   const m = marker();
   const registry = new StepRegistry();
   registry.register("design:dispatch", async (ctx) => {
     dispatchIn(ctx, wt);
     await leave(wt, m); // the agent's `nohup server &`
-    return { plan: "ok" };
+    return { plan: "ok", planDigest: EMPTY_PLAN_DIGEST };
   });
   const outcome = await advanceOneStep(db, ticketId, registry);
   await until(() => isRunning(m));
@@ -91,7 +97,7 @@ test("a process the agent step left in its worktree is reported on stderr and in
 
 test("a process that was already running when the step began is not reported", async () => {
   const { db, ticketId } = makeTestDb();
-  seedProvisionDone(db, ticketId);
+  await seedProvisionDone(db, ticketId);
   const wt = folder("styre-wt-");
   const m = marker();
   await leave(wt, m);
@@ -100,7 +106,7 @@ test("a process that was already running when the step began is not reported", a
   const registry = new StepRegistry();
   registry.register("design:dispatch", (ctx) => {
     dispatchIn(ctx, wt);
-    return { plan: "ok" };
+    return { plan: "ok", planDigest: EMPTY_PLAN_DIGEST };
   });
   await advanceOneStep(db, ticketId, registry);
   await pendingLeftoverChecks();
@@ -111,7 +117,7 @@ test("a process that was already running when the step began is not reported", a
 
 test("the check is not awaited: the step returns while it is still running", async () => {
   const { db, ticketId } = makeTestDb();
-  seedProvisionDone(db, ticketId);
+  await seedProvisionDone(db, ticketId);
   let release: (v: Map<number, string>) => void = () => {};
   let reads = 0;
   __setCwdReadersForTests({
@@ -124,7 +130,7 @@ test("the check is not awaited: the step returns while it is still running", asy
   const registry = new StepRegistry();
   registry.register("design:dispatch", (ctx) => {
     dispatchIn(ctx, folder("styre-wt-"));
-    return { plan: "ok" };
+    return { plan: "ok", planDigest: EMPTY_PLAN_DIGEST };
   });
   const outcome = await Promise.race([
     advanceOneStep(db, ticketId, registry),
@@ -146,7 +152,7 @@ test("the check is not awaited: the step returns while it is still running", asy
 
 test("a step that dispatched no agent starts no check", async () => {
   const { db, ticketId } = makeTestDb();
-  seedProvisionDone(db, ticketId);
+  await seedProvisionDone(db, ticketId);
   let reads = 0;
   __setCwdReadersForTests({
     async: async () => {
@@ -155,7 +161,7 @@ test("a step that dispatched no agent starts no check", async () => {
     },
   });
   const registry = new StepRegistry();
-  registry.register("design:dispatch", () => ({ plan: "ok" }));
+  registry.register("design:dispatch", () => ({ plan: "ok", planDigest: EMPTY_PLAN_DIGEST }));
   await advanceOneStep(db, ticketId, registry);
   await pendingLeftoverChecks();
   expect(reads).toBe(0);
@@ -164,7 +170,7 @@ test("a step that dispatched no agent starts no check", async () => {
 
 test("a failed agent step still gets its check, and its failure handling is unchanged", async () => {
   const { db, ticketId } = makeTestDb();
-  seedProvisionDone(db, ticketId);
+  await seedProvisionDone(db, ticketId);
   let reads = 0;
   __setCwdReadersForTests({
     async: async () => {
@@ -186,7 +192,7 @@ test("a failed agent step still gets its check, and its failure handling is unch
 
 test("nothing is started once a stop has begun: the signal handler runs its own check", async () => {
   const { db, ticketId } = makeTestDb();
-  seedProvisionDone(db, ticketId);
+  await seedProvisionDone(db, ticketId);
   let reads = 0;
   __setCwdReadersForTests({
     async: async () => {
@@ -198,7 +204,7 @@ test("nothing is started once a stop has begun: the signal handler runs its own 
   registry.register("design:dispatch", (ctx) => {
     dispatchIn(ctx, folder("styre-wt-"));
     door.beginStopping();
-    return { plan: "ok" };
+    return { plan: "ok", planDigest: EMPTY_PLAN_DIGEST };
   });
   await expect(advanceOneStep(db, ticketId, registry)).rejects.toThrow(door.RunInterrupted);
   await pendingLeftoverChecks();
@@ -208,7 +214,7 @@ test("nothing is started once a stop has begun: the signal handler runs its own 
 
 test("one check per worktree, however many agent dispatches the step made", async () => {
   const { db, ticketId } = makeTestDb();
-  seedProvisionDone(db, ticketId);
+  await seedProvisionDone(db, ticketId);
   let reads = 0;
   __setCwdReadersForTests({
     async: async () => {
@@ -221,7 +227,7 @@ test("one check per worktree, however many agent dispatches the step made", asyn
   registry.register("design:dispatch", (ctx) => {
     dispatchIn(ctx, wt);
     dispatchIn(ctx, wt);
-    return { plan: "ok" };
+    return { plan: "ok", planDigest: EMPTY_PLAN_DIGEST };
   });
   await advanceOneStep(db, ticketId, registry);
   await pendingLeftoverChecks();
@@ -231,7 +237,7 @@ test("one check per worktree, however many agent dispatches the step made", asyn
 
 test("only the dispatches the step itself made count: an earlier step's dispatch starts no check", async () => {
   const { db, ticketId } = makeTestDb();
-  seedProvisionDone(db, ticketId);
+  await seedProvisionDone(db, ticketId);
   let reads = 0;
   __setCwdReadersForTests({
     async: async () => {
@@ -242,7 +248,7 @@ test("only the dispatches the step itself made count: an earlier step's dispatch
   const registry = new StepRegistry();
   registry.register("design:dispatch", (ctx) => {
     dispatchIn(ctx, folder("styre-wt-"));
-    return { plan: "ok" };
+    return { plan: "ok", planDigest: EMPTY_PLAN_DIGEST };
   });
   registry.register("design:extract", () => ({ units: 0 }));
   await advanceOneStep(db, ticketId, registry); // an agent step

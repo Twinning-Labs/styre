@@ -21,6 +21,27 @@ export class StepPrerequisiteError extends Error {
   }
 }
 
+/** A step broke one of Styre's own invariants: a defect in Styre, not a transient failure. The
+ * journal records it with `invariant: true` (whatever the subclass's name), and the failure policy
+ * escalates it at once, on attempt 1, with its message as the reason: a retry would only repeat the
+ * defect and its agent calls. Subclasses name the kind of violation. */
+export class InvariantViolation extends Error {
+  readonly invariant = true;
+  constructor(message: string) {
+    super(message);
+    this.name = "InvariantViolation";
+  }
+}
+
+/** A handler returned a result its step's commit or manifest cannot accept (a defect in the
+ * handler; spec §6.2). */
+export class MalformedStepResultError extends InvariantViolation {
+  constructor(message: string) {
+    super(message);
+    this.name = "MalformedStepResultError";
+  }
+}
+
 /** An attempted operation did not complete. Retry the same step within its attempt budget;
  * never interpret this as a behavioral verdict or ask an author to repair code for it. */
 export class StepExecutionError extends Error {
@@ -51,7 +72,7 @@ export interface RunStepParams {
    *  review verdict: if it ran in a later transaction, a crash in between would leave a `succeeded`
    *  review with an un-applied verdict and the resolver would advance past blocking findings. Runs
    *  after the (effectful, non-transactional) `execute`, so it sees the persisted effect. */
-  onSucceed?: (step: steps.WorkflowStepRow) => void;
+  onSucceed?: (step: steps.WorkflowStepRow, result: unknown) => void;
 }
 
 export interface RunStepResult {
@@ -149,7 +170,7 @@ export async function runStep(db: Database, params: RunStepParams): Promise<RunS
     // onSucceed that opens its own transaction (applyReviewVerdict) composes correctly.
     db.transaction(() => {
       steps.markSucceeded(db, step.id, result);
-      params.onSucceed?.(current);
+      params.onSucceed?.(current, result);
     })();
     const finished = steps.getById(db, step.id);
     if (!finished) {

@@ -2,7 +2,11 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { hasTicketPlan, planFrontmatterLinear } from "../../src/dispatch/plan-frontmatter.ts";
+import {
+  hasTicketPlan,
+  linearFromFrontmatter,
+  planFrontmatterLinear,
+} from "../../src/dispatch/plan-frontmatter.ts";
 import { makeTempDir } from "../helpers/temp.ts";
 
 function tmp(): string {
@@ -38,4 +42,16 @@ test("hasTicketPlan matches only this ticket's plan", () => {
 
 test("hasTicketPlan is false when the plans dir is absent", () => {
   expect(hasTicketPlan(join(tmp(), "docs", "plans"), "ENG-1")).toBe(false);
+});
+
+test("linearFromFrontmatter reads only the leading frontmatter, whole value, CRLF too", () => {
+  expect(linearFromFrontmatter("---\nlinear: ENG-1\n---\n\nbody\n")).toBe("ENG-1");
+  expect(linearFromFrontmatter("---\r\ntitle: x\r\nlinear: ENG-1\r\n---\r\nbody\r\n")).toBe(
+    "ENG-1",
+  );
+  expect(linearFromFrontmatter("---\nlinear: ENG-10\n---\n")).toBe("ENG-10");
+  // a mention in the body, or frontmatter that does not lead the file, does not count
+  expect(linearFromFrontmatter("---\ntitle: x\n---\n\nlinear: ENG-1\n")).toBeNull();
+  expect(linearFromFrontmatter("# Plan\n---\nlinear: ENG-1\n---\n")).toBeNull();
+  expect(linearFromFrontmatter("no frontmatter")).toBeNull();
 });

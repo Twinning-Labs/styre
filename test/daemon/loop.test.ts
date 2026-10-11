@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
+import { EMPTY_PLAN_DIGEST } from "../../src/daemon/design-digests.ts";
+import { captureSnapshot } from "../../src/daemon/design-inputs.ts";
 import { readyTicketIds, tick } from "../../src/daemon/loop.ts";
 import { StepRegistry } from "../../src/daemon/step-registry.ts";
 import { insertTicket, setTicketStage } from "../../src/db/repos/ticket.ts";
@@ -6,12 +9,12 @@ import { insertWorkUnit, setStatus as setUnitStatus } from "../../src/db/repos/w
 import { getByKey } from "../../src/db/repos/workflow-step.ts";
 import { awaitSignal } from "../../src/engine/signals.ts";
 import * as door from "../../src/util/process/door.ts";
-import { makeTestDb } from "../helpers/db.ts";
+import { TEST_PROFILE, makeTestDb } from "../helpers/db.ts";
 
 function registry(): StepRegistry {
   const r = new StepRegistry();
   r.register("provision", () => ({}));
-  r.register("design:dispatch", () => ({}));
+  r.register("design:dispatch", () => ({ planDigest: EMPTY_PLAN_DIGEST }));
   return r;
 }
 
@@ -36,8 +39,15 @@ test("readyTicketIds excludes a ticket parked on a pending signal", () => {
 test("tick respects the maxConcurrent (K) cap", async () => {
   const { db, projectId } = makeTestDb();
   // makeTestDb already created one ticket; add two more → 3 ready, K=2 processes 2.
-  insertTicket(db, { projectId, ident: "ENG-2" });
-  insertTicket(db, { projectId, ident: "ENG-3" });
+  const eng2 = insertTicket(db, { projectId, ident: "ENG-2" });
+  const eng3 = insertTicket(db, { projectId, ident: "ENG-3" });
+  for (const ticketId of [eng2, eng3])
+    captureSnapshot(db, ticketId, {
+      profile: TEST_PROFILE,
+      unusableComponents: [],
+      nonPrimaryComponents: [],
+      config: DEFAULT_RUNTIME_CONFIG,
+    });
   const summary = await tick(db, registry(), { maxConcurrent: 2 });
   db.close();
   expect(summary.advanced).toBe(2);

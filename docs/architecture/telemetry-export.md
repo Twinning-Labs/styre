@@ -110,6 +110,33 @@ that outcome.
   yourself in the checkout during the step, with their command lines. Control characters in them are
   replaced with `?` before they are stored or emitted.
 
+**Six `note` reasons from ENG-477** (no new kind; the schema change is new columns and tables, none
+in `event_log`), all with `payload_json.event` equal to the reason (see
+[`runtime-parameters.md`](runtime-parameters.md#design-inputs-and-invalidation-eng-477)):
+- **`inputs-changed`** (a resume, or a run on a reused `--db`, found design inputs changed) —
+  `names` (the changed inputs), `pastDesign`, `message`.
+- **`invalidated`** (design steps were reset to run again) — `stepKeys`, `changed`, and `cause`:
+  `inputs` (an input the step reads changed), `feedback` (a review sent the plan back),
+  `worktree-recreated` (`provision` runs again because a resume recreated the worktree) or
+  `manifest-touched` (`provision` runs again because a change touched a dependency manifest).
+- **`adopted`** (design steps finished under an older Styre were recorded) — `stepKeys` (recorded
+  with today's inputs), `willRerun` (recorded with an empty manifest, run again once the steps
+  before them have), `message`.
+- **`reused-database`** (the run was started again on an existing database) — no other field:
+  written by a `styre run` on a reused `--db` on its own ticket when it already existed and on every
+  other active ticket, and by a resume on the checkpoint's other active tickets.
+- **`toolchain-missing`** (this host lacks a required suite's tools) — `detail`: a resume found the
+  tools missing while it had already left the run waiting for the operator, so no second pause was
+  written.
+- **`carryover-dropped`** (partial output withheld) — `stepKey`, `changed`: a step paused before it
+  finished was dispatched again under other inputs, so its partial output from before the pause was
+  not passed on.
+
+A design `loopback` event's payload also carries `consumer` (`design:dispatch`, the step its
+findings are for) and `generation` (that step's generation after the redesign reset it); a
+`loopback` written before ENG-477 has neither and is read as addressed to generation 0. The
+invalidate loop guard's escalation is an `escalated` event with signature `invalidate-loop:<step>`.
+
 ### 3.2 `dispatch` — one completed agent invocation (`dispatch` row)
 
 One row per completed dispatch (an agent call that started and ended within this run). A dispatch

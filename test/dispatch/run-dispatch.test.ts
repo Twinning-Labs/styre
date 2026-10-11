@@ -275,7 +275,14 @@ test("compose: retry-feedback AND resumeContext carryover both survive (fail→p
     {
       runner,
       ...depsFor(repo, wt),
-      resumeContext: { stepKey: fresh.step_key, transcript: "PRIOR PARTIAL OUTPUT" },
+      resumeContext: {
+        ticketId,
+        stepKey: fresh.step_key,
+        writtenBy: fresh.step_key,
+        transcript: "PRIOR PARTIAL OUTPUT",
+        generation: fresh.generation,
+        manifest: null,
+      },
     },
     {
       handlerKey: "design:extract",

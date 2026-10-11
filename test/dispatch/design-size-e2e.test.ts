@@ -1,23 +1,30 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
 import { DEFAULT_AGENT_CONFIG } from "../../src/config/agent-config.ts";
-import { DEFAULT_RUNTIME_CONFIG } from "../../src/config/runtime-config.ts";
+import { DEFAULT_RUNTIME_CONFIG, type RuntimeConfig } from "../../src/config/runtime-config.ts";
 import { advanceOneStep } from "../../src/daemon/advance.ts";
+import { captureSnapshot } from "../../src/daemon/design-inputs.ts";
 import { getTicket } from "../../src/db/repos/ticket.ts";
-import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
-import { getByKey, insertPending } from "../../src/db/repos/workflow-step.ts";
+import { getByKey } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
+import { pendingLeftoverChecks } from "../../src/util/process/leftovers.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { unitsOf } from "../helpers/design-script.ts";
+import { STEP_TEST_TIMEOUT_MS, reachDesignStep } from "../helpers/design-steps.ts";
 import { makeTempDir } from "../helpers/temp.ts";
+
+// The steps that dispatch an agent start a background leftover check (ENG-485 section 9.1); one
+// still running when the test ends keeps the command temp folder.
+afterEach(pendingLeftoverChecks);
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
 function gitRepo(): string {
   const root = makeTempDir("styre-dse-");
-  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
+  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root, timeout: 30_000 });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
   run(["config", "user.name", "T"]);
@@ -27,41 +34,63 @@ function gitRepo(): string {
   return root;
 }
 
+function profileFor(repo: string) {
+  return parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
+  });
+}
+
+const roots = new Map<string, string>();
+function rootFor(repo: string): string {
+  let root = roots.get(repo);
+  if (root === undefined) {
+    root = makeTempDir("styre-dsewt-");
+    roots.set(repo, root);
+  }
+  return root;
+}
+
 function registryFor(repo: string, runner: FakeAgentRunner) {
   return buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: repo,
-      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
-    }),
-    worktreeRoot: makeTempDir("styre-dsewt-"),
+    profile: profileFor(repo),
+    worktreeRoot: rootFor(repo),
   });
 }
 
-/** Seed design:dispatch as succeeded and insert `unitCount` backend work units.
- *  track stays null so design:size is the next step the resolver routes to. */
-function readyForSize(
+/** The real provision, design:dispatch and design:extract steps run first (spec §8), with
+ *  `unitCount` backend units that are not behavioural; track stays null so design:size is the next
+ *  step the resolver routes to. */
+async function readyForSize(
   db: ReturnType<typeof makeTestDb>["db"],
   ticketId: number,
+  repo: string,
   unitCount: number,
-) {
-  const s = insertPending(db, { ticketId, stepKey: "design:dispatch", stepType: "dispatch" });
-  db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
-  for (let i = 1; i <= unitCount; i++) {
-    insertWorkUnit(db, {
-      ticketId,
-      seq: i,
-      kind: "backend",
-      behavioral: 0,
-      verifyCheckTypes: ["test"],
-    });
-  }
-  // design:extract must also be succeeded (resolver: units present but extract step absent is fine;
-  // it checks units.length > 0 not extract step, but to be safe we mark it done too).
-  const e = insertPending(db, { ticketId, stepKey: "design:extract", stepType: "dispatch" });
-  db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(e.id);
+  config: RuntimeConfig = DEFAULT_RUNTIME_CONFIG,
+): Promise<void> {
+  // The snapshot says what this run hands its design steps (spec §4): the profile and config the
+  // flow runs with, not makeTestDb's defaults, so a manifest records the inputs the step read.
+  captureSnapshot(db, ticketId, {
+    profile: profileFor(repo),
+    unusableComponents: [],
+    nonPrimaryComponents: [],
+    config,
+  });
+  await reachDesignStep({
+    db,
+    ticketId,
+    profile: profileFor(repo),
+    worktreeRoot: rootFor(repo),
+    target: "design:size",
+    config,
+    units: unitsOf(unitCount, { behavioral: false, dir: "src", ext: "ts" }).map((u) => ({
+      ...u,
+      verify_check_types: ["test"],
+    })),
+  });
 }
 
 /** Sidecar bodies used by the fake runners. */
@@ -79,213 +108,249 @@ const ON_CONFIG = {
 
 // ─── Flow 1: Grader OFF (default): 2-unit ticket → full → routes to design:review ────────────
 
-test("grader off: 2-unit ticket sizes to 'full' via sprawl and design:review is dispatched", async () => {
-  const { db, ticketId, projectId } = makeTestDb();
-  const repo = gitRepo();
-  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
-  readyForSize(db, ticketId, 2);
+test(
+  "grader off: 2-unit ticket sizes to 'full' via sprawl and design:review is dispatched",
+  async () => {
+    const { db, ticketId, projectId } = makeTestDb();
+    const repo = gitRepo();
+    db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+    await readyForSize(db, ticketId, repo, 2);
 
-  // design:size is off — any grader call is a test failure.
-  // design:review will be called once with clean findings.
-  let callCount = 0;
-  const runner = new FakeAgentRunner(() => {
-    callCount += 1;
-    if (callCount === 1) {
-      // First (and only) agent call: design:review with clean plan → allow advance to implement.
-      return {
-        completed: true,
-        exitCode: 0,
-        stdout: cleanPlanSidecar,
-        stderr: "",
-        timedOut: false,
-        costUsd: null,
-        tokensIn: null,
-        tokensOut: null,
-      };
+    // design:size is off — any grader call is a test failure.
+    // design:review will be called once with clean findings.
+    let callCount = 0;
+    const runner = new FakeAgentRunner(() => {
+      callCount += 1;
+      if (callCount === 1) {
+        // First (and only) agent call: design:review with clean plan → allow advance to implement.
+        return {
+          completed: true,
+          exitCode: 0,
+          stdout: cleanPlanSidecar,
+          stderr: "",
+          timedOut: false,
+          costUsd: null,
+          tokensIn: null,
+          tokensOut: null,
+        };
+      }
+      // Any second call means the grader fired (wrong) or the test over-drove the loop.
+      throw new Error(`unexpected runner call #${callCount} in grader-off flow`);
+    });
+
+    const registry = registryFor(repo, runner);
+
+    // Drive the loop: design:size (no agent) sets track='full'; then design:review fires.
+    // After design:review succeeds cleanly the inline advance fires (design→implement).
+    // implement:wu1:dispatch would call the runner — we catch that throw.
+    // Default config (no opts) means complexityGrading=false — sprawl-only sizing.
+    for (let i = 0; i < 15; i++) {
+      const t = getTicket(db, ticketId);
+      if (!t || t.stage !== "design") break;
+      try {
+        await advanceOneStep(db, ticketId, registry);
+      } catch {
+        // Once the inline advance fires (design→implement) the next call tries
+        // implement:dispatch with no real worktree — expected; the stage transition is already set.
+      }
     }
-    // Any second call means the grader fired (wrong) or the test over-drove the loop.
-    throw new Error(`unexpected runner call #${callCount} in grader-off flow`);
-  });
 
-  const registry = registryFor(repo, runner);
+    const ticket = getTicket(db, ticketId);
+    const reviewStep = getByKey(db, ticketId, "design:review");
+    db.close();
 
-  // Drive the loop: design:size (no agent) sets track='full'; then design:review fires.
-  // After design:review succeeds cleanly the inline advance fires (design→implement).
-  // implement:wu1:dispatch would call the runner — we catch that throw.
-  // Default config (no opts) means complexityGrading=false — sprawl-only sizing.
-  for (let i = 0; i < 15; i++) {
-    const t = getTicket(db, ticketId);
-    if (!t || t.stage !== "design") break;
-    try {
-      await advanceOneStep(db, ticketId, registry);
-    } catch {
-      // Once the inline advance fires (design→implement) the next call tries
-      // implement:dispatch with no real worktree — expected; the stage transition is already set.
-    }
-  }
-
-  const ticket = getTicket(db, ticketId);
-  const reviewStep = getByKey(db, ticketId, "design:review");
-  db.close();
-
-  // Binding facts:
-  // 1. The sprawl sizer set track='full' (2 units ≥ FULL_TRACK_MIN_UNITS=2).
-  expect(ticket?.track).toBe("full");
-  // 2. design:review was dispatched (the step exists and is not null).
-  expect(reviewStep).not.toBeNull();
-  // 3. The only agent call was design:review (NOT a grader call). At most 2 runner calls:
-  //    design:review + the implement:dispatch attempt (which throws). callCount ≤ 2.
-  expect(callCount).toBeLessThanOrEqual(2);
-});
+    // Binding facts:
+    // 1. The sprawl sizer set track='full' (2 units ≥ FULL_TRACK_MIN_UNITS=2).
+    expect(ticket?.track).toBe("full");
+    // 2. design:review was dispatched (the step exists and is not null).
+    expect(reviewStep).not.toBeNull();
+    // 3. The only agent call was design:review (NOT a grader call). At most 2 runner calls:
+    //    design:review + the implement:dispatch attempt (which throws). callCount ≤ 2.
+    expect(callCount).toBeLessThanOrEqual(2);
+  },
+  STEP_TEST_TIMEOUT_MS,
+);
 
 // ─── Flow 2: Grader ON: 3 simple units → overall=2 → fast → SKIPS design:review ─────────────
 
-test("grader on: 3-unit ticket with overall=2 sizes to 'fast' and design:review is never created", async () => {
-  const { db, ticketId, projectId } = makeTestDb();
-  const repo = gitRepo();
-  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
-  readyForSize(db, ticketId, 3);
+test(
+  "grader on: 3-unit ticket with overall=2 sizes to 'fast' and design:review is never created",
+  async () => {
+    const { db, ticketId, projectId } = makeTestDb();
+    const repo = gitRepo();
+    db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+    await readyForSize(db, ticketId, repo, 3, ON_CONFIG.config);
 
-  // design:size (grader on): returns a grade with overall=2.
-  // design:review must NOT be called (fast-track skips it).
-  // Any call after the first grade → fail loudly.
-  let callCount = 0;
-  const runner = new FakeAgentRunner((input) => {
-    callCount += 1;
-    if (callCount === 1) {
-      // Verify this is the grade prompt (complexity grader), not design:review.
-      if (!input.prompt.includes("COMPLEXITY") && !input.prompt.includes("grading")) {
+    // design:size (grader on): returns a grade with overall=2.
+    // design:review must NOT be called (fast-track skips it).
+    // Any call after the first grade → fail loudly.
+    let callCount = 0;
+    const runner = new FakeAgentRunner((input) => {
+      callCount += 1;
+      if (callCount === 1) {
+        // Verify this is the grade prompt (complexity grader), not design:review.
+        if (!input.prompt.includes("COMPLEXITY") && !input.prompt.includes("grading")) {
+          throw new Error(
+            `grader-on flow: expected complexity grade call first, got: ${input.prompt.slice(0, 80)}`,
+          );
+        }
+        return {
+          completed: true,
+          exitCode: 0,
+          stdout: gradeSidecar(2),
+          stderr: "",
+          timedOut: false,
+          costUsd: null,
+          tokensIn: null,
+          tokensOut: null,
+        };
+      }
+      // A second call would be design:review (which must be skipped) or implement:dispatch.
+      // We only fail if it looks like design:review (the fast-track invariant).
+      if (
+        input.prompt.includes("independent plan reviewer") ||
+        input.prompt.includes("plan reviewer")
+      ) {
         throw new Error(
-          `grader-on flow: expected complexity grade call first, got: ${input.prompt.slice(0, 80)}`,
+          `grader-on fast-track: design:review must NOT be dispatched (call #${callCount})`,
         );
       }
-      return {
-        completed: true,
-        exitCode: 0,
-        stdout: gradeSidecar(2),
-        stderr: "",
-        timedOut: false,
-        costUsd: null,
-        tokensIn: null,
-        tokensOut: null,
-      };
+      // implement:dispatch has no real worktree — let it throw naturally so the stage transition
+      // (design→implement) is already committed before this call.
+      throw new Error(`expected: implement dispatch has no real worktree (call #${callCount})`);
+    });
+
+    const registry = registryFor(repo, runner);
+
+    // Drive the loop until the ticket leaves design:
+    //   Tick N: design:size runs (grader on) → grade overall=2, 3 units → combineTrack(3,2)='fast'
+    //   Tick N+1: resolver sees track='fast' (≠'full') → advance design→implement (inline)
+    //   Tick N+2: implement:wu1:dispatch → no real worktree → throws → caught.
+    for (let i = 0; i < 15; i++) {
+      const t = getTicket(db, ticketId);
+      if (!t || t.stage !== "design") break;
+      try {
+        await advanceOneStep(db, ticketId, registry, ON_CONFIG);
+      } catch {
+        // Expected once the inline advance fires.
+      }
     }
-    // A second call would be design:review (which must be skipped) or implement:dispatch.
-    // We only fail if it looks like design:review (the fast-track invariant).
-    if (
-      input.prompt.includes("independent plan reviewer") ||
-      input.prompt.includes("plan reviewer")
-    ) {
-      throw new Error(
-        `grader-on fast-track: design:review must NOT be dispatched (call #${callCount})`,
-      );
-    }
-    // implement:dispatch has no real worktree — let it throw naturally so the stage transition
-    // (design→implement) is already committed before this call.
-    throw new Error(`expected: implement dispatch has no real worktree (call #${callCount})`);
-  });
 
-  const registry = registryFor(repo, runner);
+    const ticket = getTicket(db, ticketId);
+    const reviewStep = getByKey(db, ticketId, "design:review");
+    const sizeManifest = JSON.parse(
+      getByKey(db, ticketId, "design:size")?.input_manifest ?? "null",
+    ) as Record<string, string>;
+    db.close();
 
-  // Drive the loop until the ticket leaves design:
-  //   Tick N: design:size runs (grader on) → grade overall=2, 3 units → combineTrack(3,2)='fast'
-  //   Tick N+1: resolver sees track='fast' (≠'full') → advance design→implement (inline)
-  //   Tick N+2: implement:wu1:dispatch → no real worktree → throws → caught.
-  for (let i = 0; i < 15; i++) {
-    const t = getTicket(db, ticketId);
-    if (!t || t.stage !== "design") break;
-    try {
-      await advanceOneStep(db, ticketId, registry, ON_CONFIG);
-    } catch {
-      // Expected once the inline advance fires.
-    }
-  }
-
-  const ticket = getTicket(db, ticketId);
-  const reviewStep = getByKey(db, ticketId, "design:review");
-  db.close();
-
-  // Binding facts:
-  // 1. Grade + combineTrack produced 'fast' (overall=2 < 5 AND units=3 < 5).
-  expect(ticket?.track).toBe("fast");
-  // 2. Ticket advanced past design (stage=implement).
-  expect(ticket?.stage).toBe("implement");
-  // 3. design:review step was NEVER created (fast-track skips it).
-  expect(reviewStep).toBeNull();
-});
+    // Binding facts:
+    // 1. Grade + combineTrack produced 'fast' (overall=2 < 5 AND units=3 < 5).
+    expect(ticket?.track).toBe("fast");
+    // 2. Ticket advanced past design (stage=implement).
+    expect(ticket?.stage).toBe("implement");
+    // 3. design:review step was NEVER created (fast-track skips it).
+    expect(reviewStep).toBeNull();
+    // 4. design:size's manifest records the grading-on inputs it read.
+    expect(Object.keys(sizeManifest).sort()).toEqual([
+      "config.complexityGrading",
+      "plan",
+      "profile.promptVars",
+      "profile.slug",
+      "ticket.title",
+      "workUnits",
+    ]);
+  },
+  STEP_TEST_TIMEOUT_MS,
+);
 
 // ─── Flow 3: Grader ON: 1 unit, high overall=8 → full → design:review runs ──────────────────
 
-test("grader on: 1-unit ticket with overall=8 sizes to 'full' and design:review is dispatched", async () => {
-  const { db, ticketId, projectId } = makeTestDb();
-  const repo = gitRepo();
-  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
-  readyForSize(db, ticketId, 1);
+test(
+  "grader on: 1-unit ticket with overall=8 sizes to 'full' and design:review is dispatched",
+  async () => {
+    const { db, ticketId, projectId } = makeTestDb();
+    const repo = gitRepo();
+    db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+    await readyForSize(db, ticketId, repo, 1, ON_CONFIG.config);
 
-  // Two agent calls expected:
-  //   Call 1: design:size (grader on) → grade overall=8
-  //   Call 2: design:review → clean findings
-  let callCount = 0;
-  const runner = new FakeAgentRunner((_input) => {
-    callCount += 1;
-    if (callCount === 1) {
-      // Should be the complexity grade call.
-      return {
-        completed: true,
-        exitCode: 0,
-        stdout: gradeSidecar(8),
-        stderr: "",
-        timedOut: false,
-        costUsd: null,
-        tokensIn: null,
-        tokensOut: null,
-      };
+    // Two agent calls expected:
+    //   Call 1: design:size (grader on) → grade overall=8
+    //   Call 2: design:review → clean findings
+    let callCount = 0;
+    const runner = new FakeAgentRunner((_input) => {
+      callCount += 1;
+      if (callCount === 1) {
+        // Should be the complexity grade call.
+        return {
+          completed: true,
+          exitCode: 0,
+          stdout: gradeSidecar(8),
+          stderr: "",
+          timedOut: false,
+          costUsd: null,
+          tokensIn: null,
+          tokensOut: null,
+        };
+      }
+      if (callCount === 2) {
+        // Should be design:review with clean plan.
+        return {
+          completed: true,
+          exitCode: 0,
+          stdout: cleanPlanSidecar,
+          stderr: "",
+          timedOut: false,
+          costUsd: null,
+          tokensIn: null,
+          tokensOut: null,
+        };
+      }
+      // Third call = implement:dispatch (no real worktree) — throw so the loop breaks.
+      throw new Error(`expected: implement dispatch has no real worktree (call #${callCount})`);
+    });
+
+    const registry = registryFor(repo, runner);
+
+    // Drive the loop:
+    //   Tick N: design:size (grader on) → overall=8, 1 unit → combineTrack(1,8)='full'
+    //   Tick N+1: resolver: track='full', design:review not done → design:review fires
+    //   Tick N+2: design:review clean → advance design→implement (inline)
+    //   Tick N+3: implement:wu1:dispatch → throws → caught.
+    for (let i = 0; i < 15; i++) {
+      const t = getTicket(db, ticketId);
+      if (!t || t.stage !== "design") break;
+      try {
+        await advanceOneStep(db, ticketId, registry, ON_CONFIG);
+      } catch {
+        // Expected once the inline advance fires (implement:dispatch has no real worktree).
+      }
     }
-    if (callCount === 2) {
-      // Should be design:review with clean plan.
-      return {
-        completed: true,
-        exitCode: 0,
-        stdout: cleanPlanSidecar,
-        stderr: "",
-        timedOut: false,
-        costUsd: null,
-        tokensIn: null,
-        tokensOut: null,
-      };
-    }
-    // Third call = implement:dispatch (no real worktree) — throw so the loop breaks.
-    throw new Error(`expected: implement dispatch has no real worktree (call #${callCount})`);
-  });
 
-  const registry = registryFor(repo, runner);
+    const ticket = getTicket(db, ticketId);
+    const reviewStep = getByKey(db, ticketId, "design:review");
+    const sizeManifest = JSON.parse(
+      getByKey(db, ticketId, "design:size")?.input_manifest ?? "null",
+    ) as Record<string, string>;
+    db.close();
 
-  // Drive the loop:
-  //   Tick N: design:size (grader on) → overall=8, 1 unit → combineTrack(1,8)='full'
-  //   Tick N+1: resolver: track='full', design:review not done → design:review fires
-  //   Tick N+2: design:review clean → advance design→implement (inline)
-  //   Tick N+3: implement:wu1:dispatch → throws → caught.
-  for (let i = 0; i < 15; i++) {
-    const t = getTicket(db, ticketId);
-    if (!t || t.stage !== "design") break;
-    try {
-      await advanceOneStep(db, ticketId, registry, ON_CONFIG);
-    } catch {
-      // Expected once the inline advance fires (implement:dispatch has no real worktree).
-    }
-  }
-
-  const ticket = getTicket(db, ticketId);
-  const reviewStep = getByKey(db, ticketId, "design:review");
-  db.close();
-
-  // Binding facts:
-  // 1. combineTrack(1, 8) = 'full' (overall=8 ≥ COMPLEXITY_FULL_THRESHOLD=5).
-  expect(ticket?.track).toBe("full");
-  // 2. design:review was dispatched and is not null.
-  expect(reviewStep).not.toBeNull();
-  // 3. design:review step succeeded (clean plan verdict).
-  expect(reviewStep?.status).toBe("succeeded");
-  // 4. Both the grade call and the review call fired.
-  expect(callCount).toBeGreaterThanOrEqual(2);
-});
+    // Binding facts:
+    // 1. combineTrack(1, 8) = 'full' (overall=8 ≥ COMPLEXITY_FULL_THRESHOLD=5).
+    expect(ticket?.track).toBe("full");
+    // 2. design:review was dispatched and is not null.
+    expect(reviewStep).not.toBeNull();
+    // 3. design:review step succeeded (clean plan verdict).
+    expect(reviewStep?.status).toBe("succeeded");
+    // 4. Both the grade call and the review call fired.
+    expect(callCount).toBeGreaterThanOrEqual(2);
+    // 4. design:size's manifest records the grading-on inputs it read.
+    expect(Object.keys(sizeManifest).sort()).toEqual([
+      "config.complexityGrading",
+      "plan",
+      "profile.promptVars",
+      "profile.slug",
+      "ticket.title",
+      "workUnits",
+    ]);
+  },
+  STEP_TEST_TIMEOUT_MS,
+);

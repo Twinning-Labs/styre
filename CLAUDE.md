@@ -31,7 +31,7 @@ Everything authoritative lives in `docs/architecture/`. Read top-to-bottom befor
 1. **`minimal-loop.md`** — the concrete `next_step_key` state machine, loopback resets, budget numbers, the needs-you inbox. Start here; it's the most concrete.
 2. **`control-loop.md`** — durable control-loop semantics: the control loop, the per-ticket event loop, step catalog (S1–S10) with per-step guards/inputs/outputs/tools, the structured-output interface (§3a), the Loopback Atlas (§8), invariants a step author must hold (§9).
 3. **`projector.md`** — the one-way projector: the sole outward write path from SQLite to the issue tracker (Linear/Jira), the forge (GitHub), and the notifier (Slack), draining `projection_outbox`.
-4. **`schema.sql`** — the SQLite SoT: **17 `CREATE TABLE` statements** (`grep -c '^CREATE TABLE'`). `memory_record` (Memory/UGL) is a commented-out `-- DEFERRED` stub, not one of the 17; `metric_event`, `external_id_cache`, and `projection_state` are defined but currently unwired; `run` (ENG-349) is the per-invocation identity table and is live. This file is a byte-identical copy of `src/db/schema.sql` — keep them in sync.
+4. **`schema.sql`** — the SQLite SoT: **19 `CREATE TABLE` statements** (`grep -c '^CREATE TABLE'`). `memory_record` (Memory/UGL) is a commented-out `-- DEFERRED` stub, not one of the 19; `metric_event`, `external_id_cache`, and `projection_state` are defined but currently unwired; `run` (ENG-349) is the per-invocation identity table and is live; `ticket_input` and `workflow_step_history` (ENG-477) hold the design inputs and the rows an invalidation replaced. This file is a byte-identical copy of `src/db/schema.sql` — keep them in sync.
 5. **`brainstorm.md`** — the running decision log / rationale. §4 gate taxonomy, §5 supervisor+memory (post-cutover), §9 migration plan, **§10 Open Decisions Register** (the DECIDED/OPEN status of every design item), §12 schema overview. It's append-only — **never rewrite its history**; add new entries to the §11 changelog.
 
 The `▶ RESUME HERE` banner at the top of `brainstorm.md` is the live status pointer — check it first to see what's settled and what's open.
@@ -68,7 +68,7 @@ These are the load-bearing decisions. Code that violates them is wrong even if i
 
 OSS binary — **six** subcommands (`clean, ls, migrate, notify, run, setup`) (`src/index.ts`). Full flag/exit-code/env detail in `docs/architecture/runtime-parameters.md`.
 - `styre setup <repo>` — probe the repo and write the project profile (`profile.json`).
-- `styre migrate` — bootstrap (create + migrate) the SQLite SoT.
+- `styre migrate` — bootstrap the SQLite SoT, or upgrade an older one (schema v7 on) after a `VACUUM INTO` backup next to it; refuses a newer, older or unknown schema (exit `65`).
 - `styre run <ticket>` — one-shot headless runner (the CI/cloud/fleet primitive; ephemeral per-run SQLite). Refuses if a checkpoint already exists for that ident, pointing at `--resume`/`--fresh`.
   - On a session-limit / out-of-credits dispatch death, `run` **pauses** (reason `budget`): the SoT +
     transcript are already at their live location, `$XDG_STATE_HOME/styre/<slug>/<ticket-ident>/`
@@ -79,11 +79,11 @@ OSS binary — **six** subcommands (`clean, ls, migrate, notify, run, setup`) (`
     moved since the run paused, resume refuses (exit `65`); use `--accept-head` (resume against new
     HEAD, drops carryover) or `--inspect` (diagnostics only, exit `0`). A missing repo toolchain
     aborts a fresh run with exit `69` (`EX_TOOLCHAIN_MISSING`).
-- `styre ls` — list paused/resumable efforts, finished leftovers (reapable via `styre clean --all`), and running efforts.
-- `styre clean <ident>` — reap one effort's disk artifacts (worktree + checkpoint); no ticket-status change; refuses a live run (exit `75`). `--all` reaps only provably-finished (`pr-ready`/`done`) efforts for the current project, skipping resumable pauses and live runs. `--purge` (single-ident only, rejects alongside `--all` at exit `64`) additionally deletes the local + remote branch (closes the PR).
+- `styre ls` — list paused/resumable efforts, finished leftovers (reapable via `styre clean --all`), and running efforts; also checkpoints it cannot read and checkpoints whose schema it cannot use, each with the reason.
+- `styre clean <ident>` — reap one effort's disk artifacts (worktree + checkpoint); no ticket-status change; refuses a live run (exit `75`); refuses a checkpoint it cannot read or whose schema it cannot use (exit `65`), removes nothing, and names the folder and the worktrees that look like the run's, for removal by hand; refuses an ident or slug that is not a valid folder name (exit `64`; a slug may nest with `/`, each part a folder name: see `conventions.md`). `--all` reaps only efforts proven finished (`pr-ready`/`done`) for the current project, skipping resumable pauses and live runs and checkpoints it cannot use. `--purge` (single-ident only, rejects alongside `--all` at exit `64`) additionally deletes the local + remote branch (closes the PR).
 - `styre notify --test` — send a test notification through the configured notifier (Slack). Diagnostic; without `--test` it throws a usage error and exits `64` (`EX_USAGE`), not `2`.
 
-Stream contract: `styre run` writes **only NDJSON telemetry to stdout** and all human-readable output to **stderr**; `setup` and `migrate` print human output to stdout.
+Stream contract: `styre run` writes **only NDJSON telemetry to stdout** and all human-readable output to **stderr**; `setup`, `migrate` and `notify` print human output to stderr too (only an interactive `setup` prompt's question reaches stdout, through the runtime's `prompt()`); `ls` and `clean` print their listing and summary to stdout.
 
 **(Commercial Control Plane only — not OSS, no subcommand ships in this binary):** persistent supervised mode, multi-ticket scheduling, K-concurrency; a management CLI (`status`/`inbox`/`config`/`pause`/`resume`/`logs`/`uninstall`); the needs-you inbox.
 

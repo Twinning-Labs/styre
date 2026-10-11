@@ -7,7 +7,6 @@
 // Cleanup touches only the test's own processes (test/helpers/own-processes.ts): script is claimed
 // as it starts, everything under it by descent while it is still connected (the Ctrl-\ tool is
 // claimed before the keystroke that orphans it), and `killOwned` ends whatever is left.
-import { Database } from "bun:sqlite";
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import {
   existsSync,
@@ -19,6 +18,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { readCopyOf } from "../../src/db/read-copy.ts";
 import type { ProcInfo } from "../../src/util/process/proc-table.ts";
 import { makeTicketDb, removeLifecycleFolders } from "../helpers/lifecycle.ts";
 import {
@@ -355,18 +355,15 @@ function coreFiles(pid: number, cwd: string): string[] {
 
 /** How many interruption notes the run database holds. */
 function interruptions(path: string): number {
-  const c = new Database(path, { readonly: true });
-  try {
-    return (
+  return readCopyOf(
+    path,
+    (c) =>
       c
         .query<{ n: number }, []>(
           "SELECT COUNT(*) AS n FROM event_log WHERE kind = 'note' AND reason = 'interrupted'",
         )
-        .get()?.n ?? -1
-    );
-  } finally {
-    c.close();
-  }
+        .get()?.n ?? -1,
+  );
 }
 
 // ---- the compiled styre --------------------------------------------------------------------------

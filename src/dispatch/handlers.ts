@@ -9,6 +9,18 @@ import type { UnusableComponent } from "../cli/preflight.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
 import { latestReauthorRoute } from "../daemon/arbiter-verdict.ts";
 import { latestChecksReauthorAcs } from "../daemon/checks-verdict.ts";
+import { planDigestOf, ticketPlanFilesAt } from "../daemon/design-digests.ts";
+import { recordStartingCommit } from "../daemon/design-inputs.ts";
+import {
+  type ExtractResult,
+  type PlanFindingInput,
+  type ReviewResult,
+  type SizeResult,
+  writeExtractOutputs,
+  writePlanFindings,
+  writeSizeOutput,
+} from "../daemon/design-outputs.ts";
+import { readWorkUnitsForDesign } from "../daemon/design-reads.ts";
 import { StepRegistry } from "../daemon/step-registry.ts";
 import type { HandlerContext } from "../daemon/step-registry.ts";
 import {
@@ -39,17 +51,15 @@ import {
 } from "../db/repos/ground-truth-signal.ts";
 import { getProject } from "../db/repos/project.ts";
 import { enqueue, enqueueReplacingFailed } from "../db/repos/projection-outbox.ts";
-import { insertFinding } from "../db/repos/review-finding.ts";
 import {
   assertExactFindingIds,
   findingsForUnit,
   recordResponses,
   unresolvedReviewReason,
 } from "../db/repos/review-round.ts";
-import { getTicket, setNeedsDocs, setTicketTrack } from "../db/repos/ticket.ts";
+import { getTicket } from "../db/repos/ticket.ts";
 import {
   getById as getUnit,
-  insertWorkUnit,
   listByTicket as listUnits,
   parseFilesToTouch,
   setBaseSha,
@@ -143,6 +153,7 @@ import {
 import {
   isEditablePythonPrepare,
   planProvision,
+  recordUnusableComponents,
   resetProvisionIfManifestTouched,
   resolvePythonInterpreter,
   sourceCheckCommand,
@@ -189,10 +200,17 @@ export interface RegistryDeps {
   worktreeRoot: string;
   inPlace?: boolean;
   timeoutMs?: number;
-  resumeContext?: { stepKey: string; transcript: string };
+  resumeContext?: import("./run-dispatch.ts").ResumeContext;
   /** RED-first check executor override (tests inject a scripted runner; production uses runCommand).
    *  Shared by authoring, baseline replay, delivered binding, and post-implement reruns. */
   runCheckCommand?: import("../util/run-command.ts").CmdRunner;
+  /** The run's own ticket, once it exists, when this fresh run created it; null otherwise. In
+   *  worktree mode provision records the commit the ticket branch is created from, right after it
+   *  first creates it, for that ticket only (spec §4.2 and its ruling: never for another ticket the
+   *  loop drives on a reused --db, and never for a ticket the database already held, whose branch
+   *  this run did not first create). Resume never sets it: there `worktree add -B` recreates the
+   *  branch (ENG-488), which is not its first creation. */
+  startingCommitTicketId?: () => number | null;
 }
 
 const DESIGN_TIMEOUT_MS = 60 * 60 * 1000;
@@ -525,140 +543,160 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
 
   registry.register("design:dispatch", async (ctx: HandlerContext) => {
     await environmentGate(ctx);
-    return runAgentDispatch(ctx, depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS), {
-      handlerKey: "design:dispatch",
-      template: DESIGN_TEMPLATE,
-      vars: designVars(ctx.ticket, deps.profile, designFeedback(ctx.db, ctx.ticket.id)),
-      commitScope: planScope,
-      postcondition: ({ worktreePath }) => {
-        if (!hasTicketPlan(join(worktreePath, "docs", "plans"), ctx.ticket.ident)) {
-          throw new Error(
-            "design:dispatch postcondition: no plan for this ticket under docs/plans/",
-          );
-        }
-      },
-    });
-  });
-
-  registry.register("design:extract", async (ctx: HandlerContext) => {
-    const { output } = await runAgentDispatch(
+    const outcome = await runAgentDispatch(
       ctx,
       depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
       {
-        handlerKey: "design:extract",
-        template: EXTRACT_TEMPLATE,
-        vars: extractVars(ctx.ticket, deps.profile),
-        // Read-only step: no files change, so no postcondition on the diff.
-        postcondition: () => {},
+        handlerKey: "design:dispatch",
+        template: DESIGN_TEMPLATE,
+        vars: designVars(ctx.ticket, deps.profile, designFeedback(ctx.db, ctx.ticket.id)),
+        commitScope: planScope,
+        postcondition: ({ worktreePath }) => {
+          if (!hasTicketPlan(join(worktreePath, "docs", "plans"), ctx.ticket.ident)) {
+            throw new Error(
+              "design:dispatch postcondition: no plan for this ticket under docs/plans/",
+            );
+          }
+        },
       },
     );
-
-    const parsed = extractSidecar(output, ExtractOutputSchema);
-    if (!parsed.ok) {
-      // Absent/malformed sidecar = transport failure (§3a) → failure-policy re-dispatches.
-      throw new Error(`design:extract sidecar ${parsed.reason}: ${parsed.detail}`);
+    // spec §5.3: the plan's digest at the branch head, read through git before the success
+    // transaction (anything slow is computed before it, §5.2).
+    const { repoPath, branch } = worktreeFor(ctx, deps);
+    // Fully qualified: git resolves refs/tags/<name> before refs/heads/<name>, so a tag named like
+    // the branch would otherwise select another tree.
+    const planFiles = ticketPlanFilesAt(repoPath, `refs/heads/${branch}`, ctx.ticket.ident);
+    if (planFiles.length === 0) {
+      // The postcondition found the plan in the worktree, but git has none at the branch head
+      // (an ignored docs/plans/, say). The digest of nothing never changes, so every later plan
+      // edit would go unseen. Operator ruling, 2026-10-10 (spec §5.3): fail at once without a
+      // retry (a retry writes the same ignored file), and escalate with what to change.
+      throw new StepPrerequisiteError(
+        `the plan for ${ctx.ticket.ident} is not committed at ${branch}: Styre reads the plan from git, so docs/plans/ must be committed. If docs/plans/ is ignored, remove docs/plans/ from .gitignore (or the rule that ignores it), commit that on the ticket branch, then resume with --accept-head (the commit moves the branch HEAD).`,
+      );
     }
-    const errors = validateExtraction(parsed.value.units, deps.profile.components);
-    if (errors.length > 0) {
-      throw new Error(`design:extract completeness failed: ${errors.join("; ")}`);
-    }
-    const cdotErrors = validateCdotImpact(parsed.value, deps.profile);
-    if (cdotErrors.length > 0) {
-      throw new Error(`design:extract CDOT gate failed: ${cdotErrors.join("; ")}`);
-    }
-
-    for (const u of parsed.value.units) {
-      insertWorkUnit(ctx.db, {
-        ticketId: ctx.ticket.id,
-        seq: u.seq,
-        kind: u.kind,
-        title: u.title,
-        description: u.description,
-        behavioral: u.behavioral ? 1 : 0, // the carry: classify explicitly, never default
-        testPlan: u.test_plan,
-        filesToTouch: u.files_to_touch,
-        verifyCheckTypes: u.verify_check_types,
-        dependsOn: u.depends_on,
-      });
-    }
-    if (parsed.value.cdotImpact.documentation.applies) {
-      setNeedsDocs(ctx.db, ctx.ticket.id, 1);
-    }
-    return { units: parsed.value.units.length };
+    return { ...outcome, planDigest: planDigestOf(planFiles) };
   });
 
-  registry.register("design:size", async (ctx: HandlerContext) => {
-    const units = listUnits(ctx.db, ctx.ticket.id);
-    if (!ctx.config.complexityGrading) {
-      const track = sizeTrack(units); // off: deterministic sprawl-only, no agent
-      setTicketTrack(ctx.db, ctx.ticket.id, track);
-      return { track, graded: false };
-    }
-    // on: cold cheap-tier grader → daemon combines the grade with sprawl.
-    const result = await runAgentDispatch(
-      ctx,
-      depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
-      {
-        handlerKey: "design:size",
-        template: DESIGN_COMPLEXITY_GRADE_TEMPLATE,
-        vars: complexityGradeVars(ctx.ticket, deps.profile, units),
-        postcondition: () => {}, // read-only: nothing commits
-      },
-    );
-    const parsed = extractSidecar(result.output, ComplexityGradeSchema);
-    if (!parsed.ok) {
-      throw new Error(`design:size grade sidecar ${parsed.reason}: ${parsed.detail}`);
-    }
-    const track = combineTrack(units.length, parsed.value.overall);
-    setTicketTrack(ctx.db, ctx.ticket.id, track);
-    return { track, graded: true, overall: parsed.value.overall };
-  });
+  registry.register(
+    "design:extract",
+    async (ctx: HandlerContext) => {
+      const { output } = await runAgentDispatch(
+        ctx,
+        depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
+        {
+          handlerKey: "design:extract",
+          template: EXTRACT_TEMPLATE,
+          vars: extractVars(ctx.ticket, deps.profile),
+          // Read-only step: no files change, so no postcondition on the diff.
+          postcondition: () => {},
+        },
+      );
 
-  registry.register("design:review", async (ctx: HandlerContext) => {
-    const units = listUnits(ctx.db, ctx.ticket.id);
-    const result = await runAgentDispatch(
-      ctx,
-      depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
-      {
-        handlerKey: "design:review",
-        template: DESIGN_REVIEW_TEMPLATE,
-        vars: designReviewVars(ctx.ticket, deps.profile, units),
-        postcondition: () => {}, // read-only: nothing commits
-      },
-    );
-
-    const parsed = extractSidecar(result.output, ReviewOutputSchema);
-    if (!parsed.ok) {
-      throw new Error(`design:review sidecar ${parsed.reason}: ${parsed.detail}`);
-    }
-    const seqToId = new Map(units.map((u) => [u.seq, u.id]));
-    const errors = validateReviewFindings(parsed.value.findings, [...seqToId.keys()], "plan");
-    if (errors.length > 0) {
-      throw new Error(`design:review findings invalid: ${errors.join("; ")}`);
-    }
-
-    let blocking = 0;
-    for (const f of parsed.value.findings) {
-      const blocksShip = computeBlocksShip(f.severity, f.deferral_candidate);
-      if (blocksShip === 1) {
-        blocking += 1;
+      const parsed = extractSidecar(output, ExtractOutputSchema);
+      if (!parsed.ok) {
+        // Absent/malformed sidecar = transport failure (§3a) → failure-policy re-dispatches.
+        throw new Error(`design:extract sidecar ${parsed.reason}: ${parsed.detail}`);
       }
-      insertFinding(ctx.db, {
-        ticketId: ctx.ticket.id,
-        reviewKind: "plan",
-        dispatchId: result.dispatchId,
+      const errors = validateExtraction(parsed.value.units, deps.profile.components);
+      if (errors.length > 0) {
+        throw new Error(`design:extract completeness failed: ${errors.join("; ")}`);
+      }
+      const cdotErrors = validateCdotImpact(parsed.value, deps.profile);
+      if (cdotErrors.length > 0) {
+        throw new Error(`design:extract CDOT gate failed: ${cdotErrors.join("; ")}`);
+      }
+
+      // Written by writeExtractOutputs inside the success transaction (spec §6.2): a crash before
+      // markSucceeded leaves no partial units, and the commit replaces any an older Styre left.
+      const result: ExtractResult = {
+        units: parsed.value.units.length,
+        extracted: parsed.value.units,
+        needsDocs: parsed.value.cdotImpact.documentation.applies,
+      };
+      return result;
+    },
+    { commit: writeExtractOutputs },
+  );
+
+  registry.register(
+    "design:size",
+    async (ctx: HandlerContext) => {
+      const units = readWorkUnitsForDesign(ctx.db, ctx.ticket.id);
+      if (!ctx.config.complexityGrading) {
+        const off: SizeResult = { track: sizeTrack(units), graded: false }; // sprawl only, no agent
+        return off;
+      }
+      // on: cold cheap-tier grader → daemon combines the grade with sprawl.
+      const result = await runAgentDispatch(
+        ctx,
+        depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
+        {
+          handlerKey: "design:size",
+          template: DESIGN_COMPLEXITY_GRADE_TEMPLATE,
+          vars: complexityGradeVars(ctx.ticket, deps.profile, units),
+          postcondition: () => {}, // read-only: nothing commits
+        },
+      );
+      const parsed = extractSidecar(result.output, ComplexityGradeSchema);
+      if (!parsed.ok) {
+        throw new Error(`design:size grade sidecar ${parsed.reason}: ${parsed.detail}`);
+      }
+      const on: SizeResult = {
+        track: combineTrack(units.length, parsed.value.overall),
+        graded: true,
+        overall: parsed.value.overall,
+      };
+      return on;
+    },
+    { commit: writeSizeOutput },
+  );
+
+  registry.register(
+    "design:review",
+    async (ctx: HandlerContext) => {
+      const units = readWorkUnitsForDesign(ctx.db, ctx.ticket.id);
+      const result = await runAgentDispatch(
+        ctx,
+        depsFor(ctx, deps, deps.timeoutMs ?? DESIGN_TIMEOUT_MS),
+        {
+          handlerKey: "design:review",
+          template: DESIGN_REVIEW_TEMPLATE,
+          vars: designReviewVars(ctx.ticket, deps.profile, units),
+          postcondition: () => {}, // read-only: nothing commits
+        },
+      );
+
+      const parsed = extractSidecar(result.output, ReviewOutputSchema);
+      if (!parsed.ok) {
+        throw new Error(`design:review sidecar ${parsed.reason}: ${parsed.detail}`);
+      }
+      const seqToId = new Map(units.map((u) => [u.seq, u.id]));
+      const errors = validateReviewFindings(parsed.value.findings, [...seqToId.keys()], "plan");
+      if (errors.length > 0) {
+        throw new Error(`design:review findings invalid: ${errors.join("; ")}`);
+      }
+
+      const filed: PlanFindingInput[] = parsed.value.findings.map((f) => ({
         workUnitId: f.work_unit_seq === null ? null : (seqToId.get(f.work_unit_seq) ?? null),
         severity: f.severity,
         category: f.category,
         factorsJson: f.factors === null ? null : JSON.stringify(f.factors),
         deferralCandidate: f.deferral_candidate ? 1 : 0,
-        blocksShip,
+        blocksShip: computeBlocksShip(f.severity, f.deferral_candidate),
         location: f.location,
         rationale: f.rationale,
-      });
-    }
-    return { findings: parsed.value.findings.length, blocking };
-  });
+      }));
+      const review: ReviewResult = {
+        findings: filed.length,
+        blocking: filed.filter((f) => f.blocksShip === 1).length,
+        dispatchId: result.dispatchId,
+        filed,
+      };
+      return review;
+    },
+    { commit: writePlanFindings },
+  );
 
   registry.register("docs:revise", async (ctx: HandlerContext) => {
     const { sha, changed } = await runAgentDispatch(
@@ -1341,33 +1379,17 @@ export function buildDispatchRegistry(deps: RegistryDeps): StepRegistry {
   registry.register("provision", async (ctx: HandlerContext) => {
     const { repoPath, worktreePath, branch } = worktreeFor(ctx, deps);
     ensureWorktree(repoPath, branch, worktreePath);
+    if (!deps.inPlace && deps.startingCommitTicketId?.() === ctx.ticket.id) {
+      recordStartingCommit(ctx.db, ctx.ticket.id, worktreeHead(worktreePath));
+    }
     for (const c of deps.profile.components) {
       if (!c.testEnvironment) continue;
       const problem = testEnvironmentProblem(worktreePath, c);
       if (problem) throw new StepExecutionError(`Test environment ${c.name}: ${problem}`);
     }
     // ENG-412: record what the run narrowed, ONCE, where a db + ticket finally exist (the
-    // toolchain decision is made in `styre run` before either does). `advisory: true` routes it
-    // into the PR's advisory block, so a reviewer sees that a component was skipped entirely
-    // rather than silently getting a PR that claims less coverage than it appears to.
-    const unusable = deps.unusableComponents ?? [];
-    if (unusable.length > 0) {
-      insertSignal(ctx.db, {
-        ticketId: ctx.ticket.id,
-        workUnitId: null,
-        signalType: "toolchain",
-        // `error`, not `fail`: the component was never MEASURED. `fail` would assert that a
-        // check ran and came back red, which is a different and untrue claim. (The column's
-        // CHECK constraint allows only pass/fail/error, and it caught an invented fourth value.)
-        result: "error",
-        detail: {
-          advisory: true,
-          reason: "component-unusable",
-          components: unusable.map((u) => u.component),
-          missing: unusable.flatMap((u) => u.missing.map((m) => m.missing)),
-        },
-      });
-    }
+    // toolchain decision is made in `styre run` before either does).
+    recordUnusableComponents(ctx.db, ctx.ticket.id, deps.unusableComponents ?? []);
     // ENG-425: the same contract, one aisle over — a component excluded for WHAT IT IS rather
     // than for what this machine lacks. Separate `signalType` on purpose: `advisorySweeps` keys
     // by signal_type and keeps only the newest per key, so reusing `toolchain` would make one

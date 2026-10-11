@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeAgentRunner } from "../../src/agent/fake-runner.ts";
@@ -12,15 +12,21 @@ import {
   insertWorkUnit,
   listByTicket as listWorkUnits,
 } from "../../src/db/repos/work-unit.ts";
-import { getByKey, insertPending } from "../../src/db/repos/workflow-step.ts";
+import { getByKey } from "../../src/db/repos/workflow-step.ts";
 import { buildDispatchRegistry } from "../../src/dispatch/handlers.ts";
 import { parseProfile } from "../../src/dispatch/profile.ts";
+import { pendingLeftoverChecks } from "../../src/util/process/leftovers.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { STEP_TEST_TIMEOUT_MS, reachDesignStep } from "../helpers/design-steps.ts";
 import { makeTempDir } from "../helpers/temp.ts";
+
+// The steps that dispatch an agent start a background leftover check (ENG-485 section 9.1); one
+// still running when the test ends keeps the command temp folder.
+afterEach(pendingLeftoverChecks);
 
 function gitRepo(): string {
   const root = makeTempDir("styre-ce-");
-  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root });
+  const run = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: root, timeout: 30_000 });
   run(["init", "-b", "main"]);
   run(["config", "user.email", "t@s.dev"]);
   run(["config", "user.name", "T"]);
@@ -43,7 +49,7 @@ function untrackedNow(cwd: string): string[] {
       "-z",
       "--untracked-files=all",
     ],
-    { cwd },
+    { cwd, timeout: 30_000 },
   ).stdout.toString();
   return out
     .split("\0")
@@ -156,7 +162,7 @@ test("A2 under-delivered: a unit that touches a file it did NOT declare loops ba
   const runner = sequencedRunner([
     (cwd) => {
       // touches y.ts, never the declared x.ts
-      Bun.spawnSync(["mkdir", "-p", join(cwd, "src")]);
+      Bun.spawnSync(["mkdir", "-p", join(cwd, "src")], { timeout: 30_000 });
       writeFileSync(join(cwd, "src", "y.ts"), "export const y = 1;\n");
     },
   ]);
@@ -345,64 +351,93 @@ const ABSENT_RC = {
   releasePackaging: { mechanism: "none" },
 };
 
+function profileFor(repo: string) {
+  return parseProfile({
+    slug: "demo",
+    targetRepo: repo,
+    components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
+    runtimeContext: ABSENT_RC,
+  });
+}
+
+const roots = new Map<string, string>();
+function rootFor(repo: string): string {
+  let root = roots.get(repo);
+  if (root === undefined) {
+    root = makeTempDir("styre-cewt6-");
+    roots.set(repo, root);
+  }
+  return root;
+}
+
 function registryFor(repo: string, runner: FakeAgentRunner) {
   return buildDispatchRegistry({
     runner,
     agentConfig: DEFAULT_AGENT_CONFIG,
-    profile: parseProfile({
-      slug: "demo",
-      targetRepo: repo,
-      components: [{ name: "app", kind: "node", paths: ["**"], commands: { test: "bun test" } }],
-      runtimeContext: ABSENT_RC,
-    }),
-    worktreeRoot: makeTempDir("styre-cewt6-"),
+    profile: profileFor(repo),
+    worktreeRoot: rootFor(repo),
   });
 }
 
 const sidecar = (json: string) =>
   `Here is the breakdown.\n\n\`\`\`styre-sidecar\n${json}\n\`\`\`\n`;
 
-// design:dispatch must be 'succeeded' and stage 'design' so the resolver routes to design:extract.
-function readyForExtract(db: Database, ticketId: number) {
-  const s = insertPending(db, { ticketId, stepKey: "design:dispatch", stepType: "dispatch" });
-  db.query("UPDATE workflow_step SET status = 'succeeded' WHERE id = ?").run(s.id);
+// The real provision and design:dispatch steps run first (spec §8), so the resolver routes to
+// design:extract and design:dispatch has recorded the plan digest design:extract's manifest reads.
+async function readyForExtract(db: Database, ticketId: number, repo: string): Promise<void> {
+  await reachDesignStep({
+    db,
+    ticketId,
+    profile: profileFor(repo),
+    worktreeRoot: rootFor(repo),
+    target: "design:extract",
+  });
 }
 
-test("A6 plan gate: an extraction with files_to_touch: [] does not persist work units (re-dispatch)", async () => {
-  const { db, ticketId, projectId } = makeTestDb();
-  const repo = gitRepo();
-  db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
-  readyForExtract(db, ticketId);
-  const runner = new FakeAgentRunner(() => ({
-    completed: true,
-    exitCode: 0,
-    stdout: sidecar(
-      JSON.stringify({
-        units: [
-          {
-            seq: 1,
-            kind: "backend",
-            title: "x",
-            description: "d",
-            behavioral: false,
-            test_plan: null,
-            files_to_touch: [], // the plan-gate violation: no declared files
-            verify_check_types: [],
-            depends_on: [],
-          },
-        ],
-      }),
-    ),
-    stderr: "",
-    timedOut: false,
-    costUsd: null,
-    tokensIn: null,
-    tokensOut: null,
-  }));
-  await advanceOneStep(db, ticketId, registryFor(repo, runner));
-  const step = getByKey(db, ticketId, "design:extract");
-  const units = listWorkUnits(db, ticketId);
-  db.close();
-  expect(step?.status).not.toBe("succeeded");
-  expect(units.length).toBe(0);
-});
+test(
+  "A6 plan gate: an extraction with files_to_touch: [] does not persist work units (re-dispatch)",
+  async () => {
+    const { db, ticketId, projectId } = makeTestDb();
+    const repo = gitRepo();
+    db.query("UPDATE project SET target_repo = ? WHERE id = ?").run(repo, projectId);
+    await readyForExtract(db, ticketId, repo);
+    const runner = new FakeAgentRunner(() => ({
+      completed: true,
+      exitCode: 0,
+      stdout: sidecar(
+        JSON.stringify({
+          units: [
+            {
+              seq: 1,
+              kind: "backend",
+              title: "x",
+              description: "d",
+              behavioral: false,
+              test_plan: null,
+              files_to_touch: [], // the plan-gate violation: no declared files
+              verify_check_types: [],
+              depends_on: [],
+            },
+          ],
+        }),
+      ),
+      stderr: "",
+      timedOut: false,
+      costUsd: null,
+      tokensIn: null,
+      tokensOut: null,
+    }));
+    await advanceOneStep(db, ticketId, registryFor(repo, runner));
+    const step = getByKey(db, ticketId, "design:extract");
+    const units = listWorkUnits(db, ticketId);
+    db.close();
+    // design:extract itself ran (once): before the move it was never reached (provision ran instead)
+    expect(step?.attempt).toBe(1);
+    expect(step?.status).not.toBe("succeeded");
+    expect(JSON.parse(step?.error_json ?? "{}").message).toContain(
+      "design:extract completeness failed: unit seq 1 declares no files_to_touch",
+    );
+    expect(units.length).toBe(0);
+  },
+  STEP_TEST_TIMEOUT_MS,
+);

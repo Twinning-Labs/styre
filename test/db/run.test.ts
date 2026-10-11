@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ensureRunTable, getRun, insertRun, markResumed } from "../../src/db/repos/run.ts";
+import { getRun, markResumed } from "../../src/db/repos/run.ts";
 import { makeTestDb } from "../helpers/db.ts";
 
 describe("run repo", () => {
@@ -21,21 +21,6 @@ describe("run repo", () => {
     expect(r).not.toBeNull();
     expect(r?.resumed).toBe(1);
     expect(r?.attempt).toBe(2);
-    db.close();
-  });
-
-  test("ensureRunTable creates the table when missing (pre-upgrade park bridge)", () => {
-    const { db } = makeTestDb();
-    db.exec("DROP TABLE run;"); // simulate a pre-upgrade DB
-    expect(() => getRun(db)).toThrow(); // no table
-    ensureRunTable(db);
-    expect(getRun(db)).toBeNull(); // table exists, no row yet
-    insertRun(db, {
-      runId: "backfill-id",
-      startedAt: "2026-07-21T00:00:00.000Z",
-      provider: "claude",
-    });
-    expect(getRun(db)?.run_id).toBe("backfill-id");
     db.close();
   });
 });

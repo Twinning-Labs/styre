@@ -15,17 +15,14 @@ import {
 } from "../db/repos/review-round.ts";
 import { insertPending as insertSignal } from "../db/repos/signal.ts";
 import { getTicket, setTicketStage, setTicketStatus } from "../db/repos/ticket.ts";
-import {
-  deleteByTicket,
-  listByTicket as listUnits,
-  setStatus as setUnitStatus,
-} from "../db/repos/work-unit.ts";
+import { listByTicket as listUnits, setStatus as setUnitStatus } from "../db/repos/work-unit.ts";
 import {
   getByKey,
   listStepsForUnit,
   resetAttempt,
   resetToPending,
 } from "../db/repos/workflow-step.ts";
+import { invalidateSteps } from "./invalidate.ts";
 import { enqueueStageProjection } from "./projector.ts";
 
 export type ReviewDecision = "clean" | "loopback" | "escalated";
@@ -159,18 +156,27 @@ export function codeLoopback(
   })();
 }
 
+/** The redesign loopback (spec §6.4, §6.7). It invalidates the step that consumes its feedback,
+ *  design:dispatch, with cause `feedback`, through the one invalidate function, then appends its
+ *  event carrying the findings, the consumer and the consumer's generation after the bump (§6.5),
+ *  so the rerun sees exactly this round's findings. A code review redesign (and review-resume's
+ *  retry-plan when HEAD moved) also invalidates design:extract: the units are re-created and
+ *  implemented again even when the plan comes back identical, with findings tied to a unit detached first
+ *  (§6.1). Everything else in design follows from fingerprints. The resets of the later stages
+ *  (review, verify, merge) stay until ENG-475. */
 export function redesignLoopback(
   db: Database,
   ticketId: number,
   signature: string,
   blocking: ReviewFindingRow[],
   dispatchId: string | null,
+  invalidate: readonly ("design:dispatch" | "design:extract")[],
 ): void {
-  // Snapshot the blocking findings that forced this redesign into the loopback event's payload, so
-  // the re-dispatched design agent (via designFeedback) sees exactly what to fix — regardless of
-  // which review step raised them (plan review OR code review, ENG-272). The snapshot rides
-  // event_log.payload_json and survives replacement of the old plan. Code finding identities
-  // are also retained below so the later code reviewer must resolve those obligations.
+  if (!invalidate.includes("design:dispatch"))
+    throw new Error(
+      "redesignLoopback: a redesign must invalidate design:dispatch, its feedback's consumer",
+    );
+  // The snapshot rides event_log.payload_json and survives replacement of the old plan (ENG-272).
   const findings = blocking.map((f) => ({
     category: f.category,
     location: f.location,
@@ -179,24 +185,13 @@ export function redesignLoopback(
   db.transaction(() => {
     const ticket = getTicket(db, ticketId);
     const from = ticket?.stage ?? "review";
-    // Replacing a plan must not erase unresolved code-review obligations through the unit FK.
-    // Detach them so the new plan's first unit receives the same IDs as ticket-wide findings.
-    db.query(
-      "UPDATE review_finding SET work_unit_id=NULL WHERE ticket_id=? AND review_kind='code'",
-    ).run(ticketId);
-    deleteByTicket(db, ticketId);
-    // §6, as resetTicketVerifySteps does for the gate: a redesign is a fresh round, not a
-    // continuation, so these steps get their attempt budget back. Without the reset a cycle-1
-    // failure (e.g. an extract the retry-feedback loop then fixed) leaves cycle 2 pre-spent, and
-    // the next stumble escalates a healthy ticket instead of re-dispatching. The design loop stays
-    // bounded by isRepeatedReviewLoopback (same findings signature twice → escalate), not by this
-    // counter.
-    for (const key of ["design:dispatch", "design:extract", "design:review", "review"]) {
-      const step = getByKey(db, ticketId, key);
-      if (step) {
-        resetToPending(db, step.id);
-        resetAttempt(db, step.id);
-      }
+    const { generations } = invalidateSteps(db, ticketId, invalidate, { cause: "feedback" });
+    const consumerGeneration =
+      generations["design:dispatch"] ?? getByKey(db, ticketId, "design:dispatch")?.generation ?? 0;
+    const reviewStep = getByKey(db, ticketId, "review");
+    if (reviewStep) {
+      resetToPending(db, reviewStep.id);
+      resetAttempt(db, reviewStep.id);
     }
     resetTicketVerifySteps(db, ticketId);
     resetMergeSteps(db, ticketId);
@@ -208,11 +203,10 @@ export function redesignLoopback(
       loop: "design",
       routeTo: "review",
       signature,
-      payload: { findings },
+      payload: { findings, consumer: "design:dispatch", generation: consumerGeneration },
     });
     // Project the rewind to design when it actually changes stage (code-review plan-defect: review→
-    // design). Plan-review redesign is already IN design (design→design) → guard skips it, no spurious
-    // projection. Enqueued after the loopback event so the cycle epoch counts it (finding P1/P2).
+    // design). Plan-review redesign is already IN design → no spurious projection.
     if (ticket && from !== "design") {
       enqueueStageProjection(db, ticket, from, "design");
     }
@@ -261,7 +255,7 @@ export function applyReviewVerdict(
       escalate(db, ticketId, "no progress: identical plan-review findings", signature, dispatchId);
       return { decision: "escalated" };
     }
-    redesignLoopback(db, ticketId, signature, blocking, dispatchId);
+    redesignLoopback(db, ticketId, signature, blocking, dispatchId, ["design:dispatch"]);
     return { decision: "loopback" };
   }
 
@@ -280,7 +274,10 @@ export function applyReviewVerdict(
       if (config.onPlanDefect === "redesign") {
         // Carry the triggering code-review findings into the redesign so the design agent knows
         // what forced it (ENG-272): redesignLoopback snapshots them into the loopback event.
-        redesignLoopback(db, ticketId, signature, blocking, dispatchId);
+        redesignLoopback(db, ticketId, signature, blocking, dispatchId, [
+          "design:dispatch",
+          "design:extract",
+        ]);
         return { decision: "loopback" };
       }
       escalate(

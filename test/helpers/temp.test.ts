@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { makeTempDir, trackTempEntriesMadeBy, trackTempPath } from "./temp.ts";
+import { makeTempDir, onTempCleanup, trackTempEntriesMadeBy, trackTempPath } from "./temp.ts";
 
 const repoRoot = join(import.meta.dir, "..", "..");
 
@@ -32,6 +32,18 @@ describe("a path registered inside a test", () => {
   test("is gone by the next test", () => {
     expect(tracked).not.toBe("");
     expect(existsSync(tracked)).toBe(false);
+  });
+});
+
+describe("a cleanup registered inside a test", () => {
+  const events: string[] = [];
+  test("has not run while the test runs", () => {
+    const dir = makeTempDir("styre-closer-");
+    onTempCleanup(() => events.push(`closed while the folder exists: ${existsSync(dir)}`));
+    expect(events).toEqual([]);
+  });
+  test("ran when the test ended, before its folders were removed", () => {
+    expect(events).toEqual(["closed while the folder exists: true"]);
   });
 });
 

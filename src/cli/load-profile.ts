@@ -1,6 +1,7 @@
-import { loadProfileByConvention, slugForCwd } from "../config/discover.ts";
+import { loadProfileByConvention, profilePathFor, slugForCwd } from "../config/discover.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
+import { assertCheckpointName, assertProfileSlug } from "./checkpoint-name.ts";
 import { type NonPrimaryComponent, partitionByRole } from "./component-roles.ts";
 import { usageError } from "./errors.ts";
 
@@ -38,10 +39,16 @@ export interface LoadedProfile {
  * `--resume`/`--inspect`", and `--inspect` is a read-only diagnostic that exits 0.
  */
 export function loadRunProfile(args: { profile?: string; slug?: string }): LoadedProfile {
+  // Names are checked before a path is built from them (operator rulings, 2026-10-10): the
+  // `--slug` flag builds <config>/<slug>/profile.json, and the profile's slug becomes the
+  // checkpoint folder.
+  if (args.slug && args.slug.length > 0) assertCheckpointName("slug", args.slug);
   let raw: Profile;
   let slug: string;
+  let file: string;
   if (args.profile && args.profile.length > 0) {
     raw = loadProfile(args.profile);
+    file = args.profile;
     slug = args.slug && args.slug.length > 0 ? args.slug : raw.slug;
   } else {
     const derived = args.slug && args.slug.length > 0 ? args.slug : slugForCwd();
@@ -52,8 +59,13 @@ export function loadRunProfile(args: { profile?: string; slug?: string }): Loade
       );
     }
     slug = derived;
+    // A slug derived from the folder name can hold a backslash, legal on macOS and Linux: refused here,
+    // before a run is made that --resume and clean would refuse later.
+    assertCheckpointName("slug", derived);
     raw = loadProfileByConvention(derived);
+    file = profilePathFor(derived);
   }
+  assertProfileSlug(raw.slug, file); // the slug parkDir receives
   const { primary, nonPrimary } = partitionByRole(raw);
   // ALWAYS a new object, even when nothing was dropped. Returning `raw` itself in that branch
   // would make the profile's identity depend on repo content, so a later `profile.targetRepo =`

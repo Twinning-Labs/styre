@@ -20,15 +20,31 @@ export interface WorkflowStepRow {
   ended_at: string | null;
   created_at: string;
   updated_at: string;
+  /** JSON map from each declared input to its digest at the step's success (ENG-477). */
+  input_manifest: string | null;
+  input_fingerprint: string | null;
+  /** Digest of an output that lives outside the database (the plan). */
+  output_digest: string | null;
+  fingerprint_scheme: number | null;
+  /** Incremented by each invalidation (0 for a new step). */
+  generation: number;
 }
 
 const COLS =
   "id, ticket_id, work_unit_id, seq, step_key, step_type, status, attempt, idempotency_key, " +
-  "input_json, result_json, error_json, pid, await_signal_id, started_at, ended_at, created_at, updated_at";
+  "input_json, result_json, error_json, pid, await_signal_id, started_at, ended_at, created_at, updated_at, " +
+  "input_manifest, input_fingerprint, output_digest, fingerprint_scheme, generation";
 
+/** `invariant: true` marks an invariant violation (engine/step-journal.ts `InvariantViolation`),
+ *  which the failure policy escalates at once; it is read from the error, since a repository does
+ *  not import the engine. */
 function serializeError(error: unknown): string {
   if (error instanceof Error) {
-    return JSON.stringify({ name: error.name, message: error.message });
+    return JSON.stringify(
+      (error as { invariant?: unknown }).invariant === true
+        ? { name: error.name, message: error.message, invariant: true }
+        : { name: error.name, message: error.message },
+    );
   }
   return JSON.stringify({ name: "Error", message: String(error) });
 }
@@ -117,6 +133,32 @@ export function markSucceeded(db: Database, id: number, result: unknown): void {
   ).run({ $r: JSON.stringify(result === undefined ? null : result), $now: now, $id: id });
 }
 
+/** The manifest a design table step's success was computed from (ENG-477 §5.2). */
+export function recordManifest(
+  db: Database,
+  id: number,
+  m: {
+    manifest: Record<string, string>;
+    fingerprint: string;
+    outputDigest: string | null;
+    scheme: number;
+  },
+): void {
+  db.query(
+    `UPDATE workflow_step
+       SET input_manifest = $m, input_fingerprint = $f, output_digest = $o, fingerprint_scheme = $s,
+           updated_at = $now
+     WHERE id = $id`,
+  ).run({
+    $m: JSON.stringify(m.manifest),
+    $f: m.fingerprint,
+    $o: m.outputDigest,
+    $s: m.scheme,
+    $now: nowUtc(),
+    $id: id,
+  });
+}
+
 export function markFailed(db: Database, id: number, error: unknown): void {
   const now = nowUtc();
   db.query(
@@ -149,6 +191,17 @@ export function resetAttempt(db: Database, id: number): void {
     $now: nowUtc(),
     $id: id,
   });
+}
+
+/** spec §6 step 3: a fresh round in a new generation, keeping nothing the step recorded. */
+export function resetForInvalidate(db: Database, id: number): void {
+  db.query(
+    `UPDATE workflow_step
+       SET status = 'pending', attempt = 0, result_json = NULL, error_json = NULL, pid = NULL,
+           input_manifest = NULL, input_fingerprint = NULL, output_digest = NULL,
+           fingerprint_scheme = NULL, generation = generation + 1, updated_at = $now
+     WHERE id = $id`,
+  ).run({ $now: nowUtc(), $id: id });
 }
 
 export function listStepsForUnit(

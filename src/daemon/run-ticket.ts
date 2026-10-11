@@ -5,7 +5,7 @@ import { getLatestForTicket } from "../db/repos/dispatch.ts";
 import { type EventLogRow, listByTicket } from "../db/repos/event-log.ts";
 import { insertProject } from "../db/repos/project.ts";
 import { getDeliveredPayload, hasPendingHumanResume, listPending } from "../db/repos/signal.ts";
-import { getTicket, insertTicket } from "../db/repos/ticket.ts";
+import { getByIdent, getTicket, insertTicket } from "../db/repos/ticket.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import type { ParkInfo } from "../engine/park-signal.ts";
 import { branchPrefixFor } from "../integrations/ticket-source.ts";
@@ -13,6 +13,14 @@ import type { IngestedTicket } from "../integrations/ticket-source.ts";
 import { type TelemetrySink, noopSink } from "../telemetry/emit.ts";
 import { createTelemetryEmitter } from "../telemetry/emitter.ts";
 import { pendingLeftoverChecks } from "../util/process/leftovers.ts";
+import { adoptActiveTickets } from "./adopt.ts";
+import {
+  type RunInputs,
+  captureOtherActiveTickets,
+  captureSnapshot,
+  noteReusedDatabase,
+  recordStartingCommit,
+} from "./design-inputs.ts";
 import { tick } from "./loop.ts";
 import { createNotifier } from "./notify.ts";
 import { pauseTicket } from "./pause-ticket.ts";
@@ -92,6 +100,35 @@ function undeliveredReason(db: Database, ticketId: number): string | null {
   return null;
 }
 
+/** The one way a run ends: the telemetry emitter and notifier of the run, and `finish`, the
+ *  terminal sequence (the NDJSON events and summary on stdout, the notifier's sweep and terminal
+ *  message, the outbox drained). `driveToTerminal` ends every outcome through it, and so does the
+ *  resume's toolchain pause (spec §4.1), which stops before any tick; the emitter and notifier are
+ *  returned so the per tick flush and sweep share their watermarks with `finish`. */
+export function createRunEnd(
+  db: Database,
+  opts: { ticketId: number; config: RuntimeConfig; ports: ProjectorPorts; emit?: TelemetrySink },
+): {
+  emitter: ReturnType<typeof createTelemetryEmitter>;
+  notifier: ReturnType<typeof createNotifier>;
+  finish: (result: RunResult) => Promise<RunResult>;
+} {
+  const emitter = createTelemetryEmitter(opts.emit ?? noopSink, opts.config.pricing);
+  const notifier = createNotifier(opts.config);
+  const finish = async (result: RunResult): Promise<RunResult> => {
+    // The leftover checks started after agent steps write to this database; let them end first
+    // (each is bounded by its own timeout), before anything closes it.
+    await pendingLeftoverChecks();
+    emitter.flushNew(db, opts.ticketId);
+    emitter.emitSummary(db, opts.ticketId, result);
+    notifier.sweepNew(db, opts.ticketId); // backstop: the per-tick sweep already caught these; re-sweep in case a terminal enqueued late events
+    notifier.notifyTerminal(db, opts.ticketId, result.outcome);
+    await drainOutbox(db, opts.ports); // BLOCKER-1 fix: flush the terminal + tail notify rows
+    return result;
+  };
+  return { emitter, notifier, finish };
+}
+
 /** Drive ONE ticket through repeated ticks until a terminal state. `run` exits at PR-ready (the
  *  ticket parked at merge on human_merge_approval — the PR is open, awaiting the human merge gate
  *  which `run` never delivers). Emits a best-effort `ci_handoff` telemetry snapshot on the
@@ -113,19 +150,7 @@ export async function driveToTerminal(
 ): Promise<RunResult> {
   const cap = opts.cap ?? DEFAULT_CAP;
   const ciReadTimeoutMs = opts.ciReadTimeoutMs ?? CI_READ_TIMEOUT_MS;
-  const emitter = createTelemetryEmitter(opts.emit ?? noopSink, opts.config.pricing);
-  const notifier = createNotifier(opts.config);
-  const finish = async (result: RunResult): Promise<RunResult> => {
-    // The leftover checks started after agent steps write to this database; let them end first
-    // (each is bounded by its own timeout), before anything closes it.
-    await pendingLeftoverChecks();
-    emitter.flushNew(db, opts.ticketId);
-    emitter.emitSummary(db, opts.ticketId, result);
-    notifier.sweepNew(db, opts.ticketId); // backstop: the per-tick sweep already caught these; re-sweep in case a terminal enqueued late events
-    notifier.notifyTerminal(db, opts.ticketId, result.outcome);
-    await drainOutbox(db, opts.ports); // BLOCKER-1 fix: flush the terminal + tail notify rows
-    return result;
-  };
+  const { emitter, notifier, finish } = createRunEnd(db, opts);
   let idle = 0;
   let last = { iterations: 0, stage: "", status: "" };
   for (let i = 1; i <= cap; i++) {
@@ -225,8 +250,12 @@ export async function runTicket(deps: {
   /** The ticket branch's HEAD, for the step in flight (ENG-485 section 7.5). */
   readHead?: () => string | null;
   /** Called with the ticket row's id as soon as it exists, before any step runs (ENG-485: the
-   *  stop handler needs it to record an interruption). */
-  onTicket?: (ticketId: number) => void;
+   *  stop handler needs it to record an interruption). `reused` is true when the database already
+   *  held the ticket, so this run did not create it (spec §4.2: the starting commit is recorded
+   *  only when the branch is first created). */
+  onTicket?: (ticketId: number, reused: boolean) => void;
+  /** The design inputs exactly as the handlers receive them (spec §4); captured before any step. */
+  inputs: RunInputs;
 }): Promise<RunResult & { ticketId: number; summary: string }> {
   const ingested = deps.ingested ?? (await deps.ports.issueTracker.fetchTicket(deps.ticketRef));
   const projectId = insertProject(deps.db, {
@@ -234,6 +263,7 @@ export async function runTicket(deps: {
     targetRepo: deps.profile.targetRepo,
     defaultBranch: deps.profile.defaultBranch,
   });
+  const reused = getByIdent(deps.db, projectId, ingested.ident) !== null;
   const ticketId = insertTicket(deps.db, {
     projectId,
     ident: ingested.ident,
@@ -243,7 +273,25 @@ export async function runTicket(deps: {
     branchPrefix: branchPrefixFor(ingested.typeLabel),
     externalId: ingested.externalId,
   });
-  deps.onTicket?.(ticketId);
+  deps.onTicket?.(ticketId, reused);
+  // A `styre run` on a reused --db drives an existing ticket again: the loop guard counts from
+  // here, as it does from a resume (spec §6.6). A new database has no such ticket.
+  if (reused) noteReusedDatabase(deps.db, ticketId);
+  // A new database gets every row; a reused --db keeps its ticket text and starting commit and
+  // rewrites the rest with an `inputs-changed` note (spec §4).
+  captureSnapshot(deps.db, ticketId, deps.inputs);
+  if (deps.inputs.startingCommit !== null)
+    recordStartingCommit(deps.db, ticketId, deps.inputs.startingCommit);
+  // Operator ruling, 2026-10-10 (spec §4): a reused --db can hold other active tickets, which the
+  // loop drives too (`tick` advances up to two ready tickets, loop.ts:22-41), with this run's
+  // registry and so with this run's inputs. Each gets the same snapshot, with the same note, before
+  // any step runs, after a `reused-database` note (its loop guard counts from here). The starting
+  // commit stays this run's ticket's own.
+  captureOtherActiveTickets(deps.db, ticketId, deps.inputs);
+  // A reused --db can hold steps an older Styre finished (spec §7.6); a new database has none. After
+  // every snapshot, since the pass reads them. A ticket whose branch is gone records those steps as
+  // "will rerun" (never throws).
+  adoptActiveTickets(deps.db, ticketId);
   const result = await driveToTerminal(deps.db, deps.registry, {
     ticketId,
     config: deps.runtimeConfig,

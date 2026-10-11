@@ -11,6 +11,7 @@ import type { AgentRunner } from "../agent/runner.ts";
 import type { AgentConfig } from "../config/agent-config.ts";
 import { DEFAULT_AGENT_CONFIG } from "../config/agent-config.ts";
 import { discoverRuntimeConfig } from "../config/discover.ts";
+import { newerSchemeDbRefusal, newerSchemeRecorded } from "../daemon/design-walk.ts";
 import { makeProjectorPorts } from "../daemon/ports.ts";
 import type { ProjectorPorts } from "../daemon/projector.ts";
 import { recover } from "../daemon/recover.ts";
@@ -40,7 +41,7 @@ import { EXIT, StyreError, agentCliError, errorKindForExit, usageError } from ".
 import { guardWithExitCheck } from "./exit-check.ts";
 import { loadRunProfile } from "./load-profile.ts";
 import { type StopWiring, finishRunResult, parkDir } from "./park.ts";
-import { applyToolchainGate, formatUnusableComponents } from "./preflight.ts";
+import { applyToolchainGate, toolchainNotice } from "./preflight.ts";
 import { confirmPrBase } from "./resolve-pr-base.ts";
 import { type RunLock, acquireRunLock, releaseRunLock, runLockStatus } from "./run-lock.ts";
 
@@ -174,6 +175,8 @@ export interface RunDeps {
    *  (R27). Without it, `runImpl` removes them itself when it returns. The removal does nothing
    *  while a stop is in progress. */
   keepStopHandlers?: (remove: () => void) => void;
+  /** The toolchain probe (tests); the real `probeCommandExists` otherwise. */
+  probe?: (repoDir: string, command: string) => boolean;
 }
 
 export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Promise<void> {
@@ -271,6 +274,8 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
       );
     }
 
+    // In place, the starting commit is HEAD of the checkout at run start (spec §4.2), read below.
+    let inPlaceStartingCommit: string | null = null;
     if (args["in-place"] && !(args.resume && args.resume.length > 0)) {
       const { discoverRepoRoot, assertInPlaceSafe, assertInPlaceIdentity } = await import(
         "../dispatch/in-place.ts"
@@ -283,6 +288,18 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
         );
       }
       profile.targetRepo = discovered;
+      // Read before any other check or step: a HEAD that cannot be read (a repository with no
+      // commit) would leave the run without a starting commit, so it refuses here, loudly.
+      inPlaceStartingCommit = branchHeadSha(profile.targetRepo, "HEAD");
+      if (inPlaceStartingCommit === null) {
+        throw new StyreError({
+          code: EXIT.CONFIG,
+          headline: `cannot start in place — the HEAD of ${profile.targetRepo} cannot be read`,
+          detail:
+            "An in place run records HEAD as its starting commit before any step runs; a repository with no commit has no HEAD.",
+          recovery: "Commit to the repository (or check out a commit), then re-run.",
+        });
+      }
       assertInPlaceSafe(profile.targetRepo);
       await assertInPlaceIdentity(profile.targetRepo, profile);
     }
@@ -294,6 +311,7 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
         preflight: deps?.preflight,
         runner: deps?.runner,
         stop: wiring,
+        probe: deps?.probe,
       };
       await resumeRun(
         {
@@ -320,8 +338,10 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
     }
 
     // Fail fast before any spend if a program the components' commands need isn't installed on
-    // this machine. Fresh-run path only — `--resume`/`--inspect` returned above (their re-running
-    // ground-truth steps are the check, and `--inspect` must stay exit-0 on a tool-less machine).
+    // this machine. Fresh-run path only — `--resume`/`--inspect` returned above: `--resume` makes
+    // the same toolchain decision itself in `resumeRun` (park.ts), after its resume transaction,
+    // and pauses needs_you rather than exit 69 (spec §4.1); `--inspect` must stay exit-0 on a
+    // tool-less machine.
     // ENG-412: a missing toolchain disqualifies its OWN component, not the whole run. Fatal only
     // when nothing usable is left — for a single-component repo that is the identical ENG-332
     // behaviour, and for a Python repo carrying an incidental `package.json` it is the
@@ -335,17 +355,12 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
       throw noPrimaryComponentError(formatNonPrimaryComponents(loaded.nonPrimary));
     }
 
-    const toolchain = applyToolchainGate(profile);
+    const toolchain = applyToolchainGate(profile, deps?.probe);
     profile = toolchain.profile;
     if (toolchain.unusable.length > 0) {
-      // Say it out loud, twice. Here for whoever is watching the run, and again in the PR body
-      // (the `toolchain` signal emitted by `provision`) for whoever reviews it later — a
-      // narrowed scope that only ever appeared on stderr is a silent one by the time it matters.
-      process.stderr.write(
-        `run: skipping ${toolchain.unusable.length} component(s) whose toolchain is absent; ` +
-          `the run continues with ${profile.components.map((c) => c.name).join(", ")}.\n` +
-          `${formatUnusableComponents(toolchain.unusable)}\n`,
-      );
+      // Said here for whoever is watching the run, and again in the PR body (the `toolchain`
+      // signal emitted by `provision`).
+      process.stderr.write(`run: ${toolchainNotice(toolchain.unusable, profile)}\n`);
     }
 
     // Fail fast (no retry burn) if the configured agent CLI is missing or below its supported
@@ -425,7 +440,15 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
     }
     wiring.holdLock(lock);
     try {
-      migrate(dbPath);
+      // A reused --db holding manifests from a newer FINGERPRINT_SCHEME (operator ruling,
+      // 2026-10-10): refused as resume refuses it (65), before anything is written.
+      const newerScheme = explicitDb && existsSync(dbPath) ? newerSchemeRecorded(dbPath) : null;
+      if (newerScheme !== null) {
+        process.stderr.write(`run refused: ${newerSchemeDbRefusal(newerScheme)}`);
+        process.exitCode = 65; // EXIT.RESUME_REFUSED
+        return;
+      }
+      migrate(dbPath, { log: (line) => process.stderr.write(`${line}\n`) });
       const db = openDb(dbPath);
       // A reused --db can be an older checkpoint: its warning goes to stderr (section 5.5).
       recover(db, { warn: (line) => process.stderr.write(`${line}\n`) });
@@ -438,7 +461,14 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
           provider: agentConfig.provider,
         });
       }
+      const inPlace = (args["in-place"] as boolean | undefined) ?? false;
+      // spec §4.2: in place, the starting commit is HEAD of the checkout at run start (read above).
+      const runStartingCommit = inPlace ? inPlaceStartingCommit : null;
       const runner = deps?.runner ?? resolveAgentRunner(agentConfig);
+      // spec §4.2: the run's own ticket, set by onTicket only when this run inserts it. On a
+      // reused --db another ticket the loop drives, or an own ticket the database already held,
+      // gets no starting commit from this run.
+      let ownNewTicketId: number | null = null;
       const registry = buildDispatchRegistry({
         runner,
         agentConfig,
@@ -446,7 +476,8 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
         unusableComponents: toolchain.unusable,
         nonPrimaryComponents: loaded.nonPrimary,
         worktreeRoot: mkdtempSync(join(tmpdir(), "styre-wt-")),
-        inPlace: (args["in-place"] as boolean | undefined) ?? false,
+        inPlace,
+        startingCommitTicketId: () => ownNewTicketId,
       });
 
       a.runStarted({
@@ -473,7 +504,17 @@ export async function runImpl({ args }: { args: RunArgs }, deps?: RunDeps): Prom
         // ENG-485 section 7.5: where the ticket branch stands when each step starts.
         readHead: () => branchHeadSha(profile.targetRepo, runBranch),
         // The handler can record an interruption from the moment the ticket row exists.
-        onTicket: (ticketId) => stop.setRun({ db, dbPath, ticketId, ident }),
+        onTicket: (ticketId, reused) => {
+          if (!reused) ownNewTicketId = ticketId;
+          stop.setRun({ db, dbPath, ticketId, ident });
+        },
+        inputs: {
+          profile,
+          unusableComponents: toolchain.unusable,
+          nonPrimaryComponents: loaded.nonPrimary,
+          config: runtimeConfig,
+          startingCommit: runStartingCommit,
+        },
       });
       // A step that finished during a stop is not recorded (section 7.5): nothing below may run.
       if (isStopping()) throw new RunInterrupted();

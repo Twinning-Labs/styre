@@ -190,6 +190,12 @@ messages and exit statuses are in [`runtime-parameters.md`](docs/architecture/ru
   its commit, is undone on resume by returning the branch to where the step started. In worktree mode
   that return depends on a separate fix to `ensureWorktree`, whose `git worktree add -B` on resume
   moves the branch again; until it lands, that commit can remain. In-place mode is unaffected.
+- **Design reruns in worktree mode depend on the ticket branch surviving a resume** (ENG-488). The
+  plan's digest is recorded from the branch, and the starting commit is read right after a fresh run
+  creates it. `git worktree add -B` on resume recreates the branch from the target repository's
+  checked out HEAD, which drops the run's commits and moves HEAD: a second resume is refused until
+  `--accept-head`, unless a dispatch has committed on the recreated branch in between. In place mode
+  is unaffected. Until ENG-488 lands this is the known limit of design input invalidation (ENG-477).
 - **Test artefacts from an interrupted checks step.** An interruption during that step's test run
   happens while no agent is running, so the untracked files the tests wrote are not undone on resume
   (in in-place mode they stay in your checkout). The commit is still returned as above.
@@ -215,6 +221,19 @@ Per effectful step, outside the dispatch: recording the branch head where the st
 `git rev-parse` (about 5 to 6 ms), and starting the background leftover check delays the next step's
 start by about 0.7 to 0.9 ms (the check itself, about 80 to 90 ms with macOS `lsof`, runs beside the
 next step). The sweep over an empty records folder takes about 10 µs.
+
+## Checkpoint folder names (ENG-477)
+
+- **A ticket ident or slug can no longer point a folder removal outside its checkpoint.** Before
+  ENG-477 the checkpoint folder was built as `$XDG_STATE_HOME/styre/<slug>/<ident>` with no check,
+  and the ident comes from the tracker, which Styre does not control: an ident of `..` made that
+  folder `$XDG_STATE_HOME/styre` itself, and `styre run <ticket> --fresh` would then have removed it,
+  with every project's checkpoints. Now every name is checked before any path is built from it
+  (`src/cli/checkpoint-name.ts`): an ident must be one folder name (not empty, not `.` or `..`, no
+  `/`, `\` or NUL), and each part of a slug the same. `styre run` (fresh and `--resume`),
+  `styre clean` (including `--all`) and `styre setup` refuse any other name, with exit `64` (`78`
+  for a slug read from a profile file), and as a second check the resolved checkpoint path must
+  stay inside the state folder.
 
 ## Human gate
 

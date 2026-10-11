@@ -1,7 +1,11 @@
 import type { Database } from "bun:sqlite";
 import { existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
-import { getByKey, resetAttempt, resetToPending } from "../db/repos/workflow-step.ts";
+import type { UnusableComponent } from "../cli/preflight.ts";
+import { digestValue } from "../daemon/canonical.ts";
+import { invalidateSteps } from "../daemon/invalidate.ts";
+import { insertSignal, listByTicket as listSignals } from "../db/repos/ground-truth-signal.ts";
+import { getByKey } from "../db/repos/workflow-step.ts";
 import { testCapabilities } from "../testing/capabilities.ts";
 import type { Component } from "./profile.ts";
 
@@ -255,29 +259,76 @@ export function diffTouchesManifest(changedPaths: string[]): boolean {
   });
 }
 
-/** Reset a succeeded `provision` step back to `pending` (and zero its `attempt` — a fresh install
- *  is not a retry of a prior attempt) so the resolver's `!done("provision")` gate re-fires before
- *  the next verify. A no-op if provision hasn't run yet or isn't currently `succeeded` (e.g.
- *  already pending/running/failed). Shared by the resume path (`src/cli/park.ts`) and the
- *  manifest-touch hook below. */
-export function resetProvision(db: Database, ticketId: number): void {
+/** Reset a succeeded `provision` through the invalidate function (spec §6), so it leaves history
+ *  and opens a new generation: on resume when the worktree was recreated (its installed deps are
+ *  gone), and from implement:dispatch when a diff touched a dependency manifest. A no-op unless
+ *  provision is currently `succeeded`. */
+export function resetProvision(
+  db: Database,
+  ticketId: number,
+  cause: "worktree-recreated" | "manifest-touched" = "worktree-recreated",
+): void {
   const s = getByKey(db, ticketId, "provision");
-  if (s && s.status === "succeeded") {
-    resetToPending(db, s.id);
-    resetAttempt(db, s.id);
-  }
+  if (s && s.status === "succeeded") invalidateSteps(db, ticketId, ["provision"], { cause });
 }
 
-/** The `implement:dispatch` post-commit hook (review F-2): if the dispatch's committed diff
- *  touched a dependency manifest, re-arm `provision` so it re-installs before the next verify.
- *  Only resets when provision is currently `succeeded` — a not-yet-run/already-pending provision
- *  needs no reset. */
 export function resetProvisionIfManifestTouched(
   db: Database,
   ticketId: number,
   changedFiles: string[],
 ): void {
-  if (diffTouchesManifest(changedFiles)) {
-    resetProvision(db, ticketId);
+  if (diffTouchesManifest(changedFiles)) resetProvision(db, ticketId, "manifest-touched");
+}
+
+/** What makes two advisories the same list: the components and their missing tools, each sorted
+ *  (the snapshot sorts the list too), so the host's discovery order never counts as a change. */
+function advisoryKey(components: readonly string[], missing: readonly string[]): string {
+  return digestValue({ components: [...components].sort(), missing: [...missing].sort() });
+}
+
+/** ENG-412: the advisory that the run skipped components whose toolchain this host lacks. The one
+ *  writer of the `toolchain` signal: `provision` records it, and so does a resume whose narrowing
+ *  changed while `provision` was done (spec §4.1), so `advisorySweeps` and the PR treat both
+ *  alike. `advisory: true` routes it into the PR's advisory block, so a reviewer sees that a
+ *  component was skipped entirely rather than silently getting a PR that claims less coverage than
+ *  it appears to. Records nothing for an empty list, and nothing when the ticket's newest
+ *  `toolchain` signal already names the same list: a resume records it and then the walk reruns
+ *  `provision` for the same change (ENG-477), and any other path that records it twice is just as
+ *  harmless. */
+export function recordUnusableComponents(
+  db: Database,
+  ticketId: number,
+  unusable: readonly UnusableComponent[],
+): void {
+  if (unusable.length === 0) return;
+  const components = unusable.map((u) => u.component);
+  const missing = unusable.flatMap((u) => u.missing.map((m) => m.missing));
+  const newest = listSignals(db, ticketId)
+    .filter((s) => s.signal_type === "toolchain")
+    .at(-1);
+  if (newest) {
+    const prior = JSON.parse(newest.detail_json ?? "{}") as {
+      components?: string[];
+      missing?: string[];
+    };
+    if (
+      advisoryKey(prior.components ?? [], prior.missing ?? []) === advisoryKey(components, missing)
+    )
+      return;
   }
+  insertSignal(db, {
+    ticketId,
+    workUnitId: null,
+    signalType: "toolchain",
+    // `error`, not `fail`: the component was never MEASURED. `fail` would assert that a
+    // check ran and came back red, which is a different and untrue claim. (The column's
+    // CHECK constraint allows only pass/fail/error, and it caught an invented fourth value.)
+    result: "error",
+    detail: {
+      advisory: true,
+      reason: "component-unusable",
+      components,
+      missing,
+    },
+  });
 }

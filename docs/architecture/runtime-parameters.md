@@ -21,8 +21,13 @@ Two global behaviors sit in front of the subcommands (`src/index.ts`):
   Every human-readable byte (progress, summaries, warnings, pause hints, resume diagnostics,
   missing-tool reports) goes to **stderr** (`src/cli/run.ts`, `src/cli/park.ts`). This is what makes
   `styre run … | jq` and machine consumption clean.
-- **`styre setup` and `styre migrate` print human output to stdout** via `console.log`
-  (`src/cli/setup.ts`, `src/cli/migrate.ts`). `styre notify` prints to stderr.
+- **`styre setup`**, **`styre migrate`** and **`styre notify`** print their human output to stderr
+  (`src/cli/setup.ts` through `console.warn` and `process.stderr.write`; `src/cli/migrate.ts`;
+  `src/cli/notify.ts`). The one exception: when `styre setup` runs interactively, the question of
+  each prompt is written to stdout by the runtime's `prompt()`.
+- **`styre ls` and `styre clean` print their listing and summary to stdout** (`src/cli/ls.ts`,
+  `src/cli/clean.ts`); `clean`'s failure detail and refusals go to stderr. `styre --version`
+  prints the version to stdout.
 
 Do not assume a uniform stream policy across commands — only `run` reserves stdout for NDJSON.
 
@@ -38,15 +43,15 @@ resume it with `--resume <ident>`, or discard it and start over with `styre run 
 | Flag | Type | Default | Effect |
 |---|---|---|---|
 | `--profile <path>` | string | `~/.config/styre/<slug>/profile.json` for the cwd repo | Pin the project-profile JSON. |
-| `--slug <name>` | string | derived from the cwd repo | Locate the profile + per-project config. |
+| `--slug <name>` | string | derived from the cwd repo | Locate the profile + per-project config. May contain `/` (it nests); see `conventions.md` for the names refused. |
 | `--config <path>` | string | discovered from `~/.config` | Pin the runtime config. **Hermetic**: when set, it is the *sole* source — global/per-project `config.json` are not merged. |
-| `--db <path>` | string | a fresh per-run temp DB (`os.tmpdir()/styre-run-*/run.db`) | SQLite state-of-truth for this run. |
+| `--db <path>` | string | the checkpoint, `$XDG_STATE_HOME/styre/<slug>/<ident>/run.db` | SQLite state-of-truth for this run. A database that already exists is reused: it is upgraded if an older Styre wrote it, and every active ticket in it is prepared (see [Design inputs and invalidation](#design-inputs-and-invalidation-eng-477)). `--resume` ignores it and uses the checkpoint. |
 | `--resume <ident>` | string | — | Resume a paused run by ticket ident. |
 | `--accept-head` | boolean | off | On resume, proceed even though the branch HEAD moved (drops carried-forward context). |
 | `--review-action` | `retry` or `accept-risk` | retry semantics | Resume an unresolved review; plain resume never accepts risk. Requires `--resume`. |
 | `--review-findings` | comma-separated positive IDs | — | With `accept-risk`, list exactly all current nominated major finding IDs. |
 | `--review-reason` | nonblank text | — | With `accept-risk`, record why shipping these findings is acceptable at the reviewed SHA. |
-| `--inspect` | boolean | off | Print resume diagnostics to stderr and exit `0` without running. |
+| `--inspect` | boolean | off | Print resume diagnostics to stderr and exit `0` without running. Reads a private copy of the checkpoint: it never opens or changes the database, whatever its version. |
 | `--in-place` | boolean | off | Work on a branch in the **repo root** instead of an isolated worktree. Fresh-run only (on resume it is derived from the DB). Requires a disposable, single-use checkout — see below. |
 | `--fresh` | boolean | off | Discard an existing checkpoint for this ticket and reconcile the worktree, then start over. Fresh-run only. |
 
@@ -88,12 +93,51 @@ resume refuses with exit `65`; override with `--accept-head` (resume against the
 carryover) or diagnose with `--inspect` (exit `0`). Resume also refuses with exit `65` under
 concurrent-resume lock contention — another `styre run --resume` already holds this checkpoint.
 
+Resume finds the run's own ticket by its ident, the checkpoint folder's name. A checkpoint that holds
+no ticket with that ident (or two, from two projects) is refused (exit `65`) before anything is
+written: `resume refused: the checkpoint at <dir> holds no run of <ident> (<reason>)`, naming the
+idents the checkpoint holds and saying that idents are case sensitive (it never suggests `--fresh`,
+which on a filesystem that ignores case could discard another paused run). A checkpoint with no
+tables is refused the same way.
+
+Resume also reads the profile and config again and narrows the profile to this host's toolchain
+exactly as a fresh run does, printing the same notice (`resume: skipping N component(s) whose
+toolchain is absent; …`). Where a fresh run would refuse (nothing usable, or a component whose
+suite is `required` is unusable), resume never exits `69`: it pauses for the operator (`needs_you`,
+exit `75`) with `resume: paused: this host lacks the tools for <component> (missing: <tools>); …`,
+and ends like every other `needs_you` pause (its telemetry events and summary, the notifier, the
+outbox drained). Install the tools and resume. When the resume itself already left the run waiting
+(a review verdict it applied again escalated, at the plan review gate for example), it adds no
+second pause: it records a `toolchain-missing` note (the tool gap) and says `resume: paused: the run
+is already waiting for you, and …`. When the list of components narrowed away differs from the one
+recorded, or none was recorded (a checkpoint from before ENG-477), and `provision` will not run
+again (in place, where it stays done), the resume records the toolchain advisory for the PR itself,
+in the same transaction as the snapshot.
+
+A database written by an older Styre (schema v7 or v8) is upgraded first, and its finished design
+steps are adopted (see [Design inputs and invalidation](#design-inputs-and-invalidation-eng-477)).
+A checkpoint whose design steps were fingerprinted by a newer Styre is refused before anything
+changes (exit `65`): `resume refused: this run was recorded by a newer Styre; use that version.`
+A checkpoint written by a run on a reused `--db` holds that database's other active tickets; the
+resume prepares each of them too, as that run did.
+
+The partial output carried forward goes only to the step it was written by, on the ticket whose
+dispatch wrote it, in the same generation (the step was not invalidated since), and, for a design
+step paused before it finished, only while its inputs are the ones recorded at the pause
+(`transcript.json` records the ticket, the step key, its generation and its input manifest). When
+the inputs differ, the carryover is dropped and a `carryover-dropped` note (the partial output was
+withheld) names the changed inputs; for another ticket, step or generation it is dropped without a
+note. A checkpoint written by a run on a reused `--db` can hold a pause from another ticket: its
+partial output never reaches the run's own ticket. A `transcript.json` that names no ticket was
+written by an older Styre and goes to the run's own parked step, as before. `transcript.json` stays in the checkpoint after a
+resume (ENG-497).
+
 ---
 
 ## `styre ls`
 
 List every styre effort's checkpoint across all projects under `$XDG_STATE_HOME/styre/`
-(`src/cli/ls.ts`). Takes no flags. Prints three sections, in order, to stdout:
+(`src/cli/ls.ts`). Takes no flags. Prints up to five sections, in order, to stdout:
 
 ```
 Paused/resumable efforts:
@@ -102,6 +146,12 @@ Paused/resumable efforts:
 
 Finished leftovers (reap per project with `styre clean --all`):
   <slug>/<ident>  [<kind>, <age>]  <note>
+
+Unreadable checkpoints (remove by hand: `styre clean <ident> --slug <slug>` names what to remove; or start over with `styre run <ident> --slug <slug> --fresh`):
+  <slug>/<ident>[ (running)]  <reason>
+
+Checkpoints this Styre cannot use (use the Styre that wrote them; or remove by hand, or start over with `styre run <ident> --slug <slug> --fresh`):
+  <slug>/<ident>[ (running)]  <reason>
 
 Running:
   <ident>  [<kind>, <age>]
@@ -115,13 +165,29 @@ Running:
   leftovers span every project. The section is omitted entirely when empty. Classification is by
   checkpoint kind alone — there is **no merge-state check** (nothing confirms the PR actually
   merged) and **no age-based staleness heuristic**.
+- **Unreadable checkpoints** — checkpoints `ls` could not read, with the reason: damaged (including
+  a database the readers cannot query; the reason names the error, for example a missing column),
+  written to so steadily that no stable copy could be taken in 3 attempts, or holding no ticket with
+  the folder's ident (idents are case sensitive), or more than one (the same ident in two projects).
+  Never dropped from the listing; `(running)` marks one a live run holds. Never resumable, and
+  `styre clean --all` never reaps them. Two ways out: remove it by hand (see `styre clean`;
+  `styre clean <ident> --slug <slug>` refuses, removes nothing, and names the checkpoint folder and
+  the worktrees that look like the run's), or `styre run <ident> --slug <slug> --fresh` discards it
+  and starts the ticket over, a full new run. A checkpoint folder without its `run.db` is not
+  listed, as before. The section is omitted when empty.
+- **Checkpoints this Styre cannot use** — checkpoints whose schema this Styre refuses: written by a
+  newer Styre (`written by a newer Styre (schema vN)`), an unknown database shape, or older than v7.
+  They are not damaged, and `ls` says why. Use the Styre that wrote them, which keeps the paused
+  work; or remove by hand (`styre clean` refuses them, exit `65`, and names what to remove; see
+  `styre clean`); or start over with `styre run <ident> --slug <slug> --fresh`, a full new run. The
+  section is omitted when empty.
 - **Running** — checkpoints currently live (an active `styre run` holds the lock). Live efforts
   never appear as reapable, even if their classified kind would otherwise qualify. The section is
   omitted entirely when empty.
 
 When the sweep that `ls` runs first (see
 [Stopping, interruption and orphan cleanup](#stopping-interruption-and-orphan-cleanup-eng-485))
-stopped any orphan, a fourth section follows, one row per orphan:
+stopped any orphan, a last section follows, one row per orphan:
 
 ```
 Stopped orphans (left running when Styre was force quit):
@@ -130,6 +196,15 @@ Stopped orphans (left running when Styre was force quit):
 
 Age is rendered by `humanAge`: under 60 minutes as `"<m>m"`, under 24 hours as `"<h>h"`, otherwise
 `"<d>d"` (integer floors).
+
+`ls` reaches the same folders as before: `<state>/<slug>/<ident>`, two levels down. A checkpoint
+under a nested slug (`team/app`) is not listed yet (ENG-491). Each row is the run's own ticket,
+found by its ident, the checkpoint folder's name, even when the checkpoint (written by a run on a
+reused `--db`) holds other tickets.
+
+`ls`, `clean`, `--fresh` and `--inspect` never open a checkpoint itself: they read a private copy of
+it, and of its `-wal` and `-shm`, removed afterwards, with queries that work on every shape since
+v7, and never upgrade it.
 
 ---
 
@@ -144,7 +219,7 @@ by the merge itself: cleaning a run's disk state is not the same as abandoning t
 | `<ident>` | positional | — | Ticket ident to clean (e.g. `ENG-123`). Required unless `--all`. |
 | `--all` | boolean | off | Reap only the provably-finished (`pr-ready`/`done`) efforts for the current project; skips resumable pauses and live runs. Mutually exclusive with `<ident>`. |
 | `--purge` | boolean | off | Single-ident only — rejects alongside `--all` (exit `64`). After reaping, also deletes the local + remote branch (closes the PR). Opt-in; silent when there is no branch/PR. |
-| `--slug <name>` | string | derived from the cwd repo | Project slug to locate the profile. |
+| `--slug <name>` | string | derived from the cwd repo | Project slug to locate the profile. May contain `/` (it nests); see `conventions.md` for the names refused. |
 | `--profile <path>` | string | discovered | Path to the project-profile JSON. |
 
 - **`styre clean <ident>`** — reaps that one effort's worktree + checkpoint. No ticket-status
@@ -156,7 +231,42 @@ by the merge itself: cleaning a run's disk state is not the same as abandoning t
 - **`styre clean <ident> --purge`** — after reaping, additionally deletes the local + remote branch,
   closing the PR. On the repo's **default branch**, `--purge` skips the branch/PR deletion — the
   default branch is never deleted — but still reaps the disk state; it prints a stderr warning and
-  exits `0` (a soft skip, not a failure).
+  exits `0` (a soft skip, not a failure). The branch is the run's own ticket's, found by its ident
+  (a checkpoint written by a run on a reused `--db` holds other tickets too).
+- **A checkpoint `clean` cannot use**: one it cannot read (damaged, or no ticket with that ident
+  recorded) or one whose schema this Styre refuses (written by a newer Styre, an unknown shape,
+  older than v7). `clean` refuses (exit `65`) and removes nothing: no folder, no worktree, no
+  branch. It names the reason, the checkpoint folder, and the worktrees of the target repository
+  that look like the run's (a folder named after the ident whose parent folder's name starts with
+  `styre-wt-`; never the repository itself), or says none was found:
+  `styre clean: cannot clean '<ident>': this Styre cannot use its checkpoint (<reason>)`. It prints
+  no command. With a live lock it refuses with exit `75` first. `--purge` refuses the same way
+  (exit `65`). A checkpoint folder without its `run.db` is still "no styre effort" (exit `64`), as
+  before.
+
+  For a checkpoint written by a newer Styre, use that Styre: it keeps the paused work. Otherwise,
+  to remove the run by hand: look in each worktree `clean` named for uncommitted or untracked work
+  first, and decide yourself what to keep, since `git worktree remove` refuses a worktree that
+  holds any; then remove each one with `git worktree remove` run in the target repository, and
+  last delete the checkpoint folder `clean` named. Edits an interrupted step left in the
+  repository itself are not touched (for an in place run, check `git status` there). To start the
+  ticket over instead, `styre run <ident> --slug <slug> --fresh` discards the checkpoint and
+  starts a full new run. (Safe removal of such checkpoints by Styre itself is ENG-491.)
+- `styre clean --all` skips both kinds, and reaches the same folders as before (a nested slug's
+  checkpoints are not reached yet: ENG-491).
+- The ident and `--slug` are checked before any path is built from them. An ident is one folder
+  name: empty, `.`, `..`, or one containing `/`, `\` or a NUL character is refused. A slug may
+  contain `/` and then nests (see `conventions.md`); each part between slashes must be a folder
+  name by the same rule, so `team/app` is accepted and `team/..`, `/abs`, `a//b` and `a/./b` are
+  refused. Exit `64` for a name given on the command line or derived from the repository, `78`
+  for a slug read from a profile file. `styre run` (fresh and `--resume`) and `styre setup` apply
+  the same check, to the `--slug` flag, a derived slug, the profile's own slug and the ticket's
+  ident; `setup` never writes a profile whose slug `run` would refuse.
+- **In place, an interrupted step's edits** are undone before `clean` (and `--fresh`) discard a
+  checkpoint, reading it through a private copy. When the checkpoint cannot be read at all, they say
+  `styre: could not read <path> to undo an interrupted step's edits: <why>` and go on with the
+  discard without the undo, and without the warning about a step an older Styre left running
+  (before ENG-477, a read that failed after the running steps were listed stopped the discard).
 
 Stream reminder: `clean` prints its summary to stdout (`reaped N finished leftover(s); kept M
 resumable/unknown; F failed` for `--all`; `reaped <ident> (freed worktree, removed checkpoint)` for
@@ -174,7 +284,7 @@ path needs no marker.
 |---|---|---|---|
 | `--out <path>` | string | `$XDG_CONFIG_HOME/styre/<slug>/profile.json` | Output profile path. |
 | `--checks <v>` | string | probe decides | Override the checks system. Validated against `github \| external \| none`; any other value throws. |
-| `--slug <name>` | string | derived from the repo | Override the derived project slug (stores the profile under that slug). |
+| `--slug <name>` | string | derived from the repo | Override the derived project slug (stores the profile under that slug). May contain `/` (it nests); see `conventions.md` for the names refused. |
 | `--force` | boolean | off | Overwrite an existing profile, discarding the operator-resolved runtime-context merge. |
 | `--reprobe` | boolean | off | Re-probe from scratch. **Behaviorally identical to `--force`** in the current code (both set the same `clean` path). |
 | `--config <path>` | string | discovered | Selects the agent **provider** for the setup run (used to gate the required provider API key). Not otherwise forwarded into the profile. |
@@ -189,7 +299,35 @@ no prompt, and agent-authored commands are accepted only under `--trust-agent-co
 ## `styre migrate`
 
 Create or upgrade the SQLite database; idempotent (`src/cli/migrate.ts`). Prints
-`bootstrapped: <path> (schema vN)` or `already current: …` to stdout.
+`bootstrapped: <path> (schema vN)`, `already current: <path> (schema vN)` or
+`upgraded from v<old>: <path> (schema v<new>)` to stderr.
+
+An older database (schema v7 or v8) is upgraded (`src/db/migrate.ts`): first a backup next to it,
+`<db>.v<old>.<UTC timestamp with milliseconds>.bak` (`VACUUM INTO`, complete even while another
+reader holds a snapshot; a failed backup stops the upgrade), then each migration in its own
+transaction, with foreign keys checked at its end, then a structural comparison with `schema.sql`.
+It prints, on stderr, `migrate: backed up <db> (schema v<old>) to <backup>` and
+`migrate: upgraded <db> from schema v<old> to v<new>`, then the summary line above. `styre run`
+(fresh, on a reused `--db`, and `--resume`) upgrades the same way, printing the two `migrate: `
+lines. Refusals (exit `65`; the database is left as it is):
+- `migrate: <db> is schema v<N>, newer than this Styre's v<M>` (use the newer Styre that wrote it);
+- `migrate: <db> is schema v<N> but has a shape this Styre does not know`;
+- `migrate: <db> is schema v<N>; Styre upgrades checkpoints from v7 on`;
+- `migrate: <db> has tables but no schema_meta, a shape this Styre does not know`.
+
+Each says to start that run over with `styre run <ticket> --fresh`, and, for a database given to
+`styre migrate` that is no run's checkpoint, to remove it so `styre migrate` creates a new one. The
+command's error prefix comes first and is said once: `styre migrate` prints `styre migrate: …`,
+and `styre run` (fresh, on a reused `--db`, and `--resume`) prints `styre run: migrate: …`. A
+migration that fails leaves the database at the last version that completed (exit `70`); the
+backup is kept. The structural comparison runs inside the last migration's transaction, so a
+difference rolls that migration back too. `styre ls`,
+`styre clean`, `--fresh` and `--resume --inspect` read a checkpoint without upgrading it;
+`--inspect` never opens or changes the database, whatever its version (no migration, no backup, no
+run row), and only takes and releases the run lock, as every resume does. For a checkpoint an older
+Styre wrote, `--inspect` says `resume will upgrade this checkpoint from v<old> to v<new>, after
+writing a backup`, or why resume would refuse it, with the recorded base, the current head and the
+step to dispatch again.
 
 | Flag | Type | Default | Effect |
 |---|---|---|---|
@@ -321,7 +459,7 @@ itself.
 ### Messages
 
 Every line below goes to stderr, for every command: `styre run`'s stdout keeps only NDJSON, and the
-human output `ls` and `setup` print on stdout stays clean. Text in angle brackets is filled in;
+human output `ls` and `clean` print on stdout stays clean. Text in angle brackets is filled in;
 `<ident>` is `an unknown run` when a record names no ticket. A test
 (`test/lifecycle/messages-doc.test.ts`) checks that each line here is a message in `src/`, that every
 `styre: …` message in `src/` is here (apart from a short, tested list of messages unrelated to
@@ -495,6 +633,139 @@ file. Make Styre that process with `exec`:
 
 ---
 
+## Design inputs and invalidation (ENG-477)
+
+A design step is done only while its recorded inputs still match. What counts as an input is the
+declared table in `src/daemon/design-graph.ts` (`DESIGN_TABLE`), checked against its own rules when
+it is first used (a table that breaks them stops the run: `the declared design table breaks its own
+rules`, exit `70`, a Styre defect):
+
+| Step | Inputs |
+|---|---|
+| `provision` | the profile's components; the components narrowed away for this host's toolchain, and those classified as not part of the product |
+| `design:dispatch` | the ticket title and description; the profile's slug, prompt variables, runtime context and components |
+| `design:extract` | the ticket ident and title; the profile's slug, prompt variables, runtime context and components; the plan |
+| `design:size` | `complexityGrading` and the work units; when grading is on, also the ticket title, the profile's slug and prompt variables, and the plan |
+| `design:review` (full track only) | the ticket title (not its description); the profile's slug and prompt variables; the plan and the work units |
+
+The snapshot inputs live in the `ticket_input` table. The ticket text is fixed for the run: resume
+never reads the tracker, so start over with `--fresh` to pick up an edited ticket. The profile, the
+lists of components narrowed away, and `complexityGrading` are rewritten from what the handlers
+will receive now on each resume and on a reused `--db`. Model choices and `onPlanDefect` are not
+inputs. The same table also holds the commit the run started from (`run.startingCommit`; not an
+input of any step). It is recorded once and never rewritten, not on resume and not after
+`--accept-head`, and only ever for the run's own ticket, never for another ticket the loop drives on
+a reused `--db`:
+- in place, the checkout's HEAD at run start (an in place run whose HEAD cannot be read refuses
+  before any step, exit `78`); on a reused `--db`, the run's own ticket keeps the value it already
+  has, and one that has none gets this run's HEAD;
+- in worktree mode, the branch head right after the ticket's first `provision`, recorded by the run
+  that created the ticket. A ticket the database already held when the run started (one an older
+  Styre started, or one whose worktree run stopped before its first `provision`) has none, and a
+  later run on a reused `--db` does not add one.
+
+The plan is read from git at the branch head, never from the worktree, so it must be committed.
+When `design:dispatch` finds no plan for the ticket committed there (for example because
+`docs/plans/` is in `.gitignore`), it stops at once, without a retry, and the run waits for you
+(exit `75`) with that reason: remove `docs/plans/` from `.gitignore`, commit that on the ticket
+branch, then resume with `--accept-head` (the commit moves the branch HEAD, so a plain resume is
+refused).
+
+The design walk recomputes each finished step's inputs from the run's database and, at the first
+one whose inputs changed, invalidates that step alone; the steps that read its output are judged
+again once it has run, and stay done when its output comes back the same. A step that breaks one of
+Styre's own rules while it runs (it reads an earlier step's output its row does not declare, or
+returns a result its step cannot record) is not retried: the run waits for you at once, with the
+violation as the reason (exit `75`).
+
+A run on a reused `--db`, and a resume, prepare every active ticket in that database the same way
+(the snapshot and, for steps an older Styre finished, the adopt pass below), not only their own:
+the loop drives every ready ticket it finds. Waiting tickets are left alone. The toolchain advisory
+stays the run's own ticket's, and so does the starting commit: another ticket's `provision` records
+none, even when it runs in this run (see above).
+
+A run whose design steps were fingerprinted by a newer Styre (a newer fingerprint scheme) is
+refused before anything changes (exit `65`): on resume (`this run was recorded by a newer Styre;
+use that version`, or start the ticket over with `--fresh`), and on a fresh run that reuses its
+database with `--db` (`this database holds a run recorded by a newer Styre; use that version, or
+point --db at a new database`, naming the tickets; `--fresh` does not help there, since a reused
+database ignores it). `--inspect` says so.
+
+Notes written to the run's events (and emitted as `event` rows, see
+[`telemetry-export.md`](telemetry-export.md)):
+- `inputs-changed` (inputs changed since they were recorded): on a resume or a reused `--db`, the
+  names of the inputs whose values changed. Past design, the note says the change takes effect the
+  next time the run is in design; the run carries on from where it paused. In design, it says the
+  steps that read them are judged again when the run next walks the design steps. A run stopped at
+  the plan review gate is judged by that gate first, which stays closed until the plan changes:
+  edit the plan and resume with `--accept-head`.
+- `carryover-dropped` (partial output withheld): a step paused before it finished is dispatched
+  again under other inputs, so its partial output from before the pause is not passed on; the note
+  names the step and the changed inputs.
+- `invalidated` (a design step was reset to run again): the step keys, the cause and the changed
+  input names; the previous row is kept in `workflow_step_history`. The cause is one of: `inputs`
+  (an input the step reads changed), `feedback` (a review sent the plan back to be redesigned),
+  `worktree-recreated` (`provision` runs again because a resume recreated the worktree and its
+  installed dependencies are gone), or `manifest-touched` (`provision` runs again because a change
+  touched a dependency manifest).
+- `adopted` (finished steps recorded on upgrade): on the first resume, or run on a reused `--db`,
+  after an upgrade, the finished design steps of a run paused by an older Styre, recorded with
+  today's inputs (`stepKeys`); an edit made between the pause and the upgrade cannot be detected.
+  Steps that finished after a step that has not (a pause in the middle of a redesign, say), steps
+  that do not apply on the ticket's track, and, when the plan cannot be read at the branch head,
+  `design:dispatch` and every step after it, are listed under `willRerun`: they run again once the
+  steps before them have.
+- `reused-database` (the run was started again on an existing database): written by a `styre run`
+  on a reused `--db` on its own ticket when that ticket already existed and on every other active
+  ticket there, and by a resume on the checkpoint's other active tickets; the loop guard below
+  counts from it, as from a resume.
+- `toolchain-missing` (this host lacks a required suite's tools): a resume found the tools missing
+  while the resume had already left the run waiting for you (a review verdict applied again on
+  resume that escalated, at the plan review gate for example); it records the missing tools instead
+  of a second pause.
+
+A run stopped at the plan review gate leaves it only through a design loopback or an `invalidated`
+note that names a `design:` step; the resets of `provision` (`worktree-recreated`,
+`manifest-touched`, or `inputs` for a changed toolchain list) say nothing about the plan and leave
+it at the gate.
+
+Escalation `invalidate-loop:<step>` (the invalidate loop guard): a design step's inputs changed
+again after it had already been invalidated for changed inputs three times since the latest resume,
+run on a reused `--db`, or redesign. Each of those legitimately changes inputs, so each starts the
+count again; an unstable digest does none of them, and is what the guard catches. The run waits for
+you (`needs_you`, exit `75`); report it, since it points at a Styre defect.
+
+**Fingerprint scheme.** Every recorded manifest carries the scheme number (`FINGERPRINT_SCHEME`,
+today `1`) of the Styre that recorded it. The scheme covers everything a digest depends on: the
+encoding, how the profile and config are parsed (their defaults included), what each design step
+declares as its inputs, and how each output is digested. A release that changes any of these (a new
+profile field with a default, a changed config default, a declared input added or removed) bumps
+the scheme; a test (`test/daemon/fingerprint-pin.test.ts`) that pins the digests of a fixed set of
+inputs fails until it does. A step whose manifest was recorded under an older scheme counts as
+changed: it reruns the next time the run is in design, and a run paused past design is unaffected
+until a redesign brings it back. Side effects of a bump on a paused run's first resume: the
+`inputs-changed` note may name inputs nobody edited (their digests are computed differently now;
+past design its message still says the change takes effect the next time the run is in design), and
+a step paused before it finished loses its partial output from before the pause (a
+`carryover-dropped` note), because its recorded inputs no longer compare equal. The adopt pass never
+adopts an older scheme's manifest; it only records steps that have none.
+
+`--resume --inspect` is read only, whatever the checkpoint's version: it reads a private copy and
+never opens or changes the database (no migration, no backup, and no run row: before ENG-477 it
+marked the run resumed). Like every resume it takes and releases the run lock, so it cannot race a
+live resume. It reads through queries that work on every shape since v7, and prints a `schema:`
+line: the version and `current`; for a checkpoint an older Styre wrote,
+`resume will upgrade this checkpoint from v<old> to v<new>, after writing a backup`; or why resume
+would refuse it (newer than this Styre, a shape it does not know, older than v7, design steps
+fingerprinted by a newer Styre, or no ticket with that ident), followed by the recorded base, the
+current head and the step to dispatch again, as before ENG-477, and `(no changes made)`.
+
+Known limit, worktree mode: the ticket branch must survive a resume, and `git worktree add -B` on
+resume recreates it from the target repository's checked out HEAD (ENG-488; see
+[`SECURITY.md`](../../SECURITY.md)).
+
+---
+
 ## Exit codes (error codes) and their meaning
 
 The process exit code is the machine-readable error code. The space is enumerated in `src/cli/run.ts`
@@ -506,19 +777,19 @@ convention, which is what lets a CI/fleet caller branch on them.
 |---|---|---|---|
 | `0` | success | The command did its job. For `run`: a PR is open and ready (`done` / `pr-ready`; `pr-ready` requires the forge to have returned the PR's URL and the push of the current head to have been delivered — otherwise the run pauses instead, exit `75`). Also returned by `--version`, `--help`, `run --resume --inspect`, and a `styre clean --purge` soft-skip on the default branch. | — |
 | `1` | operational stop | `abandoned` — a reserved terminal outcome. **Not currently emitted by any run.** | No — a human should look at it. |
-| `64` | usage (`EX_USAGE`) | CLI misuse — e.g. `styre notify` without `--test`, `styre clean --all --purge`, or a fresh `styre run <ticket>` when a checkpoint already exists for that ident (`usageError` → `EXIT.USAGE`). A misuse error, not a run failure. | No — correct the invocation. |
-| `65` | resume refused (`EX_DATAERR`) | `run --resume`, refused because either the branch HEAD moved since the run paused and `--accept-head` was not passed, *or* concurrent-resume lock contention — another `styre run --resume` already holds this checkpoint. | Yes, deliberately — re-run with `--accept-head` (HEAD moved) or retry once the other resume releases the lock (contention), or `--inspect` (diagnose, exits `0`). |
+| `64` | usage (`EX_USAGE`) | CLI misuse — e.g. `styre notify` without `--test`, `styre clean --all --purge`, or a fresh `styre run <ticket>` when a checkpoint already exists for that ident (`usageError` → `EXIT.USAGE`), or an ident or slug that is not a valid folder name (see `conventions.md`: an ident is one folder name; a slug may nest with `/`, each part one folder name), given on the command line, derived from the repository, or from the tracker (`styre run` fresh or `--resume`, `styre clean`, `styre setup`). A misuse error, not a run failure. | No — correct the invocation. |
+| `65` | checkpoint refused (`EX_DATAERR`) | `run --resume`, refused because either the branch HEAD moved since the run paused and `--accept-head` was not passed, *or* another resume of the same checkpoint holds its lock — another `styre run --resume` already holds this checkpoint, *or* the checkpoint holds no ticket with that ident (idents are case sensitive; the refusal names the idents it holds), or an invalid review decision. Also a database that cannot be upgraded: newer than this Styre, older than v7, or of an unknown shape (`styre run`, `--resume` and `styre migrate`); `styre clean <ident>` refusing a checkpoint it cannot read or whose schema it cannot use (nothing removed); a resume of a run whose design steps were fingerprinted by a newer Styre ("this run was recorded by a newer Styre; use that version"); and a fresh run on a reused `--db` that holds such a run ("this database holds a run recorded by a newer Styre; use that version, or point --db at a new database"; nothing changed in either). | Yes, deliberately — re-run with `--accept-head` (HEAD moved) or retry once the other resume releases the lock (contention), or `--inspect` (diagnose, exits `0`); for a missing ident, resume with the ident exactly as the checkpoint holds it. A database written by a newer Styre: use that Styre, which keeps the paused work; otherwise, or for one that cannot be upgraded, start over with `--fresh`. `styre clean <ident>` on a checkpoint it cannot use: not as is; for a newer Styre's checkpoint use that Styre first; otherwise remove the run by hand (see `styre clean <ident>` above), or start over with `styre run <ident> --slug <slug> --fresh`. |
 | `69` | toolchain missing (`EX_UNAVAILABLE`) | A required repo toolchain program (a build/test/check tool the profile depends on) is not installed on this machine. Detected by the fresh-run preflight *before any spend*; never raised on `--resume`/`--inspect`. Also raised when component-role classification (ENG-425) leaves the run no primary component to work on — same fresh-run-only rule: a resumed or inspected run is never refused for it. Also raised, on any run, resume or setup, when the agent CLI is missing, below its minimum version, or lacks a flag Styre needs to confine agents (ENG-476), and when an agent run in `setup` could not be confirmed as confined (including one stopped at startup). | Yes, after you install or upgrade the tool — the stderr report names it. |
-| `70` | internal (`EX_SOFTWARE`) | An unexpected crash or a violated internal invariant — anything that is not a `StyreError` reaching the error boundary. Also set by `styre run` and `styre setup` when a launch is still running at a normal exit (ENG-485: Styre stops and names it), but only when the exit status was otherwise `0`. | No — this is a bug; please report it. |
-| `75` | paused (`EX_TEMPFAIL`) | **Any** paused run (`exitCodeForOutcome`) — reason `budget`, `needs_you` (including a PR the forge did not deliver — a resume retries the request; one made for an older commit is replaced when the PR step runs again at the new head — and an agent dispatch whose confinement could not be confirmed, ENG-476, whose cause the run summary's timeline shows), or `interrupted` (reserved: a stop signal does not pause a run, it ends it with the signal's own status, `129` to `143`). The checkpoint (SoT + transcript) is already on disk and **no retry attempt is consumed**. Also returned by `styre clean <ident>` when that ident is currently a live run — `clean` refuses rather than reaping. | Paused: yes — `styre run --resume <ident> --profile <p>`. `clean` on a live run: not as-is — wait for the run to finish or pause, then clean. |
+| `70` | internal (`EX_SOFTWARE`) | An unexpected crash or a violated internal invariant — anything that is not a `StyreError` reaching the error boundary. Also set by `styre run` and `styre setup` when a launch is still running at a normal exit (ENG-485: Styre stops and names it), but only when the exit status was otherwise `0`. Also: a migration that failed (the database stays at the last version that completed; the backup is kept), and a declared design table that breaks its own rules (`the declared design table breaks its own rules`, a Styre defect). An invariant broken inside a step is not exit `70`: the step escalates at once and the run pauses (`75`). | No — this is a bug; please report it. |
+| `75` | paused (`EX_TEMPFAIL`) | **Any** paused run (`exitCodeForOutcome`) — reason `budget`, `needs_you` (including a PR the forge did not deliver — a resume retries the request; one made for an older commit is replaced when the PR step runs again at the new head — and an agent dispatch whose confinement could not be confirmed, ENG-476, whose cause the run summary's timeline shows, or a resume paused because this host lacks a required suite's tools, or a plan that is not committed at the branch head, or an invariant a step broke), or the invalidate loop guard's escalation (signature `invalidate-loop:<step>`: a design step kept finding changed inputs), or `interrupted` (reserved: a stop signal does not pause a run, it ends it with the signal's own status, `129` to `143`). The checkpoint (SoT + transcript) is already on disk and **no retry attempt is consumed**. Also returned by `styre clean <ident>` when that ident is currently a live run — `clean` refuses rather than reaping. | Paused: yes — `styre run --resume <ident> --profile <p>`. `clean` on a live run: not as-is — wait for the run to finish or pause, then clean. |
 | `129`, `130`, `131`, `143` | ended by a stop signal | `styre run` or `styre setup` stopped the agent and its commands on SIGHUP, SIGINT, SIGQUIT or SIGTERM and ended itself by the same signal ([Exit statuses on a signal](#exit-statuses-on-a-signal)). For `run`, the interruption is recorded and costs no attempt. Never `75`. | Yes — `styre run --resume <ident>`. |
-| `78` | config (`EX_CONFIG`) | A bad config/profile value, an unknown adapter, an unresolved profile (`configError` → `EXIT.CONFIG`), or — at `run` start — a forge with neither the profile's `defaultBranch` nor its own default branch to open a PR against. Also raised when `agent.provider` is `codex`, which Styre cannot yet confine (ENG-476; lifted by ENG-484). | No — fix the value, or re-run `styre setup`. |
+| `78` | config (`EX_CONFIG`) | A bad config/profile value, an unknown adapter, an unresolved profile (`configError` → `EXIT.CONFIG`), or — at `run` start — a forge with neither the profile's `defaultBranch` nor its own default branch to open a PR against. Also raised when `agent.provider` is `codex`, which Styre cannot yet confine (ENG-476; lifted by ENG-484), for a profile whose own `slug` is not a valid folder name (`styre run`, `styre clean --profile`; rerun `styre setup` with `--slug`), and for an `--in-place` run whose HEAD cannot be read (a repository with no commit), refused before any step. | No — fix the value, or re-run `styre setup`. |
 
 **How to read them as a caller:**
 
 - **`0`** — done; for `run`, go merge the PR.
 - **`75`** — any paused run, whatever the reason (`budget` / `needs_you` / `interrupted`): back off and re-run the *same* ticket with `--resume`; a fleet scheduler should retry, not mark it failed. The same code is also returned by `styre clean <ident>` when that ident is a live run — `clean` refused rather than reaping, so wait for the run to finish (or pause), then clean.
-- **`65`** — either the world moved under a paused run (branch HEAD advanced) or a concurrent `--resume` already holds this checkpoint; a human (or a policy) decides whether to accept the new HEAD (`--accept-head`), retry once the other resume finishes, or investigate (`--inspect`).
+- **`65`** — a checkpoint was refused: the world moved under a paused run (branch HEAD advanced), a concurrent `--resume` already holds this checkpoint, or the checkpoint cannot be used as it is (no ticket with that ident; a schema or fingerprints this Styre cannot use; `styre clean` on such a checkpoint); a human (or a policy) decides whether to accept the new HEAD (`--accept-head`), retry once the other resume finishes, use the Styre that wrote it, start over with `--fresh`, or investigate (`--inspect`).
 - **`69`** — an environment/provisioning gap on this machine, not a problem with the ticket; fix the host toolchain and re-run.
 - **`1`** — reserved for `abandoned`. Not currently emitted by any run — cleaning a run's disk state (`styre clean`) is not the same as abandoning the ticket.
 - **`64` / `78`** — a misuse or a bad config value: the invocation or the config needs fixing, not a retry.

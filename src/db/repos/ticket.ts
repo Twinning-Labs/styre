@@ -79,6 +79,13 @@ export function getByIdent(db: Database, projectId: number, ident: string): Tick
   );
 }
 
+/** Every ticket whose status is `active`, by id: the ones a run on a reused --db may drive. */
+export function listActiveTickets(db: Database): TicketRow[] {
+  return db
+    .query<TicketRow, []>(`SELECT ${COLS} FROM ticket WHERE status = 'active' ORDER BY id`)
+    .all();
+}
+
 export function setTicketStatus(db: Database, id: number, status: string): void {
   db.query("UPDATE ticket SET status = $status, updated_at = $now WHERE id = $id").run({
     $status: status,
@@ -98,6 +105,14 @@ export function setTicketStage(db: Database, id: number, stage: string): void {
 export function setTicketTrack(db: Database, id: number, track: string): void {
   db.query("UPDATE ticket SET track = $track, updated_at = $now WHERE id = $id").run({
     $track: track,
+    $now: nowUtc(),
+    $id: id,
+  });
+}
+
+/** design:size's output cleared by an invalidation (spec §6.1). */
+export function clearTicketTrack(db: Database, id: number): void {
+  db.query("UPDATE ticket SET track = NULL, updated_at = $now WHERE id = $id").run({
     $now: nowUtc(),
     $id: id,
   });

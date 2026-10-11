@@ -125,6 +125,7 @@ test("resumeRun derives in-place from the persisted worktree path: skips wipe/re
     // scenario's failing build check escalates (pending human_resume), not a resolver dead-end.
     process.exitCode = 0;
     await resumeRun({ resume: ident }, profile, DEFAULT_RUNTIME_CONFIG, {
+      probe: () => true,
       ports: {
         issueTracker: fakeIssueTracker({
           ticket: {
@@ -240,6 +241,7 @@ test("resumeRun re-checks in-place identity before mutating: throws when the act
 
     await expect(
       resumeRun({ resume: ident }, profile, DEFAULT_RUNTIME_CONFIG, {
+        probe: () => true,
         ports: {
           issueTracker: fakeIssueTracker({
             ticket: {
@@ -331,6 +333,7 @@ test("resumeRun refuses in-place resume when the disposability marker is absent:
 
     await expect(
       resumeRun({ resume: ident }, profile, DEFAULT_RUNTIME_CONFIG, {
+        probe: () => true,
         ports: {
           issueTracker: fakeIssueTracker({
             ticket: {
@@ -438,6 +441,7 @@ test("resumeRun with the marker present re-applies profile.targetRepo (the disco
     // scenario's failing build check escalates (pending human_resume), not a resolver dead-end.
     process.exitCode = 0;
     await resumeRun({ resume: ident }, profile, DEFAULT_RUNTIME_CONFIG, {
+      probe: () => true,
       ports: {
         issueTracker: fakeIssueTracker({
           ticket: {

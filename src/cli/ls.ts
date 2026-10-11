@@ -35,7 +35,7 @@ export async function lsImpl(opts?: { root?: string; swept?: LaunchRecord[] }): 
 
   const resumable = all.filter((c) => c.resumable && !c.live).sort((a, b) => a.ageMs - b.ageMs);
   const leftovers = all.filter((c) => (c.kind === "pr-ready" || c.kind === "done") && !c.live);
-  const running = all.filter((c) => c.live);
+  const running = all.filter((c) => c.live && c.kind !== "unreadable" && c.kind !== "incompatible");
 
   const lines: string[] = [];
 
@@ -54,6 +54,30 @@ export async function lsImpl(opts?: { root?: string; swept?: LaunchRecord[] }): 
     lines.push("Finished leftovers (reap per project with `styre clean --all`):");
     for (const c of leftovers) {
       lines.push(leftoverRow(c));
+    }
+  }
+
+  // Never dropped (operator rulings, 2026-10-09 and 2026-10-10): a checkpoint that could not be
+  // read, and one whose schema this Styre cannot use, each with the reason. The hints carry --slug,
+  // since ls spans every project and clean otherwise derives the slug from the current folder.
+  const unusable = [
+    [
+      "unreadable",
+      "Unreadable checkpoints (remove by hand: `styre clean <ident> --slug <slug>` names what to remove; or start over with `styre run <ident> --slug <slug> --fresh`):",
+    ],
+    [
+      "incompatible",
+      "Checkpoints this Styre cannot use (use the Styre that wrote them; or remove by hand, or start over with `styre run <ident> --slug <slug> --fresh`):",
+    ],
+  ] as const;
+  for (const [kind, title] of unusable) {
+    const rows = all.filter((c) => c.kind === kind);
+    if (rows.length === 0) continue;
+    lines.push("");
+    lines.push(title);
+    for (const c of rows) {
+      const liveMark = c.live ? " (running)" : "";
+      lines.push(`  ${c.slug}/${c.ident}${liveMark}  ${c.note ?? ""}`.trimEnd());
     }
   }
 

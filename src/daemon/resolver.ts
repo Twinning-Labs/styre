@@ -2,12 +2,15 @@ import type { Database } from "bun:sqlite";
 import { listActiveByTicket as listAcChecks } from "../db/repos/ac-check.ts";
 import { getLatestByWorkUnit, getLatestForTicket } from "../db/repos/dispatch.ts";
 import * as gts from "../db/repos/ground-truth-signal.ts";
-import { requiredPlanFindings, unresolvedReviewReason } from "../db/repos/review-round.ts";
+import { unresolvedReviewReason } from "../db/repos/review-round.ts";
 import { hasDelivered } from "../db/repos/signal.ts";
 import { getTicket } from "../db/repos/ticket.ts";
 import * as workUnits from "../db/repos/work-unit.ts";
 import { getByKey } from "../db/repos/workflow-step.ts";
+import type { DesignStepKey } from "./design-graph.ts";
+import { walkDesign } from "./design-walk.ts";
 import { evidenceFloor } from "./evidence-floor.ts";
+import type { InvalidateReason } from "./invalidate.ts";
 
 export type StepDescriptor =
   | {
@@ -22,6 +25,7 @@ export type StepDescriptor =
   | { kind: "wait"; signalType: string }
   | { kind: "blocked"; reason: string }
   | { kind: "escalate"; reason: string; signature: string; stepKey: string }
+  | { kind: "invalidate"; stepKeys: DesignStepKey[]; reason: InvalidateReason }
   | { kind: "done" };
 
 function done(db: Database, ticketId: number, stepKey: string): boolean {
@@ -97,34 +101,12 @@ export function nextStepKey(db: Database, ticketId: number): StepDescriptor {
 
   switch (ticket.stage) {
     case "design": {
-      // Provision runs FIRST — before the design dispatches — so a missing-tool / broken-install
-      // environment fault fails before any design spend. It depends on nothing design produces:
-      // design commits only under docs/plans/ (planScope), so it cannot touch a dependency
-      // manifest. Reused by implement (whose provision gates find it done and skip;
-      // resetProvisionIfManifestTouched still re-arms it, §2).
-      if (!done(db, ticketId, "provision")) {
-        return step("provision", "provision", "provision", null);
-      }
-      if (!done(db, ticketId, "design:dispatch")) {
-        return step("design:dispatch", "dispatch", "design:dispatch", null);
-      }
-      if (workUnits.listByTicket(db, ticketId).length === 0) {
-        return step("design:extract", "dispatch", "design:extract", null);
-      }
-      if (ticket.track === null) {
-        return step("design:size", "dispatch", "design:size", null);
-      }
-      if (ticket.track === "full" && !done(db, ticketId, "design:review")) {
-        return step("design:review", "dispatch", "design:review", null);
-      }
-      if (ticket.track === "full" && requiredPlanFindings(db, ticketId).length) {
-        return {
-          kind: "escalate",
-          reason: "unresolved plan-review findings",
-          signature: "review:unresolved-plan",
-          stepKey: "design:review",
-        };
-      }
+      // Generated from the declared design table (src/daemon/design-graph.ts, spec §3, §5.4):
+      // provision, design:dispatch, design:extract, design:size, design:review and its gate, each
+      // "done" only when done with the inputs it has now.
+      const designStep = walkDesign(db, ticket);
+      if (designStep !== null) return designStep;
+      // Past the table's last row: today's checks routing, unchanged (E9).
       if (!done(db, ticketId, "checks:dispatch")) {
         return step("checks:dispatch", "dispatch", "checks:dispatch", null);
       }

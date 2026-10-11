@@ -51,11 +51,14 @@ the *service-install* edge. The same TS core compiles to per-platform binaries.
     tarball (a **static/musl** build for portability across distros); `.deb`/`.rpm` later.
   - **Container** — a small OCI (Linux) image; the primary cloud / fleet / CI artifact.
   - **GitHub Action** — wraps the container/binary for CI.
-  - **Upgrade** (any target): replace the binary/image; `migrate()` self-applies schema migrations on start.
+  - **Upgrade** (any target): replace the binary/image; `migrate()` applies schema migrations on start,
+    after a `VACUUM INTO` backup, and proves the result against `schema.sql` (ENG-477). A run paused
+    under schema v7 or later resumes on the new binary.
 - **OSS run modes (`styre` binary):**
   - **`styre setup <repo>`** — the probe: discover the project-profile, discover/ask the checks-system,
     write the project profile (`profile.json`). Idempotent. *The developer hook.*
-  - **`styre migrate`** — bootstraps and migrates the SQLite SoT under `$XDG_STATE_HOME/styre/`.
+  - **`styre migrate`** — bootstraps the SQLite SoT under `$XDG_STATE_HOME/styre/`, or upgrades an
+    existing one the same way `run` does.
   - **`styre run <ticket>`** — a **one-shot runner**: execute ONE ticket to PR-ready and exit,
     emitting NDJSON telemetry to stdout. Per-run SQLite journaled directly to its checkpoint path
     (the checkpoint IS the live location, not a temp file) — the journal gives in-run crash-resume;
@@ -67,12 +70,14 @@ the *service-install* edge. The same TS core compiles to per-platform binaries.
       retry. The run is resumed — never re-run from scratch — with
       `styre run --resume <ticket> --profile <p>` (re-runs only the interrupted step; `--accept-head`
       accepts a moved HEAD; `--inspect` is diagnostics-only, exit `0`).
-  - **`styre ls`** — lists every effort in three sections: paused/resumable efforts (each with its
-    `styre run --resume` hint), finished-but-uncleaned leftovers (reapable via `styre clean --all`),
-    and currently running efforts.
+  - **`styre ls`** — lists every effort in up to five sections: paused/resumable efforts (each with
+    its `styre run --resume` hint), finished leftovers not yet cleaned (reapable via
+    `styre clean --all`), checkpoints it could not read and checkpoints whose schema it cannot use
+    (each with the reason), and currently running efforts.
   - **`styre clean <ident>` / `--all` / `--purge`** — reaps a run's disk state. `styre clean <ident>`
     removes one effort's worktree + checkpoint (no ticket-status change; refuses a live run, exit
-    `75`). `styre clean --all` reaps only provably-finished (`pr-ready`/`done`) efforts for the current
+    `75`) and a checkpoint it cannot read or whose schema it cannot use (exit `65`, nothing removed).
+    `styre clean --all` reaps only efforts proven finished (`pr-ready`/`done`) for the current
     project. `styre clean <ident> --purge` additionally deletes the local + remote branch, closing the
     PR.
   - **`styre notify --test`** — a diagnostic that sends one test notification through the configured
@@ -206,6 +211,16 @@ The plane integrates *only* through these. Treat them as the public API surface 
      in [`telemetry-export.md`](telemetry-export.md), kept current with `src/telemetry/events.ts`.
 4. **(Later) a programmatic API.** The vision mentions "feeds into the harness API." At OSS cutover the
    artifact contracts (1–3) suffice; a thin REST/IPC API is a later addition for tighter coupling.
+
+**A ticket driven through the core's step code needs its design inputs first** (ENG-477). Every
+design step requires the ticket's snapshot in `ticket_input`, written by `captureSnapshot`
+(`src/daemon/design-inputs.ts`). `styre run` writes it for every active ticket it drives, fresh,
+resumed or on a reused `--db`. A driver that calls `tick` (`src/daemon/loop.ts`) or
+`advanceOneStep` (`src/daemon/advance.ts`) itself must call `captureSnapshot` before a ticket's
+first step; otherwise that step stops the run with an internal error naming the missing snapshot
+(exit `70`). On a database an older Styre wrote, it must also run the adopt pass
+(`adoptActiveTickets`, `src/daemon/adopt.ts`) after the snapshots, as `styre run` does; otherwise the
+design walk stops with an internal error on the first finished design step that has no manifest.
 
 ## 6. Implications to thread into the spec (flag, don't redesign now)
 

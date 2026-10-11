@@ -78,7 +78,7 @@ by the `project_id` FK and the per-project `project.paused` breaker.
 ```
 on_start():
   open_db(); PRAGMA foreign_keys=ON; busy_timeout=5000
-  migrate()                       # §10 self-bootstrap / apply pending schema migrations
+  migrate()                       # §10 create, or upgrade (backup, versioned migrations, structural proof)
   recover()                       # §6.1 reconcile crash-interrupted steps + drain outbox
   loop()
 
@@ -114,6 +114,11 @@ switch descriptor.kind:
                     'running' → recover() owns it; 'failed' → apply_failure_policy, §8)
   'advance'       → write the stage transition (+ enqueue its projection in the same tx), recurse
   'mark-verified' → mark the work-unit verified, recurse
+  'invalidate'    → design only (ENG-477): one transaction: a `note` event (reason `invalidated`,
+                    the step was reset; with the step keys, the cause and the changed input names;
+                    not a loopback), the step's row copied to workflow_step_history, the step reset
+                    to a fresh round in the next generation, its outputs cleared (minimal-loop §1);
+                    recurse
   'wait'          → await a signal (status='waiting'); the loop resumes on delivery (§7) — the only
                     current instance (merge approval) resolves to `pr-ready` once the PR is delivered
                     (an undelivered PR request pauses `needs_you` instead — projector.md §7)
@@ -238,15 +243,21 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 ### Design
 
 **S1a · `design:dispatch`** — fused brainstorm + plan (deep tier; default Opus 4.8)
-- **Guard:** `stage='design'`; `provision` already succeeded (it runs first, below); worktree exists;
-  no succeeded `design:dispatch` unless a re-design loopback was requested.
+- **Guard:** `stage='design'`; `provision` done with its current inputs (it runs first); worktree
+  exists. "Done" for every design step (provision, S1a, S1b, S1b2, S1c) means succeeded **and** its
+  recorded input manifest equals its inputs now (ENG-477, minimal-loop §1); a redesign reruns S1a
+  through an invalidate (cause `feedback`, a review sent the plan back).
 - **Input:** ticket identity/title/`type_label` + description **injected by the runner** (the agent
   does not read the tracker); the design prompt (compiled template, rendered by `render-prompt.ts`) +
   project-profile.
 - **Output:** a committed **plan artifact** (`docs/plans/<date>-<eng-n>-*.md`, `linear: ENG-N`
   frontmatter). The plan must *contain*, per work-unit, the facts S1b needs (kind, files, behavioral?
-  + how tested, verify check-types, dependencies) — as prose, never as JSON. Sets `needs_docs`
-  (whether the change is doc-impacting).
+  + how tested, verify check-types, dependencies) — as prose, never as JSON, and whether the change
+  affects the documentation (S1b records it as `needs_docs`). When S1a succeeds the runner records
+  the plan's digest: path and content of the `docs/plans/*.md` files whose frontmatter `linear:`
+  names this ticket, at the branch head, read through git (ENG-477). The plan must therefore be
+  committed: when none is committed there (for example because `docs/plans/` is in `.gitignore`),
+  S1a fails at once without a retry and escalates with what to change (DI2 in §8).
 - **Tools:** `Read`, `Grep`, `Glob`, `Write`, `Edit`, `WebSearch`, `WebFetch`
   (`src/dispatch/tool-allowlists.ts`). The commit is scoped to `docs/plans/` by the runner
   (`planScope`), not by the tool set. ❌ no `Bash`, no MCP servers (`--strict-mcp-config`); web access
@@ -254,13 +265,16 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 - **Failure → route:** D2/D3 in §8.
 
 **S1b · `design:extract`** — decomposition into `work_unit` rows (cheap tier; default Haiku 4.5, forced structured output)
-- **Guard:** S1a succeeded (plan committed); no `work_unit` rows yet.
+- **Guard:** S1a done with its current inputs (the plan's digest is one of S1b's inputs). Rows are
+  no longer the gate.
 - **Input:** the committed plan doc + the `work_unit` schema.
 - **Output:** validated **`work_unit` rows** (kind / files_to_touch / behavioral / test_plan /
   verify_check_types / depends_on). The runner then runs the **mechanical completeness check** (zod
   shape + required fields present + behavioral⇒`test_plan` present + `depends_on` acyclic & valid) —
   deterministic, no LLM. **Postcondition: ≥1 work_unit, completeness clean.** Track sizing is **no
-  longer done here** — it moved to its own step (`design:size`, S1b2 below).
+  longer done here** — it moved to its own step (`design:size`, S1b2 below). The units and
+  `needs_docs` are written in the success transaction, with `origin='extract'`; a crash before it
+  leaves none.
 - **Mechanism:** mechanical formalization → cheap model, forced-schema tool calls (§3a). The
   extractor fills only what the plan supports and leaves unsupported fields empty — it never
   invents; an empty *required* field means the **plan** is missing that info (→ D2).
@@ -268,7 +282,10 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
   the plan didn't supply → re-design (D2); no plan / no units (D3).
 
 **S1b2 · `design:size`** — set the review track (fast / full)
-- **Guard:** `ticket.track IS NULL` (runs once, after extract).
+- **Guard:** S1b done with its current inputs; `design:size` not done with its current inputs
+  (the `ticket.track` column is no longer the gate). Its inputs are the work units and
+  `complexityGrading`, and, when grading is on, the plan, the ticket title, the profile's slug and
+  prompt variables. The track is written in the success transaction.
 - **Output:** `ticket.track ∈ {fast, full}`. `full` runs the S1c semantic plan-review gate; `fast`
   skips it. This is a **routing heuristic, never a ship-gate verdict** — the grade only chooses how
   much review ceremony, never whether to ship, and never overrides a ground-truth gate.
@@ -279,14 +296,15 @@ GOAL-INSTALL touchpoint; replaces the legacy `header-missing-inputs`).
 - **Tools:** none for the deterministic path; read-only for the optional grader. ❌ no `Write`/`Edit`.
 
 **S1c · `design:review`** — semantic plan-quality gate (cold; deep tier, default Opus 4.8; **full-track only**, C2)
-- **Guard:** S1b completeness clean; `track='full'`.
-- **Input — cold (anti-anchoring):** the plan + the ticket requirements + the codebase. **NOT** the
+- **Guard:** S1b2 done with its current inputs; `track='full'`.
+- **Input — cold (anti-anchoring):** the plan + the ticket title (not its description: the
+  recording proxy test pins the fields Styre hands it, ENG-477) + the codebase. **NOT** the
   designer's reasoning. The prompt also includes the persisted work-unit decomposition (seq,
   scope, files, tests and dependencies); findings reference these canonical seqs, which can differ
   from plan task numbers after extraction combines tasks. Unmapped/plan-wide findings use null.
 - **Mechanism (§3a):** files findings via tool calls (`file_finding` / `complete_review`); the runner
   derives the verdict from the ledger — the **same machinery as code-review (S5)**, applied to the
-  plan.
+  plan. The findings are written in the success transaction, before the verdict reads them.
 - **Dimensions:** feasibility/correctness · completeness-of-substance · internal consistency · scope
   (over/under, vs the sizing rubric) · conciseness/anti-slop · testability (a *meaningful* test_plan,
   not just present) · decomposition quality.
@@ -729,6 +747,12 @@ at that point.
 The resolver never re-executes a `succeeded` step — it reads `result_json`. The journal is the memo
 table; with §5 idempotency every operation is at-least-once-attempted, exactly-once-effective.
 
+**Replay beside invalidate (ENG-477).** In the design stage a succeeded step is replayed only while
+its recorded input manifest matches its inputs now. When it does not, the resolver returns
+`invalidate` instead of the step, so the journal's replay is never asked to stand for a step whose
+inputs changed (that request would escalate with signature `step-replay-no-progress:<step>`, the
+interpreter's guard against a resolver that asks for a finished step again).
+
 ### 6.3 Dispatch crash
 An agent CLI dies mid-run, or Styre dies under it: step `running`, no `result_json` → the next Styre
 command's sweep stops any orphan from its launch record → `recover()` resets the step →
@@ -820,8 +844,11 @@ discarded with `--fresh` — are in execution-model.md.)*
 | D1 | design:extract | JSON shape invalid (rare; forced output) | re-run extract (cheap) | — | K_shape → escalate |
 | D2 | runner completeness check | empty *required* field — the plan lacks the info | → S1a re-design | plan | K_distinct → escalate |
 | D3 | post-design postcondition | no plan committed / zero work-units | → S1a re-design | plan | K_distinct → escalate |
-| DV1 | S1c plan-review | blocking plan-finding | → S1a re-design with findings | plan | K_distinct → escalate |
+| DV1 | S1c plan review | a blocking plan finding | → S1a redesign with findings (invalidate `design:dispatch`, cause `feedback`) | plan | blocking findings with the same signature as the latest loopback whose loop is `implement` or `design` (whatever wrote it: a review, the AC gate, the arbiter or reauthor, a verify or completeness failure, an operator HEAD change on resume) escalate at once, so a loopback of those loops with another signature in between resets this check and identical findings then go on toward the limit; at most `REVIEW_REPAIR_LIMIT = 3` review loopbacks per ticket, plan and code review together, then escalate ⁴ |
 | DV2 | S1c plan-review | reviewer death / transport | retry dispatch | — | K_retry → escalate |
+| DI1 | design walk | a succeeded design step's inputs changed (an edit while paused, another host's toolchain) | invalidate that step (cause `inputs`); the steps that read its output are judged again after it reruns | step | escalate with signature `invalidate-loop:<step>` (the invalidate loop guard) instead of a fourth such invalidate of one step since the latest resume, run on a reused `--db`, or redesign |
+| DI2 | S1a postcondition | the plan is in the worktree but not committed at the branch head (for example `docs/plans/` is in `.gitignore`) | escalate at once, no retry (a prerequisite the operator fixes: commit the plan, resume with `--accept-head`) | — | immediate |
+| DI3 | any design step | an invariant violation: an undeclared read of an earlier step's output, a malformed handler result, a missing plan digest (`InvariantViolation`, a Styre defect) | escalate at once, the violation as the reason | — | immediate, no retry |
 | **Implement + unit verify** ||||||
 | I1 | S2b | agent death / timeout | retry fresh dispatch | unit | attempt cap → escalate |
 | I2 | ~~S2b postcondition~~ | ~~noop — empty diff~~ — **superseded by CM1**: S2b has no non-empty-diff postcondition; an empty dispatch diff for a real unit surfaces as `under ≠ ∅` at `completeness:wuN` and routes via CM1 below | — | — | — |
@@ -839,6 +866,7 @@ discarded with `--fresh` — are in execution-model.md.)*
 | G5 | S3d reauthor | `code-wrong` / rejected | → implement (gate-origin reset) | unit/ticket | — |
 | G6 | resolver | stuck HEAD — blamed & gate already succeeded, nothing new committed | escalate ("stuck") | — | immediate |
 | GC | S1e `checks:classify` | unresolved checks after classify | supersede flagged checks; reset `checks:dispatch`+`checks:classify` (**no stage flip**) | — | attempt cap → escalate |
+| EF | resolver, leaving implement | the evidence floor fails: a required suite has no passing receipt at the commit about to ship, or nothing executed there came back clean and not every criterion was proven by its gating checks | escalate (signature `evidence-floor`) | — | immediate; a resume computes the same answer from the same state |
 | **Integration** ||||||
 | N1 | S4 | integration handler *throws* (genuine, not advisory-red) | insert ticket-scoped `reconcile` unit; reset the gate | ticket | attempt cap → escalate |
 | **Docs** ||||||
@@ -846,9 +874,10 @@ discarded with `--fresh` — are in execution-model.md.)*
 | **Code review** ||||||
 | V1 | S5 | blocking finding, **code** category (runner `blocks_ship`: critical or major, including suggested deferrals) | → S2b, targeted | unit | 3 review-origin loopbacks per ticket; consecutive identical findings escalate earlier |
 | V2 | S5 | reviewer judges scope expansion **unjustified** → files a `scope` finding ² | = V1 (justify or revert) | unit | 3 review-origin loopbacks per ticket; consecutive identical findings escalate earlier |
-| V3 | S5 | blocking finding, **plan-defect** category (impl correct, plan wrong) | per `onPlanDefect`: **`escalate`** (default) or **`redesign`** → S1a re-design | plan | attempt cap → escalate |
+| V3 | S5 | blocking finding, **plan-defect** category (impl correct, plan wrong) | per `onPlanDefect`: **`escalate`** (default) or **`redesign`** → S1a re-design | plan | blocking findings with the same signature as the latest loopback whose loop is `implement` or `design` (whatever wrote it: a review, the AC gate, the arbiter or reauthor, a verify or completeness failure, an operator HEAD change on resume) escalate at once, so a loopback of those loops with another signature in between resets this check and identical findings then go on toward the limit; at most `REVIEW_REPAIR_LIMIT = 3` review loopbacks per ticket, plan and code review together, then escalate (both checked before the category). Under `escalate`, a plain resume applies the verdict again and escalates again at once; set `onPlanDefect` to `redesign` and resume, or change the code and resume with `--accept-head` |
 | V-def | paused S5 | operator explicitly accepts all current nominated major IDs at unchanged reviewed HEAD, with rationale | mark deferred and audit the decision; disclose in PR | ticket | critical/plan findings cannot be accepted |
 | V4 | S5 | reviewer death / transport (dispatch didn't complete) | retry dispatch | — | K_retry → escalate |
+| V5 | resolver, stage review | a succeeded review, but the ledger is unresolved: an open major or critical code finding, or a risk acceptance that names another commit | escalate (signature `review-unresolved`) | — | immediate |
 
 > ENG-164: a transport death is now classified by cause. session-limit / out-of-credits →
 > `parked` (resumable, attempt NOT consumed); crash / timeout / unknown → `transient` retry as
@@ -866,9 +895,14 @@ discarded with `--fresh` — are in execution-model.md.)*
 | **External effects & infra** ||||||
 | X1 | outbox drainer | external effect fails past retry budget (GitHub/Linear outage) | escalate (infra); ticket pauses | — | K_retry → escalate |
 | X2 | any | worktree/git corrupted (wedged index/merge, disk) | escalate (infra) | — | — |
+| X3 | `styre run`, at the merge wait | after draining the outbox (at most `OUTBOX_RETRY_BUDGET = 5` drains), the forge has not returned the PR's URL, or the push of the current head was not delivered | pause `needs_you` (exit 75) instead of reporting `pr-ready` | — | immediate |
+| **Start and resume** ||||||
+| RT | `styre run --resume` | a required suite's tools are missing on this host | pause `needs_you`, exit 75 (never 69); a ticket the resume already left waiting gets a `toolchain-missing` note instead of a second pause | — | immediate |
+| RS | `styre run --resume`, or a fresh run on a reused `--db` | design steps fingerprinted under a scheme newer than this Styre's `FINGERPRINT_SCHEME` | refuse, exit 65, before anything is written; the fresh run names the tickets and does not suggest `--fresh` | — | immediate |
 | **Cross-cutting terminators** ||||||
 | B0 | any step | `attempt >= 3` (`DEFAULT_MAX_ATTEMPTS`) | escalate (resumable wait) | — | **the implemented bound** |
 | B0′ | any loop | same failure signature vs the immediately-previous loopback | escalate fast | — | consecutive-identical guard |
+| SR | interpreter | the resolver asks for a step the journal already holds as succeeded (replaying it cannot change routing) | escalate (signature `step-replay-no-progress:<step>`) | — | immediate |
 | ~~B1/B2/B3~~ | — | ~~per-loop distinct cap / cross-loop 3-of-20 / spend-wall-clock ceiling~~ — **not implemented** (deferred; no code reads `dispatch.cost_usd` for control). The live bounds are B0/B0′, 3 review-origin loopbacks per ticket, 3 review verification requests per ticket, plus the per-gate round caps (G-rows) and the 200-tick / 3-idle run caps. | — | — |
 
 ² **Scope is reviewer-judged (A3):** the reviewer first decides if an expansion is **benign/justified**
@@ -884,6 +918,8 @@ completeness/verify failure can therefore cost up to `maxAttempts × 2` implemen
 either exhausts. The semantic **AC-completeness** layer (a dropped acceptance criterion; a file
 declared by multiple units where none did the real work) is explicitly **out of scope for CM1** — it
 is a deferred follow-up folded into S5 review, not this row.
+
+⁴ **Resuming at the plan review gate.** A run stopped by a plan review escalation (the verdict's, or the gate row's `review:unresolved-plan`) resumes with `retry-plan`. With HEAD unchanged it applies the plan review verdict again, which redesigns only when the findings' signature differs from that of the latest `implement` or `design` loopback (from any origin, so one in between with another signature resets the check): with unchanged findings a plain resume escalates again at once. The way forward is a committed plan change and a resume with `--accept-head`, which invalidates `design:dispatch` and `design:extract` (signature `review:operator-plan-head-changed`). One exception: after such an `--accept-head` redesign whose plan came back unchanged, the latest `design` loopback's signature is `review:operator-plan-head-changed`, so a plain resume does redesign.
 
 ### 8.4 Loopback targets, by meaning
 **→ implement** (unit or ticket scope — the code is wrong; most failures — including CM1's
@@ -946,13 +982,18 @@ half is V-def). **New rows the audit surfaced:** CFG, X1, X2.
 > **persistent host-service supervision** (launchd/systemd keep-alive), the always-on multi-ticket
 > process, and the **needs-you inbox** are the **commercial Control Plane**'s outer loop — fenced
 > below, not deleted. In OSS, `styre setup` probes the repo and writes the project profile; `styre run`
-> is an ephemeral per-ticket process (no host service); `styre migrate` bootstraps the SoT.
+> is an ephemeral per-ticket process (no host service); `styre migrate` bootstraps the SoT, or
+> upgrades an older one.
 
 One command, no server setup. Implications the runner owns *(OSS-core unless marked commercial)*:
 - **Single self-contained binary** (TS compiled, node bundled) — no global installs; escapes the
   bash-3.2 curse entirely.
 - **Embedded SQLite, zero-ops** — no DB server; WAL on by default.
-- **Self-bootstrapping schema** — `migrate()` creates/upgrades the DB on start; no manual SQL.
+- **Self-bootstrapping schema** — `migrate()` creates the DB, or upgrades it: a `VACUUM INTO` backup
+  next to it, each pending migration in its own transaction with a foreign key check, then a
+  structural comparison against `schema.sql`, inside the last migration's transaction. Checkpoints
+  from v7 on are upgraded; newer, older or unknown shapes are refused (exit `65`), and a failed
+  migration leaves the last version that completed (exit `70`). No manual SQL.
 - **One idempotent `setup <target-repo>`** — seeds the `project` row, refreshes the `linear_id_cache`,
   and **discovers/asks the checks system**. *(Commercial Control Plane: setup also creates+migrates a
   shared DB and installs the host service — **launchd on macOS, systemd on Linux**, both first-class

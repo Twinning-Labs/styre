@@ -51,8 +51,8 @@ CREATE TABLE schema_meta (
     note        TEXT
 );
 INSERT INTO schema_meta (version, applied_at, note)
-VALUES (8, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-        'v8: add run table for telemetry run identity (ENG-349)');
+VALUES (9, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+        'v9: design input fingerprints, work_unit.origin, ticket_input, workflow_step_history (ENG-477)');
 
 -- ============================================================================
 -- §A  PROJECT + TICKET   (replaces issue-state.json + stage:* / pipeline:* labels)
@@ -156,6 +156,9 @@ CREATE TABLE work_unit (
                           'pending','implementing','verifying','verified','blocked')),
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
+    -- v9 (ENG-477): which step wrote the unit. 'reconcile' units come from the integration
+    -- failure path and stay out of design:extract's output digest. Added last (0009).
+    origin            TEXT NOT NULL DEFAULT 'extract' CHECK (origin IN ('extract','reconcile')),
 
     UNIQUE (ticket_id, seq)
 );
@@ -190,6 +193,15 @@ CREATE TABLE workflow_step (
     ended_at        TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
+    -- v9 (ENG-477, design input invalidation): what a design step's success was computed from.
+    -- input_manifest maps each declared input to its digest; output_digest is set only where the
+    -- output lives outside the database (the plan); generation counts invalidations. Added last,
+    -- in migration order (0009), so the structural proof holds.
+    input_manifest     TEXT CHECK (input_manifest IS NULL OR json_valid(input_manifest)),
+    input_fingerprint  TEXT,
+    output_digest      TEXT,
+    fingerprint_scheme INTEGER,
+    generation         INTEGER NOT NULL DEFAULT 0,
 
     UNIQUE (ticket_id, step_key)                       -- determinism: one row per logical step
 );
@@ -483,12 +495,11 @@ CREATE TABLE projection_outbox (
 CREATE INDEX idx_outbox_pending ON projection_outbox (status, created_at);
 
 -- ----------------------------------------------------------------------------
--- run — per-invocation identity (ENG-349). Exactly one row per ephemeral run DB.
+-- run — the identity of one invocation (ENG-349). Exactly one row per ephemeral run DB.
 -- The telemetry export stamps run_id/provider/started_at onto every emitted row so a
 -- consumer can correlate rows and tell two runs of the same ticket apart. ticket_id is a
--- run-local rowid and is NOT a cross-run key. NOTE: the CREATE below is mirrored verbatim
--- in src/db/repos/run.ts (ensureRunTable) as the pre-upgrade-park resume bridge — keep them
--- identical (schema.sql remains the source of truth).
+-- rowid local to this run's database and is NOT a key across runs. A v7 checkpoint gains
+-- this table through the v7 -> v8 migration (src/db/migrations/0008-run-table.ts).
 -- ----------------------------------------------------------------------------
 CREATE TABLE run (
     id          INTEGER PRIMARY KEY,
@@ -498,6 +509,44 @@ CREATE TABLE run (
     resumed     INTEGER NOT NULL DEFAULT 0 CHECK (resumed IN (0,1)),
     attempt     INTEGER NOT NULL DEFAULT 1
 );
+
+-- ----------------------------------------------------------------------------
+-- ticket_input — the design inputs that are not already rows (ENG-477, spec §4): the ticket
+-- text and the starting commit (written once, never rewritten), and the profile and config
+-- values the design handlers receive (rewritten on resume, with an `inputs-changed` note).
+-- value_json is canonical JSON; digest is its SHA-256.
+-- ----------------------------------------------------------------------------
+CREATE TABLE ticket_input (
+    ticket_id   INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
+    name        TEXT    NOT NULL,
+    value_json  TEXT    NOT NULL CHECK (json_valid(value_json)),
+    digest      TEXT    NOT NULL,
+    captured_at TEXT    NOT NULL,
+    PRIMARY KEY (ticket_id, name)
+);
+
+-- workflow_step_history — a design step's row as it was before an invalidation reset it
+-- (ENG-477, spec §6). event_id is the `invalidated` note event that caused the reset.
+CREATE TABLE workflow_step_history (
+    id                 INTEGER PRIMARY KEY,
+    step_id            INTEGER NOT NULL REFERENCES workflow_step(id) ON DELETE CASCADE,
+    ticket_id          INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
+    event_id           INTEGER NOT NULL REFERENCES event_log(id) ON DELETE CASCADE,
+    step_key           TEXT    NOT NULL,
+    status             TEXT    NOT NULL,
+    attempt            INTEGER NOT NULL,
+    result_json        TEXT,
+    error_json         TEXT,
+    input_manifest     TEXT,
+    input_fingerprint  TEXT,
+    output_digest      TEXT,
+    fingerprint_scheme INTEGER,
+    generation         INTEGER NOT NULL,
+    started_at         TEXT,
+    ended_at           TEXT,
+    archived_at        TEXT    NOT NULL
+);
+CREATE INDEX idx_step_history_step ON workflow_step_history (step_id, generation);
 
 -- ============================================================================
 -- §H  DERIVED VIEWS  (derived, not stored)

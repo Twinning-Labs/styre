@@ -1,15 +1,21 @@
-import { Database } from "bun:sqlite";
-import { existsSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, realpathSync, rmSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { defineCommand } from "citty";
 import { loadProfileByConvention, slugForCwd } from "../config/discover.ts";
+import { readCopyOf } from "../db/read-copy.ts";
 import { getLatestWorktreePath } from "../db/repos/dispatch.ts";
 import type { Profile } from "../dispatch/profile.ts";
 import { loadProfile } from "../dispatch/profile.ts";
-import { deleteLocalBranch, deleteRemoteBranch, reconcileWorktree } from "../dispatch/worktree.ts";
+import {
+  deleteLocalBranch,
+  deleteRemoteBranch,
+  listWorktrees,
+  reconcileWorktree,
+} from "../dispatch/worktree.ts";
 import { undoBeforeDiscard } from "../util/process/interruption.ts";
 import { sweepOrphans } from "../util/process/sweep.ts";
-import { classifyCheckpointDb, listCheckpoints } from "./checkpoints.ts";
+import { assertCheckpointName, assertProfileSlug, checkpointPath } from "./checkpoint-name.ts";
+import { checkpointUse, listCheckpoints } from "./checkpoints.ts";
 import { EXIT, StyreError, usageError } from "./errors.ts";
 import { guard } from "./output.ts";
 import { parkDir } from "./park.ts";
@@ -35,13 +41,7 @@ export interface EffortRef {
  *  force-remove, see `reconcileWorktree`), then delete its checkpoint dir. Shared by clean's
  *  single-ident, `--all`, and `--purge` paths (ENG-386 Tasks 4-5). Never touches ticket status. */
 export function reapEffort(targetRepo: string, c: EffortRef): void {
-  const db = new Database(c.dbPath, { readonly: true });
-  let stale: string | null;
-  try {
-    stale = getLatestWorktreePath(db, c.ticketId);
-  } finally {
-    db.close();
-  }
+  const stale = readCopyOf(c.dbPath, (db) => getLatestWorktreePath(db, c.ticketId));
   // In place, an interrupted step's edits are still in the checkout: undo them before the
   // checkpoint that names them is removed (ENG-485 section 7.5). Every caller checked the run lock.
   undoBeforeDiscard(c.dbPath, (line) => process.stderr.write(`${line}\n`));
@@ -52,6 +52,53 @@ export function reapEffort(targetRepo: string, c: EffortRef): void {
   rmSync(c.dir, { recursive: true, force: true });
 }
 
+/** Worktrees of `targetRepo` that look like they belonged to a Styre run of `ident`: a folder named
+ *  after the ident whose parent folder's name starts with `styre-wt-` (what run.ts and park.ts
+ *  make), never the main entry and never the repository's own real path. Only printed, never
+ *  removed (operator ruling, 2026-10-10). */
+export function styreWorktreeCandidates(targetRepo: string, ident: string): string[] {
+  const repo = realpathSync(targetRepo);
+  return listWorktrees(targetRepo)
+    .slice(1) // git lists the main working tree first
+    .map((w) => w.path)
+    .filter((p) => basename(p) === ident && basename(dirname(p)).startsWith("styre-wt-"))
+    .filter((p) => !existsSync(p) || realpathSync(p) !== repo);
+}
+
+/** `styre clean <ident>` on a checkpoint it cannot use (operator rulings, 2026-10-10): refuse
+ *  (exit 65) and remove nothing. It describes, as plain text, why, where the checkpoint is, and
+ *  which worktrees look like the run's, and points at the docs for removing them by hand. It prints
+ *  no shell command (nested slug listing and printed commands are ENG-491). */
+function refuseUnusableCheckpoint(
+  where: { ident: string; dir: string },
+  kind: "unreadable" | "incompatible",
+  reason: string,
+  targetRepo: string,
+): StyreError {
+  const lines = [`checkpoint folder: ${where.dir}`];
+  try {
+    const paths = styreWorktreeCandidates(targetRepo, where.ident);
+    if (paths.length === 0) lines.push(`no worktree of ${targetRepo} looks like this run's`);
+    else {
+      lines.push(`worktrees of ${targetRepo} that look like this run's:`);
+      lines.push(...paths.map((p) => `  ${p}`));
+    }
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    lines.push(`could not list the worktrees of ${targetRepo}: ${why}`);
+  }
+  const docs = "the `styre clean` section of docs/architecture/runtime-parameters.md";
+  return new StyreError({
+    code: EXIT.RESUME_REFUSED,
+    headline: `cannot clean '${where.ident}': this Styre cannot use its checkpoint (${reason})`,
+    detail: lines.join("\n"),
+    recovery:
+      kind === "incompatible"
+        ? `Nothing was removed. To keep the paused work, use the Styre that wrote it; to remove the run by hand instead, see ${docs}.`
+        : `Nothing was removed. To remove the run by hand, see ${docs}.`,
+  });
+}
+
 /** `styre clean <ident>`: reap ONE effort's disk artifacts — free its worktree and delete its
  *  checkpoint dir. Never changes ticket status (that's the issue tracker's job, driven by the
  *  merge itself) and never touches the SoT beyond a read-only classify. */
@@ -59,6 +106,8 @@ export async function cleanImpl(
   args: CleanArgs,
   opts?: { root?: string; targetRepo?: string; profile?: Profile },
 ): Promise<void> {
+  // Names are checked before any path is built from them (operator rulings, 2026-10-10).
+  if (args.ident !== undefined) assertCheckpointName("ident", args.ident);
   if (!args.ident && !args.all) {
     throw usageError("clean: name an effort's ident, or pass --all");
   }
@@ -85,6 +134,11 @@ export async function cleanImpl(
     }
     slug = derived;
   }
+  // On every path, `--all` and the opts seams included (ruling B1): a slug read from a profile file
+  // is a config error (78), any other a usage error (64).
+  if (args.slug === undefined && args.profile && !opts?.profile)
+    assertProfileSlug(slug, args.profile);
+  assertCheckpointName("slug", slug);
   // Persist the convention-loaded profile into `profile` (rather than discarding it after reading
   // only `.targetRepo`) so `profile.defaultBranch` — the repo's REAL default branch — is available
   // to the --purge guard below. Only skip the disk load when the opts.targetRepo test seam is in
@@ -148,7 +202,7 @@ export async function cleanImpl(
   const ident = args.ident;
   if (!ident) throw usageError("clean: name an effort's ident, or pass --all");
 
-  const dir = opts?.root ? join(opts.root, slug, ident) : parkDir(slug, ident);
+  const dir = opts?.root ? checkpointPath(opts.root, slug, ident) : parkDir(slug, ident);
   const dbPath = join(dir, "run.db");
   if (!existsSync(dbPath)) {
     throw usageError(`no styre effort on '${ident}'`);
@@ -163,16 +217,13 @@ export async function cleanImpl(
     });
   }
 
-  const db = new Database(dbPath, { readonly: true });
-  let cls: ReturnType<typeof classifyCheckpointDb>;
-  try {
-    cls = classifyCheckpointDb(db, dir);
-  } finally {
-    db.close();
+  // A checkpoint it cannot use, by schema or by damage, is refused (exit 65) and nothing is
+  // removed (operator ruling, 2026-10-10: ENG-477 adds no new way to delete anything).
+  const use = checkpointUse(dbPath, dir, ident, "");
+  if (use.kind !== "usable") {
+    throw refuseUnusableCheckpoint({ ident, dir }, use.kind, use.reason, targetRepo);
   }
-  if (cls === null) {
-    throw usageError(`no styre effort on '${ident}' (empty or unreadable checkpoint)`);
-  }
+  const cls = use.cls;
 
   reapEffort(targetRepo, { branch: cls.branch, dir, ticketId: cls.ticketId, dbPath });
 

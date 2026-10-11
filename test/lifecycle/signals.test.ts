@@ -5,6 +5,7 @@ import { Database } from "bun:sqlite";
 import { afterAll, afterEach, describe, expect, jest, test } from "bun:test";
 import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { readCopyOf } from "../../src/db/read-copy.ts";
 import * as door from "../../src/util/process/door.ts";
 import {
   type CoreDumpState,
@@ -148,20 +149,16 @@ const ticketRun = () => {
   door.beginStep({ stepId: t.stepId, startedAt: t.startedAt, ident: "ENG-1", headAtStart: null });
   return { t, db, run: { db, dbPath: t.path, ticketId: t.ticketId, ident: "ENG-1" } };
 };
-const notes = (path: string): number => {
-  const c = new Database(path, { readonly: true });
-  try {
-    return (
+const notes = (path: string): number =>
+  readCopyOf(
+    path,
+    (c) =>
       c
         .query<{ n: number }, []>(
           "SELECT COUNT(*) AS n FROM event_log WHERE kind = 'note' AND reason = 'interrupted'",
         )
-        .get()?.n ?? -1
-    );
-  } finally {
-    c.close();
-  }
-};
+        .get()?.n ?? -1,
+  );
 
 afterEach(() => {
   // Even on failure: nothing a test started may outlive it, and nothing else is touched. A launch
@@ -303,11 +300,11 @@ describe("order and messages", () => {
     expect(out.err).toEqual([OPENING_INT]);
     expect(out.emitted).toEqual([]);
     expect(out.exited).toEqual([130]);
-    const check = new Database(t.path, { readonly: true });
-    expect(
+    // The writer `db` is still open: the private copy takes its -wal and -shm too.
+    const recorded = readCopyOf(t.path, (check) =>
       check.query("SELECT COUNT(*) AS n FROM event_log WHERE reason = 'interrupted'").get(),
-    ).toEqual({ n: 0 });
-    check.close();
+    );
+    expect(recorded).toEqual({ n: 0 });
     db.close();
   });
 });
@@ -327,11 +324,10 @@ describe("recording", () => {
     expect(out.emitted.length).toBe(1);
     expect(out.emitted[0]).toMatchObject({ kind: "note", reason: "interrupted" });
     expect(out.err.at(-1)).toBe("styre: run interrupted; resume with: styre run --resume ENG-1\n");
-    const check = new Database(t.path, { readonly: true });
-    expect(check.query("SELECT attempt FROM workflow_step WHERE id = ?").get(t.stepId)).toEqual({
-      attempt: 1,
-    });
-    check.close();
+    const step = readCopyOf(t.path, (check) =>
+      check.query("SELECT attempt FROM workflow_step WHERE id = ?").get(t.stepId),
+    );
+    expect(step).toEqual({ attempt: 1 });
     db.close();
   });
 
@@ -358,12 +354,14 @@ describe("recording", () => {
     h.context.worktree = "/elsewhere";
     await p;
     expect(out.emitted.length).toBe(1);
-    const check = new Database(t.path, { readonly: true });
-    const note = check
-      .query<{ payload_json: string }, []>(
-        "SELECT payload_json FROM event_log WHERE reason = 'interrupted'",
-      )
-      .get();
+    const { note, dispatch } = readCopyOf(t.path, (check) => ({
+      note: check
+        .query<{ payload_json: string }, []>(
+          "SELECT payload_json FROM event_log WHERE reason = 'interrupted'",
+        )
+        .get(),
+      dispatch: check.query("SELECT outcome FROM dispatch WHERE id = ?").get(t.dispatchRowId),
+    }));
     expect(JSON.parse(note?.payload_json ?? "{}")).toMatchObject({
       stepId: t.stepId,
       dispatchRowId: t.dispatchRowId,
@@ -371,10 +369,7 @@ describe("recording", () => {
       worktree: scratch,
       signal: "SIGTERM",
     });
-    expect(check.query("SELECT outcome FROM dispatch WHERE id = ?").get(t.dispatchRowId)).toEqual({
-      outcome: "interrupted",
-    });
-    check.close();
+    expect(dispatch).toEqual({ outcome: "interrupted" });
     db.close();
   });
 
