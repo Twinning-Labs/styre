@@ -20,19 +20,16 @@ import {
   stepRow,
 } from "../../src/daemon/design-graph.ts";
 import { StepRegistry } from "../../src/daemon/step-registry.ts";
+import { listByTicket as listEvents } from "../../src/db/repos/event-log.ts";
 import { insertProject } from "../../src/db/repos/project.ts";
 import { listPending } from "../../src/db/repos/signal.ts";
 import { getInput } from "../../src/db/repos/ticket-input.ts";
-import {
-  getTicket,
-  insertTicket,
-  setTicketStage,
-  setTicketTrack,
-} from "../../src/db/repos/ticket.ts";
-import { insertWorkUnit } from "../../src/db/repos/work-unit.ts";
+import { getTicket, insertTicket, setTicketTrack } from "../../src/db/repos/ticket.ts";
 import { getByKey } from "../../src/db/repos/workflow-step.ts";
 import { pendingLeftoverChecks } from "../../src/util/process/leftovers.ts";
 import { makeTestDb } from "../helpers/db.ts";
+import { DesignHarness, HARNESS_TEST_TIMEOUT_MS } from "../helpers/design-harness.ts";
+import { unitsOf } from "../helpers/design-script.ts";
 import {
   STEP_TEST_TIMEOUT_MS,
   atStep,
@@ -73,20 +70,34 @@ test(
 test(
   "provision run while the ticket is in implement records its manifest too (§5.2)",
   async () => {
-    const t = makeDesignTicket();
-    // Stated exception (no faked state): the stage and the work unit are written directly. The
-    // real path to a provision run in implement is an implement dispatch whose committed diff
-    // touches a dependency manifest (resetProvisionIfManifestTouched re-arms provision), which needs
-    // the whole design stage, a component with a manifest and a scripted implement that edits it.
-    // This test is about the manifest provision records, not about how it was re-armed; the
-    // re-arming has its own tests.
-    setTicketStage(t.db, t.ticketId, "implement");
-    insertWorkUnit(t.db, { ticketId: t.ticketId, seq: 1, kind: "backend", status: "verifying" });
-    const outcome = await advanceOneStep(t.db, t.ticketId, t.registry, { config: t.config });
-    expect(outcome).toEqual({ kind: "stepped", stepKey: "provision" });
-    expect(getByKey(t.db, t.ticketId, "provision")?.input_manifest).not.toBeNull();
+    // The real path: a worktree mode run paused in implement; its resume recreates the worktree,
+    // so provision is invalidated (cause worktree-recreated) and runs again while the ticket is in
+    // implement. Units with nothing to verify let the checks steps pass without an agent.
+    const h = new DesignHarness("worktree");
+    try {
+      const units = () => unitsOf(2, { behavioral: false });
+      expect(await h.fresh({ script: { units, parkAt: "implement" } })).toBe(75);
+      expect(h.read((db, id) => getTicket(db, id)?.stage)).toBe("implement");
+      expect(h.read((db, id) => getByKey(db, id, "provision")?.generation)).toBe(0);
+      await h.resume({ script: { units } });
+      h.read((db, id) => {
+        const rerun = listEvents(db, id)
+          .filter((e) => e.reason === "invalidated")
+          .map((e) => JSON.parse(e.payload_json ?? "{}") as { stepKeys: string[]; cause: string })
+          .filter((p) => p.stepKeys.includes("provision"));
+        expect(rerun).toEqual([
+          expect.objectContaining({ stepKeys: ["provision"], cause: "worktree-recreated" }),
+        ]);
+        const provision = getByKey(db, id, "provision");
+        expect(provision?.generation).toBe(1); // the rerun, in implement
+        expect(provision?.status).toBe("succeeded");
+        expect(provision?.input_manifest).not.toBeNull();
+      });
+    } finally {
+      h.cleanup();
+    }
   },
-  STEP_TEST_TIMEOUT_MS,
+  HARNESS_TEST_TIMEOUT_MS,
 );
 
 test(
